@@ -703,12 +703,17 @@ export class ChatCompressionService {
     let coldOutputBudget = COMPACT_MAX_OUTPUT_TOKENS;
     const runColdCompression = () => {
       const slim = getColdInput();
-      if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
+      if (
+        slim.stats.imagesStripped > 0 ||
+        slim.stats.documentsStripped > 0 ||
+        slim.stats.textPartsTruncated > 0
+      ) {
         config
           .getDebugLogger()
           .debug(
-            `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s) ` +
-              `and ${slim.stats.documentsStripped} document(s) from side-query payload`,
+            `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s), ` +
+              `${slim.stats.documentsStripped} document(s), and truncated ` +
+              `${slim.stats.textPartsTruncated} text part(s) in side-query payload`,
           );
       }
       // Clamp the output budget to the receiving model's remaining window so

@@ -3697,8 +3697,12 @@ export class LlmChat {
                     payloadRecoveryNoop = true;
                   }
                   debugLogger.warn(
-                    `Reactive compression did not recover context overflow: ` +
-                      `status=${reactiveInfo.compressionStatus}.`,
+                    requestPayloadOverflow.isTooLarge
+                      ? `Reactive compression did not recover request ` +
+                          `payload overflow: ` +
+                          `status=${reactiveInfo.compressionStatus}.`
+                      : `Reactive compression did not recover context ` +
+                          `overflow: status=${reactiveInfo.compressionStatus}.`,
                   );
                   if (
                     isCompressionFailureStatus(reactiveInfo.compressionStatus)
@@ -3738,8 +3742,12 @@ export class LlmChat {
                   reactiveCompressionAttempted &&
                   !exactRoute;
                 debugLogger.warn(
-                  'Reactive compression already attempted; ' +
-                    'propagating the context overflow error to caller.',
+                  requestPayloadOverflow.isTooLarge
+                    ? 'Reactive compression already attempted; ' +
+                        'propagating the request payload overflow error to ' +
+                        'caller.'
+                    : 'Reactive compression already attempted; ' +
+                        'propagating the context overflow error to caller.',
                 );
               }
               if (attemptedPayloadRecovery) {
@@ -3764,6 +3772,10 @@ export class LlmChat {
                   // A NOOP means the oversize sits in the current request
                   // itself (no earlier history to compress), where a new
                   // session would reproduce the identical failure.
+                  debugLogger.warn(
+                    'Request payload overflow recovery exhausted; ' +
+                      'surfacing actionable 413 error.',
+                  );
                   const actionableError = new Error(
                     payloadRecoveryNoop
                       ? REQUEST_PAYLOAD_TOO_LARGE_NOOP_MESSAGE
