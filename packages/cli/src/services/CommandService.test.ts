@@ -578,4 +578,276 @@ describe('CommandService', () => {
       expect(service.getCommands()).toHaveLength(2);
     });
   });
+
+  // ── Truth matrix: claimFreeName collision handling ──
+  // Every name source × collision state × entry spelling × operation.
+  describe('claimFreeName truth matrix', () => {
+    type MatrixCommand = {
+      name: string;
+      kind:
+        | typeof CommandKind.FILE
+        | typeof CommandKind.SKILL
+        | typeof CommandKind.BUILT_IN;
+      extensionName?: string;
+    };
+    it.each<{
+      commands: MatrixCommand[];
+      expectedName: string;
+      expectedKind: MatrixCommand['kind'];
+      expectedExtension: string;
+      label: string;
+    }>([
+      // ── Skill collision: keeps qualified name, takes numeric suffix ──
+      {
+        commands: [
+          { name: 'demo:chat', kind: CommandKind.FILE },
+          { name: 'demo:chat', kind: CommandKind.SKILL, extensionName: 'demo' },
+        ],
+        expectedName: 'demo:chat1',
+        expectedKind: CommandKind.SKILL,
+        expectedExtension: 'demo',
+        label:
+          'skill keeps qualified key, takes suffix on collision with file command',
+      },
+      {
+        commands: [
+          { name: 'demo:chat', kind: CommandKind.FILE },
+          { name: 'demo:chat1', kind: CommandKind.FILE },
+          { name: 'demo:chat', kind: CommandKind.SKILL, extensionName: 'demo' },
+        ],
+        expectedName: 'demo:chat2',
+        expectedKind: CommandKind.SKILL,
+        expectedExtension: 'demo',
+        label: 'skill skips occupied suffix, takes next free number',
+      },
+      {
+        commands: [
+          { name: 'other:tool', kind: CommandKind.FILE },
+          {
+            name: 'other:tool',
+            kind: CommandKind.SKILL,
+            extensionName: 'other',
+          },
+        ],
+        expectedName: 'other:tool1',
+        expectedKind: CommandKind.SKILL,
+        expectedExtension: 'other',
+        label:
+          'non-colliding namespaced key passes through; colliding takes suffix',
+      },
+
+      // ── Non-skill extension command: gets dot notation ──
+      {
+        commands: [
+          { name: 'deploy', kind: CommandKind.BUILT_IN },
+          { name: 'deploy', kind: CommandKind.FILE, extensionName: 'firebase' },
+        ],
+        expectedName: 'firebase.deploy',
+        expectedKind: CommandKind.FILE,
+        expectedExtension: 'firebase',
+        label: 'extension command gets dot notation on collision with built-in',
+      },
+      {
+        commands: [
+          { name: 'deploy', kind: CommandKind.FILE },
+          { name: 'deploy', kind: CommandKind.FILE, extensionName: 'gcp' },
+        ],
+        expectedName: 'gcp.deploy',
+        expectedKind: CommandKind.FILE,
+        expectedExtension: 'gcp',
+        label:
+          'extension command gets dot notation on collision with user command',
+      },
+      {
+        commands: [
+          { name: 'deploy', kind: CommandKind.FILE },
+          { name: 'gcp.deploy', kind: CommandKind.FILE },
+          { name: 'deploy', kind: CommandKind.FILE, extensionName: 'gcp' },
+        ],
+        expectedName: 'gcp.deploy1',
+        expectedKind: CommandKind.FILE,
+        expectedExtension: 'gcp',
+        label:
+          'extension command gets dot notation with suffix on secondary conflict',
+      },
+
+      // ── Multiple collisions with incrementing suffixes ──
+      {
+        commands: [
+          { name: 'deploy', kind: CommandKind.FILE },
+          { name: 'gcp.deploy', kind: CommandKind.FILE },
+          { name: 'gcp.deploy1', kind: CommandKind.FILE },
+          { name: 'deploy', kind: CommandKind.FILE, extensionName: 'gcp' },
+        ],
+        expectedName: 'gcp.deploy2',
+        expectedKind: CommandKind.FILE,
+        expectedExtension: 'gcp',
+        label:
+          'extension command takes suffix 2 past multiple occupied dot-notation names',
+      },
+
+      // ── No collision: name passes through unchanged ──
+      {
+        commands: [
+          {
+            name: 'other:tool',
+            kind: CommandKind.SKILL,
+            extensionName: 'other',
+          },
+        ],
+        expectedName: 'other:tool',
+        expectedKind: CommandKind.SKILL,
+        expectedExtension: 'other',
+        label: 'non-colliding skill name passes through untouched',
+      },
+    ])(
+      'produces $expectedName for $label',
+      async ({ commands, expectedName, expectedKind, expectedExtension }) => {
+        const mockCommands = commands.map((c) =>
+          createMockCommand(c.name, c.kind),
+        );
+        const cmdsWithExt = commands.map((c, i) => ({
+          ...mockCommands[i],
+          extensionName: c.extensionName,
+        }));
+
+        const service = await CommandService.create(
+          [new MockCommandLoader(cmdsWithExt)],
+          new AbortController().signal,
+        );
+
+        const matching = service
+          .getCommands()
+          .find(
+            (cmd) =>
+              cmd.extensionName === expectedExtension &&
+              cmd.kind === expectedKind,
+          );
+        expect(matching?.name).toBe(expectedName);
+        expect(matching?.kind).toBe(expectedKind);
+      },
+    );
+
+    it.each<{
+      commands: MatrixCommand[];
+      disabledNames: ReadonlySet<string>;
+      expectedCommandName: string;
+      expectedCount: number;
+      label: string;
+    }>([
+      // ── disabledNames filtering with dual-spelling ──
+      {
+        commands: [
+          { name: 'demo:pdf', kind: CommandKind.FILE },
+          { name: 'docs:pdf', kind: CommandKind.SKILL, extensionName: 'docs' },
+        ],
+        disabledNames: new Set(['pdf']),
+        expectedCommandName: 'demo:pdf',
+        expectedCount: 1,
+        label: 'legacy bare disablement matches collision-qualified skill',
+      },
+      {
+        commands: [
+          { name: 'demo:pdf', kind: CommandKind.FILE },
+          { name: 'docs:pdf', kind: CommandKind.SKILL, extensionName: 'docs' },
+        ],
+        disabledNames: new Set(['docs:pdf']),
+        expectedCommandName: 'demo:pdf',
+        expectedCount: 1,
+        label: 'qualified disablement matches collision-qualified skill',
+      },
+      {
+        commands: [
+          { name: 'demo:pdf', kind: CommandKind.FILE },
+          { name: 'docs:pdf', kind: CommandKind.SKILL, extensionName: 'docs' },
+        ],
+        disabledNames: new Set(['pdf', 'docs:pdf']),
+        expectedCommandName: 'demo:pdf',
+        expectedCount: 1,
+        label:
+          'both spellings remove the qualified skill; the unrelated file command survives',
+      },
+    ])(
+      'disabledNames $label',
+      async ({
+        commands,
+        disabledNames,
+        expectedCommandName,
+        expectedCount,
+      }) => {
+        const mockCommands = commands.map((c) =>
+          createMockCommand(c.name, c.kind),
+        );
+        const cmdsWithExt = commands.map((c, i) => ({
+          ...mockCommands[i],
+          extensionName: c.extensionName,
+        }));
+
+        const service = await CommandService.create(
+          [new MockCommandLoader(cmdsWithExt)],
+          new AbortController().signal,
+          disabledNames,
+        );
+
+        if (expectedCount === 0) {
+          expect(service.getCommands()).toHaveLength(0);
+        } else {
+          expect(service.getCommands()).toHaveLength(expectedCount);
+          expect(service.getCommands()[0]?.name).toBe(expectedCommandName);
+        }
+      },
+    );
+  });
+
+  // ── Extensionless collision: neither command can be renamed ──
+  describe('extensionless name precedence', () => {
+    it('keeps the file command when a same-named local skill is aggregated first (#9408 R1-7)', async () => {
+      // This is the order buildCommandLoaders hands production: local skills,
+      // then saved workflows, then file commands. Neither `deploy` carries an
+      // extensionName, so the collision rename cannot fire for either one and
+      // the later writer keeps the name. The user's own command must win, the
+      // way it did before #9408 moved skills to the end of the list.
+      const localSkill = createMockCommand('deploy', CommandKind.SKILL);
+      const fileCommand = createMockCommand('deploy', CommandKind.FILE);
+
+      const service = await CommandService.create(
+        [
+          new MockCommandLoader([localSkill]),
+          new MockCommandLoader([fileCommand]),
+        ],
+        new AbortController().signal,
+      );
+
+      const winners = service
+        .getCommands()
+        .filter((cmd) => cmd.name === 'deploy');
+      expect(winners).toHaveLength(1);
+      expect(winners[0]?.kind).toBe(CommandKind.FILE);
+    });
+
+    it('suffixes an extension skill that collides with an earlier file command (#9408 R1-7)', async () => {
+      // The counterpart, and the reason extension skills still load last: they
+      // can be renamed, so neither side is silently lost.
+      const fileCommand = createMockCommand('demo:chat', CommandKind.FILE);
+      const extensionSkill = {
+        ...createMockCommand('demo:chat', CommandKind.SKILL),
+        extensionName: 'demo',
+      };
+
+      const service = await CommandService.create(
+        [
+          new MockCommandLoader([fileCommand]),
+          new MockCommandLoader([extensionSkill]),
+        ],
+        new AbortController().signal,
+      );
+
+      const names = service
+        .getCommands()
+        .filter((cmd) => cmd.name.startsWith('demo:chat'))
+        .map((cmd) => cmd.name);
+      expect(names).toContain('demo:chat');
+      expect(names).toContain('demo:chat1');
+    });
+  });
 });

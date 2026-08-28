@@ -53,9 +53,23 @@ export async function recordAutoSkillCommandUsage(
   }
 }
 
+export type SkillCommandLevel = 'user' | 'project' | 'extension';
+
+const ALL_SKILL_LEVELS: readonly SkillCommandLevel[] = [
+  'user',
+  'project',
+  'extension',
+];
+
 /**
- * Loads user-level, project-level, and extension-level skills as slash
- * commands, making them directly invocable via /<skill-name>.
+ * Loads skills from the given levels as slash commands, making them directly
+ * invocable via /<skill-name>. Defaults to every level; production passes an
+ * explicit level set so that extension skills can be aggregated after
+ * `FileCommandLoader` while user and project skills keep their historic
+ * position. Only extension skills carry an `extensionName`, and only
+ * extension skills reach the collision rename in `CommandService`, so the two
+ * groups cannot share one aggregation slot without deciding, by array order
+ * alone, which of them silently overwrites a same-named file command.
  *
  * - User/project skills: always model-invocable (same as bundled), unless
  *   disable-model-invocation is set.
@@ -64,7 +78,10 @@ export async function recordAutoSkillCommandUsage(
  *   is set.
  */
 export class SkillCommandLoader implements ICommandLoader {
-  constructor(private readonly config: Config | null) {}
+  constructor(
+    private readonly config: Config | null,
+    readonly levels: readonly SkillCommandLevel[] = ALL_SKILL_LEVELS,
+  ) {}
 
   async loadCommands(_signal: AbortSignal): Promise<SlashCommand[]> {
     if (this.config?.getBareMode?.()) {
@@ -79,13 +96,11 @@ export class SkillCommandLoader implements ICommandLoader {
     }
 
     try {
-      const [userSkills, projectSkills, extensionSkills] = await Promise.all([
-        skillManager.listSkills({ level: 'user' }),
-        skillManager.listSkills({ level: 'project' }),
-        skillManager.listSkills({ level: 'extension' }),
-      ]);
+      const loadedPerLevel = await Promise.all(
+        this.levels.map((level) => skillManager.listSkills({ level })),
+      );
 
-      const allSkills = [...userSkills, ...projectSkills, ...extensionSkills];
+      const allSkills = loadedPerLevel.flat();
 
       // Apply user-controlled `skills.disabled` filter HERE (inside the
       // skill loader) rather than via `CommandService`'s global denylist —
@@ -101,8 +116,12 @@ export class SkillCommandLoader implements ICommandLoader {
         (skill) => skill.userInvocable === false,
       ).length;
 
+      const perLevel = this.levels
+        .map((level, i) => `${loadedPerLevel[i]?.length ?? 0} ${level}`)
+        .join(' + ');
+
       debugLogger.debug(
-        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands; ${allSkills.length - visibleSkills.length} hidden by skills.disabled; ${nonUserInvocableCount} marked non-user-invocable`,
+        `Loaded ${perLevel} skill(s) as slash commands; ${allSkills.length - visibleSkills.length} hidden by skills.disabled; ${nonUserInvocableCount} marked non-user-invocable`,
       );
 
       return visibleSkills.map((skill) => {

@@ -51,15 +51,8 @@ import {
 } from '../commands/types.js';
 import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
-import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
-import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
-import { FileCommandLoader } from '../../services/FileCommandLoader.js';
-import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
-import { McpPromptLoader } from '../../services/McpPromptLoader.js';
-import {
-  recordAutoSkillCommandUsage,
-  SkillCommandLoader,
-} from '../../services/SkillCommandLoader.js';
+import { buildCommandLoaders } from '../../services/command-loaders.js';
+import { recordAutoSkillCommandUsage } from '../../services/SkillCommandLoader.js';
 import {
   parseSlashCommand,
   parseStackedSlashCommands,
@@ -758,17 +751,7 @@ export const useSlashCommandProcessor = (
     const controller = new AbortController();
     const load = async () => {
       try {
-        const loaders = [
-          new McpPromptLoader(config),
-          new BuiltinCommandLoader(config),
-          new BundledSkillLoader(config),
-          new SavedWorkflowLoader(config),
-          new FileCommandLoader(config),
-          // Skills load last: a file command claiming a qualified skill
-          // name must arrive before the skill so the numeric-suffix
-          // branch in CommandService fires instead of a silent override.
-          new SkillCommandLoader(config),
-        ];
+        const loaders = buildCommandLoaders(config);
         const disabled = config?.getDisabledSlashCommands() ?? [];
         const commandService = await CommandService.create(
           loaders,

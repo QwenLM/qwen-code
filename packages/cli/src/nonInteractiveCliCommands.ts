@@ -19,16 +19,9 @@ import {
   recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
-import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
-import { BundledSkillLoader } from './services/BundledSkillLoader.js';
-import { FileCommandLoader } from './services/FileCommandLoader.js';
-import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
-import { McpPromptLoader } from './services/McpPromptLoader.js';
+import { buildCommandLoaders } from './services/command-loaders.js';
 import { skillMatchesSettingName } from './config/skill-settings.js';
-import {
-  recordAutoSkillCommandUsage,
-  SkillCommandLoader,
-} from './services/SkillCommandLoader.js';
+import { recordAutoSkillCommandUsage } from './services/SkillCommandLoader.js';
 import {
   type CommandContext,
   CommandKind,
@@ -421,17 +414,7 @@ export const handleSlashCommand = async (
       : 'non_interactive';
 
   // Load all commands to check if the command exists but is not allowed
-  const allLoaders = [
-    new McpPromptLoader(config),
-    new BuiltinCommandLoader(config),
-    new BundledSkillLoader(config),
-    new SavedWorkflowLoader(config),
-    new FileCommandLoader(config),
-    // Skills load last: a file command claiming a qualified skill name
-    // must arrive before the skill so the numeric-suffix branch in
-    // CommandService fires instead of a silent override.
-    new SkillCommandLoader(config),
-  ];
+  const allLoaders = buildCommandLoaders(config);
 
   // Build the disabled-command set (case-insensitive).
   const disabledSlashCommandsRaw = config.getDisabledSlashCommands();
@@ -751,17 +734,7 @@ export const getAvailableCommands = async (
   executionPolicy?: NonInteractiveSlashCommandPolicy,
 ): Promise<SlashCommand[]> => {
   try {
-    const loaders = [
-      new McpPromptLoader(config),
-      new BuiltinCommandLoader(config),
-      new BundledSkillLoader(config),
-      new SavedWorkflowLoader(config),
-      new FileCommandLoader(config),
-      // Skills load last: a file command claiming a qualified skill name
-      // must arrive before the skill so the numeric-suffix branch in
-      // CommandService fires instead of a silent override.
-      new SkillCommandLoader(config),
-    ];
+    const loaders = buildCommandLoaders(config);
 
     const disabledSlashCommands = config.getDisabledSlashCommands();
     const commandService = await CommandService.create(
