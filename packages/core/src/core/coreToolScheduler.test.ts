@@ -3724,8 +3724,6 @@ describe('CoreToolScheduler', () => {
       isToolEnabled: vi.fn().mockResolvedValue(false),
       findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
       isCoreToolsAllowListEmpty: vi.fn().mockReturnValue(true),
-      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
-      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(false),
     };
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
@@ -3785,8 +3783,6 @@ describe('CoreToolScheduler', () => {
       isToolEnabled: vi.fn().mockResolvedValue(false),
       findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
       isCoreToolsAllowListEmpty: vi.fn().mockReturnValue(true),
-      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
-      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(true),
     };
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({

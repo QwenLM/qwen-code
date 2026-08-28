@@ -2476,18 +2476,18 @@ export class CoreToolScheduler {
               permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined. Matching deny rule: "${matchingRule}".`;
             } else if (
               // An explicitly empty coreTools allowlist (`tools.core: []`)
-              // rejects EVERY tool, so the generic "permission was
-              // declined" text (nothing was ever asked or declined) and
-              // the `permissions.allow` remediation below are both wrong:
-              // adding an allow rule can never satisfy the empty gate.
+              // rejects EVERY tool, so both branches that follow are wrong
+              // here: the coreTools-miss branch advises adding the tool to
+              // the core tools list, but for a deliberately tool-free
+              // session the remedy is removing the empty setting — and the
+              // generic "permission was declined" fallback implies
+              // something was asked and declined, which never happened.
               // Name the responsible knob instead (#10065). The optional
               // call keeps scoped PermissionManager shims from throwing
               // until they grow the method; this branch sits ahead of the
-              // coreTools-miss and allowlist-advice branches because the
-              // empty gate rejects listed-or-not, covered-or-not tools
-              // alike (`isToolDisabledByCoreToolsAllowList` is also true
-              // under `[]`, but "add it to the core tools list" is the
-              // wrong remedy for a deliberately tool-free session).
+              // coreTools-miss branch because the empty gate rejects
+              // listed-or-not tools alike (`isToolDisabledByCoreToolsAllowList`
+              // is also true under `[]`).
               typeof pm.isCoreToolsAllowListEmpty === 'function' &&
               pm.isCoreToolsAllowListEmpty()
             ) {
