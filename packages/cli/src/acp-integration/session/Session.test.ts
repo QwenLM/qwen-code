@@ -807,6 +807,7 @@ describe('Session', () => {
       getApprovalModeRevision: vi.fn().mockReturnValue(0),
       switchModel: switchModelSpy,
       setReasoningEffort: vi.fn(),
+      getReasoningPreference: vi.fn().mockReturnValue(undefined),
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
@@ -4604,6 +4605,29 @@ describe('Session', () => {
       expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith(undefined);
     });
 
+    it('clears persisted opaque effort when switching the default to a non-Qwen model', async () => {
+      mockSettings.user.settings = {
+        model: { reasoningEffort: 'vendor.ultra' },
+      };
+      vi.mocked(mockConfig.getReasoningPreference).mockReturnValue(
+        'vendor.ultra',
+      );
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `gemini-2.5-pro(${AuthType.USE_GEMINI})`,
+      });
+
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningEffort',
+        undefined,
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+      expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith(undefined);
+    });
+
     it('emits a current_model_update extNotification after switching (A1)', async () => {
       await session.setModel({
         sessionId: 'test-session-id',
@@ -4793,6 +4817,7 @@ describe('Session', () => {
       mockSettings.user.settings = {
         model: { reasoningEffort: 'ultra' },
       };
+      vi.mocked(mockConfig.getReasoningPreference).mockReturnValue('ultra');
       await session.setModel(
         {
           sessionId: 'test-session-id',
@@ -4807,7 +4832,7 @@ describe('Session', () => {
         undefined,
       );
       expect(mockSettings.setValue).not.toHaveBeenCalled();
-      expect(mockConfig.setReasoningEffort).not.toHaveBeenCalled();
+      expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith(undefined);
       expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
         modelId: 'qwen3-coder-flash',
         authType: AuthType.USE_OPENAI,
@@ -4815,6 +4840,10 @@ describe('Session', () => {
     });
 
     it('does not persist a shared model default for a standalone session', async () => {
+      mockSettings.user.settings = {
+        model: { reasoningEffort: 'ultra' },
+      };
+      vi.mocked(mockConfig.getReasoningPreference).mockReturnValue('ultra');
       session.dispose();
       vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
       session = new Session(
@@ -4838,6 +4867,7 @@ describe('Session', () => {
         undefined,
       );
       expect(mockSettings.setValue).not.toHaveBeenCalled();
+      expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith(undefined);
       expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
         modelId: 'qwen3-coder-flash',
         authType: AuthType.USE_OPENAI,

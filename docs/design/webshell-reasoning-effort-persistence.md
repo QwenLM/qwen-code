@@ -16,7 +16,7 @@ There is no global normalization, ordering, allowlist, or fallback for persisted
 
 ACP uses `default` only as an interaction instruction to remove `model.reasoningEffort`; that ACP path never writes the sentinel. The open setting does not reserve `default` globally, so a value authored directly in settings remains an opaque provider value. After clearing the selected scope, the live session adopts the resulting merged value, including an inherited opaque string from a lower-precedence scope.
 
-Persisting a model switch to a toggle-only Qwen model clears `model.reasoningEffort` from every active writable settings scope and clears the live override after the switch succeeds. This avoids carrying a tiered or provider-specific value into a model that accepts only `enable_thinking`. Session-only model switches do not mutate the persisted default, and switches to tiered qwen3.8-max models preserve the effort value.
+Persisting a model switch to a toggle-only Qwen model clears `model.reasoningEffort` from every active writable settings scope and clears the live override after the switch succeeds. Switching to a non-Qwen model performs the same cleanup only for an opaque provider-specific effort; built-in tiers remain portable. Session-only and managed-session switches clear only an incompatible live override without mutating the persisted default. Read-only managed settings are also left unchanged while their incompatible live override is removed. Switches to tiered qwen3.8-max models preserve the effort value.
 
 ## Persistence boundary
 

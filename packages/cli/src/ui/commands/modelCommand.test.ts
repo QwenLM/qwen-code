@@ -22,6 +22,7 @@ function createMockConfig(
 ): Partial<Config> {
   return {
     getContentGeneratorConfig: vi.fn().mockReturnValue(contentGeneratorConfig),
+    getReasoningPreference: vi.fn().mockReturnValue(undefined),
   };
 }
 
@@ -280,6 +281,7 @@ describe('modelCommand', () => {
           ]),
           switchModel,
           setReasoningEffort,
+          getReasoningPreference: vi.fn().mockReturnValue('ultra'),
           getChatRecordingService: vi.fn().mockReturnValue({
             recordSessionModel,
           }),
@@ -346,6 +348,7 @@ describe('modelCommand', () => {
             .fn()
             .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
           switchModel,
+          getReasoningPreference: vi.fn().mockReturnValue(undefined),
           getModel: vi.fn(() => currentModel),
           getAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
           getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
@@ -371,6 +374,7 @@ describe('modelCommand', () => {
 
   it('switches the standalone session model without persisting defaults', async () => {
     const setValue = vi.fn();
+    const setReasoningEffort = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);
     mockContext = createMockCommandContext({
       executionMode: 'acp',
@@ -391,6 +395,8 @@ describe('modelCommand', () => {
             .fn()
             .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
           switchModel,
+          setReasoningEffort,
+          getReasoningPreference: vi.fn().mockReturnValue('ultra'),
           getModel: vi.fn().mockReturnValue('qwen-max'),
           getAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
           getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
@@ -399,7 +405,9 @@ describe('modelCommand', () => {
             recordSessionModel: vi.fn().mockResolvedValue(true),
           }),
         },
-        settings: createMockSettings(setValue),
+        settings: createMockSettings(setValue, {
+          model: { reasoningEffort: 'ultra' },
+        }),
       },
     });
 
@@ -411,6 +419,7 @@ describe('modelCommand', () => {
       undefined,
     );
     expect(setValue).not.toHaveBeenCalled();
+    expect(setReasoningEffort).toHaveBeenCalledWith(undefined);
   });
 
   it('rejects standalone model scope and auxiliary selectors before mutation', async () => {
@@ -847,6 +856,7 @@ describe('modelCommand', () => {
             .fn()
             .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
           switchModel,
+          getReasoningPreference: vi.fn().mockReturnValue(undefined),
         },
         settings: createMockSettings(setValue),
       },
@@ -2059,6 +2069,7 @@ describe('modelCommand', () => {
             .fn()
             .mockReturnValue([{ id: '--fast-model', label: '--fast-model' }]),
           switchModel,
+          getReasoningPreference: vi.fn().mockReturnValue(undefined),
         },
         settings: createMockSettings(setValue),
       },

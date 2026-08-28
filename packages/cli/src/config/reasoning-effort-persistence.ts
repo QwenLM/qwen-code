@@ -5,6 +5,7 @@
  */
 
 import {
+  isBuiltInReasoningEffort,
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
   type Config,
@@ -13,13 +14,32 @@ import { getWritableScopes } from './modelProvidersScope.js';
 import { SettingScope, type LoadedSettings } from './settings.js';
 import { settingExistsInScope } from './settingsUtils.js';
 
-export function clearReasoningEffortForToggleOnlyModel(
+export function clearIncompatibleReasoningEffortForModel(
   config: Config,
   settings: LoadedSettings,
   modelId: string,
+  persistSettings = true,
 ): boolean {
-  if (!isQwenFamilyWireModel(modelId) || isTieredEffortWireModel(modelId)) {
+  const preference = config.getReasoningPreference();
+  if (isTieredEffortWireModel(modelId)) {
     return false;
+  }
+  const hasOpaquePreference =
+    typeof preference === 'string' && !isBuiltInReasoningEffort(preference);
+  const isToggleOnlyQwen = isQwenFamilyWireModel(modelId);
+  const hasIncompatibleLivePreference =
+    typeof preference === 'string' && (isToggleOnlyQwen || hasOpaquePreference);
+
+  if (!isToggleOnlyQwen && !hasOpaquePreference) {
+    return false;
+  }
+
+  if (!persistSettings) {
+    if (!hasIncompatibleLivePreference) {
+      return false;
+    }
+    config.setReasoningEffort(undefined);
+    return true;
   }
 
   const owningScopes = getWritableScopes(settings).filter((scope) =>
@@ -31,7 +51,11 @@ export function clearReasoningEffortForToggleOnlyModel(
     ),
   );
   if (owningScopes.length === 0) {
-    return false;
+    if (!hasIncompatibleLivePreference) {
+      return false;
+    }
+    config.setReasoningEffort(undefined);
+    return true;
   }
 
   for (const scope of owningScopes) {

@@ -14,7 +14,7 @@ import type {
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
-import { clearReasoningEffortForToggleOnlyModel } from '../../config/reasoning-effort-persistence.js';
+import { clearIncompatibleReasoningEffortForModel } from '../../config/reasoning-effort-persistence.js';
 import {
   AuthType,
   type AvailableModel,
@@ -148,8 +148,13 @@ async function switchMainModel(
         ? { requireCachedCredentials: true }
         : undefined,
     );
+    clearIncompatibleReasoningEffortForModel(
+      config,
+      settings,
+      parsed.modelId,
+      persistSelection,
+    );
     if (persistSelection) {
-      clearReasoningEffortForToggleOnlyModel(config, settings, parsed.modelId);
       persistSetting(
         settings,
         'security.auth.selectedType',
@@ -168,8 +173,13 @@ async function switchMainModel(
   }
 
   await config.switchModel(currentAuthType, modelArg, undefined);
+  clearIncompatibleReasoningEffortForModel(
+    config,
+    settings,
+    modelArg,
+    persistSelection,
+  );
   if (persistSelection) {
-    clearReasoningEffortForToggleOnlyModel(config, settings, modelArg);
     persistSetting(settings, 'model.name', modelArg, scopeOverride);
     persistSetting(settings, 'model.baseUrl', '', scopeOverride);
   }

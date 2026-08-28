@@ -67,6 +67,7 @@ const renderComponent = (
     getModel: vi.fn(() => DEFAULT_QWEN_MODEL),
     setModel: vi.fn().mockResolvedValue(undefined),
     switchModel: vi.fn().mockResolvedValue(undefined),
+    getReasoningPreference: vi.fn().mockReturnValue(undefined),
     getAuthType: vi.fn(() => 'qwen-oauth'),
     getAllConfiguredModels: vi.fn(() =>
       getFilteredQwenModels().map((m) => ({

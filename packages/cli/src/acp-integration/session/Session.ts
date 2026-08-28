@@ -278,7 +278,7 @@ import type {
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
-import { clearReasoningEffortForToggleOnlyModel } from '../../config/reasoning-effort-persistence.js';
+import { clearIncompatibleReasoningEffortForModel } from '../../config/reasoning-effort-persistence.js';
 import {
   deleteNestedPropertySafe,
   settingExistsInScope,
@@ -9748,12 +9748,13 @@ export class Session implements SessionContext {
     const persistDefault =
       !this.requiresManagedConversationBinding &&
       (options.persistDefault ?? true);
+    clearIncompatibleReasoningEffortForModel(
+      this.config,
+      this.settings,
+      effectiveModelId,
+      persistDefault,
+    );
     if (persistDefault) {
-      clearReasoningEffortForToggleOnlyModel(
-        this.config,
-        this.settings,
-        effectiveModelId,
-      );
       const persistScope = getPersistScopeForModelSelection(this.settings);
       this.settings.setValue(
         persistScope,
