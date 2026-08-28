@@ -6995,12 +6995,17 @@ describe('stage 1-pre duplicate gate', () => {
   it('pins the anti-vacuity clauses of the subsumption definition', () => {
     // Without the cancellation clause, a line the closer both adds and
     // deletes counts as covered; without the matched-sections clause, a
-    // rename-only diff closes vacuously against any closer.
+    // rename-only diff closes vacuously against any closer; without the
+    // occurrence-count clause, one deleted occurrence in the closer's
+    // patch covers any number of identical deletions here (blank lines
+    // make that commonplace).
     expect(section).toContain('cancels out and covers neither direction');
     expect(section).toContain('quantifiers range over matched sections only');
     expect(section).toContain(
       'covered only by an equivalent change to the same path',
     );
+    expect(section).toContain('at least as many times');
+    expect(section).toContain('count occurrences, not set membership');
   });
 
   it('never closes a diff with no production changes', () => {
@@ -7018,6 +7023,11 @@ describe('stage 1-pre duplicate gate', () => {
     // is pinned too — every stage-local variable is bound in a snippet.
     expect(section).toContain('repository { nameWithOwner }');
     expect(section).toContain('read -r MERGED_PR MERGED_FLAG MERGED_REPO');
+    // The jq output interpolation wires the selection set to the binding:
+    // reverted to the pre-PR two-field form, MERGED_REPO stays empty for
+    // every closer, the gate rejects them all, and the duplicate gate is
+    // dead while every other pin stays green.
+    expect(section).toContain('\\(.merged) \\(.repository.nameWithOwner)');
     expect(section).toContain('[ "$MERGED_REPO" = "$REPO" ]');
     expect(section).toContain('never resolved to a colliding number');
   });
@@ -7032,6 +7042,10 @@ describe('stage 1-pre duplicate gate', () => {
     expect(section).toContain('bound to the loop');
     expect(section).toContain('FIRST one');
     expect(section).toContain('the deterministic `$ISSUES` order');
+    // $MERGED_PRS drops which issue each closer came from; when the
+    // chosen closer closed several linked issues, the singular close
+    // comment needs a rule for which #N it names.
+    expect(section).toContain('names the FIRST linked');
   });
 
   it('enumerates the remaining delta per closer, never as a union', () => {
@@ -7066,6 +7080,10 @@ describe('stage 1-pre duplicate gate', () => {
     // closer fetch failed" is unreachable and an empty patch reaches
     // judgment as verified.
     expect(section).toContain('*" $MERGED_PR "*) ;;');
+    // The else arm is the only line that ever populates the closer set:
+    // deleted, $MERGED_PRS stays empty, the judgment branch becomes
+    // unreachable, and every completed-issue PR escalates instead.
+    expect(section).toContain('*) MERGED_PRS="$MERGED_PRS $MERGED_PR" ;;');
     expect(section).toContain('FETCHED_PRS="$FETCHED_PRS $MERGED_PR"');
     expect(section).toContain('MERGED_PRS="$FETCHED_PRS"');
   });
