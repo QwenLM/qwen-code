@@ -1473,7 +1473,7 @@ describe('BackgroundTasksDialog', () => {
     it('renders the Error block on failed status with a "+ Stopped because" verb', () => {
       // Dream failures need to surface — they are the user's only signal
       // that consolidation didn't happen as expected (success path
-      // already produces a memory_saved toast in useGeminiStream).
+      // already produces a memory_saved toast in useLlmStream).
       const h = setup([
         dreamEntry({
           status: 'failed',
