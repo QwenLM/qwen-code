@@ -162,6 +162,9 @@ jobs:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ github.event.issue.number || github.event.pull_request.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          # Empty for a pull_request_review trigger: review bodies have no
+          # reactions endpoint, so only the two comment shapes get the 👀.
+          COMMENT_ID: '${{ github.event.comment.id }}'
         run: |-
           set -euo pipefail
           PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')"
@@ -169,32 +172,55 @@ jobs:
             echo "PR #${PR_NUMBER} is ${PR_STATE}; skipping acknowledgement." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # The 👀 on the command itself is the one signal GitHub renders in
+          # place, next to what the requester typed. Best effort: a failed
+          # reaction must not cost the ack comment below.
+          case "$GITHUB_EVENT_NAME" in
+            issue_comment)
+              REACTION_PATH="repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" ;;
+            pull_request_review_comment)
+              REACTION_PATH="repos/${GITHUB_REPOSITORY}/pulls/comments/${COMMENT_ID}/reactions" ;;
+            *)
+              REACTION_PATH="" ;;
+          esac
+          if [ -n "$REACTION_PATH" ] && [ -n "$COMMENT_ID" ]; then
+            gh api --method POST "$REACTION_PATH" -f content=eyes > /dev/null \
+              || echo "Could not react to comment ${COMMENT_ID}." >> "$GITHUB_STEP_SUMMARY"
+          fi
           # Blank line after the marker, or none of the prose below renders. A
           # line opening with `<!--` starts an HTML block that runs to the line
           # containing the closing delimiter, and the REST of that line stays
           # inside it — so gluing the text on shipped it as raw source with a
           # dead link. Verified against GitHub's own renderer.
-          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is queued in [workflow run](%s)._' "$RUN_URL")"
-          EXISTING_ACK_ID="$(
-            # -F would otherwise make gh api default to POST.
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-              --method GET \
-              --paginate \
-              -F per_page=100 \
-              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
-          )" || EXISTING_ACK_ID=""
-          if [ -n "$EXISTING_ACK_ID" ]; then
-            gh api \
-              --method PATCH \
-              "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ACK_ID}" \
-              -f body="$ACK_BODY" > /dev/null
-            echo "Queued acknowledgement updated on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
-          else
-            gh pr comment "$PR_NUMBER" \
-              --repo "$GITHUB_REPOSITORY" \
-              --body "$ACK_BODY"
-            echo "Queued acknowledgement posted on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          #
+          # A command-triggered run executes against the base branch, so its
+          # `review-pr` check attaches to main's commit and never shows under
+          # this PR's checks — the link here is the only way to watch it.
+          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is running in [workflow run](%s). A command-triggered review is not listed under the checks of this PR; the result is posted here as a review when it finishes._' "$RUN_URL")"
+          # One ack per PR, and it must sit right under the command that asked
+          # for it. Editing the previous ack in place kept the count at one but
+          # left the notice wherever the FIRST request landed — on a 15-comment
+          # thread that was comment #2, above the previous day's triage, and
+          # the requester reading from the bottom concluded nothing had
+          # started. Delete-then-post keeps the count and moves the notice to
+          # the bottom. Nothing keys on the comment id: every consumer
+          # (qwen-autofix's bot-comment filters, the review's bypass audit)
+          # matches the marker.
+          # -F would otherwise make gh api default to POST.
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --method GET \
+            --paginate \
+            -F per_page=100 \
+            | jq -r '.[] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]") | .id' \
+            | while read -r STALE_ACK_ID; do
+                [ -n "$STALE_ACK_ID" ] || continue
+                gh api --method DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${STALE_ACK_ID}" \
+                  || echo "Could not delete stale acknowledgement ${STALE_ACK_ID}." >> "$GITHUB_STEP_SUMMARY"
+              done
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$ACK_BODY"
+          echo "Queued acknowledgement posted on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
 
   review-config:
     # Bot-requested review_requested only: a CODEOWNERS-covered PR open
