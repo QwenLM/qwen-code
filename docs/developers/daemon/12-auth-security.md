@@ -52,7 +52,7 @@ All three refusals are explicit boot failures (visible in stderr / thrown to the
 never silent. The threat model from #3803 explicitly forbids silently letting a
 daemon bind beyond loopback in the open.
 
-`createServeApp()` does not own a socket, so it does not reject a declared non-loopback hostname without a token. Such an embed never enters trusted-loopback mode: strict routes, session shell, and Local Control pairing material fail closed. It does reject `requireAuth: true` without a non-empty token at construction so non-strict routes cannot accidentally remain open under an invalid hardened configuration.
+`runQwenServe()` resolves `localhost` once, pins the listener to that address, and verifies the actual listener address before publishing trusted-loopback authority; if the result is outside `127.0.0.0/8` or `::1`, token-less startup fails and closes the listener. `createServeApp()` does not own a socket, so its caller remains responsible for ensuring that a declared loopback hostname is bound only to loopback. A declared non-loopback embed keeps strict routes, session shell, and Local Control pairing material fail closed. It also rejects `requireAuth: true` without a non-empty token at construction so non-strict routes cannot accidentally remain open under an invalid hardened configuration.
 
 ### Middleware chain (HTTP request order)
 

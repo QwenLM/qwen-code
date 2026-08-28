@@ -644,6 +644,7 @@ provider decision with their normal tool policy and isolation boundary.
 ## Default deployment threat model
 
 - **127.0.0.1 only** — loopback bind, no auth needed.
+- **`localhost` is resolved once, pinned, and verified after listen** — if its actual listener address is outside `127.0.0.0/8` or `::1`, token-less startup closes the listener and fails.
 - **`--hostname 0.0.0.0` requires a token** — boot refuses without one.
 - **`LOOPBACK_BINDS` includes IPv6** — `::1` and `[::1]` count as loopback for the no-token rule.
 - **Host header allowlist** — on **loopback** binds the daemon checks `Host:` matches `localhost:port` / `127.0.0.1:port` / `[::1]:port` / `host.docker.internal:port` (case-insensitive per RFC 7230 §5.4) to defend against DNS rebinding. **Non-loopback binds (`--hostname 0.0.0.0`) intentionally bypass the Host allowlist** — the operator has chosen the surface area, so the bearer-token gate is the sole authentication layer; reverse proxies / SNI / client cert pinning are the operator's responsibility, not the daemon's. If you need Host-based isolation on a non-loopback bind, terminate TLS + check Host at a front proxy.

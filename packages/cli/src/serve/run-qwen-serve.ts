@@ -6,6 +6,7 @@
 
 import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { lookup } from 'node:dns/promises';
 import * as fs from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import * as https from 'node:https';
@@ -84,7 +85,7 @@ import {
   hostAssignsIpv6Loopback,
   isOwnInterfaceAddress,
 } from './local-bind-addresses.js';
-import { isHostGateLoopback, isLoopbackBind } from './loopback-binds.js';
+import { isLoopbackAddress, isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveServeToken } from './serve-token.js';
@@ -787,23 +788,7 @@ export function assertChannelWorkerDaemonUrlIsLocal(
         `a zone-less literal address of one of this machine's interfaces.`,
     );
   }
-  if (isHostGateLoopback(host)) return;
-  if (isLoopbackBind(host)) {
-    // A wide 127/8 bind passes `isLoopbackBind` and the kernel routes it to
-    // loopback, but the primary Host gate answers only the spellings in
-    // `LOOPBACK_BINDS` — every other 127.x.y.z gets 403 before a route.
-    // Order matters: this refusal must run BEFORE the own-interface escape
-    // below — a wide loopback address can be assigned to a local interface
-    // (`ip addr add 127.0.0.2/8 dev lo`), and the gate 403s it either way.
-    throw new Error(
-      `Channels cannot start: --hostname "${hostname}" is a loopback ` +
-        `address the daemon's Host header gate refuses (it answers only ` +
-        `127.0.0.1, localhost, and [::1]), so channel workers cannot reach ` +
-        `the daemon on it. Bind to one of those spellings, to the wildcard ` +
-        `(0.0.0.0 / ::), or to a literal address of one of this machine's ` +
-        `interfaces.`,
-    );
-  }
+  if (isLoopbackBind(host)) return;
   if (isOwnInterfaceAddress(host)) return;
   throw new Error(
     `Channels cannot start: --hostname "${hostname}" is not a loopback bind ` +
@@ -2026,6 +2011,10 @@ export interface RunQwenServeDeps {
   bridge?: AcpSessionBridge;
   /** Test/embed override for the plain HTTP server constructor. */
   httpServerFactory?: (app: Application) => Server;
+  /** Test override for resolving `localhost` before authority is derived. */
+  bindHostnameLookup?: (
+    hostname: string,
+  ) => Promise<{ address: string; family: number }>;
   /**
    * Whether to start the real ACP child eagerly after listen. Production
    * keeps this on; tests can disable it so boot-path assertions do not wait
@@ -3294,8 +3283,12 @@ async function runQwenServeImpl(
   loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
   const token = resolveServeToken(optsIn.token);
+  const bindHostname =
+    optsIn.hostname.toLowerCase() === 'localhost'
+      ? (await (deps.bindHostnameLookup ?? lookup)(optsIn.hostname)).address
+      : optsIn.hostname;
   const trustedLoopbackMode = isTrustedLoopbackMode({
-    loopbackBind: isLoopbackBind(optsIn.hostname),
+    loopbackBind: isLoopbackAddress(bindHostname),
     tokenConfigured: token !== undefined,
     requireAuth: optsIn.requireAuth === true,
   });
@@ -3344,6 +3337,7 @@ async function runQwenServeImpl(
   // resolved below.
   const opts: ServeOptions = {
     ...optsIn,
+    hostname: bindHostname,
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
@@ -7829,7 +7823,7 @@ async function runQwenServeImpl(
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const scheme = tlsOptions ? 'https' : 'http';
-      const url = `${scheme}://${formatHostForUrl(opts.hostname)}:${actualPort}`;
+      const url = `${scheme}://${formatHostForUrl(optsIn.hostname)}:${actualPort}`;
       const liveRuntimeBaseDir = path.dirname(daemonLogBaseDir);
       const liveDiscoveryOwners: Array<{
         runtimeBaseDir: string;
@@ -9245,6 +9239,36 @@ async function runQwenServeImpl(
     const tryListen = (attemptPort: number, attempt: number): void => {
       const handleListening = (): void => {
         server.removeListener('error', handleError);
+        const address = server.address();
+        if (
+          trustedLoopbackMode &&
+          (typeof address !== 'object' ||
+            address === null ||
+            !isLoopbackAddress(address.address))
+        ) {
+          const resolvedAddress =
+            typeof address === 'object' && address !== null
+              ? address.address
+              : String(address);
+          const error = new Error(
+            `Refusing trusted-loopback mode because ${opts.hostname} ` +
+              `bound to non-loopback address ${resolvedAddress}. Set ` +
+              `${QWEN_SERVER_TOKEN_ENV} or pass --token, or bind to an ` +
+              `explicit loopback address.`,
+          );
+          removeCurrentServePidfile();
+          markServeAppStartupFailed(error);
+          void serveAppLifecycle.close().then(
+            () => reject(error),
+            (closeError: unknown) =>
+              reject(
+                closeError instanceof Error
+                  ? new AggregateError([error, closeError], error.message)
+                  : error,
+              ),
+          );
+          return;
+        }
         onListening();
       };
       const handleError = (err: NodeJS.ErrnoException): void => {

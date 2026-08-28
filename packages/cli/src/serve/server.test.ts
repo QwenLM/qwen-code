@@ -29597,6 +29597,47 @@ describe('runQwenServe', () => {
     ).rejects.toThrow(/Refusing to bind/);
   });
 
+  it('refuses tokenless localhost when it resolves outside loopback', async () => {
+    const bindHostnameLookup = vi.fn(async () => ({
+      address: '192.0.2.10',
+      family: 4,
+    }));
+    await expect(
+      runQwenServe(
+        {
+          hostname: 'localhost',
+          port: 0,
+          mode: 'http-bridge',
+        },
+        { bindHostnameLookup },
+      ),
+    ).rejects.toThrow(/Refusing to bind 192\.0\.2\.10/);
+    expect(bindHostnameLookup).toHaveBeenCalledWith('localhost');
+  });
+
+  it('refuses trusted mode when the actual listener address is not loopback', async () => {
+    const httpServerFactory = vi.fn((app) => {
+      const server = createServer(app);
+      vi.spyOn(server, 'address').mockReturnValue({
+        address: '0.0.0.0',
+        family: 'IPv4',
+        port: 0,
+      });
+      return server;
+    });
+    await expect(
+      runQwenServe(
+        {
+          hostname: 'localhost',
+          port: 0,
+          mode: 'http-bridge',
+        },
+        { httpServerFactory },
+      ),
+    ).rejects.toThrow(/bound to non-loopback address 0\.0\.0\.0/);
+    expect(httpServerFactory).toHaveBeenCalledOnce();
+  });
+
   it('refuses to start with --require-auth on loopback when no token configured (#4175 PR 15)', async () => {
     // Boot-loud check: silently dropping the flag would leave the
     // operator believing loopback is hardened when it isn't.

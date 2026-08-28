@@ -48,15 +48,9 @@ export function isLoopbackBind(hostname: string): boolean {
   return LOOPBACK_BINDS.has(normalized) || isIpv4Loopback(normalized);
 }
 
-/**
- * The loopback spellings the primary Host gate (auth.ts) answers when the
- * daemon binds loopback — its allowlist carries exactly these names (plus
- * `host.docker.internal`, which is never a bind spelling). `isLoopbackBind`
- * is wider because the kernel routes all of 127/8 to loopback, but a worker
- * dialing any other 127.x.y.z gets `403 Invalid Host header` from the very
- * daemon it is trying to reach, so the worker-URL validators must certify
- * this narrower set.
- */
-export function isHostGateLoopback(hostname: string): boolean {
-  return LOOPBACK_BINDS.has(hostname.toLowerCase());
+export function isLoopbackAddress(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return (
+    normalized === '::1' || normalized === '[::1]' || isIpv4Loopback(normalized)
+  );
 }

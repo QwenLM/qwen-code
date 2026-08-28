@@ -149,10 +149,12 @@ credential. It is not the default local workflow proposed here.
 
 ### Trusted-loopback mode trusts reachable local callers
 
-The trust decision is made from the configured bind, not from a claim in an
-HTTP header. `isLoopbackBind()` recognizes `localhost`, `::1`, `[::1]`, and
-the complete `127.0.0.0/8` range. The primary socket cannot normally accept a
-direct LAN connection in this mode.
+The trust decision is made from the actual bind address, not from a claim in an
+HTTP header. `runQwenServe()` resolves `localhost` once, pins the listener to
+that address, and verifies after listen that it is `::1` or in the complete
+`127.0.0.0/8` range before publishing the daemon. A direct `createServeApp()`
+embed has no socket to verify, so its caller remains responsible for ensuring
+that a declared loopback hostname is bound only to loopback.
 
 The guarantee is deliberately no stronger than that. Loopback is not user or
 process identity. Another local account, a compromised browser process, a
@@ -190,7 +192,7 @@ remain separate concepts.
 ## Required invariants
 
 1. A primary request may receive trusted-loopback authority only when the
-   configured primary bind is loopback, no resolved runtime token exists, and
+   actual primary bind is loopback, no resolved runtime token exists, and
    `requireAuth` is false.
 2. A request on the Local Control listener never receives authority merely
    because the primary listener is trusted loopback.
