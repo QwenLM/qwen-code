@@ -33,6 +33,9 @@ export interface OpenTuiKeyInput {
   shift?: boolean;
   /** macOS Option flag reported by the kitty protocol parser. */
   option?: boolean;
+  /** kitty protocol Super (Cmd) flag — the original KeypressContext folds
+   * ALT|SUPER into its single `meta` flag. */
+  super?: boolean;
   sequence?: string;
   /** Bracketed-paste delivery (OpenTUI routes pastes via a separate event). */
   paste?: boolean;
@@ -40,13 +43,23 @@ export interface OpenTuiKeyInput {
 
 /**
  * Key names @opentui/core emits differently from the original readline
- * parser. Under the kitty protocol opentui names keypad Enter 'kpenter'
- * (kittyKeyMap 57414) while the original parser maps 57414 to 'return'
- * (KeypressContext), so the unnormalized name matches no RETURN/SUBMIT
- * binding and numpad Enter cannot confirm a dialog in kitty mode.
+ * parser. Under the kitty protocol opentui prefixes the keypad cluster with
+ * 'kp' (kittyKeyMap 57414-57426) while the original parser maps those
+ * codepoints to the plain names (KeypressContext); without the aliases the
+ * whole keypad navigation cluster matches no binding in kitty mode.
  */
 const OPENTUI_KEY_NAME_ALIASES: Readonly<Record<string, string>> = {
   kpenter: 'return',
+  kpleft: 'left',
+  kpright: 'right',
+  kpup: 'up',
+  kpdown: 'down',
+  kppageup: 'pageup',
+  kppagedown: 'pagedown',
+  kphome: 'home',
+  kpend: 'end',
+  kpinsert: 'insert',
+  kpdelete: 'delete',
 };
 
 /**
@@ -54,15 +67,15 @@ const OPENTUI_KEY_NAME_ALIASES: Readonly<Record<string, string>> = {
  * by `ui/keyMatchers.ts`. OpenTUI already emits the same key names the
  * original readline parser uses ('return', 'escape', 'up', 'backspace', ...)
  * modulo the known aliases above, so only modifier normalization is needed:
- * the original single `meta` flag covers Alt/Option (and the `command`
- * binding column), so Option folds into `meta` exactly like the original
- * KeypressContext does for terminals.
+ * the original single `meta` flag covers Alt/Option/Super (and the
+ * `command` binding column), so Option and Super fold into `meta` exactly
+ * like the original KeypressContext folds ALT|SUPER for terminals.
  */
 export function toOriginalKey(input: OpenTuiKeyInput): Key {
   return {
     name: OPENTUI_KEY_NAME_ALIASES[input.name] ?? input.name,
     ctrl: !!input.ctrl,
-    meta: !!(input.meta || input.option),
+    meta: !!(input.meta || input.option || input.super),
     shift: !!input.shift,
     paste: !!input.paste,
     sequence: input.sequence ?? '',

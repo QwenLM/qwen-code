@@ -524,12 +524,16 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     );
     detail(
       'Memory files',
+      // The producer emits ContextMemoryDetail ({ path, tokens }); map to
+      // the name field detail() renders.
       [
         ...((item['memoryFiles'] ?? []) as Array<{
-          name: string;
+          path: string;
           tokens: number;
         }>),
-      ].sort(byTokens),
+      ]
+        .map((file) => ({ name: file.path, tokens: file.tokens }))
+        .sort(byTokens),
     );
     const skills = [
       ...((item['skills'] ?? []) as Array<{

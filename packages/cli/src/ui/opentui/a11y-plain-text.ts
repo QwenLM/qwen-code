@@ -22,12 +22,25 @@ import stripAnsiLib from 'strip-ansi';
 // strip-ansi 7.x strips the introducer of CSI sequences with private
 // parameter markers (e.g. the SGR mouse report \x1b[<0;5;1M) but leaves
 // their parameter bytes as visible text; remove the full sequence first.
+// The intermediate-byte class (0x20-0x2F) covers DECRQCRA-style sequences
+// whose final byte is preceded by one (e.g. CSI ? … $ y).
 // eslint-disable-next-line no-control-regex
-const PRIVATE_PARAM_CSI = /\x1b\[[?<>=][0-9;:<=>?]*[@-~]/g;
+const PRIVATE_PARAM_CSI = /\x1b\[[?<>=][0-9;:<=>?]*[\x20-\x2F]*[@-~]/g;
+
+// strip-ansi also leaves DCS/SOS/PM/APC sequences (only the 2-byte
+// introducer of a DCS is consumed) and unterminated OSC bodies in place;
+// consume them through ST/BEL/end-of-input so SIXEL payloads or tmux
+// passthroughs never reach the screen reader as announced garbage.
+/* eslint-disable no-control-regex */
+const OTHER_ESCAPE_SEQUENCE =
+  /\x1b[PX^_][\s\S]*?(?:\x1b\\|\x07|$)|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)/g;
+/* eslint-enable no-control-regex */
 
 /** Strips all ANSI escape sequences, leaving the readable text. */
 export function stripAnsi(text: string): string {
-  return stripAnsiLib(text.replace(PRIVATE_PARAM_CSI, ''));
+  return stripAnsiLib(
+    text.replace(PRIVATE_PARAM_CSI, '').replace(OTHER_ESCAPE_SEQUENCE, ''),
+  );
 }
 
 /**
@@ -45,7 +58,10 @@ export function markdownToPlainText(markdown: string): string {
   let fenceChar: '`' | '~' | null = null;
   let fenceLength = 0;
 
-  for (const rawLine of markdown.split('\n')) {
+  // CommonMark line endings: \r\n, \n, and lone \r all terminate a line;
+  // splitting on \n alone leaves \r on the line, which `.` excludes and
+  // `$` cannot see past, deadening fence detection for CRLF markdown.
+  for (const rawLine of markdown.split(/\r\n|\n|\r/)) {
     // CommonMark fence: 3+ backticks/tildes, optionally indented up to 3
     // spaces. An OPENING fence may carry info text (```js); a CLOSING
     // fence cannot — a fence-like line with trailing content inside a
@@ -88,13 +104,17 @@ export function markdownToPlainText(markdown: string): string {
     }
     // Extract code spans before the other inline passes: their contents are
     // literal text and must not be consumed as links/emphasis markup.
-    // CommonMark: a span opens with N backticks and closes on the next run
-    // of exactly N backticks (single backticks inside ``spans`` survive).
+    // Mirrors ink's INLINE_CODE_SPAN_PATTERN_SOURCE: non-empty content, and
+    // the closing run is neither preceded nor followed by another backtick,
+    // so `` and stray runs stay literal instead of being consumed reordered.
     const codeSpans: string[] = [];
-    text = text.replace(/(?<!`)(`+)([\s\S]*?)\1(?!`)/g, (_, _ticks, span) => {
-      codeSpans.push(span);
-      return `\u0000${codeSpans.length - 1}\u0000`;
-    });
+    text = text.replace(
+      /(?<!`)(`+)(?!`)([\s\S]+?)(?<!`)\1(?!`)/g,
+      (_, _ticks, span) => {
+        codeSpans.push(span);
+        return `\u0000${codeSpans.length - 1}\u0000`;
+      },
+    );
     // Images -> alt text, links -> link text.
     text = text.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1');
     text = text.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');

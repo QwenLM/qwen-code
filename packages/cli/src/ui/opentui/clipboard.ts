@@ -34,36 +34,17 @@ export function osc52Sequence(
   return sequence;
 }
 
-// Same cap as ink's writeOsc52: iTerm2 caps at ~100KB base64, xterm ~8KB;
-// 75KB utf-8 is ~100KB base64. Larger payloads skip OSC 52 and rely on the
-// platform command.
-const MAX_OSC52_BYTES = 75_000;
-
 /**
  * Write text to the system clipboard.
- * OSC 52 first (works inside alternate screen when the terminal honors it),
- * platform command as reliable fallback. Never throws.
+ * Never throws.
+ *
+ * copyText delegates to copyToClipboard — the existing utility already
+ * has the TTY gate, the OSC 52 fallback (via writeOsc52 / wrapForMultiplexer),
+ * and the platform command path. A self-written OSC 52 here would
+ * double-emit on the no-xclip Linux/SSH path exactly this feature targets.
  */
 export async function copyText(text: string): Promise<boolean> {
   if (!text) return false;
-  // Warp blocks OSC 52 by default and shows a scary security banner; skip it there.
-  const isWarp =
-    /warp/i.test(process.env['TERM_PROGRAM'] ?? '') ||
-    /warp/i.test(process.env['TERMINAL_EMULATOR'] ?? '');
-  // TTY gate (writeOsc52 convention): piped/redirected stdout would inject
-  // raw escape bytes into the pipe consumer's input stream.
-  const stream = process.stderr.isTTY
-    ? process.stderr
-    : process.stdout.isTTY
-      ? process.stdout
-      : null;
-  if (!isWarp && stream && Buffer.byteLength(text, 'utf8') <= MAX_OSC52_BYTES) {
-    try {
-      stream.write(osc52Sequence(text));
-    } catch {
-      /* ignore */
-    }
-  }
   try {
     await copyToClipboard(text);
     return true;
