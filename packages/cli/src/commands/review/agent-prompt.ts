@@ -1402,8 +1402,12 @@ function fetchedShaOf(report: PlanReport): string | undefined {
  * have any. Resolved against the process cwd, like every other use of
  * `worktreePath` here: the report stores it repo-relative and review commands
  * run from the project root.
+ *
+ * Exported for `emit-workflow`, which must probe the tree exactly the way this
+ * command's handler does: both paths build through `buildLaunch`, and a probe
+ * only one of them ran is a divergence in the briefs the two paths bake.
  */
-function worktreeResidueOf(report: PlanReport): WorktreeResidue {
+export function worktreeResidueOf(report: PlanReport): WorktreeResidue {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
   // Hand over the sha fetch-pr recorded: committing the contamination moves
@@ -2356,12 +2360,15 @@ export function findingsSection(
  * Build one agent's brief and launch prompt, write the brief beside the plan, and
  * return the key and the prompt for the caller to record and print.
  *
- * One body for both callers on purpose: the single-agent path and `--roster` must
- * emit byte-identical prompts for the same agent, because the delivery check
- * compares agents against records — a drift between the two paths would read as a
- * rewritten launch on a run that did everything right.
+ * One body for every caller on purpose: the single-agent path, `--roster` and
+ * `emit-workflow` must emit byte-identical prompts for the same agent, because
+ * the delivery check compares agents against records — a drift between the
+ * paths would read as a rewritten launch on a run that did everything right.
+ * Exported for that reason: a caller that rebuilt this would be a second
+ * implementation of the invariant, and byte-parity would become something a
+ * test asserts rather than something the code cannot break.
  */
-function buildLaunch(
+export function buildLaunch(
   report: PlanReport,
   planPath: string,
   spec: {
