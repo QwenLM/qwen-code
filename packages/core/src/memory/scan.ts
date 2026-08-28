@@ -24,10 +24,7 @@ import {
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
-import {
-  listTrustedMemoryMarkdownFiles,
-  resolveTrustedMemoryFile,
-} from './trusted-memory-filesystem.js';
+import { listTrustedMemoryMarkdownFiles } from './trusted-memory-filesystem.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_SCAN');
 
@@ -294,7 +291,7 @@ export function parseAutoMemoryTopicDocument(
   };
 }
 
-async function listMarkdownFiles(root: string): Promise<string[]> {
+async function listMarkdownFiles(root: string) {
   return listTrustedMemoryMarkdownFiles(
     root,
     getMemoryRootTrustedAnchor(root),
@@ -334,9 +331,9 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
   incompleteScopes: AutoMemoryIncompleteScope[];
   rootError?: unknown;
 }> {
-  let relativePaths: string[];
+  let files: Awaited<ReturnType<typeof listMarkdownFiles>>;
   try {
-    relativePaths = await listMarkdownFiles(root);
+    files = await listMarkdownFiles(root);
   } catch (error) {
     debugLogger.debug(`failed to list memory root ${root}`, error);
     return {
@@ -355,16 +352,7 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
   const docs: ScannedAutoMemoryDocument[] = [];
   let fileReadFailures = 0;
   await Promise.all(
-    relativePaths.map(async (relativePath) => {
-      const trustedFile = await resolveTrustedMemoryFile(
-        root,
-        getMemoryRootTrustedAnchor(root),
-        relativePath,
-      );
-      if (!trustedFile) {
-        fileReadFailures += 1;
-        return;
-      }
+    files.map(async ({ relativePath, resolvedPath: trustedFile }) => {
       const filePath = path.join(root, relativePath);
       try {
         const [content, stats] = await Promise.all([
@@ -400,7 +388,7 @@ async function scanAutoMemoryDocumentsFromRootWithStatus(
     incompleteScopes.push({
       scope: opts.scope,
       reason: 'file_read_failed',
-      discovered: relativePaths.length,
+      discovered: files.length,
       returned: returnedDocs.length,
     });
   }

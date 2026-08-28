@@ -49,14 +49,19 @@ export async function resolveTrustedMemoryRoot(
   return resolved;
 }
 
+export interface TrustedMemoryFile {
+  relativePath: string;
+  resolvedPath: string;
+}
+
 export async function listTrustedMemoryMarkdownFiles(
   root: string,
   trustedAnchor: string,
   excludedFilename: string,
-): Promise<string[]> {
+): Promise<TrustedMemoryFile[]> {
   const resolvedRoot = await resolveTrustedMemoryRoot(root, trustedAnchor);
   if (!resolvedRoot) return [];
-  const files: string[] = [];
+  const files: TrustedMemoryFile[] = [];
 
   const visit = async (
     directory: string,
@@ -78,14 +83,23 @@ export async function listTrustedMemoryMarkdownFiles(
       ) {
         const resolvedPath = await fs.realpath(absolutePath);
         if (isWithin(resolvedRoot, resolvedPath)) {
-          files.push(relativePath.replaceAll('\\', '/'));
+          files.push({
+            relativePath: relativePath.replaceAll('\\', '/'),
+            resolvedPath,
+          });
         }
       }
     }
   };
 
   await visit(root, '');
-  return files.sort();
+  return files.sort((a, b) =>
+    a.relativePath < b.relativePath
+      ? -1
+      : a.relativePath > b.relativePath
+        ? 1
+        : 0,
+  );
 }
 
 export async function resolveTrustedMemoryFile(

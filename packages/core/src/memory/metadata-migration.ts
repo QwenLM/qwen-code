@@ -151,7 +151,7 @@ function splitFrontmatter(content: string): FrontmatterParts {
   };
 }
 
-async function listMemoryFiles(root: string): Promise<string[]> {
+async function listMemoryFiles(root: string) {
   return listTrustedMemoryMarkdownFiles(
     root,
     getMemoryRootTrustedAnchor(root),
@@ -164,13 +164,10 @@ export async function scanMemoryMetadataMigrationCandidates(
   scope: AutoMemoryScope,
 ): Promise<MemoryMetadataMigrationCandidate[]> {
   const candidates: MemoryMetadataMigrationCandidate[] = [];
-  for (const relativePath of await listMemoryFiles(root)) {
-    const trustedFile = await resolveTrustedMemoryFile(
-      root,
-      getMemoryRootTrustedAnchor(root),
-      relativePath,
-    );
-    if (!trustedFile) continue;
+  for (const {
+    relativePath,
+    resolvedPath: trustedFile,
+  } of await listMemoryFiles(root)) {
     const filePath = path.join(root, relativePath);
     let content: string;
     try {
@@ -226,10 +223,12 @@ export async function scanMemoryMetadataCorpusStatus(params: {
   const scannedRoots = await Promise.all(
     roots.map(async ({ root, scope }) => {
       const files = [];
-      for (const relativePath of await listMemoryFiles(root)) {
+      for (const { relativePath, resolvedPath } of await listMemoryFiles(
+        root,
+      )) {
         let content: string;
         try {
-          content = await fs.readFile(path.join(root, relativePath), 'utf-8');
+          content = await fs.readFile(resolvedPath, 'utf-8');
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
           throw error;
