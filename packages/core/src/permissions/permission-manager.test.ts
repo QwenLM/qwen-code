@@ -2914,6 +2914,47 @@ describe('PermissionManager', () => {
       warnSpy.mockRestore();
     });
 
+    it('warns when a valid entry matches no registered tool (#10075)', async () => {
+      // A `read_flie`-style typo parses cleanly (only unbalanced parens
+      // are invalid) and survives resolveToolName (unknown names pass
+      // through for dynamically discovered tools), so it escapes the
+      // dropped-entries warning while activating an allowlist that
+      // matches nothing — silently deferring the whole toolset, the exact
+      // surprise class #10075 reported. Pin the diagnostic.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      pm = new PermissionManager(makeConfig({ eagerTools: ['read_flie'] }));
+      pm.initialize();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'tools.eager: 1 entry ("read_flie") does not match any registered tool name',
+        ),
+      );
+      // The fail-closed semantic is unchanged — only the silence was the
+      // bug: the unlisted tools stay deferred, not disabled.
+      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
+        'deferred',
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('stays quiet for unknown mcp__ and computer_use__ names (#10075)', async () => {
+      // Dynamically discovered families have no alias entry by design and
+      // must keep their pass-through; the unknown-name warning only
+      // targets names neither the alias table nor a discovery prefix
+      // recognizes.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      pm = new PermissionManager(
+        makeConfig({
+          eagerTools: ['mcp__server__tool', 'computer_use__screenshot'],
+        }),
+      );
+      pm.initialize();
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('tools.eager'),
+      );
+      warnSpy.mockRestore();
+    });
+
     it('deny rules still win over eager membership', async () => {
       pm = new PermissionManager(
         makeConfig({
