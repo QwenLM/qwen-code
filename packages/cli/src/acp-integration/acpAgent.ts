@@ -12087,7 +12087,6 @@ class QwenAgent implements Agent {
         >;
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload: {
-        this.modelProviderReloadRevision += 1;
         if (
           !this.settings.reloadScopesFromDiskAtomically([
             SettingScope.User,
@@ -12097,6 +12096,7 @@ class QwenAgent implements Agent {
           debugLogger.warn('Model-provider settings reload failed');
           return { configsRefreshed: 0, configsFailed: 1 };
         }
+        this.modelProviderReloadRevision += 1;
         const merged = this.settings.merged;
         reloadEnvironment(merged, cwd);
         const providerProtocol = merged.providerProtocol ?? {};
@@ -12995,14 +12995,19 @@ class QwenAgent implements Agent {
         const providerReloadRevision = this.modelProviderReloadRevision;
         const previousModelProviders = settings.merged.modelProviders;
         const previousProviderProtocol = settings.merged.providerProtocol;
-        if (
+        const settingsReloaded =
           settings.reloadScopesFromDiskAtomically?.([
             SettingScope.User,
             SettingScope.Workspace,
-          ]) === false
-        ) {
-          throw new Error(
-            'Unable to reload model-provider settings from disk.',
+          ]) !== false;
+        if (!settingsReloaded) {
+          if (providerReloadRevision !== options.configProviderRevision) {
+            throw new Error(
+              'Unable to reload model-provider settings from disk.',
+            );
+          }
+          debugLogger.warn(
+            'Final model-provider settings reload failed; keeping current settings',
           );
         }
         config.reloadModelProvidersConfig?.(

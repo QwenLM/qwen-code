@@ -81,6 +81,10 @@ child reload succeeds.
 
 If the child cannot reload either settings scope from disk, it does not apply
 the stale in-memory provider registry and reports a failed child refresh.
+During Session publication, the same read failure is fail-closed only when the
+provider revision advanced during construction; otherwise the Session keeps
+its already loaded settings so an unrelated malformed file does not block all
+new and restored Sessions.
 
 `failed` is returned as a successful mutation with a user-facing warning. A
 workspace generation closing during the operation keeps its existing 503
