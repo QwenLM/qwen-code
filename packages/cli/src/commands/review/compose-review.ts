@@ -3964,7 +3964,17 @@ function composeReviewBody(
     coverageEntries.some(
       (e) =>
         e !== budgetEntry &&
-        (entry === e.subject || entry.includes(`${e.subject} — ${e.reason}`)),
+        (entry === e.subject ||
+          entry.includes(`${e.subject} — ${e.reason}`) ||
+          // The Chinese twin of the same match: the stderr instruction
+          // relays the structural entries in BOTH languages, and a zh relay
+          // (the `subjectZh——reasonZh` shape deadline.ts coins) that
+          // escapes the dedup flips `dimensionGapsAreDepthOnly` and
+          // withholds the anchor from a run its English relay clears.
+          entry === e.subjectZh ||
+          (e.subjectZh !== undefined &&
+            e.reasonZh !== undefined &&
+            entry.includes(`${e.subjectZh}——${e.reasonZh}`))),
     );
   const nonEchoedDimensionGaps = [
     ...unreviewed,
@@ -4854,17 +4864,11 @@ function composeReviewBody(
   for (const d of unreviewed) {
     if (seenCaller.has(d)) continue; // a caller pasting itself twice
     seenCaller.add(d);
-    // The budget-stop entry never reason-matches: its relays are already
-    // deduped by the marker phrase above, and letting its `reverse audit`
-    // subject claim the match swallowed unrelated reverse-audit scopes the
-    // caller disclosed with their own reasons (a bare subject echo still
-    // dedups).
-    const echoesCoverage = covEntries.some(
-      (e) =>
-        d === e.subject ||
-        (e !== budgetEntry && d.includes(`${e.subject} — ${e.reason}`)),
-    );
-    if (!echoesCoverage) callerLeft.push(d);
+    // The SAME predicate the decision layer applies: one dedup rule for
+    // both registers. Its budget exemption keeps a bare `reverse audit`
+    // whiff renderable (the whiff's only detector), and its zh arms dedup
+    // a Chinese relay of a structural entry the English arms cover.
+    if (!echoesCoverageEntry(d)) callerLeft.push(d);
   }
   // Bare caller names share the whiffed-agent explanation; an entry that
   // brought its own reason (after an em-dash) is rendered verbatim, its own

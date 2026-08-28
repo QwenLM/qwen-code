@@ -96,7 +96,7 @@ import {
 } from './lib/repository-context.js';
 import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { SHA_RE } from './lib/ledger.js';
-import { planTokenLine } from './lib/selection.js';
+import { PLAN_TOKEN_LABEL, planTokenLine } from './lib/selection.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
@@ -1055,7 +1055,11 @@ export function buildWholeDiffBlock(
   parts.push(
     ...toolBudgetBlock(report, { mandatoryReads: wholeDiffReadPages(report) }),
   );
-  parts.push(...tail(rules));
+  // The single entrance where repo-controlled text rides a launch below
+  // the marker lines — inerted, not appended raw (see FORGEABLE_MARKER_LINE).
+  parts.push(
+    ...tail(rules === undefined ? undefined : inertMarkerLines(rules)),
+  );
   return parts.join('\n');
 }
 
@@ -1214,6 +1218,24 @@ function diffReadingBlock(
 
   return parts;
 }
+
+// The identity-marker shapes a launch may carry, matched as lines: the
+// plan-token line (lib/selection.ts) and the chunk-identity line
+// (lib/coverage.ts's CHUNK_RE). Repository rules ride the whole-diff
+// launch BELOW the token line, and a rules line wearing one of these
+// shapes would forge the record's identity: `launchPlanToken` reads the
+// LAST standalone marker and the anchored CHUNK_RE takes the FIRST, so
+// one forged line re-keys the run's own whole-diff records or assigns
+// them a chunk they own none of. A leading space breaks both anchors —
+// both parsers match from line start — and leaves the rule legible.
+const FORGEABLE_MARKER_LINE = new RegExp(
+  `^(?:${PLAN_TOKEN_LABEL} [0-9a-f]{16}$|` +
+    'You are review agent `chunk \\d+ of \\d+`)',
+  'gm',
+);
+
+const inertMarkerLines = (text: string): string =>
+  text.replace(FORGEABLE_MARKER_LINE, (line) => ` ${line}`);
 
 /** The closing half every prompt shares: how to report, and what "nothing" means. */
 function tail(

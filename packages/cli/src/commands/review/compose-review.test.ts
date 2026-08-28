@@ -8226,6 +8226,11 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(parseLedger(r.body)?.sha).toBeUndefined();
     expect(r.capAxes.coverage).toContain('unreviewed-dimension');
     expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
+    // The decision layer keeping the entry is only half the contract: the
+    // render path's echo dedup must not swallow it either, or the posted
+    // body never discloses the whiff while `capAxes.coverage` says coverage
+    // is in doubt (R19-32).
+    expect(r.body).toContain('returned no evidence of its walk twice');
   });
 
   it('classifies a ROUND-CAP stop the same way, relay or no relay', () => {
@@ -15996,6 +16001,47 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     expect(r.capAxes.verification).toContain('unreviewed-dimension');
   });
 
+  it('keeps a floor-only cap on the verification axis when the echo is the zh relay', () => {
+    // The stderr instruction relays the structural entry in BOTH languages
+    // (R17-3): the zh sentence — the `subjectZh——reasonZh` shape
+    // coverage.ts coins — must dedup exactly like the English relay, or it
+    // flips `dimensionGapsAreDepthOnly` and misroutes the cap to the
+    // coverage axis for a run whose only doubt is the verification floor.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent → floor gap
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        '反向审计——没有审计 agent 是用本 skill 构建的 prompt 启动的——负责搜寻' +
+          '评审其余部分遗漏问题的这道工序，即便运行过，也缺失了 brief 承载的方法',
+      ],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
+  it('keeps a floor-only cap on the verification axis when the echo is the bare zh subject', () => {
+    // The exact-match zh arm: a bare `反向审计` relay of the floor entry
+    // dedupes against `subjectZh` exactly as the bare English subject does
+    // against `subject` (R17-3).
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent → floor gap
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['反向审计'],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
   it('keeps a floor-only cap on the verification axis when the echo is the bare subject', () => {
     // The exact-match half of the subject-echo dedup: stderr relays can
     // carry the structural entry's subject ALONE, without the reason tail
@@ -16087,6 +16133,35 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     const ledger = parseLedger(r.body);
     expect(ledger?.round).toBe(1);
     expect(ledger?.sha).toBe('deadbeef00112233');
+  });
+
+  it('anchors a clean balanced-medium run whose orchestrator relays the skip in Chinese', () => {
+    // The zh twin of the anchor test (R17-3): the by-design skip relayed as
+    // the zh structural sentence must echo-dedup exactly like the English
+    // relay, or `dimensionGapsAreDepthOnly` flips false, the cap misroutes
+    // to the coverage axis, and the anchor withholds — regenerating the
+    // full-diff re-review loop the anchor exists to end.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify'], {
+        effort: 'medium',
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        '反向审计——未运行——均衡（medium）档跳过二次审查步骤，因此本次判定上限为 ' +
+          'Comment，不会 Approve',
+      ],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.dimensionGapsAreDepthOnly).toBe(true);
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.posture).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
   });
 
   it('keeps a repairable floor gap on the verification axis beside the medium skip', () => {

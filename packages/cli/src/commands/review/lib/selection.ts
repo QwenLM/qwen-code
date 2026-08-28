@@ -154,8 +154,9 @@ const PLAN_TOKEN_RE = new RegExp(`^${PLAN_TOKEN_LABEL} ([0-9a-f]{16})$`, 'mg');
 export function launchPlanToken(launchPrompt: string): string | null {
   // The LAST standalone marker: the launch's own. Foreign markers can only
   // PRECEDE it — folded findings land between the identity line and the
-  // token line, and nothing after the token line carries PR-controlled text
-  // that could open a line of its own.
+  // token line, and the repo-controlled text appended AFTER it (the
+  // whole-diff block's rules) is inerted line-by-line before it rides the
+  // launch, so it cannot open a marker line there.
   let token: string | null = null;
   for (const m of launchPrompt.matchAll(PLAN_TOKEN_RE)) token = m[1];
   return token;

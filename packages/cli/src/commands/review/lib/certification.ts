@@ -62,6 +62,20 @@ export function declaresOwnUncoverable(
 }
 
 /**
+ * The chunk id a record's return declares uncoverable, whatever chunk the
+ * record was ASSIGNED. A paraphrased launch breaks the anchored identity
+ * line and de-assigns the record, but the declaration line survives — the
+ * coverage walk reads the id off it so the declaration is sealed and ruled
+ * on instead of dropped (R17-4). The quotation caveat rides the walk's
+ * seals there, not this atom: an id read off a return is a claim, and the
+ * walk decides what proves it.
+ */
+export function declaredUncoverableChunkId(rec: AgentRecord): number | null {
+  const m = UNCOVERABLE_RE.exec(rec.finalText);
+  return m === null ? null : Number(m[1]);
+}
+
+/**
  * Does ANY of these serialized tool-call args name the EXACT `path`?
  *
  * The match itself lives in `transcripts.ts` beside the code that serializes

@@ -11,6 +11,7 @@
 // command that reports it stopped saying a file was skipped.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -138,7 +139,15 @@ describe('capture-local (command boundary)', () => {
     expect(plan.chunks.length).toBeGreaterThan(0);
     expect(plan.untrackedFiles).toEqual(['src/pay.ts']);
     expect(existsSync(plan.diffPathAbsolute)).toBe(true);
-    expect(readFileSync(plan.diffPathAbsolute, 'utf8')).toBe(DIFF);
+    const writtenDiff = readFileSync(plan.diffPathAbsolute, 'utf8');
+    expect(writtenDiff).toBe(DIFF);
+    // The identity must digest the SAME bytes the plan was built from: the
+    // merge that restructured this command around `diffBytes` dropped the
+    // `diffText` declaration while the use site survived (R19-1), and a
+    // substitute constant would stay type-correct while naming nothing.
+    expect(plan.selection.sourceArtifactSha256).toBe(
+      createHash('sha256').update(writtenDiff, 'utf8').digest('hex'),
+    );
   });
 
   it('creates the output directory the caller chose', () => {

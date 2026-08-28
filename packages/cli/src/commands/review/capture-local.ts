@@ -1195,7 +1195,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
         operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
         hasDeadline: hasReviewDeadline(process.env),
       },
-      diffText,
+      diffBytes.toString('utf8'),
     ),
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
