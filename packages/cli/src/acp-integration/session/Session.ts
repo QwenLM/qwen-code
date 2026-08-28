@@ -3516,9 +3516,16 @@ export class Session implements SessionContext {
     ) {
       return false;
     }
+    // Retire the registry entry before touching the store. `removeTerminal`
+    // refuses a live or handle-held entry — the registry's own last word
+    // on whether the run is still active here — so `false` for an entry
+    // that exists means the run re-registered and must not be reported
+    // deleted; a persisted-only run has no entry to retire.
+    if (registry.get(runId) !== undefined && !registry.removeTerminal(runId)) {
+      return false;
+    }
     if (!(await deleteWorkflowSnapshot(this.config, runId))) return false;
     this.workflowDeletionSeqByRunId.set(runId, ++this.workflowDeletionSeq);
-    registry.removeTerminal(runId);
     this.unpersistedWorkflowHistory.delete(runId);
     this.mergedWorkflowRunIds.delete(runId);
     this.persistedWorkflowRunIds.delete(runId);

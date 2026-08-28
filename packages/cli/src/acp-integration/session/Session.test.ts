@@ -3445,6 +3445,7 @@ describe('Session', () => {
       runId: target.runId,
       status: 'failed',
     });
+    mockWorkflowRunRegistry.removeTerminal.mockReturnValueOnce(true);
     listWorkflowSnapshotsSpy.mockResolvedValueOnce([...newer, target]);
 
     await expect(
@@ -3509,6 +3510,58 @@ describe('Session', () => {
       runId: 'wf_deadbeef',
       status: 'failed',
     });
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      true,
+    );
+    expect(deleteWorkflowSnapshotSpy).toHaveBeenCalledWith(
+      mockConfig,
+      snapshot.runId,
+    );
+  });
+
+  it('does not report a deletion whose registry entry could not be retired', async () => {
+    // `removeTerminal` refuses a live or handle-held entry. Ignoring its
+    // answer reported success for a run that was still registered here,
+    // whose settlement then re-persisted the "deleted" history.
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_stuck',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValue([snapshot]);
+    mockWorkflowRunRegistry.get.mockReturnValue({
+      runId: snapshot.runId,
+      status: 'failed',
+    });
+    mockWorkflowRunRegistry.removeTerminal.mockReturnValueOnce(false);
+
+    await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
+      false,
+    );
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
+    expect(session.getWorkflowHistory()).toHaveLength(1);
+
+    mockWorkflowRunRegistry.removeTerminal.mockReturnValueOnce(true);
     await expect(session.deleteWorkflowHistory(snapshot.runId)).resolves.toBe(
       true,
     );
@@ -3678,6 +3731,7 @@ describe('Session', () => {
     );
     listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
     mockWorkflowRunRegistry.get.mockReturnValue({ status: 'failed' });
+    mockWorkflowRunRegistry.removeTerminal.mockReturnValueOnce(true);
 
     const deletion = session.deleteWorkflowHistory(snapshot.runId);
     await vi.waitFor(() =>
