@@ -1969,10 +1969,13 @@ describe('<ModelDialog />', () => {
   // --- Modality provenance badge + "Test image support" action (#10309) ---
 
   const pressT = async () => {
-    // The dialog registers two useKeypress handlers: [0] escape/left,
-    // [1] the gated 't' probe action.
+    // The dialog registers two useKeypress handlers per render: escape/left
+    // first, then the gated 't' probe action. Handlers accumulate across
+    // re-renders and remounts, so always fire the LATEST registered one —
+    // its closure holds the current mount's props and state.
+    const calls = mockedUseKeypress.mock.calls;
     await act(async () => {
-      mockedUseKeypress.mock.calls[1][0]({
+      calls[calls.length - 1][0]({
         name: 't',
         ctrl: false,
         meta: false,
@@ -2029,6 +2032,87 @@ describe('<ModelDialog />', () => {
     } as unknown as Partial<Config>);
 
     expect(getByText('text · image · probe-tested')).toBeDefined();
+    expect(queryByText('t: test image support')).toBeNull();
+  });
+
+  it('prefers a settings-persisted probe verdict over the registry pattern cache', () => {
+    // The registry cached modalitiesSource at registration time and a plain
+    // settings.setValue does not refresh it — but the dialog reads the live
+    // settings store, so the persisted verdict must drive BOTH the badge and
+    // the t-action gating even while the entry still says 'pattern'.
+    const { getByText, queryByText } = renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'pattern-model'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
+        getModelsConfig: vi.fn(() => ({
+          getGenerationConfig: vi.fn(() => ({
+            baseUrl: 'https://api.example.com/v1',
+          })),
+        })),
+      } as unknown as Partial<Config>,
+      {
+        merged: {
+          probeResults: {
+            'openai|pattern-model|https://api.example.com/v1': {
+              verdict: 'text_only',
+              probedAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
+        },
+      } as unknown as Partial<LoadedSettings>,
+    );
+
+    expect(getByText('text-only · probe-tested')).toBeDefined();
+    expect(queryByText('t: test image support')).toBeNull();
+  });
+
+  it('shows a hand-written explicit declaration over a stale persisted probe record', () => {
+    // A wrong verdict was persisted earlier; the phase-1 remediation is to
+    // hand-write modelProviders modalities and reload the registry, which
+    // stamps the entry 'explicit'. The live probe read must not shadow
+    // that: badge shows manual with the hand-written value.
+    const { getByText, queryByText } = renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'explicit-model'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'explicit-model',
+            label: 'Explicit Model',
+            description: '',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'MODEL_DIALOG_PROBE_TEST_KEY',
+            modalities: { image: true },
+            modalitiesSource: 'explicit',
+          },
+        ]),
+        getModelsConfig: vi.fn(() => ({
+          getGenerationConfig: vi.fn(() => ({
+            baseUrl: 'https://api.example.com/v1',
+          })),
+        })),
+      } as unknown as Partial<Config>,
+      {
+        merged: {
+          probeResults: {
+            // Stale text_only verdict under the SAME key the dialog's live
+            // read would use — it must not flip the hand-written value.
+            'openai|explicit-model|https://api.example.com/v1': {
+              verdict: 'text_only',
+              probedAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
+        },
+      } as unknown as Partial<LoadedSettings>,
+    );
+
+    expect(getByText('text · image · manual')).toBeDefined();
+    expect(queryByText('text-only · probe-tested')).toBeNull();
+    // Explicit entries never offer the t action, record or not.
     expect(queryByText('t: test image support')).toBeNull();
   });
 
@@ -2145,6 +2229,71 @@ describe('<ModelDialog />', () => {
       // local dialog state.
       expect(getByText('text · image · probe-tested')).toBeDefined();
       expect(getByText('accepts images')).toBeDefined();
+    } finally {
+      if (previousKey === undefined) {
+        delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+      } else {
+        process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = previousKey;
+      }
+    }
+  });
+
+  it('hides the t action once a verdict concludes and keeps it after unknown', async () => {
+    const previousKey = process.env['MODEL_DIALOG_PROBE_TEST_KEY'];
+    process.env['MODEL_DIALOG_PROBE_TEST_KEY'] = 'sk-probe-test';
+    const renderPatternDialog = () =>
+      renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'pattern-model'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          getAllConfiguredModels: vi.fn(() => [patternSourceModel]),
+          getModelsConfig: vi.fn(() => ({
+            getGenerationConfig: vi.fn(() => ({
+              baseUrl: 'https://api.example.com/v1',
+            })),
+          })),
+        } as unknown as Partial<Config>,
+        {
+          forScope: () => ({ settings: {} }),
+        } as unknown as Partial<LoadedSettings>,
+      );
+    try {
+      // Concluded verdict: the t action must disappear. Note the mocked
+      // setValue does NOT refresh settings.merged, so the live-settings
+      // lookup still misses — only the local verdict state gates the action
+      // here, which is exactly the fallback under test.
+      mockedProbeImageSupport.mockResolvedValue({
+        verdict: 'image',
+        httpStatus: 200,
+        snippet: 'ok',
+      });
+      const first = renderPatternDialog();
+
+      await pressT();
+
+      expect(first.getByText('text · image · probe-tested')).toBeDefined();
+      expect(first.queryByText('t: test image support')).toBeNull();
+      first.unmount();
+
+      // Unknown verdict: nothing was written and no conclusion exists, so
+      // retry stays available (phase 1 has no other re-probe entry point).
+      mockedProbeImageSupport.mockResolvedValue({
+        verdict: 'unknown',
+        httpStatus: 429,
+        snippet: 'rate limited',
+      });
+      const second = renderPatternDialog();
+
+      await pressT();
+
+      expect(
+        second.getByText(
+          'inconclusive (auth/rate-limit/timeout) — nothing written',
+        ),
+      ).toBeDefined();
+      expect(second.getByText('t: test image support')).toBeDefined();
+      second.unmount();
     } finally {
       if (previousKey === undefined) {
         delete process.env['MODEL_DIALOG_PROBE_TEST_KEY'];

@@ -17,6 +17,7 @@ import {
   isImageGenerationCapable,
   parseVisionModelSetting,
   probeImageSupport,
+  readProbeResult,
   resolveModelId,
   withProbeResult,
   type AvailableModel as CoreAvailableModel,
@@ -799,19 +800,58 @@ export function ModelDialog({
       ? probeState
       : 'idle';
 
+  // Live probe-verdict source: the registry caches modalitiesSource at
+  // registration/reload time (a plain settings.setValue does NOT refresh
+  // already-registered entries), so a verdict concluded earlier in this
+  // session — or written by an earlier dialog session — is visible here only
+  // through the settings store itself. Keyed the same way the write path
+  // keys it (declared/resolved entry baseUrl). Read-side hardening mirrors
+  // the registry: only verdicts exactly 'image'/'text_only' are honored;
+  // hand-edited garbage abstains to the entry's own source.
+  //
+  // The live read only applies to STILL-PATTERN-CACHED entries. An
+  // 'explicit'-stamped entry got there because the user hand-wrote
+  // modelProviders modalities — the phase-1 remediation exit for a wrong
+  // verdict — and a stale probe record must not shadow it in the UI. A
+  // 'probe'-stamped entry loses nothing either: phase 1 has no re-probe
+  // path, so the live store can never hold a newer conclusion than the
+  // registration-time stamp.
+  const liveRawVerdict =
+    highlightedEntry &&
+    !highlightedEntry.isRuntime &&
+    highlightedEntry.model.modalitiesSource === 'pattern'
+      ? readProbeResult(
+          settings.merged?.probeResults,
+          highlightedEntry.authType,
+          highlightedEntry.model.id,
+          highlightedEntry.model.baseUrl,
+        )?.verdict
+      : undefined;
+  const liveProbeVerdict: 'image' | 'text_only' | undefined =
+    liveRawVerdict === 'image' || liveRawVerdict === 'text_only'
+      ? liveRawVerdict
+      : undefined;
+
   // The `t` action only applies to regex-guessed (pattern-source)
-  // modalities: explicit declarations need no probe, probe-derived entries
-  // already carry a persisted verdict, and QWEN_OAUTH's two probe-key
+  // modalities: explicit declarations need no probe, and entries carrying a
+  // conclusion — registry-stamped 'probe' source OR a live settings hit for
+  // a still-pattern-cached entry — need none; QWEN_OAUTH's two probe-key
   // spellings diverge in phase 1 (see probe-store.ts), so it is excluded.
   // Runtime models have no modalitiesSource and are excluded by the same
   // check. A probe in flight disables re-trigger globally so two concurrent
-  // probes can never race the whole-map read-modify-write.
+  // probes can never race the whole-map read-modify-write, and a CONCLUDED
+  // local verdict hides the action too ('unknown' keeps it — retry is the
+  // only recourse for an inconclusive probe in phase 1).
   const canTestImageSupport =
     !!highlightedEntry &&
     !highlightedEntry.isRuntime &&
     highlightedEntry.authType !== AuthType.QWEN_OAUTH &&
-    highlightedEntry.model.modalitiesSource === 'pattern' &&
-    probeState !== 'probing';
+    (liveProbeVerdict === undefined
+      ? highlightedEntry.model.modalitiesSource
+      : 'probe') === 'pattern' &&
+    probeState !== 'probing' &&
+    activeProbeState !== 'image' &&
+    activeProbeState !== 'text_only';
 
   const handleTestImageSupport = useCallback(async () => {
     if (!highlightedEntry || probeState === 'probing') return;
@@ -891,21 +931,31 @@ export function ModelDialog({
     { isActive: true },
   );
 
-  // Registry entries cache modalities/modalitiesSource — a plain
-  // settings.setValue does not refresh them without a registry reload, which
-  // we deliberately do NOT trigger mid-dialog. While a final verdict for the
-  // highlighted entry is on screen, locally derive BOTH the badge source and
-  // the modality value from it, so the panel never contradicts itself (e.g.
-  // `text-only · probe-tested` above `accepts images`); other entries'
-  // badges refresh the next time the dialog opens.
-  const displayedModalitiesSource: ModalitySource | undefined =
+  // Modality badge/value provenance is a two-layer source. Layer 1 is the
+  // registry's registration-time cache (`modalitiesSource`), which a plain
+  // settings.setValue does not refresh without a registry reload — and we
+  // deliberately do NOT reload mid-dialog. Layer 2 is the live settings
+  // store (`probeResults`), read on every render for the highlighted entry
+  // — but ONLY while that entry is still pattern-cached; 'explicit' and
+  // 'probe' stamps show their own value (a hand-written explicit
+  // declaration is the phase-1 way out of a wrong verdict, so it must not
+  // be shadowed by the stale probe record underneath). A local verdict from
+  // THIS dialog's probe overrides both, so the panel never contradicts
+  // itself mid-feedback (e.g. `text-only · probe-tested` above
+  // `accepts images`).
+  const displayedProbeVerdict: 'image' | 'text_only' | undefined =
     activeProbeState === 'image' || activeProbeState === 'text_only'
+      ? activeProbeState
+      : liveProbeVerdict;
+  const displayedModalitiesSource: ModalitySource | undefined =
+    displayedProbeVerdict !== undefined
       ? 'probe'
       : highlightedEntry?.model.modalitiesSource;
   const displayedModalities: InputModalities | undefined =
-    activeProbeState === 'image'
+    displayedProbeVerdict === 'image'
       ? { ...highlightedEntry?.model.modalities, image: true }
-      : activeProbeState === 'text_only' && highlightedEntry?.model.modalities
+      : displayedProbeVerdict === 'text_only' &&
+          highlightedEntry?.model.modalities
         ? { ...highlightedEntry.model.modalities, image: false }
         : highlightedEntry?.model.modalities;
 

@@ -321,6 +321,7 @@ export * from './services/tool-write-origin.js';
 export {
   type ModalityProbeRecord,
   type ProbeResultStore,
+  readProbeResult,
   withProbeResult,
 } from './services/modalityProbe/probe-store.js';
 export {

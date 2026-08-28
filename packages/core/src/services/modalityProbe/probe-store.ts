@@ -27,6 +27,13 @@ export type ProbeResultStore = Record<string, ModalityProbeRecord>;
  * resolves to `''` in the resolver path but 'DYNAMIC_QWEN_OAUTH_BASE_URL' in
  * the registry path — hard-coded oauth models are therefore poor probe
  * candidates in phase 1.
+ *
+ * Another known divergence (phase-1 boundary, see the Draft PR description):
+ * under baseUrl environment overrides (e.g. OPENAI_BASE_URL), the resolver
+ * composes keys from the RESOLVED baseUrl while the registry/dialog compose
+ * keys from the DECLARED value — a record written via one path can be missed
+ * by the other. Advisory-only impact (a missed record falls back to the
+ * pattern tier); revisit when a re-probe/reset flow lands.
  */
 export function buildProbeKey(
   authType: string,
@@ -56,5 +63,13 @@ export function withProbeResult(
   baseUrl: string | undefined,
   record: ModalityProbeRecord,
 ): ProbeResultStore {
-  return { ...store, [buildProbeKey(authType, modelId, baseUrl)]: record };
+  // Write-side hardening: settings.json is human-editable, so `probeResults`
+  // may be hand-corrupted into a non-object (e.g. a bare string). Spreading
+  // such a value would materialize index keys ("0", "1", ...) and persist
+  // them, so treat anything that is not a plain object as empty.
+  const base =
+    typeof store === 'object' && store !== null && !Array.isArray(store)
+      ? store
+      : {};
+  return { ...base, [buildProbeKey(authType, modelId, baseUrl)]: record };
 }
