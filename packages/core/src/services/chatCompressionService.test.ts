@@ -4140,7 +4140,7 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
       const baseOpts = {
         promptId: 'p',
         force: true,
-        config: { ...makeFakeConfig(), getTargetDir: () => dir },
+        config: { ...makeFakeConfig(), getTargetDir: () => dir } as Config,
         consecutiveFailures: 0,
         originalTokenCount: 180_000,
         trigger: 'auto' as const,
