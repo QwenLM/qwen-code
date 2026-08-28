@@ -53,7 +53,9 @@ vi.mock('../../config/storage.js', async (importOriginal) => {
 // otherwise the real readFile runs.
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  type ReadFileHook = (...args: Parameters<typeof actual.readFile>) => unknown;
+  type ReadFileHook = (
+    ...args: Parameters<typeof actual.readFile>
+  ) => unknown;
   let readFileHook: ReadFileHook | undefined;
   return {
     ...actual,
