@@ -113,6 +113,26 @@ const readFileFault = vi.hoisted(() => ({
   afterRead: undefined as (() => Promise<void> | void) | undefined,
 }));
 
+const descriptorReadHook = vi.hoisted(() => ({
+  afterRead: undefined as (() => void) | undefined,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const readFileSyncWithHook = ((...args: unknown[]) => {
+    const result = (actual.readFileSync as (...readArgs: unknown[]) => unknown)(
+      ...args,
+    );
+    if (typeof args[0] === 'number') {
+      const afterRead = descriptorReadHook.afterRead;
+      descriptorReadHook.afterRead = undefined;
+      afterRead?.();
+    }
+    return result;
+  }) as typeof actual.readFileSync;
+  return { ...actual, readFileSync: readFileSyncWithHook };
+});
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
@@ -460,6 +480,7 @@ afterEach(async () => {
   readFileFault.triggerCall = 0;
   readFileFault.calls = 0;
   readFileFault.afterRead = undefined;
+  descriptorReadHook.afterRead = undefined;
   setDebugLogSession(null);
   resetDebugLoggingState();
   Storage.setRuntimeBaseDir(null);
@@ -1006,6 +1027,28 @@ describe('SessionWriterLease', () => {
       const lockRecord = await fs.readFile(lockPath, 'utf8');
       await fs.writeFile(replacementPath, lockRecord);
       await fs.rename(replacementPath, lockPath);
+
+      expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a lock replaced while cleanup ownership is being verified',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const replacementPath = `${lockPath}.replacement`;
+      writeFileSync(replacementPath, readFileSync(lockPath));
+      descriptorReadHook.afterRead = () => {
+        renameSync(replacementPath, lockPath);
+      };
 
       expect(() => lease.assertCleanupOwned()).toThrow(SessionWriterLostError);
       await expect(lease.release()).rejects.toBeInstanceOf(

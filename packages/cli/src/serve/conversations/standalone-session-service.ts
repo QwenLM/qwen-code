@@ -1338,7 +1338,8 @@ export class StandaloneSessionService {
     const pending = this.pendingLifecycleLeaseReleases.get(pendingKey);
     if (
       pending &&
-      !(await this.releaseLifecycleLease(pending, storageSessionId))
+      !(await this.releaseLifecycleLease(pending, storageSessionId)) &&
+      this.pendingLifecycleLeaseReleases.get(pendingKey) === pending
     ) {
       throw new SessionWriterUnavailableError({
         message: 'A previous session writer lease is still being released.',
@@ -1512,6 +1513,26 @@ export class StandaloneSessionService {
     return { sessionId, code: mapped.code, message: mapped.message };
   }
 
+  private async reconcileCatalogAfterLifecycleError(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+    expectedLocation: 'active' | 'archived',
+  ): Promise<void> {
+    try {
+      const durable = await this.inspectStoredStandalone(runtime, sessionId);
+      if (
+        durable.kind !== 'standalone' ||
+        durable.location !== expectedLocation
+      ) {
+        return;
+      }
+      runtime.bridge.markSessionCatalogChanged();
+      this.options.invalidateSessionListCache(runtime);
+    } catch {
+      return;
+    }
+  }
+
   private async archiveMany(
     sessionIds: string[],
   ): Promise<ArchiveStandaloneSessionsResult> {
@@ -1601,6 +1622,11 @@ export class StandaloneSessionService {
           runtime.bridge.markSessionCatalogChanged();
           this.options.invalidateSessionListCache(runtime);
         } catch (error) {
+          await this.reconcileCatalogAfterLifecycleError(
+            runtime,
+            sessionId,
+            'archived',
+          );
           if (
             error instanceof StandaloneSessionServiceError &&
             error.code === 'standalone_session_not_found'
@@ -1705,6 +1731,11 @@ export class StandaloneSessionService {
           runtime.bridge.markSessionCatalogChanged();
           this.options.invalidateSessionListCache(runtime);
         } catch (error) {
+          await this.reconcileCatalogAfterLifecycleError(
+            runtime,
+            sessionId,
+            'active',
+          );
           if (
             error instanceof StandaloneSessionServiceError &&
             error.code === 'standalone_session_not_found'

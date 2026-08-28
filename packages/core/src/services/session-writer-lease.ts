@@ -2103,23 +2103,26 @@ export class SessionWriterLease {
       if (!hasVerifiableInode(stat.ino)) {
         throw new SessionWriterUnavailableError();
       }
-      let pathStat: Stats;
-      try {
-        pathStat = nodeFs.lstatSync(this.lockPath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      const assertPathMatchesDescriptor = (): void => {
+        let pathStat: Stats;
+        try {
+          pathStat = nodeFs.lstatSync(this.lockPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new SessionWriterLostError();
+          }
+          throw new SessionWriterUnavailableError();
+        }
+        if (
+          !pathStat.isFile() ||
+          pathStat.isSymbolicLink() ||
+          pathStat.dev !== stat.dev ||
+          pathStat.ino !== stat.ino
+        ) {
           throw new SessionWriterLostError();
         }
-        throw new SessionWriterUnavailableError();
-      }
-      if (
-        !pathStat.isFile() ||
-        pathStat.isSymbolicLink() ||
-        pathStat.dev !== stat.dev ||
-        pathStat.ino !== stat.ino
-      ) {
-        throw new SessionWriterLostError();
-      }
+      };
+      assertPathMatchesDescriptor();
       const raw = nodeFs.readFileSync(descriptor, 'utf8');
       const record = parseLockRecord(raw);
       if (
@@ -2130,6 +2133,7 @@ export class SessionWriterLease {
       ) {
         throw new SessionWriterLostError();
       }
+      assertPathMatchesDescriptor();
       return { dev: stat.dev, ino: stat.ino };
     } catch (error) {
       if (error instanceof SessionWriterError) throw error;

@@ -711,6 +711,72 @@ describe('StandaloneSessionService', () => {
     });
   });
 
+  it('invalidates the catalog when archive cleanup fails after the move', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    mockWriterLease();
+    vi.mocked(SessionService.prototype.getSessionLocation)
+      .mockResolvedValueOnce('active')
+      .mockResolvedValueOnce('active')
+      .mockResolvedValue('archived');
+    vi.spyOn(SessionService.prototype, 'archiveSessions').mockResolvedValue({
+      archived: [],
+      alreadyArchived: [],
+      resolvedConflicts: [],
+      notFound: [],
+      errors: [{ sessionId, error: new SessionWriterLostError() }],
+    });
+
+    await expect(harness.service.archive([sessionId])).resolves.toMatchObject({
+      archived: [],
+      errors: [
+        {
+          sessionId,
+          code: 'standalone_session_operation_failed',
+        },
+      ],
+    });
+
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    expect(harness.invalidateSessionListCache).toHaveBeenCalledWith(
+      harness.runtime,
+    );
+  });
+
+  it('invalidates the catalog when unarchive cleanup fails after the move', async () => {
+    mockArchivedStandalone();
+    const harness = createHarness();
+    mockWriterLease();
+    vi.mocked(SessionService.prototype.getSessionLocation)
+      .mockResolvedValueOnce('archived')
+      .mockResolvedValueOnce('archived')
+      .mockResolvedValue('active');
+    vi.spyOn(SessionService.prototype, 'unarchiveSessions').mockResolvedValue({
+      unarchived: [],
+      alreadyActive: [],
+      resolvedConflicts: [],
+      notFound: [],
+      errors: [{ sessionId, error: new SessionWriterLostError() }],
+    });
+
+    await expect(harness.service.unarchive([sessionId])).resolves.toMatchObject(
+      {
+        unarchived: [],
+        errors: [
+          {
+            sessionId,
+            code: 'standalone_session_operation_failed',
+          },
+        ],
+      },
+    );
+
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    expect(harness.invalidateSessionListCache).toHaveBeenCalledWith(
+      harness.runtime,
+    );
+  });
+
   it('journals, stages, commits, and cleans a standalone deletion', async () => {
     mockActiveStandalone();
     const harness = createHarness();
@@ -924,6 +990,69 @@ describe('StandaloneSessionService', () => {
       fileCleanupPending: [],
     });
 
+    expect(
+      SessionService.prototype.acquireSessionWriterLease,
+    ).toHaveBeenCalledTimes(2);
+    expect(nextLease.release).toHaveBeenCalledOnce();
+    expect(harness.deletionJournal.clear).toHaveBeenCalledOnce();
+  });
+
+  it('evicts a parked lost lease before exact deletion recovery', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    const lostLease = mockWriterLease();
+    lostLease.release
+      .mockImplementationOnce(async () => {
+        lostLease.isReleased = true;
+        lostLease.isReleaseDurabilityPending = true;
+        throw new Error('release I/O failed');
+      })
+      .mockRejectedValueOnce(new Error('release I/O failed'))
+      .mockRejectedValueOnce(new SessionWriterLostError());
+    const nextLease = {
+      assertOwnedAndUnchanged: vi.fn(async () => undefined),
+      assertCleanupOwned: vi.fn(),
+      release: vi.fn(async () => undefined),
+      isReleased: false,
+      isReleaseDurabilityPending: false,
+    };
+    vi.mocked(SessionService.prototype.acquireSessionWriterLease)
+      .mockResolvedValueOnce(lostLease as never)
+      .mockResolvedValueOnce(nextLease as never);
+    vi.spyOn(
+      SessionService.prototype,
+      'removeSessionTranscriptForLifecycle',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockResolvedValue();
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [sessionId],
+    });
+
+    vi.mocked(
+      SessionService.prototype.findSessionIdIgnoringCase,
+    ).mockResolvedValue(undefined);
+    harness.deletionJournal.read.mockResolvedValueOnce(
+      deletionEntry() as never,
+    );
+    harness.inspectStandaloneDeletionPaths.mockResolvedValueOnce({
+      status: 'absent',
+    });
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [],
+    });
+
+    expect(lostLease.release).toHaveBeenCalledTimes(3);
     expect(
       SessionService.prototype.acquireSessionWriterLease,
     ).toHaveBeenCalledTimes(2);
