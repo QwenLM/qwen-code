@@ -31,7 +31,7 @@ import {
   createTranscriptToolCallStartUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { sanitizeTerminalText } from '../../../ui/utils/textUtils.js';
-import { associateAcpToolResultArtifact } from '../../../utils/tool-result-boundary-diagnostics.js';
+import { associateAcpToolResultArtifact } from '../../../nonInteractive/tool-result-boundary-diagnostics.js';
 
 const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Read]: 'read',

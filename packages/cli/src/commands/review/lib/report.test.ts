@@ -80,6 +80,22 @@ describe('buildPlanReport', () => {
     expect(report.files[0].heavy).toBe(false);
   });
 
+  it('carries the wrapper signal through — the 1e roster gate reads the report, not the diff', () => {
+    // All three capture commands spread `buildPlanReport`, so the field the
+    // diff parser computed rides into every plan the roster can read.
+    expect(
+      buildPlanReport(buildDiffPlan(editFile('src/a.ts', 3, 2), 400), null, {})
+        .wrapperSignal,
+    ).toBe(false);
+    expect(
+      buildPlanReport(
+        buildDiffPlan(makeDiff('src/caching-layer.ts', 20), 400),
+        null,
+        {},
+      ).wrapperSignal,
+    ).toBe(true);
+  });
+
   it('emits addedRanges only on heavy files', () => {
     const diff =
       editFile('src/heavy.ts', 3, 900) + makeDiff('src/light.ts', 20);

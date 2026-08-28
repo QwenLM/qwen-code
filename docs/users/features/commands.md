@@ -117,7 +117,7 @@ Commands for managing AI tools and models.
 | `/permissions`        | Manage permission rules                                                               | `/permissions`                                                                                            |
 | `/agents`             | Manage subagents                                                                      | `/agents manage`, `/agents create`                                                                        |
 | `/arena`              | Manage Arena sessions                                                                 | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
-| `/goal`               | Set a goal — keep working until condition met                                         | `/goal <condition>`, `/goal clear`                                                                        |
+| `/goal`               | Set a goal — keep working until condition met (see [Goals](./goals.md))               | `/goal <condition>`, `/goal clear`                                                                        |
 | `/tasks`              | List background tasks                                                                 | `/tasks`                                                                                                  |
 | `/workflows`          | Inspect workflow runs; cooperatively pause/resume a background run                    | `/workflows`, `/workflows <runId>`, `/workflows p <runId>`                                                |
 | `/lsp`                | Show LSP server status                                                                | `/lsp`                                                                                                    |
@@ -144,6 +144,7 @@ These commands invoke bundled skills that provide specialized workflows.
 | `/review`     | Multi-agent code review (12 parallel agents at high effort)   | `/review`, `/review 123`, `/review 123 --comment`, `/review --effort low` |
 | `/coordinate` | Coordinate read-only workers and one optional worktree writer | `/coordinate investigate and fix the authentication regression`           |
 | `/loop`       | Run a prompt on a recurring schedule                          | `/loop 5m check the build`                                                |
+| `/goal-draft` | Turn a fuzzy intention into a verifiable `/goal` objective    | `/goal-draft make the auth tests pass`                                    |
 | `/simplify`   | Review recent changes and apply safe cleanup edits directly   | `/simplify`, `/simplify focus on duplication`                             |
 | `/qc-helper`  | Answer questions about Qwen Code usage and configuration      | `/qc-helper how do I configure MCP?`                                      |
 

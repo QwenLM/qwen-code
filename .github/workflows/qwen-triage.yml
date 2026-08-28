@@ -942,6 +942,30 @@ jobs:
             fi
             exit 1
           fi
+          # A non-empty response is not necessarily a triage: on an API error
+          # the stream-json adapter appends the formatted error LAST
+          # (BaseJsonOutputAdapter appendText), optionally followed by
+          # rate-limit guidance. Run 33070765162 (triage for #10285) answered
+          # with a bare 268-char "[API Error: Connection error. ...]" that
+          # this step passed as success, so nothing retried or alerted. Strip
+          # the known suffixes, right-trim, then fail on the trailing shape --
+          # a real summary that merely quotes an API error mid-prose keeps
+          # writing afterwards and stays green. Same pattern as
+          # qwen-code-pr-review.yml.
+          BODY="${RESPONSE}"
+          for S in \
+            'Possible quota limitations in place or slow response times detected. Please wait and try again later.' \
+            'Please wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method' \
+            'Please wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method'; do
+            BODY="${BODY%"$S"}"
+          done
+          BODY="${BODY%"${BODY##*[![:space:]]}"}"
+          case "${BODY}" in
+            *"[API Error: "*"]")
+              echo "::error title=Triage aborted by an API error::The model API returned an error instead of a triage, so no triage was posted. This is infrastructure, not this issue -- re-run the failed job."
+              exit 1
+              ;;
+          esac
           echo "Triage response received (${#RESPONSE} chars)."
 
       - name: 'Notify silent triage re-run'
@@ -958,6 +982,27 @@ jobs:
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
+          # A close at/after the trigger is a terminal action of THIS run:
+          # Stage 1-pre closes a duplicate PR without leaving a review, and
+          # the review-list check below cannot tell that apart from a re-run
+          # that did nothing — it would announce on the just-closed PR that
+          # the re-run "did not" review it, and the ::warning would dispatch
+          # a human to a correctly-handled run. Read the PR's own state and
+          # exit quietly; a close BEFORE the trigger keeps the old behaviour,
+          # because this run still owes its summary. A failed `gh pr view`
+          # is not fatal: the review-list check below then decides, as before.
+          if PR_STATE="$(
+               gh pr view "$NUMBER" --repo "$GITHUB_REPOSITORY" --json state,closedAt
+             )" &&
+             CLOSED_SINCE_TRIGGER="$(
+               printf '%s' "$PR_STATE" |
+                 jq -r --arg since "$TRIGGERED_AT" \
+                   '.closedAt != null and .closedAt >= $since'
+             )" &&
+             [ "$CLOSED_SINCE_TRIGGER" = true ]; then
+            echo "PR closed at/after the trigger comment; no re-run summary needed."
+            exit 0
+          fi
           HAS_REVIEW=false
           HEAD_SHA=''
           # unknown until both the review list and the head SHA are readable
@@ -3559,13 +3604,9 @@ jobs:
                 group_dirs+=('.')
                 group_cmds+=("node --test $(printf '%q' "./$f")")
                 ;;
-              packages/desktop/*|docs-site/*)
-                # Outside the npm-workspace install set (root workspaces
-                # exclude packages/desktop; docs-site is standalone), so the
-                # gate's vitest can never collect them — and desktop's
-                # nested apps each carry a package.json plus a BUILD
-                # vite.config.ts that would otherwise fool the generic
-                # resolver into treating bun-family tests as runnable.
+              docs-site/*)
+                # Outside the npm-workspace install set (docs-site is
+                # standalone), so the gate's vitest can never collect it.
                 add_skip "$f" 'outside the npm-workspace install set (unsupported runner family), skipped'
                 ;;
               *)
@@ -3579,9 +3620,9 @@ jobs:
                 fi
                 pkg="$OWNING_PKG_DIR"
                 if ! has_vitest_config "$pkg"; then
-                  # e.g. packages/desktop runs `bun test` — an unsupported
-                  # runner family stays explicitly out of scope rather than
-                  # being mis-run through vitest.
+                  # A package whose tests use an unsupported runner family
+                  # stays explicitly out of scope rather than being mis-run
+                  # through vitest.
                   add_skip "$f" "owning package ${pkg} has no vitest config (unsupported runner family), skipped"
                   continue
                 fi

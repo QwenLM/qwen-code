@@ -11,8 +11,12 @@ import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
-} from '../utils/environmentContext.js';
-import { sanitizeTitle, tryGenerateSessionTitle } from './sessionTitle.js';
+} from '../core/environmentContext.js';
+import {
+  normalizeForEchoCompare,
+  sanitizeTitle,
+  tryGenerateSessionTitle,
+} from './sessionTitle.js';
 
 interface MockOptions {
   fastModel?: string | undefined;
@@ -35,7 +39,7 @@ function makeConfig(opts: MockOptions): {
   const config = {
     getFastModel: vi.fn(() => opts.fastModel ?? undefined),
     getModel: vi.fn(() => 'qwen-plus'),
-    getGeminiClient: vi.fn(() => ({
+    getLlmClient: vi.fn(() => ({
       getHistoryShallow: () => opts.history ?? [],
       getChat: () => ({
         getHistory: () => opts.history ?? [],
@@ -453,7 +457,7 @@ describe('tryGenerateSessionTitle', () => {
     const config = {
       getFastModel: vi.fn(() => 'qwen-turbo'),
       getModel: vi.fn(() => 'qwen-plus'),
-      getGeminiClient: vi.fn(() => ({
+      getLlmClient: vi.fn(() => ({
         getHistoryShallow: () => history,
         getChat: () => ({
           getHistory: () => history,
@@ -635,7 +639,7 @@ describe('tryGenerateSessionTitle', () => {
     const config = {
       getFastModel: vi.fn(() => 'qwen-turbo'),
       getModel: vi.fn(() => 'qwen-plus'),
-      getGeminiClient: vi.fn(() => ({
+      getLlmClient: vi.fn(() => ({
         getHistoryShallow: () => history,
         getChat: () => ({
           getHistory: () => history,
@@ -698,5 +702,31 @@ describe('sanitizeTitle', () => {
     // High surrogate must not linger on its own.
     expect(sanitized).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
     expect(sanitized.length).toBeLessThanOrEqual(200);
+  });
+});
+
+describe('normalizeForEchoCompare', () => {
+  it('normalizes both sides of the echo comparison identically (#9772)', () => {
+    // An example with edge punctuation must compare equal to the echo that
+    // sanitizeTitle strips that punctuation off — otherwise the guard
+    // silently misses it.
+    expect(normalizeForEchoCompare('Fix CI!')).toBe(
+      normalizeForEchoCompare('Fix CI'),
+    );
+    expect(normalizeForEchoCompare('"Fix CI!"')).toBe(
+      normalizeForEchoCompare('fix ci'),
+    );
+    expect(normalizeForEchoCompare('重构鉴权！')).toBe(
+      normalizeForEchoCompare('重构鉴权'),
+    );
+  });
+
+  it('keeps interior punctuation so distinct titles stay distinct', () => {
+    expect(normalizeForEchoCompare('(WIP) Fix build')).not.toBe(
+      normalizeForEchoCompare('WIP Fix build'.toLowerCase()),
+    );
+    expect(normalizeForEchoCompare('Fix login button styling')).not.toBe(
+      normalizeForEchoCompare('Fix login button on mobile'),
+    );
   });
 });

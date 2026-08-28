@@ -35,12 +35,14 @@ import type {
 import {
   DaemonHttpError,
   DaemonPendingPromptLimitError,
+  DaemonTransportClosedError,
   isDaemonTurnError,
   isStaleBranchPointError,
   type PromptResult,
 } from '@qwen-code/sdk/daemon';
 import { extractHttpStatus, isInvalidClientIdError } from './httpErrors.js';
 import {
+  mapProviderStatus,
   mapReasoningControls,
   mapSessionContextReasoning,
   mapSupportedCommands,
@@ -76,6 +78,16 @@ import type {
 
 interface RefBox<T> {
   current: T;
+}
+
+function isDaemonSessionDisconnectedError(error: unknown): boolean {
+  return (
+    error instanceof DaemonTransportClosedError ||
+    (error instanceof TypeError &&
+      /(?:fetch failed|failed to fetch|networkerror|load failed)/i.test(
+        error.message,
+      ))
+  );
 }
 
 function normalizePromptFiles(
@@ -193,6 +205,14 @@ export interface CreateDaemonSessionActionsArgs {
   clearLiveJournalRepair?: () => void;
 }
 
+export function getWorkspaceModelsAfterSessionClear(
+  current: DaemonConnectionState,
+): DaemonConnectionState['models'] {
+  return current.providers
+    ? mapProviderStatus(current.providers).models
+    : current.models;
+}
+
 export function getConnectionAfterSessionClear(
   current: DaemonConnectionState,
   clearedSessionId: string | undefined,
@@ -211,6 +231,7 @@ export function getConnectionAfterSessionClear(
     delete next.supportedCommands;
     delete next.context;
     delete next.reasoning;
+    next.models = getWorkspaceModelsAfterSessionClear(current);
     // Keep `commands`/`skills`: they are workspace-scoped (skills, custom,
     // MCP-prompt and workflow slash commands all live at the workspace/config
     // level, not the session), so they stay valid after the session is
@@ -1086,6 +1107,19 @@ export function createDaemonSessionActions({
           ),
           'Set reasoning effort timed out',
         );
+        const nextReasoning = mapReasoningControls(
+          result.configOptions,
+          getConnection().reasoning?.effort,
+        );
+        const confirmed =
+          value === 'none'
+            ? nextReasoning?.enabled === false
+            : nextReasoning?.enabled === true && nextReasoning.effort === value;
+        if (!confirmed) {
+          throw new Error(
+            `Daemon did not confirm reasoning effort ${JSON.stringify(value)}`,
+          );
+        }
         const current = getConnection();
         if (
           sessionRef.current === session &&
@@ -1105,10 +1139,7 @@ export function createDaemonSessionActions({
             const configOptions = result.configOptions;
             return {
               ...current,
-              reasoning: mapReasoningControls(
-                configOptions,
-                current.reasoning?.effort,
-              ),
+              reasoning: nextReasoning,
               context: current.context
                 ? {
                     ...current.context,
@@ -2078,15 +2109,14 @@ export function createDaemonSessionActions({
     },
 
     async getStats() {
-      const session = requireSessionForAction(
-        addNotice,
-        sessionRef.current,
-        'Load stats failed',
-        'load_stats',
-      );
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
       try {
         return await withActionTimeout(session.stats(), 'Load stats timed out');
       } catch (error) {
+        if (isDaemonSessionDisconnectedError(error)) {
+          throw error;
+        }
         throw dispatchActionError(
           addNotice,
           'Load stats failed',

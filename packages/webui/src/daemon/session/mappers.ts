@@ -56,6 +56,7 @@ export function mapProviderStatus(
       ].join('\0');
       if (seen.has(modelKey)) continue;
       seen.add(modelKey);
+      const reasoningPreview = mapReasoningControls(model.configOptions);
       models.push({
         id: model.modelId,
         baseModelId: model.baseModelId,
@@ -70,6 +71,7 @@ export function mapProviderStatus(
         ...(model.baseUrl !== undefined ? { baseUrl: model.baseUrl } : {}),
         ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
         ...(model.isRuntime ? { isRuntime: true } : {}),
+        ...(reasoningPreview ? { reasoningPreview } : {}),
       });
     }
   }
@@ -147,10 +149,13 @@ export function mapReasoningControls(
     const value = getString(getRecord(item), 'value');
     return value ? [value] : [];
   });
-  if (!values.includes('none')) return undefined;
-  const currentValue = getString(option, 'currentValue');
   const meta = getRecord(option['_meta']);
   const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
+  const thinkingMandatory = reasoningMeta?.['thinkingMandatory'] === true;
+  if (!thinkingMandatory && !values.includes('none')) return undefined;
+  const currentValue = getString(option, 'currentValue');
+  if (!currentValue || !values.includes(currentValue)) return undefined;
+  if (thinkingMandatory && currentValue === 'none') return undefined;
   const selectableValues = values.filter((value) => value !== 'none');
   if (selectableValues.length === 0) return undefined;
   if (reasoningMeta?.['toggleOnly'] === true) {
@@ -158,6 +163,7 @@ export function mapReasoningControls(
       enabled: currentValue !== 'none',
       effort: selectableValues[0]!,
       efforts: [],
+      ...(thinkingMandatory ? { canDisable: false } : {}),
     };
   }
   const efforts = selectableValues;
@@ -167,7 +173,12 @@ export function mapReasoningControls(
       (value): value is string =>
         typeof value === 'string' && efforts.includes(value),
     ) ?? efforts[0]!;
-  return { enabled: currentValue !== 'none', effort, efforts };
+  return {
+    enabled: currentValue !== 'none',
+    effort,
+    efforts,
+    ...(thinkingMandatory ? { canDisable: false } : {}),
+  };
 }
 
 export function mapSessionContextReasoning(
@@ -610,12 +621,11 @@ function getGoalState(
     return undefined;
   }
   const lastReason = getString(source, 'lastReason');
-  // `limitKind` is what tells a client an evidence-limited Goal cannot be
-  // resumed; dropping it here would leave the UI offering a Resume the reducer
-  // always rejects.
   const limitKindRaw = getString(source, 'limitKind');
   const limitKind =
-    limitKindRaw === 'evidence_catalog' || limitKindRaw === 'checkpoint_request'
+    limitKindRaw === 'evidence_catalog' ||
+    limitKindRaw === 'checkpoint_request' ||
+    limitKindRaw === 'token_budget'
       ? limitKindRaw
       : undefined;
   return {

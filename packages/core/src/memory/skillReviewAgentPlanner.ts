@@ -7,13 +7,16 @@
 import type { Content } from '@google/genai';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { Config } from '../config/config.js';
-import type { PermissionManager } from '../permissions/permission-manager.js';
+import { deriveConfig, type Config } from '../config/config.js';
+import type {
+  PermissionManager,
+  ToolRegistrationStatus,
+} from '../permissions/permission-manager.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
 } from '../permissions/types.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
@@ -49,8 +52,11 @@ type SkillScopedPermissionManager = Pick<
   PermissionManager,
   | 'evaluate'
   | 'findMatchingDenyRule'
+  | 'getToolRegistrationStatus'
   | 'hasMatchingAskRule'
   | 'hasRelevantRules'
+  | 'isPermissionsAllowListActive'
+  | 'isToolDisabledByCoreToolsAllowList'
   | 'isToolEnabled'
 >;
 
@@ -254,12 +260,37 @@ export function createSkillScopedAgentConfig(
       if (basePm) return basePm.isToolEnabled(toolName);
       return true;
     },
+    async getToolRegistrationStatus(
+      toolName: string,
+    ): Promise<ToolRegistrationStatus> {
+      if (isScopedTool(toolName)) return 'registered';
+      if (basePm) {
+        return typeof basePm.getToolRegistrationStatus === 'function'
+          ? basePm.getToolRegistrationStatus(toolName)
+          : Promise.resolve('registered' as ToolRegistrationStatus);
+      }
+      return 'registered';
+    },
+    // The scheduler's permission-denied message branch calls this on
+    // whatever `getPermissionManager()` returns (#9827). Without the
+    // delegation a shim-rejected call under an active allowlist threw
+    // `TypeError: ... is not a function` instead of reaching the
+    // designed permission error.
+    isPermissionsAllowListActive(): boolean {
+      return basePm?.isPermissionsAllowListActive() ?? false;
+    },
+    isToolDisabledByCoreToolsAllowList(toolName: string): boolean {
+      return (
+        (typeof basePm?.isToolDisabledByCoreToolsAllowList === 'function' &&
+          basePm.isToolDisabledByCoreToolsAllowList(toolName)) ||
+        false
+      );
+    },
   };
 
-  const scopedConfig = Object.create(config) as Config;
-  scopedConfig.getPermissionManager = () =>
-    scopedPm as unknown as PermissionManager;
-  return scopedConfig;
+  return deriveConfig(config, {
+    getPermissionManager: () => scopedPm as unknown as PermissionManager,
+  });
 }
 
 // Exported for tests so the `auto-skill-` prefix instruction stays asserted

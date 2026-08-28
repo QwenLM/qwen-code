@@ -118,6 +118,8 @@ export interface DaemonReasoningControls {
   enabled: boolean;
   effort: string;
   efforts: string[];
+  /** Defaults to true. False means effort is mutable but thinking is required. */
+  canDisable?: boolean;
 }
 
 export interface DaemonTokenUsage {
@@ -282,6 +284,7 @@ export interface DaemonModelInfo {
   baseUrl?: string;
   envKey?: string;
   isRuntime?: boolean;
+  reasoningPreview?: DaemonReasoningControls;
 }
 
 export interface DaemonCommandInfo {

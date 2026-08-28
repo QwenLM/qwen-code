@@ -25,7 +25,6 @@ import { hasOwnModelProviders } from './modelProvidersScope.js';
 import {
   type Settings,
   type MemoryImportFormat,
-  type MergeStrategy,
   type SettingsSchema,
   type SettingDefinition,
   getSettingsSchema,
@@ -34,8 +33,8 @@ import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
   setNestedPropertySafe,
   WORKSPACE_RESTRICTED_SETTINGS,
-} from '../utils/settingsUtils.js';
-import { customDeepMerge } from '../utils/deepMerge.js';
+} from './settingsUtils.js';
+import { customDeepMerge, type MergeStrategy } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
 import { runMigrations, needsMigration } from './migration/index.js';
 import {
@@ -377,7 +376,6 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
       );
     }
   }
-
   return [...warningSet];
 }
 

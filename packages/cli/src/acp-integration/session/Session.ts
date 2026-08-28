@@ -17,7 +17,7 @@ import type {
 } from '@google/genai';
 import type {
   Config,
-  GeminiChat,
+  LlmChat,
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
   ToolResult,
@@ -89,6 +89,7 @@ import {
   Kind,
   ToolNames,
   ToolErrorType,
+  CreateSubSessionTool,
   fireNotificationHook,
   firePermissionRequestHook,
   firePreToolUseHook,
@@ -168,6 +169,7 @@ import {
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
   GoalPersistenceUnavailableError,
+  ambientGoalToolResultProvenance,
   goalTurnContext,
   sessionIdContext,
   promptIdContext,
@@ -202,14 +204,17 @@ import {
   buildBackgroundEntryLabel,
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
+  buildGoalContinuationParts,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
+import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import {
   type ActiveWorkHoldV1,
+  type BridgeConversationDirectoryExpectation,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
@@ -219,6 +224,7 @@ import {
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
@@ -270,10 +276,9 @@ import type {
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
-import {
-  insertAfterFunctionResponses,
-  normalizePartList,
-} from '../../utils/nonInteractiveHelpers.js';
+import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
+import { isSameConversationPath } from '../../utils/conversation-directory-identity.js';
+import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
@@ -288,7 +293,10 @@ import {
   collectGoalStatusItemsFromRecords,
   findGoalToRestore,
 } from '../../ui/utils/restoreGoal.js';
-import { CommandKind } from '../../ui/commands/types.js';
+import {
+  CommandKind,
+  type NonInteractiveSlashCommandPolicy,
+} from '../../ui/commands/types.js';
 import { extractAtPathCommands } from '../../ui/hooks/atCommandProcessor.js';
 import {
   ACP_ROUTE_ID_PREFIX,
@@ -322,7 +330,7 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
-import { observeAcpToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
+import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
@@ -336,6 +344,7 @@ import { SubAgentTracker } from './SubAgentTracker.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
+  type PermissionPersistencePolicy,
   requestPermissionWithAbort,
   resolvePermissionOutcome,
   toPermissionOptions,
@@ -528,6 +537,7 @@ type StopContinuationResult =
   | {
       kind: 'terminal';
       stopReason: PromptResponse['stopReason'];
+      loopProtectionStopped?: boolean;
       supersededAutomaticContinuation?: boolean;
     };
 
@@ -545,6 +555,8 @@ interface AcpGoalTurn {
   controller: AbortController;
   origin: 'runtime' | 'user';
   continuationContext: string;
+  objectiveUpdated?: boolean;
+  windDown?: boolean;
   verifierFeedback?: string;
   modelStarted: boolean;
 }
@@ -558,23 +570,6 @@ function sameGoalPermit(
     left.revision === right.revision &&
     left.turnId === right.turnId
   );
-}
-
-function buildGoalContinuationParts(turn: AcpGoalTurn): Part[] {
-  return [
-    {
-      text: [
-        'Continue working on the active Goal.',
-        'Use get_goal for the authoritative objective and evidence state.',
-        "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
-        'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
-        `Runtime continuation context: ${turn.continuationContext}`,
-        ...(turn.verifierFeedback
-          ? [`Verifier feedback: ${turn.verifierFeedback}`]
-          : []),
-      ].join('\n'),
-    },
-  ];
 }
 
 async function claimGoalTurn(
@@ -676,6 +671,45 @@ export const LOOP_DETECTED_TURN_ERROR_MESSAGE =
 const TOOL_EXECUTION_CANCELLED_MESSAGE = 'Tool execution was cancelled.';
 const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
   'The tool had already completed; its output was discarded.';
+
+type ManagedConversationBinding = {
+  expectation: BridgeConversationDirectoryExpectation;
+  assertIdentity: () => Promise<void>;
+  state: 'pending' | 'committed' | 'released';
+};
+
+type ManagedConversationActivation = {
+  run: () => Promise<void>;
+  onRelease?: () => void;
+  releaseScheduled: boolean;
+  state: 'pending' | 'activating' | 'ready' | 'poisoned';
+  promise?: Promise<void>;
+  error?: unknown;
+};
+
+function sameManagedConversationExpectation(
+  left: BridgeConversationDirectoryExpectation,
+  right: BridgeConversationDirectoryExpectation,
+): boolean {
+  return (
+    left.canonicalSessionId === right.canonicalSessionId &&
+    left.root.canonicalPath === right.root.canonicalPath &&
+    left.root.device === right.root.device &&
+    left.root.inode === right.root.inode &&
+    left.child.name === right.child.name &&
+    left.child.canonicalPath === right.child.canonicalPath &&
+    left.child.device === right.child.device &&
+    left.child.inode === right.child.inode
+  );
+}
+
+function managedConversationBindingError(): RequestError {
+  return new RequestError(
+    -32004,
+    'The standalone working directory is missing.',
+    { errorKind: 'working_directory_missing' },
+  );
+}
 
 function createDaemonToolLoopState(
   repeatedToolFailureMode: RepeatedToolFailureGuardMode,
@@ -1619,6 +1653,67 @@ function collectMcpServerMentionRefs(
   }
 }
 
+/**
+ * Register `create_sub_session` on a daemon session's tool registry — the one
+ * registry the core-side gate in `Config.createToolRegistry` cannot cover,
+ * because `config.initialize()` builds it before the {@link Session}
+ * constructor wires the sub-session spawner. Registries built later (sub-agent
+ * / override rebuilds) pick the tool up from that gate instead;
+ * `copyDiscoveredToolsFrom` never carries built-ins.
+ *
+ * Gated on the spawner being wired: only daemon-backed sessions wire it (see
+ * {@link Session.#registerSubSessionSpawner}). A standalone `--acp` session's
+ * peer is the editor, which does not implement the bridge's `qwen/control/*`
+ * methods — declaring the tool there would only advertise an action whose
+ * every call fails with JSON-RPC -32601.
+ *
+ * Applies the same registration-status check as that gate. Disabled tools stay
+ * out of the registry; permission-deferred tools stay behind ToolSearch instead
+ * of being revealed by this late registration path. Being session-scoped, the
+ * tool is absent from the workspace tools inventory the daemon serves from its
+ * bootstrap registry — that panel lists workspace tools, and a daemon-only tool
+ * that exists per session is deliberately not one.
+ */
+export async function registerCreateSubSessionTool(
+  config: Config,
+): Promise<void> {
+  if (!config.getSubSessionSpawner()) {
+    return;
+  }
+  const permissionManager = config.getPermissionManager();
+  const registrationStatus = permissionManager
+    ? await permissionManager.getToolRegistrationStatus(
+        ToolNames.CREATE_SUB_SESSION,
+      )
+    : 'registered';
+  if (registrationStatus === 'disabled') {
+    return;
+  }
+  const toolRegistry = config.getToolRegistry();
+  if (registrationStatus === 'deferred') {
+    toolRegistry.registerPermissionDeferredFactory(
+      ToolNames.CREATE_SUB_SESSION,
+      async () => new CreateSubSessionTool(config),
+    );
+    await config.getLlmClient().setTools();
+    return;
+  }
+  toolRegistry.registerTool(new CreateSubSessionTool(config));
+  // The registration lands after `config.initialize()` → `startChat()` already
+  // snapshotted the chat's tool declarations, and the tool is deferred — so it
+  // stays filtered out of the declarations until revealed. Reveal it and
+  // refresh the snapshot so the model is actually offered the tool this
+  // session. Pin the reveal so a `/clear`-style `startChat` re-run
+  // re-declares it: the startup preload that would otherwise restore it is
+  // all-or-nothing on a schema-size budget (and off entirely when the
+  // operator threshold is ≤ 0 / non-finite), so an unpinned reveal would
+  // silently drop the tool from the declarations on the first `/clear` in
+  // those configurations.
+  toolRegistry.revealDeferredTool(ToolNames.CREATE_SUB_SESSION);
+  toolRegistry.pinDeferredToolReveal(ToolNames.CREATE_SUB_SESSION);
+  await config.getLlmClient().setTools();
+}
+
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
@@ -1632,16 +1727,45 @@ export interface AvailableCommandsSnapshot {
   }>;
 }
 
+const STANDALONE_SLASH_COMMAND_POLICY: NonInteractiveSlashCommandPolicy =
+  Object.freeze({
+    allowSessionReset: false,
+    allowWorkspaceSettingsWrite: false,
+    persistModelSelection: false,
+    blockedBuiltinCommandNames: Object.freeze([
+      'cd',
+      'clear',
+      'directory',
+      'diff',
+      'dream',
+      'export',
+      'learn',
+      'curator',
+      'workflows',
+    ]),
+  });
+
+const STANDALONE_PERMISSION_PERSISTENCE_POLICY: PermissionPersistencePolicy =
+  Object.freeze({
+    allowProjectPersistence: false,
+    allowUserPersistence: true,
+  });
+
+const STANDALONE_WORKTREE_ACTION_ERROR =
+  'Standalone sessions cannot change or override their working directory.';
+
 export async function buildAvailableCommandsSnapshot(
   config: Config,
   abortSignal: AbortSignal = AbortSignal.timeout(10_000),
   settings?: LoadedSettings,
+  executionPolicy?: NonInteractiveSlashCommandPolicy,
 ): Promise<AvailableCommandsSnapshot> {
   const slashCommands = await getAvailableCommands(
     config,
     abortSignal,
     'acp',
     settings,
+    executionPolicy,
   );
   const disabledSkillNames = config.getDisabledSkillNames();
   const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
@@ -1813,7 +1937,7 @@ export class Session implements SessionContext {
   private cronCompletion: Promise<void> | null = null;
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
-  private lastPromptTokenCountChat: GeminiChat | null = null;
+  private lastPromptTokenCountChat: LlmChat | null = null;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
   // ACP can continue one logical conversation through prompt, cron, and
@@ -1894,6 +2018,11 @@ export class Session implements SessionContext {
   private liveSpeakToUserTool?: SpeakToUserTool;
   private liveConversationActive: boolean | undefined;
   private liveEndInstructionPending = false;
+  private readonly requiresManagedConversationBinding: boolean;
+  private readonly requiresManagedConversationActivation: boolean;
+  private readonly slashCommandPolicy?: NonInteractiveSlashCommandPolicy;
+  private managedConversationBinding?: ManagedConversationBinding;
+  private managedConversationActivation?: ManagedConversationActivation;
 
   // Message rewrite middleware (optional, installed after history replay)
   messageRewriter?: MessageRewriteMiddleware;
@@ -1946,6 +2075,16 @@ export class Session implements SessionContext {
     private readonly onActiveWorkChanged?: () => void,
   ) {
     this.sessionId = id;
+    this.requiresManagedConversationBinding =
+      isReservedStandaloneSessionSourceType(
+        this.config.getSessionSourceType?.(),
+      );
+    this.requiresManagedConversationActivation =
+      this.requiresManagedConversationBinding &&
+      this.config.isProvisionalWorkspace?.() === true;
+    this.slashCommandPolicy = this.requiresManagedConversationBinding
+      ? STANDALONE_SLASH_COMMAND_POLICY
+      : undefined;
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
     const todoStopGuardEnabled =
       this.settings.merged.experimental?.todoStopGuard === true &&
@@ -1974,6 +2113,7 @@ export class Session implements SessionContext {
     this.#bindGoalRuntime();
     this.#registerBackgroundNotificationCallbacks();
     this.#registerSubSessionSpawner();
+    this.#registerCurrentSessionScheduledTaskCreator();
     this.config
       .getWorkflowRunRegistry?.()
       .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
@@ -2013,6 +2153,10 @@ export class Session implements SessionContext {
             controller: new AbortController(),
             origin: 'runtime',
             continuationContext: input.continuationContext,
+            ...(input.objectiveUpdated
+              ? { objectiveUpdated: input.objectiveUpdated }
+              : {}),
+            ...(input.windDown ? { windDown: true } : {}),
             ...(input.verifierFeedback
               ? { verifierFeedback: input.verifierFeedback }
               : {}),
@@ -2205,6 +2349,7 @@ export class Session implements SessionContext {
   }
 
   async #drainGoalQueue(): Promise<void> {
+    if (this.#isAutomaticWorkHeld()) return;
     if (this.goalQueue.length === 0) return;
     await this.runExclusiveAutomaticHistoryMutation(() =>
       this.#drainGoalQueueExclusive(),
@@ -2221,7 +2366,8 @@ export class Session implements SessionContext {
       this.cronProcessing ||
       this.cronAbortController ||
       this.notificationProcessing ||
-      this.notificationAbortController
+      this.notificationAbortController ||
+      this.#isAutomaticWorkHeld()
     ) {
       return;
     }
@@ -2270,6 +2416,27 @@ export class Session implements SessionContext {
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       void this.#drainGoalQueue();
+    }
+  }
+
+  /**
+   * Confirms the continuation's prompt reached the model.
+   *
+   * `startGoalTurn` resolves at enqueue time, so the runtime cannot tell a
+   * delivered turn from a queued one when it settles; `#settleGoalTurn`'s
+   * degraded-persistence fallback settles a model-started turn through
+   * `releaseTurn`, and only this confirmation keeps that turn's objective
+   * announcement from rolling back and re-firing on the next continuation.
+   */
+  #markGoalTurnDelivered(turnKey: string): void {
+    try {
+      this.config.getGoalRuntime().markTurnDelivered(turnKey);
+    } catch (error) {
+      debugLogger.debug(
+        `Failed to confirm ACP Goal turn delivery: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
@@ -2897,15 +3064,26 @@ export class Session implements SessionContext {
 
   /**
    * Wire the sub-session spawner to the daemon over the ACP `extMethod` request
-   * channel. The `create_sub_session` tool (model-initiated) is its caller. ONLY
-   * the ACP/daemon session wires it, so the tool is inert (reports daemon-only)
-   * in interactive TUI / headless, where no bridge exists.
+   * channel. The `create_sub_session` tool (model-initiated) is its caller.
+   * Wired only on daemon-backed sessions: the daemon stamps every child it
+   * spawns with `QWEN_CODE_SERVE=1` (see `acp-bridge/src/spawnChannel.ts` and
+   * `serve/channel-worker-supervisor.ts`). A standalone `--acp` session — an
+   * editor companion spawning the same command line — hosts its peer in the
+   * editor, which does not implement the bridge's `qwen/control/*` methods, so
+   * a spawner there would only power a tool whose every call fails with
+   * JSON-RPC -32601. Interactive TUI / headless never construct a Session at
+   * all. Where no spawner is wired, {@link registerCreateSubSessionTool} and
+   * the core-side registry gate leave the tool out of the model's action space
+   * instead of declaring it forever unable to run.
    *
    * A tool-initiated request runs while the caller's turn is suspended in the
    * tool await — safe because the ACP channel supports concurrent bidirectional
    * in-flight requests and prompts serialize per-session, not per-child.
    */
   #registerSubSessionSpawner(): void {
+    if (process.env[QWEN_CODE_SERVE_ENV] !== '1') {
+      return;
+    }
     this.config.setSubSessionSpawner(async (req) => {
       const resp = await this.client.extMethod(
         SERVE_CONTROL_EXT_METHODS.createSubSession,
@@ -2937,6 +3115,60 @@ export class Session implements SessionContext {
           ? { parentSessionPersisted: resp['parentSessionPersisted'] }
           : {}),
       };
+    });
+  }
+
+  #registerCurrentSessionScheduledTaskCreator(): void {
+    if (process.env[QWEN_CODE_SERVE_ENV] !== '1') {
+      return;
+    }
+    this.config.setCurrentSessionScheduledTaskCreator(async (req) => {
+      let resp: Record<string, unknown>;
+      try {
+        resp = await this.client.extMethod(
+          SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+          {
+            callerSessionId: this.sessionId,
+            promptId: getInvocationContext()?.promptId ?? req.promptId,
+            cron: req.cron,
+            prompt: req.prompt,
+            recurring: req.recurring,
+          },
+        );
+      } catch (error) {
+        const code =
+          error && typeof error === 'object' && 'code' in error
+            ? (error as { code?: unknown }).code
+            : undefined;
+        if (code === -32601) {
+          throw new Error(
+            'current_session_scheduling_unavailable: The daemon does not support current-session scheduling.',
+          );
+        }
+        const data =
+          isRecord(error) && isRecord(error['data'])
+            ? error['data']
+            : undefined;
+        const errorKind = data?.['errorKind'];
+        if (typeof errorKind === 'string') {
+          const hint = data?.['hint'];
+          throw new Error(
+            `${errorKind}: ${typeof hint === 'string' && hint.length > 0 ? hint : 'Current-session scheduled task creation was rejected.'}`,
+          );
+        }
+        throw error;
+      }
+      if (
+        typeof resp['id'] !== 'string' ||
+        resp['id'].length === 0 ||
+        typeof resp['cron'] !== 'string' ||
+        resp['cron'].length === 0
+      ) {
+        throw new Error(
+          'cron_create: bridge returned an invalid scheduled-task result',
+        );
+      }
+      return { id: resp['id'], cron: resp['cron'] };
     });
   }
 
@@ -3038,11 +3270,11 @@ export class Session implements SessionContext {
   }
 
   async #syncLiveToolDeclarations(): Promise<void> {
-    const geminiClient = this.config.getGeminiClient();
-    if (!geminiClient) {
+    const llmClient = this.config.getLlmClient();
+    if (!llmClient) {
       throw new Error('The Live backend model client is unavailable.');
     }
-    await geminiClient.setTools();
+    await llmClient.setTools();
   }
 
   async setLiveConversationActive(active: boolean): Promise<void> {
@@ -3060,7 +3292,7 @@ export class Session implements SessionContext {
       this.liveEndInstructionPending = true;
       this.config.setLiveAppendSystemPrompt(LIVE_BACKEND_END_INSTRUCTIONS);
     }
-    await this.config.getGeminiClient()?.refreshSystemInstruction();
+    await this.config.getLlmClient()?.refreshSystemInstruction();
   }
 
   async appendLiveConversationTranscript(
@@ -3109,7 +3341,7 @@ export class Session implements SessionContext {
     if (this.liveConversationActive || !this.liveEndInstructionPending) return;
     this.liveEndInstructionPending = false;
     this.config.setLiveAppendSystemPrompt(undefined);
-    await this.config.getGeminiClient()?.refreshSystemInstruction();
+    await this.config.getLlmClient()?.refreshSystemInstruction();
   }
 
   getId(): string {
@@ -3125,6 +3357,7 @@ export class Session implements SessionContext {
    * mount.
    */
   startCronScheduler(): void {
+    if (this.#isAutomaticWorkHeld()) return;
     // Best-effort: a cron startup failure must not break session creation.
     this.#startCronSchedulerInRuntime().catch((error) => {
       debugLogger.warn(
@@ -3135,6 +3368,162 @@ export class Session implements SessionContext {
 
   getConfig(): Config {
     return this.config;
+  }
+
+  installPendingManagedConversationBinding(
+    expectation: BridgeConversationDirectoryExpectation,
+    assertIdentity: () => Promise<void>,
+  ): void {
+    if (
+      !this.requiresManagedConversationBinding ||
+      expectation.canonicalSessionId !== this.sessionId
+    ) {
+      throw managedConversationBindingError();
+    }
+    if (
+      this.managedConversationBinding &&
+      this.managedConversationBinding.state !== 'released' &&
+      !sameManagedConversationExpectation(
+        this.managedConversationBinding.expectation,
+        expectation,
+      )
+    ) {
+      throw managedConversationBindingError();
+    }
+    this.managedConversationBinding = {
+      expectation,
+      assertIdentity,
+      state: 'pending',
+    };
+  }
+
+  installManagedConversationActivation(
+    run: () => Promise<void>,
+    onRelease?: () => void,
+  ): void {
+    if (
+      !this.requiresManagedConversationActivation ||
+      this.managedConversationActivation
+    ) {
+      throw managedConversationBindingError();
+    }
+    this.managedConversationActivation = {
+      run,
+      ...(onRelease ? { onRelease } : {}),
+      releaseScheduled: false,
+      state: 'pending',
+    };
+  }
+
+  private async activateManagedConversation(): Promise<void> {
+    if (!this.requiresManagedConversationActivation) return;
+    const activation = this.managedConversationActivation;
+    if (!activation) throw managedConversationBindingError();
+    if (activation.state === 'ready') return;
+    if (activation.state === 'poisoned') throw activation.error;
+    if (activation.promise) return activation.promise;
+    activation.state = 'activating';
+    const promise = activation
+      .run()
+      .then(() => {
+        activation.state = 'ready';
+      })
+      .catch((error: unknown) => {
+        activation.state = 'poisoned';
+        activation.error = error;
+        throw error;
+      });
+    activation.promise = promise;
+    return promise;
+  }
+
+  async commitManagedConversationBinding(
+    expectation: BridgeConversationDirectoryExpectation,
+  ): Promise<void> {
+    const binding = this.managedConversationBinding;
+    if (
+      !this.requiresManagedConversationBinding ||
+      !binding ||
+      !sameManagedConversationExpectation(binding.expectation, expectation)
+    ) {
+      throw managedConversationBindingError();
+    }
+    if (binding.state === 'committed' || binding.state === 'released') return;
+    if (
+      !isSameConversationPath(
+        this.config.getTargetDir(),
+        binding.expectation.child.canonicalPath,
+      )
+    ) {
+      throw managedConversationBindingError();
+    }
+    await binding.assertIdentity();
+    await this.activateManagedConversation();
+    await binding.assertIdentity();
+    binding.state = 'committed';
+  }
+
+  async releaseManagedConversationBinding(
+    expectation: BridgeConversationDirectoryExpectation,
+  ): Promise<void> {
+    const binding = this.managedConversationBinding;
+    if (
+      !this.requiresManagedConversationBinding ||
+      !binding ||
+      binding.state === 'pending' ||
+      !sameManagedConversationExpectation(binding.expectation, expectation)
+    ) {
+      throw managedConversationBindingError();
+    }
+    if (binding.state === 'released') return;
+    if (
+      !isSameConversationPath(
+        this.config.getTargetDir(),
+        binding.expectation.child.canonicalPath,
+      )
+    ) {
+      throw managedConversationBindingError();
+    }
+    await binding.assertIdentity();
+    binding.state = 'released';
+    const activation = this.managedConversationActivation;
+    if (activation && !activation.releaseScheduled) {
+      activation.releaseScheduled = true;
+      try {
+        activation.onRelease?.();
+      } catch (error) {
+        debugLogger.warn(
+          `Managed conversation release callback failed [session ${this.sessionId}]: ${error}`,
+        );
+      }
+    }
+    this.startCronScheduler();
+    void this.sendAvailableCommandsUpdate();
+    void this.#drainGoalQueue();
+    void this.#drainCronQueue();
+    void this.#drainNotificationQueue();
+  }
+
+  private async assertManagedConversationBindingReady(): Promise<void> {
+    if (!this.requiresManagedConversationBinding) return;
+    const binding = this.managedConversationBinding;
+    if (
+      binding?.state !== 'released' ||
+      !isSameConversationPath(
+        this.config.getTargetDir(),
+        binding.expectation.child.canonicalPath,
+      )
+    ) {
+      throw managedConversationBindingError();
+    }
+    await binding.assertIdentity();
+  }
+
+  #isAutomaticWorkHeld(): boolean {
+    return (
+      this.requiresManagedConversationBinding &&
+      this.managedConversationBinding?.state !== 'released'
+    );
   }
 
   shouldHintAskUserQuestionRestore(): boolean {
@@ -3157,6 +3546,9 @@ export class Session implements SessionContext {
         'Session history mutation is in progress',
       );
     }
+    if (this.requiresManagedConversationBinding) {
+      await this.assertManagedConversationBindingReady();
+    }
     try {
       await this.config.assertCanStartTurn();
     } catch (error) {
@@ -3166,6 +3558,9 @@ export class Session implements SessionContext {
         });
       }
       throw error;
+    }
+    if (this.requiresManagedConversationBinding) {
+      await this.assertManagedConversationBindingReady();
     }
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
@@ -3235,6 +3630,16 @@ export class Session implements SessionContext {
       holds.push({ category: 'shell', id: 'background-shells' });
     }
     return holds;
+  }
+
+  hasStandaloneRelocationBlockers(): boolean {
+    return (
+      this.collectActiveWorkHolds().length > 0 ||
+      this.config
+        .getMonitorRegistry()
+        .getAll()
+        .some((monitor) => monitor.status === 'running')
+    );
   }
 
   #activeWorkChanged(): void {
@@ -3421,6 +3826,7 @@ export class Session implements SessionContext {
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
+    this.config.setCurrentSessionScheduledTaskCreator(undefined);
     this.config
       .getWorkflowRunRegistry?.()
       .setApprovalRequestCallback(undefined);
@@ -3518,7 +3924,7 @@ export class Session implements SessionContext {
       );
     }
 
-    const chat = this.config.getGeminiClient()!.getChat();
+    const chat = this.config.getLlmClient()!.getChat();
     const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
@@ -3569,7 +3975,7 @@ export class Session implements SessionContext {
   }
 
   captureHistorySnapshot(): Content[] {
-    return this.config.getGeminiClient()!.getChat().getHistoryShallow();
+    return this.config.getLlmClient()!.getChat().getHistoryShallow();
   }
 
   getRewindableUserTurnCount(): number {
@@ -3596,10 +4002,7 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config
-      .getGeminiClient()!
-      .getChat()
-      .setHistory(structuredClone(history));
+    this.config.getLlmClient()!.getChat().setHistory(structuredClone(history));
     this.activeTodoPlanRevision = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
@@ -4189,8 +4592,8 @@ export class Session implements SessionContext {
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
-    const geminiClient = this.config.getGeminiClient();
-    if (!geminiClient || !geminiClient.isInitialized()) {
+    const llmClient = this.config.getLlmClient();
+    if (!llmClient || !llmClient.isInitialized()) {
       return { accepted: false, interruption: 'none' };
     }
 
@@ -4273,7 +4676,7 @@ export class Session implements SessionContext {
     if (this.settings.merged.ui?.enableFollowupSuggestions === false) return;
     if (this.config.getApprovalMode() === ApprovalMode.PLAN) return;
 
-    const chat = this.config.getGeminiClient()?.getChat();
+    const chat = this.config.getLlmClient()?.getChat();
     if (!chat) return;
 
     const ac = new AbortController();
@@ -4394,10 +4797,11 @@ export class Session implements SessionContext {
     goalTurn?: AcpGoalTurn,
     channelTurn = false,
   ): Promise<PromptResponse> {
+    let managedMemoryRecallStarted = false;
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
-      async () => {
+      async (): Promise<PromptResponse> => {
         await this.assertCanStartTurn();
         if (pendingSend.signal.aborted) {
           return { stopReason: 'cancelled' };
@@ -4419,7 +4823,7 @@ export class Session implements SessionContext {
         // it, `qwen review fetch-pr` cannot record its worktree lease and an
         // interrupted /review leaves the review worktree behind. TUI and
         // headless enter this context at their prompt entry points
-        // (useGeminiStream.ts / nonInteractiveCli.ts); ACP had no equivalent.
+        // (use-llm-stream.ts / nonInteractiveCli.ts); ACP had no equivalent.
         // enterWith (not run) so the 500-line turn body below stays unnested;
         // the binding dies with this async scope.
         promptIdContext.enterWith(promptId);
@@ -4433,7 +4837,7 @@ export class Session implements SessionContext {
             messageType: 'acp_prompt',
             ...(parentContext ? { parentContext } : {}),
           },
-          async () => {
+          async (): Promise<PromptResponse> => {
             // Extract text from all text blocks to construct the full prompt text for logging
             const promptText = params.prompt
               .filter((block) => block.type === 'text')
@@ -4649,6 +5053,7 @@ export class Session implements SessionContext {
                   // subscription stays on the disposed instance.
                   startNewSession: () => this.rebindGoalRuntimeForNewSession(),
                 },
+                this.slashCommandPolicy,
               );
 
               if (
@@ -4750,6 +5155,11 @@ export class Session implements SessionContext {
             // call, one persisted transcript record per lap — until someone
             // pauses or clears the goal.
             const isRuntimeContinuation = goalTurn?.origin === 'runtime';
+            const isFreshUserTurn =
+              !isRetry &&
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              !isRuntimeContinuation;
             if (
               !isContinue &&
               !isRestoreAskUserQuestion &&
@@ -4801,6 +5211,13 @@ export class Session implements SessionContext {
               }
             }
 
+            if (isFreshUserTurn) {
+              managedMemoryRecallStarted = true;
+              this.config
+                .getLlmClient()
+                .beginManagedAutoMemoryRecall(promptText, pendingSend.signal);
+            }
+
             if (!continuesCurrentWorkChain && !this.todoStopGuard.enabled) {
               this.#resetTodoStopGuardBackgroundLineage();
             }
@@ -4813,7 +5230,7 @@ export class Session implements SessionContext {
             this.activeTodoWorkChainPromptId = promptId;
 
             // Snapshot file state before this turn (mirrors the makeSnapshot
-            // block in GeminiClient.sendMessageStream). Placed after
+            // block in LlmClient.sendMessageStream). Placed after
             // slash-command and hook early-returns so locally handled commands
             // don't create phantom snapshots that desync the snapshot index.
             // Restore continuations record no user message; rewindToTurn()
@@ -4841,10 +5258,18 @@ export class Session implements SessionContext {
 
             // Prepend session-level system reminders (plan mode / subagent /
             // arena) so the model sees them, matching the behaviour of
-            // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
+            // `LlmClient.sendMessageStream` in the CLI/TUI path. Without this,
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
+            if (isFreshUserTurn) {
+              const memory = await this.config
+                .getLlmClient()
+                .consumeManagedAutoMemoryRecall('initial');
+              if (memory?.prompt) {
+                systemReminders.unshift({ text: memory.prompt });
+              }
+            }
             if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on
@@ -4931,7 +5356,7 @@ export class Session implements SessionContext {
             // not just the stop-hook loop. Daemon turns run autonomously in
             // all approval modes (approvals are mediated by the ACP client
             // rather than by gating this loop), so unlike the CLI reference
-            // (useGeminiStream.ts, which only emits in YOLO) this is
+            // (use-llm-stream.ts, which only emits in YOLO) this is
             // intentionally emitted for every mode.
             try {
               if (isRestoreAskUserQuestion) {
@@ -5093,7 +5518,12 @@ export class Session implements SessionContext {
                   // a completed iteration — a phantom turn on the goal's
                   // count and a checkpoint recording work that never ran.
                   // Re-assigning on later loop laps is harmless.
-                  if (goalTurn) goalTurn.modelStarted = true;
+                  if (goalTurn) {
+                    goalTurn.modelStarted = true;
+                    if (goalTurn.origin === 'runtime') {
+                      this.#markGoalTurnDelivered(goalTurn.turnKey);
+                    }
+                  }
                   const sendResult =
                     await this.#sendMessageStreamWithAutoCompression(
                       promptId,
@@ -5253,7 +5683,7 @@ export class Session implements SessionContext {
                   this.todoStopGuard.pauseForTrustedRetry();
 
                   // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-                  // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
+                  // Aligned with use-llm-stream.ts handleFinishedWithErrorEvent
                   const errorStatus = getErrorStatus(error);
                   const errorMessage =
                     error instanceof Error ? error.message : String(error);
@@ -5401,7 +5831,41 @@ export class Session implements SessionContext {
                   getActiveInteractionSpan(),
                 );
               }
-              return result;
+              if (
+                isFreshUserTurn &&
+                result.stopReason === 'end_turn' &&
+                !result.loopProtectionStopped &&
+                this.config.getManagedAutoMemoryEnabled()
+              ) {
+                const memoryManager = this.config.getMemoryManager();
+                const history = this.#getCurrentChat().getHistoryShallow();
+                void memoryManager
+                  .scheduleExtract({
+                    projectRoot: this.config.getProjectRoot(),
+                    sessionId: this.config.getSessionId(),
+                    history,
+                    config: this.config,
+                  })
+                  .catch((error: unknown) => {
+                    debugLogger.warn(
+                      'Failed to schedule ACP managed auto-memory extraction.',
+                      error,
+                    );
+                  });
+                void memoryManager
+                  .scheduleDream({
+                    projectRoot: this.config.getProjectRoot(),
+                    sessionId: this.config.getSessionId(),
+                    config: this.config,
+                  })
+                  .catch((error: unknown) => {
+                    debugLogger.warn(
+                      'Failed to schedule ACP managed auto-memory dream.',
+                      error,
+                    );
+                  });
+              }
+              return { stopReason: result.stopReason };
             } finally {
               logConversationFinishedEvent(
                 this.config,
@@ -5429,7 +5893,11 @@ export class Session implements SessionContext {
             result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
         );
       },
-    );
+    ).finally(() => {
+      if (managedMemoryRecallStarted) {
+        this.config.getLlmClient().finishManagedAutoMemoryRecall();
+      }
+    });
   }
 
   async #handleStopHookLoop(
@@ -5441,7 +5909,10 @@ export class Session implements SessionContext {
     modelOverride?: string,
     responseCapture?: AgentResponseCapture,
     rejectOnLoopDetected = false,
-  ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
+  ): Promise<{
+    stopReason: PromptResponse['stopReason'];
+    loopProtectionStopped?: boolean;
+  }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
     let stopHookReasons: string[] = [];
@@ -5510,7 +5981,7 @@ export class Session implements SessionContext {
             },
           );
           if (continuation.kind === 'terminal') {
-            return { stopReason: continuation.stopReason };
+            return continuation;
           }
           continue;
         }
@@ -5610,7 +6081,7 @@ export class Session implements SessionContext {
               },
             );
             if (continuation.kind === 'terminal') {
-              return { stopReason: continuation.stopReason };
+              return continuation;
             }
             continue;
           }
@@ -5749,7 +6220,7 @@ export class Session implements SessionContext {
         stopHookReasons = stopHookReasons.slice(0, -1);
       }
       if (continuation.kind === 'terminal') {
-        return { stopReason: continuation.stopReason };
+        return continuation;
       }
     }
   }
@@ -5841,7 +6312,7 @@ export class Session implements SessionContext {
         | ChannelDeliveryResponseBlock
         | undefined;
       let channelDeliveryCheckpoint = 0;
-      let providerSendChat: GeminiChat | undefined;
+      let providerSendChat: LlmChat | undefined;
       let userContentPushCountBeforeSend = 0;
 
       try {
@@ -6349,6 +6820,7 @@ export class Session implements SessionContext {
             stopReason: options.rejectOnLoopDetected
               ? cancelledOrThrowLoopDetected(pendingSend.signal, toolLoopState)
               : getAbortAwareEndTurnStopReason(pendingSend.signal),
+            loopProtectionStopped: true,
             ...(supersededAutomaticContinuation
               ? { supersededAutomaticContinuation: true }
               : {}),
@@ -6363,6 +6835,18 @@ export class Session implements SessionContext {
           options.rejectOnLoopDetected ?? false,
         );
         nextMessage = nextAfterTools.message;
+        if (nextAfterTools.stoppedByRepeatedToolFailure) {
+          return {
+            kind: 'terminal',
+            stopReason: options.rejectOnLoopDetected
+              ? cancelledOrThrowLoopDetected(pendingSend.signal, toolLoopState)
+              : getAbortAwareEndTurnStopReason(pendingSend.signal),
+            loopProtectionStopped: true,
+            ...(supersededAutomaticContinuation
+              ? { supersededAutomaticContinuation: true }
+              : {}),
+          };
+        }
         if (nextAfterTools.hadMidTurnUserInput) {
           nextGuardContinuation = undefined;
           continue;
@@ -6602,8 +7086,8 @@ export class Session implements SessionContext {
     }
   }
 
-  #getCurrentChat(): GeminiChat {
-    return this.config.getGeminiClient()!.getChat();
+  #getCurrentChat(): LlmChat {
+    return this.config.getLlmClient()!.getChat();
   }
 
   async #runWithFullTurnModel<T>(
@@ -6622,9 +7106,9 @@ export class Session implements SessionContext {
   /**
    * Create the MessageDisplay hook dispatcher for one model call's streamed
    * reply, or null when the hook isn't registered (the common case — keeps
-   * the streaming loops zero-cost). The ACP surface consumes GeminiChat's
+   * the streaming loops zero-cost). The ACP surface consumes LlmChat's
    * raw stream directly rather than going through
-   * GeminiClient.sendMessageStream, so it has to fire this hook itself —
+   * LlmClient.sendMessageStream, so it has to fire this hook itself —
    * with the same contract as the terminal UI path in client.ts: debounced
    * cumulative text, one message_id per model call, and an is_final firing
    * on every non-aborted exit (delivered by awaiting `finish()` in a
@@ -6670,7 +7154,7 @@ export class Session implements SessionContext {
       ) => Promise<BeforeModelSendDecision>;
     } = {},
   ): Promise<AutoCompressionSendResult> {
-    const geminiClient = this.config.getGeminiClient()!;
+    const llmClient = this.config.getLlmClient()!;
     if (options.prepareBeforeCompression) {
       const decision = await options.prepareBeforeCompression();
       if (decision.kind === 'stop') {
@@ -6694,7 +7178,7 @@ export class Session implements SessionContext {
       !(options.getModelOverride?.() ?? options.modelOverride)
     ) {
       try {
-        const compressed = await geminiClient.tryCompressChat(
+        const compressed = await llmClient.tryCompressChat(
           promptId,
           false,
           abortSignal,
@@ -6716,11 +7200,20 @@ export class Session implements SessionContext {
           const warningSuffix = compressed.warning
             ? `\n⚠️ ${compressed.warning}`
             : '';
+          // Estimated counts (#9309) get a '~' prefix so the notice doesn't
+          // read as an API-reported figure on a different scale than a later
+          // banner.
+          const formatCount = (count?: number, isEstimated?: boolean) =>
+            count === undefined
+              ? 'unknown'
+              : isEstimated
+                ? `~${count}`
+                : String(count);
           compressionDiagnostic =
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
-            `${compressed.originalTokenCount ?? 'unknown'} to ` +
-            `${compressed.newTokenCount ?? 'unknown'} tokens).` +
+            `${formatCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} to ` +
+            `${formatCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)} tokens).` +
             warningSuffix;
         }
       } catch (compressionError) {
@@ -6793,6 +7286,16 @@ export class Session implements SessionContext {
         `Send aborted after pre-send validation for prompt ${promptId}`,
       );
       return { responseStream: null, stopReason: 'cancelled' };
+    }
+
+    if (message[0]?.functionResponse) {
+      const memory =
+        await llmClient.consumeManagedAutoMemoryRecall('tool_result');
+      if (memory?.prompt) {
+        message = insertAfterFunctionResponses(message, [
+          { text: memory.prompt },
+        ]);
+      }
     }
 
     const chat = this.#getCurrentChat();
@@ -7313,17 +7816,27 @@ export class Session implements SessionContext {
         message.kind === 'text' ? message.message : message.displayText;
       let rawParts: Part[];
       try {
-        rawParts =
-          message.kind === 'text'
-            ? [{ text: message.message }]
-            : await withTimeoutSignal(
-                abortSignal,
-                MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
-                (signal) =>
-                  this.#resolvePrompt(message.content, signal, {
-                    onFullTurnModel: options.onFullTurnModel,
-                  }),
-              );
+        if (message.kind === 'text') {
+          rawParts = [{ text: message.message }];
+        } else {
+          rawParts = await withTimeoutSignal(
+            abortSignal,
+            MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
+            (signal) =>
+              this.#resolvePrompt(message.content, signal, {
+                deferBridgeConversions: true,
+              }),
+          );
+          // Keep local resolution bounded, then let media bridges own their
+          // longer timeouts while remaining cancellable by the real turn.
+          rawParts = await this.#applyBridgeConversionsIfNeeded(
+            rawParts,
+            abortSignal,
+            options.onFullTurnModel,
+          );
+          // Bridges report cancellation as skipped instead of throwing.
+          abortSignal.throwIfAborted();
+        }
       } catch (messageError) {
         if (abortSignal.aborted && !options.preserveFallbackOnAbort) {
           return parts;
@@ -7375,6 +7888,7 @@ export class Session implements SessionContext {
    */
   async #startCronSchedulerIfNeeded(): Promise<void> {
     if (this.disposed) return;
+    if (this.#isAutomaticWorkHeld()) return;
     if (!this.config.isCronEnabled()) return;
     if (this.cronDisabledByTokenLimit) return;
     const scheduler = this.config.getCronScheduler();
@@ -7386,13 +7900,15 @@ export class Session implements SessionContext {
     // are delivered as late fires through the start() callback below.
     // Durable tasks live under ~/.qwen (user-owned, not in the working
     // tree), so no folder-trust gate is needed here.
-    try {
-      await scheduler.enableDurable(this.sessionId);
-    } catch (err) {
-      // Durable support is best-effort; session-only jobs still run.
-      debugLogger.warn(
-        `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
-      );
+    if (!this.requiresManagedConversationBinding) {
+      try {
+        await scheduler.enableDurable(this.sessionId);
+      } catch (err) {
+        // Durable support is best-effort; session-only jobs still run.
+        debugLogger.warn(
+          `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+        );
+      }
     }
 
     // dispose() may have run while the durable load was in flight; its
@@ -7487,6 +8003,7 @@ export class Session implements SessionContext {
   async #drainCronQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.#isAutomaticWorkHeld()) return;
     if (this.cronProcessing) return;
     // Don't process cron while a user prompt is active — the queue will be
     // drained after the prompt completes (see end of prompt()).
@@ -7502,6 +8019,7 @@ export class Session implements SessionContext {
 
   async #drainCronQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.cronProcessing) return;
+    if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.notificationProcessing) return;
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     if (this.#nextCronQueueIndex() < 0) return;
@@ -7602,10 +8120,14 @@ export class Session implements SessionContext {
    * `_meta.source='cron'`, streams the model response, and handles tool calls.
    */
   async #executeCronPrompt(item: CronQueueItem): Promise<void> {
-    // Same session-ID binding rationale as #executePrompt.
-    return runWithInvocationContext(undefined, () =>
-      sessionIdContext.run(this.config.getSessionId(), () =>
-        this.#executeCronPromptInner(item),
+    // Same session-ID binding rationale as #executePrompt, and the same
+    // reason to leave the Goal store as the notification drain: a cron turn
+    // is never a Goal turn, whatever lineage it was scheduled from.
+    return goalTurnContext.exit(() =>
+      runWithInvocationContext(undefined, () =>
+        sessionIdContext.run(this.config.getSessionId(), () =>
+          this.#executeCronPromptInner(item),
+        ),
       ),
     );
   }
@@ -8302,6 +8824,7 @@ export class Session implements SessionContext {
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.#isAutomaticWorkHeld()) return;
     if (this.notificationProcessing) return;
     if (
       this.pendingPrompt ||
@@ -8322,6 +8845,7 @@ export class Session implements SessionContext {
 
   async #drainNotificationQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.notificationProcessing) return;
+    if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       return;
     }
@@ -8380,9 +8904,17 @@ export class Session implements SessionContext {
         this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
-          await runWithInvocationContext(undefined, () =>
-            sessionIdContext.run(this.config.getSessionId(), () =>
-              this.#executeBackgroundNotificationPromptInner(item),
+          // A notification fires from async resources created inside the
+          // turn that spawned the task, so a Goal permit can reach here by
+          // lineage after that turn is long over. This is not a Goal turn:
+          // leave the store, as #executePrompt does for every non-Goal turn,
+          // or the notification's tool results would be stamped as evidence
+          // for a turn that never made those calls.
+          await goalTurnContext.exit(() =>
+            runWithInvocationContext(undefined, () =>
+              sessionIdContext.run(this.config.getSessionId(), () =>
+                this.#executeBackgroundNotificationPromptInner(item),
+              ),
             ),
           );
         } finally {
@@ -8834,13 +9366,19 @@ export class Session implements SessionContext {
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 
+  buildAvailableCommandsSnapshot(): Promise<AvailableCommandsSnapshot> {
+    return buildAvailableCommandsSnapshot(
+      this.config,
+      undefined,
+      this.settings,
+      this.slashCommandPolicy,
+    );
+  }
+
   private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+    if (this.#isAutomaticWorkHeld()) return;
     const { availableCommands, availableSkills, availableSkillDetails } =
-      await buildAvailableCommandsSnapshot(
-        this.config,
-        undefined,
-        this.settings,
-      );
+      await this.buildAvailableCommandsSnapshot();
     const update: SessionUpdate = {
       sessionUpdate: 'available_commands_update',
       availableCommands,
@@ -9058,7 +9596,10 @@ export class Session implements SessionContext {
         debugLogger.debug('model-update extNotification failed', error);
       });
 
-    if (options.persistDefault ?? true) {
+    const persistDefault =
+      !this.requiresManagedConversationBinding &&
+      (options.persistDefault ?? true);
+    if (persistDefault) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
       this.settings.setValue(
         persistScope,
@@ -9230,13 +9771,19 @@ export class Session implements SessionContext {
         ) {
           return;
         }
-        this.config
-          .getChatRecordingService()
-          ?.recordToolResult(finalized[index].responseParts, {
+        const goalProvenance = ambientGoalToolResultProvenance(record.toolName);
+        this.config.getChatRecordingService()?.recordToolResult(
+          finalized[index].responseParts,
+          {
             ...record.metadata,
             persistedOutputFiles: finalized[index].persistedOutputFiles,
             artifacts: finalized[index].artifacts,
-          });
+          },
+          // Passed only inside a Goal turn: outside one this call keeps its
+          // former two-argument shape, so nothing about ordinary recording
+          // changes.
+          ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+        );
       });
       return {
         ...result,
@@ -9810,13 +10357,13 @@ export class Session implements SessionContext {
   /**
    * Assemble the per-turn system reminders the model needs to see at the
    * start of a user query or cron fire. Mirrors the subagent/plan/arena
-   * branches in `GeminiClient.sendMessageStream` (`client.ts:848-878`) —
+   * branches in `LlmClient.sendMessageStream` (`client.ts:848-878`) —
    * the ACP path bypasses that code, so without this helper plan mode is
    * silently inert and subagent/arena sessions lose context.
    *
    * Scope note: the `relevantAutoMemory` reminder is intentionally NOT
    * included here. Managed auto-memory requires a prefetch pipeline that
-   * lives in `GeminiClient`, and porting it into the ACP path is tracked
+   * lives in `LlmClient`, and porting it into the ACP path is tracked
    * separately as part of the broader middleware-alignment work.
    */
   async #buildInitialSystemReminders(): Promise<Part[]> {
@@ -10186,6 +10733,27 @@ export class Session implements SessionContext {
         const isAgentTool = tool.name === ToolNames.AGENT;
         const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
         const isEnterPlanModeTool = tool.name === ToolNames.ENTER_PLAN_MODE;
+        const requestsAgentWorkingDirectory =
+          isAgentTool &&
+          (args['isolation'] === 'worktree' ||
+            (typeof args['working_dir'] === 'string' &&
+              args['working_dir'].trim().length > 0));
+        if (
+          this.requiresManagedConversationBinding &&
+          (requestsAgentWorkingDirectory ||
+            tool.name === ToolNames.ENTER_WORKTREE ||
+            tool.name === ToolNames.EXIT_WORKTREE)
+        ) {
+          return earlyErrorResponse(
+            new Error(STANDALONE_WORKTREE_ACTION_ERROR),
+            toolName,
+            {
+              status: 'error',
+              errorType: ToolErrorType.EXECUTION_DENIED,
+              executionStatus: 'not_started',
+            },
+          );
+        }
         if (isAgentTool) {
           agentToolAbortController = new AbortController();
           activeToolAbortSignal = agentToolAbortController.signal;
@@ -10248,6 +10816,9 @@ export class Session implements SessionContext {
                 onStopAfterPermissionCancel?.();
               },
               (params, signal) => this.#requestPermissionQueued(params, signal),
+              this.requiresManagedConversationBinding
+                ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
+                : undefined,
             );
 
             // Set up sub-agent tool tracking
@@ -10442,7 +11013,7 @@ export class Session implements SessionContext {
             // Parallels coreToolScheduler.ts.
             const messages =
               this.config
-                .getGeminiClient?.()
+                .getLlmClient?.()
                 ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
             const decision = await evaluateAutoMode({
               ctx: pmCtx,
@@ -10822,6 +11393,9 @@ export class Session implements SessionContext {
               const permissionOptions = toPermissionOptions(
                 confirmationDetails,
                 pmForcedAsk,
+                this.requiresManagedConversationBinding
+                  ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
+                  : undefined,
               );
               const offeredPermissionOptions = permissionOptions.map(
                 (option) => ({ ...option }),
@@ -11017,7 +11591,6 @@ export class Session implements SessionContext {
               // requestPermission (user saw dialog and made a choice).
               // AUTO_EDIT auto-approved tools never reach here.
               if (
-                outcome === ToolConfirmationOutcome.ProceedAlways ||
                 outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
                 outcome === ToolConfirmationOutcome.ProceedAlwaysUser
               ) {
@@ -11875,6 +12448,9 @@ export class Session implements SessionContext {
         executionStatus,
       });
     } finally {
+      if (terminalStatus && terminalStatus !== 'cancelled') {
+        this.config.getLlmClient().recordCompletedToolCall(toolName, args);
+      }
       if (terminalStatus === 'cancelled') {
         endToolSpan(toolSpan, { success: false, cancelled: true });
       } else {
@@ -11985,6 +12561,13 @@ export class Session implements SessionContext {
       }
 
       case 'unsupported': {
+        if (result.originalType === 'unsupported_action') {
+          throw new RequestError(
+            -32004,
+            'This action is not supported in this standalone session.',
+            { errorKind: 'unsupported_action' },
+          );
+        }
         // Command returned an unsupported result type
         const unsupportedError = `Slash command not supported in ACP integration: ${result.reason}`;
         throw new Error(unsupportedError);
@@ -12030,6 +12613,7 @@ export class Session implements SessionContext {
     options: {
       promptLast?: boolean;
       onFullTurnModel?: (model: string) => boolean;
+      deferBridgeConversions?: boolean;
     } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
@@ -12041,6 +12625,14 @@ export class Session implements SessionContext {
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
+    const finish = (parts: Part[]) =>
+      options.deferBridgeConversions
+        ? parts
+        : this.#applyBridgeConversionsIfNeeded(
+            parts,
+            abortSignal,
+            options.onFullTurnModel,
+          );
 
     const parts = message.map((part) => {
       switch (part.type) {
@@ -12185,19 +12777,11 @@ export class Session implements SessionContext {
       extensionParts.length === 0 &&
       mcpServerParts.length === 0
     ) {
-      return this.#applyBridgeConversionsIfNeeded(
-        partsToSend,
-        abortSignal,
-        options.onFullTurnModel,
-      );
+      return finish(partsToSend);
     }
 
     if (pathSpecsToRead.length === 0 && embeddedContext.length === 0) {
-      return this.#applyBridgeConversionsIfNeeded(
-        [...partsToSend, ...extensionParts, ...mcpServerParts],
-        abortSignal,
-        options.onFullTurnModel,
-      );
+      return finish([...partsToSend, ...extensionParts, ...mcpServerParts]);
     }
 
     // Construct the initial part of the query for the LLM
@@ -12304,11 +12888,7 @@ export class Session implements SessionContext {
       ? [...referenceParts, promptPart]
       : [promptPart, ...referenceParts];
 
-    return this.#applyBridgeConversionsIfNeeded(
-      processedQueryParts,
-      abortSignal,
-      options.onFullTurnModel,
-    );
+    return finish(processedQueryParts);
   }
 
   async #applyBridgeConversionsIfNeeded(
@@ -12369,8 +12949,9 @@ export class Session implements SessionContext {
 
     if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
       try {
-        await this.messageEmitter.emitAgentMessage(
+        await this.messageEmitter.emitVisionBridgeNotice(
           formatVisionBridgeNotice(bridgeResult),
+          bridgeResult,
         );
       } catch (error) {
         debugLogger.debug(

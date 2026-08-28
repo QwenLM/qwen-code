@@ -28,7 +28,7 @@ import {
   buildReport,
   type FindingsReport,
   validateFindings,
-} from '../../utils/findings.js';
+} from './findings.js';
 import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
 import { isSameFile } from './lib/same-file.js';
@@ -284,6 +284,35 @@ function validateVerdict(value: unknown): PersistedVerdict {
   // carries no deferredCount, and a mid-upgrade save must not fail over a
   // count that only affects display. A PRESENT value of any other wrong
   // shape is refused like every other field here.
+  // Same absence semantics as `deferredCount` below: a composed JSON written
+  // by a build predating the approach signal carries no field at all, and a
+  // mid-upgrade load must not fail over one that only affects display. A
+  // PRESENT value of the wrong shape is refused like every other field here.
+  const approachRaw = verdict['approachSignal'] ?? null;
+  if (approachRaw !== null) {
+    const signal = object(approachRaw, 'Composed verdict.approachSignal');
+    for (const key of ['round', 'src0', 'srcDiffLines'] as const) {
+      if (
+        typeof signal[key] !== 'number' ||
+        !Number.isInteger(signal[key]) ||
+        (signal[key] as number) <= 0
+      ) {
+        throw new Error(
+          `Composed verdict.approachSignal.${key} must be a positive integer.`,
+        );
+      }
+    }
+    if (typeof signal['growth'] !== 'number' || !(signal['growth'] >= 0)) {
+      throw new Error(
+        'Composed verdict.approachSignal.growth must be a non-negative number.',
+      );
+    }
+    if (typeof signal['nonConverged'] !== 'boolean') {
+      throw new Error(
+        'Composed verdict.approachSignal.nonConverged must be a boolean.',
+      );
+    }
+  }
   const deferredCount = verdict['deferredCount'] ?? 0;
   if (
     typeof deferredCount !== 'number' ||
@@ -505,6 +534,20 @@ function validateVerdict(value: unknown): PersistedVerdict {
             srcDiffLines: (lowSignal as Record<string, number>)[
               'srcDiffLines'
             ]!,
+          },
+    approachSignal:
+      approachRaw === null
+        ? null
+        : {
+            round: (approachRaw as Record<string, number>)['round']!,
+            src0: (approachRaw as Record<string, number>)['src0']!,
+            srcDiffLines: (approachRaw as Record<string, number>)[
+              'srcDiffLines'
+            ]!,
+            growth: (approachRaw as Record<string, number>)['growth']!,
+            nonConverged: (approachRaw as Record<string, unknown>)[
+              'nonConverged'
+            ] as boolean,
           },
     verdictLine: nonEmptyString(
       verdict['verdictLine'],

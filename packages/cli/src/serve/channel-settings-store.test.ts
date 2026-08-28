@@ -102,6 +102,23 @@ describe('WorkspaceChannelSettingsStore', () => {
         throw new Error('not used');
       },
     });
+    registerPlugin({
+      channelType: 'non-user-default-management-test',
+      displayName: 'Non-user default management test',
+      defaultSessionScope: 'chat_thread',
+      management: { fields: [] },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
+    registerPlugin({
+      channelType: 'user-default-management-test',
+      displayName: 'User default management test',
+      management: { fields: [] },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
   });
 
   beforeEach(() => {
@@ -209,6 +226,72 @@ describe('WorkspaceChannelSettingsStore', () => {
         >
       )['bot']?.['sessionScope'],
     ).toBe('chat_thread');
+  });
+
+  it.each([
+    {
+      label: 'an explicit non-user session scope',
+      type: 'user-default-management-test',
+      extra: { sessionScope: 'chat_thread' },
+      message: 'requires sessionScope "user"',
+    },
+    {
+      label: 'a plugin non-user default session scope',
+      type: 'non-user-default-management-test',
+      extra: {},
+      message: 'requires sessionScope "user"',
+    },
+    {
+      label: 'channel group history',
+      type: 'user-default-management-test',
+      extra: { groupHistoryLimit: 1 },
+      message: 'cannot use groupHistoryLimit',
+    },
+    {
+      label: 'per-group history',
+      type: 'user-default-management-test',
+      extra: {
+        groups: { group1: { groupHistoryLimit: 1 } },
+      },
+      message: 'group "group1" cannot use groupHistoryLimit',
+    },
+  ])('rejects multiSession with $label', async ({ type, extra, message }) => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await expect(
+      store.upsert('named-bot', {
+        expectedRevision: store.snapshot().revision,
+        config: { type, multiSession: true, ...extra },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: expect.stringContaining(message),
+    });
+  });
+
+  it('rejects enabling multiSession while preserving webhook config', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "named-bot": {
+    "type": "user-default-management-test",
+    "webhooks": { "sources": {} }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await expect(
+      store.upsert('named-bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'user-default-management-test',
+          multiSession: true,
+          webhooks: { sources: {} },
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: expect.stringContaining('cannot use webhooks'),
+    });
   });
 
   it('replaces and clears secrets only through explicit operations', async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   DaemonHttpError,
   DaemonPendingPromptLimitError,
+  DaemonTransportClosedError,
   type DaemonCapabilities,
   type DaemonSessionClient,
   type GoalSnapshotV2,
@@ -92,6 +93,90 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('context');
   });
 
+  it('restores workspace model previews after clearing session context models', () => {
+    const next = getConnectionAfterSessionClear(
+      {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        sessionId: 'session-a',
+        context: contextStatus('session-a'),
+        models: [
+          {
+            id: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            label: 'Qwen 3.8 Max',
+          },
+        ],
+        providers: {
+          v: 1,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          current: { modelId: 'qwen3.8-max' },
+          providers: [
+            {
+              kind: 'model_provider',
+              status: 'ok',
+              authType: 'qwen-oauth',
+              current: true,
+              models: [
+                {
+                  modelId: 'qwen3.8-max',
+                  baseModelId: 'qwen3.8-max',
+                  name: 'Qwen 3.8 Max',
+                  isCurrent: true,
+                  isRuntime: false,
+                  configOptions: [
+                    {
+                      id: 'reasoning_effort',
+                      currentValue: 'xhigh',
+                      options: [
+                        { value: 'none' },
+                        { value: 'low' },
+                        { value: 'medium' },
+                        { value: 'xhigh' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      } as DaemonConnectionState,
+      'session-a',
+    );
+
+    expect(next.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
+  it('keeps the prior model list when no workspace providers are loaded', () => {
+    // Older daemons without workspaceProviders support (or a rejected fetch)
+    // leave `providers` undefined; the pre-clear list must survive the clear.
+    const models = [
+      {
+        id: 'qwen3.8-max',
+        baseModelId: 'qwen3.8-max',
+        label: 'Qwen 3.8 Max',
+      },
+    ];
+    const next = getConnectionAfterSessionClear(
+      {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        sessionId: 'session-a',
+        context: contextStatus('session-a'),
+        models,
+      } as DaemonConnectionState,
+      'session-a',
+    );
+
+    expect(next.models).toEqual(models);
+  });
+
   it('preserves a concurrently loaded session', () => {
     const next = getConnectionAfterSessionClear(
       {
@@ -172,6 +257,58 @@ describe('resolveSessionRestoreTimeouts', () => {
 });
 
 describe('createDaemonSessionActions', () => {
+  it('does not report a stats error while the session is disconnected', async () => {
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice });
+
+    await expect(actions.getStats()).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('does not report a stats error when the session disconnects in flight', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('session-a');
+    session.stats.mockRejectedValueOnce(new DaemonTransportClosedError());
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getStats()).rejects.toThrow(
+      'Transport connection closed',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'fetch failed',
+    'Failed to fetch',
+    'NetworkError when attempting to fetch resource',
+    'Load failed',
+  ])(
+    'does not report a stats error when fetch disconnects in flight: %s',
+    async (message) => {
+      const addNotice = vi.fn();
+      const session = createMockSession('session-a');
+      session.stats.mockRejectedValueOnce(new TypeError(message));
+      const { actions } = createActionsHarness({ addNotice, session });
+
+      await expect(actions.getStats()).rejects.toThrow(message);
+      expect(addNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reports non-disconnect stats errors', async () => {
+    const addNotice = vi.fn((notice) => notice);
+    const session = createMockSession('session-a');
+    session.stats.mockRejectedValueOnce(new Error('bad response'));
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getStats()).rejects.toThrow('bad response');
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'load_stats' }),
+    );
+  });
+
   it('clears the previous Goal before starting a fresh session', async () => {
     const { actions, getConnection } = createActionsHarness({
       connection: {
@@ -2313,6 +2450,52 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('applies a reasoning effort only when the daemon confirms it', async () => {
+    const session = createMockSession('session-a');
+    session.setConfigOption.mockResolvedValueOnce({
+      configOptions: reasoningConfigOptions('medium'),
+    });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentModel: 'qwen3.8-max',
+      },
+      session,
+    });
+
+    await expect(actions.setReasoningEffort('medium')).resolves.toBeUndefined();
+
+    expect(session.setConfigOption).toHaveBeenCalledWith(
+      'reasoning_effort',
+      'medium',
+    );
+    expect(getConnection().reasoning).toEqual({
+      enabled: true,
+      effort: 'medium',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
+  it('rejects a reasoning effort when live config options do not confirm it', async () => {
+    const session = createMockSession('session-a');
+    session.setConfigOption.mockResolvedValueOnce({ configOptions: [] });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentModel: 'qwen3.8-max',
+      },
+      session,
+    });
+
+    await expect(actions.setReasoningEffort('medium')).rejects.toThrow(
+      'Daemon did not confirm reasoning effort "medium"',
+    );
+
+    expect(getConnection().reasoning).toBeUndefined();
+  });
+
   it('does not apply a late approval mode to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');
@@ -2534,6 +2717,9 @@ function createMockSession(
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
+    setConfigOption: vi.fn(async (_configId: string, value: string) => ({
+      configOptions: reasoningConfigOptions(value),
+    })),
     uploadAttachment: vi.fn(
       async (data: Blob, name: string, mimeType: string) => ({
         type: mimeType.startsWith('image/')
@@ -2552,10 +2738,26 @@ function createMockSession(
     removePendingPrompt: vi.fn(async () => ({ removed: true })),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
+    stats: vi.fn(),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
     goal: vi.fn(),
     controlGoal: vi.fn(),
   };
+}
+
+function reasoningConfigOptions(currentValue: string) {
+  return [
+    {
+      id: 'reasoning_effort',
+      currentValue,
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'xhigh' },
+      ],
+    },
+  ];
 }
 
 function createDeferred<T>() {

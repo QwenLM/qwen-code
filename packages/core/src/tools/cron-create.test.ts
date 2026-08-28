@@ -6,15 +6,23 @@ import { CronCreateTool } from './cron-create.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 import { readCronTasks } from '../services/cronTasksFile.js';
 import { Storage } from '../config/storage.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
+import type { CurrentSessionScheduledTaskCreator } from '../config/config.js';
 
 let tmpDir: string;
 
-function makeConfig(maxAgeDays = 7) {
+function makeConfig(
+  maxAgeDays = 7,
+  currentSessionCreator?: CurrentSessionScheduledTaskCreator,
+  sessionSourceType?: string,
+) {
   const scheduler = new CronScheduler(tmpDir, maxAgeDays * 24 * 60 * 60 * 1000);
   return {
     getCronScheduler: () => scheduler,
     getCronRecurringMaxAgeDays: () => maxAgeDays,
     getProjectRoot: () => tmpDir,
+    getCurrentSessionScheduledTaskCreator: () => currentSessionCreator,
+    getSessionSourceType: () => sessionSourceType,
     _scheduler: scheduler,
   } as unknown as import('../config/config.js').Config & {
     _scheduler: CronScheduler;
@@ -117,6 +125,22 @@ describe('CronCreateTool', () => {
     expect(tasks[0]!.prompt).toBe('durable check');
   });
 
+  it('rejects durable jobs for standalone sessions without touching storage', async () => {
+    config = makeConfig(7, undefined, 'standalone');
+    tool = new CronCreateTool(config);
+    const invocation = tool.build({
+      cron: '*/5 * * * *',
+      prompt: 'durable check',
+      durable: true,
+    });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('not supported');
+    expect(config._scheduler.list()).toHaveLength(0);
+    await expect(readCronTasks(tmpDir)).resolves.toEqual([]);
+  });
+
   it('does not write to disk when durable=false', async () => {
     const invocation = tool.build({
       cron: '*/5 * * * *',
@@ -126,6 +150,97 @@ describe('CronCreateTool', () => {
 
     const tasks = await readCronTasks(tmpDir);
     expect(tasks).toHaveLength(0);
+  });
+
+  it('creates a durable task in the current daemon session', async () => {
+    const requests: Array<Parameters<CurrentSessionScheduledTaskCreator>[0]> =
+      [];
+    config = makeConfig(7, async (request) => {
+      requests.push(request);
+      return { id: 'cron-current', cron: request.cron };
+    });
+    tool = new CronCreateTool(config);
+
+    const result = await promptIdContext.run('prompt-1', () =>
+      tool
+        .build({
+          cron: '*/5 * * * *',
+          prompt: '  keep working  ',
+          durable: true,
+          sessionMode: 'current',
+        })
+        .execute(new AbortController().signal),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.returnDisplay).toContain('cron-current');
+    expect(result.returnDisplay).toContain('[current conversation]');
+    expect(result.llmContent).toContain('bound to the current conversation');
+    expect(requests).toEqual([
+      {
+        cron: '*/5 * * * *',
+        prompt: 'keep working',
+        recurring: true,
+        promptId: 'prompt-1',
+      },
+    ]);
+    expect(config._scheduler.list()).toHaveLength(0);
+    expect(await readCronTasks(tmpDir)).toHaveLength(0);
+  });
+
+  it('surfaces a plain-object daemon error for current-session mode', async () => {
+    const message = 'The caller session does not own the active prompt';
+    config = makeConfig(7, async () => {
+      throw { code: -32602, message };
+    });
+    tool = new CronCreateTool(config);
+
+    const result = await promptIdContext.run('prompt-1', () =>
+      tool
+        .build({
+          cron: '*/5 * * * *',
+          prompt: 'keep working',
+          durable: true,
+          sessionMode: 'current',
+        })
+        .execute(new AbortController().signal),
+    );
+
+    expect(result.llmContent).toBe(`Error creating cron job: ${message}`);
+    expect(result.returnDisplay).toBe(message);
+    expect(result.error).toEqual({ message });
+  });
+
+  it('rejects current-session mode for a session-only job', async () => {
+    const result = await tool
+      .build({
+        cron: '*/5 * * * *',
+        prompt: 'keep working',
+        sessionMode: 'current',
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('requires durable: true');
+    expect(config._scheduler.list()).toHaveLength(0);
+  });
+
+  it('rejects current-session mode without an active daemon prompt', async () => {
+    config = makeConfig(7, async () => ({
+      id: 'unexpected',
+      cron: '*/5 * * * *',
+    }));
+    tool = new CronCreateTool(config);
+
+    const result = await tool
+      .build({
+        cron: '*/5 * * * *',
+        prompt: 'keep working',
+        durable: true,
+        sessionMode: 'current',
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('active daemon prompt');
   });
 
   it.each(['', '   '])('rejects blank prompt %j', (prompt) => {

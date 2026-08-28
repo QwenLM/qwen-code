@@ -1480,6 +1480,7 @@ export default {
     'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
   'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
+  'from nested agent': 'от вложенного агента',
   Running: 'Выполняется',
   Pausing: 'Приостанавливается',
   Paused: 'Приостановлено',

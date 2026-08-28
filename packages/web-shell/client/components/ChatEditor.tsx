@@ -52,6 +52,8 @@ import {
 import { AtMentionPanel } from './AtMentionPanel';
 import { useFileUpload, type FileUploadItem } from '../hooks/useFileUpload';
 import { fileReferenceInsertText } from '../hooks/useAtMentionMenu';
+import { AddMenu } from './composer/AddMenu';
+import { computePrependSkillTransaction } from './composer/prependSkillInvocation';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import {
   getComposerTagIconUrl,
@@ -132,7 +134,12 @@ export type ComposerToolbarAction =
   | 'files'
   | 'widthMode'
   | 'voice'
-  | 'workspace';
+  | 'workspace'
+  // Unlike the actions above, `addMenu` is never shown unless the host
+  // lists it explicitly in `visibleToolbarActions` — the generic gate
+  // defaults to "show" when the prop is absent, so `+` checks the prop
+  // directly to stay off by default.
+  | 'addMenu';
 
 // Dropped folders surface in `dataTransfer.files` as 0-byte Files; only the
 // items API can tell them apart, and folder uploads are out of scope.
@@ -1057,13 +1064,13 @@ function ModelReasoningControls({
   onSelect,
 }: {
   reasoning: DaemonReasoningControls;
-  onSelect: (value: string) => Promise<void> | void;
+  onSelect?: (value: string) => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const hasEffortOptions = reasoning.efforts.length > 0;
   const select = async (value: string) => {
-    if (busy) return;
+    if (busy || !onSelect) return;
     setBusy(true);
     try {
       await onSelect(value);
@@ -1083,7 +1090,7 @@ function ModelReasoningControls({
         <span>{t('reasoning.thinking')}</span>
         <Switch
           checked={reasoning.enabled}
-          disabled={busy}
+          disabled={busy || !onSelect || reasoning.canDisable === false}
           aria-label={t('reasoning.thinking')}
           data-web-shell-thinking-toggle
           onCheckedChange={(enabled) =>
@@ -1104,7 +1111,7 @@ function ModelReasoningControls({
               className={styles.reasoningEffortRow}
               aria-pressed={reasoning.effort === effort}
               data-web-shell-effort={effort}
-              disabled={!reasoning.enabled || busy}
+              disabled={!reasoning.enabled || busy || !onSelect}
               onClick={() => void select(effort)}
             >
               <span>{t(`reasoning.effort.${effort}`)}</span>
@@ -1681,6 +1688,7 @@ export const ChatEditor = memo(
 
     const addComposerTags = core.addTags;
     const clearImageDragState = core.clearImageDragState;
+    const focusComposer = core.focus;
     const ingestFiles = core.ingestFiles;
     const insertUploadReference = useCallback(
       (path: string) => {
@@ -1843,6 +1851,63 @@ export const ChatEditor = memo(
       pendingDropFiles,
       uploadFiles,
     ]);
+    // -- Composer add menu (`+`) ---------------------------------------------
+    const showAddMenuAction = visibleToolbarActions?.includes('addMenu');
+    const getAddMenuWorkspaceActions = useCallback(
+      () => core.workspaceActionsRef.current,
+      [core.workspaceActionsRef],
+    );
+    const handleAddMenuFiles = useCallback(
+      (files: File[], destination: 'attach' | 'upload') => {
+        if (destination === 'upload') {
+          if (!uploadEnabled) return;
+          uploadFiles(files, fileUploadDirectory ?? '.', insertUploadReference);
+        } else {
+          ingestFiles(files);
+        }
+        focusComposer();
+      },
+      [
+        fileUploadDirectory,
+        focusComposer,
+        ingestFiles,
+        insertUploadReference,
+        uploadEnabled,
+        uploadFiles,
+      ],
+    );
+    const handleAddMenuInsertReference = useCallback(
+      (tag: WebShellComposerTag) => {
+        addComposerTags([tag], { placement: 'inline', position: 'end' });
+        const view = core.viewRef.current;
+        if (view) {
+          view.dispatch({
+            selection: { anchor: view.state.doc.length },
+            scrollIntoView: true,
+          });
+        }
+        focusComposer();
+      },
+      [addComposerTags, core.viewRef, focusComposer],
+    );
+    const handleAddMenuPrependSkill = useCallback(
+      (invocation: string) => {
+        const view = core.viewRef.current;
+        const spec = computePrependSkillTransaction(
+          view ? view.state.doc.toString() : core.getText(),
+          invocation,
+        );
+        if (!spec) return focusComposer();
+        if (view) {
+          view.dispatch(spec);
+          view.focus();
+        } else {
+          core.mobileComposer?.textareaRef.current?.setSelectionRange(0, 0);
+          core.insertText(spec.changes.insert);
+        }
+      },
+      [core, focusComposer],
+    );
     const handleUploadPickerChange = useCallback(
       (event: ReactChangeEvent<HTMLInputElement>) => {
         const files = Array.from(event.target.files ?? []);
@@ -2313,7 +2378,7 @@ export const ChatEditor = memo(
       currentModelLabel,
       lastConfirmedModelLabel,
     });
-    const showReasoningOptions = Boolean(reasoning && onSelectReasoningEffort);
+    const showReasoningOptions = Boolean(reasoning);
     const reasoningEffortLabel = reasoning
       ? reasoning.efforts.length > 0
         ? t(`reasoning.effort.${reasoning.effort}`)
@@ -2525,6 +2590,7 @@ export const ChatEditor = memo(
       modeLabel,
       normalizedModelChipLabel,
       sessionName,
+      showAddMenuAction,
       showModelAction,
       showModeAction,
       workspaceIndicatorVisible,
@@ -2674,6 +2740,7 @@ export const ChatEditor = memo(
                 <input
                   ref={searchInputRef}
                   className={styles.searchInput}
+                  data-web-shell-composer-history-search
                   value={searchQuery}
                   onChange={handleSearchInput}
                   onCompositionEnd={handleSearchCompositionEnd}
@@ -2980,6 +3047,40 @@ export const ChatEditor = memo(
                   </div>
                 )}
                 <div className={styles.toolbarLeft}>
+                  {showAddMenuAction && (
+                    <AddMenu
+                      key={JSON.stringify([
+                        sessionId,
+                        atWorkspaceCwd,
+                        Boolean(disabled),
+                      ])}
+                      disabled={disabled}
+                      availabilityKey={JSON.stringify([
+                        fileUploadEnabled === false,
+                        uploadEnabled,
+                        Boolean(
+                          core.workspaceActionsRef.current?.globWorkspace ??
+                            core.workspaceActionsRef.current?.listDirectory,
+                        ),
+                        Boolean(
+                          core.workspaceActionsRef.current
+                            ?.loadExtensionsStatus,
+                        ),
+                        Boolean(
+                          core.workspaceActionsRef.current?.loadMcpStatus,
+                        ),
+                        Boolean(skills?.length),
+                      ])}
+                      addFileAvailable={fileUploadEnabled !== false}
+                      uploadAvailable={uploadEnabled}
+                      onAddFiles={handleAddMenuFiles}
+                      onFilePickerCancel={focusComposer}
+                      onInsertReference={handleAddMenuInsertReference}
+                      onPrependSkill={handleAddMenuPrependSkill}
+                      getWorkspaceActions={getAddMenuWorkspaceActions}
+                      skills={skills ?? []}
+                    />
+                  )}
                   {workspaceSelectVisible &&
                     workspaces &&
                     onSelectWorkspace && (
@@ -3130,9 +3231,7 @@ export const ChatEditor = memo(
                             : undefined
                         }
                         header={
-                          showReasoningOptions &&
-                          reasoning &&
-                          onSelectReasoningEffort ? (
+                          showReasoningOptions && reasoning ? (
                             <ModelReasoningControls
                               reasoning={reasoning}
                               onSelect={onSelectReasoningEffort}
