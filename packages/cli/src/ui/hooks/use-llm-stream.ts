@@ -3136,7 +3136,7 @@ export const useLlmStream = (
               // still gets to fold into the thought on completion.
               if (
                 finishReasonInfoMessage(
-                  (event as ServerGeminiFinishedEvent).value.reason,
+                  (event as ServerLlmFinishedEvent).value.reason,
                 )
               ) {
                 settleThoughtMergeDeferral(userMessageTimestamp, promptId);

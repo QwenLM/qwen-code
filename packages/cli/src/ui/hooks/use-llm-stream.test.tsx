@@ -12001,8 +12001,8 @@ describe('useLlmStream', () => {
     // deferral-active resolution tests.
     const renderDeferredTestHook = () =>
       renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
+        useLlmStream(
+          new MockedLlmClientClass(mockConfig),
           [],
           mockAddItem,
           mockConfig,
@@ -12078,7 +12078,7 @@ describe('useLlmStream', () => {
           prompt_id: promptId,
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: {
           callId,
           responseParts: [{ text: 'file contents' }],
@@ -12706,11 +12706,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'planning an edit' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'edit',
@@ -12720,7 +12720,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -12750,7 +12750,7 @@ describe('useLlmStream', () => {
             prompt_id: 'p1',
           },
           status: 'success',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           response: {
             callId: 'tc1',
             responseParts: [{ text: 'edited' }],
@@ -12802,11 +12802,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'planning a search' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -12816,7 +12816,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -12863,7 +12863,7 @@ describe('useLlmStream', () => {
             prompt_id: 'p1',
           },
           status: 'cancelled',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           response: {
             callId: 'tc1',
             responseParts: [],
@@ -12918,11 +12918,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'planning before cancel' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -12935,7 +12935,7 @@ describe('useLlmStream', () => {
           // user cancels locally (no UserCancelled event reaches the loop).
           await holdStream;
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -12996,7 +12996,7 @@ describe('useLlmStream', () => {
             prompt_id: 'p1',
           },
           status: 'cancelled',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           response: {
             callId: 'tc1',
             responseParts: [],
@@ -13041,24 +13041,24 @@ describe('useLlmStream', () => {
         if (streamCallCount === 1) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'main answer',
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
         }
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'btw thinking' },
           };
           await holdBtwTcr;
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'btw-tc',
               name: 'read_file',
@@ -13072,7 +13072,7 @@ describe('useLlmStream', () => {
           };
           await holdBtwEnd;
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -13201,12 +13201,12 @@ describe('useLlmStream', () => {
         if (streamCallCount === 1) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'main answer',
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -13214,12 +13214,12 @@ describe('useLlmStream', () => {
         if (streamCallCount === 2) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'btw thinking' },
             };
             await holdBtwTcr;
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'btw-tc',
                 name: 'read_file',
@@ -13230,18 +13230,18 @@ describe('useLlmStream', () => {
             };
             await holdBtwEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
         }
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'next answer',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -13361,26 +13361,26 @@ describe('useLlmStream', () => {
         if (streamCallCount === 1) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'main answer',
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
         }
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'btw mid-thought' },
           };
           // Stays mid-thought: no ToolCallRequest arrives before the
           // foreground cancel below, so no deferral is ever armed.
           await holdBtwTcr;
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -13474,11 +13474,11 @@ describe('useLlmStream', () => {
         if (streamCallCount === 1) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'main thinking' },
             };
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'main-tc',
                 name: 'read_file',
@@ -13489,7 +13489,7 @@ describe('useLlmStream', () => {
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -13497,23 +13497,23 @@ describe('useLlmStream', () => {
         if (streamCallCount === 2) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'btw one reasoning' },
             };
             await holdBtwEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
         }
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'next answer',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -13650,12 +13650,12 @@ describe('useLlmStream', () => {
         if (streamCallCount === 1) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'main answer',
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -13663,12 +13663,12 @@ describe('useLlmStream', () => {
         if (streamCallCount === 2) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'btw thinking' },
             };
             await holdBtwTcr;
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'btw-tc',
                 name: 'read_file',
@@ -13679,7 +13679,7 @@ describe('useLlmStream', () => {
             };
             await holdBtwEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -13688,11 +13688,11 @@ describe('useLlmStream', () => {
         // settlement must not touch the surviving stream's deferral.
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'cron answer',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -13831,12 +13831,12 @@ describe('useLlmStream', () => {
           // its own, so no deferral arms at its boundary.
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'main working',
             };
             await holdMainTcr;
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'main-tc',
                 name: 'read_file',
@@ -13847,7 +13847,7 @@ describe('useLlmStream', () => {
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -13856,17 +13856,17 @@ describe('useLlmStream', () => {
           // Oversized reasoning: the head commits in-stream at the split,
           // the tail stays pending while this stream keeps streaming.
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'B'.repeat(20_000) },
           };
           await holdBtwMid;
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: ' tail-more' },
           };
           await holdBtwEnd;
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -13989,12 +13989,12 @@ describe('useLlmStream', () => {
           // ?btw batch completes.
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'main working',
             };
             await holdMain;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -14005,11 +14005,11 @@ describe('useLlmStream', () => {
           // tool-turn response.
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'btw thinking' },
             };
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'btw-tc1',
                 name: 'read_file',
@@ -14020,7 +14020,7 @@ describe('useLlmStream', () => {
             };
             await holdBtwEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -14029,14 +14029,14 @@ describe('useLlmStream', () => {
         // re-armed deferral must survive a foreground Esc.
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: {
               subject: '',
               description: 'btw continuation thinking',
             },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'btw-tc2',
               name: 'read_file',
@@ -14047,7 +14047,7 @@ describe('useLlmStream', () => {
           };
           await holdContinuationEnd;
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -14194,11 +14194,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'planning a read' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -14208,7 +14208,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'MAX_TOKENS', usageMetadata: undefined },
           };
         })(),
@@ -14266,11 +14266,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'FIRST-THOUGHT-ALPHA' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -14280,15 +14280,15 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'SECOND-THOUGHT-BETA' },
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'the answer',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -14354,11 +14354,11 @@ describe('useLlmStream', () => {
         .mockReturnValueOnce(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'MAIN thought M' },
             };
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'tc1',
                 name: 'read_file',
@@ -14368,7 +14368,7 @@ describe('useLlmStream', () => {
               },
             };
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })(),
@@ -14402,7 +14402,7 @@ describe('useLlmStream', () => {
             prompt_id: 'p2',
           },
           status: 'success',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           response: {
             callId: 'tc-other',
             responseParts: [{ text: 'other contents' }],
@@ -14467,11 +14467,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'FIRST-THOUGHT' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'call-A',
               name: 'read_file',
@@ -14481,11 +14481,11 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'SECOND-THOUGHT' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'call-B',
               name: 'read_file',
@@ -14495,7 +14495,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -14534,7 +14534,7 @@ describe('useLlmStream', () => {
             prompt_id: 'p1',
           },
           status: 'success',
-          responseSubmittedToGemini: false,
+          responseSubmittedToLlm: false,
           response: { callId, responseParts: [{ text: 'contents' }] },
           tool: { displayName: 'ReadFile' },
           invocation: {
@@ -14569,7 +14569,7 @@ describe('useLlmStream', () => {
 
     it('should merge when a replay-suppressed call is pruned from the armed set', async () => {
       const getOnComplete = captureSchedulerOnComplete();
-      const client = new MockedGeminiClientClass(mockConfig);
+      const client = new MockedLlmClientClass(mockConfig);
       // call-B is already handled in history: its first replay is suppressed
       // per-call (the circuit breaker needs a REPEATED duplicate), so it
       // never joins the scheduled batch.
@@ -14586,11 +14586,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'planning before replay' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'call-A',
               providerCallId: 'prov-A',
@@ -14601,7 +14601,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'call-B',
               providerCallId: 'prov-B',
@@ -14612,14 +14612,14 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
       );
 
       const { result } = renderHook(() =>
-        useGeminiStream(
+        useLlmStream(
           client,
           [],
           mockAddItem,
@@ -14670,7 +14670,7 @@ describe('useLlmStream', () => {
           prompt_id: 'p1',
         },
         status: 'success',
-        responseSubmittedToGemini: false,
+        responseSubmittedToLlm: false,
         response: { callId: 'call-A', responseParts: [{ text: 'contents' }] },
         tool: { displayName: 'ReadFile' },
         invocation: {
@@ -14719,14 +14719,14 @@ describe('useLlmStream', () => {
         if (streamCallCount === 1) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'main turn thinking' },
             };
             // Hold before the TCR so the deferral is still unarmed when the
             // concurrent prompt is submitted (the arms-after-submit window).
             await holdMainTcr;
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'tc1',
                 name: 'read_file',
@@ -14737,7 +14737,7 @@ describe('useLlmStream', () => {
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -14745,11 +14745,11 @@ describe('useLlmStream', () => {
         return (async function* () {
           await holdBtwContent;
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'btw answer',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -14846,13 +14846,13 @@ describe('useLlmStream', () => {
         return (async function* () {
           if (isMain) {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'main answer',
             };
           }
           await hold;
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -14936,12 +14936,12 @@ describe('useLlmStream', () => {
         if (streamCallCount === 1) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Content,
+              type: ServerLlmEventType.Content,
               value: 'main answer',
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -14955,12 +14955,12 @@ describe('useLlmStream', () => {
             // deferral.
             await holdBtw1Thought;
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'btw one thinking' },
             };
             await holdBtw1Tcr;
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'btw1-tc',
                 name: 'read_file',
@@ -14973,7 +14973,7 @@ describe('useLlmStream', () => {
             };
             await holdBtw1End;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -14981,11 +14981,11 @@ describe('useLlmStream', () => {
         return (async function* () {
           await holdBtw2Content;
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'btw two answer',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -15116,14 +15116,14 @@ describe('useLlmStream', () => {
         if (streamCallCount === 1) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'main turn thinking' },
             };
             // Hold before the TCR so the deferral is still unarmed when the
             // concurrent prompt is submitted (the arms-after-submit window).
             await holdMainTcr;
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: mainCallId,
                 name: 'read_file',
@@ -15134,7 +15134,7 @@ describe('useLlmStream', () => {
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -15202,20 +15202,20 @@ describe('useLlmStream', () => {
         'Error',
         [
           {
-            type: ServerGeminiEventType.Error,
+            type: ServerLlmEventType.Error,
             value: { message: 'btw failed', retryable: false },
           },
         ],
       ],
       [
         'non-continuation Retry',
-        [{ type: ServerGeminiEventType.Retry, isContinuation: false }],
+        [{ type: ServerLlmEventType.Retry, isContinuation: false }],
       ],
       [
         'abnormal Finished',
         [
           {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'MAX_TOKENS', usageMetadata: undefined },
           },
         ],
@@ -15228,7 +15228,7 @@ describe('useLlmStream', () => {
         'ModelFallback',
         [
           {
-            type: ServerGeminiEventType.ModelFallback,
+            type: ServerLlmEventType.ModelFallback,
             fromModel: 'primary-model',
             toModel: 'fallback-model',
             fallbackIndex: 1,
@@ -15295,7 +15295,7 @@ describe('useLlmStream', () => {
       const { releaseBtw, releaseMainEnd } =
         await armMainDeferralWithConcurrentBtwStream([
           {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc-btw',
               name: 'read_file',
@@ -15305,7 +15305,7 @@ describe('useLlmStream', () => {
             },
           },
           {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           },
         ]);
@@ -15346,7 +15346,7 @@ describe('useLlmStream', () => {
               prompt_id: 'p-btw',
             },
             status: 'success',
-            responseSubmittedToGemini: false,
+            responseSubmittedToLlm: false,
             response: { callId: 'tc-btw', responseParts: [] },
             tool: { displayName: 'ReadFile' },
             invocation: {
@@ -15381,7 +15381,7 @@ describe('useLlmStream', () => {
         await armMainDeferralWithConcurrentBtwStream(
           [
             {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'call_qwen_1',
                 name: 'read_file',
@@ -15391,7 +15391,7 @@ describe('useLlmStream', () => {
               },
             },
             {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             },
           ],
@@ -15418,7 +15418,7 @@ describe('useLlmStream', () => {
               prompt_id: 'btw-prompt',
             },
             status: 'success',
-            responseSubmittedToGemini: false,
+            responseSubmittedToLlm: false,
             response: { callId: 'call_qwen_1', responseParts: [] },
             tool: { displayName: 'ReadFile' },
             invocation: {
@@ -15483,7 +15483,7 @@ describe('useLlmStream', () => {
             // own before the tool call.
             await holdMainTcr;
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'tc1',
                 name: 'read_file',
@@ -15494,29 +15494,29 @@ describe('useLlmStream', () => {
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
         }
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'BTW-FOREIGN-THOUGHT' },
           };
           // Subject-only thought flushes the buffered reasoning into the
           // shared pending slot.
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: 'working' },
           };
           await holdBtwEnd;
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'btw answer',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -15653,7 +15653,7 @@ describe('useLlmStream', () => {
         if (streamCallCount === 1) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'MAIN-THOUGHT-ALPHA' },
             };
             // Hold before the TCR so the deferral is still unarmed when
@@ -15663,7 +15663,7 @@ describe('useLlmStream', () => {
             // stream admitted before the arm.)
             await holdMainTcr;
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'tc1',
                 name: 'read_file',
@@ -15674,7 +15674,7 @@ describe('useLlmStream', () => {
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -15682,26 +15682,26 @@ describe('useLlmStream', () => {
         return (async function* () {
           await holdBtwThoughts;
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'BTW-ONE' },
           };
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'BTW-TWO' },
           };
           // Subject-only thought flushes the buffered reasoning, overwriting
           // the armed (snapshot-protected) pending slot in place.
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: 'working' },
           };
           await holdBtwContent;
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'btw answer',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -15837,12 +15837,12 @@ describe('useLlmStream', () => {
         if (streamCallCount === 1) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'MAIN-THOUGHT' },
             };
             await holdMainTcr;
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'tc1',
                 name: 'read_file',
@@ -15853,7 +15853,7 @@ describe('useLlmStream', () => {
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
@@ -15861,21 +15861,21 @@ describe('useLlmStream', () => {
         return (async function* () {
           await holdBtw;
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'BTW-THOUGHT-V2' },
           };
           // Subject-only thought flushes the buffered reasoning, overwriting
           // the armed (snapshot-protected) pending slot in place.
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: 'working' },
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'btw answer',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -16007,7 +16007,7 @@ describe('useLlmStream', () => {
             // Tool-first main turn: no thought of its own.
             await holdMainTcr;
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'tc1',
                 name: 'read_file',
@@ -16018,37 +16018,37 @@ describe('useLlmStream', () => {
             };
             await holdMainEnd;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
         }
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'BTW-PART-ONE' },
           };
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: 'working' },
           };
           await holdBtwPart2;
           // The foreign stream is STILL STREAMING: more reasoning follows the
           // main turn's ToolCallRequest boundary.
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { description: 'BTW-PART-TWO' },
           };
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: 'working-more' },
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'btw answer',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -16132,11 +16132,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'reasoning before cancel' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -16145,7 +16145,7 @@ describe('useLlmStream', () => {
               prompt_id: 'p1',
             },
           };
-          yield { type: ServerGeminiEventType.UserCancelled };
+          yield { type: ServerLlmEventType.UserCancelled };
         })(),
       );
 
@@ -16187,11 +16187,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'reasoning before error' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -16201,7 +16201,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Error,
+            type: ServerLlmEventType.Error,
             value: { message: 'Something went wrong', retryable: false },
           };
         })(),
@@ -16236,11 +16236,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'reasoning before retry' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -16250,7 +16250,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Retry,
+            type: ServerLlmEventType.Retry,
             isContinuation: false,
           };
           // The retry attempt re-issues the tool call. This is realistic
@@ -16262,7 +16262,7 @@ describe('useLlmStream', () => {
           // (the fallback resolves the deferral after the loop), so the
           // regression this test exists to catch would go undetected.
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc2',
               name: 'read_file',
@@ -16272,7 +16272,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -16334,11 +16334,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'reasoning before recovery' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -16348,7 +16348,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Retry,
+            type: ServerLlmEventType.Retry,
             isContinuation: true,
           };
           // Hold before Finished so the end-of-loop anti-stranding fallback
@@ -16356,7 +16356,7 @@ describe('useLlmStream', () => {
           // Retry-site behavior under test.
           await holdEnd;
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -16417,11 +16417,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'reasoning before fallback' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -16431,7 +16431,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.ModelFallback,
+            type: ServerLlmEventType.ModelFallback,
             fromModel: 'primary-model',
             toModel: 'fallback-model',
             fallbackIndex: 1,
@@ -16476,11 +16476,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'reasoning before content' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -16490,11 +16490,11 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'direct answer',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -16540,11 +16540,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'reasoning before loop halt' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -16553,7 +16553,7 @@ describe('useLlmStream', () => {
               prompt_id: 'p1',
             },
           };
-          yield { type: ServerGeminiEventType.LoopDetected };
+          yield { type: ServerLlmEventType.LoopDetected };
         })(),
       );
 
@@ -16588,7 +16588,7 @@ describe('useLlmStream', () => {
 
     it('should commit the deferred thought as-is when a repeated duplicate provider id drops the batch', async () => {
       captureSchedulerOnComplete();
-      const client = new MockedGeminiClientClass(mockConfig);
+      const client = new MockedLlmClientClass(mockConfig);
       client.getHistoryToolCallFingerprints = vi
         .fn()
         .mockReturnValue(
@@ -16604,7 +16604,7 @@ describe('useLlmStream', () => {
         .mockReturnValueOnce(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'tool-history',
                 providerCallId: 'tool-history',
@@ -16619,14 +16619,14 @@ describe('useLlmStream', () => {
         .mockReturnValueOnce(
           (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: {
                 subject: '',
                 description: 'reasoning before duplicate drop',
               },
             };
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'tool-history',
                 providerCallId: 'tool-history',
@@ -16639,14 +16639,14 @@ describe('useLlmStream', () => {
               },
             };
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: undefined, usageMetadata: undefined },
             };
           })(),
         );
 
       const { result } = renderHook(() =>
-        useGeminiStream(
+        useLlmStream(
           client,
           [],
           mockAddItem,
@@ -16702,11 +16702,11 @@ describe('useLlmStream', () => {
         if (streamCallCount === 1) {
           return (async function* () {
             yield {
-              type: ServerGeminiEventType.Thought,
+              type: ServerLlmEventType.Thought,
               value: { subject: '', description: 'planning before btw' },
             };
             yield {
-              type: ServerGeminiEventType.ToolCallRequest,
+              type: ServerLlmEventType.ToolCallRequest,
               value: {
                 callId: 'tc1',
                 name: 'read_file',
@@ -16719,18 +16719,18 @@ describe('useLlmStream', () => {
             // while the concurrent prompt is submitted.
             await holdMainStream;
             yield {
-              type: ServerGeminiEventType.Finished,
+              type: ServerLlmEventType.Finished,
               value: { reason: 'STOP', usageMetadata: undefined },
             };
           })();
         }
         return (async function* () {
           yield {
-            type: ServerGeminiEventType.Content,
+            type: ServerLlmEventType.Content,
             value: 'btw answer',
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })();
@@ -16797,11 +16797,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'reasoning before throw' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -16847,11 +16847,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'planning an image read' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -16861,7 +16861,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -16923,11 +16923,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'planning an overflow read' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -16937,7 +16937,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),
@@ -17009,11 +17009,11 @@ describe('useLlmStream', () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Thought,
+            type: ServerLlmEventType.Thought,
             value: { subject: '', description: 'planning a memory read' },
           };
           yield {
-            type: ServerGeminiEventType.ToolCallRequest,
+            type: ServerLlmEventType.ToolCallRequest,
             value: {
               callId: 'tc1',
               name: 'read_file',
@@ -17023,7 +17023,7 @@ describe('useLlmStream', () => {
             },
           };
           yield {
-            type: ServerGeminiEventType.Finished,
+            type: ServerLlmEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
           };
         })(),

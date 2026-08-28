@@ -15,7 +15,7 @@ import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type {
   HistoryItemWithoutId,
   HistoryItemToolGroup,
-  HistoryItemGeminiThought,
+  HistoryItemLlmThought,
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from '../utils/findings-coalescing.js';
@@ -529,8 +529,8 @@ describe('useHistoryManager', () => {
       const mergedThought = result.current.history.find(
         (item) =>
           item.type === 'gemini_thought' &&
-          (item as HistoryItemGeminiThought).toolSummary !== undefined,
-      ) as HistoryItemGeminiThought | undefined;
+          (item as HistoryItemLlmThought).toolSummary !== undefined,
+      ) as HistoryItemLlmThought | undefined;
       expect(mergedThought).toBeDefined();
       expect(mergedThought?.toolSummary).toBe('Read /foo');
     });
