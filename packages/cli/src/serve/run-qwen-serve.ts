@@ -2116,8 +2116,6 @@ async function loadServeRuntimeModules() {
     createDaemonWorkspaceService: workspaceModule.createDaemonWorkspaceService,
     WorkspaceSettingsPartialPersistError:
       workspaceTypesModule.WorkspaceSettingsPartialPersistError,
-    WorkspaceSkillNotToggleableError:
-      workspaceTypesModule.WorkspaceSkillNotToggleableError,
     createDaemonStatusProvider:
       daemonStatusProviderModule.createDaemonStatusProvider,
     createWorkspaceProvidersStatusProvider:
@@ -4372,6 +4370,7 @@ async function runQwenServeImpl(
       stopScheduledTaskKeepalive?: () => void;
       stopWorkspaceGitState?: () => void;
       stopLiveCoordinator?: () => void;
+      stopWebTerminalRegistry?: () => void;
       subSessionStoppers?: Array<() => void>;
     };
     const stopSafely = (name: string, stop: (() => void) | undefined) => {
@@ -4388,6 +4387,7 @@ async function runQwenServeImpl(
     stopSafely('scheduled-task keepalive', locals.stopScheduledTaskKeepalive);
     stopSafely('workspace git state', locals.stopWorkspaceGitState);
     stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
+    stopSafely('web terminal registry', locals.stopWebTerminalRegistry);
     stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {
       stopSafely('sub-session launcher', stop);
@@ -4999,15 +4999,6 @@ async function runQwenServeImpl(
         const fresh = loadSettingsForPersistence(workspace);
         const normalizedName = skillName.trim().toLowerCase();
         const resolved = resolveSkillSettings(fresh);
-        const disablement = resolved.disablements.get(normalizedName);
-        if (disablement?.reason === 'hard' && disablement.lockedScope) {
-          throw new runtime.WorkspaceSkillNotToggleableError(
-            skillName,
-            'locked',
-            disablement.lockedScope,
-          );
-        }
-
         const workspaceDisabled = skillSettingStrings(
           fresh,
           WORKSPACE_SETTING_SCOPE,
@@ -5092,18 +5083,6 @@ async function runQwenServeImpl(
 
         for (const skillName of skillNames) {
           const normalizedName = skillName.trim().toLowerCase();
-          const disablement = resolved.disablements.get(normalizedName);
-          if (disablement?.reason === 'hard' && disablement.lockedScope) {
-            outcomes.push({
-              skillName,
-              error: new runtime.WorkspaceSkillNotToggleableError(
-                skillName,
-                'locked',
-                disablement.lockedScope,
-              ),
-            });
-            continue;
-          }
           const updated = updateWorkspaceSkillSettingLists(
             next,
             skillName,
@@ -6868,6 +6847,9 @@ async function runQwenServeImpl(
             const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
               'stopScheduledTaskKeepaliveForWorkspace'
             ] as ((workspaceCwd: string) => void) | undefined;
+            const releaseWebTerminalsForWorkspace = app?.locals?.[
+              'releaseWebTerminalsForWorkspace'
+            ] as ((workspaceCwd: string) => void) | undefined;
             try {
               stopWorkspaceGitStateForWorkspace?.(runtimeToDrain.workspaceCwd);
             } catch (err) {
@@ -6883,6 +6865,14 @@ async function runQwenServeImpl(
             } catch (err) {
               daemonLog.error(
                 'workspace scheduled-task cleanup error',
+                err instanceof Error ? err : null,
+              );
+            }
+            try {
+              releaseWebTerminalsForWorkspace?.(runtimeToDrain.workspaceCwd);
+            } catch (err) {
+              daemonLog.error(
+                'workspace web-terminal cleanup error',
                 err instanceof Error ? err : null,
               );
             }

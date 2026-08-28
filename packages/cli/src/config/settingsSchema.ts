@@ -2664,7 +2664,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: 10,
             description:
-              'Context-window percentage used as the session-start budget for preloading deferred tools (bundled built-ins and MCP alike). When every deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Set 0 to always load deferred tools on demand.',
+              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Tools demoted by tools.eager are excluded from this preload and stay on demand. Set 0 to always load deferred tools on demand.',
             showInDialog: true,
             // A percentage of the context window: values above 100 would set a
             // budget larger than the window and unconditionally preload every
@@ -2766,14 +2766,14 @@ const SETTINGS_SCHEMA = {
         },
       },
       // Legacy tool permission fields – kept for backward compatibility.
-      // Use permissions.{allow,ask,deny} instead.
       core: {
         type: 'array',
         label: 'Core Tools (deprecated)',
         category: 'Tools',
         requiresRestart: true,
         default: undefined as string[] | undefined,
-        description: 'Deprecated. Use permissions.allow instead.',
+        description:
+          'Deprecated. permissions.allow cannot reproduce this registration restriction because it only auto-approves calls. Use tools.eager to defer unlisted eager-by-default tools or permissions.deny to remove tools. An empty list is treated as unset and disables nothing.',
         showInDialog: false,
       },
       allowed: {
@@ -2816,6 +2816,16 @@ const SETTINGS_SCHEMA = {
           'Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
+      },
+      eager: {
+        type: 'array',
+        label: 'Eager Tool Schemas',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas are still withheld but nothing can load them back, so the demoted tools are out of reach for that session and a warning is logged. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
+        showInDialog: false,
       },
       approvalMode: {
         type: 'enum',
