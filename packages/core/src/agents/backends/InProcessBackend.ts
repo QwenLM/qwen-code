@@ -13,20 +13,23 @@
 
 import path from 'node:path';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import { ApprovalMode, Config } from '../../config/config.js';
+import {
+  ApprovalMode,
+  type Config,
+  type DerivedApprovalModeConfigHooks,
+  deriveApprovalModeConfig,
+  deriveAgentConfig,
+} from '../../config/config.js';
 import { Storage } from '../../config/storage.js';
 import { type ContentGenerator } from '../../core/contentGenerator.js';
 import type { RuntimeContentGeneratorView } from '../runtime/agent-context.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
-import { WorkspaceContext } from '../../utils/workspaceContext.js';
-import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { createRuntimeContentGeneratorView } from '../../models/content-generator-config.js';
 import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
 import { AgentCore } from '../runtime/agent-core.js';
 import { AgentEventEmitter } from '../runtime/agent-events.js';
 import { ContextState } from '../runtime/agent-headless.js';
 import { AgentInteractive } from '../runtime/agent-interactive.js';
-import { createDenialState } from '../../permissions/denialTracking.js';
 import { runWithTeammateIdentity } from '../team/identity.js';
 import type {
   Backend,
@@ -536,7 +539,7 @@ async function createPerAgentConfig(
   modelId?: string,
   authOverrides?: InProcessSpawnConfig['authOverrides'],
   approvalMode?: ApprovalMode,
-  approvalModeHooks?: ApprovalModeOverrideHooks,
+  approvalModeHooks?: DerivedApprovalModeConfigHooks,
 ): Promise<{
   config: Config;
   contentGenerator?: ContentGenerator;
@@ -544,43 +547,34 @@ async function createPerAgentConfig(
   runtimeView?: RuntimeContentGeneratorView;
   cleanup: () => void;
 }> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let override = Object.create(base) as any;
-  let dedicatedContentGenerator: ContentGenerator | undefined;
-  let contentGeneratorError: string | undefined;
-  let runtimeView: RuntimeContentGeneratorView | undefined;
-  let cleanup = () => {};
-
-  if (approvalMode !== undefined) {
-    const handle = createApprovalModeConfigOverride(
-      base,
-      approvalMode,
-      approvalModeHooks,
-    );
-    override = handle.config as unknown as Record<string, unknown>;
-    cleanup = handle.cleanup;
-  }
-
-  let agentRegistry: ToolRegistry | undefined;
-  try {
-    override.getWorkingDir = () => cwd;
-    override.getTargetDir = () => cwd;
-    override.getProjectRoot = () => cwd;
-    override.getPlanFilePath = () => {
+  // Every per-agent config needs child-local approval state, not just the
+  // ones spawned with an explicit mode: tools bind to this config, and
+  // teammate mode switches (Shift+Tab) plus "Proceed always" confirmations
+  // call `setApprovalMode` on it — which the derived-Config guard rejects
+  // unless an approval profile owns the transition. When no mode was
+  // requested, snapshot the base's current mode: the initial mode equals
+  // the base mode, so no AUTO strip is acquired and cleanup stays a no-op.
+  const approvalHandle = deriveApprovalModeConfig(
+    base,
+    approvalMode ?? base.getApprovalMode(),
+    { hooks: approvalModeHooks },
+  );
+  const handle = deriveAgentConfig(approvalHandle.config, cwd, {
+    customIgnoreFiles: base.getFileFilteringOptions().customIgnoreFiles,
+    getPlanFilePath: () => {
       const sessionId = Storage.sanitizePlanSessionId(base.getSessionId());
       const scopedAgentId = Storage.sanitizePlanSessionId(agentId);
       return path.join(base.getPlansDir(), `${sessionId}-${scopedAgentId}.md`);
-    };
+    },
+  });
+  const override = handle.config;
+  const cleanup = approvalHandle.cleanup;
+  let dedicatedContentGenerator: ContentGenerator | undefined;
+  let contentGeneratorError: string | undefined;
+  let runtimeView: RuntimeContentGeneratorView | undefined;
+  let agentRegistry: ToolRegistry | undefined;
 
-    const agentWorkspace = new WorkspaceContext(cwd);
-    override.getWorkspaceContext = () => agentWorkspace;
-
-    const agentFileService = new FileDiscoveryService(
-      cwd,
-      base.getFileFilteringOptions().customIgnoreFiles,
-    );
-    override.getFileService = () => agentFileService;
-
+  try {
     // Delegated rather than re-enacted. The three steps below used to be
     // inlined here, identical to the shared helper — and a second copy is a
     // second place for an invariant to be broken: a change sharing the
@@ -649,125 +643,6 @@ async function createPerAgentConfig(
     }
     throw error;
   }
-}
-
-interface ApprovalModeOverrideHooks {
-  acquireAutoApprovalOverride(): boolean;
-  releaseAutoApprovalOverride(): void;
-}
-
-function createApprovalModeConfigOverride(
-  base: Config,
-  mode: ApprovalMode,
-  hooks?: ApprovalModeOverrideHooks,
-): { config: Config; cleanup: () => void } {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const override = Object.create(base) as any;
-  const baseApprovalMode = base.getApprovalMode();
-  const initialMode = getTrustedInitialApprovalMode(base, mode);
-  let autoOverrideAcquired = false;
-  const acquireAutoOverride = () => {
-    if (autoOverrideAcquired || base.getApprovalMode() === ApprovalMode.AUTO) {
-      return;
-    }
-    if (hooks) {
-      autoOverrideAcquired = hooks.acquireAutoApprovalOverride();
-      return;
-    }
-    base.getPermissionManager?.()?.stripDangerousRulesForAutoMode();
-    autoOverrideAcquired = true;
-  };
-  const releaseAutoOverride = () => {
-    if (!autoOverrideAcquired) {
-      return;
-    }
-    if (hooks) {
-      hooks.releaseAutoApprovalOverride();
-    } else if (base.getApprovalMode() !== ApprovalMode.AUTO) {
-      base.getPermissionManager?.()?.restoreDangerousRules();
-    }
-    autoOverrideAcquired = false;
-  };
-
-  override.approvalMode = initialMode;
-  override.manualPlanExitNoticeEventState = {
-    ...(override.manualPlanExitNoticeEventState ?? {
-      version: 0,
-      kind: 'clear',
-    }),
-  };
-  override.getApprovalMode = Config.prototype.getApprovalMode;
-  override.prePlanMode =
-    initialMode === ApprovalMode.PLAN
-      ? baseApprovalMode === ApprovalMode.PLAN
-        ? base.getPrePlanMode()
-        : baseApprovalMode
-      : undefined;
-  override.approvalModeRevision = 0;
-
-  override.setApprovalMode = (
-    nextMode: ApprovalMode,
-    options?: Parameters<Config['setApprovalMode']>[1],
-  ) => {
-    const beforeMode = (override as Config).getApprovalMode();
-    const hadOwnPermissionManager = Object.prototype.hasOwnProperty.call(
-      override,
-      'permissionManager',
-    );
-    const ownPermissionManager = override.permissionManager;
-    override.permissionManager = null;
-    try {
-      Config.prototype.setApprovalMode.call(
-        override as Config,
-        nextMode,
-        options,
-      );
-    } finally {
-      if (hadOwnPermissionManager) {
-        override.permissionManager = ownPermissionManager;
-      } else {
-        delete override.permissionManager;
-      }
-    }
-
-    const afterMode = (override as Config).getApprovalMode();
-    if (beforeMode !== ApprovalMode.AUTO && afterMode === ApprovalMode.AUTO) {
-      acquireAutoOverride();
-    } else if (
-      beforeMode === ApprovalMode.AUTO &&
-      afterMode !== ApprovalMode.AUTO
-    ) {
-      releaseAutoOverride();
-    }
-  };
-  override.autoModeDenialState = createDenialState();
-
-  const cleanup = () => {
-    releaseAutoOverride();
-  };
-
-  if (
-    initialMode === ApprovalMode.AUTO &&
-    base.getApprovalMode() !== ApprovalMode.AUTO
-  ) {
-    acquireAutoOverride();
-  }
-
-  return { config: override as Config, cleanup };
-}
-
-function getTrustedInitialApprovalMode(
-  base: Config,
-  mode: ApprovalMode,
-): ApprovalMode {
-  if (
-    !base.isTrustedFolder() &&
-    mode !== ApprovalMode.DEFAULT &&
-    mode !== ApprovalMode.PLAN
-  ) {
-    return ApprovalMode.DEFAULT;
-  }
-  return mode;
 }
 
 function createRunInContext(

@@ -49,6 +49,7 @@ import {
   isTerminalStatus,
   isSettledStatus,
   isSuccessStatus,
+  lastVisibleAnswer,
 } from '../runtime/agent-types.js';
 import {
   logArenaSessionStarted,
@@ -1674,19 +1675,9 @@ export class ArenaManager {
     transcript: ArenaTranscriptEntry[] | undefined,
   ): string | undefined {
     if (!transcript) return undefined;
-
-    for (let i = transcript.length - 1; i >= 0; i--) {
-      const message = transcript[i]!;
-      if (
-        message.role === 'assistant' &&
-        !message.thought &&
-        message.content.trim()
-      ) {
-        return message.content.trim();
-      }
-    }
-
-    return undefined;
+    // Shared with TeamManager's pre-attach recovery: the most recent
+    // non-empty, non-thought assistant message wins.
+    return lastVisibleAnswer(transcript);
   }
 
   private async addApproachSummaries(

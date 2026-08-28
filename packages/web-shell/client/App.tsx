@@ -908,6 +908,8 @@ export interface WebShellSidebarOptions {
   defaultCollapsed?: boolean;
   /** Whether to show WebShell's built-in compact drawer toggle. Defaults to true. */
   showCompactToggle?: boolean;
+  /** Whether to show the Tasks/Channels session-source switch. Defaults to true. */
+  showSessionSourceSwitch?: boolean;
   /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
   /** Customize the primary navigation area (new task button, custom entries). */
@@ -1240,6 +1242,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   enabled: boolean;
   defaultCollapsed: boolean;
   showCompactToggle: boolean;
+  showSessionSourceSwitch: boolean;
   branding?: false | WebShellSidebarBranding;
   primaryNav?: WebShellSidebarPrimaryNavOptions;
   hideProjectHeader?: boolean;
@@ -1248,15 +1251,26 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
 } {
   if (sidebar === true) {
-    return { enabled: true, defaultCollapsed: false, showCompactToggle: true };
+    return {
+      enabled: true,
+      defaultCollapsed: false,
+      showCompactToggle: true,
+      showSessionSourceSwitch: true,
+    };
   }
   if (!sidebar) {
-    return { enabled: false, defaultCollapsed: false, showCompactToggle: true };
+    return {
+      enabled: false,
+      defaultCollapsed: false,
+      showCompactToggle: true,
+      showSessionSourceSwitch: true,
+    };
   }
   return {
     enabled: sidebar.enabled ?? true,
     defaultCollapsed: sidebar.defaultCollapsed ?? false,
     showCompactToggle: sidebar.showCompactToggle ?? true,
+    showSessionSourceSwitch: sidebar.showSessionSourceSwitch ?? true,
     branding: sidebar.branding,
     primaryNav: sidebar.primaryNav,
     hideProjectHeader: sidebar.hideProjectHeader,
@@ -4854,7 +4868,7 @@ export function App({
         if (request !== loadedSkillsRequestRef.current) return;
         setLoadedSkills(availableSkillInfos(status));
         setLoadedSkillsReady(true);
-        return true;
+        return status;
       } catch (error) {
         if (notifyOnError) {
           pushToast(
@@ -4925,17 +4939,36 @@ export function App({
     }
     pendingSkillTogglesByContextRef.current.set(contextKey, pendingToggles);
     let cancelled = false;
-    void reloadLoadedSkills(workspaceCwd, true).then((loaded) => {
-      if (cancelled || !loaded) return;
+    void reloadLoadedSkills(workspaceCwd, true).then((status) => {
+      if (cancelled || !status) return;
       markHandled();
       if (!sessionId) {
         pendingSkillTogglesByContextRef.current.delete(contextKey);
         return;
       }
+      const availableWorkspaceSkillNames = new Set(
+        status.skills
+          .filter((skill) => skill.status === 'ok')
+          .map((skill) => skill.name.toLowerCase()),
+      );
+      const pendingForSession = pendingToggles.filter(
+        (toggle) =>
+          !toggle.enabled ||
+          availableWorkspaceSkillNames.has(toggle.name.toLowerCase()),
+      );
+      if (pendingForSession.length === 0) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        setLoadedSkillsFallback(undefined);
+        return;
+      }
+      pendingSkillTogglesByContextRef.current.set(
+        contextKey,
+        pendingForSession,
+      );
       const currentSnapshot = connectionSkillSnapshotRef.current;
       if (
         currentSnapshot.sessionId === sessionId &&
-        sessionSkillsReflectToggle(currentSnapshot.skills, pendingToggles)
+        sessionSkillsReflectToggle(currentSnapshot.skills, pendingForSession)
       ) {
         pendingSkillTogglesByContextRef.current.delete(contextKey);
         setLoadedSkillsFallback(undefined);
@@ -6012,8 +6045,9 @@ export function App({
         reasoningIntent &&
         reasoningIntent.modelId === modelId &&
         reasoningPreview &&
-        (reasoningIntent.value === 'none' ||
-          reasoningPreview.efforts.includes(reasoningIntent.value))
+        (reasoningIntent.value === 'none'
+          ? reasoningPreview.canDisable !== false
+          : reasoningPreview.efforts.includes(reasoningIntent.value))
           ? reasoningIntent.value
           : undefined;
       const modeId =
@@ -6529,11 +6563,26 @@ export function App({
       ? connection.models?.find((model) => model.id === currentModel)
           ?.reasoningPreview
       : undefined;
+  useEffect(() => {
+    if (
+      pendingReasoningIntent?.modelId === currentModel &&
+      pendingReasoningIntent.value === 'none' &&
+      welcomeReasoningPreview?.canDisable === false
+    ) {
+      setPendingReasoningIntent(undefined);
+    }
+  }, [
+    currentModel,
+    pendingReasoningIntent,
+    setPendingReasoningIntent,
+    welcomeReasoningPreview,
+  ]);
   const validPendingReasoningIntent =
     pendingReasoningIntent?.modelId === currentModel &&
     welcomeReasoningPreview &&
-    (pendingReasoningIntent.value === 'none' ||
-      welcomeReasoningPreview.efforts.includes(pendingReasoningIntent.value))
+    (pendingReasoningIntent.value === 'none'
+      ? welcomeReasoningPreview.canDisable !== false
+      : welcomeReasoningPreview.efforts.includes(pendingReasoningIntent.value))
       ? pendingReasoningIntent
       : undefined;
   const displayedReasoning = hasAuthoritativeReasoningContext
@@ -11249,6 +11298,7 @@ export function App({
       if (!preview) return;
       const previous = pendingReasoningIntentRef.current;
       if (value === 'none') {
+        if (preview.canDisable === false) return;
         const previousEffort =
           previous?.modelId === modelId &&
           preview.efforts.includes(previous.effort)
@@ -12357,6 +12407,9 @@ export function App({
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
                   branding={sidebarOptions.branding}
                   primaryNav={sidebarOptions.primaryNav}
+                  showSessionSourceSwitch={
+                    sidebarOptions.showSessionSourceSwitch
+                  }
                   hideProjectHeader={sidebarOptions.hideProjectHeader}
                   sessionActions={sidebarOptions.sessionActions}
                   footer={sidebarOptions.footer}
@@ -13054,6 +13107,7 @@ export function App({
                             const messageListContent = (
                               <LiveMessageList
                                 ref={messageListRef}
+                                sessionKey={connection.sessionId}
                                 baselineBlocks={blocks}
                                 baselineSummary={blockChangeSummary}
                                 baselineMessages={messages}

@@ -685,6 +685,41 @@ describe('InProcessBackend', () => {
     expect(parentConfig.setApprovalMode).not.toHaveBeenCalled();
   });
 
+  it('lets a teammate without an explicit approval mode switch modes child-locally', async () => {
+    // No `inProcess.approvalMode` — TeamManager passes undefined for every
+    // non-plan teammate. Tools bind to this config, so "Proceed always"
+    // (AUTO_EDIT) and Shift+Tab mode switches must transition child-local
+    // state instead of hitting the bare-derived-Config guard.
+    const parentConfig = createMockConfig() as unknown as {
+      getApprovalMode: ReturnType<typeof vi.fn>;
+      setApprovalMode: ReturnType<typeof vi.fn>;
+    };
+    const backendWithParentMode = new InProcessBackend(parentConfig as never);
+    await backendWithParentMode.init();
+
+    await backendWithParentMode.spawnAgent(createSpawnConfig('agent-1'));
+
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const lastCall = MockAgentCore.mock.calls.at(-1);
+    expect(lastCall).toBeDefined();
+
+    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
+    const agentContext = runtimeContext as unknown as Config;
+
+    expect(agentContext.getApprovalMode()).toBe(DEFAULT_MODE);
+
+    // "Proceed always" on a tool confirmation.
+    agentContext.setApprovalMode(ApprovalMode.AUTO_EDIT);
+    expect(agentContext.getApprovalMode()).toBe(ApprovalMode.AUTO_EDIT);
+    expect(parentConfig.getApprovalMode()).toBe(DEFAULT_MODE);
+    expect(parentConfig.setApprovalMode).not.toHaveBeenCalled();
+
+    // Shift+Tab back to default.
+    agentContext.setApprovalMode(DEFAULT_MODE);
+    expect(agentContext.getApprovalMode()).toBe(DEFAULT_MODE);
+    expect(parentConfig.getApprovalMode()).toBe(DEFAULT_MODE);
+  });
+
   it('uses a teammate-scoped plan file path in per-agent config', async () => {
     const parentConfig = createMockConfig() as unknown as {
       getPlanFilePath: ReturnType<typeof vi.fn>;
