@@ -304,6 +304,12 @@ describe('MCP guidance', () => {
     // never a reason to relax.
     expect(prompt).toMatch(/`arguments`/);
     expect(prompt).toMatch(/self-reported by the server/);
+    // Every annotation key the projection forwards must be named here, or
+    // the classifier sees a key the prompt never marked as unverified.
+    expect(prompt).toMatch(/readOnlyHint/);
+    expect(prompt).toMatch(/destructiveHint/);
+    expect(prompt).toMatch(/idempotentHint/);
+    expect(prompt).toMatch(/openWorldHint/);
     // Every marker form the projection emits must be announced.
     expect(prompt).toContain('`…[truncated N chars]`');
     expect(prompt).toContain('`[omitted: …]`');

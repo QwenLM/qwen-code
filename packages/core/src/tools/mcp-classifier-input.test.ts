@@ -191,21 +191,53 @@ describe('projectMcpArguments', () => {
 });
 
 describe('buildMcpClassifierInput', () => {
-  it('surfaces server, tool, arguments and only the declared annotations', () => {
+  it('surfaces server, tool, arguments and every declared annotation', () => {
     const input = buildMcpClassifierInput({
       serverName: 'github',
       serverToolName: 'create_issue',
-      annotations: { destructiveHint: true, readOnlyHint: undefined },
+      // All four keys the projection forwards: dropping any one of them
+      // from ANNOTATION_KEYS must red this exact-match assertion.
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       params: { repo: 'acme/app', title: 'bug' },
     });
     expect(input).toEqual({
       server: 'github',
       tool: 'create_issue',
-      annotations: { destructiveHint: true },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       arguments: { repo: 'acme/app', title: 'bug' },
     });
     expect('arguments_truncated' in input).toBe(false);
     expect('name_truncated' in input).toBe(false);
+  });
+
+  it('drops annotation values the server did not declare as booleans', () => {
+    const input = buildMcpClassifierInput({
+      serverName: 'github',
+      serverToolName: 'create_issue',
+      annotations: {
+        destructiveHint: true,
+        readOnlyHint: undefined,
+        // A server may assert a non-boolean; it must not reach the prompt.
+        idempotentHint: 'true' as unknown as boolean,
+      },
+      params: {},
+    });
+    expect(input).toEqual({
+      server: 'github',
+      tool: 'create_issue',
+      annotations: { destructiveHint: true },
+      arguments: {},
+    });
   });
 
   it('omits annotations entirely when the server declared none', () => {

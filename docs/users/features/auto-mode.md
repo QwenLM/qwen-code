@@ -292,10 +292,11 @@ tightened over time.
   every call from a server that is not marked `trust: true` goes to the
   classifier with the server name, the tool name, the server's
   self-reported annotations (`readOnlyHint` / `destructiveHint` /
-  `openWorldHint`) and a bounded copy of the arguments. The classifier
-  is told the annotations are unverified. It cannot see what the server
-  actually does with the call, so a misleading tool name plus benign
-  arguments can still pass. If you trust a specific MCP tool, add
+  `idempotentHint` / `openWorldHint`) and a bounded copy of the
+  arguments. The classifier is told the annotations are unverified. It
+  cannot see what the server actually does with the call, so a
+  misleading tool name plus benign arguments can still pass. If you
+  trust a specific MCP tool, add
   `permissions.allow: ["mcp__server__tool"]` so it bypasses the
   classifier entirely; if you want the classifier to see only the tool
   name (for example when it runs against a different provider than the
