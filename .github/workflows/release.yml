@@ -653,7 +653,7 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
         run: |-
-          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/external-context/package.json
+          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
