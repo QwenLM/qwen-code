@@ -84,7 +84,12 @@ export function loadConfig(
     );
   }
 
-  const portRaw = str(env['QWEN_LIVE_PORT']) ?? str(file['port']);
+  const portRaw =
+    str(env['QWEN_LIVE_PORT']) ??
+    // Accept the natural JSON spelling ("port": 4171) as well as a string.
+    (typeof file['port'] === 'number'
+      ? String(file['port'])
+      : str(file['port']));
   const port = portRaw === undefined ? 0 : Number(portRaw);
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
     throw new Error(`Invalid QWEN_LIVE_PORT: ${portRaw}`);

@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * @license
  * Copyright 2026 Qwen
@@ -24,6 +25,17 @@ export type {
 
 async function main(): Promise<void> {
   const logger = new LiveLogger();
+  // A stray rejection in a background chain (event pump, auto-approval)
+  // must be diagnosable, not process-fatal.
+  process.on('unhandledRejection', (reason) => {
+    logger.error(
+      `unhandled rejection: ${
+        reason instanceof Error
+          ? (reason.stack ?? reason.message)
+          : String(reason)
+      }`,
+    );
+  });
   let daemon: LiveDaemon;
   try {
     daemon = new LiveDaemon(loadConfig());

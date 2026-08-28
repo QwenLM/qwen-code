@@ -161,10 +161,14 @@ describe('ToolDispatcher', () => {
     const result = await pending;
 
     expect(result.ok).toBe(false);
-    expect(JSON.parse(result.receipt)).toEqual({
-      status: 'error',
-      note: 'tool handler timed out',
-    });
+    const receipt = JSON.parse(result.receipt) as {
+      status: string;
+      note: string;
+    };
+    // The handler keeps running (side effects are real): the receipt must
+    // read as "still in progress", never as a retryable failure.
+    expect(receipt.status).toBe('pending');
+    expect(receipt.note).toContain('Do not retry');
   });
 
   it('does not time out a handler that resolves before the deadline', async () => {

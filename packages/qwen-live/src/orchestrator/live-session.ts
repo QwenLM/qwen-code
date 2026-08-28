@@ -28,6 +28,7 @@ import type { LiveState } from '../host/types.js';
 import { buildLiveInstructions } from '../realtime/instructions.js';
 import {
   openQwenRealtimeSession,
+  QWEN_REALTIME_LIMITS,
   type QwenRealtimeSession,
   type RealtimeFunctionCall,
   type RealtimeTranscriptEntry,
@@ -105,7 +106,6 @@ export interface LiveSessionOptions {
 interface CallContext {
   epoch: number;
   callId: string;
-  generation: number;
   realtime?: QwenRealtimeSession;
   stopping: boolean;
   speechInProgress: boolean;
@@ -124,6 +124,22 @@ function firstSentence(text: string, max: number): string {
   if (!trimmed) return '';
   const stop = trimmed.search(/[.!?。！？]/);
   const sentence = stop >= 0 ? trimmed.slice(0, stop + 1) : trimmed;
+  return sentence.length > max ? `${sentence.slice(0, max)}…` : sentence;
+}
+
+/**
+ * The spoken take-away from a long result: its closing sentence. Backend
+ * summaries are tail-clamped, so the head may start mid-sentence — the
+ * final sentence is the model's own conclusion and always complete.
+ */
+function lastSentence(text: string, max: number): string {
+  const trimmed = text.trim().replace(/\s+/g, ' ');
+  if (!trimmed) return '';
+  const parts = trimmed
+    .split(/(?<=[.!?。！？])\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const sentence = parts[parts.length - 1] ?? trimmed;
   return sentence.length > max ? `${sentence.slice(0, max)}…` : sentence;
 }
 
@@ -151,7 +167,6 @@ export class LiveSession {
   private readonly gracefulStopDrainMs: number;
   private readonly handles = new HandleRegistry();
   private active?: CallContext;
-  private generationSeq = 0;
 
   constructor(private readonly options: LiveSessionOptions) {
     this.host = options.host;
@@ -172,7 +187,6 @@ export class LiveSession {
     const context: CallContext = {
       epoch: call.epoch,
       callId: call.callId,
-      generation: ++this.generationSeq,
       stopping: false,
       speechInProgress: false,
       responseInFlight: false,
@@ -432,14 +446,26 @@ export class LiveSession {
           message: error.message,
           fatal: error.fatal,
         });
+        if (error.fatal && context.stopping) {
+          // The socket is done for; the stop drain would otherwise wait the
+          // full budget for response/speech flags that can never settle.
+          context.responseInFlight = false;
+          context.speechInProgress = false;
+        }
         if (error.fatal && !context.stopping) {
           this.host.failCall(context.epoch, 'Live Voice failed.');
+          this.cleanupContext(context);
         }
       },
       onClose: (info: { reason: string }) => {
         if (this.active !== context) return;
         this.log.write('session.end', { reason: info.reason });
-        if (!context.stopping && info.reason !== 'client') {
+        if (context.stopping) {
+          context.responseInFlight = false;
+          context.speechInProgress = false;
+          return;
+        }
+        if (info.reason !== 'client') {
           this.host.failCall(context.epoch, 'Live Voice disconnected.');
           this.cleanupContext(context);
         }
@@ -466,17 +492,27 @@ export class LiveSession {
     });
     const ctx: ToolContext = { activeTranscript: event.activeTranscript };
     const result = await dispatcher.dispatch(event.name, event.arguments, ctx);
+    // The realtime session rejects empty or oversized outputs; a stranded
+    // call would hang that response's arbitration. Clamp defensively.
+    let receipt = result.receipt;
+    if (receipt.length > QWEN_REALTIME_LIMITS.maxFunctionOutputChars) {
+      receipt = JSON.stringify({
+        status: 'error',
+        note: 'The result was too large to return; check the session on screen.',
+      });
+    }
+    if (!receipt.trim()) receipt = '{}';
     this.log.write('tool.result', {
       name: event.name,
       callId: event.callId,
       ok: result.ok,
-      receipt: result.receipt.slice(0, 2_000),
+      receipt: receipt.slice(0, 2_000),
     });
     if (this.active !== context || !context.realtime) return;
     try {
       context.realtime.submitFunctionOutput(
         { callEpoch: context.epoch, callId: event.callId },
-        result.receipt,
+        receipt,
       );
     } catch (error) {
       this.log.write('error', {
@@ -737,17 +773,50 @@ export class LiveSession {
     backend: BackendHandle,
     signal: AbortSignal,
   ): Promise<void> {
-    for await (const event of this.adaptor.events(backend, { signal })) {
-      if (this.active !== context) return;
+    // The SSE stream can end without a session_closed (daemon restart,
+    // dropped connection). Resubscribe with backoff instead of leaving the
+    // session permanently unobserved — completion events would be lost.
+    let backoffMs = 1_000;
+    while (this.active === context && !signal.aborted) {
+      let sawEvent = false;
+      try {
+        for await (const event of this.adaptor.events(backend, { signal })) {
+          if (this.active !== context) return;
+          sawEvent = true;
+          backoffMs = 1_000;
+          this.log.write('backend.event', {
+            session: sessionHandle,
+            type: event.type,
+            ...('jobRef' in event && event.jobRef !== undefined
+              ? { jobRef: event.jobRef }
+              : {}),
+          });
+          this.onBackendEvent(context, sessionHandle, backend, event);
+          if (event.type === 'session_closed') {
+            context.pumps.delete(sessionHandle);
+            return;
+          }
+        }
+      } catch (error) {
+        if (signal.aborted || this.active !== context) break;
+        this.log.write('error', {
+          source: 'pump',
+          session: sessionHandle,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if (signal.aborted || this.active !== context) break;
       this.log.write('backend.event', {
         session: sessionHandle,
-        type: event.type,
-        ...('jobRef' in event && event.jobRef !== undefined
-          ? { jobRef: event.jobRef }
-          : {}),
+        type: 'stream_ended',
+        resubscribeInMs: backoffMs,
+        sawEvent,
       });
-      this.onBackendEvent(context, sessionHandle, backend, event);
-      if (event.type === 'session_closed') break;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, backoffMs);
+        timer.unref?.();
+      });
+      backoffMs = Math.min(backoffMs * 2, 10_000);
     }
     context.pumps.delete(sessionHandle);
   }
@@ -787,7 +856,7 @@ export class LiveSession {
         const job = this.jobFor(sessionHandle, event.jobRef);
         if (job) job.state = 'done';
         const label = job?.jobHandle ?? sessionHandle;
-        const spokenSummary = firstSentence(
+        const spokenSummary = lastSentence(
           event.summary,
           MAX_SPOKEN_SUMMARY_CHARS,
         );
@@ -838,6 +907,22 @@ export class LiveSession {
               context: `[PERMISSION ${ask.pending.requestHandle}] Session ${sessionHandle} wants to run: ${event.title}. Ask the user and relay their answer with respond_permission.`,
               spoken: `The task wants to ${event.title}. Should I allow it?`,
             });
+          })
+          .catch((error: unknown) => {
+            // A rejected broker chain must never become an unhandled
+            // rejection (it would take the whole daemon down mid-call).
+            this.log.write('error', {
+              source: 'permission',
+              message: error instanceof Error ? error.message : String(error),
+            });
+            if (this.active === context) {
+              context.injector.enqueue({
+                kind: 'error',
+                context: `[ERROR ${sessionHandle}] A permission request could not be processed; the task may be stuck waiting for approval.`,
+                spoken:
+                  'A task is waiting for an approval I could not process. You may need to check it on screen.',
+              });
+            }
           });
         return;
       }
@@ -922,6 +1007,11 @@ export class LiveSession {
     } catch {
       /* already closed */
     }
+    // A stop() waiter must never be left hanging when the context is torn
+    // down through another path (daemon shutdown, fatal error).
+    const resolve = context.stopResolve;
+    context.stopResolve = undefined;
+    resolve?.(undefined);
   }
 
   private closeActive(): void {

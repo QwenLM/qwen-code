@@ -161,10 +161,12 @@ describe('Injector batching', () => {
     injector.noteResponseDone();
 
     expect(sink.contextCalls).toEqual([
-      'job_1 finished\njob_2 is halfway\njob_3 wants to edit a file',
+      // Permission asks are moved to the front of the batch so the
+      // size-capped context join can never truncate their handles.
+      'job_3 wants to edit a file\njob_1 finished\njob_2 is halfway',
     ]);
     expect(sink.speechCalls).toEqual([
-      'Job one finished. Job two is halfway. Job three needs permission.',
+      'Job three needs permission. Job one finished. Job two is halfway.',
     ]);
     expect(sink.injected).toHaveLength(3);
     expect(injector.pendingCount).toBe(0);
@@ -244,7 +246,7 @@ describe('Injector queue maintenance', () => {
 
     injector.noteResponseDone();
     injector.noteSpeechStopped();
-    expect(sink.contextCalls).toEqual(['finished\nneeds approval']);
+    expect(sink.contextCalls).toEqual(['needs approval\nfinished']);
   });
 
   it('retracts a queued permission ask by request id', () => {

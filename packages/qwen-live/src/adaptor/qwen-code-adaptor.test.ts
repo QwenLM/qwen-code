@@ -311,6 +311,55 @@ describe('QwenCodeAdaptor.prompt steering', () => {
     expect(receipt.joinedActiveTurn).toBeUndefined();
   });
 
+  it('falls back to a full prompt when a steer payload carries images', async () => {
+    const client = makeClient();
+    const { adaptor, handle } = await busyAdaptor(client);
+
+    const receipt = await adaptor.prompt(
+      handle,
+      [
+        { type: 'text', text: 'look at this' },
+        {
+          type: 'image',
+          mimeType: 'image/png',
+          data: new Uint8Array([1, 2, 3]),
+          name: 'shot.png',
+        },
+      ],
+      { steer: true },
+    );
+
+    // Mid-turn injection is text-only; dropping the screenshot silently
+    // would betray the handoff contract.
+    expect(client.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(client.uploadSessionAttachment).toHaveBeenCalledOnce();
+    expect(client.promptNonBlocking).toHaveBeenCalledOnce();
+    expect(receipt.status).toBe('queued');
+  });
+
+  it('maps the client-side pending-prompt limit error to a rejected receipt', async () => {
+    const client = makeClient({
+      promptNonBlocking: vi.fn(async () => {
+        const error = new Error('Pending prompts full: "sess" (2/2)');
+        error.name = 'DaemonPendingPromptLimitError';
+        throw error;
+      }),
+    });
+    const { adaptor, handle } = await busyAdaptor(client);
+    vi.mocked(client.enqueueMidTurnMessage).mockResolvedValueOnce({
+      accepted: false,
+    });
+
+    const receipt = await adaptor.prompt(
+      handle,
+      [{ type: 'text', text: 'one more thing' }],
+      { steer: true },
+    );
+
+    expect(receipt.status).toBe('rejected');
+    expect(receipt.note).toContain('queue is full');
+  });
+
   it('skips the mid-turn injection entirely when the session is idle', async () => {
     const client = makeClient();
     const adaptor = makeAdaptor(client);
@@ -523,6 +572,44 @@ describe('QwenCodeAdaptor.respondPermission', () => {
       SESSION_ID,
       'req-1',
       { outcome: { outcome: 'selected', optionId: 'allow' } },
+      ISSUED_CLIENT_ID,
+    );
+    expect(result).toBe('delivered');
+  });
+
+  it('classifies real serve snake_case option ids (proceed_once)', async () => {
+    // Regression: `\b` treats "_" as a word character, so a boundary match
+    // against the raw id never fires — an allow vote silently degraded to a
+    // cancelled outcome and serve dropped the turn.
+    const client = makeClient();
+    const adaptor = makeAdaptor(client);
+    await adaptor.createSession();
+    vi.mocked(client.subscribeEvents).mockReturnValueOnce(
+      envelopeStream([
+        envelope('permission_request', {
+          requestId: 'req-1',
+          toolCall: { name: 'write_file' },
+          // Bare ids, no labels: nothing else may rescue the classification.
+          options: [
+            { optionId: 'proceed_once' },
+            { optionId: 'proceed_always' },
+            { optionId: 'cancel' },
+          ],
+        }),
+      ]),
+    );
+    await collect(adaptor, handleFor());
+
+    const result = await adaptor.respondPermission(
+      handleFor(),
+      'req-1',
+      'allow',
+    );
+
+    expect(client.respondToSessionPermission).toHaveBeenCalledWith(
+      SESSION_ID,
+      'req-1',
+      { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
       ISSUED_CLIENT_ID,
     );
     expect(result).toBe('delivered');

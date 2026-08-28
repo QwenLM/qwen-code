@@ -224,4 +224,26 @@ describe('PermissionBroker', () => {
       auto: true,
     });
   });
+
+  it('falls back to a spoken ask when the silent auto-approval fails to deliver', async () => {
+    const { adaptor, broker, logEvents } = createBroker();
+    const first = await request(broker, { requestId: 'r1' });
+    await broker.respond(first.pending.requestHandle, 'allow_always');
+
+    // The standing rule matches, but the backend is unreachable: the ask
+    // must surface to the user instead of crashing the caller.
+    adaptor.respondPermission.mockRejectedValueOnce(
+      new Error('daemon unreachable'),
+    );
+    const second = await request(broker, { requestId: 'r2' });
+
+    expect(second.autoAnswered).toBe(false);
+    expect(broker.resolveHandle(second.pending.requestHandle)).toBeDefined();
+    const failure = logEvents.find(
+      (event) =>
+        event.type === 'permission.decision' &&
+        event.payload['outcome'] === 'delivery_failed',
+    );
+    expect(failure?.payload).toMatchObject({ auto: true, decision: 'allow' });
+  });
 });
