@@ -86,6 +86,15 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
+import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
+import { WorkspaceRenameDialog } from './WorkspaceRenameDialog';
+import {
+  DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
+  summarizeSessions,
+  type WorkspaceManagementTarget,
+  type WorkspaceOverviewItem,
+} from './workspaceOverviewModel';
+import { writeClipboardText } from '../../utils/clipboard';
 import { sessionMatchesGitQuery } from './sessionSearch';
 import { SessionPrBadge } from '../SessionPrBadge';
 import {
@@ -339,6 +348,16 @@ type SessionWorkspaceScope =
   | { kind: 'untrusted'; cwd: string; workspace: DaemonWorkspaceCapability }
   | { kind: 'unknown'; cwd: string };
 
+export interface WebShellSidebarWorkspaceOverviewOptions {
+  /**
+   * Facet chips under an expanded workspace row. Defaults to every facet
+   * except hooks.
+   */
+  items?: readonly WorkspaceOverviewItem[];
+}
+
+export type { WorkspaceManagementTarget, WorkspaceOverviewItem };
+
 interface WebShellSidebarProps {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
@@ -404,6 +423,25 @@ interface WebShellSidebarProps {
   /** Customize which action buttons appear on session rows. */
   sessionActions?: WebShellSidebarSessionActionsOptions;
   footer?: false | WebShellSidebarFooterOptions;
+  /**
+   * Session counts, full path and facet chips on workspace rows. Pass `false`
+   * to keep the plain folder headers.
+   */
+  workspaceOverview?: false | WebShellSidebarWorkspaceOverviewOptions;
+  /**
+   * Open a management page (MCP, skills, …) for a workspace. Offered on the
+   * daemon's primary workspace only: the management pages read the
+   * connection's bound workspace, so another workspace's row cannot open its
+   * own view yet (#10399, layer B1).
+   */
+  onOpenWorkspaceManagement?: (
+    target: WorkspaceManagementTarget,
+    workspaceCwd: string,
+  ) => void;
+  /** Start a new session that works in an isolated git worktree. */
+  onNewWorktreeSession?: (
+    workspaceCwd?: string,
+  ) => Promise<boolean> | boolean | void;
 }
 
 function cx(...classes: Array<string | false | undefined>): string {
@@ -855,6 +893,9 @@ export function WebShellSidebar({
   hideProjectHeader,
   sessionActions: sessionActionsOptions,
   footer,
+  workspaceOverview,
+  onOpenWorkspaceManagement,
+  onNewWorktreeSession,
 }: WebShellSidebarProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -1034,6 +1075,7 @@ export function WebShellSidebar({
     loading,
     error,
     data: sessionsPage,
+    nextCursor: sessionsNextCursor,
     reload,
     deleteSession,
     exportSession,
@@ -1050,6 +1092,20 @@ export function WebShellSidebar({
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
+  // Header counts for the primary workspace, whose sessions this component
+  // lists itself (the section only renders the folder header for it).
+  const primarySessionStats = useMemo(
+    () =>
+      includePrimaryWorkspaceSessions && sessionsPage !== undefined
+        ? summarizeSessions(sessions, Boolean(sessionsNextCursor))
+        : undefined,
+    [
+      includePrimaryWorkspaceSessions,
+      sessions,
+      sessionsNextCursor,
+      sessionsPage,
+    ],
+  );
   // The catalog starts with loading=false before its subscription requests
   // data, so !loading is not “settled”. Treat the first data as the ready signal (empty
   // lists are still defined data) so the initial-catalog latch waits. Errors
@@ -1212,6 +1268,10 @@ export function WebShellSidebar({
     useState<DaemonWorkspaceRemovalActivity | null>(null);
   const [workspaceRemovalSubmitting, setWorkspaceRemovalSubmitting] =
     useState(false);
+  const [workspaceRenameCandidate, setWorkspaceRenameCandidate] =
+    useState<DaemonWorkspaceCapability | null>(null);
+  const [workspaceRenameSubmitting, setWorkspaceRenameSubmitting] =
+    useState(false);
   const workspaceRemovalMountedRef = useRef(false);
   const workspaceRemovalDismissedRef = useRef(false);
   const [
@@ -1305,6 +1365,16 @@ export function WebShellSidebar({
   const workspaceRemovalEnabled = Boolean(
     connection.capabilities?.features?.includes('workspace_runtime_removal'),
   );
+  const workspaceRenameEnabled = Boolean(
+    connection.capabilities?.features?.includes(
+      'dynamic_workspace_registration',
+    ),
+  );
+  const workspaceOverviewEnabled = workspaceOverview !== false;
+  const workspaceOverviewItems =
+    workspaceOverview === false
+      ? DEFAULT_WORKSPACE_OVERVIEW_ITEMS
+      : (workspaceOverview?.items ?? DEFAULT_WORKSPACE_OVERVIEW_ITEMS);
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
   const canExportWorkspaceSessions =
@@ -2335,6 +2405,68 @@ export function WebShellSidebar({
       setWorkspaceRemovalCandidate(candidate);
     },
     [workspaceRemovalSubmitting],
+  );
+
+  const requestWorkspaceRename = useCallback(
+    (candidate: DaemonWorkspaceCapability) => {
+      if (workspaceRenameSubmitting) return;
+      setWorkspaceRenameCandidate(candidate);
+    },
+    [workspaceRenameSubmitting],
+  );
+
+  const confirmWorkspaceRename = useCallback(
+    async (displayName: string | null) => {
+      const candidate = workspaceRenameCandidate;
+      if (!candidate || workspaceRenameSubmitting) return;
+      setWorkspaceRenameSubmitting(true);
+      try {
+        await workspaceActions.updateWorkspace(candidate.id, { displayName });
+        // The row label reads the capabilities list; refresh so the new name
+        // shows without waiting for the next connection tick.
+        await workspace.refreshCapabilities?.();
+        setWorkspaceRenameCandidate(null);
+      } catch (error) {
+        onError(error, t('sidebar.renameWorkspaceFailed'));
+      } finally {
+        setWorkspaceRenameSubmitting(false);
+      }
+    },
+    [
+      onError,
+      t,
+      workspace,
+      workspaceActions,
+      workspaceRenameCandidate,
+      workspaceRenameSubmitting,
+    ],
+  );
+
+  const copyWorkspacePath = useCallback(
+    (candidate: DaemonWorkspaceCapability) => {
+      void writeClipboardText(candidate.cwd).catch((error: unknown) => {
+        onError(error, t('sidebar.copyWorkspacePathFailed'));
+      });
+    },
+    [onError, t],
+  );
+
+  const reloadWorkspaceRuntime = useCallback(
+    (candidate: DaemonWorkspaceCapability) => {
+      // Deferred so a client without the reload method (older SDK) reports
+      // through onError instead of throwing out of the menu handler.
+      void Promise.resolve()
+        .then(() => workspace.client.workspaceByCwd(candidate.cwd).reload())
+        .then(() => {
+          // A reload re-reads settings and may restart the child; refetch the
+          // per-workspace lists and chips instead of waiting a poll interval.
+          setWorkspaceSessionsReloadToken((token) => token + 1);
+        })
+        .catch((error: unknown) => {
+          onError(error, t('sidebar.reloadWorkspaceFailed'));
+        });
+    },
+    [onError, t, workspace.client],
   );
 
   const confirmWorkspaceRemoval = useCallback(async () => {
@@ -4737,6 +4869,17 @@ export function WebShellSidebar({
             </div>
           </DialogShell>
         )}
+        {workspaceRenameCandidate && (
+          <WorkspaceRenameDialog
+            key={workspaceRenameCandidate.id}
+            workspace={workspaceRenameCandidate}
+            busy={workspaceRenameSubmitting}
+            onSubmit={(displayName) => void confirmWorkspaceRename(displayName)}
+            onClose={() => {
+              if (!workspaceRenameSubmitting) setWorkspaceRenameCandidate(null);
+            }}
+          />
+        )}
         {workspaceRemovalCandidate && (
           <DialogShell
             title={t('sidebar.removeWorkspaceTitle')}
@@ -5242,6 +5385,19 @@ export function WebShellSidebar({
                   }}
                 >
                   <span>{t('sidebar.project')}</span>
+                  {workspaceOverviewEnabled && projectWorkspaces.length > 1 && (
+                    <span
+                      className={styles.projectsHeaderCount}
+                      aria-label={t('sidebar.workspaceCount', {
+                        count: projectWorkspaces.length,
+                      })}
+                      title={t('sidebar.workspaceCount', {
+                        count: projectWorkspaces.length,
+                      })}
+                    >
+                      {projectWorkspaces.length}
+                    </span>
+                  )}
                   <IconChevron expanded={projectsExpanded} />
                 </button>
                 <div className={styles.projectsHeaderActions}>
@@ -5376,7 +5532,13 @@ export function WebShellSidebar({
                             })
                           }
                           showSessionDetails={sessionActionItems.has('details')}
-                          headerActions={(visible) => {
+                          overviewEnabled={workspaceOverviewEnabled}
+                          overviewItems={workspaceOverviewItems}
+                          compact={footerTight}
+                          sessionStats={
+                            ws.primary ? primarySessionStats : undefined
+                          }
+                          headerActions={(visible, overview) => {
                             if (
                               lockedWorkspaceCwd &&
                               lockedWorkspaceOptions?.render
@@ -5390,6 +5552,52 @@ export function WebShellSidebar({
                               ws.removable === true;
                             if (!ws.trusted && !canRemove) return null;
                             const wsCwd = ws.primary ? undefined : ws.cwd;
+                            const realPath = isAbsolutePath(ws.cwd);
+                            const canRename =
+                              !lockedWorkspaceCwd &&
+                              workspaceRenameEnabled &&
+                              realPath;
+                            // Management pages read the connection's bound
+                            // workspace, so only the primary row can open
+                            // its own view today (#10399, layer B1).
+                            const canManage =
+                              ws.primary &&
+                              ws.trusted &&
+                              Boolean(onOpenWorkspaceManagement);
+                            const menuActions: WorkspaceMenuActions = {
+                              ...(canRename
+                                ? { rename: () => requestWorkspaceRename(ws) }
+                                : {}),
+                              ...(realPath
+                                ? { copyPath: () => copyWorkspacePath(ws) }
+                                : {}),
+                              ...(ws.trusted
+                                ? { newSession: () => handleNewSession(wsCwd) }
+                                : {}),
+                              ...(ws.trusted && onNewWorktreeSession
+                                ? {
+                                    newWorktreeSession: () =>
+                                      void onNewWorktreeSession(wsCwd),
+                                  }
+                                : {}),
+                              ...(canManage
+                                ? {
+                                    openManagement: (
+                                      target: WorkspaceManagementTarget,
+                                    ) =>
+                                      onOpenWorkspaceManagement?.(
+                                        target,
+                                        ws.cwd,
+                                      ),
+                                  }
+                                : {}),
+                              ...(ws.trusted && realPath
+                                ? { reload: () => reloadWorkspaceRuntime(ws) }
+                                : {}),
+                              ...(canRemove
+                                ? { remove: () => requestWorkspaceRemoval(ws) }
+                                : {}),
+                            };
                             return (
                               <div
                                 className={styles.workspaceHeaderActions}
@@ -5436,54 +5644,33 @@ export function WebShellSidebar({
                                     </button>
                                   </>
                                 )}
-                                {canRemove && (
-                                  <SessionMenu
+                                {/* A locked (embedded) sidebar keeps its
+                                    action area to the session controls the
+                                    host already expects. */}
+                                {!lockedWorkspaceCwd && (
+                                  <WorkspaceMenu
+                                    workspace={ws}
+                                    actions={menuActions}
+                                    overview={overview}
+                                    disabled={
+                                      (workspaceRemovalSubmitting &&
+                                        workspaceRemovalCandidate?.id ===
+                                          ws.id) ||
+                                      (workspaceRenameSubmitting &&
+                                        workspaceRenameCandidate?.id === ws.id)
+                                    }
+                                    triggerClassName={
+                                      styles.workspaceHeaderAction
+                                    }
+                                    contentStyle={SESSION_MENU_PORTAL_STYLE}
                                     onOpenChange={handleSessionMenuOpenChange}
-                                  >
-                                    <DropdownMenuTrigger asChild>
-                                      <button
-                                        className={styles.workspaceHeaderAction}
-                                        type="button"
-                                        aria-label={t(
-                                          'sidebar.workspaceActions',
-                                        )}
-                                        disabled={
-                                          workspaceRemovalSubmitting &&
-                                          workspaceRemovalCandidate?.id ===
-                                            ws.id
-                                        }
-                                      >
-                                        <EllipsisVerticalIcon
-                                          size={16}
-                                          strokeWidth={1.2}
-                                        />
-                                      </button>
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent
-                                      align="end"
-                                      className="w-auto min-w-40"
-                                      style={SESSION_MENU_PORTAL_STYLE}
-                                      onPointerDownOutside={
-                                        handleSessionMenuPointerDownOutside
-                                      }
-                                      onCloseAutoFocus={
-                                        handleSessionMenuCloseAutoFocus
-                                      }
-                                    >
-                                      <DropdownMenuItem
-                                        variant="destructive"
-                                        aria-label={`${t(
-                                          'sidebar.removeWorkspace',
-                                        )}: ${ws.cwd}`}
-                                        onSelect={() =>
-                                          requestWorkspaceRemoval(ws)
-                                        }
-                                      >
-                                        <Trash2Icon />
-                                        {t('sidebar.removeWorkspace')}
-                                      </DropdownMenuItem>
-                                    </DropdownMenuContent>
-                                  </SessionMenu>
+                                    onPointerDownOutside={
+                                      handleSessionMenuPointerDownOutside
+                                    }
+                                    onCloseAutoFocus={
+                                      handleSessionMenuCloseAutoFocus
+                                    }
+                                  />
                                 )}
                               </div>
                             );

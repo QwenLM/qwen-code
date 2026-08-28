@@ -153,6 +153,9 @@ export type {
   WebShellSidebarSessionActionsOptions,
   WebShellSidebarSessionActionItem,
   WebShellSidebarSessionInlineActionItem,
+  WebShellSidebarWorkspaceOverviewOptions,
+  WorkspaceManagementTarget,
+  WorkspaceOverviewItem,
 } from './components/sidebar/WebShellSidebar';
 export type { WebShellLanguage } from './i18n';
 export type { WebShellTheme } from './themeContext';

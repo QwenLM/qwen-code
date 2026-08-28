@@ -1,0 +1,66 @@
+/* Facet chips under an expanded workspace header. */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 2px 8px 6px 30px;
+}
+
+.chipsCompact {
+  padding-left: 26px;
+}
+
+.chipItem {
+  display: inline-flex;
+  min-width: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  height: 18px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--sidebar-accent);
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.chip svg {
+  flex: 0 0 auto;
+  display: block;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chipLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chipValue {
+  font-variant-numeric: tabular-nums;
+  color: var(--sidebar-foreground);
+}
+
+.chipUnknown .chipValue {
+  color: var(--muted-foreground);
+}
+
+.chipIssue {
+  background: color-mix(in srgb, var(--warning, #d29922) 18%, transparent);
+  color: var(--warning, #d29922);
+}
+
+.chipIssue .chipValue {
+  color: inherit;
+}

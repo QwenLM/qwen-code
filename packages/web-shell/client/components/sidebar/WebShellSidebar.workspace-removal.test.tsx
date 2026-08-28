@@ -145,6 +145,7 @@ const {
     },
     workspaceActions: {
       addWorkspace: vi.fn(),
+      updateWorkspace: vi.fn(),
       removeWorkspace: vi.fn(),
       listSessionGroups: vi.fn(),
     },
@@ -325,6 +326,8 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
 
 const { I18nProvider } = await import('../../i18n');
 const { WebShellSidebar } = await import('./WebShellSidebar');
+type WorkspaceManagementTarget =
+  import('./WebShellSidebar').WorkspaceManagementTarget;
 const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY } = await import(
   './collapsedSessionSections'
 );
@@ -390,6 +393,10 @@ function renderSidebar(
     onSelectWorkspace?: (cwd: string | undefined) => void;
     onError?: (error: unknown, message: string) => void;
     onOpenGoals?: () => void;
+    onOpenWorkspaceManagement?: (
+      target: WorkspaceManagementTarget,
+      workspaceCwd: string,
+    ) => void;
     onOpenAddWorkspace?: () => void;
     onNewSession?: (workspaceCwd?: string) => boolean;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
@@ -437,6 +444,7 @@ function renderSidebar(
           selectedWorkspaceCwd={overrides.selectedWorkspaceCwd}
           onSelectWorkspace={overrides.onSelectWorkspace}
           onOpenAddWorkspace={overrides.onOpenAddWorkspace}
+          onOpenWorkspaceManagement={overrides.onOpenWorkspaceManagement}
           workspaces={overrides.workspaces}
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
           lockedWorkspace={overrides.lockedWorkspace}
@@ -458,6 +466,12 @@ function workspaceAction(cwd: string): HTMLButtonElement | undefined {
       cwd.split('/').at(-1)!,
     ),
   );
+}
+
+function menuItemLabels(): string[] {
+  return Array.from(
+    document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ).map((item) => item.textContent ?? '');
 }
 
 function click(element: HTMLElement): void {
@@ -2907,7 +2921,17 @@ describe('WebShellSidebar workspace removal', () => {
     };
     renderSidebar();
 
-    expect(workspaceAction('/tmp/other')).toBeUndefined();
+    // The trusted row keeps its other workspace actions; only Remove is gone.
+    const trigger = workspaceAction('/tmp/other');
+    expect(trigger).toBeDefined();
+    act(() => click(trigger!));
+    expect(
+      document.body.querySelector(
+        '[aria-label="Remove workspace: /tmp/other"]',
+      ),
+    ).toBeNull();
+    expect(menuItemLabels()).not.toContain('Remove workspace');
+    // An untrusted row has nothing but removal to offer.
     expect(workspaceAction('/tmp/danger')).toBeUndefined();
   });
 
@@ -2916,7 +2940,6 @@ describe('WebShellSidebar workspace removal', () => {
 
     const trigger = workspaceAction('/tmp/danger');
     expect(trigger).toBeDefined();
-    expect(workspaceAction('/tmp/project')).toBeUndefined();
 
     act(() => click(trigger!));
     const item = document.body.querySelector(
@@ -2925,6 +2948,117 @@ describe('WebShellSidebar workspace removal', () => {
     const menu = item?.closest('[data-slot="dropdown-menu-content"]');
     expect(menu?.classList.contains('w-auto')).toBe(true);
     expect(menu?.classList.contains('min-w-40')).toBe(true);
+    // Untrusted: no runtime to ask, so only Copy path and Remove.
+    expect(menuItemLabels()).toEqual(['Copy path', 'Remove workspace']);
+  });
+
+  it('never offers removal on the primary workspace menu', () => {
+    renderSidebar();
+
+    const trigger = workspaceAction('/tmp/project');
+    expect(trigger).toBeDefined();
+    act(() => click(trigger!));
+    const labels = menuItemLabels();
+    expect(labels).toContain('Copy path');
+    expect(labels).toContain('New task');
+    expect(labels).toContain('Reload runtime');
+    expect(labels).not.toContain('Remove workspace');
+    expect(labels).not.toContain('Rename…');
+  });
+
+  it('offers rename only on dynamic-registration daemons and saves through the registry', async () => {
+    renderSidebar();
+    act(() => click(workspaceAction('/tmp/other')!));
+    expect(menuItemLabels()).not.toContain('Rename…');
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'dynamic_workspace_registration'],
+    };
+    workspaceActions.updateWorkspace.mockResolvedValueOnce({
+      id: 'secondary',
+      cwd: '/tmp/other',
+      displayName: 'Other API',
+      primary: false,
+      trusted: true,
+    });
+    renderSidebar();
+    act(() => click(workspaceAction('/tmp/other')!));
+    const rename = document.body.querySelector<HTMLElement>(
+      '[role="menuitem"][data-highlighted], [role="menuitem"]',
+    );
+    expect(rename?.textContent).toBe('Rename…');
+    act(() => click(rename!));
+
+    const input = document.querySelector<HTMLInputElement>(
+      '#workspace-display-name',
+    );
+    expect(input).not.toBeNull();
+    expect(input!.placeholder).toBe('other');
+    act(() => setInputValue(input!, ' Other API '));
+    await act(async () => {
+      input!.form!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(workspaceActions.updateWorkspace).toHaveBeenCalledWith('secondary', {
+      displayName: 'Other API',
+    });
+    expect(workspace.refreshCapabilities).toHaveBeenCalled();
+    expect(document.querySelector('#workspace-display-name')).toBeNull();
+  });
+
+  it('reloads a workspace runtime through its qualified client', async () => {
+    const reload = vi.fn().mockResolvedValue({
+      env: { updatedKeys: [], removedKeys: [] },
+      changedKeys: [],
+      childReloaded: true,
+    });
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      reload,
+    }));
+    renderSidebar();
+    act(() => click(workspaceAction('/tmp/other')!));
+    const item = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Reload runtime');
+    expect(item).toBeDefined();
+    await act(async () => {
+      click(item!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(workspace.client.workspaceByCwd).toHaveBeenCalledWith('/tmp/other');
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens management pages for the primary workspace only', () => {
+    const onOpenWorkspaceManagement = vi.fn();
+    renderSidebar({ onOpenWorkspaceManagement });
+
+    act(() => click(workspaceAction('/tmp/other')!));
+    expect(menuItemLabels()).not.toContain('MCP');
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+
+    act(() => click(workspaceAction('/tmp/project')!));
+    const mcp = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent?.startsWith('MCP'));
+    expect(mcp).toBeDefined();
+    act(() => click(mcp!));
+    expect(onOpenWorkspaceManagement).toHaveBeenCalledWith(
+      'mcp',
+      '/tmp/project',
+    );
   });
 
   it('removes the selected workspace and falls back to primary', async () => {

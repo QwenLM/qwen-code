@@ -202,6 +202,7 @@ import {
   WebShellSidebar,
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
+  type WebShellSidebarWorkspaceOverviewOptions,
   type WebShellSidebarLockedWorkspace,
   type WebShellSidebarPrimaryNavOptions,
   type WebShellSidebarSessionActionsOptions,
@@ -931,6 +932,11 @@ export interface WebShellSidebarOptions {
   footer?: false | WebShellSidebarFooterOptions;
   /** Customize the workspace row shown when lockWorkspaceCwd is active. */
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
+  /**
+   * Session counts, full path and facet chips (MCP, skills, …) on workspace
+   * rows. Pass `false` to keep plain folder headers.
+   */
+  workspaceOverview?: false | WebShellSidebarWorkspaceOverviewOptions;
 }
 
 export type SessionChangeEvent =
@@ -1260,6 +1266,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   sessionActions?: WebShellSidebarSessionActionsOptions;
   footer?: false | WebShellSidebarFooterOptions;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
+  workspaceOverview?: false | WebShellSidebarWorkspaceOverviewOptions;
 } {
   if (sidebar === true) {
     return {
@@ -1288,6 +1295,7 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
     sessionActions: sidebar.sessionActions,
     footer: sidebar.footer,
     lockedWorkspace: sidebar.lockedWorkspace,
+    workspaceOverview: sidebar.workspaceOverview,
   };
 }
 
@@ -12472,6 +12480,20 @@ export function App({
                   workspaces={workspaces}
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
+                  workspaceOverview={sidebarOptions.workspaceOverview}
+                  onOpenWorkspaceManagement={(target) => {
+                    closeMobileDrawer();
+                    openPanel(target);
+                  }}
+                  onNewWorktreeSession={async (workspaceCwd) => {
+                    // createNewSession resets the git intent so a stale one
+                    // never leaks into the next session; arm worktree mode
+                    // after it settles so the lazily created session picks
+                    // it up on its first prompt.
+                    const created = await createNewSession(workspaceCwd);
+                    if (created) setGitModeIntent({ mode: 'worktree' });
+                    return created;
+                  }}
                   branding={sidebarOptions.branding}
                   primaryNav={sidebarOptions.primaryNav}
                   showSessionSourceSwitch={

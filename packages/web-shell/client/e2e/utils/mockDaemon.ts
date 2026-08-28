@@ -60,6 +60,7 @@ export interface WebShellDaemonScenario {
   extensions: DaemonWorkspaceExtensionsStatus;
   extensionOperations: ExtensionActiveOperations;
   extensionUpdateCheck: ExtensionUpdateCheckResponse;
+  mcp: DaemonWorkspaceMcpStatus;
   channelTypes: DaemonChannelTypeCatalog;
   channels: DaemonChannelsSnapshot;
   pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
@@ -128,6 +129,7 @@ type ScenarioOverrides = Partial<
     | 'extensions'
     | 'extensionOperations'
     | 'extensionUpdateCheck'
+    | 'mcp'
     | 'channelTypes'
     | 'channels'
     | 'pairingRequests'
@@ -147,6 +149,7 @@ type ScenarioOverrides = Partial<
   extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
   extensionOperations?: Partial<ExtensionActiveOperations>;
   extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
+  mcp?: Partial<DaemonWorkspaceMcpStatus>;
   channelTypes?: DaemonChannelTypeCatalog;
   channels?: DaemonChannelsSnapshot;
   pairingRequests?: Record<string, DaemonChannelPairingRequest[]>;
@@ -328,6 +331,19 @@ export function createWebShellDaemonScenario(
     ...(overrides.extensionUpdateCheck ?? {}),
   };
 
+  const mcp: DaemonWorkspaceMcpStatus = {
+    v: 1,
+    workspaceCwd,
+    initialized: true,
+    discoveryState: 'completed',
+    servers: [],
+    errors: [],
+    clientCount: 0,
+    budgetMode: 'off',
+    budgets: [],
+    ...(overrides.mcp ?? {}),
+  };
+
   const sessions = overrides.sessions ?? [
     {
       sessionId,
@@ -364,6 +380,7 @@ export function createWebShellDaemonScenario(
     extensions,
     extensionOperations,
     extensionUpdateCheck,
+    mcp,
     channelTypes: overrides.channelTypes ?? [],
     channels: overrides.channels ?? { revision: '1', instances: {} },
     pairingRequests: overrides.pairingRequests ?? {},
@@ -662,6 +679,7 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/voice' ||
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/skills\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
@@ -743,6 +761,12 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/skills\/?$/.test(path)) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path)
+  ) {
     return true;
   }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
@@ -913,6 +937,48 @@ async function handleDaemonRoute(
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/skills\/?$/.test(path)) {
     await json(route, scenario.skills);
+    return;
+  }
+  // Sidebar workspace overview facets. The qualified extensions route answers
+  // with the workspace projection, not the manager's status document.
+  const overviewMatch = path.match(
+    /^\/workspaces\/([^/]+)\/(mcp|extensions|memory|hooks)\/?$/,
+  );
+  if (method === 'GET' && overviewMatch) {
+    const workspaceCwd = decodeURIComponent(overviewMatch[1] ?? '');
+    const facet = overviewMatch[2];
+    if (facet === 'mcp') {
+      await json(route, workspaceMcp(scenario));
+    } else if (facet === 'extensions') {
+      await json(route, {
+        v: 1,
+        workspaceId: workspaceCwd,
+        workspaceCwd,
+        trusted: true,
+        desiredGeneration: 0,
+        appliedGeneration: 0,
+        extensions: [],
+      });
+    } else if (facet === 'memory') {
+      await json(route, {
+        v: 1,
+        workspaceCwd,
+        initialized: true,
+        files: [],
+        totalBytes: 0,
+        fileCount: 0,
+        ruleCount: 0,
+      });
+    } else {
+      await json(route, {
+        v: 1,
+        workspaceCwd,
+        initialized: true,
+        disabled: false,
+        hooks: [],
+        events: {},
+      });
+    }
     return;
   }
   if (method === 'GET' && path === '/workspace/settings') {
@@ -1862,17 +1928,7 @@ function isRecord(body: unknown): body is Record<string, unknown> {
 function workspaceMcp(
   scenario: WebShellDaemonScenario,
 ): DaemonWorkspaceMcpStatus {
-  return {
-    v: 1,
-    workspaceCwd: scenario.workspaceCwd,
-    initialized: true,
-    discoveryState: 'completed',
-    servers: [],
-    errors: [],
-    clientCount: 0,
-    budgetMode: 'off',
-    budgets: [],
-  };
+  return scenario.mcp;
 }
 
 function workspaceMcpTools(

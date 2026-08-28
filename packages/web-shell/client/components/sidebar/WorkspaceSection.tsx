@@ -42,6 +42,15 @@ import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { sessionMatchesGitQuery } from './sessionSearch';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
 import { groupSessionsByChannelType } from './channelSessionGroups';
+import { useWorkspaceOverview } from './useWorkspaceOverview';
+import { WorkspaceOverview } from './WorkspaceOverview';
+import {
+  DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
+  summarizeSessions,
+  type WorkspaceOverviewItem,
+  type WorkspaceOverviewSnapshot,
+  type WorkspaceSessionStats,
+} from './workspaceOverviewModel';
 import styles from './WorkspaceSection.module.css';
 import sidebarStyles from './WebShellSidebar.module.css';
 import { useSessionCatalogQuery } from '../../session-catalog/session-catalog-hooks';
@@ -109,7 +118,31 @@ interface WorkspaceSectionProps {
   renderSession: (session: DaemonSessionSummary) => ReactNode;
   mapSession?: (session: DaemonSessionSummary) => DaemonSessionSummary;
   showSessionDetails?: boolean;
-  headerActions?: (visible: boolean) => ReactNode;
+  /**
+   * Hover-revealed actions at the right edge of the folder header. Receives
+   * the workspace's overview snapshot (undefined until fetched or when the
+   * overview is disabled) so a menu can show live counts.
+   */
+  headerActions?: (
+    visible: boolean,
+    overview: WorkspaceOverviewSnapshot | undefined,
+  ) => ReactNode;
+  /**
+   * Show session counts in the header and, while expanded, the full path and
+   * facet chips (MCP, skills, …). Off by default so embedders that render
+   * their own header keep today's layout. Facets are fetched only while the
+   * section is expanded and the workspace is trusted.
+   */
+  overviewEnabled?: boolean;
+  overviewItems?: readonly WorkspaceOverviewItem[];
+  /** Narrow sidebar: chips drop their text labels. */
+  compact?: boolean;
+  /**
+   * Session counts for the header. The primary workspace's sessions are
+   * listed by the sidebar itself, so it passes them in; other workspaces
+   * count their own catalog page.
+   */
+  sessionStats?: WorkspaceSessionStats;
   onRenameGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
   onDeleteGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
   renameGroupLabel?: string;
@@ -152,6 +185,10 @@ export function WorkspaceSection({
   mapSession,
   showSessionDetails = true,
   headerActions,
+  overviewEnabled = false,
+  overviewItems = DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
+  compact = false,
+  sessionStats,
   onRenameGroup,
   onDeleteGroup,
   renameGroupLabel,
@@ -429,6 +466,27 @@ export function WorkspaceSection({
     workspace.trusted,
   ]);
 
+  // Facet chips ride the expanded state like the session list: a collapsed
+  // row costs nothing, and an untrusted workspace has no runtime to ask.
+  const { overview } = useWorkspaceOverview(client, gitPollCwd, {
+    enabled: overviewEnabled && expanded && workspace.trusted && !disabled,
+    items: overviewItems,
+    reloadToken,
+  });
+  const stats = useMemo<WorkspaceSessionStats | undefined>(() => {
+    if (!overviewEnabled) return undefined;
+    if (sessionStats) return sessionStats;
+    if (!sessionsEnabled || sessionsPage === undefined) return undefined;
+    return summarizeSessions(sessions, Boolean(sessionsResult.nextCursor));
+  }, [
+    overviewEnabled,
+    sessionStats,
+    sessions,
+    sessionsEnabled,
+    sessionsPage,
+    sessionsResult.nextCursor,
+  ]);
+
   const visibleSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     return sessions
@@ -524,13 +582,65 @@ export function WorkspaceSection({
                 <WorkspaceFolderIcon open={expanded} />
               </span>
               <span className={styles.headerContent}>
-                <span className={styles.name}>{workspaceLabel(workspace)}</span>
+                <span className={styles.name} title={workspace.cwd}>
+                  {workspaceLabel(workspace)}
+                </span>
               </span>
               {!workspace.trusted && (
                 <span className={styles.badge}>{untrustedLabel}</span>
               )}
               {readOnly && (
                 <span className={styles.badge}>{readOnlyLabel}</span>
+              )}
+              {stats && stats.total > 0 && (
+                <span className={styles.headerCounts}>
+                  {stats.attention > 0 && (
+                    <span
+                      className={cx(
+                        styles.headerCount,
+                        styles.headerCountAttention,
+                      )}
+                      title={t('sidebar.sessionsAttention', {
+                        count: stats.attention,
+                      })}
+                      aria-label={t('sidebar.sessionsAttention', {
+                        count: stats.attention,
+                      })}
+                    >
+                      {stats.attention}
+                    </span>
+                  )}
+                  {stats.running > 0 && (
+                    <span
+                      className={cx(
+                        styles.headerCount,
+                        styles.headerCountRunning,
+                      )}
+                      title={t('sidebar.sessionsRunning', {
+                        count: stats.running,
+                      })}
+                      aria-label={t('sidebar.sessionsRunning', {
+                        count: stats.running,
+                      })}
+                    >
+                      {stats.running}
+                    </span>
+                  )}
+                  <span
+                    className={cx(styles.headerCount, styles.headerCountTotal)}
+                    title={t('sidebar.sessionsTotal', {
+                      count: stats.total,
+                      truncated: stats.truncated ? 1 : 0,
+                    })}
+                    aria-label={t('sidebar.sessionsTotal', {
+                      count: stats.total,
+                      truncated: stats.truncated ? 1 : 0,
+                    })}
+                  >
+                    {stats.total}
+                    {stats.truncated ? '+' : ''}
+                  </span>
+                </span>
               )}
             </>
           )}
@@ -559,8 +669,26 @@ export function WorkspaceSection({
             </button>
           </BranchPickerPopover>
         )}
-        {headerActions?.(actionsVisible)}
+        {headerActions?.(actionsVisible, overview)}
       </div>
+      {overviewEnabled && expanded && !disabled && !renderHeader && (
+        <>
+          <div
+            className={cx(styles.path, compact && styles.pathCompact)}
+            title={workspace.cwd}
+            data-web-shell-workspace-path
+          >
+            {workspace.cwd}
+          </div>
+          {workspace.trusted && (
+            <WorkspaceOverview
+              overview={overview}
+              items={overviewItems}
+              compact={compact}
+            />
+          )}
+        </>
+      )}
       {renderSessions &&
         (expanded || Boolean(searchQuery.trim())) &&
         !disabled && (
