@@ -6,7 +6,7 @@
 
 import type { RetryErrorClassification } from '../utils/retryErrorClassification.js';
 
-// Internal stream retry allow-list. Keep this outside geminiChat.ts because
+// Internal stream retry allow-list. Keep this outside llm-chat.ts because
 // that file is re-exported from the package barrel, and this retry policy is
 // not part of the public API.
 export const RETRYABLE_STREAM_TRANSPORT_CODES: ReadonlySet<string> = new Set([
