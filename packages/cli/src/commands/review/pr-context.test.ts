@@ -792,6 +792,57 @@ describe('extractCodeRefs', () => {
 });
 
 describe('carriesBlockerSignal', () => {
+  it('strips every GFM quoting form, in renderer precedence, before scanning (R14-4)', () => {
+    // ~~~ fences, a 4-backtick fence CONTAINING ```, inline code spans and
+    // indented code are all quoted text; a mid-line ``` run is not a fence;
+    // whichever of a fence / an HTML comment opens first owns the text.
+    expect(
+      carriesBlockerSignal('note\n~~~\n[critical] in tilde fence\n~~~\n'),
+    ).toBe(false);
+    expect(
+      carriesBlockerSignal('note\n````\n```\n[critical] nested\n```\n````\n'),
+    ).toBe(false);
+    expect(carriesBlockerSignal('see `[critical]` in the log')).toBe(false);
+    expect(carriesBlockerSignal('para\n\n    [critical] indented code\n')).toBe(
+      false,
+    );
+    // A mid-line ``` run is text, not a delimiter: the blocker claim before
+    // it and after it are both still the comment's own words.
+    expect(carriesBlockerSignal('this is blocking ``` still ``` yes')).toBe(
+      true,
+    );
+    // A `<!--` INSIDE a fence is fence content — it must not pair with a
+    // `-->` outside and delete a visible claim across the boundary.
+    expect(
+      carriesBlockerSignal('```\n<!--\n```\nthis is a blocker --> for real'),
+    ).toBe(true);
+    // A fence opener INSIDE an open comment is comment text: the comment
+    // still closes where it closes.
+    expect(carriesBlockerSignal('<!-- ``` -->\nmust-fix before merge')).toBe(
+      true,
+    );
+  });
+
+  it('ignores blocker tokens inside a fenced code block — quoted output is not a claim (R14-4)', () => {
+    // The posting contract mandates a fenced witness under every finding, and
+    // program output routinely prints literal markers ("[Critical]", "still
+    // fails"). Scanning inside the fence would self-promote a non-blocking
+    // Suggestion into the blocker section every round.
+    const fenced =
+      'Suggestion: tidy the helper.\n\nWitness:\n```\n[Critical] printed by the suite\nstill fails here\nblocking: test log\n```\n';
+    expect(carriesBlockerSignal(fenced)).toBe(false);
+    // The identical tokens OUTSIDE a fence still promote.
+    expect(carriesBlockerSignal('[Critical] printed by the suite')).toBe(true);
+    // An unclosed fence swallows the rest, as GitHub renders it.
+    expect(carriesBlockerSignal('note\n```\n[critical] never closed')).toBe(
+      false,
+    );
+    // A blocker claim BEFORE the fence is still seen.
+    expect(carriesBlockerSignal('This is a blocker.\n```\nlog\n```')).toBe(
+      true,
+    );
+  });
+
   it('recognises a blocker that never uses the [Critical] marker', () => {
     // The real PR #6486 heading. Only /review emits `[Critical]`; a human
     // types whatever they type, and the old literal-marker gate saw none of it.

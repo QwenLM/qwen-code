@@ -46,7 +46,10 @@ export interface GoalTurnFinishedTransition {
   lastReason?: string;
   /** Tokens billed to the turn that just finished. */
   tokensUsed?: number;
-  /** Set when the finishing turn was the spend window's wind-down hand-off. */
+  /**
+   * Set when the finishing turn was the spend window's wind-down hand-off
+   * and was delivered to the model.
+   */
   windDownTurnId?: string;
 }
 

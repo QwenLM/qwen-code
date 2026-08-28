@@ -299,6 +299,17 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         HTTPS_PROXY: 'http://primary-proxy.example:8080',
       },
       workspaceRegistry,
+      extraWsRoutes: [
+        {
+          path: '/test-extra',
+          bypassPrimaryDrain: true,
+          onConnection: (ws) => {
+            ws.send('extra-ready');
+            ws.close(1000, 'done');
+          },
+        },
+        { path: '/test-primary-extra', onConnection: () => {} },
+      ],
       deviceFlowRegistry,
       cdpTunnelOverWs: true,
       cdpTunnelRegistry: cdpRegistry,
@@ -1749,6 +1760,41 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     });
 
     expect(response).toEqual({ status: 503, retryAfter: '5' });
+  });
+
+  it('does not apply primary ACP drain to an extra WebSocket route', async () => {
+    handle!.beginWorkspaceDrain('primary-id');
+
+    const message = await new Promise<string>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/test-extra`, {
+        handshakeTimeout: 2000,
+      });
+      ws.on('message', (data: WebSocket.RawData) => resolve(data.toString()));
+      ws.on('error', reject);
+    });
+
+    expect(message).toBe('extra-ready');
+  });
+
+  it('keeps primary-scoped extra routes behind the primary drain gate', async () => {
+    handle!.beginWorkspaceDrain('primary-id');
+
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/test-primary-extra`, {
+        handshakeTimeout: 2000,
+      });
+      ws.on('unexpected-response', (_req, res) => {
+        resolve(res.statusCode);
+        ws.terminate();
+      });
+      ws.on('open', () => {
+        ws.close();
+        reject(new Error('primary-scoped extra route should not open'));
+      });
+      ws.on('error', reject);
+    });
+
+    expect(status).toBe(503);
   });
 
   it('rejects unowned and spoofed correlation frames during drain', async () => {
