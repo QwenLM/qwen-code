@@ -86,46 +86,55 @@ export function toPeerSessionInfo(
  */
 export async function listMessageablePeers(): Promise<PeerSessionInfo[]> {
   const records = await listLiveSessions();
-  const candidates = dedupeBySessionId(
-    records
-      .map(toPeerSessionInfo)
-      .filter((peer): peer is PeerSessionInfo => peer !== null),
-  );
+  const candidates = records
+    .map(toPeerSessionInfo)
+    .filter((peer): peer is PeerSessionInfo => peer !== null);
 
   const reachable = await Promise.all(
     candidates.map((peer) => probePeerSocket(peer.ipcPath)),
   );
-  return candidates.filter((_, index) => reachable[index]);
+  return dedupeSameNameTwins(candidates.filter((_, index) => reachable[index]));
 }
 
 /**
- * Keep one peer per session id, the most recently started.
+ * Keep one peer per (session id, name), the most recently started.
  *
  * The registry is keyed by pid, so one session id can be live under two of
  * them: `qwen --resume <id>` in a second pane starts another process without
- * signalling the original, and no lease covers the interactive TUI. Both
- * records flatten to the same name AND the same ref — every address in the
- * grammar (`name`, `name [ref]`, `[ref]`, bare ref) then resolves
- * `ambiguous`, `advertisablePeerAddress` gives up on both, and `list_agents`
- * omits the session while the send error advises a full `name [ref]` that
- * cannot resolve either. The session blacks out until one process exits.
+ * signalling the original, and no lease covers the interactive TUI. When
+ * both panes sit in the same directory the records flatten to the same
+ * name AND the same ref — every address in the grammar (`name`,
+ * `name [ref]`, `[ref]`, bare ref) then resolves `ambiguous`,
+ * `advertisablePeerAddress` gives up on both, and `list_agents` omits the
+ * session while the send error advises a full `name [ref]` that cannot
+ * resolve either. The session blacks out until one process exits.
  *
  * Two value-equal peers are not a real choice — they are one session seen
  * twice — so collapsing them is what preserves the grammar. Newest-first
  * matches the registry's own ordering, and is the process a user who just
  * ran `--resume` is looking at.
+ *
+ * Names are derived from the cwd, so the same session resumed from a
+ * different directory (or re-pointed by `/cd`) is a *differently named*
+ * incarnation. Those are not collapsed: each bare name still resolves to
+ * exactly one process, only the shared `[ref]` is ambiguous, and dropping
+ * one would turn a name a peer was just told about into `not-found`.
+ *
+ * Runs after the probe, over reachable peers only, so a twin whose socket
+ * does not answer never shadows the one that does.
  */
-function dedupeBySessionId(
+function dedupeSameNameTwins(
   peers: readonly PeerSessionInfo[],
 ): PeerSessionInfo[] {
-  const newestBySessionId = new Map<string, PeerSessionInfo>();
+  const newestByKey = new Map<string, PeerSessionInfo>();
   for (const peer of peers) {
-    const seen = newestBySessionId.get(peer.sessionId);
+    const key = `${peer.sessionId}\0${peer.name}`;
+    const seen = newestByKey.get(key);
     if (!seen || peer.startedAt > seen.startedAt) {
-      newestBySessionId.set(peer.sessionId, peer);
+      newestByKey.set(key, peer);
     }
   }
-  return [...newestBySessionId.values()];
+  return [...newestByKey.values()];
 }
 
 export type PeerResolution =

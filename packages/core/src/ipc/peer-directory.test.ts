@@ -146,12 +146,79 @@ describe('listMessageablePeers', () => {
 
     expect(peers).toHaveLength(1);
     expect(peers[0]).toMatchObject({ sessionId: 'shared', pid: 101 });
-    // Newest wins, and only the survivor is probed.
-    expect(probePeerSocket).toHaveBeenCalledTimes(1);
-    expect(probePeerSocket).toHaveBeenCalledWith('/tmp/b.sock');
+    // Newest wins.
     expect(resolvePeerTarget(peers, 'app-ab')).toEqual({
       kind: 'one',
       peer: peers[0],
+    });
+  });
+
+  it('falls back to the older twin when the newest does not answer', async () => {
+    // A record outlives its process by the width of a crash, so the newest
+    // twin can be the dead one. Collapsing before the probe would drop the
+    // reachable original along with it and black the session out anyway.
+    listLiveSessions.mockResolvedValue([
+      record({
+        sessionId: 'shared',
+        pid: 100,
+        ipcPath: '/tmp/a.sock',
+        startedAt: 1_000,
+      }),
+      record({
+        sessionId: 'shared',
+        pid: 101,
+        ipcPath: '/tmp/b.sock',
+        startedAt: 2_000,
+      }),
+    ]);
+    probePeerSocket.mockImplementation(async (path: string) =>
+      path.endsWith('a.sock'),
+    );
+
+    const peers = await listMessageablePeers();
+
+    expect(peers).toHaveLength(1);
+    expect(peers[0]).toMatchObject({ sessionId: 'shared', pid: 100 });
+  });
+
+  it('keeps differently named incarnations of one session id', async () => {
+    // Names are cwd-derived, so `qwen --resume <id>` from another directory
+    // (or a later `/cd`) registers a second, differently named process.
+    // Each bare name resolves on its own; only the shared ref is ambiguous.
+    // Collapsing them would turn the older, still-listening process into
+    // `not-found` for any peer that was told its name.
+    listLiveSessions.mockResolvedValue([
+      record({
+        sessionId: 'shared',
+        pid: 100,
+        cwd: '/w/app',
+        name: 'app-f7',
+        ipcPath: '/tmp/a.sock',
+        startedAt: 1_000,
+      }),
+      record({
+        sessionId: 'shared',
+        pid: 101,
+        cwd: '/w/other',
+        name: 'other-f7',
+        ipcPath: '/tmp/b.sock',
+        startedAt: 2_000,
+      }),
+    ]);
+
+    const peers = await listMessageablePeers();
+
+    expect(peers.map((p) => p.pid).sort()).toEqual([100, 101]);
+    expect(resolvePeerTarget(peers, 'app-f7')).toMatchObject({
+      kind: 'one',
+      peer: { pid: 100 },
+    });
+    expect(resolvePeerTarget(peers, 'other-f7')).toMatchObject({
+      kind: 'one',
+      peer: { pid: 101 },
+    });
+    expect(resolvePeerTarget(peers, `[${peerRef('shared')}]`)).toMatchObject({
+      kind: 'ambiguous',
     });
   });
 
