@@ -132,6 +132,7 @@ function buildRememberSystemPrompt(memoryPrompt: string): string {
     '- Create or update exactly one managed memory entry, then stop.',
     '- Do not inspect or depend on any user-visible chat session history.',
     '- Use read/list/search/write/edit tools only inside the managed memory directories.',
+    '- Never modify, overwrite, rename, or delete anything under `pinned/`: those records are user-curated and protected. If the request conflicts with one, write your entry as a separate record instead.',
     '- When finished, report only whether the memory update completed; do not quote or summarize memory content.',
     '',
     memoryPrompt,
@@ -224,6 +225,14 @@ export async function runManagedRememberByAgent(params: {
       includeProjectMemory: params.scope !== 'user',
       includeUserMemory: params.scope !== 'project',
       restrictReadsToMemoryPaths: true,
+      // `pinned/` records are user-curated and declared read-only by the
+      // extraction and dream planners, which both pass this. Remember is an
+      // explicit write request whose rules steer the agent to update a
+      // conflicting entry, and MEMORY.md — embedded in this agent's system
+      // prompt — indexes pinned records like any other, so without this the
+      // agent can be steered straight onto one and
+      // `completeAfterFirstSuccessfulWrite` would report success over it.
+      protectPinnedMemory: true,
     },
   );
   let result: ForkedAgentResult;
@@ -280,19 +289,25 @@ export async function runManagedRememberByAgent(params: {
   // entry files. MEMORY.md loads verbatim into every future session, so no
   // exit path may leave the agent's index write on disk unrepaired — failed
   // and cancelled runs included.
-  const writtenScopes = (() => {
-    try {
-      return classifyTouchedScopes(filesWritten, params.projectRoot);
-    } catch (err) {
-      if (result.status === 'completed') {
-        throw err;
+  // Classify per file rather than all-or-nothing: one unclassifiable path
+  // must not void the repair of the classifiable ones it was reported
+  // alongside. A mixed report is exactly the shape that leaves a
+  // hand-written MEMORY.md on disk, so the escape is surfaced only after
+  // every store it could be paired with has been rebuilt.
+  const { writtenScopes, escapeError } = (() => {
+    const scopes: WorkspaceRememberScope[] = [];
+    let firstEscape: unknown;
+    for (const filePath of filesWritten) {
+      try {
+        scopes.push(...classifyTouchedScopes([filePath], params.projectRoot));
+      } catch (err) {
+        firstEscape ??= err;
       }
-      // A failed or cancelled run surfaces its termination reason, not a
-      // path-escape audit; the best-effort repair below skips what it cannot
-      // classify.
-      debugLogger.error('Remember write audit failed:', err);
-      return [];
     }
+    return {
+      writtenScopes: uniqueSortedScopes(scopes),
+      escapeError: firstEscape,
+    };
   })();
   const rebuildWrittenScopes = () =>
     Promise.all([
@@ -308,6 +323,20 @@ export async function runManagedRememberByAgent(params: {
             })
         : Promise.resolve(),
     ]);
+  if (escapeError !== undefined) {
+    if (result.status === 'completed') {
+      // The audit failed, but the memory-root writes reported alongside the
+      // escape are real and their index is stale until rebuilt.
+      await rebuildWrittenScopes().catch((err: unknown) => {
+        debugLogger.error('Memory index rebuild failed:', err);
+      });
+      throw escapeError;
+    }
+    // A failed or cancelled run surfaces its termination reason, not a
+    // path-escape audit; the repair below still covers what could be
+    // classified.
+    debugLogger.error('Remember write audit failed:', escapeError);
+  }
   if (result.status === 'failed' || result.status === 'cancelled') {
     // Best-effort: a rebuild failure must not mask the termination reason.
     await rebuildWrittenScopes().catch((err: unknown) => {

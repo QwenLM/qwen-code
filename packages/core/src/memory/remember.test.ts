@@ -920,6 +920,96 @@ describe('remember memory helper', () => {
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
   });
 
+  it('denies writes to pinned records the remember rules could steer onto', async () => {
+    // `pinned/` is declared read-only by the extraction and dream planners,
+    // which both pass protectPinnedMemory. Remember steers the agent to
+    // update a conflicting entry and MEMORY.md indexes pinned records like
+    // any other, so without the same flag a curated record is writable and
+    // completeAfterFirstSuccessfulWrite would report success over it.
+    const touched = path.join(getAutoMemoryRoot(projectRoot), 'note.md');
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [touched],
+      filesWritten: [touched],
+    } satisfies ForkedAgentResult);
+
+    await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Remember me.',
+      contextMode: 'workspace',
+    });
+
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      config: Config;
+      systemPrompt: string;
+    };
+    const pm = params.config.getPermissionManager() as PermissionManager;
+    const pinnedFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'pinned',
+      'conventions.md',
+    );
+    for (const toolName of [ToolNames.WRITE_FILE, ToolNames.EDIT]) {
+      await expect(
+        pm.evaluate({ toolName, filePath: pinnedFile }),
+      ).resolves.toBe('deny');
+    }
+    // An ordinary entry beside it stays writable.
+    await expect(
+      pm.evaluate({ toolName: ToolNames.WRITE_FILE, filePath: touched }),
+    ).resolves.toBe('allow');
+    expect(params.systemPrompt).toContain('pinned/');
+  });
+
+  it('rebuilds the classifiable stores before surfacing a mixed path escape', async () => {
+    // A completed run reporting MEMORY.md alongside a non-memory path used
+    // to rethrow before any rebuild, leaving the agent's hand-written index
+    // on disk to load verbatim into every future session.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [path.join(getAutoMemoryRoot(projectRoot), 'MEMORY.md')],
+      filesWritten: [
+        path.join(getAutoMemoryRoot(projectRoot), 'MEMORY.md'),
+        path.join(tempDir, 'outside.md'),
+      ],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember me.',
+        contextMode: 'workspace',
+      }),
+    ).rejects.toMatchObject({ code: 'remember_path_escape' });
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+  });
+
+  it('repairs the classifiable subset when a failed run also escapes', async () => {
+    // One unclassifiable path used to void the repair of every classifiable
+    // one reported with it: the audit returned [] wholesale.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'failed',
+      terminateReason: 'max turns exceeded',
+      filesTouched: [path.join(getAutoMemoryRoot(projectRoot), 'MEMORY.md')],
+      filesWritten: [
+        path.join(getAutoMemoryRoot(projectRoot), 'MEMORY.md'),
+        path.join(tempDir, 'outside.md'),
+      ],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember me.',
+        contextMode: 'workspace',
+      }),
+    ).rejects.toThrow('max turns exceeded');
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+  });
+
   it('rejects when managed memory is unavailable', async () => {
     await expect(
       runManagedRememberByAgent({
