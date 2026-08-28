@@ -33,7 +33,6 @@ import {
   type ServeWorkspacePreflightStatus,
   type ServeWorkspaceSkillsRefreshResult,
   type ServeWorkspaceSkillsStatus,
-  type ServeWorkspaceSkillStatus,
 } from '@qwen-code/acp-bridge/status';
 
 import {
@@ -49,10 +48,6 @@ import {
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
 
 import { loadSettings } from '../../config/settings.js';
-import {
-  resolveSkillSettings,
-  skillMatchesSettingName,
-} from '../../config/skill-settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import { buildPermissionSettings } from '../../config/permission-settings.js';
 import {
@@ -74,10 +69,8 @@ import {
 } from '../workspace-skill-management.js';
 
 import {
-  mapWorkspaceSkillToggleError,
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSkillNotFoundError,
-  WorkspaceSkillNotToggleableError,
   WorkspaceSettingsPartialPersistError,
 } from './types.js';
 import type {
@@ -91,7 +84,6 @@ import type {
   WorkspaceAcpPreheatResult,
   WorkspaceAcpStatusResult,
   WorkspaceSkillBatchToggleResult,
-  WorkspaceSkillToggleError,
   WorkspaceSkillToggleResult,
   WorkspaceSkillToggleActivation,
   PersistDisabledSkillsBatchResult,
@@ -126,7 +118,6 @@ export type {
 export {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSkillNotFoundError,
-  WorkspaceSkillNotToggleableError,
   mapWorkspaceSkillToggleError,
 } from './types.js';
 
@@ -235,31 +226,6 @@ async function withTimeout<T>(
       },
     );
   });
-}
-
-/**
- * Resolve a requested skill name against the loaded status rows. Exact
- * canonical names win; extension skills also answer to their pre-rename
- * bare spelling (#9408), so documented bare-name automation keeps working
- * after collision qualification renames a skill. Two-phase on purpose:
- * the fallback must never steal a request from a skill whose canonical
- * name matches exactly.
- */
-function resolveSkillStatusRow(
-  skills: readonly ServeWorkspaceSkillStatus[],
-  requestedSkillName: string,
-): ServeWorkspaceSkillStatus | undefined {
-  const normalizedName = requestedSkillName.trim().toLowerCase();
-  return (
-    skills.find(
-      (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
-    ) ??
-    skills.find(
-      (candidate) =>
-        candidate.kind === 'skill' &&
-        skillMatchesSettingName(candidate, new Set([normalizedName])),
-    )
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -869,43 +835,10 @@ export function createDaemonWorkspaceService(
       enabled: boolean,
     ): Promise<WorkspaceSkillToggleResult> {
       assertActiveGeneration();
-      const skill = resolveSkillStatusRow(
-        (await getWorkspaceSkillsStatus()).skills,
-        requestedSkillName,
-      );
-      if (!skill) throw new WorkspaceSkillNotFoundError(requestedSkillName);
-      if (skill.userInvocable === false) {
-        throw new WorkspaceSkillNotToggleableError(
-          skill.name,
-          'not_user_invocable',
-        );
-      }
-
-      const needsLegacyInactiveCheck =
-        skill.level === 'extension' &&
-        skill.status === 'disabled' &&
-        skill.disabledReason === undefined;
-      const disabledBySettings =
-        needsLegacyInactiveCheck &&
-        skillMatchesSettingName(
-          skill,
-          resolveSkillSettings(loadBoundSettings(true)).disabledNames,
-        );
-      if (
-        skill.level === 'extension' &&
-        skill.status === 'disabled' &&
-        (skill.disabledReason === 'inactive_extension' ||
-          (skill.disabledReason === undefined && !disabledBySettings))
-      ) {
-        throw new WorkspaceSkillNotToggleableError(
-          skill.name,
-          'inactive_extension',
-        );
-      }
-
+      const skillName = requestedSkillName.trim();
       const persisted = await persistDisabledSkills(
         boundWorkspace,
-        skill.name,
+        skillName,
         enabled,
         assertGenerationOpen,
       );
@@ -959,7 +892,7 @@ export function createDaemonWorkspaceService(
           },
         ];
         const mutation = createSkillToggleMutation({
-          skills: [{ name: skill.name, enabled }],
+          skills: [{ name: skillName, enabled }],
           activation,
           sessionsRefreshed,
           sessionsFailed,
@@ -979,7 +912,7 @@ export function createDaemonWorkspaceService(
       }
 
       return {
-        skillName: skill.name,
+        skillName,
         enabled,
         changed: persisted.changed,
         activation,
@@ -994,78 +927,12 @@ export function createDaemonWorkspaceService(
       enabled: boolean,
     ): Promise<WorkspaceSkillBatchToggleResult> {
       assertActiveGeneration();
-      const status = await getWorkspaceSkillsStatus();
-      const skillsByName = new Map<
-        string,
-        ServeWorkspaceSkillsStatus['skills'][number]
-      >();
-      for (const skill of status.skills) {
-        const normalizedName = skill.name.trim().toLowerCase();
-        if (!skillsByName.has(normalizedName)) {
-          skillsByName.set(normalizedName, skill);
-        }
-      }
-      const disabledNames = resolveSkillSettings(
-        loadBoundSettings(true),
-      ).disabledNames;
-      const targets: Array<
-        | { requestedName: string; skillName: string }
-        | { requestedName: string; error: WorkspaceSkillToggleError }
-      > = [];
-
-      for (const requestedName of requestedSkillNames) {
-        const normalizedName = requestedName.trim().toLowerCase();
-        const skill =
-          skillsByName.get(normalizedName) ??
-          resolveSkillStatusRow(status.skills, requestedName);
-        if (!skill) {
-          // Unknown names persist as-is: targets may be declared before a
-          // skill is installed, and a persisted bare entry still matches a
-          // later-qualified skill through the dual-spelling settings probe.
-          targets.push({ requestedName, skillName: requestedName });
-          continue;
-        }
-        let domainError: unknown;
-        if (skill.userInvocable === false) {
-          domainError = new WorkspaceSkillNotToggleableError(
-            skill.name,
-            'not_user_invocable',
-          );
-        } else {
-          const legacyInactive =
-            skill.level === 'extension' &&
-            skill.status === 'disabled' &&
-            skill.disabledReason === undefined &&
-            !skillMatchesSettingName(skill, disabledNames);
-          if (
-            skill.level === 'extension' &&
-            skill.status === 'disabled' &&
-            (skill.disabledReason === 'inactive_extension' || legacyInactive)
-          ) {
-            domainError = new WorkspaceSkillNotToggleableError(
-              skill.name,
-              'inactive_extension',
-            );
-          }
-        }
-
-        if (domainError) {
-          const error = mapWorkspaceSkillToggleError(domainError);
-          if (!error) throw domainError;
-          targets.push({ requestedName, error });
-        } else {
-          targets.push({ requestedName, skillName: skill.name });
-        }
-      }
-
-      const validSkillNames = targets.flatMap((target) =>
-        'skillName' in target ? [target.skillName] : [],
-      );
+      const skillNames = requestedSkillNames.map((name) => name.trim());
       const persisted: PersistDisabledSkillsBatchResult =
-        validSkillNames.length > 0
+        skillNames.length > 0
           ? await persistDisabledSkillsBatch(
               boundWorkspace,
-              validSkillNames,
+              skillNames,
               enabled,
               assertGenerationOpen,
             )
@@ -1078,31 +945,18 @@ export function createDaemonWorkspaceService(
         ]),
       );
       const results: WorkspaceSkillBatchToggleResult['results'] = [];
-      const errors: WorkspaceSkillBatchToggleResult['errors'] = [];
-      for (const target of targets) {
-        if ('error' in target) {
-          errors.push(target.error);
-          continue;
-        }
-        const outcome = persistedByName.get(
-          target.skillName.trim().toLowerCase(),
-        );
+      for (const skillName of skillNames) {
+        const outcome = persistedByName.get(skillName.toLowerCase());
         if (!outcome) {
           throw new Error(
-            `Missing persisted Skill batch outcome: ${target.skillName}`,
+            `Missing persisted Skill batch outcome: ${skillName}`,
           );
         }
-        if ('error' in outcome) {
-          const error = mapWorkspaceSkillToggleError(outcome.error);
-          if (!error) throw outcome.error;
-          errors.push(error);
-        } else {
-          results.push({
-            skillName: outcome.skillName,
-            enabled,
-            changed: outcome.changed,
-          });
-        }
+        results.push({
+          skillName: outcome.skillName,
+          enabled,
+          changed: outcome.changed,
+        });
       }
 
       const changed = results.some((result) => result.changed);
@@ -1170,7 +1024,7 @@ export function createDaemonWorkspaceService(
         sessionsRefreshed,
         sessionsFailed,
         results,
-        errors,
+        errors: [],
       };
     },
 
@@ -1197,9 +1051,10 @@ export function createDaemonWorkspaceService(
       scope: WorkspaceSkillScope,
     ): Promise<WorkspaceSkillMutationResult> {
       assertActiveGeneration();
-      const skill = resolveSkillStatusRow(
-        (await getWorkspaceSkillsStatus()).skills,
-        requestedSkillName,
+      const normalizedName = requestedSkillName.trim().toLowerCase();
+      const status = await getWorkspaceSkillsStatus();
+      const skill = status.skills.find(
+        (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
       );
       if (!skill) throw new WorkspaceSkillNotFoundError(requestedSkillName);
       const expectedLevel = scope === 'workspace' ? 'project' : 'user';

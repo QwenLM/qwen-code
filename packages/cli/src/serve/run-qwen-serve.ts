@@ -2116,8 +2116,6 @@ async function loadServeRuntimeModules() {
     createDaemonWorkspaceService: workspaceModule.createDaemonWorkspaceService,
     WorkspaceSettingsPartialPersistError:
       workspaceTypesModule.WorkspaceSettingsPartialPersistError,
-    WorkspaceSkillNotToggleableError:
-      workspaceTypesModule.WorkspaceSkillNotToggleableError,
     createDaemonStatusProvider:
       daemonStatusProviderModule.createDaemonStatusProvider,
     createWorkspaceProvidersStatusProvider:
@@ -4995,27 +4993,11 @@ async function runQwenServeImpl(
           resolveSkillSettings,
           skillSettingStrings,
           skillSettingEntriesMatchAny,
-          skillSettingEntriesMatch,
           updateWorkspaceSkillSettingLists,
         } = await import('../config/skill-settings.js');
         const fresh = loadSettingsForPersistence(workspace);
         const normalizedName = skillName.trim().toLowerCase();
         const resolved = resolveSkillSettings(fresh);
-        const disablement =
-          resolved.disablements.get(normalizedName) ??
-          [...resolved.disablements.entries()].find(
-            ([entry]) =>
-              skillSettingEntriesMatch(entry, normalizedName) &&
-              entry !== normalizedName,
-          )?.[1];
-        if (disablement?.reason === 'hard' && disablement.lockedScope) {
-          throw new runtime.WorkspaceSkillNotToggleableError(
-            skillName,
-            'locked',
-            disablement.lockedScope,
-          );
-        }
-
         const workspaceDisabled = skillSettingStrings(
           fresh,
           WORKSPACE_SETTING_SCOPE,
@@ -5082,7 +5064,6 @@ async function runQwenServeImpl(
           resolveSkillSettings,
           skillSettingStrings,
           skillSettingEntriesMatchAny,
-          skillSettingEntriesMatch,
           updateWorkspaceSkillSettingLists,
         } = await import('../config/skill-settings.js');
         const fresh = loadSettingsForPersistence(workspace);
@@ -5102,24 +5083,6 @@ async function runQwenServeImpl(
 
         for (const skillName of skillNames) {
           const normalizedName = skillName.trim().toLowerCase();
-          const disablement =
-            resolved.disablements.get(normalizedName) ??
-            [...resolved.disablements.entries()].find(
-              ([entry]) =>
-                skillSettingEntriesMatch(entry, normalizedName) &&
-                entry !== normalizedName,
-            )?.[1];
-          if (disablement?.reason === 'hard' && disablement.lockedScope) {
-            outcomes.push({
-              skillName,
-              error: new runtime.WorkspaceSkillNotToggleableError(
-                skillName,
-                'locked',
-                disablement.lockedScope,
-              ),
-            });
-            continue;
-          }
           const updated = updateWorkspaceSkillSettingLists(
             next,
             skillName,

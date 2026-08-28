@@ -17,7 +17,7 @@ import type {
 } from '@google/genai';
 import type {
   Config,
-  GeminiChat,
+  LlmChat,
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
   ToolResult,
@@ -1696,7 +1696,7 @@ export async function registerCreateSubSessionTool(
       ToolNames.CREATE_SUB_SESSION,
       async () => new CreateSubSessionTool(config),
     );
-    await config.getGeminiClient().setTools();
+    await config.getLlmClient().setTools();
     return;
   }
   toolRegistry.registerTool(new CreateSubSessionTool(config));
@@ -1712,7 +1712,7 @@ export async function registerCreateSubSessionTool(
   // those configurations.
   toolRegistry.revealDeferredTool(ToolNames.CREATE_SUB_SESSION);
   toolRegistry.pinDeferredToolReveal(ToolNames.CREATE_SUB_SESSION);
-  await config.getGeminiClient().setTools();
+  await config.getLlmClient().setTools();
 }
 
 export interface AvailableCommandsSnapshot {
@@ -1943,7 +1943,7 @@ export class Session implements SessionContext {
   private cronCompletion: Promise<void> | null = null;
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
-  private lastPromptTokenCountChat: GeminiChat | null = null;
+  private lastPromptTokenCountChat: LlmChat | null = null;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
   // ACP can continue one logical conversation through prompt, cron, and
@@ -3276,11 +3276,11 @@ export class Session implements SessionContext {
   }
 
   async #syncLiveToolDeclarations(): Promise<void> {
-    const geminiClient = this.config.getGeminiClient();
-    if (!geminiClient) {
+    const llmClient = this.config.getLlmClient();
+    if (!llmClient) {
       throw new Error('The Live backend model client is unavailable.');
     }
-    await geminiClient.setTools();
+    await llmClient.setTools();
   }
 
   async setLiveConversationActive(active: boolean): Promise<void> {
@@ -3298,7 +3298,7 @@ export class Session implements SessionContext {
       this.liveEndInstructionPending = true;
       this.config.setLiveAppendSystemPrompt(LIVE_BACKEND_END_INSTRUCTIONS);
     }
-    await this.config.getGeminiClient()?.refreshSystemInstruction();
+    await this.config.getLlmClient()?.refreshSystemInstruction();
   }
 
   async appendLiveConversationTranscript(
@@ -3347,7 +3347,7 @@ export class Session implements SessionContext {
     if (this.liveConversationActive || !this.liveEndInstructionPending) return;
     this.liveEndInstructionPending = false;
     this.config.setLiveAppendSystemPrompt(undefined);
-    await this.config.getGeminiClient()?.refreshSystemInstruction();
+    await this.config.getLlmClient()?.refreshSystemInstruction();
   }
 
   getId(): string {
@@ -3930,7 +3930,7 @@ export class Session implements SessionContext {
       );
     }
 
-    const chat = this.config.getGeminiClient()!.getChat();
+    const chat = this.config.getLlmClient()!.getChat();
     const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
@@ -3981,7 +3981,7 @@ export class Session implements SessionContext {
   }
 
   captureHistorySnapshot(): Content[] {
-    return this.config.getGeminiClient()!.getChat().getHistoryShallow();
+    return this.config.getLlmClient()!.getChat().getHistoryShallow();
   }
 
   getRewindableUserTurnCount(): number {
@@ -4008,10 +4008,7 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config
-      .getGeminiClient()!
-      .getChat()
-      .setHistory(structuredClone(history));
+    this.config.getLlmClient()!.getChat().setHistory(structuredClone(history));
     this.activeTodoPlanRevision = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
@@ -4601,8 +4598,8 @@ export class Session implements SessionContext {
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
-    const geminiClient = this.config.getGeminiClient();
-    if (!geminiClient || !geminiClient.isInitialized()) {
+    const llmClient = this.config.getLlmClient();
+    if (!llmClient || !llmClient.isInitialized()) {
       return { accepted: false, interruption: 'none' };
     }
 
@@ -4685,7 +4682,7 @@ export class Session implements SessionContext {
     if (this.settings.merged.ui?.enableFollowupSuggestions === false) return;
     if (this.config.getApprovalMode() === ApprovalMode.PLAN) return;
 
-    const chat = this.config.getGeminiClient()?.getChat();
+    const chat = this.config.getLlmClient()?.getChat();
     if (!chat) return;
 
     const ac = new AbortController();
@@ -4832,7 +4829,7 @@ export class Session implements SessionContext {
         // it, `qwen review fetch-pr` cannot record its worktree lease and an
         // interrupted /review leaves the review worktree behind. TUI and
         // headless enter this context at their prompt entry points
-        // (useGeminiStream.ts / nonInteractiveCli.ts); ACP had no equivalent.
+        // (use-llm-stream.ts / nonInteractiveCli.ts); ACP had no equivalent.
         // enterWith (not run) so the 500-line turn body below stays unnested;
         // the binding dies with this async scope.
         promptIdContext.enterWith(promptId);
@@ -5223,7 +5220,7 @@ export class Session implements SessionContext {
             if (isFreshUserTurn) {
               managedMemoryRecallStarted = true;
               this.config
-                .getGeminiClient()
+                .getLlmClient()
                 .beginManagedAutoMemoryRecall(promptText, pendingSend.signal);
             }
 
@@ -5239,7 +5236,7 @@ export class Session implements SessionContext {
             this.activeTodoWorkChainPromptId = promptId;
 
             // Snapshot file state before this turn (mirrors the makeSnapshot
-            // block in GeminiClient.sendMessageStream). Placed after
+            // block in LlmClient.sendMessageStream). Placed after
             // slash-command and hook early-returns so locally handled commands
             // don't create phantom snapshots that desync the snapshot index.
             // Restore continuations record no user message; rewindToTurn()
@@ -5267,13 +5264,13 @@ export class Session implements SessionContext {
 
             // Prepend session-level system reminders (plan mode / subagent /
             // arena) so the model sees them, matching the behaviour of
-            // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
+            // `LlmClient.sendMessageStream` in the CLI/TUI path. Without this,
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
             if (isFreshUserTurn) {
               const memory = await this.config
-                .getGeminiClient()
+                .getLlmClient()
                 .consumeManagedAutoMemoryRecall('initial');
               if (memory?.prompt) {
                 systemReminders.unshift({ text: memory.prompt });
@@ -5365,7 +5362,7 @@ export class Session implements SessionContext {
             // not just the stop-hook loop. Daemon turns run autonomously in
             // all approval modes (approvals are mediated by the ACP client
             // rather than by gating this loop), so unlike the CLI reference
-            // (useGeminiStream.ts, which only emits in YOLO) this is
+            // (use-llm-stream.ts, which only emits in YOLO) this is
             // intentionally emitted for every mode.
             try {
               if (isRestoreAskUserQuestion) {
@@ -5692,7 +5689,7 @@ export class Session implements SessionContext {
                   this.todoStopGuard.pauseForTrustedRetry();
 
                   // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-                  // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
+                  // Aligned with use-llm-stream.ts handleFinishedWithErrorEvent
                   const errorStatus = getErrorStatus(error);
                   const errorMessage =
                     error instanceof Error ? error.message : String(error);
@@ -5904,7 +5901,7 @@ export class Session implements SessionContext {
       },
     ).finally(() => {
       if (managedMemoryRecallStarted) {
-        this.config.getGeminiClient().finishManagedAutoMemoryRecall();
+        this.config.getLlmClient().finishManagedAutoMemoryRecall();
       }
     });
   }
@@ -6321,7 +6318,7 @@ export class Session implements SessionContext {
         | ChannelDeliveryResponseBlock
         | undefined;
       let channelDeliveryCheckpoint = 0;
-      let providerSendChat: GeminiChat | undefined;
+      let providerSendChat: LlmChat | undefined;
       let userContentPushCountBeforeSend = 0;
 
       try {
@@ -7095,8 +7092,8 @@ export class Session implements SessionContext {
     }
   }
 
-  #getCurrentChat(): GeminiChat {
-    return this.config.getGeminiClient()!.getChat();
+  #getCurrentChat(): LlmChat {
+    return this.config.getLlmClient()!.getChat();
   }
 
   async #runWithFullTurnModel<T>(
@@ -7115,9 +7112,9 @@ export class Session implements SessionContext {
   /**
    * Create the MessageDisplay hook dispatcher for one model call's streamed
    * reply, or null when the hook isn't registered (the common case — keeps
-   * the streaming loops zero-cost). The ACP surface consumes GeminiChat's
+   * the streaming loops zero-cost). The ACP surface consumes LlmChat's
    * raw stream directly rather than going through
-   * GeminiClient.sendMessageStream, so it has to fire this hook itself —
+   * LlmClient.sendMessageStream, so it has to fire this hook itself —
    * with the same contract as the terminal UI path in client.ts: debounced
    * cumulative text, one message_id per model call, and an is_final firing
    * on every non-aborted exit (delivered by awaiting `finish()` in a
@@ -7163,7 +7160,7 @@ export class Session implements SessionContext {
       ) => Promise<BeforeModelSendDecision>;
     } = {},
   ): Promise<AutoCompressionSendResult> {
-    const geminiClient = this.config.getGeminiClient()!;
+    const llmClient = this.config.getLlmClient()!;
     if (options.prepareBeforeCompression) {
       const decision = await options.prepareBeforeCompression();
       if (decision.kind === 'stop') {
@@ -7187,7 +7184,7 @@ export class Session implements SessionContext {
       !(options.getModelOverride?.() ?? options.modelOverride)
     ) {
       try {
-        const compressed = await geminiClient.tryCompressChat(
+        const compressed = await llmClient.tryCompressChat(
           promptId,
           false,
           abortSignal,
@@ -7299,7 +7296,7 @@ export class Session implements SessionContext {
 
     if (message[0]?.functionResponse) {
       const memory =
-        await geminiClient.consumeManagedAutoMemoryRecall('tool_result');
+        await llmClient.consumeManagedAutoMemoryRecall('tool_result');
       if (memory?.prompt) {
         message = insertAfterFunctionResponses(message, [
           { text: memory.prompt },
@@ -10366,9 +10363,14 @@ export class Session implements SessionContext {
   /**
    * Assemble the per-turn system reminders the model needs to see at the
    * start of a user query or cron fire. Mirrors the subagent/plan/arena
-   * branches in `GeminiClient.sendMessageStream` (`client.ts:848-878`) —
+   * branches in `LlmClient.sendMessageStream` (`client.ts:848-878`) —
    * the ACP path bypasses that code, so without this helper plan mode is
    * silently inert and subagent/arena sessions lose context.
+   *
+   * Scope note: the `relevantAutoMemory` reminder is intentionally NOT
+   * included here. Managed auto-memory requires a prefetch pipeline that
+   * lives in `LlmClient`, and porting it into the ACP path is tracked
+   * separately as part of the broader middleware-alignment work.
    */
   async #buildInitialSystemReminders(): Promise<Part[]> {
     const reminders: Part[] = [];
@@ -11017,7 +11019,7 @@ export class Session implements SessionContext {
             // Parallels coreToolScheduler.ts.
             const messages =
               this.config
-                .getGeminiClient?.()
+                .getLlmClient?.()
                 ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
             const decision = await evaluateAutoMode({
               ctx: pmCtx,
@@ -12453,7 +12455,7 @@ export class Session implements SessionContext {
       });
     } finally {
       if (terminalStatus && terminalStatus !== 'cancelled') {
-        this.config.getGeminiClient().recordCompletedToolCall(toolName, args);
+        this.config.getLlmClient().recordCompletedToolCall(toolName, args);
       }
       if (terminalStatus === 'cancelled') {
         endToolSpan(toolSpan, { success: false, cancelled: true });

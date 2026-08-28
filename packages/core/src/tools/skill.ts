@@ -165,7 +165,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    * toggle, or MCP-prompt provider change).
    *
    * It deliberately does NOT mutate the tool declaration or call
-   * `geminiClient.setTools()`. The Skill tool's description is static
+   * `llmClient.setTools()`. The Skill tool's description is static
    * (`SKILL_TOOL_DESCRIPTION`), so the skill set no longer affects the tools
    * block — and the tools block is the front of the tools → system → messages
    * prompt-cache prefix, where any byte change invalidates the whole cached

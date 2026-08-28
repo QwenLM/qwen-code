@@ -194,7 +194,6 @@ describe('computeWorkspaceSkillListUpdates', () => {
     // 'review' is toggled.
     const result = computeWorkspaceSkillListUpdates(
       ['orphan', 'review'],
-      new Set<string>(),
       [],
       [
         {
@@ -211,13 +210,9 @@ describe('computeWorkspaceSkillListUpdates', () => {
     expect(result.enabledChanged).toBe(false);
   });
 
-  it('drops locked higher-scope entries so they are not re-emitted', () => {
-    // 'locked' is disabled at a higher scope; the picker must not re-emit it at
-    // workspace scope. Toggling 'review' on provides a genuine change so the
-    // write path is exercised while 'orphan' is still preserved.
+  it('preserves workspace declarations that duplicate higher-scope entries', () => {
     const result = computeWorkspaceSkillListUpdates(
       ['locked', 'orphan', 'review'],
-      new Set(['locked']),
       [],
       [
         {
@@ -229,14 +224,13 @@ describe('computeWorkspaceSkillListUpdates', () => {
       ],
     );
 
-    expect(result.disabled).toEqual(['orphan']);
+    expect(result.disabled).toEqual(['locked', 'orphan']);
     expect(result.disabledChanged).toBe(true);
   });
 
   it('reports no change when nothing toggled and lists already match', () => {
     const result = computeWorkspaceSkillListUpdates(
       ['orphan'],
-      new Set<string>(),
       [],
       [
         {
@@ -256,7 +250,6 @@ describe('computeWorkspaceSkillListUpdates', () => {
   it('records an explicit opt-in when enabling a default-disabled skill', () => {
     const result = computeWorkspaceSkillListUpdates(
       [],
-      new Set<string>(),
       [],
       [
         {
