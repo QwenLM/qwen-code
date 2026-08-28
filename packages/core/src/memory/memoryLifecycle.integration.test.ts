@@ -60,6 +60,7 @@ describe('managed auto-memory lifecycle integration', () => {
       getSessionId: () => 'session-1',
       getModel: () => 'qwen3-coder-plus',
       getMemoryRecallMode: () => 'structured',
+      isTrustedFolder: () => true,
     } as Config;
     vi.clearAllMocks();
     extractionCount = 0;
