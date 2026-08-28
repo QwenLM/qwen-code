@@ -31,6 +31,7 @@ const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
 );
+const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
   spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
@@ -369,6 +370,63 @@ describe('qwen-triage tmux workflow', () => {
 
     // A real response still passes, and 'null' still counts as no response.
     expect(run({ RESPONSE: 'triaged' }).status).toBe(0);
+    expect(run({ RESPONSE: 'null' }).status).not.toBe(0);
+  });
+
+  it('fails an API-error response instead of passing it as a triage (#10314)', () => {
+    const checkStep = step('Check triage response');
+    const body = checkStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(body).toBeTruthy();
+    const script = body.replace(/^ {10}/gm, '');
+    const run = (env) => {
+      const proc = spawnSync('bash', ['-c', script], {
+        env: {
+          ...process.env,
+          RESPONSE: '',
+          TRIAGE_OUTCOME: 'success',
+          ...env,
+        },
+        encoding: 'utf8',
+      });
+      return { status: proc.status, out: `${proc.stdout}${proc.stderr}` };
+    };
+
+    // The verbatim 268-char response of run 33070765162 (triage for #10285):
+    // a bare model-layer connection error that the old check classified as a
+    // successful triage, so nothing retried or alerted.
+    const apiError =
+      '[API Error: Connection error. (cause: connect ETIMEDOUT 47.94.20.201:443; connect ENETUNREACH 2408:400a:3e:effd:6ac1:ae6e:cde9:4efe:443 - Local (:::0); connect ETIMEDOUT 101.201.58.201:443; connect ENETUNREACH 2408:400a:3e:effb:c146:fb04:1e3d:5cc1:443 - Local (:::0))]';
+    const bare = run({ RESPONSE: apiError });
+    expect(bare.status).not.toBe(0);
+    expect(bare.out).toContain('API error');
+
+    // The stream-json adapter appends the formatted error LAST
+    // (BaseJsonOutputAdapter appendText), optionally followed by rate-limit
+    // guidance: an error after partial output and a quota error ending in
+    // the guidance suffix must fail too. Same shapes as
+    // qwen-code-pr-review.yml's classifier.
+    expect(
+      run({ RESPONSE: `Partial triage notes\n${apiError}` }).status,
+    ).not.toBe(0);
+    expect(
+      run({
+        RESPONSE:
+          '[API Error: Quota exceeded.] Please wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method',
+      }).status,
+    ).not.toBe(0);
+
+    // A real summary still passes: one that merely QUOTES an API error
+    // mid-prose keeps writing afterwards (parity with the pr-review
+    // workflow's success_mentions_api_error case), and the normal
+    // empty/'null' behavior is untouched.
+    expect(
+      run({
+        RESPONSE:
+          'This issue reports "[API Error: Connection error.]" which points at the model endpoint; needs the endpoint config.',
+      }).status,
+    ).toBe(0);
+    expect(run({ RESPONSE: 'triaged' }).status).toBe(0);
+    expect(run({ RESPONSE: '' }).status).not.toBe(0);
     expect(run({ RESPONSE: 'null' }).status).not.toBe(0);
   });
 
@@ -1196,7 +1254,8 @@ describe('qwen-triage tmux workflow', () => {
           const bin = join(dir, 'bin');
           mkdirSync(bin, { recursive: true });
           writeFileSync(join(dir, 'reviews.json'), JSON.stringify(reviews));
-          // Stand-in for `gh`: serves the review list and head SHA, and
+          // Stand-in for `gh`: serves the PR state, the review list and
+          // the head SHA, and
           // captures the comment body the step would have posted.
           writeFileSync(
             join(bin, 'gh'),
@@ -1204,6 +1263,7 @@ describe('qwen-triage tmux workflow', () => {
               '#!/usr/bin/env bash',
               'case "$*" in',
               `  "api user --jq .login") echo bot ;;`,
+              `  "pr view 1 --repo QwenLM/qwen-code --json state,closedAt") echo '{"state":"OPEN","closedAt":null}' ;;`,
               `  *"/pulls/1/reviews"*) cat "${join(dir, 'reviews.json')}" ;;`,
               `  *"/pulls/1 --jq .head.sha") [ -n "$FAKE_HEAD" ] && echo "$FAKE_HEAD" || exit 1 ;;`,
               `  *"/issues/1/comments"*)`,
@@ -1281,6 +1341,104 @@ describe('qwen-triage tmux workflow', () => {
       expect(noHead.status).toBe(0);
       expect(noHead.log).not.toContain('Triage re-run left no bot review');
       expect(noHead.comment).toContain('could not be read');
+    },
+  );
+
+  // A Stage 1-pre duplicate-close exit leaves no review at all, and the
+  // review-list check above cannot tell it apart from a re-run that did
+  // nothing: it announced "completed without a new review ... it did not"
+  // on the PR the same run just closed, and the ::warning dispatched a
+  // human to a correctly-handled run. The close IS the terminal action:
+  // the step must read the PR's own state and exit quietly. A close BEFORE
+  // the trigger keeps the old behaviour — that run still owes its summary.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'exits quietly when the PR was closed at/after the trigger comment',
+    () => {
+      const notifyStep = step('Notify silent triage re-run');
+      // The exemption reads the PR itself, not only the review list.
+      expect(notifyStep).toContain(
+        'gh pr view "$NUMBER" --repo "$GITHUB_REPOSITORY" --json state,closedAt',
+      );
+      const body = notifyStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+      expect(body).toBeTruthy();
+      const script = body.replace(/^ {10}/gm, '');
+
+      const run = (prState, reviews = []) => {
+        const dir = mkdtempSync(join(tmpdir(), 'triage-close-exit-'));
+        try {
+          const bin = join(dir, 'bin');
+          mkdirSync(bin, { recursive: true });
+          writeFileSync(join(dir, 'pr-state.json'), JSON.stringify(prState));
+          writeFileSync(join(dir, 'reviews.json'), JSON.stringify(reviews));
+          // Stand-in for `gh`: serves the PR state, an (empty) review list
+          // and the head SHA, and captures the comment body the step would
+          // have posted.
+          writeFileSync(
+            join(bin, 'gh'),
+            [
+              '#!/usr/bin/env bash',
+              'case "$*" in',
+              `  "api user --jq .login") echo bot ;;`,
+              `  "pr view 1 --repo QwenLM/qwen-code --json state,closedAt") cat "${join(dir, 'pr-state.json')}" ;;`,
+              `  *"/pulls/1/reviews"*) cat "${join(dir, 'reviews.json')}" ;;`,
+              `  *"/pulls/1 --jq .head.sha") echo head ;;`,
+              `  *"/issues/1/comments"*)`,
+              `    for a in "$@"; do case "$a" in body=*) printf '%s' "\${a#body=}" > "${join(dir, 'comment.txt')}" ;; esac; done`,
+              `    echo '{}' ;;`,
+              '  *) echo "unexpected gh call: $*" >&2; exit 1 ;;',
+              'esac',
+            ].join('\n'),
+            { mode: 0o755 },
+          );
+          const proc = spawnSync('bash', ['-c', script], {
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              NUMBER: '1',
+              TRIGGERED_AT: '2026-01-02T00:00:00Z',
+              RUN_URL: 'https://example.invalid/run',
+            },
+            encoding: 'utf8',
+          });
+          let comment = '';
+          try {
+            comment = readFileSync(join(dir, 'comment.txt'), 'utf8');
+          } catch {
+            comment = '';
+          }
+          return {
+            status: proc.status,
+            log: `${proc.stdout}${proc.stderr}`,
+            comment,
+          };
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      };
+
+      // The close-exit shape: closed after the trigger, no review left.
+      // Neither the summary comment nor the warning may fire.
+      const closeExit = run({
+        state: 'CLOSED',
+        closedAt: '2026-01-03T00:00:00Z',
+      });
+      expect(closeExit.status).toBe(0);
+      expect(closeExit.comment).toBe('');
+      expect(closeExit.log).not.toContain('Triage re-run left no bot review');
+      expect(closeExit.log).toContain('no re-run summary needed');
+
+      // The boundary: a close BEFORE the trigger comment is not this run's
+      // terminal action, so the old notify behaviour stays intact.
+      const closedBefore = run({
+        state: 'CLOSED',
+        closedAt: '2026-01-01T00:00:00Z',
+      });
+      expect(closedBefore.status).toBe(0);
+      expect(closedBefore.log).toContain('Triage re-run left no bot review');
+      expect(closedBefore.comment).toContain(
+        '<!-- qwen-triage stage=rerun-summary -->',
+      );
     },
   );
 
@@ -6803,5 +6961,102 @@ describe('triage skips the autofix bot’s own bookkeeping issues (#9264)', () =
       readFileSync('.github/workflows/qwen-autofix.yml', 'utf8'),
     );
     expect(autofixDoc.env.AUTOFIX_BOT).toBe(`\${{ ${botIdentityCore} }}`);
+  });
+});
+
+describe('stage 1-pre duplicate gate', () => {
+  const section = prSkill.slice(
+    prSkill.indexOf('**1-pre. Duplicate / already-fixed check'),
+    prSkill.indexOf('**1a. Template check:**'),
+  );
+
+  it('reads linked issues from GitHub closing references, not a keyword grep', () => {
+    // A keyword grep misses 6 of the 9 closing-keyword forms and matches
+    // substrings like "prefixes"; GitHub's own parser is the linkage source.
+    expect(section).toContain('--json closingIssuesReferences');
+    expect(section).not.toContain("grep -oiE '(fixes|closes|resolves)");
+  });
+
+  it('runs only for PRs targeting the default branch', () => {
+    // Backports to release/* branches legitimately carry changes that already
+    // exist on the default branch; without this scope the gate closes them.
+    expect(section).toContain('Run 1-pre only when the PR targets the default');
+    expect(section).toContain('defaultBranchRef');
+    expect(section).not.toContain('?ref=main');
+  });
+
+  it('defines subsumption over the full diff, never over added lines alone', () => {
+    // Added-lines-only quantification closes deletions-only diffs vacuously;
+    // the deleted-lines clause must stay.
+    expect(section).toContain('every production line this PR adds');
+    expect(section).toContain('every production line this PR deletes');
+  });
+
+  it('never closes a diff with no production changes', () => {
+    // Stage 0 exclusions empty the comparison set for tests-only PRs; such a
+    // diff must be a remaining delta, never "Fully subsumed".
+    expect(section).toContain('NO production changes');
+    expect(section).toContain('never fully subsumed');
+  });
+
+  it('scopes linkage extraction to same-repo closing references', () => {
+    // A bare `.number` extraction drops the repository qualifier, so a
+    // cross-repo closing reference resolves against this repo's
+    // same-numbered unrelated issue. The scoping filter and the skip rule
+    // must stay.
+    expect(section).toContain('.repository.owner.login');
+    expect(section).toContain('cross-repo closing references are skipped');
+  });
+
+  it('guards the duplicate close against a human reopen', () => {
+    // A re-run on a reopened PR re-derives identical inputs; without the
+    // reopen guard the gate re-closes against a maintainer's deliberate
+    // reopen, and every later re-run closes again. Deleting the guard must
+    // make this red.
+    expect(section).toContain('**Reopen guard.**');
+    expect(section).toContain('do not post or close again');
+  });
+
+  it('binds each linked-issue state to its gate action', () => {
+    // The per-issue dispatch is the gate's decision table; deleting it or
+    // swapping the NOT_PLANNED and COMPLETED actions must not leave the
+    // suite green. The loop only collects states, so an OPEN issue must not
+    // short-circuit to 1a over a CLOSED one.
+    expect(section).toContain('"OPEN" -> contributes nothing');
+    expect(section).toContain('"CLOSED NOT_PLANNED" -> request changes');
+    expect(section).toContain('"CLOSED COMPLETED" -> run the closer query');
+    expect(section).not.toContain('"OPEN" -> proceed to 1a');
+  });
+
+  it('defines one fixed precedence for mixed linked-issue states', () => {
+    // xe6u: `fixes #101 and fixes #102` with #101 OPEN, #102 CLOSED-COMPLETED
+    // must have one deterministic outcome. Without an explicit precedence the
+    // per-issue loop legend and the aggregate bullets contradict each other.
+    expect(section).toContain('fixed precedence');
+    expect(section).toContain('never short-circuits');
+  });
+
+  it('never closes on an unresolvable closer', () => {
+    // The ambiguity bullet is the only explicit prohibition against closing
+    // on a closer that cannot be resolved; deleting it must make this red.
+    expect(section).toContain('never close on ambiguity');
+  });
+
+  it('SKILL.md restates the 1-pre boundary without a production qualifier', () => {
+    // xe6: SKILL.md's escalation summary must match pr-workflow.md's
+    // operational definition — request changes on ANY remaining delta, close
+    // only when the ENTIRE diff is subsumed. Re-qualifying either side with
+    // "production" contradicts "any non-production addition is a remaining
+    // delta" and "a diff with NO production changes is never fully subsumed",
+    // giving a tests-only PR opposite instructions in the two files.
+    const summary = triageSkillDoc.slice(
+      triageSkillDoc.indexOf('The escalation criteria are those defined in'),
+      triageSkillDoc.indexOf('Never execute PR-derived code'),
+    );
+    expect(summary).toContain('a remaining delta');
+    expect(summary).toContain('entire diff');
+    expect(summary).toContain('fully subsumed');
+    expect(summary).not.toContain('production delta');
+    expect(summary).not.toContain('production diff');
   });
 });

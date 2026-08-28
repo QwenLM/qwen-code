@@ -57,6 +57,12 @@ export const REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
   max: 'Max',
 };
 
+type ModelReasoningConfigState = {
+  enabled?: boolean;
+  effort?: ReasoningEffort;
+  thinkingMandatory?: boolean;
+};
+
 export function getModelConfiguration(modelId: string | undefined):
   | {
       readonly reasoning?: ModelReasoningConfiguration;
@@ -67,13 +73,14 @@ export function getModelConfiguration(modelId: string | undefined):
 
 export function buildModelReasoningConfigOption(
   modelId: string | undefined,
-  state: { enabled?: boolean; effort?: ReasoningEffort } = {},
+  state: ModelReasoningConfigState = {},
 ): SessionConfigOption | undefined {
   const reasoning = getModelConfiguration(modelId)?.reasoning;
   if (!reasoning?.thinking) return undefined;
+  const thinkingMandatory = state.thinkingMandatory === true;
 
   const currentValue =
-    state.enabled === false
+    state.enabled === false && !thinkingMandatory
       ? REASONING_EFFORT_NONE
       : reasoning.toggleOnly
         ? REASONING_EFFORT_DEFAULT
@@ -88,11 +95,15 @@ export function buildModelReasoningConfigOption(
     type: 'select',
     currentValue,
     options: [
-      {
-        value: REASONING_EFFORT_NONE,
-        name: 'Thinking off',
-        description: 'Disable thinking for this session',
-      },
+      ...(thinkingMandatory
+        ? []
+        : [
+            {
+              value: REASONING_EFFORT_NONE,
+              name: 'Thinking off',
+              description: 'Disable thinking for this session',
+            },
+          ]),
       ...(reasoning.toggleOnly
         ? [
             {
@@ -109,17 +120,24 @@ export function buildModelReasoningConfigOption(
     ],
     _meta: {
       'qwenCode/reasoning': reasoning.toggleOnly
-        ? { toggleOnly: true }
-        : { defaultEffort: reasoning.defaultEffort },
+        ? {
+            toggleOnly: true,
+            ...(thinkingMandatory ? { thinkingMandatory: true } : {}),
+          }
+        : {
+            defaultEffort: reasoning.defaultEffort,
+            ...(thinkingMandatory ? { thinkingMandatory: true } : {}),
+          },
     },
   };
 }
 
 export function buildModelReasoningConfigPreview(
   modelId: string | undefined,
+  state: ModelReasoningConfigState = {},
 ): SessionConfigOption[] | undefined {
   const reasoning = getModelConfiguration(modelId)?.reasoning;
   if (!reasoning?.thinking || reasoning.toggleOnly) return undefined;
-  const option = buildModelReasoningConfigOption(modelId);
+  const option = buildModelReasoningConfigOption(modelId, state);
   return option ? [option] : undefined;
 }

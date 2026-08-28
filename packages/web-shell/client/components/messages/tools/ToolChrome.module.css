@@ -438,9 +438,11 @@
 
 .lineName {
   flex-shrink: 0;
+  font-size: 13px;
 }
 
 .lineArg {
+  font-size: 13px;
   min-width: 0;
   flex: 1;
   overflow: hidden;

@@ -130,6 +130,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import type { SessionArchiveCoordinator } from './server/session-archive.js';
 import type {
   DaemonTrustPolicySnapshot,
   DaemonWorkspaceTrustDecision,
@@ -152,6 +153,7 @@ import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import type {
   ChannelDeliveryHandler,
   ChannelDeliveryHostResult,
+  CurrentSessionScheduledTaskCreateHandler,
   ExternalToolGuardHandler,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import { getCliVersion } from '../utils/version.js';
@@ -1594,9 +1596,10 @@ function certCoversHost(x509: X509Certificate, host: string): boolean {
  *   - array → first non-empty string element after trim, or undefined
  *   - anything else (object, number, boolean, undefined) → undefined
  *
- * Returning `undefined` is the bridge's signal to use its own
- * `getCurrentGeminiMdFilename()` default — so a malformed value
- * keeps the daemon alive rather than producing a garbage filename.
+ * Returning `undefined` leaves the workspace on the daemon's init-default
+ * chain — the primary workspace's configured `context.fileName` snapshot
+ * (`contextFilenameForInit`), then the hard-coded `QWEN.md` — so a malformed
+ * value keeps the daemon alive rather than producing a garbage filename.
  */
 export function extractContextFilename(value: unknown): string | undefined {
   if (typeof value === 'string') {
@@ -2113,8 +2116,6 @@ async function loadServeRuntimeModules() {
     createDaemonWorkspaceService: workspaceModule.createDaemonWorkspaceService,
     WorkspaceSettingsPartialPersistError:
       workspaceTypesModule.WorkspaceSettingsPartialPersistError,
-    WorkspaceSkillNotToggleableError:
-      workspaceTypesModule.WorkspaceSkillNotToggleableError,
     createDaemonStatusProvider:
       daemonStatusProviderModule.createDaemonStatusProvider,
     createWorkspaceProvidersStatusProvider:
@@ -2162,6 +2163,7 @@ function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
   sessionArtifactsPersistenceAvailable: boolean,
+  currentSessionSchedulingAvailable: boolean,
   env: Readonly<Record<string, string | undefined>>,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
@@ -2180,6 +2182,7 @@ function currentServeFeaturesForRunQwenServe(
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
+    currentSessionSchedulingAvailable,
     workspaceGenerationAvailable: true,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
@@ -2202,6 +2205,7 @@ function createBootstrapCapabilities(input: {
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
+  currentSessionSchedulingAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   env: Readonly<Record<string, string | undefined>>;
 }): CapabilitiesEnvelope {
@@ -2216,6 +2220,7 @@ function createBootstrapCapabilities(input: {
       input.opts,
       input.sessionShellCommandEnabled,
       input.sessionArtifactsPersistenceAvailable,
+      input.currentSessionSchedulingAvailable,
       input.env,
     ),
     modelServices: [],
@@ -2409,6 +2414,7 @@ function createBootstrapServeApp(input: {
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
+  currentSessionSchedulingAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   multiWorkspaceCapabilitiesRequireRuntime: boolean;
   getRuntimeError: () => string | undefined;
@@ -2427,6 +2433,7 @@ function createBootstrapServeApp(input: {
     qwenCodeVersion,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    currentSessionSchedulingAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime,
     getRuntimeError,
@@ -2492,6 +2499,7 @@ function createBootstrapServeApp(input: {
         qwenCodeVersion,
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
+        currentSessionSchedulingAvailable,
         permissionPolicy,
         env: process.env,
       }),
@@ -2631,6 +2639,7 @@ function createBootstrapServeApp(input: {
           opts,
           sessionShellCommandEnabled,
           sessionArtifactsPersistenceAvailable,
+          currentSessionSchedulingAvailable,
           process.env,
         ),
       },
@@ -4107,6 +4116,12 @@ async function runQwenServeImpl(
   // bucket plus the window-scoped event-loop histogram it resets each seal.
   // Torn down together with the event-loop monitor on runtime restart/stop.
   let daemonMetricsSampler: { dispose(): void } | undefined;
+  // Low-frequency sweep refreshing bound-PR state snapshots (open → merged).
+  // The refresh module loads via dynamic import (see start site) because it
+  // pulls the SessionService chain, which must stay out of the pre-listen
+  // static closure; the generation guards dispose-vs-async-start races.
+  let sessionPrRefreshTimer: { dispose(): void } | undefined;
+  let sessionPrRefreshGeneration = 0;
   let runtimeStartupError: string | undefined;
   let runtimeStarting: Promise<void> | undefined;
   let markRuntimeReady!: () => void;
@@ -4126,6 +4141,10 @@ async function runQwenServeImpl(
     daemonEventLoopMonitor = undefined;
     const metricsSampler = daemonMetricsSampler;
     daemonMetricsSampler = undefined;
+    const prRefreshTimer = sessionPrRefreshTimer;
+    sessionPrRefreshTimer = undefined;
+    sessionPrRefreshGeneration += 1;
+    prRefreshTimer?.dispose();
     try {
       eventLoopMonitor?.dispose();
     } catch (err) {
@@ -4351,6 +4370,7 @@ async function runQwenServeImpl(
       stopScheduledTaskKeepalive?: () => void;
       stopWorkspaceGitState?: () => void;
       stopLiveCoordinator?: () => void;
+      stopWebTerminalRegistry?: () => void;
       subSessionStoppers?: Array<() => void>;
     };
     const stopSafely = (name: string, stop: (() => void) | undefined) => {
@@ -4367,6 +4387,7 @@ async function runQwenServeImpl(
     stopSafely('scheduled-task keepalive', locals.stopScheduledTaskKeepalive);
     stopSafely('workspace git state', locals.stopWorkspaceGitState);
     stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
+    stopSafely('web terminal registry', locals.stopWebTerminalRegistry);
     stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {
       stopSafely('sub-session launcher', stop);
@@ -4981,15 +5002,6 @@ async function runQwenServeImpl(
         const fresh = loadSettingsForPersistence(workspace);
         const normalizedName = skillName.trim().toLowerCase();
         const resolved = resolveSkillSettings(fresh);
-        const disablement = resolved.disablements.get(normalizedName);
-        if (disablement?.reason === 'hard' && disablement.lockedScope) {
-          throw new runtime.WorkspaceSkillNotToggleableError(
-            skillName,
-            'locked',
-            disablement.lockedScope,
-          );
-        }
-
         const workspaceDisabled = skillSettingStrings(
           fresh,
           WORKSPACE_SETTING_SCOPE,
@@ -5074,18 +5086,6 @@ async function runQwenServeImpl(
 
         for (const skillName of skillNames) {
           const normalizedName = skillName.trim().toLowerCase();
-          const disablement = resolved.disablements.get(normalizedName);
-          if (disablement?.reason === 'hard' && disablement.lockedScope) {
-            outcomes.push({
-              skillName,
-              error: new runtime.WorkspaceSkillNotToggleableError(
-                skillName,
-                'locked',
-                disablement.lockedScope,
-              ),
-            });
-            continue;
-          }
           const updated = updateWorkspaceSkillSettingLists(
             next,
             skillName,
@@ -5193,9 +5193,55 @@ async function runQwenServeImpl(
     // from a child's agent turn and (for 'first-turn') return its result.
     // Dynamic-imported (not at module scope) so the serve fast-path bundle
     // closure check doesn't trace create-sub-session's transitive deps.
-    const { createSubSessionLauncher } = await import(
-      './create-sub-session.js'
-    );
+    const [{ createSubSessionLauncher }, scheduledTaskRoutes] =
+      await Promise.all([
+        import('./create-sub-session.js'),
+        import('./routes/scheduled-tasks.js'),
+      ]);
+    const createCurrentSessionScheduledTaskHandler =
+      (
+        workspaceCwd: string,
+        runtimeBaseDir: string,
+        getBridge: () => AcpSessionBridge | undefined,
+        assertGenerationOpen: () => void,
+      ): CurrentSessionScheduledTaskCreateHandler =>
+      async ({
+        callerSessionId,
+        cron,
+        prompt,
+        recurring,
+        assertCallerPromptActive,
+      }) => {
+        const targetBridge = getBridge();
+        if (!targetBridge) {
+          throw new Error(
+            'Current-session scheduling is unavailable while the workspace runtime is starting.',
+          );
+        }
+        const task =
+          await scheduledTaskRoutes.createScheduledTaskWithExistingSession(
+            {
+              workspaceCwd,
+              runtimeBaseDir,
+              bridge: targetBridge,
+              assertGenerationOpen,
+              resolveLiveSessionOwner: (sessionId) =>
+                workspaceRegistryForPersistence.current === undefined
+                  ? { kind: 'unavailable' }
+                  : workspaceRegistryForPersistence.current.resolveLiveSessionOwner(
+                      sessionId,
+                    ),
+            },
+            {
+              sessionId: callerSessionId,
+              cron,
+              prompt,
+              recurring,
+            },
+            { source: 'cron-tool', assertCallerPromptActive },
+          );
+        return { id: task.id, cron: task.cron };
+      };
     // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
     // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)
     // brings its own options.
@@ -5217,6 +5263,13 @@ async function runQwenServeImpl(
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         onCreateSubSession: subSessionLauncher.launch,
+        onCreateCurrentSessionScheduledTask:
+          createCurrentSessionScheduledTaskHandler(
+            boundWorkspace,
+            primarySessionRuntimeBaseDir,
+            () => bridgeRef,
+            () => primaryGenerationGuard.assertOpen(),
+          ),
         onChannelDelivery: createBoundChannelDeliveryHandler(
           boundWorkspace,
           () => channelWorkerManager,
@@ -5668,6 +5721,13 @@ async function runQwenServeImpl(
         ),
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
+        onCreateCurrentSessionScheduledTask:
+          createCurrentSessionScheduledTaskHandler(
+            workspaceInput.cwd,
+            secondaryEnv.sessionRuntimeBaseDir,
+            () => secondaryBridgeRef,
+            () => secondaryGenerationGuard.assertOpen(),
+          ),
         onChannelDelivery: createBoundChannelDeliveryHandler(
           workspaceInput.cwd,
           () => channelWorkerManager,
@@ -6091,6 +6151,43 @@ async function runQwenServeImpl(
       },
     };
 
+    // Same lifecycle as the metrics sampler above: retire any prior timer
+    // before starting a new one (buildRuntime re-entry), unref'd inside.
+    // Dynamic import on purpose: session-pr-refresh statically pulls the
+    // SessionService chain (glob et al.), which the serve fast-path bundle
+    // closure check forbids in this pre-listen root's static closure.
+    sessionPrRefreshTimer?.dispose();
+    const refreshGeneration = ++sessionPrRefreshGeneration;
+    void import('./server/session-pr-refresh.js')
+      .then((mod) => {
+        if (refreshGeneration !== sessionPrRefreshGeneration) return;
+        sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
+          workspaceRegistry,
+          // The coordinator lives on the serve app (createServeApp below),
+          // which is built after this timer starts; read it per tick like
+          // the metrics sampler reads `acpHandle`.
+          getArchiveCoordinator: () =>
+            (
+              app.locals as {
+                sessionArchiveCoordinator?: SessionArchiveCoordinator;
+              }
+            ).sessionArchiveCoordinator,
+        });
+      })
+      .catch((error) => {
+        // Degrade to "no PR-state sweep" instead of leaking an unhandled
+        // rejection: the serve fast path installs no process-level
+        // unhandledRejection handler before this runs, and Node's default
+        // for one is to exit — a failed chunk load (e.g. an in-place
+        // upgrade replacing dist/ under the running daemon) would take
+        // down every runtime, session, and connection the daemon serves.
+        daemonLog.warn(
+          `session-pr-refresh load failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
+
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     interface WorkspaceRuntimeBuildOptions {
       readonly provenance?: WorkspaceRuntimeProvenance;
@@ -6217,6 +6314,10 @@ async function runQwenServeImpl(
         ...(provenance === 'live-conversation'
           ? {
               notifySentCompletion: true,
+              getStandaloneSessionService: () =>
+                (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+                  'standaloneSessionService'
+                ],
               isolatedWorkspace: {
                 materializeDirectory: (sessionId: string) =>
                   liveConversationWorkspace.materializeConversationDirectory(
@@ -6242,6 +6343,13 @@ async function runQwenServeImpl(
           ),
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
+          onCreateCurrentSessionScheduledTask:
+            createCurrentSessionScheduledTaskHandler(
+              cwd,
+              wsEnv.sessionRuntimeBaseDir,
+              () => wsBridgeRef,
+              () => generationGuard.assertOpen(),
+            ),
           onChannelDelivery: createBoundChannelDeliveryHandler(
             cwd,
             () => channelWorkerManager,
@@ -6752,6 +6860,9 @@ async function runQwenServeImpl(
             const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
               'stopScheduledTaskKeepaliveForWorkspace'
             ] as ((workspaceCwd: string) => void) | undefined;
+            const releaseWebTerminalsForWorkspace = app?.locals?.[
+              'releaseWebTerminalsForWorkspace'
+            ] as ((workspaceCwd: string) => void) | undefined;
             try {
               stopWorkspaceGitStateForWorkspace?.(runtimeToDrain.workspaceCwd);
             } catch (err) {
@@ -6767,6 +6878,14 @@ async function runQwenServeImpl(
             } catch (err) {
               daemonLog.error(
                 'workspace scheduled-task cleanup error',
+                err instanceof Error ? err : null,
+              );
+            }
+            try {
+              releaseWebTerminalsForWorkspace?.(runtimeToDrain.workspaceCwd);
+            } catch (err) {
+              daemonLog.error(
+                'workspace web-terminal cleanup error',
                 err instanceof Error ? err : null,
               );
             }
@@ -6938,6 +7057,7 @@ async function runQwenServeImpl(
       // (keepalive) and reloads them on boot (rehydration). Off by default so
       // direct createServeApp embeds/tests don't spawn sessions.
       manageScheduledTaskSessions: true,
+      currentSessionSchedulingAvailable: deps.bridge === undefined,
       fsFactory: routeFsFactory,
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
@@ -7306,6 +7426,7 @@ async function runQwenServeImpl(
     qwenCodeVersion: cliVersion,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    currentSessionSchedulingAvailable: false,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime: workspaceInputs.length > 1,
     getRuntimeError: () => runtimeStartupError,
@@ -8523,7 +8644,7 @@ async function runQwenServeImpl(
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
-            // NOTE: the SIGINT/SIGTERM handlers stay attached during the
+            // NOTE: the shutdown signal handlers stay attached during the
             // drain so a second signal can take the explicit force-exit path
             // above. Detaching them up front would leave Node's default signal
             // behavior in charge and could orphan agent children. We detach
@@ -8556,6 +8677,7 @@ async function runQwenServeImpl(
               if (!preserveSignalHandlers) {
                 process.removeListener('SIGINT', onSignal);
                 process.removeListener('SIGTERM', onSignal);
+                process.removeListener('SIGHUP', onSignal);
               }
               process.removeListener(
                 'uncaughtExceptionMonitor',
@@ -8861,6 +8983,7 @@ async function runQwenServeImpl(
 
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
+      process.on('SIGHUP', onSignal);
       process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
       // The per-attempt boot-error listener was removed by handleListening.
