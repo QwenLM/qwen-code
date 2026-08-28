@@ -214,7 +214,7 @@ export function sendBridgeError(
     });
     return;
   }
-  if (err instanceof BridgeTimeoutError) {
+  if (err instanceof BridgeTimeoutError && err.label === 'newSession') {
     recordExpectedBridgeError(err, ctx, daemonLog);
     res.set('Retry-After', String(restoreRetryAfterSeconds(err.timeoutMs)));
     res.status(504).json({

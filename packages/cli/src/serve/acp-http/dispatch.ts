@@ -840,6 +840,13 @@ export function toRpcError(err: unknown): {
     }
     case 'BridgeTimeoutError': {
       const timeoutError = err as BridgeTimeoutError;
+      if (timeoutError.label !== 'newSession') {
+        return {
+          code: RPC.INTERNAL_ERROR,
+          message: 'Internal error',
+          data: { errorKind: 'internal' },
+        };
+      }
       return {
         code: RPC.INTERNAL_ERROR,
         message: timeoutError.message,

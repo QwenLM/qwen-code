@@ -10341,6 +10341,7 @@ describe('createAcpSessionBridge', () => {
     const releaseAdmission = vi.fn();
     const handle = makeChannel({
       loadSessionImpl: () => lateRestore.promise,
+      extMethodImpl: activeWorkCloseImpl,
     });
     const restoreEvents = recordRestoreEvents();
     const bridge = makeBridge({
@@ -10654,6 +10655,7 @@ describe('createAcpSessionBridge', () => {
     const lateRestore = deferred<LoadSessionResponse>();
     const handle = makeChannel({
       loadSessionImpl: () => lateRestore.promise,
+      extMethodImpl: activeWorkCloseImpl,
       newSessionImpl: async (params) => {
         const requestedSessionId =
           typeof params._meta === 'object' && params._meta !== null
@@ -10724,6 +10726,7 @@ describe('createAcpSessionBridge', () => {
     const lateRestore = deferred<LoadSessionResponse>();
     const handle = makeChannel({
       loadSessionImpl: () => lateRestore.promise,
+      extMethodImpl: activeWorkCloseImpl,
       newSessionImpl: async (params) => {
         const requestedSessionId =
           typeof params._meta === 'object' && params._meta !== null
@@ -10927,11 +10930,67 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('clears overdue state per restore while another remains within grace', async () => {
+    vi.useFakeTimers();
+    const lateA = deferred<LoadSessionResponse>();
+    const lateB = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: (params) =>
+        params.sessionId === 'overdue-a' ? lateA.promise : lateB.promise,
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
+          ? { closed: true }
+          : {},
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 5,
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const restoreA = bridge
+        .loadSession({ sessionId: 'overdue-a', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(10);
+      const restoreB = bridge
+        .loadSession({ sessionId: 'within-grace-b', workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await restoreA).toBeInstanceOf(SessionRestoreTimeoutError);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await restoreB).toBeInstanceOf(SessionRestoreTimeoutError);
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'restore_settlement_overdue' });
+
+      lateA.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: expect.any(String) });
+
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'restore_settlement_overdue' });
+      lateB.reject(new Error('late failure'));
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
   it('stops condemning a channel once its abandoned restore settles cleanly', async () => {
     vi.useFakeTimers();
     const lateRestore = deferred<LoadSessionResponse>();
     const handle = makeChannel({
       loadSessionImpl: () => lateRestore.promise,
+      extMethodImpl: activeWorkCloseImpl,
     });
     const bridge = makeBridge({
       sessionScope: 'thread',
@@ -11205,6 +11264,7 @@ describe('createAcpSessionBridge', () => {
         params.sessionId === 'restore-first'
           ? firstRestore.promise
           : secondRestore.promise,
+      extMethodImpl: activeWorkCloseImpl,
     });
     const bridge = makeBridge({
       sessionScope: 'thread',
@@ -11305,6 +11365,56 @@ describe('createAcpSessionBridge', () => {
             call.params['sessionId'] === 'restore-timeout-pending-spawn',
         ),
       ).toHaveLength(1);
+      expect(handle.killed).toBe(false);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('quarantines fresh work when late restore cleanup is refused', async () => {
+    vi.useFakeTimers();
+    const lateRestore = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => lateRestore.promise,
+      extMethodImpl: (method, params) => {
+        if (
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+          params['sessionId'] === 'restore-close-refused'
+        ) {
+          return { closed: false, holds: [agentHold('late-agent')] };
+        }
+        return { closed: true, holds: [] };
+      },
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      sessionRestoreTimeoutMs: 20,
+      channelFactory: async () => handle.channel,
+    });
+    try {
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const timedOut = bridge
+        .loadSession({
+          sessionId: 'restore-close-refused',
+          workspaceCwd: WS_A,
+        })
+        .catch((error: unknown) => error);
+      await advanceRestoreDeadline(20);
+      expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+
+      lateRestore.resolve({});
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toMatchObject({ reason: 'restore_cleanup_failed' });
+      await expect(
+        bridge.sendPrompt(sibling.sessionId, {
+          sessionId: sibling.sessionId,
+          prompt: [{ type: 'text', text: 'still alive' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
       expect(handle.killed).toBe(false);
     } finally {
       await bridge.shutdown();

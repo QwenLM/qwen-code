@@ -86,6 +86,14 @@ describe('toRpcError', () => {
     });
   });
 
+  it('leaves non-session-initialization bridge timeouts on the generic path', () => {
+    expect(toRpcError(new BridgeTimeoutError('initialize', 10_000))).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: 'Internal error',
+      data: { errorKind: 'internal' },
+    });
+  });
+
   it('maps the abandoned-restore fence with its reason and hint', () => {
     // SDK transport negotiation prefers acp-ws and acp-http over REST, so
     // without this mapping the default arm turns a retryable fence into an

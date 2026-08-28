@@ -3470,7 +3470,7 @@ export class Config {
 
     if (!this.provisionalWorkspace) {
       recordStartupEvent('config_initialize_hierarchical_memory_start');
-      await this.refreshHierarchicalMemory('session_start');
+      await this.refreshHierarchicalMemory('session_start', options?.signal);
       recordStartupEvent('config_initialize_hierarchical_memory_end');
       this.debugLogger.debug('Hierarchical memory loaded');
     }
@@ -3933,6 +3933,7 @@ export class Config {
 
   async refreshHierarchicalMemory(
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
+    signal?: AbortSignal,
   ): Promise<void> {
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
@@ -3965,6 +3966,7 @@ export class Config {
         loadReason,
         onInstructionsLoaded: createInstructionsLoadedCallback(
           () => this.hookSystem,
+          signal,
         ),
       },
     );

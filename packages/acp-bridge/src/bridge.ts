@@ -933,12 +933,11 @@ interface ChannelInfo {
    */
   unsettledAbandonedRestores: Set<string>;
   /**
-   * Set when an abandoned restore has outlived its settlement grace period.
-   * Existing sessions keep working; fresh session work is refused so the
-   * channel can drain and be recycled, which is what finally closes the
-   * transport out from under the request we cannot cancel.
+   * Abandoned restore ids that outlived their settlement grace. Existing
+   * sessions keep working; fresh session work is refused while this is
+   * non-empty so the channel can drain and be recycled.
    */
-  restoreSettlementOverdue: boolean;
+  overdueAbandonedRestores: Set<string>;
   /** Grace timers armed at restore abandonment, keyed by session id. */
   restoreSettlementTimers: Map<string, NodeJS.Timeout>;
   /** Timed-out newSession requests whose underlying ACP call is still live. */
@@ -2648,7 +2647,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (ci.isQuarantined) {
         return { channel: ci, reason: 'restore_cleanup_failed' };
       }
-      if (ci.restoreSettlementOverdue) {
+      if (ci.overdueAbandonedRestores.size > 0) {
         return { channel: ci, reason: 'restore_settlement_overdue' };
       }
       if (ci.newSessionCleanupFailed) {
@@ -3482,7 +3481,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   function channelIsCondemned(ci: ChannelInfo): boolean {
     return (
       ci.isQuarantined ||
-      ci.restoreSettlementOverdue ||
+      ci.overdueAbandonedRestores.size > 0 ||
       ci.newSessionCleanupFailed ||
       ci.overdueAbandonedNewSessions.size > 0
     );
@@ -3509,7 +3508,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ci.restoreSettlementTimers.delete(sessionId);
       if (!ci.unsettledAbandonedRestores.has(sessionId)) return;
       if (ci.isDying || !aliveChannels.has(ci)) return;
-      ci.restoreSettlementOverdue = true;
+      ci.overdueAbandonedRestores.add(sessionId);
       writeStderrLine(
         `qwen serve: abandoned session/${action} for ${JSON.stringify(sessionId)} has not settled ` +
           `${restoreSettlementGraceMs}ms after its deadline; refusing fresh sessions on channel ${ci.id} until it settles or drains`,
@@ -4250,7 +4249,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         workspaceMcpAuthenticationTimers: new Map(),
         emptyReapPending: false,
         unsettledAbandonedRestores: new Set(),
-        restoreSettlementOverdue: false,
+        overdueAbandonedRestores: new Set(),
         restoreSettlementTimers: new Map(),
         unsettledAbandonedNewSessions: new Set(),
         overdueAbandonedNewSessions: new Set(),
@@ -7462,9 +7461,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           clearTimeout(reclaimedTimer);
           channel.restoreSettlementTimers.delete(req.sessionId);
         }
-        if (channel.unsettledAbandonedRestores.size === 0) {
-          channel.restoreSettlementOverdue = false;
-        }
+        channel.overdueAbandonedRestores.delete(req.sessionId);
         releaseAdmissionOnce();
         resolveSettlement();
         return;
@@ -7484,7 +7481,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           return;
         }
         try {
-          await Promise.race([
+          const closeResult = await Promise.race([
             withTimeout(
               channel.connection.extMethod(
                 SERVE_CONTROL_EXT_METHODS.sessionClose,
@@ -7498,6 +7495,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ),
             getChannelClosedReject(channel),
           ]);
+          if (!isRecord(closeResult) || closeResult['closed'] !== true) {
+            throw new Error('ACP child refused abandoned restore cleanup');
+          }
           telemetry.event('session.restore.cleanup', {
             'qwen-code.daemon.session_restore.action': action,
             'qwen-code.daemon.session_restore.cleanup_result': 'closed',
@@ -7565,11 +7565,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           clearTimeout(graceTimer);
           channel.restoreSettlementTimers.delete(req.sessionId);
         }
-        // Only the last overdue restore lifts the admission block; a second
-        // one still outstanding keeps the channel closed to fresh work.
-        if (channel.unsettledAbandonedRestores.size === 0) {
-          channel.restoreSettlementOverdue = false;
-        }
+        channel.overdueAbandonedRestores.delete(req.sessionId);
         releaseAdmissionOnce();
         resolveSettlement();
       }

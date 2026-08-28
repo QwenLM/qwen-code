@@ -89,6 +89,17 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
+  it('leaves non-session-initialization bridge timeouts on the generic path', () => {
+    const { response, status, json, set } = responseMock();
+    const error = new BridgeTimeoutError('initialize', 10_000);
+
+    sendBridgeError(response, error);
+
+    expect(set).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({ error: error.message });
+  });
+
   it.each([
     ['conversation_runtime_in_use', true],
     ['conversation_runtime_unavailable', true],
