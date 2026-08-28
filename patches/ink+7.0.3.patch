@@ -290,6 +290,15 @@ index ef659f3..767d861 100644
          const hasStaticOutput = staticOutput !== '';
          const isTty = this.options.stdout.isTTY;
          // Detect fullscreen: output fills or exceeds terminal height.
+@@ -710,7 +729,7 @@ export default class Ink {
+             if (sync) {
+                 this.options.stdout.write(bsu);
+             }
+-            this.options.stdout.write(ansiEscapes.clearTerminal + this.fullStaticOutput + output);
++            this.options.stdout.write(ansiEscapes.clearTerminal + this.fullStaticOutput + outputToRender);
+             this.lastOutput = output;
+             this.lastOutputToRender = outputToRender;
+             this.lastOutputHeight = outputHeight;
 diff --git a/node_modules/ink/build/log-update.js b/node_modules/ink/build/log-update.js
 index cdb5fc4..89925ea 100644
 --- a/node_modules/ink/build/log-update.js

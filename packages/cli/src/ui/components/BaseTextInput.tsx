@@ -176,16 +176,20 @@ export function getPhysicalCursorPosition(
 ): { x: number; y: number } | undefined {
   if (!showCursor || !hasMeasured) return undefined;
 
-  const position = getAbsolutePosition(node);
-  if (!position) return undefined;
+  if (!node) return undefined;
 
   const relativeRow = cursorVisualRow - scrollVisualRow;
   const lineText = linesToRender[relativeRow] || '';
   const textBeforeCursor = cpSlice(lineText, 0, cursorVisualCol);
   const physicalCol = stringWidth(textBeforeCursor);
   return {
-    x: position.left + prefixWidth + physicalCol,
-    y: position.top + relativeRow + 1,
+    // Ink recalculates Yoga layout after this render, before reading these values.
+    get x() {
+      return getAbsolutePosition(node)!.left + prefixWidth + physicalCol;
+    },
+    get y() {
+      return getAbsolutePosition(node)!.top + relativeRow + 1;
+    },
   };
 }
 

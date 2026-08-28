@@ -4,10 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, useState, type ReactNode } from 'react';
+import { act, useRef, useState, type ReactNode } from 'react';
 import ansiEscapes from 'ansi-escapes';
-import { Box, render, Static, Text, type Instance, useCursor } from 'ink';
+import {
+  Box,
+  render,
+  Static,
+  Text,
+  type DOMElement,
+  type Instance,
+  useBoxMetrics,
+  useCursor,
+} from 'ink';
 import { afterEach, describe, expect, it } from 'vitest';
+import { getPhysicalCursorPosition } from './components/BaseTextInput.js';
 
 const SHOW_CURSOR = '\u001B[?25h';
 const mountedApps = new Set<Instance>();
@@ -221,6 +231,64 @@ describe.each([false, true])(
       await unmount(app);
     });
 
+    it('positions a lazy cursor after content above it shrinks out of fullscreen', async () => {
+      const capture = createTestStdout(6);
+      let shrinkHistory!: () => void;
+
+      function History() {
+        const [multiline, setMultiline] = useState(true);
+        shrinkHistory = () => setMultiline(false);
+        return <Text>{multiline ? 'history-a\nhistory-b' : 'history'}</Text>;
+      }
+
+      function CursorOwner() {
+        const ref = useRef<DOMElement | null>(null);
+        const { hasMeasured } = useBoxMetrics(ref);
+        useCursor().setCursorPosition(
+          getPhysicalCursorPosition(ref.current, {
+            hasMeasured,
+            showCursor: true,
+            cursorVisualRow: 0,
+            cursorVisualCol: 0,
+            scrollVisualRow: 0,
+            linesToRender: [''],
+            prefixWidth: 2,
+          }),
+        );
+        return (
+          <Box ref={ref} flexDirection="column">
+            <Text>border</Text>
+            <Text>input</Text>
+          </Box>
+        );
+      }
+
+      const app = await mount(
+        <Box flexDirection="column">
+          <History />
+          <CursorOwner />
+          <Text>{'footer-a\nfooter-b'}</Text>
+        </Box>,
+        capture.stdout,
+        incrementalRendering,
+      );
+      capture.reset();
+
+      await updateAndFlush(app, shrinkHistory);
+
+      const output = capture.read();
+      expect(output).toContain(ansiEscapes.clearTerminal);
+      expect(output).not.toContain(
+        'history\nborder\ninput\nfooter-a\nfooter-b\n' +
+          expectedCursorSuffix(2),
+      );
+      expect(output).toContain(
+        'history\nborder\ninput\nfooter-a\nfooter-b\n' +
+          expectedCursorSuffix(3),
+      );
+      await unmount(app);
+    });
+
     it('positions the hardware cursor at the correct row in fullscreen (y > 0)', async () => {
       // Regression test for QwenLM/qwen-code#7980: in fullscreen mode the
       // output has no trailing newline, so the terminal cursor sits ON the
@@ -359,6 +427,63 @@ describe.each([false, true])(
       expect(capture.read()).toContain(expectedCursorSuffix(3, 4));
       await unmount(app);
     });
+
+    it.each([
+      { direction: 'grows', initiallyMultiline: false, staleCursorUp: 3 },
+      { direction: 'shrinks', initiallyMultiline: true, staleCursorUp: 1 },
+    ])(
+      'does not show a stale cursor when content above the input $direction',
+      async ({ initiallyMultiline, staleCursorUp }) => {
+        const capture = createTestStdout();
+        let updateHistory!: () => void;
+
+        function History() {
+          const [multiline, setMultiline] = useState(initiallyMultiline);
+          updateHistory = () => setMultiline(!initiallyMultiline);
+          return <Text>{multiline ? 'history-a\nhistory-b' : 'history'}</Text>;
+        }
+
+        function CursorOwner() {
+          const ref = useRef<DOMElement | null>(null);
+          const { hasMeasured } = useBoxMetrics(ref);
+          useCursor().setCursorPosition(
+            getPhysicalCursorPosition(ref.current, {
+              hasMeasured,
+              showCursor: true,
+              cursorVisualRow: 0,
+              cursorVisualCol: 0,
+              scrollVisualRow: 0,
+              linesToRender: [''],
+              prefixWidth: 2,
+            }),
+          );
+          return (
+            <Box ref={ref} flexDirection="column">
+              <Text>border</Text>
+              <Text>input</Text>
+            </Box>
+          );
+        }
+
+        const app = await mount(
+          <Box flexDirection="column">
+            <History />
+            <CursorOwner />
+            <Text>footer</Text>
+          </Box>,
+          capture.stdout,
+          incrementalRendering,
+        );
+        capture.reset();
+
+        await updateAndFlush(app, updateHistory);
+
+        const output = capture.read();
+        expect(output).not.toContain(expectedCursorSuffix(staleCursorUp));
+        expect(output).toContain(expectedCursorSuffix(2));
+        await unmount(app);
+      },
+    );
 
     it('does not write when a sibling rerenders identical output', async () => {
       const capture = createTestStdout();
