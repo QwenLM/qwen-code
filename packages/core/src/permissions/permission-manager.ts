@@ -124,6 +124,27 @@ export interface PermissionManagerConfig {
 }
 
 /**
+ * Classifies a raw `tools.core` entry as name-less: it carries no usable
+ * tool name. Non-string entries, empty/whitespace-only strings, malformed
+ * rules (unbalanced parens parse to `invalid`), and entries whose tool
+ * part parses to the empty string (`"()"`, `"(ls -l)"`) are all name-less.
+ *
+ * This is the single shared classification behind BOTH faces of the
+ * empty-allowlist collapse: the gate in `PermissionManager.initialize()`
+ * below and the CLI startup notice in `packages/cli/src/config/config.ts`.
+ * They must agree on what counts as name-less, or the notice can stay
+ * silent for a list the gate collapses to the empty allowlist — exactly
+ * the silent tool-free session #10065 set out to diagnose (#10080).
+ */
+export function isNamelessCoreToolsEntry(entry: unknown): boolean {
+  if (typeof entry !== 'string' || entry.trim() === '') {
+    return true;
+  }
+  const rule = parseRule(entry);
+  return rule.invalid || rule.toolName === '';
+}
+
+/**
  * Manages tool and command permissions by evaluating a set of
  * prioritised rules against allow / ask / deny lists.
  *
@@ -224,17 +245,21 @@ export class PermissionManager {
     // non-array value (e.g. `"tools": { "core": null }`, the common JSON
     // idiom for clearing this deprecated key) means no restriction.
     // Entries that carry no tool name — the empty string, whitespace-only
-    // strings, non-string garbage — are dropped: an all-empty-string list
-    // (`[""]`, e.g. an unset-variable expansion written into settings)
-    // collapses to the explicit EMPTY allowlist with both #10065
-    // diagnostics instead of a size-1 allowlist that matches nothing and
-    // silently disables every tool while `isCoreToolsAllowListEmpty()`
-    // stays false (#10065).
+    // strings, non-string garbage, malformed rules, and entries whose tool
+    // part parses to the empty string (`"()"`, `"(ls -l)"`, e.g. an
+    // unset-variable or template expansion written into settings) — are
+    // dropped via the shared `isNamelessCoreToolsEntry` classification, so
+    // a list made up only of such entries (`[""]`, `["()"]`) collapses to
+    // the explicit EMPTY allowlist with both #10065 diagnostics instead of
+    // a size-1 allowlist that matches nothing and silently disables every
+    // tool while `isCoreToolsAllowListEmpty()` stays false (#10065). The
+    // CLI startup notice uses the same helper, so notice and gate cannot
+    // drift apart (#10080).
     const rawCoreTools = this.config.getCoreTools?.();
     if (Array.isArray(rawCoreTools)) {
       this.coreToolsAllowList = new Set(
         rawCoreTools
-          .filter((t) => typeof t === 'string' && t.trim() !== '')
+          .filter((t) => !isNamelessCoreToolsEntry(t))
           .map((t) => parseRule(t).toolName),
       );
     }
