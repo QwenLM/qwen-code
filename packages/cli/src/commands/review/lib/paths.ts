@@ -9,8 +9,8 @@
 // preferences resolve under Storage's project directory. Use `path.join`
 // rather than string concatenation so Windows backslashes are produced.
 
-import { existsSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core';
 import { safeTarget } from '../../../utils/paths.js';
 
@@ -251,4 +251,92 @@ export function inertPath(p: string): string {
   // tail of a filename run as markup in the file the agent treats as
   // authoritative.
   return p.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u2500`]+/gu, ' ');
+}
+
+/**
+ * `realpathSync(p)`, or the same answer for a path whose leaf does not exist
+ * yet: resolve the deepest ancestor that does, then re-append what was walked
+ * past. A path with no existing ancestor at all (an unreachable mount, a
+ * hostile chain) comes back untouched — the caller's containment check still
+ * rules on it, and refusing to name it at all would fail reviews that work.
+ */
+function canonicalise(abs: string): string {
+  const walked: string[] = [];
+  let cur = abs;
+  for (;;) {
+    try {
+      const real = realpathSync(cur);
+      return walked.length === 0 ? real : join(real, ...walked.reverse());
+    } catch {
+      const parent = resolve(cur, '..');
+      // `resolve('/', '..')` is `/`: the root is its own parent, so this is
+      // the termination condition, not a step.
+      if (parent === cur) return abs;
+      // Strip only THIS platform's separators: `\` is a legal POSIX
+      // filename byte (this PR's own `notes\` fixtures insist on it), and
+      // the two-class strip corrupted a leaf like `\link` into `link` on
+      // the walk-up — the capture then diffed a different name and the real
+      // file dropped mutely (R23: dangling `\link` at the repo root is the
+      // end-to-end shape, since only a realpath FAILURE reaches this walk).
+      walked.push(
+        cur.slice(parent.length).replace(sep === '/' ? /^\/+/ : /^[\\/]+/, ''),
+      );
+      cur = parent;
+    }
+  }
+}
+
+/**
+ * Where a user-supplied path sits relative to the repository root — the ONE
+ * answer both the parent's artifact pin and the child's capture must read.
+ *
+ * `qwen review run <file>` pins the artifact name it polls for from this, and
+ * `capture-local --file` scopes the diff from it. When the two spell the same
+ * file differently the parent polls a name no child ever writes: the review
+ * runs, posts, and then reports "no composed verdict was produced". They drifted
+ * once already, and the two corners below are why one call site cannot be
+ * trusted to re-derive it.
+ *
+ * `resolve` does not follow symlinks while `rev-parse --show-toplevel` returns
+ * the CANONICAL root — on macOS `/tmp` is a symlink to `/private/tmp`, so a
+ * path typed under `/tmp` relativises against a root sharing no prefix with it
+ * and comes back as a `..` walk out of a repository it is plainly inside.
+ * `realpathSync` throws on a path not on disk yet, which a reviewed file may
+ * legitimately be (a brand-new untracked file is exactly that feature's
+ * subject) — so the canonicalisation resolves the nearest ancestor that DOES
+ * exist and re-appends the rest, which is what makes the symlinked prefix and
+ * the not-yet-created file hold at the same time rather than one at a time.
+ *
+ * And `rel.startsWith('..')` is not the containment check it looks like: a
+ * file called `..foo.ts` at the repository root relativises to `..foo.ts` and
+ * would be read as having escaped. What escapes is `..` itself, a path whose
+ * FIRST SEGMENT is `..`, or an absolute one (no relative spelling exists).
+ */
+export function repoRelativeOf(
+  repoRoot: string,
+  file: string,
+  from: string = process.cwd(),
+): { rel: string; abs: string; escapes: boolean } {
+  const abs = canonicalise(resolve(from, file));
+  const rel = relative(repoRoot, abs);
+  // `rel === ''` is the repository ROOT, which is inside the repository — the
+  // one place the old test called an escape. `classifyRunTarget` accepts a
+  // directory target explicitly ("a tab-completed `src/` classifies as a file
+  // target"), so the root is a reachable one, and treating it as an escape
+  // split the two sides that must agree: the parent fell back to pinning the
+  // typed spelling while the child derived `safeTarget('') === 'target'`, so
+  // the poll never matched and a review that had run — and with `--comment`
+  // already posted — reported no verdict. `--file <root>` also threw the
+  // self-contradictory "resolves to <root>, which is outside the repository
+  // at <root>". As a pathspec `.` scopes the diff to the whole tree, which is
+  // what naming the root asks for.
+  const escapes = rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
+  // Git spells every path with forward slashes on every platform, and `rel`
+  // flows VERBATIM into git pathspecs, the candidate's recorded `source`,
+  // and `cachePathFor`'s digest — where node's win32 `relative()` answers
+  // backslashes, one file got two different cache filenames across
+  // platforms and the win32 lane failed every assertion spelling the posix
+  // form (R21-1). Normalized HERE, after the escape check computed against
+  // the platform separator, so both consumers of `rel` see one spelling.
+  return { rel: sep === '/' ? rel : rel.split(sep).join('/'), abs, escapes };
 }
