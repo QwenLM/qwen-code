@@ -19,13 +19,17 @@ import {
 import { Button } from './ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Spinner } from './ui/spinner';
+import { cn } from '@/lib/utils';
 
 interface LocalControlQrButtonProps {
   onOpenSettings: () => void;
+  /** Extra classes for the trigger, e.g. to match a host header's action style. */
+  className?: string;
 }
 
 export function LocalControlQrButton({
   onOpenSettings,
+  className,
 }: LocalControlQrButtonProps) {
   const { t } = useI18n();
   const { baseUrl, token } = useWorkspace();
@@ -61,6 +65,7 @@ export function LocalControlQrButton({
           type="button"
           variant="ghost"
           size="icon-xs"
+          className={cn(className)}
           aria-label={t('localControl.open')}
           title={t('localControl.open')}
         >

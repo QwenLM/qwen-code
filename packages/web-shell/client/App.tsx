@@ -12605,6 +12605,9 @@ export function App({
                               )
                           : undefined
                       }
+                      onOpenLocalControlSettings={
+                        handleOpenLocalControlSettings
+                      }
                     />
                   )}
                 </div>

@@ -2,7 +2,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -502,27 +501,18 @@ export function SettingsMessage({
   useEffect(() => {
     if (categories.length === 0) return;
     if (!categories.some((category) => category.id === activeCategory)) {
-      setActiveCategory(categories[0]!.id);
+      // A deep link (initialCategory) only matters while no valid category
+      // is selected, so it wins on mount but never overrides a later manual
+      // switch. Keeping this in one effect avoids two effects racing to set
+      // the initial category under StrictMode double-invocation.
+      const preferred =
+        initialCategory &&
+        categories.some((category) => category.id === initialCategory)
+          ? initialCategory
+          : categories[0]!.id;
+      setActiveCategory(preferred);
     }
-  }, [activeCategory, categories]);
-
-  // Deep link: apply the requested category once per value, after the
-  // fallback above so this setState wins when both run in the same batch.
-  // A ref (not a dep on activeCategory) keeps later manual category switches
-  // from being forced back.
-  const appliedInitialCategoryRef = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    if (
-      !initialCategory ||
-      appliedInitialCategoryRef.current === initialCategory
-    ) {
-      return;
-    }
-    if (categories.some((category) => category.id === initialCategory)) {
-      appliedInitialCategoryRef.current = initialCategory;
-      setActiveCategory(initialCategory);
-    }
-  }, [initialCategory, categories]);
+  }, [activeCategory, categories, initialCategory]);
 
   useEffect(() => {
     if (error) setMessage(error.message);
