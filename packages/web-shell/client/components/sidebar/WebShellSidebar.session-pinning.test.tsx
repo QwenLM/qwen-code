@@ -1090,4 +1090,43 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
 
+  it('renders each member once when a group mixes pinned and unpinned sessions', async () => {
+    mockDesignGroupCatalog();
+    const pinnedMember = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    const activeMember = makeSession('active-member', {
+      displayName: 'Active member',
+      groupId: 'design-group',
+    });
+    active.sessions = [pinnedMember, activeMember];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedMember];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group?.textContent).toContain('\u00b7 2');
+    const titles = Array.from(
+      group!.querySelectorAll('[data-web-shell-session-title]'),
+    ).map((node) => node.textContent ?? '');
+    expect(
+      titles.filter((title) => title === 'Pinned member'),
+    ).toHaveLength(1);
+    expect(
+      titles.filter((title) => title === 'Active member'),
+    ).toHaveLength(1);
+    // The pinned member still renders in the Pinned section too.
+    expect(pinnedListTitles()).toContain('Pinned member');
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
 });
