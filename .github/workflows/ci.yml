@@ -605,7 +605,7 @@ jobs:
       # timeline from a failed run (#10035): the artifact keeps the samples
       # around long enough to correlate them with this job and runner.
       - name: 'Upload disk-pressure samples'
-        if: "${{ failure() }}"
+        if: '${{ failure() }}'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'disk-pressure-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}'
