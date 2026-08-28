@@ -197,6 +197,18 @@ describe('platform lanes — the retired sensitivity classifier', () => {
   });
 });
 
+describe('GitHub helper tests', () => {
+  it('runs every invocation serially', () => {
+    const helperSteps = Object.values(ci.jobs)
+      .flatMap((job) => job.steps ?? [])
+      .filter((step) => String(step.run ?? '').includes('env.HELPER_TESTS'));
+    expect(helperSteps).not.toHaveLength(0);
+    for (const step of helperSteps) {
+      expect(String(step.run), step.name).toContain('--test-concurrency=1');
+    }
+  });
+});
+
 describe('platform lanes — a failing nightly is visible', () => {
   it('files an issue when the scheduled CI run fails on main', () => {
     // A nightly nobody is told about is the same silence the merge-queue gate
