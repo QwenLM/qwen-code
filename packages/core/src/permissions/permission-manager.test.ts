@@ -2605,6 +2605,33 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('read_file')).toBe(true);
     });
 
+    it('non-string coreTools entries are dropped without throwing', async () => {
+      // Settings loading performs no element validation (the schema
+      // declares only `type: 'array'`), so a hand-edited `"core": [42]`
+      // — or a mixed `["read_file", 42]` — reaches `initialize()` raw.
+      // The `typeof t === 'string'` half of the filter must drop the
+      // garbage instead of letting `parseRule(42)` throw while the
+      // allowlist is built (#10080).
+      pm = new PermissionManager(
+        makeConfig({ coreTools: [42 as unknown as string] }),
+      );
+      expect(() => pm.initialize()).not.toThrow();
+      // An all-non-string list names nothing, so it collapses to the
+      // explicit empty allowlist exactly like `[]` / `[""]` — both
+      // #10065 diagnostics stay reachable.
+      expect(pm.isCoreToolsAllowListEmpty()).toBe(true);
+      expect(await pm.isToolEnabled('read_file')).toBe(false);
+
+      // A mixed list keeps its named tool and drops the garbage entry.
+      pm = new PermissionManager(
+        makeConfig({ coreTools: ['read_file', 42 as unknown as string] }),
+      );
+      expect(() => pm.initialize()).not.toThrow();
+      expect(pm.isCoreToolsAllowListEmpty()).toBe(false);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
+    });
+
     it('undefined coreTools keeps tools enabled', async () => {
       pm = new PermissionManager(makeConfig());
       pm.initialize();
