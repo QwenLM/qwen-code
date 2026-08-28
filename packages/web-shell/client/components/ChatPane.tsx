@@ -95,6 +95,7 @@ import composerStatusStyles from './ComposerStatusStack.module.css';
 import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
+import { serializeContextUsageMessage } from './messages/ContextUsageMessage';
 import type {
   TurnOutputKind,
   TurnOutputOpenRequest,
@@ -110,12 +111,12 @@ import { PaneHeaderActions } from './PaneHeaderActions';
 import styles from './ChatPane.module.css';
 import accentStyles from './WorkspaceAccent.module.css';
 
-// Split-view panes get the same interactive composer controls as the main chat,
-// each scoped to the pane's own session: the approval-mode and model pickers,
-// plus voice dictation. The width toggle is omitted (panes size themselves); the
-// slash menu is populated from the session's own command list (see below).
+// Split-view panes get the same session-scoped composer controls as the main
+// chat. The width toggle is omitted because panes size themselves.
 const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
+  'addMenu',
   'approvalMode',
+  'contextUsage',
   'model',
   'voice',
 ];
@@ -1024,6 +1025,60 @@ export function ChatPane({
       };
     });
   }, [connection.commands, t]);
+  const skills = useMemo(() => {
+    const commandsByName = new Map(
+      commands.map((command) => [command.name.toLowerCase(), command]),
+    );
+    return (connection.skills ?? [])
+      .map((name) => {
+        const command = commandsByName.get(name.toLowerCase());
+        return {
+          name,
+          description: command?.description ?? '',
+          ...(command?.argumentHint
+            ? { argumentHint: command.argumentHint }
+            : {}),
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [commands, connection.skills]);
+  const handleShowContextUsage = useCallback(() => {
+    if (
+      shouldBlockComposerSubmit({
+        connectionStatus: connection.status,
+        hasSession: Boolean(connection.sessionId),
+      })
+    ) {
+      return;
+    }
+    const owner = sessionOwnerGuard.capture();
+    if (streamingStateRef.current === 'idle') {
+      store.appendLocalUserMessage('/context');
+    }
+    actions
+      .getContextUsage({ detail: false })
+      .then((result) => {
+        if (!owner.isCurrent()) return;
+        store.dispatch([
+          {
+            type: 'status',
+            text: serializeContextUsageMessage(result),
+            clearActiveText: false,
+          },
+        ]);
+      })
+      .catch((error: unknown) => {
+        if (!owner.isCurrent()) return;
+        reportError(error, 'Failed to load context usage');
+      });
+  }, [
+    actions,
+    connection.sessionId,
+    connection.status,
+    reportError,
+    sessionOwnerGuard,
+    store,
+  ]);
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
@@ -1402,10 +1457,14 @@ export function ChatPane({
             onCancel={handleCancel}
             isRunning={isResponding || sessionHasActivePrompt}
             commands={commands}
+            skills={skills}
             queuedMessages={queuedTexts}
             onPopQueuedMessages={editLastQueuedPrompt}
             onClearQueuedMessages={clearQueuedPrompts}
             visibleToolbarActions={paneToolbarActions}
+            tokenCount={connection.tokenCount ?? 0}
+            contextWindow={connection.contextWindow ?? 0}
+            onShowContextUsage={handleShowContextUsage}
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
             workspaceTitle={paneWorkspaceCwd}
             workspaceColor={workspaceAccent}
