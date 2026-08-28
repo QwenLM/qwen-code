@@ -4,14 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const { writeTerminalTitleSpy, useWakeRepaintMock, buildWakeRepaintSpy } =
-  vi.hoisted(() => ({
-    writeTerminalTitleSpy: vi.fn(),
-    useWakeRepaintMock: vi.fn(),
-    buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
-      vi.fn(() => deps),
-    ),
-  }));
+const {
+  writeTerminalTitleSpy,
+  useWakeRepaintMock,
+  buildWakeRepaintSpy,
+  readCronTasksMock,
+} = vi.hoisted(() => ({
+  writeTerminalTitleSpy: vi.fn(),
+  useWakeRepaintMock: vi.fn(),
+  readCronTasksMock: vi.fn(),
+  buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
+    vi.fn(() => deps),
+  ),
+}));
 
 vi.mock('./hooks/use-wake-repaint.js', () => ({
   useWakeRepaint: useWakeRepaintMock,
@@ -20,6 +25,18 @@ vi.mock('./hooks/use-wake-repaint.js', () => ({
 vi.mock('./utils/terminal-resize-reflow.js', () => ({
   buildWakeRepaint: buildWakeRepaintSpy,
 }));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    // Control the durable scheduled_tasks.json read so the cron startup
+    // tests can pin the startup notice's only real source (and its catch
+    // fallback) instead of hitting a nonexistent hashed path.
+    readCronTasks: readCronTasksMock,
+  };
+});
 
 vi.mock('./utils/windowTitle.js', async (importOriginal) => {
   const actual =
@@ -468,6 +485,8 @@ describe('AppContainer State Management', () => {
     // durable-task file read out of their lifecycle and opt in explicitly in
     // the scheduled-task tests below.
     vi.spyOn(mockConfig, 'isCronEnabled').mockReturnValue(false);
+    readCronTasksMock.mockReset();
+    readCronTasksMock.mockResolvedValue([]);
 
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
@@ -895,9 +914,24 @@ describe('AppContainer State Management', () => {
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       vi.spyOn(mockConfig, 'getWarnings').mockReturnValue([]);
       vi.mocked(mockConfig.isCronEnabled).mockReturnValue(true);
+      // Scheduler size stays 0: the banner must come from the durable
+      // scheduled_tasks.json read alone (the scheduler is not loaded yet
+      // at startup).
       vi.spyOn(mockConfig, 'getCronScheduler').mockReturnValue({
-        size: 2,
+        size: 0,
       } as ReturnType<Config['getCronScheduler']>);
+      const durableTask = {
+        id: 'startup-task',
+        cron: '0 9 * * *',
+        prompt: 'check status',
+        recurring: true,
+        createdAt: 1,
+        lastFiredAt: null,
+      };
+      readCronTasksMock.mockResolvedValue([
+        durableTask,
+        { ...durableTask, id: 'second-task' },
+      ]);
 
       render(
         <AppContainer
@@ -946,10 +980,32 @@ describe('AppContainer State Management', () => {
         truncateToItem: vi.fn(),
       });
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getWarnings').mockReturnValue([]);
       vi.spyOn(mockConfig, 'isCronEnabled').mockReturnValue(false);
       vi.spyOn(mockConfig, 'getCronScheduler').mockReturnValue({
         size: 2,
       } as ReturnType<Config['getCronScheduler']>);
+      // Seed a durable task so removing the isCronEnabled gate would
+      // announce it: the mocked read resolves immediately, so the startup
+      // IIFE completes and its addItem lands before the absence assertion.
+      readCronTasksMock.mockResolvedValue([
+        {
+          id: 'startup-task',
+          cron: '0 9 * * *',
+          prompt: 'check status',
+          recurring: true,
+          createdAt: 1,
+          lastFiredAt: null,
+        },
+      ]);
+
+      // consumePendingStartupWorktreeNotice is invoked synchronously right
+      // after the cron block; waiting for it proves startup passed the
+      // gated section (and the banner addItem would already have run)
+      // before we assert the notice stayed absent.
+      const startupNoticeSpy = vi
+        .spyOn(mockConfig, 'consumePendingStartupWorktreeNotice')
+        .mockReturnValue(null);
 
       render(
         <AppContainer
@@ -961,7 +1017,53 @@ describe('AppContainer State Management', () => {
       );
 
       await vi.waitFor(() => {
-        expect(mockConfig.initialize).toHaveBeenCalled();
+        expect(startupNoticeSpy).toHaveBeenCalled();
+      });
+      expect(readCronTasksMock).not.toHaveBeenCalled();
+      expect(addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('active scheduled'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('completes startup without a notice when the durable tasks read fails', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getWarnings').mockReturnValue([]);
+      vi.mocked(mockConfig.isCronEnabled).mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getCronScheduler').mockReturnValue({
+        size: 0,
+      } as ReturnType<Config['getCronScheduler']>);
+      readCronTasksMock.mockRejectedValue(new Error('corrupt tasks file'));
+
+      // Startup must reach past the failed read
+      // (consumePendingStartupWorktreeNotice is invoked synchronously right
+      // after the cron block) without announcing anything.
+      const startupNoticeSpy = vi
+        .spyOn(mockConfig, 'consumePendingStartupWorktreeNotice')
+        .mockReturnValue(null);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(startupNoticeSpy).toHaveBeenCalled();
       });
       expect(addItem).not.toHaveBeenCalledWith(
         expect.objectContaining({
@@ -5593,9 +5695,21 @@ describe('AppContainer State Management', () => {
       mockedUseHistory.mockReturnValue(historyManager);
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       vi.mocked(mockConfig.isCronEnabled).mockReturnValue(true);
+      // Scheduler size stays 0: the banner must come from the durable
+      // scheduled_tasks.json read alone.
       vi.spyOn(mockConfig, 'getCronScheduler').mockReturnValue({
-        size: 1,
+        size: 0,
       } as ReturnType<Config['getCronScheduler']>);
+      readCronTasksMock.mockResolvedValue([
+        {
+          id: 'startup-task',
+          cron: '0 9 * * *',
+          prompt: 'check status',
+          recurring: true,
+          createdAt: 1,
+          lastFiredAt: null,
+        },
+      ]);
       vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
         conversation: {
           sessionId: 'session-1',

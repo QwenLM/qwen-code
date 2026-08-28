@@ -1054,13 +1054,14 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       let activeScheduledTaskCount = 0;
       if (config.isCronEnabled()) {
-        activeScheduledTaskCount = config.getCronScheduler()?.size ?? 0;
+        // Count durable tasks read from disk only. The in-memory scheduler
+        // is structurally empty at this point: enableDurable() — the only
+        // TUI path that loads durable jobs into the scheduler — is gated
+        // on isConfigInitialized, which this same effect sets only below,
+        // and session-only jobs cannot exist before input is enabled.
         try {
           const durableTasks = await readCronTasks(config.getProjectRoot());
-          activeScheduledTaskCount = Math.max(
-            activeScheduledTaskCount,
-            countActiveScheduledTasks(durableTasks),
-          );
+          activeScheduledTaskCount = countActiveScheduledTasks(durableTasks);
         } catch (error) {
           debugLogger.warn(`Failed to read scheduled tasks at startup: ${error}`);
         }
