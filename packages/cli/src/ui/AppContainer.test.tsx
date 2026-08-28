@@ -946,7 +946,7 @@ describe('AppContainer State Management', () => {
         expect(addItem).toHaveBeenCalledWith(
           {
             type: MessageType.WARNING,
-            text: '2 active scheduled tasks. Run /loop list to inspect.',
+            text: '2 active scheduled tasks. Run /loop list (loop skill) to inspect.',
           },
           expect.any(Number),
         );
@@ -955,7 +955,7 @@ describe('AppContainer State Management', () => {
 
     it('formats the startup notice for active scheduled tasks', () => {
       expect(getScheduledTasksStartupWarning(2)).toBe(
-        '2 active scheduled tasks. Run /loop list to inspect.',
+        '2 active scheduled tasks. Run /loop list (loop skill) to inspect.',
       );
     });
 
@@ -965,7 +965,7 @@ describe('AppContainer State Management', () => {
 
     it('uses singular wording for one active scheduled task', () => {
       expect(getScheduledTasksStartupWarning(1)).toBe(
-        '1 active scheduled task. Run /loop list to inspect.',
+        '1 active scheduled task. Run /loop list (loop skill) to inspect.',
       );
     });
 
@@ -5736,14 +5736,14 @@ describe('AppContainer State Management', () => {
         expect(historyManager.addItem).toHaveBeenCalledWith(
           {
             type: MessageType.WARNING,
-            text: '1 active scheduled task. Run /loop list to inspect.',
+            text: '1 active scheduled task. Run /loop list (loop skill) to inspect.',
           },
           expect.any(Number),
         );
       });
       expect(calls.indexOf('load')).toBeLessThan(
         calls.indexOf(
-          'add:1 active scheduled task. Run /loop list to inspect.',
+          'add:1 active scheduled task. Run /loop list (loop skill) to inspect.',
         ),
       );
     });

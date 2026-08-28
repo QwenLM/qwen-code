@@ -673,7 +673,12 @@ export function getScheduledTasksStartupWarning(
 ): string | null {
   if (activeTaskCount < 1) return null;
   const taskLabel = activeTaskCount === 1 ? 'task' : 'tasks';
-  return `${activeTaskCount} active scheduled ${taskLabel}. Run /loop list to inspect.`;
+  // `/loop list` comes from the bundled loop skill (registered as a slash
+  // command by BundledSkillLoader), not from the built-in command set, so
+  // it can be absent (bare mode, skills.disabled). Flag the skill in the
+  // wording so the recommendation stays interpretable when /loop is not
+  // registered in this session.
+  return `${activeTaskCount} active scheduled ${taskLabel}. Run /loop list (loop skill) to inspect.`;
 }
 
 export function countActiveScheduledTasks(
