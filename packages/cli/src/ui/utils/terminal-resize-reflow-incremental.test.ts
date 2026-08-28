@@ -282,6 +282,81 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       restore();
     }
   });
+  it('does not clobber the frame model on a mid-content clearTerminal sequence', () => {
+    // R11-6: a benign write merely CONTAINING clearTerminal mid-content
+    // (echoed nested-TUI output, a library writing stdout directly) is not
+    // a reset write. The reset match must anchor to the write head the way
+    // the erase match does; otherwise the junk tail arms a pending reset
+    // that the next genuine diff slots into the model, replacing the live
+    // frame with the fragment.
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const frame = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + frame.join('\n'));
+      const junk = Array.from(
+        { length: 10 },
+        (_, i) => `JUNK-${i}-` + 'z'.repeat(20),
+      );
+      stdout.write(`log ${ansiEscapes.clearTerminal}${junk.join('\n')}`);
+      stdout.written.length = 0;
+      repaint!();
+      expect(stdout.written.length).toBe(1);
+      let replay = stdout.written[0]!;
+      expect(replay.startsWith(ansiEscapes.clearViewport)).toBe(true);
+      // The anchored frame survives the junk write.
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-9-');
+      expect(replay).not.toContain('JUNK-');
+      // A following genuine diff still applies to the anchored frame.
+      const next = frame.slice();
+      next[3] = 'AFTER-NOISE-UPDATE';
+      stdout.write(
+        incrementalDiffFrame(frame, next, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      replay = stdout.written[0]!;
+      expect(replay).toContain('AFTER-NOISE-UPDATE');
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-9-');
+      expect(replay).not.toContain('JUNK-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not blank the frame model on a mid-content clearTerminal with an empty tail', () => {
+    // R11-6 empty-tail variant: a mid-content match whose tail is empty
+    // would hit the alternate-screen-entry sub-branch — blanking a good
+    // model and arming expectFirstFrame — unless the reset match is
+    // anchored to the write head.
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const frame = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + frame.join('\n'));
+      stdout.write(`log ${ansiEscapes.clearTerminal}`);
+      stdout.written.length = 0;
+      repaint!();
+      expect(stdout.written.length).toBe(1);
+      const replay = stdout.written[0]!;
+      expect(replay.startsWith(ansiEscapes.clearViewport)).toBe(true);
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-9-');
+    } finally {
+      restore();
+    }
+  });
 
   it('preserves trailing cursor suffixes across diff application', () => {
     const stdout = new FakeStdout();
@@ -661,6 +736,57 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       restore();
     }
   });
+  it('does not force-store a bare diff off a sticky first-frame arm', () => {
+    // R11-3: the alternate-screen entry clear arms expectFirstFrame; a
+    // clear-only erase write (Ink log.clear) arms the handoff burst before
+    // the first bare frame lands. The burst's capture/disarm transitions
+    // must clear expectFirstFrame too — otherwise the sticky arm later
+    // force-stores a bare incremental diff as the model frame, bypassing
+    // MIN_FRAME_LINES, and every following diff fails the head-count
+    // equation against the corrupt model.
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      stdout.write(ansiEscapes.clearTerminal);
+      stdout.write(RETURN_PREFIX + ansiEscapes.eraseLines(12));
+      const frame = frameLines(20, 12);
+      stdout.write(frame.join('\n'));
+      const next = frame.slice();
+      next[2] = 'DIFF-ONE';
+      stdout.write(
+        incrementalDiffFrame(frame, next, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      const next2 = next.slice();
+      next2[5] = 'DIFF-TWO';
+      stdout.write(
+        incrementalDiffFrame(next, next2, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      expect(stdout.written.length).toBe(1);
+      const replay = stdout.written[0]!;
+      expect(replay.startsWith(ansiEscapes.clearViewport)).toBe(true);
+      expect(replay).toContain('DIFF-ONE');
+      expect(replay).toContain('DIFF-TWO');
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-11-');
+      // The stored model is frame content — never raw diff ops.
+      expect(replay.slice(ansiEscapes.clearViewport.length)).not.toContain(
+        '\u001B',
+      );
+    } finally {
+      restore();
+    }
+  });
 
   it('a post-window stray bell cannot clobber a captured single-write VP burst', () => {
     const stdout = new FakeStdout();
@@ -971,6 +1097,49 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       const replay = stdout.written[0]!;
       expect(replay).toContain('line-0-');
       expect(replay).not.toContain('-re');
+    } finally {
+      restore();
+    }
+  });
+  it('drops a pending reset anchor on a second reset with a control-only tail', () => {
+    // R11-4: a printable-tail reset arms pendingResetFrame, deferring the
+    // anchor to the next diff's head count. If a second clearTerminal
+    // write with a control-only tail lands before that diff, the screen is
+    // cleared again — the stale pending bytes of the FIRST reset must be
+    // dropped like at every other reset site, or the next bare diff slots
+    // a model from two resets ago.
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const transcript = ['committed-a', 'committed-b'];
+      const reset = frameLines(20, 10).map((line) => `${line}-rA`);
+      publishResetFullscreen(stdout, false);
+      stdout.write(
+        ansiEscapes.clearTerminal +
+          transcript.join('\n') +
+          '\n' +
+          reset.join('\n'),
+      );
+      stdout.write(ansiEscapes.clearTerminal + CURSOR_HIDE);
+      const next = reset.slice();
+      next[5] = 'POST-SECOND-RESET';
+      stdout.write(
+        incrementalDiffFrame(reset, next, {
+          trailingNewline: true,
+          prevTrailingNewline: true,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      // The model is empty: the second reset dropped the stale anchor and
+      // the orphaned diff applied to nothing, so repaint is a bare clear.
+      expect(stdout.written).toEqual([ansiEscapes.clearViewport]);
     } finally {
       restore();
     }

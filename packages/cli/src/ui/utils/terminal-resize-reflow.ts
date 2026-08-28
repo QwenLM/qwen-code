@@ -62,16 +62,17 @@ const ERASE_LINES_PATTERN = createEraseLinesPattern();
 const VP_ERASE_LINES_RE = /(?:\u001B\[2K\u001B\[1A)*\u001B\[2K\u001B\[G/;
 
 /**
- * A VP erase match is an erase-prefixed FRAME write only at the write head:
- * real Ink frame writes start with the erase sequence (possibly after cursor
+ * An erase or reset sequence marks a frame/reset write only at the write
+ * head: real Ink writes start with the sequence (possibly after cursor
  * positioning / other control bytes), never after printable content. A
  * benign write merely CONTAINING the sequence mid-content (echoed
  * nested-TUI output, a library writing stdout directly) must stay an
- * ordinary content write — otherwise its tail clobbers the frame model and,
- * inside the post-shrink clear window, gets CLEAR_VIEWPORT spliced into the
- * middle of the write (R10-1).
+ * ordinary content write — otherwise its tail clobbers the frame model
+ * and, inside the post-shrink clear window, gets CLEAR_VIEWPORT spliced
+ * into the middle of the write (R10-1), or arms a pending reset from junk
+ * (R11-6).
  */
-function vpEraseMatchAtWriteHead(chunk: string, matchIndex: number): boolean {
+function sequenceAtWriteHead(chunk: string, matchIndex: number): boolean {
   return stripAnsi(chunk.slice(0, matchIndex)).trim() === '';
 }
 
@@ -607,7 +608,8 @@ export function installTerminalResizeReflow(
       const match = (isVP ? VP_ERASE_LINES_RE : ERASE_LINES_PATTERN).exec(
         chunk,
       );
-      if (match && (!isVP || vpEraseMatchAtWriteHead(chunk, match.index))) {
+      const resetAt = chunk.indexOf(CLEAR_TERMINAL);
+      if (match && (!isVP || sequenceAtWriteHead(chunk, match.index))) {
         const content = chunk.slice(match.index + match[0].length);
         const eraseCount = countOccurrences(match[0], ERASE_LINE);
         // VP incremental shrink-diff frames carry the erase prefix in front
@@ -693,7 +695,7 @@ export function installTerminalResizeReflow(
             }
           }
         }
-      } else if (chunk.includes(CLEAR_TERMINAL)) {
+      } else if (resetAt !== -1 && sequenceAtWriteHead(chunk, resetAt)) {
         // Overflow-path full reset (clearTerminal + full static history +
         // live frame as one write, with NO preceding log.clear()): the chunk
         // is not a frame, so drop the model until a clean erase-prefixed
@@ -704,9 +706,7 @@ export function installTerminalResizeReflow(
         barePrintableCount = 0;
         burstCaptured = false;
         if (isVP) {
-          const after = chunk.slice(
-            chunk.indexOf(CLEAR_TERMINAL) + CLEAR_TERMINAL.length,
-          );
+          const after = chunk.slice(resetAt + CLEAR_TERMINAL.length);
           if (after === '') {
             // Alternate-screen entry: the first frame follows as a single
             // bare write — arm its capture. Incremental diffs alone cannot
@@ -740,6 +740,8 @@ export function installTerminalResizeReflow(
               markerKnown: pendingResetFullscreen !== undefined,
             });
           } else {
+            pendingResetFrame = '';
+            pendingResetFullscreen = undefined;
             model.content = '';
           }
         } else {
@@ -789,11 +791,14 @@ export function installTerminalResizeReflow(
           if (isVP && applyIncrementalDiff(model, chunk, currentWidth)) {
             debugLogger.debug('diff', { applied: true, armed: true });
             expectFrame = false;
+            expectFirstFrame = false;
             barePrintableCount = 0;
             burstCaptured = false;
           } else if (diffHead === null) {
-            if (modelFrame(chunk, barePrintableCount > 1 && !late))
+            if (modelFrame(chunk, barePrintableCount > 1 && !late)) {
               burstCaptured = true;
+              expectFirstFrame = false;
+            }
             if (barePrintableCount > 1) expectFrame = false;
           }
         }
