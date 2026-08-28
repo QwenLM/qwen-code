@@ -85,6 +85,7 @@ describe('HookRunner', () => {
         }
       }),
       kill: vi.fn(),
+      unref: vi.fn(),
     };
     return mockProcess;
   };
@@ -129,6 +130,7 @@ describe('HookRunner', () => {
       exitCode: null,
       signalCode: null,
       kill: vi.fn(),
+      unref: vi.fn(),
       on: vi.fn((event: string, callback: Listener) => {
         addListener(event, callback);
         return mockProcess;
@@ -1105,7 +1107,7 @@ describe('HookRunner', () => {
       Object.assign(new Error('no such process'), { code: 'ESRCH' });
 
     it.each(parentExitSurvivingEvents)(
-      'uses parent-independent output streams for synchronous and async %s hooks',
+      'uses a detached parent-independent supervisor for synchronous and async %s hooks',
       async (eventName) => {
         mockSpawn.mockImplementation(() => createMockProcess());
 
@@ -1122,7 +1124,13 @@ describe('HookRunner', () => {
 
         expect(mockSpawn).toHaveBeenCalledTimes(2);
         for (const call of mockSpawn.mock.calls) {
-          expect(call[2].stdio).toEqual(['pipe', 'ignore', 'ignore']);
+          expect(call[0]).toBe(process.execPath);
+          expect(call[1]).toContain('--eval');
+          expect(call[2].stdio).toBe('ignore');
+          expect(call[2].detached).toBe(true);
+        }
+        for (const result of mockSpawn.mock.results) {
+          expect(result.value.unref).toHaveBeenCalledOnce();
         }
       },
     );
