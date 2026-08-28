@@ -5,12 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GeminiContentGenerator } from './geminiContentGenerator.js';
+import { LlmContentGenerator } from './llm-content-generator.js';
 import { GoogleGenAI } from '@google/genai';
 
-const mockReportGeminiRequest = vi.hoisted(() => vi.fn());
-const mockReportGeminiResponse = vi.hoisted(() => vi.fn());
-const mockReportGeminiChunk = vi.hoisted(() => vi.fn());
+const mockReportLlmRequest = vi.hoisted(() => vi.fn());
+const mockReportLlmResponse = vi.hoisted(() => vi.fn());
+const mockReportLlmChunk = vi.hoisted(() => vi.fn());
 
 vi.mock('@google/genai', () => {
   const mockGenerateContent = vi.fn();
@@ -28,19 +28,19 @@ vi.mock('@google/genai', () => {
   };
 });
 vi.mock('../../telemetry/gen-ai-request.js', () => ({
-  reportGeminiRequest: mockReportGeminiRequest,
-  reportGeminiResponse: mockReportGeminiResponse,
-  reportGeminiChunk: mockReportGeminiChunk,
+  reportLlmRequest: mockReportLlmRequest,
+  reportLlmResponse: mockReportLlmResponse,
+  reportLlmChunk: mockReportLlmChunk,
 }));
 
-describe('GeminiContentGenerator', () => {
-  let generator: GeminiContentGenerator;
+describe('LlmContentGenerator', () => {
+  let generator: LlmContentGenerator;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let mockGoogleGenAI: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    generator = new GeminiContentGenerator({
+    generator = new LlmContentGenerator({
       apiKey: 'test-api-key',
     });
     mockGoogleGenAI = vi.mocked(GoogleGenAI).mock.results[0].value;
@@ -49,7 +49,7 @@ describe('GeminiContentGenerator', () => {
   it('should merge customHeaders into existing httpOptions.headers', async () => {
     vi.mocked(GoogleGenAI).mockClear();
 
-    void new GeminiContentGenerator(
+    void new LlmContentGenerator(
       {
         apiKey: 'test-api-key',
         httpOptions: {
@@ -86,7 +86,7 @@ describe('GeminiContentGenerator', () => {
     const expectedResponse = { responseId: 'test-id' };
     mockGoogleGenAI.models.generateContent.mockResolvedValue(expectedResponse);
     const telemetryAttempt = {};
-    mockReportGeminiRequest.mockReturnValueOnce(telemetryAttempt);
+    mockReportLlmRequest.mockReturnValueOnce(telemetryAttempt);
 
     const response = await generator.generateContent(request, 'prompt-id');
 
@@ -103,10 +103,10 @@ describe('GeminiContentGenerator', () => {
         }),
       }),
     );
-    expect(mockReportGeminiRequest).toHaveBeenCalledWith(
+    expect(mockReportLlmRequest).toHaveBeenCalledWith(
       mockGoogleGenAI.models.generateContent.mock.calls[0][0],
     );
-    expect(mockReportGeminiResponse).toHaveBeenCalledWith(
+    expect(mockReportLlmResponse).toHaveBeenCalledWith(
       telemetryAttempt,
       expectedResponse,
     );
@@ -146,7 +146,7 @@ describe('GeminiContentGenerator', () => {
     })();
     mockGoogleGenAI.models.generateContentStream.mockResolvedValue(mockStream);
     const telemetryAttempt = {};
-    mockReportGeminiRequest.mockReturnValueOnce(telemetryAttempt);
+    mockReportLlmRequest.mockReturnValueOnce(telemetryAttempt);
 
     const stream = await generator.generateContentStream(request, 'prompt-id');
 
@@ -163,14 +163,14 @@ describe('GeminiContentGenerator', () => {
         }),
       }),
     );
-    expect(mockReportGeminiRequest).toHaveBeenCalledWith(
+    expect(mockReportLlmRequest).toHaveBeenCalledWith(
       mockGoogleGenAI.models.generateContentStream.mock.calls[0][0],
     );
     expect(await stream.next()).toEqual({
       done: false,
       value: { responseId: '1' },
     });
-    expect(mockReportGeminiChunk).toHaveBeenCalledWith(telemetryAttempt, {
+    expect(mockReportLlmChunk).toHaveBeenCalledWith(telemetryAttempt, {
       responseId: '1',
     });
   });
@@ -206,7 +206,7 @@ describe('GeminiContentGenerator', () => {
     );
 
     await expect(stream.next()).rejects.toBe(failure);
-    expect(mockReportGeminiChunk).not.toHaveBeenCalled();
+    expect(mockReportLlmChunk).not.toHaveBeenCalled();
   });
 
   it('should call embedContent on the underlying model', async () => {
@@ -221,7 +221,7 @@ describe('GeminiContentGenerator', () => {
   });
 
   it('should prioritize contentGeneratorConfig samplingParams over request config', async () => {
-    const generatorWithParams = new GeminiContentGenerator({ apiKey: 'test' }, {
+    const generatorWithParams = new LlmContentGenerator({ apiKey: 'test' }, {
       model: 'gemini-1.5-flash',
       samplingParams: {
         temperature: 0.1,
@@ -252,16 +252,13 @@ describe('GeminiContentGenerator', () => {
   });
 
   it('should map reasoning effort to thinkingConfig', async () => {
-    const generatorWithReasoning = new GeminiContentGenerator(
-      { apiKey: 'test' },
-      {
-        model: 'gemini-2.5-pro',
-        reasoning: {
-          effort: 'high',
-        },
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any,
-    );
+    const generatorWithReasoning = new LlmContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-2.5-pro',
+      reasoning: {
+        effort: 'high',
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
 
     const request = {
       model: 'gemini-2.5-pro',
@@ -285,7 +282,7 @@ describe('GeminiContentGenerator', () => {
   it("maps reasoning effort 'max' to HIGH (Gemini has no higher tier)", async () => {
     // 'max' is a DeepSeek-specific extension. Gemini caps at HIGH, so the
     // converter must clamp instead of falling through to UNSPECIFIED.
-    const generatorWithMax = new GeminiContentGenerator({ apiKey: 'test' }, {
+    const generatorWithMax = new LlmContentGenerator({ apiKey: 'test' }, {
       model: 'gemini-2.5-pro',
       reasoning: { effort: 'max' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -309,7 +306,7 @@ describe('GeminiContentGenerator', () => {
   });
 
   it("maps reasoning effort 'medium' to MEDIUM", async () => {
-    const generatorWithMedium = new GeminiContentGenerator({ apiKey: 'test' }, {
+    const generatorWithMedium = new LlmContentGenerator({ apiKey: 'test' }, {
       model: 'gemini-2.5-pro',
       reasoning: { effort: 'medium' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -333,7 +330,7 @@ describe('GeminiContentGenerator', () => {
   });
 
   it("clamps reasoning effort 'xhigh' to HIGH (Gemini has no xhigh tier)", async () => {
-    const generatorWithXhigh = new GeminiContentGenerator({ apiKey: 'test' }, {
+    const generatorWithXhigh = new LlmContentGenerator({ apiKey: 'test' }, {
       model: 'gemini-2.5-pro',
       reasoning: { effort: 'xhigh' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
