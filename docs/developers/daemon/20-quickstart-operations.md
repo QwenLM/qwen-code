@@ -137,7 +137,7 @@ Boot calls `loadSettings(boundWorkspace)` once:
 | --------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `policy.permissionStrategy` | `'first-responder' \| 'designated' \| 'consensus' \| 'local-only'` | Sets `BridgeOptions.permissionPolicy`. **Boot validates with `validatePolicyConfig`**; unknown values throw `InvalidPolicyConfigError` instead of falling back silently. |
 | `policy.consensusQuorum`    | positive integer                                                   | N for the `consensus` policy. Default is `floor(M/2)+1`. If set under a non-consensus policy, it is ignored and boot logs a stderr warning.                              |
-| `context.fileName`          | string                                                             | Overrides `getCurrentGeminiMdFilename()` and controls which file `POST /workspace/init` writes.                                                                          |
+| `context.fileName`          | string                                                             | Controls which file `POST /workspace/init` writes through the workspace-service `contextFilename`.                                                                       |
 | `tools.disabled`            | string[]                                                           | Normalized through `normalizeDisabledToolList()` (trim, drop empty entries, dedupe) before affecting the next ACP child spawn.                                           |
 | `tools.approvalMode`        | string                                                             | Default session approval mode.                                                                                                                                           |
 | `telemetry`                 | object                                                             | OTel configuration: `enabled`, `otlpEndpoint`, `otlpProtocol`, per-signal endpoints, and more. See [`17-configuration.md`](./17-configuration.md).                       |
@@ -225,7 +225,7 @@ qwen serve
 packages/cli/index.ts              main()
    |
    v
-gemini.tsx                         main() - parseArguments()
+llm.tsx                         main() - parseArguments()
    |
    v (yargs assembly)
 config/config.ts                   import { serveCommand } ...
@@ -276,7 +276,7 @@ Key facts:
 
 - **`createServeApp` only builds; it does not listen.** It returns an `express()` instance with middleware and routes mounted. Ordinary-only embedders may continue to own `app.listen()`. Embedders that use Live/Conversations must bind the actual Node server to the exported app lifecycle before listening and await that lifecycle during shutdown.
 - **`() => actualPort` is a lazy closure.** `actualPort` is assigned in the `server.listen` callback. The `hostAllowlist` middleware reads it on demand, so ephemeral ports (`--port 0`) still gate the `Host` header correctly.
-- **`await blockForever()` is intentional.** If `yargs.parse()` resolves, the CLI top level falls through into the interactive TUI entrypoint (`gemini.tsx`). SIGINT / SIGTERM exit through `runQwenServe`'s `onSignal` path.
+- **`await blockForever()` is intentional.** If `yargs.parse()` resolves, the CLI top level falls through into the interactive TUI entrypoint (`llm.tsx`). SIGINT / SIGTERM exit through `runQwenServe`'s `onSignal` path.
 
 ## 10. HTTP route file split
 

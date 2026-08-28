@@ -104,6 +104,17 @@ function managementFieldsWithSharedControls(
             options: SESSION_SCOPE_OPTIONS,
           },
         ]),
+    ...(declared.has('multiSession')
+      ? []
+      : [
+          {
+            key: 'multiSession',
+            label: 'Named Sessions',
+            kind: 'boolean' as const,
+            description:
+              'Retain an owner-scoped catalog of named tasks in daemon-managed mode',
+          },
+        ]),
   ];
 }
 

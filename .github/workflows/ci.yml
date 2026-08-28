@@ -61,7 +61,7 @@ env:
   # BOTH the github_ci_only helper step and the full-profile Test step, so a
   # new helper test can't be added to one path and silently dropped from the
   # other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/assign-pr-owner.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -412,6 +412,10 @@ jobs:
       - name: 'Check desktop workspace isolation'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:desktop-isolation'
+
+      - name: 'Check TUI dependency direction'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run check:tui-dep-direction'
 
       - name: 'Install linters'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -1029,6 +1033,18 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/configure-windows-runner'
 
+      # Hosted runners expose TEMP through an 8.3 short alias. Self-hosted
+      # runners keep their configured, alias-free RUNNER_TEMP path.
+      - name: 'Point temp at a short-alias-free directory'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}"
+        shell: 'powershell'
+        run: |-
+          $temp = Join-Path $env:RUNNER_WORKSPACE 'qwen-code-temp'
+          New-Item -ItemType Directory -Force -Path $temp | Out-Null
+          "TEMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "TEMP set to $temp"
+
       # Same stale-checkout guard as the Ubuntu gate: this job now runs on ECS,
       # so fail loud if the checkout lacks the merge-queue head rather than
       # silently testing the wrong tree into a merge.
@@ -1058,6 +1074,19 @@ jobs:
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
+
+      # Compare case-insensitively: Windows paths are case-insensitive and
+      # realpathSync returns the on-disk casing, so a drive-letter or
+      # directory-case difference is the SAME directory under one spelling,
+      # not the 8.3 alias this guards. A strict !== there would fail the
+      # self-hosted lane too — it runs this step against the runner's
+      # pre-existing RUNNER_TEMP — for a reason unrelated to the alias. The
+      # alias case (RUNNER~1 -> runneradmin) differs by more than casing and
+      # still fails; a casing-only difference warns so it stays visible.
+      - name: 'Verify temp paths carry no short alias'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['TEMP', 'TMP']) { const value = process.env[key]; if (!value) { console.error(key + ' is not set'); process.exitCode = 1; continue; } const real = fs.realpathSync(value); if (real === value) continue; if (real.toLowerCase() === value.toLowerCase()) { console.log('::warning::' + key + ' differs from its real path only by casing: ' + value + ' -> ' + real); continue; } console.error(key + ' carries a short alias: ' + value + ' -> ' + real); process.exitCode = 1; }"
 
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"

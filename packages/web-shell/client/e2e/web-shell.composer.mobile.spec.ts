@@ -27,6 +27,7 @@ import {
 } from './utils/emptyMobileComposer';
 
 const COMPOSER_TEXTAREA = 'textarea[data-web-shell-composer-editor]';
+const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 
 test('renders the textarea backend instead of CodeMirror on touch devices', async ({
   page,
@@ -100,6 +101,71 @@ test('keeps voice controls reachable on an extra-narrow touch viewport', async (
   await expect(more).toBeHidden();
   await expect(send).toBeVisible();
   await expect(activeToolbar.locator('button:visible')).toHaveCount(2);
+});
+
+test('keeps a persisted wide sidebar inside the mobile drawer and exposes close', async ({
+  page,
+}, testInfo) => {
+  await page.addInitScript(
+    ([key, width]) => {
+      window.localStorage.setItem(key, width);
+    },
+    [SIDEBAR_WIDTH_STORAGE_KEY, '512'] as const,
+  );
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  await page.getByRole('button', { name: 'Toggle menu' }).tap();
+
+  const drawer = page.getByRole('dialog', { name: 'Workspace sidebar' });
+  const sidebar = page.getByRole('complementary', {
+    name: 'Workspace sidebar',
+  });
+  await expect(drawer).toBeVisible();
+  await expect(sidebar).toBeVisible();
+  const { drawerWidth, sidebarWidth } = await sidebar.evaluate((element) => ({
+    drawerWidth: element.parentElement?.getBoundingClientRect().width ?? 0,
+    sidebarWidth: element.getBoundingClientRect().width,
+  }));
+  expect(sidebarWidth).toBeCloseTo(drawerWidth * 0.7, 0);
+  expect(sidebarWidth).toBeLessThanOrEqual(drawerWidth);
+
+  await page.screenshot({
+    path: 'client/e2e/test-results/responsive-sidebar-drawer.png',
+    fullPage: true,
+  });
+  await page.getByRole('button', { name: 'Collapse' }).tap();
+  await expect(drawer).toBeHidden();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        SIDEBAR_WIDTH_STORAGE_KEY,
+      ),
+    )
+    .toBe('512');
+
+  await page.setViewportSize({ width: 700, height: 915 });
+  await page.getByRole('button', { name: 'Toggle menu' }).click();
+  await expect(drawer).toBeVisible();
+  await expect
+    .poll(() =>
+      sidebar.evaluate((element) => element.getBoundingClientRect().width),
+    )
+    .toBeCloseTo(420, 0);
+  await page.getByRole('button', { name: 'Collapse' }).click();
+  await expect(drawer).toBeHidden();
+
+  await page.setViewportSize({ width: 1000, height: 915 });
+  await expect(sidebar).toBeVisible();
+  // Width stays at the mobile-mount clamp: resize re-clamping only shrinks
+  // within a session, and the drawer never expands toward the persisted 512.
+  await expect
+    .poll(() =>
+      sidebar.evaluate((element) => element.getBoundingClientRect().width),
+    )
+    .toBeCloseTo(420, 0);
 });
 
 test('tap, type, and Send submit through the shared prompt pipeline', async ({
