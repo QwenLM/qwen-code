@@ -349,17 +349,12 @@ export interface WorkspaceSkillToggleResult {
   sessionsFailed: number;
 }
 
-export type WorkspaceSkillToggleErrorCode =
-  | 'skill_not_found'
-  | 'skill_not_toggleable'
-  | 'skill_inactive_extension';
+export type WorkspaceSkillToggleErrorCode = 'skill_not_found';
 
 export interface WorkspaceSkillToggleError {
   skillName: string;
   code: WorkspaceSkillToggleErrorCode;
   error: string;
-  reason?: WorkspaceSkillNotToggleableReason;
-  lockedScope?: 'system' | 'user' | 'systemDefaults';
 }
 
 export interface WorkspaceSkillBatchToggleItem {
@@ -386,9 +381,10 @@ export interface PersistDisabledSkillResult {
   }>;
 }
 
-export type PersistDisabledSkillsBatchOutcome =
-  | { skillName: string; changed: boolean }
-  | { skillName: string; error: WorkspaceSkillNotToggleableError };
+export interface PersistDisabledSkillsBatchOutcome {
+  skillName: string;
+  changed: boolean;
+}
 
 export interface PersistDisabledSkillsBatchResult {
   outcomes: PersistDisabledSkillsBatchOutcome[];
@@ -398,30 +394,10 @@ export interface PersistDisabledSkillsBatchResult {
   }>;
 }
 
-export type WorkspaceSkillNotToggleableReason =
-  | 'not_user_invocable'
-  | 'inactive_extension'
-  | 'locked';
-
 export class WorkspaceSkillNotFoundError extends Error {
   constructor(readonly skillName: string) {
     super(`Skill not found: ${skillName}`);
     this.name = 'WorkspaceSkillNotFoundError';
-  }
-}
-
-export class WorkspaceSkillNotToggleableError extends Error {
-  constructor(
-    readonly skillName: string,
-    readonly reason: WorkspaceSkillNotToggleableReason,
-    readonly lockedScope?: 'system' | 'user' | 'systemDefaults',
-  ) {
-    super(
-      lockedScope
-        ? `Skill ${skillName} is locked by ${lockedScope} settings`
-        : `Skill ${skillName} is not toggleable: ${reason}`,
-    );
-    this.name = 'WorkspaceSkillNotToggleableError';
   }
 }
 
@@ -433,18 +409,6 @@ export function mapWorkspaceSkillToggleError(
       skillName: error.skillName,
       code: 'skill_not_found',
       error: error.message,
-    };
-  }
-  if (error instanceof WorkspaceSkillNotToggleableError) {
-    return {
-      skillName: error.skillName,
-      code:
-        error.reason === 'inactive_extension'
-          ? 'skill_inactive_extension'
-          : 'skill_not_toggleable',
-      error: error.message,
-      reason: error.reason,
-      ...(error.lockedScope ? { lockedScope: error.lockedScope } : {}),
     };
   }
   return undefined;
