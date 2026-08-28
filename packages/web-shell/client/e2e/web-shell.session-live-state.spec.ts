@@ -214,7 +214,7 @@ test('scopes full and pinned sessions to the requested workspace', async ({
   const secondaryPinned = await page.evaluate(
     async ({ baseURL, cwd }) => {
       const response = await fetch(
-        `${baseURL}/workspaces/${encodeURIComponent(cwd)}/sessions?group=pinned`,
+        `${baseURL}/workspaces/${encodeURIComponent(cwd)}/sessions?view=organized&group=pinned`,
       );
       return response.json();
     },
