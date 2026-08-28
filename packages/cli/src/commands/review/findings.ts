@@ -47,6 +47,8 @@ import {
   FINDING_CONFIDENCES,
   FINDING_OUTCOMES,
   FINDING_SOURCES,
+  FINDING_DIRECTIONS,
+  FINDING_BASELINES,
   compressFindingSummary,
 } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -84,6 +86,19 @@ export type Outcome = (typeof OUTCOMES)[number];
 /** Where a finding came from — the tag that decides whether it was verified. */
 export const SOURCES = FINDING_SOURCES;
 export type Source = (typeof SOURCES)[number];
+
+/**
+ * A Critical's two decision axes (#10291) — defined in core beside the
+ * other lists. The convergence posture reads them: at a resolved `critical`
+ * floor a Critical that is `fails-closed` AND `new-surface` is recorded
+ * rather than requested, exactly like a Suggestion; every other Critical
+ * posts. The renderer keeps no copy — it ignores the fields — so neither
+ * list is in the vocabulary snapshot the four above are.
+ */
+export const DIRECTIONS = FINDING_DIRECTIONS;
+export type Direction = (typeof DIRECTIONS)[number];
+export const BASELINES = FINDING_BASELINES;
+export type Baseline = (typeof BASELINES)[number];
 
 /** One location a finding applies to. A pattern aggregate carries several. */
 export interface FindingLocation {
@@ -149,6 +164,19 @@ export interface Finding {
   fixConstraint?: string;
   /** Free-form kebab-case tag (`correctness`, `security`, `test-coverage`, …). */
   category?: string;
+  /**
+   * Which way a Critical fails, stated by the verifier off its witness:
+   * `certifies-falsely` (a wrong result presented as correct) or
+   * `fails-closed` (refuses, wedges or degrades without one). Absent when
+   * the witness could not settle it — and absence never classifies.
+   */
+  direction?: Direction;
+  /**
+   * What a Critical is measured against, off the same evidence:
+   * `regression` (the merge base handled the trigger) or `new-surface` (the
+   * failing path does not exist at the merge base). Absent like `direction`.
+   */
+  baseline?: Baseline;
   /** Every location, in report order. A standalone finding has exactly one. */
   locations: FindingLocation[];
   /**
@@ -466,6 +494,29 @@ export function validateFindings(raw: unknown): Finding[] {
         ? fixConstraintRaw
         : undefined;
 
+    // The two axes are enums like `confidence`: a present value outside the
+    // list is a typo'd classification and fails with the index, because a
+    // value that silently dropped would turn a deferrable Critical into one
+    // that posts (fail-open) without anyone seeing the drop.
+    const direction =
+      o['direction'] === undefined
+        ? undefined
+        : oneOf(o['direction'], DIRECTIONS);
+    if (o['direction'] !== undefined && !direction) {
+      fail(
+        i,
+        `has direction ${JSON.stringify(o['direction'])}; expected one of ${DIRECTIONS.map((s) => JSON.stringify(s)).join(', ')}.`,
+      );
+    }
+    const baseline =
+      o['baseline'] === undefined ? undefined : oneOf(o['baseline'], BASELINES);
+    if (o['baseline'] !== undefined && !baseline) {
+      fail(
+        i,
+        `has baseline ${JSON.stringify(o['baseline'])}; expected one of ${BASELINES.map((s) => JSON.stringify(s)).join(', ')}.`,
+      );
+    }
+
     return {
       id,
       severity,
@@ -488,6 +539,8 @@ export function validateFindings(raw: unknown): Finding[] {
       ...(asString(o, 'category')
         ? { category: asString(o, 'category')! }
         : {}),
+      ...(direction ? { direction } : {}),
+      ...(baseline ? { baseline } : {}),
       locations: parseLocations(o, i),
       ...(assetFiles ? { assetFiles } : {}),
       ...(assets ? { assets } : {}),
@@ -626,31 +679,75 @@ export function holdCriticalsFailingOnBase(
 }
 
 /**
- * The witness rule's machine half. Step 4 demands that a confirmed Critical
+ * A `witness` that opens with `not run` and carries no reason after the dash
+ * is the escape hatch used without paying its toll: Step 4's rule is that the
+ * line names why no run could settle the claim, and an empty reason names
+ * nothing — so downstream it counts as no witness at all.
+ *
+ * "No reason" is detected as "no letter or digit after `not run`" (Unicode
+ * classes, not `\w`), NOT as an enumeration of dash glyphs: the first draft
+ * listed three dashes and any other dash-like character (U+2015, U+2212,
+ * U+FF0D) slipped through as a "reason" — while the obvious tightening,
+ * `\W*$`, fails the other way, reading a perfectly good CJK reason as empty
+ * because JavaScript's `\w` is ASCII-only. A reason in any script contributes
+ * a letter or a number; punctuation alone contributes neither.
+ */
+export function isEmptyNotRunWitness(witness: string): boolean {
+  // The phrase's own word-continuation is consumed before the remainder is
+  // tested: `not runnable` and `not running —` are the brief's reason-less
+  // forms too, and counting their `nable`/`ning` letters as reason content
+  // was the same fail-open one suffix over.
+  const m = /^\s*(?:witness:\s*)?not run[\p{L}\p{N}]*(?<rest>[\s\S]*)$/iu.exec(
+    witness,
+  );
+  if (!m) return false;
+  return !/[\p{L}\p{N}]/u.test(m.groups!['rest']!);
+}
+
+/**
+ * The witness rule's machine half. Step 4 demands that a confirmed finding
  * carry its executed evidence — the `witness` field, holding either the
  * observed output or the verifier's `not run — <reason>` line — and promises
  * the demotion is mechanical. This is the mechanism, in the same place the
- * test-delta holdback lives: a high-confidence Critical from the one
- * non-deterministic source that arrives with no witness is filed at low
- * confidence — terminal-only, never posted. Only `source: 'review'` is
+ * test-delta holdback lives: a high-confidence Critical or Suggestion from
+ * the one non-deterministic source that arrives with no witness is filed at
+ * low confidence — terminal-only, never posted. Both postable severities,
+ * not just Critical: a Suggestion posts to the PR on the same terms
+ * (DESIGN.md — Why Suggestion-level findings are posted as inline comments,
+ * like Critical), so an unexecuted claim rides onto the author's screen
+ * through the Suggestion door exactly as it would have through the Critical
+ * one. `Nice to have` is exempt — it is terminal-only by construction, so
+ * there is nothing for the rule to hold back. Only `source: 'review'` is
  * judged: a `[build]`/`[test]`/`[lint]`/`[probe]` finding IS a run's output,
- * so its witness is constitutive, not an attachment. Nothing is deleted and
- * nothing is raised; the appended sentence names the rule that moved it and
- * the way back (attach the witness, or say why none could run). Idempotent by
- * construction — a demoted finding re-fed through `--input` is already low
- * confidence and is not touched again.
+ * so its witness is constitutive, not an attachment. A `not run` line with
+ * an EMPTY reason counts as absent — the escape hatch is the reason, not the
+ * phrase. Nothing is deleted and nothing is raised; the appended sentence
+ * names the rule that moved it and the way back (attach the witness, or say
+ * why none could run). Idempotent by construction — a demoted finding re-fed
+ * through `--input` is already low confidence and is not touched again.
  */
-export function holdUnwitnessedCriticals(findings: readonly Finding[]): {
+export function holdUnwitnessedFindings(findings: readonly Finding[]): {
   findings: Finding[];
   unwitnessed: string[];
 } {
   const unwitnessed: string[] = [];
   const out = findings.map((f) => {
     if (
-      f.severity !== 'Critical' ||
+      (f.severity !== 'Critical' && f.severity !== 'Suggestion') ||
       f.confidence !== 'high' ||
       f.source !== 'review' ||
-      f.witness !== undefined
+      // A measurement-held SUGGESTION is exempt, deliberately: test-delta
+      // just demoted it Critical→Suggestion on the promise that it STAYS in
+      // front of a human as a posted Suggestion whose note says how to
+      // re-raise it. Judging it here would compose the two holds into a
+      // silent drop to terminal-only, and it is not the unexecuted claim
+      // this rule exists to stop — the measurement that moved it IS a run's
+      // output, riding as `heldByMeasurement`. Scoped to Suggestion on
+      // purpose: a finding re-raised to Critical through the note's own
+      // "file it at Critical again" door still carries the marker, and it
+      // must face the witness rule like any other unexecuted Critical.
+      (f.heldByMeasurement !== undefined && f.severity === 'Suggestion') ||
+      (f.witness !== undefined && !isEmptyNotRunWitness(f.witness))
     ) {
       return f;
     }
@@ -658,7 +755,7 @@ export function holdUnwitnessedCriticals(findings: readonly Finding[]): {
     return {
       ...f,
       confidence: 'low' as Confidence,
-      failureScenario: `${f.failureScenario}\n\nFiled at low confidence by the witness rule: this confirmed Critical arrived with neither a witness (the executed evidence that settled the verdict) nor a \`not run — <reason>\` line. Attach either and it stands at high confidence again.`,
+      failureScenario: `${f.failureScenario}\n\nFiled at low confidence by the witness rule: this confirmed ${f.severity} arrived with neither a witness (the executed evidence that settled the verdict) nor a \`not run — <reason>\` line naming why no run could settle it. Attach either and it stands at high confidence again.`,
     };
   });
   return { findings: out, unwitnessed };
@@ -1033,8 +1130,13 @@ export function renderFindings(report: FindingsReport): string[] {
     const more =
       f.locations.length > 1 ? ` (+${f.locations.length - 1} more)` : '';
     const confidence = f.confidence === 'low' ? ' [low confidence]' : '';
+    // The axes render as the same bracket tags the posted claim line carries.
+    const axes = [f.direction, f.baseline]
+      .filter((a) => a !== undefined)
+      .map((a) => ` [${a}]`)
+      .join('');
     const outcome = f.outcome ? ` [${f.outcome}]` : '';
-    return `${f.severity} — ${where}${more} — ${f.shortSummary}${confidence}${outcome}`;
+    return `${f.severity}${axes} — ${where}${more} — ${f.shortSummary}${confidence}${outcome}`;
   });
 }
 
@@ -1233,7 +1335,7 @@ export const findingsCommand: CommandModule = {
         shared,
       ));
     }
-    const witnessHold = holdUnwitnessedCriticals(findings);
+    const witnessHold = holdUnwitnessedFindings(findings);
     findings = witnessHold.findings;
     const report = buildReport(findings);
 
@@ -1304,7 +1406,7 @@ export const findingsCommand: CommandModule = {
     // reads as the reviewer's own judgement.
     for (const id of witnessHold.unwitnessed) {
       writeStderrLine(
-        `findings: ${id} filed at low confidence — a confirmed Critical carried neither a witness nor a 'not run' reason (Step 4's witness rule)`,
+        `findings: ${id} filed at low confidence — a confirmed finding carried neither a witness nor a 'not run' reason (Step 4's witness rule)`,
       );
     }
     // A hold that was weighed and reversed is a decision, and a decision this

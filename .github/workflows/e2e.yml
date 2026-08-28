@@ -220,6 +220,15 @@ jobs:
           # self-hosted runners from pressure-flake unhandled errors.
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          if [ "${RUNNER_OS:-}" = "Linux" ]; then
+            QWEN_CI_TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX 2>/dev/null || true)"
+            if [ -n "$QWEN_CI_TMPDIR" ]; then
+              TMPDIR="$QWEN_CI_TMPDIR"
+              export TMPDIR
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
+            fi
+          fi
           # The docker leg runs vitest directly instead of through
           # test:integration:sandbox:docker: that script would rebuild the image
           # the step above just built.
