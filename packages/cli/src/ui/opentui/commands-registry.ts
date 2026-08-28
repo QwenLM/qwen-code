@@ -18,7 +18,7 @@
  *    `/branch` are host actions (handleResume / handleBranch), never dialogs.
  *
  * 2. Command routes — one entry per built-in command module registered by
- *    services/BuiltinCommandLoader.ts (67 modules). Each entry lists the
+ *    services/BuiltinCommandLoader.ts (69 modules). Each entry lists the
  *    action-result kinds the command can produce and the dialogs it opens,
  *    so the OpenTUI dispatcher covers every built-in command the ink TUI
  *    does. `commands-registry.test.ts` cross-checks names, aliases, and
@@ -209,7 +209,7 @@ export interface CommandRouteSpec {
 }
 
 /**
- * All 67 built-in command modules, one entry each, in the registration order
+ * All 69 built-in command modules, one entry each, in the registration order
  * of BuiltinCommandLoader.ts. `/status` is aboutCommand's canonical name
  * ('about' is the alias); names with subcommands list the union of the whole
  * command tree.

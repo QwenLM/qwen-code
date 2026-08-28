@@ -250,10 +250,19 @@ describe('OPEN_TUI_COMMAND_ROUTES (built-in registry parity)', () => {
   }, 30000);
 
   it('declares gates only for the loader-gated commands', () => {
-    const gated = OPEN_TUI_COMMAND_ROUTES.filter((r) => r.gatedBy)
+    // TypeScript enforces at compile time that every gatedBy value is a valid
+    // CommandGate — no runtime loop needed. This check pins the *names* of the
+    // gated routes so a bogus gatedBy on an ungated command is caught here.
+    const gatedNames = OPEN_TUI_COMMAND_ROUTES.filter((r) => r.gatedBy)
       .map((r) => r.name)
       .sort();
-    expect(gated).toEqual(['dream', 'forget', 'lsp', 'trust', 'workflows']);
+    expect(gatedNames).toEqual([
+      'dream',
+      'forget',
+      'lsp',
+      'trust',
+      'workflows',
+    ]);
   });
 
   it('only lists dialog kinds that exist in the original union', () => {
