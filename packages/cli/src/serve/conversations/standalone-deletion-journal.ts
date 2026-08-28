@@ -115,7 +115,11 @@ function parseSessionId(value: string): string {
 }
 
 function hasVerifiableInode(inode: number): boolean {
-  return inode !== 0;
+  return Number.isSafeInteger(inode) && inode > 0;
+}
+
+function normalizeInode(inode: number): number {
+  return hasVerifiableInode(inode) ? inode : 0;
 }
 
 function sameDirectoryIdentity(
@@ -637,7 +641,7 @@ export class StandaloneDeletionJournal {
     }
     return {
       device: stat.dev,
-      inode: stat.ino,
+      inode: normalizeInode(stat.ino),
       inodeVerifiable: hasVerifiableInode(stat.ino),
     };
   }
@@ -710,7 +714,7 @@ export class StandaloneDeletionJournal {
       const opened = await handle.stat();
       const openedIdentity = {
         device: opened.dev,
-        inode: opened.ino,
+        inode: normalizeInode(opened.ino),
         inodeVerifiable: hasVerifiableInode(opened.ino),
       };
       if (
@@ -736,7 +740,7 @@ export class StandaloneDeletionJournal {
     const opened = await directory.handle.stat();
     const openedIdentity = {
       device: opened.dev,
-      inode: opened.ino,
+      inode: normalizeInode(opened.ino),
       inodeVerifiable: hasVerifiableInode(opened.ino),
     };
     if (

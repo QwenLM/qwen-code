@@ -60,6 +60,7 @@ import {
   invisibleTrackedPaths,
   movedSince,
   hashWorktreeFiles,
+  isPathProvablyAbsent,
   readLocalCache,
   revisionIdentities,
   stateIdOf,
@@ -186,19 +187,7 @@ function vanishedStillOnDisk(
   const onDisk: string[] = [];
   for (const p of Object.keys(cachedFiles)) {
     if (Object.hasOwn(currentHashes, p)) continue;
-    try {
-      lstatSync(join(repoRoot, p));
-    } catch (err) {
-      // Only ENOENT proves deletion. Any other failure — EACCES under an
-      // unreadable ancestor, ELOOP, EIO — is a path that may well still
-      // hold the cached bytes, and folding it into "gone" let the round end
-      // at a DECIDED scope-emptied stop over bytes no round captured
-      // (R19-3). Unmeasurable is uncertifiable: it stays in the on-disk
-      // set, whose downstream is a refusal at the cost of a full round.
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        continue; // genuinely gone — the symmetric difference owns it
-      }
-    }
+    if (isPathProvablyAbsent(repoRoot, p)) continue;
     onDisk.push(p);
   }
   if (onDisk.length === 0) return [];

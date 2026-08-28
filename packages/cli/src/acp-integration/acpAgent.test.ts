@@ -4466,18 +4466,20 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const canonicalChild = await fs.realpath(path.join(canonicalRoot, name));
     const rootStats = await fs.lstat(canonicalRoot);
     const childStats = await fs.lstat(canonicalChild);
+    const normalizedInode = (inode: number) =>
+      Number.isSafeInteger(inode) && inode > 0 ? inode : 0;
     return {
       canonicalSessionId: sessionId,
       root: {
         canonicalPath: canonicalRoot,
         device: rootStats.dev,
-        inode: rootStats.ino,
+        inode: normalizedInode(rootStats.ino),
       },
       child: {
         name,
         canonicalPath: canonicalChild,
         device: childStats.dev,
-        inode: childStats.ino,
+        inode: normalizedInode(childStats.ino),
       },
     };
   }

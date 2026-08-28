@@ -25,7 +25,7 @@
 
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { gitOpt, gitRaw, gitWithInput, gitWithInputRaw } from './git.js';
 import { LITERAL_PATHSPECS } from './diff-flags.js';
 
@@ -39,6 +39,31 @@ import { LITERAL_PATHSPECS } from './diff-flags.js';
  * "unchanged" forever and silently left incremental scope.
  */
 export const UNHASHABLE = 'unhashable';
+
+export function isPathProvablyAbsent(
+  repoRoot: string,
+  relativePath: string,
+): boolean {
+  const candidate = join(repoRoot, relativePath);
+  try {
+    lstatSync(candidate);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+  }
+
+  let ancestor = dirname(candidate);
+  for (;;) {
+    try {
+      return lstatSync(ancestor).isDirectory();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+    }
+    const parent = dirname(ancestor);
+    if (parent === ancestor) return false;
+    ancestor = parent;
+  }
+}
 
 export interface LocalCacheCandidate {
   v: 1;
@@ -644,16 +669,7 @@ export function invisibleTrackedPaths(repoRoot: string): string[] | null {
       // `revisionIdentities` apply to undecodable paths. Never exempt it:
       // it stays flagged (R19-1).
       if (p.includes('\ufffd')) return false;
-      try {
-        lstatSync(join(repoRoot, p));
-        return false;
-      } catch (err) {
-        // Only ENOENT proves absence: an EACCES/ENOTDIR/ELOOP failure on a
-        // PRESENT flagged path folded into "absent" and the exemption then
-        // certified bytes `git diff` was blind to (R19-2). Unmeasurable is
-        // uncertifiable — it stays flagged.
-        return (err as NodeJS.ErrnoException).code === 'ENOENT';
-      }
+      return isPathProvablyAbsent(repoRoot, p);
     }),
   );
   if (absent.size === 0) return tagged;

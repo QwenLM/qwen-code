@@ -12,16 +12,16 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 /**
  * True iff `ino` can be used as proof of file identity.
  *
- * FAT/exFAT and some SMB-style filesystems do not expose inode numbers and
- * report `Stats.ino === 0` for every entry, so comparing by `dev:ino` there
- * collapses unrelated directories onto one identity.
- *
- * This restates core's `hasVerifiableInode()` rather than importing it: this
- * module is reachable from the serve pre-listen fast path, and importing the
- * core package barrel pulls its whole module graph into that bundle closure.
+ * FAT/exFAT and some SMB-style filesystems report `Stats.ino === 0`, while
+ * Windows can expose file IDs that exceed JavaScript's safe integer range.
+ * Neither value can be compared as an exact identity proof.
  */
 function hasVerifiableInode(ino: number): boolean {
-  return Number(ino) !== 0;
+  return Number.isSafeInteger(ino) && ino > 0;
+}
+
+function normalizedInode(ino: number): number {
+  return hasVerifiableInode(ino) ? ino : 0;
 }
 
 export interface ConversationRootIdentity {
@@ -134,11 +134,11 @@ function hasRootIdentity(
   stats: Stats,
   root: ConversationRootIdentity,
 ): boolean {
-  if (!root.inodeVerifiable) return stats.dev === root.device;
+  const inodeVerifiable = hasVerifiableInode(stats.ino);
   return (
-    hasVerifiableInode(stats.ino) &&
     stats.dev === root.device &&
-    stats.ino === root.inode
+    inodeVerifiable === root.inodeVerifiable &&
+    (!inodeVerifiable || stats.ino === root.inode)
   );
 }
 
@@ -151,10 +151,13 @@ function hasRootIdentity(
  * blocks the feature outright, so only the device is required.
  */
 function isSameDirectoryIdentity(before: Stats, after: Stats): boolean {
-  if (!hasVerifiableInode(before.ino) || !hasVerifiableInode(after.ino)) {
-    return before.dev === after.dev;
-  }
-  return before.dev === after.dev && before.ino === after.ino;
+  const beforeVerifiable = hasVerifiableInode(before.ino);
+  const afterVerifiable = hasVerifiableInode(after.ino);
+  return (
+    before.dev === after.dev &&
+    beforeVerifiable === afterVerifiable &&
+    (!beforeVerifiable || before.ino === after.ino)
+  );
 }
 
 function hasExpectedDirectoryIdentity(
@@ -225,7 +228,7 @@ export async function createConversationRootIdentity(
     configuredRoot,
     canonicalRoot,
     device: after.dev,
-    inode: after.ino,
+    inode: normalizedInode(after.ino),
     inodeVerifiable: hasVerifiableInode(after.ino),
   };
 }
@@ -350,7 +353,7 @@ async function inspectConversationNamedDirectoryIdentity(
     name,
     canonicalPath: canonical,
     device: after.dev,
-    inode: after.ino,
+    inode: normalizedInode(after.ino),
   };
   if (expected && !hasExpectedDirectoryIdentity(identity, expected)) {
     throw new ConversationDirectoryIdentityError(

@@ -3198,6 +3198,32 @@ function isOwnerOnlyDirectory(stats: Stats): boolean {
   return (stats.mode & 0o077) === 0;
 }
 
+function hasVerifiableManagedInode(inode: number): boolean {
+  return Number.isSafeInteger(inode) && inode > 0;
+}
+
+function hasExpectedManagedDirectoryIdentity(
+  stats: Stats,
+  expected: { device: number; inode: number },
+): boolean {
+  const inodeVerifiable = hasVerifiableManagedInode(stats.ino);
+  return (
+    stats.dev === expected.device &&
+    inodeVerifiable === (expected.inode !== 0) &&
+    (!inodeVerifiable || stats.ino === expected.inode)
+  );
+}
+
+function isSameManagedDirectoryIdentity(left: Stats, right: Stats): boolean {
+  const leftVerifiable = hasVerifiableManagedInode(left.ino);
+  const rightVerifiable = hasVerifiableManagedInode(right.ino);
+  return (
+    left.dev === right.dev &&
+    leftVerifiable === rightVerifiable &&
+    (!leftVerifiable || left.ino === right.ino)
+  );
+}
+
 function hasOnlyKeys(
   value: Record<string, unknown>,
   keys: readonly string[],
@@ -3315,10 +3341,8 @@ async function assertManagedConversationDirectoryIdentity(
     !isOwnerOnlyDirectory(rootBefore) ||
     !isOwnerOnlyDirectory(rootAfter) ||
     !isSameConversationPath(canonicalRoot, expectation.root.canonicalPath) ||
-    rootBefore.dev !== expectation.root.device ||
-    rootBefore.ino !== expectation.root.inode ||
-    rootAfter.dev !== expectation.root.device ||
-    rootAfter.ino !== expectation.root.inode
+    !hasExpectedManagedDirectoryIdentity(rootBefore, expectation.root) ||
+    !hasExpectedManagedDirectoryIdentity(rootAfter, expectation.root)
   ) {
     throw managedConversationDirectoryError(false);
   }
@@ -3339,10 +3363,8 @@ async function assertManagedConversationDirectoryIdentity(
     !isOwnerOnlyDirectory(childBefore) ||
     !isOwnerOnlyDirectory(childAfter) ||
     !isSameConversationPath(canonicalChild, expectation.child.canonicalPath) ||
-    childBefore.dev !== expectation.child.device ||
-    childBefore.ino !== expectation.child.inode ||
-    childAfter.dev !== expectation.child.device ||
-    childAfter.ino !== expectation.child.inode
+    !hasExpectedManagedDirectoryIdentity(childBefore, expectation.child) ||
+    !hasExpectedManagedDirectoryIdentity(childAfter, expectation.child)
   ) {
     throw managedConversationDirectoryError(false);
   }
@@ -10003,16 +10025,16 @@ class QwenAgent implements Agent {
           if (
             !isOwnerOnlyDirectory(rootBefore) ||
             !isOwnerOnlyDirectory(rootAfter) ||
-            rootBefore.dev !== rootAfter.dev ||
-            rootBefore.ino !== rootAfter.ino ||
+            !isSameManagedDirectoryIdentity(rootBefore, rootAfter) ||
             (conversationDirectoryExpectation !== undefined &&
               (!isSameConversationPath(
                 canonicalRoot,
                 conversationDirectoryExpectation.root.canonicalPath,
               ) ||
-                rootAfter.dev !==
-                  conversationDirectoryExpectation.root.device ||
-                rootAfter.ino !== conversationDirectoryExpectation.root.inode))
+                !hasExpectedManagedDirectoryIdentity(
+                  rootAfter,
+                  conversationDirectoryExpectation.root,
+                )))
           ) {
             if (conversationDirectoryExpectation !== undefined) {
               throw managedConversationDirectoryError(false);
@@ -10045,17 +10067,16 @@ class QwenAgent implements Agent {
           if (
             !isOwnerOnlyDirectory(targetBefore) ||
             !isOwnerOnlyDirectory(targetAfter) ||
-            targetBefore.dev !== targetAfter.dev ||
-            targetBefore.ino !== targetAfter.ino ||
+            !isSameManagedDirectoryIdentity(targetBefore, targetAfter) ||
             (conversationDirectoryExpectation !== undefined &&
               (!isSameConversationPath(
                 canonicalPath,
                 conversationDirectoryExpectation.child.canonicalPath,
               ) ||
-                targetAfter.dev !==
-                  conversationDirectoryExpectation.child.device ||
-                targetAfter.ino !==
-                  conversationDirectoryExpectation.child.inode)) ||
+                !hasExpectedManagedDirectoryIdentity(
+                  targetAfter,
+                  conversationDirectoryExpectation.child,
+                ))) ||
             relativeTarget.length === 0 ||
             relativeTarget.startsWith('..') ||
             path.isAbsolute(relativeTarget) ||
@@ -10086,11 +10107,12 @@ class QwenAgent implements Agent {
           }
           if (
             !isOwnerOnlyDirectory(rootFinal) ||
-            rootFinal.dev !== rootAfter.dev ||
-            rootFinal.ino !== rootAfter.ino ||
+            !isSameManagedDirectoryIdentity(rootFinal, rootAfter) ||
             (conversationDirectoryExpectation !== undefined &&
-              (rootFinal.dev !== conversationDirectoryExpectation.root.device ||
-                rootFinal.ino !== conversationDirectoryExpectation.root.inode))
+              !hasExpectedManagedDirectoryIdentity(
+                rootFinal,
+                conversationDirectoryExpectation.root,
+              ))
           ) {
             if (conversationDirectoryExpectation !== undefined) {
               throw managedConversationDirectoryError(false);
