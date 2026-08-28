@@ -622,6 +622,50 @@ setInterval(() => {}, 1000);
       expect(result.error).toBeUndefined();
     }, 10_000);
 
+    it('preserves a prompt exit 124 when the parent event loop is delayed past the deadline', async () => {
+      const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-exit-124-'));
+      const markerPath = join(tempDir, 'hook.done');
+
+      try {
+        const runner = new HookRunner();
+        const resultPromise = runner.executeHook(
+          {
+            type: HookType.Command,
+            command: `: > ${JSON.stringify(markerPath)}; sleep 0.05; exit 124`,
+            source: HooksConfigSource.Project,
+            shell: 'bash',
+            timeout: 1000,
+          },
+          HookEventName.SessionDelete,
+          {
+            session_id: 'surviving-delayed-exit-124-test',
+            transcript_path: join(tempDir, 'transcript.jsonl'),
+            cwd: tempDir,
+            hook_event_name: HookEventName.SessionDelete,
+            timestamp: new Date().toISOString(),
+          },
+        );
+
+        await waitFor(
+          async () =>
+            (await readFile(markerPath, 'utf8').catch(() => undefined)) !==
+            undefined,
+          5000,
+        );
+        const blockedUntil = Date.now() + 1300;
+        while (Date.now() < blockedUntil) {
+          // Delay delivery of the supervisor status and close events.
+        }
+
+        const result = await resultPromise;
+        expect(result).toMatchObject({ success: false, exitCode: 124 });
+        expect(result.error).toBeUndefined();
+        expect(result.duration).toBeGreaterThan(1000);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    }, 10_000);
+
     it('isolates the supervisor from hook NODE_OPTIONS', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-node-options-'));
       const preloadPath = join(tempDir, 'preload.cjs');
@@ -723,6 +767,87 @@ setInterval(() => {}, 1000);
         await rm(tempDir, { recursive: true, force: true });
       }
     }, 10_000);
+
+    it('reaps a surviving hook when its supervisor is stopped before abort', async () => {
+      const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-stopped-'));
+      const fixturePath = join(tempDir, 'hook.mjs');
+      const readyPath = join(tempDir, 'hook.ready');
+      const hookPidPath = join(tempDir, 'hook.pid');
+      const supervisorPidPath = join(tempDir, 'supervisor.pid');
+      const controller = new AbortController();
+      let hookPid: number | undefined;
+      let supervisorPid: number | undefined;
+
+      try {
+        await writeFile(
+          fixturePath,
+          `import { writeFileSync } from 'node:fs';
+
+process.on('SIGTERM', () => {});
+writeFileSync(process.argv[2], String(process.pid));
+writeFileSync(process.argv[3], String(process.ppid));
+writeFileSync(process.argv[4], 'ready');
+setInterval(() => {}, 1000);
+`,
+        );
+        const runner = new HookRunner();
+        const resultPromise = runner.executeHook(
+          {
+            type: HookType.Command,
+            command: `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(fixturePath)} ${JSON.stringify(hookPidPath)} ${JSON.stringify(supervisorPidPath)} ${JSON.stringify(readyPath)}`,
+            source: HooksConfigSource.Project,
+            shell: 'bash',
+            timeout: 60_000,
+          },
+          HookEventName.MessageDisplay,
+          {
+            session_id: 'surviving-stopped-supervisor-test',
+            transcript_path: join(tempDir, 'transcript.jsonl'),
+            cwd: tempDir,
+            hook_event_name: HookEventName.MessageDisplay,
+            timestamp: new Date().toISOString(),
+          },
+          controller.signal,
+        );
+
+        await waitFor(async () => {
+          hookPid = await readPid(hookPidPath);
+          supervisorPid = await readPid(supervisorPidPath);
+          return (
+            hookPid !== undefined &&
+            supervisorPid !== undefined &&
+            (await readFile(readyPath, 'utf8').catch(() => '')) === 'ready'
+          );
+        }, 5000);
+
+        process.kill(supervisorPid as number, 'SIGSTOP');
+        controller.abort();
+        const result = await resultPromise;
+
+        expect(result.error?.message).toBe(
+          'Hook execution cancelled (aborted)',
+        );
+        expect(isRunning(supervisorPid as number)).toBe(false);
+        expect(isRunning(hookPid as number)).toBe(false);
+      } finally {
+        controller.abort();
+        if (supervisorPid && isRunning(supervisorPid)) {
+          try {
+            process.kill(-supervisorPid, 'SIGKILL');
+          } catch {
+            // Already gone.
+          }
+        }
+        if (hookPid && isRunning(hookPid)) {
+          try {
+            process.kill(-hookPid, 'SIGKILL');
+          } catch {
+            // Already gone.
+          }
+        }
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    }, 15_000);
 
     it('keeps supervising a surviving hook group after its root exits', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-descendant-'));

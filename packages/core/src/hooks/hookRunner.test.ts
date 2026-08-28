@@ -1129,7 +1129,7 @@ describe('HookRunner', () => {
         for (const call of mockSpawn.mock.calls) {
           expect(call[0]).toBe(process.execPath);
           expect(call[1]).toContain('--eval');
-          expect(call[2].stdio).toBe('ignore');
+          expect(call[2].stdio).toEqual(['ignore', 'ignore', 'ignore', 'pipe']);
           expect(call[2].detached).toBe(true);
         }
         for (const result of mockSpawn.mock.results) {
