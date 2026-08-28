@@ -94,6 +94,7 @@ import {
   bearerAuth,
   denyBrowserOriginCors,
   hostAllowlist,
+  isTrustedLoopbackMode,
   parseAllowOriginPatterns,
 } from './auth.js';
 import type { LocalControlService } from './local-control/index.js';
@@ -3293,13 +3294,23 @@ async function runQwenServeImpl(
   loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
   const token = resolveServeToken(optsIn.token);
+  const trustedLoopbackMode = isTrustedLoopbackMode({
+    loopbackBind: isLoopbackBind(optsIn.hostname),
+    tokenConfigured: token !== undefined,
+    requireAuth: optsIn.requireAuth === true,
+  });
   const channelDeliveryDiagnosticRedaction: WorkerDiagnosticRedactionOptions = {
     workerEnv: daemonRuntimeBaseEnv,
     ...(token ? { daemonToken: token } : {}),
   };
   const sessionShellCommandEnabled =
-    optsIn.enableSessionShell === true && token !== undefined;
-  if (optsIn.enableSessionShell === true && token === undefined) {
+    optsIn.enableSessionShell === true &&
+    (token !== undefined || trustedLoopbackMode);
+  if (
+    optsIn.enableSessionShell === true &&
+    token === undefined &&
+    !trustedLoopbackMode
+  ) {
     writeStderrLine(
       `qwen serve: --enable-session-shell ignored because no bearer token ` +
         `is configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token to ` +
@@ -3584,7 +3595,10 @@ async function runQwenServeImpl(
             'token gates API routes; the Web Shell static assets stay ' +
             'pre-auth in every mode unless --no-web, and /health stays ' +
             'pre-auth on loopback unless --require-auth is set)'
-          : ''),
+          : trustedLoopbackMode
+            ? ' (WARNING: these browser origins receive full API authority ' +
+              'without a bearer token in trusted loopback mode)'
+            : ''),
     );
   }
   if (opts.allowPrivateAuthBaseUrl) {
@@ -9094,7 +9108,9 @@ async function runQwenServeImpl(
       );
       if (!token) {
         writeStderrLine(
-          `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,
+          `qwen serve: trusted loopback mode; local callers have full API ` +
+            `access without bearer authentication. Use --require-auth with ` +
+            `${QWEN_SERVER_TOKEN_ENV} on shared or untrusted hosts.`,
         );
         if (opts.clientMcpOverWs === true) {
           writeStderrLine(

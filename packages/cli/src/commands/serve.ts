@@ -337,7 +337,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
+          'Enable direct POST /session/:id/shell execution. Available with bearer auth or trusted loopback; each call still requires a session-bound client id.',
       })
       .option('tls-cert', {
         type: 'string',

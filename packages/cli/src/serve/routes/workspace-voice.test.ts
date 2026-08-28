@@ -954,7 +954,7 @@ describe('workspace voice routes', () => {
     expect(h.transcribe).not.toHaveBeenCalled();
   });
 
-  it('POST /workspace/voice/transcribe requires a configured token on loopback defaults', async () => {
+  it('POST /workspace/voice/transcribe runs on trusted loopback without a token', async () => {
     await teardown(h);
     h = await makeHarness({ token: '' });
     await writeVoiceModelSettings(h);
@@ -965,9 +965,9 @@ describe('workspace voice routes', () => {
       .set('Content-Type', 'audio/wav')
       .send(Buffer.from([1, 2, 3, 4]));
 
-    expect(res.status).toBe(401);
-    expect(res.body.code).toBe('token_required');
-    expect(h.transcribe).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(res.body.text).toBe('hello from audio');
+    expect(h.transcribe).toHaveBeenCalledOnce();
   });
 
   it('registers transcription as a strict mutation route', () => {

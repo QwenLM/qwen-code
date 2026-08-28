@@ -37,9 +37,11 @@ import {
   bearerAuth,
   createMutationGate,
   hostAllowlist,
+  isTrustedLoopbackMode,
   MutableOriginAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
+import { isLoopbackBind } from './loopback-binds.js';
 import {
   CredentialStore,
   listenerIdentityOf,
@@ -744,6 +746,18 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  const tokenConfigured =
+    typeof opts.token === 'string' && opts.token.length > 0;
+  if (opts.requireAuth === true && !tokenConfigured) {
+    throw new Error(
+      'createServeApp: requireAuth requires a non-empty bearer token.',
+    );
+  }
+  const trustedLoopbackMode = isTrustedLoopbackMode({
+    loopbackBind: isLoopbackBind(opts.hostname),
+    tokenConfigured,
+    requireAuth: opts.requireAuth === true,
+  });
   const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
   // The scheduled-task helpers retain an outer watchdog for injected bridges.
   // A value above the timer ceiling is their explicit no-watchdog sentinel.
@@ -861,10 +875,9 @@ export function createServeApp(
       injected: deps.fsFactory,
       trusted: false,
     });
-  const tokenConfigured =
-    typeof opts.token === 'string' && opts.token.length > 0;
   const sessionShellCommandEnabled =
-    opts.enableSessionShell === true && tokenConfigured;
+    opts.enableSessionShell === true &&
+    (tokenConfigured || trustedLoopbackMode);
   // Reverse tool channel (issue #5626, Phase 2). Process-scoped registry that
   // bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
   // child's `client_mcp/message` ext-method. Prefer the registry `runQwenServe`
@@ -1904,11 +1917,11 @@ export function createServeApp(
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
   // Authorization header to a `<script src>` subresource or an address-bar
-  // navigation, so gating it would just break the UI — the front-end's own
-  // API calls still carry the bearer (getDaemonAuthHeaders) and every API
-  // route below stays token-gated. The SPA deep-link fallback is registered
-  // LATER (after all API routes, see mountWebShellSpaFallback) so authed
-  // routes win over the shell. Exact `/session/:id` document navigations are
+  // navigation, so gating it would just break the UI. The front end attaches
+  // a configured bearer via getDaemonAuthHeaders; token-less trusted-loopback
+  // calls use listener authority. The SPA deep-link fallback is registered
+  // LATER (after all API routes, see mountWebShellSpaFallback) so API routes
+  // win over the shell. Exact `/session/:id` document navigations are
   // mounted here too because a browser refresh cannot attach the bearer header
   // before the shell loads. The assets dir is resolved by the caller
   // (runQwenServe) and injected via deps.webShellDir; `--no-web` sets
@@ -2000,11 +2013,12 @@ export function createServeApp(
 
   installJsonBodyParser(app);
 
-  // Mutation-route gate factory. Non-strict mode is passthrough;
-  // `{ strict: true }` requires a token even on loopback defaults.
+  // Mutation-route gate factory. Trusted primary loopback requests have
+  // operator authority; strict routes otherwise require verified credentials.
   const mutate = createMutationGate({
     tokenConfigured,
     requireAuth: opts.requireAuth === true,
+    trustedLoopbackMode,
   });
 
   app.use(
@@ -3135,6 +3149,7 @@ export function createServeApp(
     isDaemonDraining: deps.isChannelControlDraining,
     webShellAvailable: Boolean(webShellDir),
     primaryBindHostname: opts.hostname,
+    trustedLoopbackMode,
   });
 
   // Web Shell SPA deep-link fallback — registered AFTER every API route (and

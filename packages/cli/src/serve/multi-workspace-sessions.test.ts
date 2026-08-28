@@ -1193,14 +1193,11 @@ describe('multi-workspace session dispatch', () => {
     expect(res.body.limits.maxTotalSessions).toBeNull();
   });
 
-  it('advertises multi-workspace shell only when effective session shell is enabled', async () => {
+  it('advertises multi-workspace shell on trusted loopback when explicitly enabled', async () => {
     const { app } = makeHarness({
-      serveOptions: { token: 'secret', enableSessionShell: true },
+      serveOptions: { enableSessionShell: true },
     });
-    const res = await request(app)
-      .get('/capabilities')
-      .set('Host', host())
-      .set('Authorization', 'Bearer secret');
+    const res = await request(app).get('/capabilities').set('Host', host());
 
     expect(res.status).toBe(200);
     expect(res.body.features).toContain('session_shell_command');
@@ -1417,16 +1414,15 @@ describe('multi-workspace session dispatch', () => {
     ]);
   });
 
-  it('routes secondary rewind snapshots, rewind, and shell only to the owner bridge', async () => {
+  it('routes trusted-loopback secondary rewind and shell only to the owner bridge', async () => {
     const daemonLog = makeDaemonLog();
     const { app, primaryBridge, secondaryBridge } = makeHarness({
       daemonLog,
-      serveOptions: { token: 'secret', enableSessionShell: true },
+      serveOptions: { enableSessionShell: true },
     });
-    const auth = (test: request.Test) =>
-      test.set('Host', host()).set('Authorization', 'Bearer secret');
+    const local = (test: request.Test) => test.set('Host', host());
 
-    const snapshots = await auth(
+    const snapshots = await local(
       request(app).get(
         '/session/22222222-2222-4222-a222-222222222222/rewind/snapshots',
       ),
@@ -1436,7 +1432,7 @@ describe('multi-workspace session dispatch', () => {
       `${SECONDARY_CWD}-prompt`,
     );
 
-    const rewind = await auth(
+    const rewind = await local(
       request(app).post('/session/22222222-2222-4222-a222-222222222222/rewind'),
     )
       .set('X-Qwen-Client-Id', 'client-2')
@@ -1444,7 +1440,7 @@ describe('multi-workspace session dispatch', () => {
     expect(rewind.status).toBe(200);
     expect(rewind.body.filesChanged).toEqual(['tracked.txt']);
 
-    const shell = await auth(
+    const shell = await local(
       request(app).post('/session/22222222-2222-4222-a222-222222222222/shell'),
     )
       .set('X-Qwen-Client-Id', 'client-2')
@@ -3451,7 +3447,7 @@ describe('multi-workspace session dispatch', () => {
     expect(primaryBridge.removeArtifactCalls).toEqual([]);
   });
 
-  it('preserves mutation auth while leaving language on its existing non-strict gate', async () => {
+  it('executes strict and non-strict secondary mutations on trusted loopback', async () => {
     const { app, primaryBridge, secondaryBridge } = makeHarness();
 
     const responses = await Promise.all([
@@ -3472,7 +3468,7 @@ describe('multi-workspace session dispatch', () => {
         .set('X-Qwen-Client-Id', 'secondary-client'),
     ]);
     expect(responses.map((response) => response.status)).toEqual([
-      401, 401, 401,
+      200, 200, 200,
     ]);
 
     const language = await request(app)
@@ -3486,11 +3482,12 @@ describe('multi-workspace session dispatch', () => {
         params: { language: 'zh', syncOutputLanguage: false },
       },
     ]);
-    for (const bridge of [primaryBridge, secondaryBridge]) {
-      expect(bridge.continueCalls).toEqual([]);
-      expect(bridge.addArtifactCalls).toEqual([]);
-      expect(bridge.removeArtifactCalls).toEqual([]);
-    }
+    expect(primaryBridge.continueCalls).toEqual([]);
+    expect(primaryBridge.addArtifactCalls).toEqual([]);
+    expect(primaryBridge.removeArtifactCalls).toEqual([]);
+    expect(secondaryBridge.continueCalls).toHaveLength(1);
+    expect(secondaryBridge.addArtifactCalls).toHaveLength(1);
+    expect(secondaryBridge.removeArtifactCalls).toHaveLength(1);
   });
 
   it('rejects remaining mutations for an untrusted non-primary owner', async () => {

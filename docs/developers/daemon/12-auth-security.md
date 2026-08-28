@@ -8,7 +8,7 @@
 2. **Bearer auth** — `bearerAuth` middleware with constant-time SHA-256 compare protects every route except `/health` on loopback (`require_auth` extends this to loopback and `/health` too).
 3. **Host header allowlist** — on loopback, only `localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal` (plus port) are accepted; defense against DNS rebinding. The Local Control LAN listener is the exception that always enforces its advertised-authority Host check, whatever the primary bind is.
 4. **Origin control** — the runtime app always installs `allowOriginCors` over a mutable allowlist (`MutableOriginAllowlist`): the `--allow-origin <pattern>` entries seed it, and Local Control adds the LAN origin while enabled. Non-matching origins receive the 403 deny envelope. The unconditional deny wall (`denyBrowserOriginCors`) survives only in the bootstrap app that answers before the runtime starts.
-5. **Per-route mutation gate** — Wave 4 mutating routes can opt in to `401` responses even on loopback when no token is configured, using a distinct `code: 'token_required'` error.
+5. **Per-route mutation gate** — strict routes require operator authority. A token-less loopback primary listener is trusted; bearer-authenticated and paired Local Control requests also qualify. Other token-less requests receive the distinct `code: 'token_required'` error.
 6. **Device-flow auth** — separate OAuth surface for providers (`POST /workspace/auth/device-flow` + GET/DELETE on `/:id`).
 
 This doc walks through each layer and the explicit invariants the boot path enforces.
@@ -51,6 +51,8 @@ if (parsed.allowAny && !token) {
 All three refusals are explicit boot failures (visible in stderr / thrown to the embedder),
 never silent. The threat model from #3803 explicitly forbids silently letting a
 daemon bind beyond loopback in the open.
+
+`createServeApp()` does not own a socket, so it does not reject a declared non-loopback hostname without a token. Such an embed never enters trusted-loopback mode: strict routes, session shell, and Local Control pairing material fail closed. It does reject `requireAuth: true` without a non-empty token at construction so non-strict routes cannot accidentally remain open under an invalid hardened configuration.
 
 ### Middleware chain (HTTP request order)
 
@@ -112,6 +114,7 @@ Control is enabled (the LAN origin is added/removed with the listener):
 - Non-matching `Origin` values receive the same deterministic
   `403 { error: 'Request denied by CORS policy' }` as deny mode.
 - `--allow-origin '*'` requires `--token`; otherwise boot refuses.
+- A specific `--allow-origin` is permitted without a token in trusted-loopback mode, but explicitly grants that browser origin the same full operator API authority as a local primary-listener caller. Startup logs this boundary expansion.
 - `parseAllowOriginPatterns()` validates pattern syntax at boot.
 - The `allow_origin` capability tag is advertised only when this mode is
   configured.
@@ -120,19 +123,19 @@ Control is enabled (the LAN origin is added/removed with the listener):
 
 Per-route opt-in gate. Behavior matrix:
 
-| daemon config           | route opts                      | result                           |
-| ----------------------- | ------------------------------- | -------------------------------- |
-| `requireAuth=true`      | any                             | passthrough¹                     |
-| `token` configured      | any                             | passthrough²                     |
-| no token (loopback dev) | `strict: false`                 | passthrough                      |
-| no token (loopback dev) | `strict: true`, unauthenticated | `401 { code: 'token_required' }` |
-| no token (loopback dev) | `strict: true`, authenticated³  | passthrough                      |
+| daemon/request authority          | route opts      | result                           |
+| --------------------------------- | --------------- | -------------------------------- |
+| token configured                  | any             | passthrough¹                     |
+| trusted-loopback primary listener | any             | passthrough                      |
+| paired Local Control listener     | `strict: true`  | passthrough                      |
+| non-trusted token-less request    | `strict: true`  | `401 { code: 'token_required' }` |
+| any token-less deployment         | `strict: false` | passthrough                      |
 
-¹ `--require-auth` boots only with a token, so global `bearerAuth` already 401'd unauthenticated callers.
-² Any token configuration makes global `bearerAuth` enforce bearer-required-everywhere; the gate is redundant but harmless.
-³ Authenticated via a listener-scoped credential: the Local Control LAN listener verifies its pairing credential even on a token-less daemon and stamps the request as authenticated, so strict routes pass for the paired LAN client.
+¹ Any token configuration makes global `bearerAuth` enforce bearer-required-everywhere; the gate is redundant but harmless. `--require-auth` is not itself authentication and is valid only with a token.
 
-The `code: 'token_required'` shape is distinct from `bearerAuth`'s plain `Unauthorized` so SDK clients can render a "configure --token / --require-auth" hint instead of a generic 401.
+Trusted-loopback mode is derived once from `loopback bind && no configured token && !requireAuth`. It authorizes only requests arriving through the primary listener. It does not stamp the internal bearer-authenticated marker, so listener credentials and deployment authority remain distinct facts. The `code: 'token_required'` shape remains for older daemons and non-trusted embeds so SDK clients can render a configuration hint instead of a generic 401.
+
+Local Control status and enable responses expose their pairing URL and QR only to callers with operator authority: trusted primary-listener callers, bearer-authenticated primary callers, and already paired LAN clients. Unpaired LAN callers and non-trusted embeds cannot retrieve it. Enabling still requires the primary listener; LAN clients may access after pairing or request disable under the existing rules.
 
 **Wave 4+ strict routes**: `/workspace/memory`, `/workspace/agents/*`,
 `/workspace/agents/generate`, `/file/write`, `/file/edit`,
@@ -255,19 +258,21 @@ sequenceDiagram
 
 After authenticating, `caps.features.includes('require_auth')` confirms the deployment is hardened.
 
-### Wave 4 mutation gate on no-token loopback
+### Strict mutation on trusted loopback
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant C as Client
+    participant C as Local client
     participant BA as bearerAuth (no-op, no token)
     participant MG as mutationGate({strict: true})
     participant R as Handler
 
     C->>BA: POST /workspace/memory (no Authorization)
     BA->>MG: passthrough
-    MG-->>C: 401 { code: 'token_required', error: '...' }
+    MG->>MG: primary listener + trusted-loopback mode
+    MG->>R: next()
+    R-->>C: route result
 ```
 
 ## State & Lifecycle
@@ -300,7 +305,7 @@ sequenceDiagram
 ## Caveats & Known Limits
 
 - **`--require-auth` shadows feature preflight.** Unauthenticated clients cannot discover the `require_auth` tag; their discovery surface is the 401 body itself.
-- **Mutation gate body-parser ordering**: `mutationGate({strict: true})` 401 responses fire **after** `express.json()` parses the body. Worst case on a saturated loopback listener: `--max-connections × express.json({limit: '10mb'})` ≈ 2.5 GB transient. Loopback-only attack surface, intentionally accepted.
+- **Mutation gate body-parser ordering**: `mutationGate({strict: true})` 401 responses fire **after** `express.json()` parses the body. Worst case on a saturated listener: `--max-connections × express.json({limit: '10mb'})` ≈ 2.5 GB transient. Non-loopback production entrypoints already require bearer auth before body parsing; direct non-trusted embeds own their listener exposure.
 - **Same-origin Origin stripping** in `server.ts` happens _before_ `allowOriginCors`. If a future change moves the strip elsewhere, the Web Shell breaks.
 - **Token comparison is over the SHA-256 digest**, not the raw token. Reduces timing leakage by collapsing variable-length token compares to a fixed-size digest compare.
 - The daemon does **not** carry mTLS, request signing, or pair-token proof-of-possession today. `--rate-limit` provides HTTP rate limiting by client-id / IP key; it is not client identity authentication.

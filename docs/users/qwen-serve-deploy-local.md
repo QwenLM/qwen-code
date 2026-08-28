@@ -216,7 +216,7 @@ curl -H "Authorization: Bearer $QWEN_SERVER_TOKEN" \
   http://127.0.0.1:4170/capabilities | jq .protocolVersions         # daemon's feature set
 ```
 
-When auth is configured (i.e., the daemon was started with `--token` / `QWEN_SERVER_TOKEN` set, OR `--require-auth=true`), every route except `/health` on loopback binds requires `Authorization: Bearer <token>`. If you started the daemon without a token on the loopback default (the `qwen serve` zero-config path), neither call requires a header. The templates above all configure a token, so the `Authorization` header is needed in practice. If `/capabilities` returns `401`, the unit / plist token doesn't match the env-exported token your `curl` is using.
+When auth is configured (`--token` or `QWEN_SERVER_TOKEN`; `--require-auth=true` additionally makes that token mandatory on loopback), every route except `/health` on an ordinary loopback bind requires `Authorization: Bearer <token>`. If you started the daemon without a token on the loopback default (the `qwen serve` zero-config path), neither call requires a header and the primary listener grants local callers full operator API authority. The templates above all configure a token, so the `Authorization` header is needed in practice. If `/capabilities` returns `401`, the unit / plist token doesn't match the env-exported token your `curl` is using.
 
 ## Token rotation
 

@@ -212,17 +212,18 @@ describe('POST /workspace/setup-github', () => {
     await teardown(h);
   });
 
-  it('requires strict mutation auth', async () => {
+  it('runs on trusted loopback without a token', async () => {
     await teardown(h);
     h = await makeHarness();
+    setupGithubMocks.setupGithub.mockResolvedValueOnce(setupResult());
     const res = await request(h.app)
       .post('/workspace/setup-github')
       .set('Host', loopbackHost())
       .send({ consent: true });
 
-    expect(res.status).toBe(401);
-    expect(res.body.code).toBe('token_required');
-    expect(setupGithubMocks.setupGithub).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(res.body.releaseTag).toBe('v1.2.3');
+    expect(setupGithubMocks.setupGithub).toHaveBeenCalledOnce();
   });
 
   it('requires consent', async () => {

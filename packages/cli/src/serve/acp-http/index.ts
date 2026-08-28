@@ -916,11 +916,11 @@ export function mountAcpHttp(
       res.status(400).json({ error: 'Missing Acp-Connection-Id' });
       return;
     }
-    // NOTE: like every other route, DELETE is gated only by the bearer
-    // token — the daemon's trust boundary is "holds the token for this
-    // daemon", so any token-holder may tear down any connection (same posture
+    // NOTE: like every other route, DELETE is gated by deployment-level
+    // operator authority, not by ownership of this ACP connection. Any
+    // authorized caller may therefore tear down any connection (same posture
     // as the REST `DELETE /session/:id`). A per-connection secret would add
-    // intra-token isolation; deferred with the rest of the multi-tenant
+    // intra-operator isolation; deferred with the rest of the multi-tenant
     // hardening (design §7).
     const existed = mount.registry.delete(connectionId);
     if (existed) {
