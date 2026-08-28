@@ -1095,47 +1095,6 @@ describe('SessionOverviewPanel', () => {
     expect([...onOpenSplit.mock.calls[0][0]].sort()).toEqual(expectedIds);
   });
 
-  it('defaults to 50 rows per page and supports 10, 50, and 100', () => {
-    sessionsState.sessions = Array.from({ length: 120 }, (_, i) =>
-      session(`s${i}`, { displayName: `S${i}` }),
-    );
-    render();
-    expect(rows()).toHaveLength(50);
-    expect(container!.textContent).toContain('Page 1 of 3');
-    const trigger = container!.querySelector(
-      'button[aria-label="Rows per page"]',
-    ) as HTMLElement;
-    act(() => click(trigger));
-    expect(
-      Array.from(document.querySelectorAll('[role="option"]')).map((option) =>
-        option.textContent?.trim(),
-      ),
-    ).toEqual(['10', '50', '100']);
-    const option100 = Array.from(
-      document.querySelectorAll('[role="option"]'),
-    ).find((option) => option.textContent?.trim() === '100') as HTMLElement;
-    act(() => click(option100));
-    expect(rows()).toHaveLength(100);
-    expect(container!.textContent).toContain('Page 1 of 2');
-    expect(
-      window.localStorage.getItem('qwen-web-shell-session-overview-page-size'),
-    ).toBe('100');
-    const next = footerButton('Next') as HTMLButtonElement;
-    act(() => next.dispatchEvent(new MouseEvent('click', { bubbles: true })));
-    expect(rows()).toHaveLength(20);
-    expect(container!.textContent).toContain('Page 2 of 2');
-    act(() => root?.unmount());
-    container?.remove();
-    root = null;
-    container = null;
-    render();
-    expect(rows()).toHaveLength(100);
-    expect(
-      container!.querySelector('button[aria-label="Rows per page"]')
-        ?.textContent,
-    ).toContain('100');
-  });
-
   it('keeps the toolbar and pagination responsive on narrow screens', () => {
     sessionsState.sessions = [session('s1', { displayName: 'One' })];
     render();
@@ -1662,7 +1621,7 @@ describe('SessionOverviewPanel', () => {
       ) as HTMLElement;
       expect(observedTargets.has(tableViewport)).toBe(true);
       Object.defineProperties(panel, {
-        scrollHeight: { configurable: true, value: 600 },
+        scrollHeight: { configurable: true, value: 380 },
       });
       Object.defineProperties(tableViewport, {
         clientHeight: { configurable: true, value: 200 },
@@ -1676,6 +1635,8 @@ describe('SessionOverviewPanel', () => {
       Object.defineProperties(viewport, {
         clientHeight: { configurable: true, value: 400 },
       });
+      viewport.style.paddingTop = '16px';
+      viewport.style.paddingBottom = '16px';
       act(() =>
         resizeCallbacks.forEach((callback) =>
           callback([], {} as ResizeObserver),

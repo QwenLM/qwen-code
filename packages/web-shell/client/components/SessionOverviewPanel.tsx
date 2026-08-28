@@ -1507,12 +1507,17 @@ function SessionOverviewPanelInner({
         panel.scrollHeight -
         tableViewport.clientHeight +
         tableViewport.scrollHeight;
+      const viewportStyle = getComputedStyle(viewport);
+      const viewportContentHeight =
+        viewport.clientHeight -
+        (Number.parseFloat(viewportStyle.paddingTop) || 0) -
+        (Number.parseFloat(viewportStyle.paddingBottom) || 0);
       // Asymmetric hysteresis: sticky mode's own decorations change the
       // measured natural height by -3px (pt-3 +12, border-t +1, -mb-4 -16),
       // so engage above P+1 but release only below P-3 as measured while
       // sticky — otherwise the decision flips on its own side effect.
       setFooterSticky(
-        (prev) => naturalHeight > viewport.clientHeight + (prev ? -4 : 1),
+        (prev) => naturalHeight > viewportContentHeight + (prev ? -4 : 1),
       );
     };
     update();

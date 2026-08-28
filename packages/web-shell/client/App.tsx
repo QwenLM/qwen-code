@@ -12427,6 +12427,7 @@ export function App({
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
                     setMainView('chat');
+                    splitFoldedByShrinkRef.current = false;
                     closePanel();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
