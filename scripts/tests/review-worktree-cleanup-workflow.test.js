@@ -227,6 +227,20 @@ const removeReviewTreeFn = reviewCleanStep.slice(
   reviewCleanStep.indexOf('\n}\n', removeTreeFnStart) + 2,
 );
 const bashAvailable = spawnSync('bash', ['-c', 'exit 0']).status === 0;
+// The pre-checkout sweep's ladder is individually guarded: every rung ends
+// in `|| true` with stderr swallowed, so on a Git-Bash-only PATH without
+// coreutils the whole sweep exits 0 while leaving `.qwen` on disk — the
+// behavioral fixture asserting removal must skip there instead of failing.
+const sweepToolsAvailable =
+  bashAvailable &&
+  spawnSync(
+    'bash',
+    [
+      '-c',
+      'command -v rm >/dev/null && command -v chmod >/dev/null && command -v mv >/dev/null',
+    ],
+    { stdio: 'ignore' },
+  ).status === 0;
 // The fixtures defeat rm with a chmod-555 parent, which needs POSIX
 // permission semantics: Git Bash on Windows resolves `bash` but not chmod,
 // and root ignores the bits entirely.
@@ -343,35 +357,40 @@ describe('review worktree cleanup steps', () => {
     }
   });
 
-  it('removes both known qwen state names without touching .qwenignore', () => {
-    for (const { id, run } of executableCleanCopies) {
-      const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
-      const workspace = join(root, 'workspace');
-      mkdirSync(join(workspace, '.qwen', 'agents'), { recursive: true });
-      mkdirSync(join(workspace, '.qwen.root-orig', 'agents'), {
-        recursive: true,
-      });
-      writeFileSync(join(workspace, '.qwenignore'), 'keep\n');
-
-      try {
-        const result = spawnSync('bash', ['-c', run], {
-          cwd: workspace,
-          env: { ...process.env, GITHUB_WORKSPACE: workspace },
-          encoding: 'utf8',
+  it.skipIf(!sweepToolsAvailable)(
+    'removes both known qwen state names without touching .qwenignore',
+    () => {
+      for (const { id, run } of executableCleanCopies) {
+        const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
+        const workspace = join(root, 'workspace');
+        mkdirSync(join(workspace, '.qwen', 'agents'), { recursive: true });
+        mkdirSync(join(workspace, '.qwen.root-orig', 'agents'), {
+          recursive: true,
         });
+        writeFileSync(join(workspace, '.qwenignore'), 'keep\n');
 
-        expect(result.status, `${id}: ${result.stderr}`).toBe(0);
-        expect(existsSync(join(workspace, '.qwen')), id).toBe(false);
-        expect(existsSync(join(workspace, '.qwen.root-orig')), id).toBe(false);
-        expect(existsSync(join(workspace, '.qwenignore')), id).toBe(true);
-        // Deleted, not moved: a workspace that removes cleanly must not
-        // leave a quarantine directory behind on either copy.
-        expect(existsSync(join(root, '_qwen-quarantine')), id).toBe(false);
-      } finally {
-        rmSync(root, { recursive: true, force: true });
+        try {
+          const result = spawnSync('bash', ['-c', run], {
+            cwd: workspace,
+            env: { ...process.env, GITHUB_WORKSPACE: workspace },
+            encoding: 'utf8',
+          });
+
+          expect(result.status, `${id}: ${result.stderr}`).toBe(0);
+          expect(existsSync(join(workspace, '.qwen')), id).toBe(false);
+          expect(existsSync(join(workspace, '.qwen.root-orig')), id).toBe(
+            false,
+          );
+          expect(existsSync(join(workspace, '.qwenignore')), id).toBe(true);
+          // Deleted, not moved: a workspace that removes cleanly must not
+          // leave a quarantine directory behind on either copy.
+          expect(existsSync(join(root, '_qwen-quarantine')), id).toBe(false);
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
       }
-    }
-  });
+    },
+  );
 
   it('sweeps both known qwen state names before the review checkout', () => {
     expect(reviewPreCheckoutSweepStep).toBeDefined();
