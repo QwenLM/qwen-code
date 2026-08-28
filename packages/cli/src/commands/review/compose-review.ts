@@ -192,34 +192,65 @@ const MARKER_RESERVE = LEDGER_MAX_BYTES + 2;
 const BODY_SAFETY_MARGIN = 512;
 
 /**
- * Does this plan name a pull request? The budget and the marker must not
- * disagree about whether a marker will ride, so both ask here.
+ * The capture's own decided-stop reason — the `nothingToReview.reason`
+ * field `capture-local` writes when the round is one of the three decided
+ * stops — or null when the plan carries no decision. The FIELD is the
+ * capture's own: no full-round plan carries it, so a model-written
+ * `stopReRule` on a full round finds nothing here and is refused. (The path
+ * arrives through the model-written state — the same seam every other
+ * `planPath` reader here trusts.) The REASON is returned, not discarded: it
+ * certifies what could have moved since the ledger round, and the grant's
+ * per-reason ruling constraints below read that certification.
  */
-/**
- * Does the plan carry the capture's own decided-stop decision — the
- * `nothingToReview` field `capture-local` writes when the round is one of
- * the three decided stops? The FIELD is the capture's own: no full-round
- * plan carries it, so a model-written `stopReRule` on a full round finds
- * nothing here and is refused. (The path arrives through the model-written
- * state — the same seam every other `planPath` reader here trusts.)
- */
-function planCarriesDecidedStop(planPath: string | undefined): boolean {
-  if (!planPath) return false;
+function decidedStopReason(planPath: string | undefined): string | null {
+  if (!planPath) return null;
   try {
     const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
       nothingToReview?: unknown;
     };
     const stop = plan.nothingToReview;
-    return (
-      typeof stop === 'object' &&
-      stop !== null &&
-      typeof (stop as { reason?: unknown }).reason === 'string' &&
-      (stop as { reason: string }).reason !== ''
-    );
+    if (
+      typeof stop !== 'object' ||
+      stop === null ||
+      typeof (stop as { reason?: unknown }).reason !== 'string' ||
+      (stop as { reason: string }).reason === ''
+    ) {
+      return null;
+    }
+    return (stop as { reason: string }).reason;
   } catch {
-    return false;
+    return null;
   }
 }
+
+/**
+ * The rulings each decided-stop reason licences — the capture's own
+ * certification of what could have moved since the ledger round (SKILL Step
+ * 1's stop branches prescribe the same split): `unchanged-since-last-round`
+ * certifies a byte-identical tree where every open finding stands VERBATIM
+ * (dispositions are DEDUCED, not judged); `scope-emptied` certifies each
+ * anchored path removed or byte-identical, so a finding stands or its bytes
+ * superseded it — nothing was reviewed that could fix; `clean-tree`
+ * certifies nothing moved since the findings were recorded, so the re-rule
+ * JUDGES them. A reason this table does not name licences nothing — the
+ * grant fails closed on it.
+ */
+const STOP_REASON_RULINGS: Record<string, readonly string[]> = {
+  'unchanged-since-last-round': ['still-stands'],
+  'scope-emptied': ['still-stands', 'superseded'],
+  'clean-tree': ['still-stands', 'fixed', 'superseded'],
+};
+
+/**
+ * Why a reason's licence is narrower than the full ruling set — the refusal
+ * line's second half. `clean-tree` carries no entry: every ruling is
+ * licensed there, so no refusal is ever built for it.
+ */
+const STOP_REASON_REFUSAL: Record<string, string> = {
+  'unchanged-since-last-round': 'a byte-identical tree can only still-stand',
+  'scope-emptied':
+    'an emptied scope still-stands or supersedes — nothing was reviewed that could fix',
+};
 
 /**
  * The fence `run.ts` applies to the same decided-stop decision: the capture
@@ -236,15 +267,9 @@ function stopSidecarFenced(env: NodeJS.ProcessEnv | undefined): boolean {
   let names: string[];
   try {
     names = readdirSync(REVIEW_TMP_DIR);
-  } catch (e) {
-    process.stderr.write(
-      `FENCE-PROBE cwd=${process.cwd()} err=${(e as Error).message}\n`,
-    );
+  } catch {
     return false;
   }
-  process.stderr.write(
-    `FENCE-PROBE cwd=${process.cwd()} names=${JSON.stringify(names)} runId=${runId}\n`,
-  );
   for (const name of names) {
     // `stopNameFor`'s shape: `qwen-review-<stem>-stop.json`. The target
     // class is not knowable here; match the family and let the stamp decide.
@@ -298,6 +323,10 @@ function openLedgerCriticalIds(planPath: string | undefined): string[] | null {
   }
 }
 
+/**
+ * Does this plan name a pull request? The budget and the marker must not
+ * disagree about whether a marker will ride, so both ask here.
+ */
 function planNamesPr(planPath: string | undefined): boolean {
   try {
     if (!planPath) return false;
@@ -1118,7 +1147,6 @@ export interface ComposeReviewInput {
     dispositions: Array<{
       id: string;
       ruling: 'still-stands' | 'fixed' | 'superseded';
-      evidence?: string;
     }>;
   };
   /**
@@ -3293,6 +3321,7 @@ function composeReviewBody(
   const {
     deferred: modelDeferred,
     relocated: relocatedCriticals,
+    relocatedEntries,
     relocatedDeterministic,
   } = splitDeferralChannel(
     input.deferredSuggestions,
@@ -3591,6 +3620,11 @@ function composeReviewBody(
   // refusal here THROWS rather than degrading to the regular floors, because
   // running transcript floors over a stop state composes garbage caps and
   // the orchestrator needs the actual reason.
+  // The granted dispositions, captured for the body↔disposition
+  // cross-check below — that check runs over the FINAL body set, after the
+  // deferral channel's relocation push and the gate-repost dedup, so the
+  // grant records the rulings and the check binds them to what posts.
+  const stopRulings = new Map<string, string>();
   const stopReRuleGranted = (() => {
     const srr = input.stopReRule;
     if (srr === undefined) return false;
@@ -3600,10 +3634,25 @@ function composeReviewBody(
           'ledger Critical.',
       );
     }
-    if (!planCarriesDecidedStop(input.planPath)) {
+    if (criticalsInline > 0) {
+      throw new Error(
+        'stopReRule refused: inline Criticals cannot ride a stop re-rule — ' +
+          'a granted stop re-asserts only ledger ids a previous full round ' +
+          'verified, and no verifier ran this round.',
+      );
+    }
+    const stopReason = decidedStopReason(input.planPath);
+    if (stopReason === null) {
       throw new Error(
         'stopReRule refused: the plan carries no nothingToReview decision — ' +
           'a full round takes the regular floors, never the stop re-rule.',
+      );
+    }
+    const allowedRulings = STOP_REASON_RULINGS[stopReason];
+    if (allowedRulings === undefined) {
+      throw new Error(
+        `stopReRule refused: unknown stop reason '${stopReason}' — the ` +
+          'grant fails closed on a reason it cannot rule.',
       );
     }
     if (!stopSidecarFenced(input.env)) {
@@ -3620,7 +3669,6 @@ function composeReviewBody(
           're-rule whose baseline is unreadable cannot be shown complete.',
       );
     }
-    const ruled = new Map<string, string>();
     for (const d of srr.dispositions) {
       if (
         typeof d?.id !== 'string' ||
@@ -3632,23 +3680,23 @@ function composeReviewBody(
             'of still-stands, fixed, or superseded.',
         );
       }
-      if (ruled.has(d.id)) {
+      if (stopRulings.has(d.id)) {
         throw new Error(
           `stopReRule refused: duplicate disposition for ${d.id}.`,
         );
       }
-      ruled.set(d.id, d.ruling);
+      stopRulings.set(d.id, d.ruling);
     }
     const ledgerSet = new Set(ledger);
     for (const id of ledgerSet) {
-      if (!ruled.has(id)) {
+      if (!stopRulings.has(id)) {
         throw new Error(
           `stopReRule refused: open ledger Critical ${id} has no ` +
             'disposition — a blocker cannot be dropped by omitting its row.',
         );
       }
     }
-    for (const id of ruled.keys()) {
+    for (const id of stopRulings.keys()) {
       if (!ledgerSet.has(id)) {
         throw new Error(
           `stopReRule refused: disposition ${id} matches no open ledger ` +
@@ -3656,22 +3704,17 @@ function composeReviewBody(
         );
       }
     }
-    const bodyText = (input.bodyCriticals ?? []).join('\n');
-    for (const [id, ruling] of ruled) {
-      const inBody = bodyText.includes(id);
-      if (ruling === 'still-stands' && !inBody) {
+    for (const [id, ruling] of stopRulings) {
+      if (!allowedRulings.includes(ruling)) {
         throw new Error(
-          `stopReRule refused: ${id} is ruled still-stands but no body ` +
-            'Critical carries its id — a standing blocker must post.',
-        );
-      }
-      if (ruling !== 'still-stands' && inBody) {
-        throw new Error(
-          `stopReRule refused: ${id} is ruled ${ruling} yet a body ` +
-            'Critical still carries its id — one ruling per finding.',
+          `stopReRule refused: ${id} is ruled ${ruling} under ` +
+            `${stopReason} — ${STOP_REASON_REFUSAL[stopReason]}.`,
         );
       }
     }
+    // The body↔disposition cross-check is NOT here: it runs below, over the
+    // final local body set. Relocation pushes entries after this point and
+    // ingest transforms them, so a check over the raw input missed both.
     return true;
   })();
   const gate =
@@ -3702,6 +3745,63 @@ function composeReviewBody(
         "cache ledger's open Criticals against the current tree — no " +
         'review agents ran this round.',
     );
+    // The body↔disposition cross-check, over the FINAL local set — the
+    // ingested entries plus the deferral channel's relocated Criticals,
+    // past the gate-repost dedup — because that set is what the body posts.
+    // Ids bind PER ENTRY through the claim head's own leading token — the
+    // same readback the ledger builder applies — never by substring over
+    // the joined text: a prefix collision (`R1-1` ⊂ `R1-10`) or a sibling
+    // id quoted inside another entry's prose is not a re-assertion. The
+    // relocated leg reads the TYPED entry's title because its rendered
+    // line wraps the claim where no readback reaches.
+    const stillStands = new Set<string>();
+    for (const [id, ruling] of stopRulings) {
+      if (ruling === 'still-stands') stillStands.add(id);
+    }
+    const carriedIds = new Set<string>();
+    const bindEntry = (id: string | undefined): void => {
+      if (id === undefined || !stopRulings.has(id)) {
+        throw new Error(
+          'stopReRule refused: a body Critical must carry exactly one ' +
+            'still-stands ledger id — an entry no re-rule ruled standing ' +
+            'posts a blocker no full round verified.',
+        );
+      }
+      const ruling = stopRulings.get(id);
+      if (ruling !== 'still-stands') {
+        throw new Error(
+          `stopReRule refused: ${id} is ruled ${ruling} yet a body ` +
+            'Critical still carries its id — one ruling per finding.',
+        );
+      }
+      carriedIds.add(id);
+    };
+    const ownCount = bodyCriticals.length - relocatedCriticals.length;
+    for (const entry of bodyCriticals.slice(0, ownCount)) {
+      bindEntry(
+        readClaim(
+          stripForUnattributedPost(entry).replace(LEADING_INVISIBLE_RE, ''),
+        ).id,
+      );
+    }
+    for (const entry of relocatedEntries) {
+      bindEntry(readClaim(entry.title).id);
+    }
+    for (const id of stillStands) {
+      if (!carriedIds.has(id)) {
+        throw new Error(
+          `stopReRule refused: ${id} is ruled still-stands but no body ` +
+            'Critical carries its id — a standing blocker must post.',
+        );
+      }
+    }
+    if (bodyCriticals.length !== stillStands.size) {
+      throw new Error(
+        `stopReRule refused: ${bodyCriticals.length} body Criticals ` +
+          `over ${stillStands.size} still-stands rulings — every ` +
+          'still-stands ruling re-asserts exactly one body Critical.',
+      );
+    }
   } else if (input.planPath) {
     // The gate ran above, where its claims were needed to dedup the model's
     // re-posts before provenance was taken. ONE invocation, reused here.

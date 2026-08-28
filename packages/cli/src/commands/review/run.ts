@@ -422,13 +422,17 @@ export function newestArtifactSince(
  * Exit code contract: 0 = the review completed (whatever it decided); 1 = it
  * never reached a verdict (child failed, timed out with no verdict captured,
  * or left no composed artifact); 3 = it completed AND the caller asked
- * --fail-on request-changes AND the event is REQUEST_CHANGES. A stop round
- * whose cache ledger holds open Criticals composes a REAL verdict now — the
- * orchestrator's re-rule of those findings (deduced on the incremental
- * stops, judged on clean-tree; SKILL Step 1's stop branches, machine-checked
- * by compose-review's stopReRule gate) — and gates here exactly like a full
- * round; a stop whose ledger holds nothing open completes with no event and
- * exits 0. No verdict is ever synthesised from a ledger COUNT: that count is
+ * --fail-on request-changes AND the event is REQUEST_CHANGES. A
+ * capture-stop round whose cache ledger holds open Criticals composes a REAL
+ * verdict now — the orchestrator's re-rule of those findings (deduced on the
+ * two incremental stops, judged on clean-tree; SKILL Step 1's capture-stop
+ * branches, machine-checked by compose-review's stopReRule gate) — and gates
+ * here exactly like a full round; a stop whose ledger holds nothing open
+ * completes with no event and exits 0. Known residual: the PR-target stops
+ * (up-to-date, empty-diff) write only the stop sidecar — they consume no
+ * plan, so the stopReRule grant is unreachable there and no verdict composes;
+ * a gate-only PR re-run exits 0 even when the PR cache still holds open
+ * Criticals. No verdict is ever synthesised from a ledger COUNT: that count is
  * rewritten only by a cache-writing round, so a blocker fixed and committed
  * stays `open` in it, and an exit code keyed on it is a failure no action
  * clears (#9659's deleted blocker-dating chain). 3, not 2 — yargs exits 1 on usage errors and
@@ -737,8 +741,10 @@ async function runReview(args: RunReviewArgs): Promise<void> {
       ?.path ?? null;
 
   // A round the CAPTURE decided had nothing to review is complete, even
-  // though no composed verdict exists: `compose-review` is reached only from
-  // Step 6, and both stops fire in Step 1. Polling for the verdict alone
+  // though no composed verdict may exist: a stop whose ledger holds nothing
+  // open composes none, and a stop with open Criticals composes one via
+  // Step 1's re-rule, read above exactly like a full round's. Polling for
+  // the verdict alone
   // reported "Review did not complete" over a round whose own output was
   // decided — a cached second round on an unchanged tree, or a clean tree
   // whose earlier blocker the ledger still renders as standing. The signal is
@@ -754,11 +760,13 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // blocker list comes from the cache ledger, which only a cache-writing
   // round rewrites — a stop never does — so a blocker fixed and committed
   // stays `open` there, and an exit code keyed on it is a failure no action
-  // clears. The gate on the stop path is the composed verdict read above:
-  // Step 1's stop branches re-rule the ledger's open Criticals and call
-  // compose-review (its stopReRule gate machine-checks the dispositions),
-  // so a standing blocker arrives here as a real REQUEST_CHANGES and a
-  // ledger with nothing open completes with no event.
+  // clears. The gate on the capture-stop path is the composed verdict read
+  // above: Step 1's capture-stop branches re-rule the ledger's open
+  // Criticals and call compose-review (its stopReRule gate machine-checks
+  // the dispositions), so a standing blocker arrives here as a real
+  // REQUEST_CHANGES and a ledger with nothing open completes with no event.
+  // The PR stops (up-to-date, empty-diff) are the disclosed residual: they
+  // write only the sidecar and exit 0 over whatever the PR cache holds open.
 
   const result: RunReviewResult = {
     completed,

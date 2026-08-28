@@ -15539,7 +15539,13 @@ describe('composeReview — the decided-stop re-rule', () => {
   });
 
   function stopPlan(
-    opts: { stop?: boolean; ledger?: unknown[]; name?: string } = {},
+    opts: {
+      stop?: boolean;
+      ledger?: unknown[];
+      name?: string;
+      reason?: string;
+      cacheFile?: string;
+    } = {},
   ): string {
     const cachePath = join(dir, `review-cache-${opts.name ?? 'default'}.json`);
     writeFileSync(
@@ -15561,10 +15567,14 @@ describe('composeReview — the decided-stop re-rule', () => {
         diffLines: 0,
         srcDiffLines: 0,
         skippedFiles: [],
-        cachePath,
+        cachePath: opts.cacheFile ?? cachePath,
         ...(opts.stop === false
           ? {}
-          : { nothingToReview: { reason: 'unchanged-since-last-round' } }),
+          : {
+              nothingToReview: {
+                reason: opts.reason ?? 'unchanged-since-last-round',
+              },
+            }),
       }),
     );
     return p;
@@ -15593,7 +15603,11 @@ describe('composeReview — the decided-stop re-rule', () => {
   });
 
   it('a re-rule that cleared every blocker COMMENTS, never approves', () => {
+    // A `fixed` ruling is licensed only under clean-tree — the judged stop —
+    // so the cleared shape rides one; over the deduced stops the same
+    // disposition is refused below.
     const r = reRule({
+      planPath: stopPlan({ name: 'cleared', reason: 'clean-tree' }),
       stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
       bodyCriticals: [],
     });
@@ -15634,11 +15648,14 @@ describe('composeReview — the decided-stop re-rule', () => {
   });
 
   it('refuses still-stands without its body Critical, and fixed with one', () => {
-    expect(() => reRule({ bodyCriticals: [] })).toThrow(
+    const cleared = () =>
+      stopPlan({ name: 'body-check', reason: 'clean-tree' });
+    expect(() => reRule({ planPath: cleared(), bodyCriticals: [] })).toThrow(
       /still-stands but no body Critical/,
     );
     expect(() =>
       reRule({
+        planPath: cleared(),
         stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
       }),
     ).toThrow(/ruled fixed yet a body Critical/);
@@ -15654,6 +15671,192 @@ describe('composeReview — the decided-stop re-rule', () => {
     );
     const r = reRule({ env });
     expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a fixed ruling under unchanged-since-last-round — a byte-identical tree can only still-stand', () => {
+    expect(() =>
+      reRule({
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/R1-1 is ruled fixed under unchanged-since-last-round/);
+  });
+
+  it('refuses a fixed ruling under scope-emptied, admits superseded', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'emptied', reason: 'scope-emptied' }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/R1-1 is ruled fixed under scope-emptied/);
+    const r = reRule({
+      planPath: stopPlan({ name: 'emptied-ok', reason: 'scope-emptied' }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+      bodyCriticals: [],
+    });
+    expect(r.event).toBe('COMMENT');
+  });
+
+  it('refuses an unknown stop reason — the grant fails closed', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'odd', reason: 'model-invented' }),
+      }),
+    ).toThrow(/unknown stop reason/);
+  });
+
+  it('a still-stands re-assertion composes when a fixed sibling id prefixes it', () => {
+    // The old substring check matched `R1-1` inside `R1-10: …` and threw
+    // 'ruled fixed yet a body Critical still carries its id' on this fully
+    // compliant re-rule — every retry unsatisfiable. Per-entry id binding
+    // reads each entry's OWN leading token.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'prefix',
+        reason: 'clean-tree',
+        ledger: [
+          { id: 'R1-1', severity: 'Critical', status: 'open' },
+          { id: 'R1-10', severity: 'Critical', status: 'open' },
+        ],
+      }),
+      stopReRule: {
+        dispositions: [
+          { id: 'R1-1', ruling: 'fixed' },
+          { id: 'R1-10', ruling: 'still-stands' },
+        ],
+      },
+      bodyCriticals: ['R1-10: the mechanism still fires — re-read at HEAD'],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a still-stands id present only inside another entry’s prose', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'prose',
+          reason: 'clean-tree',
+          ledger: [
+            { id: 'R2-5', severity: 'Critical', status: 'open' },
+            { id: 'R3-7', severity: 'Critical', status: 'open' },
+          ],
+        }),
+        stopReRule: {
+          dispositions: [
+            { id: 'R2-5', ruling: 'still-stands' },
+            { id: 'R3-7', ruling: 'still-stands' },
+          ],
+        },
+        bodyCriticals: ['R3-7: the gap remains — see R2-5 for context'],
+      }),
+    ).toThrow(/R2-5 is ruled still-stands but no body Critical/);
+  });
+
+  it('refuses a relocated Critical titled with an id ruled fixed', () => {
+    // The deferral channel's Criticals are relocated into the FINAL body
+    // set, so the cross-check must see them too: one titled with an id the
+    // re-rule judged fixed is exactly the blocker the grant would post
+    // against its own ruling.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'reloc', reason: 'clean-tree' }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+        bodyCriticals: [],
+        deferredSuggestions: [
+          {
+            file: 'src/wedge.ts',
+            line: 12,
+            source: 'review',
+            severity: 'Critical',
+            title: 'R1-1: the blocker the deferral channel carried',
+          },
+        ],
+      }),
+    ).toThrow(/R1-1 is ruled fixed yet a body Critical/);
+  });
+
+  it('refuses an invented body Critical carrying no ledger id', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'invented',
+          reason: 'clean-tree',
+          ledger: [{ id: 'R1-1', severity: 'Critical', status: 'fixed' }],
+        }),
+        stopReRule: { dispositions: [] },
+        bodyCriticals: ['a brand-new blocker no round ever ruled on'],
+      }),
+    ).toThrow(/must carry exactly one still-stands ledger id/);
+  });
+
+  it('refuses two body entries re-asserting one still-stands id', () => {
+    expect(() =>
+      reRule({
+        bodyCriticals: [
+          'R1-1: the mechanism still fires',
+          'R1-1: asserted twice',
+        ],
+      }),
+    ).toThrow(/exactly one body Critical/);
+  });
+
+  it('refuses inline Criticals on a granted stop round', () => {
+    expect(() => reRule({ criticalsInline: 1 })).toThrow(
+      /inline Criticals cannot ride a stop re-rule/,
+    );
+  });
+
+  it('refuses a sidecar stamped by a different run', () => {
+    mkdirSync(join(dir, '.qwen/tmp'), { recursive: true });
+    writeFileSync(
+      join(dir, '.qwen/tmp/qwen-review-local-stop.json'),
+      JSON.stringify({
+        reason: 'unchanged-since-last-round',
+        runId: 'run-OLD',
+      }),
+    );
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' } }),
+    ).toThrow(/no stop sidecar/);
+  });
+
+  it('refuses a superseded ruling that re-asserts its body Critical', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'superseded-body', reason: 'clean-tree' }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+      }),
+    ).toThrow(/R1-1 is ruled superseded yet a body Critical/);
+  });
+
+  it('refuses when the plan names no readable ledger', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'no-cache', cacheFile: '' }),
+      }),
+    ).toThrow(/ledger the plan names cannot be read/);
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'gone-cache',
+          cacheFile: join(dir, 'no-such-cache.json'),
+        }),
+      }),
+    ).toThrow(/ledger the plan names cannot be read/);
+  });
+
+  it('refuses a duplicate disposition for one id', () => {
+    expect(() =>
+      reRule({
+        stopReRule: {
+          dispositions: [
+            { id: 'R1-1', ruling: 'still-stands' },
+            { id: 'R1-1', ruling: 'fixed' },
+          ],
+        },
+      }),
+    ).toThrow(/duplicate disposition for R1-1/);
   });
 });
 

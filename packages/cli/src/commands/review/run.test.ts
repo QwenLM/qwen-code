@@ -1347,7 +1347,8 @@ describe('review run (handler)', () => {
   });
 
   it('exits 0 under --fail-on for a decided stop round', async () => {
-    // A stop composes no verdict and synthesises none: the ledger it renders
+    // A stop whose ledger holds nothing open composes no verdict and
+    // synthesises none: the ledger it renders
     // is rewritten only by a cache-writing round, so a blocker fixed and
     // committed stays `open` there — gating on it was a failure no action
     // could clear. The gate fires only on a composed REQUEST_CHANGES.
@@ -1375,6 +1376,44 @@ describe('review run (handler)', () => {
     );
 
     await runHandler({ 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBeNull();
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('a PR stop exits 0 over the PR cache’s open Criticals — disclosed residual', async () => {
+    // The PR stops (up-to-date, empty-diff) write ONLY the stop sidecar —
+    // they consume no plan, so compose-review's stopReRule grant is
+    // unreachable there and no verdict composes: a gate-only re-run exits 0
+    // even when the PR cache still holds open Criticals. The capture stops
+    // compose a re-rule; this test pins the residual the exit-contract
+    // comment discloses (#9908 tracks the capture stops only).
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-pr-9014-stop.json'),
+            JSON.stringify({
+              reason: 'up-to-date',
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ target: '9014', 'fail-on': 'request-changes' });
 
     const result = JSON.parse(outs.join(''));
     expect(result.completed).toBe(true);
