@@ -60,10 +60,16 @@ class ListAgentsInvocation extends BaseToolInvocation<
     // Peer sessions are only listed once this session has an inbox of its
     // own: without one a message could be sent but never answered, and
     // advertising a one-way address invites exactly that.
+    // Every incarnation of this session is dropped, not just its own
+    // socket: `qwen --resume <id>` in a second pane runs the same id under
+    // another process, and a twin advertised here would be sent to as a
+    // peer — sendToPeer excludes by the same rule, so the listing never
+    // shows an address the send path treats as self.
     const self = await getOwnPeerIdentity();
     const peers = self
       ? (await listMessageablePeers()).filter(
-          (peer) => peer.ipcPath !== self.ipcPath,
+          (peer) =>
+            peer.ipcPath !== self.ipcPath && peer.sessionId !== self.sessionId,
         )
       : [];
 

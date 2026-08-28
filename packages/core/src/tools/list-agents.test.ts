@@ -313,6 +313,25 @@ describe('ListAgentsTool — peer sessions', () => {
     expect(parsed.sessions[0].name).toBe('docs-cd');
   });
 
+  it('excludes a differently named twin of this session', async () => {
+    // `qwen --resume <id>` from another directory: same session id under
+    // a second process. sendToPeer refuses it as self, so advertising it
+    // would hand the model a dead address.
+    listMessageablePeers.mockResolvedValue([
+      peerRow({
+        sessionId: 'self',
+        ref: 'se1f00',
+        name: 'self-old',
+        cwd: '/w/old',
+        ipcPath: '/tmp/old.sock',
+      }),
+      peerRow({ sessionId: 's2', ref: 'bbb222' }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions).toHaveLength(1);
+    expect(parsed.sessions[0].name).toBe('docs-cd');
+  });
+
   it("keeps a peer that merely shares this session's name", async () => {
     listMessageablePeers.mockResolvedValue([
       peerRow({ name: 'self-00', ipcPath: '/tmp/self.sock' }),

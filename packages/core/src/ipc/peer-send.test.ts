@@ -202,6 +202,35 @@ describe('sendToPeer', () => {
     expect(sendPeerFrame).not.toHaveBeenCalled();
   });
 
+  it('treats a differently named twin of this session as itself', async () => {
+    // `qwen --resume <id>` from another directory runs this very session
+    // id under a second process with another name. Its inbound gate would
+    // accept a frame pinned to the shared id, so it must not be reachable.
+    listMessageablePeers.mockResolvedValue([
+      { ...peer('self', 'self-old', '/w/old'), ipcPath: '/tmp/old.sock' },
+      peer('s1', 'app-ab'),
+    ]);
+    const outcome = await sendToPeer({
+      target: 'self-old',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+    expect(outcome).toEqual({ kind: 'self', name: 'self-00' });
+    expect(sendPeerFrame).not.toHaveBeenCalled();
+  });
+
+  it('never suggests a twin of this session as a near miss', async () => {
+    listMessageablePeers.mockResolvedValue([
+      { ...peer('self', 'self-old', '/w/old'), ipcPath: '/tmp/old.sock' },
+    ]);
+    const outcome = await sendToPeer({
+      target: 'self-ol',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+    expect(outcome).toEqual({ kind: 'not-found', suggestions: [] });
+  });
+
   it("still reaches a peer that happens to share this session's name", async () => {
     listMessageablePeers.mockResolvedValue([
       { ...peer('self', 'self-00', '/w/self'), ipcPath: '/tmp/self.sock' },

@@ -208,15 +208,28 @@ export async function sendToPeer(
   const self = own === null ? null : toPeerSessionInfo(own);
   if (!self) return { kind: 'disabled' };
 
-  const peers = (await listMessageablePeers()).filter(
-    (peer) => peer.ipcPath !== self.ipcPath,
+  const directory = await listMessageablePeers();
+  // Exclude every incarnation of this session, not just its own socket:
+  // the registry is keyed by PID, and `qwen --resume <id>` from a second
+  // pane runs the same session id under another process — differently
+  // named when resumed from another directory. The receiver's gate
+  // accepts a frame pinned to its own id, so such a twin would deliver a
+  // message right back to this session while the ledger reads delivered.
+  const peers = directory.filter(
+    (peer) =>
+      peer.ipcPath !== self.ipcPath && peer.sessionId !== self.sessionId,
   );
   const resolved = resolvePeerTarget(peers, options.target);
 
   if (resolved.kind === 'none') {
-    // A session can find its own name in list_agents; addressing it is a
-    // mistake worth naming, not a silent "no such session".
-    if (resolvePeerTarget([self], options.target).kind === 'one') {
+    // A session can find its own name — or a twin's — in list_agents;
+    // addressing it is a mistake worth naming, not a silent "no such
+    // session".
+    const incarnations = [
+      self,
+      ...directory.filter((peer) => peer.sessionId === self.sessionId),
+    ];
+    if (resolvePeerTarget(incarnations, options.target).kind !== 'none') {
       return { kind: 'self', name: self.name };
     }
     return {
