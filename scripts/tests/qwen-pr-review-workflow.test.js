@@ -2304,6 +2304,43 @@ describe('upstream-timeout headroom (PR 8507 incident)', () => {
   });
 });
 
+describe('review worktree prebuild (issue #10108)', () => {
+  // `fetch-pr` installs and builds the review worktree through Agent 7's own
+  // `build-test` before any agent starts, but only when this variable is set
+  // — a local review must not pay the blocking prefix. The switch is one
+  // literal on two sides: the CLI constant and this step's env. Read the
+  // constant out of the source rather than hardcoding it here, so a rename
+  // on either side reds this test instead of silently turning the prebuild
+  // off in CI.
+  const doc = parse(workflow);
+  const review = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Run review',
+  );
+  const source = readFileSync(
+    'packages/cli/src/commands/review/lib/prebuild.ts',
+    'utf8',
+  );
+  const envName = source.match(
+    /export const PREBUILD_ENV = '([A-Z0-9_]+)'/,
+  )?.[1];
+
+  it('sets the variable the CLI reads on the Run review step', () => {
+    expect(envName).toBe('QWEN_REVIEW_PREBUILD');
+    expect(review.env[envName]).toBe('1');
+  });
+
+  it('is opt-in from that step and nowhere else in the workflow', () => {
+    expect(doc.env?.[envName]).toBeUndefined();
+    for (const [jobName, job] of Object.entries(doc.jobs)) {
+      expect(job.env?.[envName]).toBeUndefined();
+      for (const step of job.steps ?? []) {
+        if (jobName === 'review-pr' && step.name === 'Run review') continue;
+        expect(step.env?.[envName]).toBeUndefined();
+      }
+    }
+  });
+});
+
 describe('workflow expression length', () => {
   // A `run:` body containing `${{ }}` is evaluated as ONE expression template,
   // and GitHub caps a single expression at 21000 characters. Blowing that cap
