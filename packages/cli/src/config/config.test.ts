@@ -3189,6 +3189,42 @@ describe('Approval mode tool exclusion logic', () => {
     );
   });
 
+  it('should warn for name-less tools.core entries exactly like for []', async () => {
+    // `"core": ["()"]` and similar mangled specifiers are non-empty
+    // strings whose parsed tool name is empty; PermissionManager
+    // collapses them to the explicit empty allowlist, so the startup
+    // notice must fire for them too — gate and notice share the
+    // isNamelessCoreToolsEntry classification (#10065, #10080). A list
+    // still naming a tool must not warn.
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    for (const core of [['()'], ['(ls -l)']]) {
+      const namelessSettings: Settings = {
+        tools: {
+          core,
+        },
+      };
+
+      mockWriteStderrLine.mockClear();
+      await loadCliConfig(namelessSettings, argv, undefined, []);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('tools.core is an empty allowlist'),
+      );
+    }
+
+    const valuedSettings: Settings = {
+      tools: {
+        core: ['()', 'read_file'],
+      },
+    };
+
+    mockWriteStderrLine.mockClear();
+    await loadCliConfig(valuedSettings, argv, undefined, []);
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('tools.core is an empty allowlist'),
+    );
+  });
+
   it('should treat a non-array tools.core value as absent', async () => {
     // Settings loading performs no type validation, so a hand-edited
     // `"core": ""` reaches the coreTools ternary raw; it must normalize
@@ -4412,8 +4448,9 @@ describe('loadCliConfig tools.eager wiring (#9827, #10075)', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    // `[]` is an active allowlist naming nothing (defer everything), unlike
-    // `tools.core`, where an empty list is treated as unset.
+    // `[]` is an active allowlist naming nothing (defer everything); `tools.core`
+    // differs only in effect: its explicitly empty list stays active and
+    // disables every tool instead of deferring (#10065).
     expect(config.getEagerTools()).toEqual([]);
   });
 
