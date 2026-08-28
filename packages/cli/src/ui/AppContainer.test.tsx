@@ -248,6 +248,11 @@ import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 
 describe('AppContainer State Management', () => {
+  // One test below runs the real config.initialize(), which warms the tool
+  // registry; under heavy parallel CI load that can exceed the default
+  // timeout without any real hang.
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
   let mockConfig: Config;
   let mockSettings: LoadedSettings;
   let mockInitResult: InitializationResult;
