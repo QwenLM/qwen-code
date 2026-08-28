@@ -1003,6 +1003,23 @@ describe('presubmitCommand', () => {
       user: { login: 'qwen-code-ci-bot' },
     };
 
+    it('reads the carried id past axis tags placed before it (#10291)', async () => {
+      // The claim head slot admits the tags in any order; a re-post whose
+      // line leads with them must still land in the repost bucket, or it is
+      // dedup-dropped as a plain overlap every round.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** [fails-closed] [new-surface] R3-2: eq-form rescue asymmetry _— model via Qwen Code /review (v0.21.3)_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
     it('marks an id-matched overlap comment as a re-post target', async () => {
       const result = await presubmitWithComments(
         [CARRIED_COMMENT],

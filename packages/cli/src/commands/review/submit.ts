@@ -1462,8 +1462,23 @@ function submit(
       comments: comments.filter((_, i) => !drop.has(i)),
     };
     authoredIndices = base.filter((_, i) => !drop.has(i));
+    // By severity: a moved Critical (#10291 — fails-closed on new surface)
+    // is the move an operator would not expect from a floor, so the line
+    // names it rather than folding it into the Suggestion count.
+    const movedCriticals = floorEnforced.filter(
+      (i) => severityOf(comments[i] ?? {}) === 'critical',
+    ).length;
+    const movedSuggestions = floorEnforced.length - movedCriticals;
+    const moved = [
+      movedSuggestions > 0 ? `${movedSuggestions} Suggestion comment(s)` : '',
+      movedCriticals > 0
+        ? `${movedCriticals} fails-closed, new-surface Critical comment(s)`
+        : '',
+    ]
+      .filter((s) => s !== '')
+      .join(' and ');
     writeStderrLine(
-      `Floor enforcement: ${floorEnforced.length} Suggestion comment(s) ` +
+      `Floor enforcement: ${moved} ` +
         `drafted past the resolved critical floor were moved into the ` +
         `body's deferral list and will not post inline.`,
     );

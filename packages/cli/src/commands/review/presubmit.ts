@@ -31,6 +31,7 @@ import { ensureAoneAuthenticated } from './lib/platform/aone-client.js';
 import {
   LEADING_INVISIBLE_RE,
   carriedClaimLine,
+  readClaimHead,
   severityOf,
 } from './lib/inline-counts.js';
 import { carriesCommentMarker } from './lib/review-footer.js';
@@ -104,7 +105,11 @@ function extractCarriedIds(body: string): string[] {
       .split(/\r\n?|\n/)[0]
       .trim();
   }
-  const carried = LEDGER_ID_READBACK.exec(line ?? '');
+  // Through the claim-head strip the ledger builder applies (#10291): a
+  // re-post whose claim line leads with the axis tags before its carried
+  // id must still read as that id's re-post, or it lands in the plain
+  // overlap bucket and is dedup-dropped every round.
+  const carried = LEDGER_ID_READBACK.exec(readClaimHead(line ?? '').stripped);
   return carried ? [carried[1]] : [];
 }
 

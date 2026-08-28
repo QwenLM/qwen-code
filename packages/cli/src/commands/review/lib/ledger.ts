@@ -21,6 +21,8 @@
 // wrong verdict. Parsing is correspondingly fail-quiet: a body whose marker is
 // malformed simply contributes no ledger.
 
+import { readClaimHead } from './inline-counts.js';
+
 /** One finding the review stands behind, carried to the next round. */
 export interface LedgerFinding {
   /**
@@ -52,9 +54,49 @@ export interface LedgerFinding {
    * flag, which is exactly what they mean.
    */
   k?: 1;
+  /**
+   * A Critical's two decision axes (#10291), read off the posted claim
+   * line's `[certifies-falsely]`/`[fails-closed]` and
+   * `[regression]`/`[new-surface]` tags: `d` is the direction (`c` / `f`),
+   * `b` the baseline (`r` / `n`) — one letter each on the body-bytes
+   * discipline, spelled out by `LEDGER_DIRECTIONS` / `LEDGER_BASELINES`.
+   * Absent when the claim carried no tag, which is also how a marker
+   * written before the fields existed reads. They decide nothing in this
+   * module: the next round's Step 6 routing reads them off the side file,
+   * and the autofix tooling keys on them (#9907). A value this version does
+   * not know is normalised to absent like `k`, never used to reject the
+   * entry.
+   */
+  d?: 'c' | 'f';
+  b?: 'r' | 'n';
   line?: number;
   /** One line, capped — enough for the next round to re-locate the claim. */
   title: string;
+}
+
+/** The marker's one-letter direction spellings, and what each means. */
+export const LEDGER_DIRECTIONS = {
+  c: 'certifies-falsely',
+  f: 'fails-closed',
+} as const;
+/** The marker's one-letter baseline spellings, and what each means. */
+export const LEDGER_BASELINES = {
+  r: 'regression',
+  n: 'new-surface',
+} as const;
+
+/**
+ * The axes a finding carries, spelled out — `fails-closed, new-surface` —
+ * or `''` when it carries neither. One renderer for the side-file table and
+ * the terminal, so the two cannot spell a classification differently.
+ */
+export function axesOf(f: Pick<LedgerFinding, 'd' | 'b'>): string {
+  return [
+    f.d === undefined ? undefined : LEDGER_DIRECTIONS[f.d],
+    f.b === undefined ? undefined : LEDGER_BASELINES[f.b],
+  ]
+    .filter((a) => a !== undefined)
+    .join(', ');
 }
 
 /**
@@ -358,25 +400,6 @@ export const LEDGER_ID_READBACK = new RegExp(
 export const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
 
 /**
- * The fix-induced marking, read from the head of the CLAIM — after the id and
- * its separator, never inside the id grammar.
- *
- * Placing it there is the whole point. `LEDGER_ID_READBACK` is shared by
- * `readClaim`, so widening it to swallow a parenthetical would put the
- * ledger's carry on the same regex as a model-written adjective: a spelling
- * or spacing the wider grammar failed to anticipate (`R1-2(Fix-Induced):`)
- * would stop matching the id at all, and the finding would be silently
- * renumbered — the exact failure "one finding, one name" exists to prevent.
- * Read here, the id is already in hand and nothing about this token can cost
- * it: an unrecognised marking leaves the draft counted as a re-post, which is
- * what every round did before this existed.
- *
- * Case-insensitive, and tolerant of inner spacing, because it governs only
- * whether a comment counts as first-time work — never which finding it is.
- */
-export const FIX_INDUCED_READBACK = /^\(\s*fix-induced\s*\)[:.,-]?\s*/i;
-
-/**
  * The id a claim line carries, whether that id fronts a NEW defect, and the
  * claim itself with both stripped.
  *
@@ -399,18 +422,18 @@ export function readClaim(rest: string): {
   fixInduced: boolean;
   title: string;
 } {
-  const line = rest.split('\n')[0].trim();
-  const carried = LEDGER_ID_READBACK.exec(line);
-  const afterId = (carried ? line.slice(carried[0].length) : line).trim();
-  // Only ever a marking on a CARRIED id. On a fresh finding there is no
-  // entry for the defect to have been induced by, so the token would be
-  // decoration — and honouring it there would let a stray parenthetical add
-  // a first-time count the round already gets for that comment anyway.
-  const marked = carried ? FIX_INDUCED_READBACK.exec(afterId) : null;
+  // ONE reader for the claim's head slot (#10291): the id, the
+  // `(fix-induced)` marking, the axis tags and the source tag are
+  // tokenised wherever the model placed them in the slot — a source tag
+  // between the id and the marking included — and the title is what is
+  // left past the slot, the source tag kept as the finding's own text.
+  // An anchored readback restated here once disagreed with the
+  // tokeniser on exactly that placement.
+  const head = readClaimHead(rest.split('\n')[0].trim());
   return {
-    id: carried?.[1],
-    fixInduced: marked !== null,
-    title: (marked ? afterId.slice(marked[0].length) : afterId).trim(),
+    ...(head.id === undefined ? {} : { id: head.id }),
+    fixInduced: head.fixInduced,
+    title: head.claim,
   };
 }
 
@@ -863,7 +886,7 @@ export function isLedgerClosure(
  * hand-edited marker nor a side file is bound by it.
  */
 export function normalizeLedgerFinding(f: LedgerFinding): LedgerFinding {
-  const { k: _k, ...rest } = f;
+  const { k: _k, d: _d, b: _b, ...rest } = f;
   return {
     ...rest,
     id: f.id.slice(0, LEDGER_MAX_ID),
@@ -878,6 +901,10 @@ export function normalizeLedgerFinding(f: LedgerFinding): LedgerFinding {
     // decides-nothing siblings (`posted`, `prevPosted`, `floor`) are all
     // normalised the same way.
     ...(f.k === 1 ? { k: 1 as const } : {}),
+    // The axes too: a spelling this version does not know reads as "not
+    // classified", which every consumer treats as "posts at any floor".
+    ...(f.d === 'c' || f.d === 'f' ? { d: f.d } : {}),
+    ...(f.b === 'r' || f.b === 'n' ? { b: f.b } : {}),
   };
 }
 
