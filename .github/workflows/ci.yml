@@ -50,15 +50,14 @@ on:
           - 'hosted'
 
 concurrency:
-  # Scoped by event as well as ref, like `e2e.yml` and for the same collision
-  # class. Unscoped, the group collapses onto `Qwen Code CI-refs/heads/main`
-  # and the post-merge run shares it with (1) the nightly's 60-minute lanes,
-  # neither cancelling on `main`, so merges inside that window queue behind it
-  # and supersede each other unreported; and (2) any PR from a fork branch
-  # named literally `refs/heads/main` — a legal ref name whose `head_ref` makes
-  # the group byte-identical while that run cancels in progress, letting an
-  # actor with no repo access kill the signal on every merge.
-  group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref }}'
+  # Event + source repo + ref, not ref alone. Without the event the group
+  # collapses onto `Qwen Code CI-refs/heads/main`, shared with the nightly
+  # (60-minute lanes, neither cancelling on `main`). Without the source repo,
+  # same-named branches across forks collide — they evaluate in the base
+  # repo's namespace and PR runs DO cancel in progress, so a fork whose
+  # default branch is `main` cancels a victim PR's run on every push.
+  # Supersede within a PR is kept: one branch backs one open PR per fork.
+  group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'
   cancel-in-progress: |-
     ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}
 

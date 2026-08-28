@@ -37,7 +37,35 @@ const failureIssue = parse(
 // `on:` parses as the boolean true in YAML 1.1.
 const triggers = ci[true] ?? ci['on'];
 const LANES = ['test_macos', 'test_windows'];
+const PUSH_JOBS = ['classify_pr', 'test'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
+
+// One helper for both "an <event> run reaches exactly these jobs" invariants.
+// They started as hand-copies and had already diverged: the push mirror's
+// allowlist gained `schedule` while the nightly's never gained `push`, so a
+// push-only job would have failed the nightly assertion with the factually
+// wrong message `<job> would also run on the nightly schedule`, pointing the
+// fixer at the wrong event. Parameterising makes that class of drift
+// impossible — both call sites now share one allowlist shape.
+const assertEventReachesOnly = (event, allowedJobs, allowlist) => {
+  const allowRe = new RegExp(
+    `github\\.event_name == '(${allowlist.join('|')})'`,
+  );
+  for (const [name, job] of Object.entries(ci.jobs)) {
+    if (allowedJobs.includes(name)) continue;
+    const cond = String(job.if ?? '');
+    const excluded =
+      cond.includes(`github.event_name != '${event}'`) || allowRe.test(cond);
+    expect(excluded, `${name} would also run on ${event}`).toBe(true);
+    // Mentioning an allowlisted event is not the same as excluding this one:
+    // `event == 'pull_request' || event == '<event>'` satisfies the check
+    // above while still running. Require the impossibility.
+    expect(cond, `${name} admits ${event} explicitly`).not.toContain(
+      `github.event_name == '${event}'`,
+    );
+    expect(cond, `${name} has no event gate at all`).not.toBe('');
+  }
+};
 
 describe('platform lanes — triggers', () => {
   it('gives the workflow a scheduled trigger', () => {
@@ -152,26 +180,12 @@ describe('platform lanes — triggers', () => {
     // therefore either exclude `schedule` outright or gate on an event
     // allowlist that cannot contain it — otherwise the nightly quietly
     // becomes a full CI run every day.
-    for (const [name, job] of Object.entries(ci.jobs)) {
-      if (LANES.includes(name)) continue;
-      const cond = String(job.if ?? '');
-      const excluded =
-        cond.includes("github.event_name != 'schedule'") ||
-        /github\.event_name == '(pull_request|merge_group|workflow_dispatch)'/.test(
-          cond,
-        );
-      expect(excluded, `${name} would also run on the nightly schedule`).toBe(
-        true,
-      );
-      // Mentioning an allowlisted event is not the same as excluding this
-      // one: `event == 'pull_request' || event == 'schedule'` satisfies the
-      // check above while running nightly. Require the impossibility.
-      expect(
-        cond,
-        `${name} admits the schedule event explicitly`,
-      ).not.toContain("github.event_name == 'schedule'");
-      expect(cond, `${name} has no event gate at all`).not.toBe('');
-    }
+    assertEventReachesOnly('schedule', LANES, [
+      'pull_request',
+      'merge_group',
+      'workflow_dispatch',
+      'push',
+    ]);
   });
 });
 
@@ -191,15 +205,20 @@ describe('platform lanes — triggers', () => {
 // suite green while silently turning the lane off, widening it, or pointing it
 // at the wrong tree.
 describe('post-merge push lane', () => {
-  const PUSH_JOBS = ['classify_pr', 'test'];
   const stepOf = (job, name) =>
     (ci.jobs[job].steps ?? []).find((s) => s.name === name);
 
   it('is triggered on main and nowhere else', () => {
     // Drop the trigger and the post-merge signal is gone with it; widen the
     // branch list and every dev branch push spends a pool runner.
-    expect(triggers.push).toBeDefined();
-    expect(triggers.push.branches).toEqual(['main']);
+    // The whole object, not just `branches`: a sibling `tags:` key would
+    // widen the lane to every tag push while `branches` still read `['main']`.
+    // That also breaks the size ratchet — on a tag-creation push
+    // `github.event.before` is all zeros, so WORKFLOW_SIZE_BASE_SHA is
+    // unresolvable and both enforcers take their strict arm — and
+    // main-ci-failure-issue.yml's `head_branch == 'main'` filter means no
+    // issue is filed for tag runs: a silent red on release day.
+    expect(triggers.push).toEqual({ branches: ['main'] });
   });
 
   it('classify_pr admits push in its event allowlist', () => {
@@ -211,31 +230,35 @@ describe('post-merge push lane', () => {
   });
 
   it('test accepts push while still excluding the nightly', () => {
+    // Both halves are load-bearing. The exclusion checks are not enough on
+    // their own: rewriting `test.if` into allowlist form — `!cancelled() &&
+    // event != 'schedule' && (event == 'pull_request' || event ==
+    // 'merge_group' || event == 'workflow_dispatch')` — contains no
+    // `!= 'push'`, so it passes them, is skipped by the exclusivity helper
+    // (test is in PUSH_JOBS), and leaves the routing tests green because they
+    // inject EVENT_NAME=push into pick_runner's shell directly. On a real
+    // push, classify_pr would run, test would skip, the run would conclude
+    // `success`, and the failure watcher — gated on `conclusion == 'failure'`
+    // — would file nothing: the lane gone with zero red anywhere. Requiring
+    // the gate to stay exclusion-shaped forecloses that.
     const cond = condOf('test');
     expect(cond).not.toContain("github.event_name != 'push'");
+    expect(cond).not.toContain('github.event_name ==');
     expect(cond).toContain("github.event_name != 'schedule'");
   });
 
   it('keeps a post-merge run to exactly classify_pr and test', () => {
-    // The mirror of the nightly assertion: a `push:` trigger fires the whole
-    // workflow, so every other job must exclude push outright or gate on an
-    // allowlist that cannot contain it. Otherwise a merge quietly becomes a
-    // full CI run — desktop_shell's cargo build included.
-    for (const [name, job] of Object.entries(ci.jobs)) {
-      if (PUSH_JOBS.includes(name)) continue;
-      const cond = String(job.if ?? '');
-      const excluded =
-        cond.includes("github.event_name != 'push'") ||
-        /github\.event_name == '(pull_request|merge_group|workflow_dispatch|schedule)'/.test(
-          cond,
-        );
-      expect(excluded, `${name} would also run on a post-merge push`).toBe(
-        true,
-      );
-      expect(cond, `${name} admits push explicitly`).not.toContain(
-        "github.event_name == 'push'",
-      );
-    }
+    // The mirror of the nightly assertion, through the same helper: a `push:`
+    // trigger fires the whole workflow, so every other job must exclude push
+    // outright or gate on an allowlist that cannot contain it. Otherwise a
+    // merge quietly becomes a full CI run — desktop_shell's cargo build
+    // included.
+    assertEventReachesOnly('push', PUSH_JOBS, [
+      'pull_request',
+      'merge_group',
+      'workflow_dispatch',
+      'schedule',
+    ]);
   });
 
   it('checks out the commit the push reported, not the branch tip', () => {
@@ -266,13 +289,34 @@ describe('post-merge push lane', () => {
     expect(String(step.if)).toContain("github.event_name != 'push'");
   });
 
-  it('scopes the concurrency group by event', () => {
-    // Unscoped, the group collapses onto `Qwen Code CI-refs/heads/main` and
-    // the post-merge run shares it with the nightly (60-minute lanes, no
-    // cancellation on main) and with any PR from a fork branch named
-    // literally `refs/heads/main` — a legal ref name whose `head_ref` makes
-    // the group byte-identical while its own run cancels in progress.
-    expect(String(ci.concurrency.group)).toContain('github.event_name');
+  it('scopes the concurrency group and keeps main uncancellable', () => {
+    // All three components, the way e2e-workflow.test.js pins its own.
+    //
+    // Event: unscoped, the group collapses onto `Qwen Code CI-refs/heads/main`
+    // and the post-merge run shares it with the nightly (60-minute lanes, no
+    // cancellation on main) and with any PR from a fork branch named literally
+    // `refs/heads/main` — a legal ref name.
+    //
+    // Repo + ref: `head_ref` alone is not unique. Two PRs with the same head
+    // branch name — including from different forks, which evaluate groups in
+    // the base repo's namespace — share a group, and PR runs DO cancel in
+    // progress, so they cancel each other. A fork's default branch is `main`,
+    // the most common head_ref there is. Dropping the ref half entirely would
+    // collapse every PR into one group and leave this suite green.
+    //
+    // cancel-in-progress: flipping it to `true` was measured to be invisible
+    // to all 1854 test:scripts tests, while consecutive merges would cancel
+    // each other — the history this repo already recorded once, when 67 of
+    // 100 push runs were cancelled and only 25 ever reported.
+    const group = String(ci.concurrency.group);
+    expect(group).toContain('github.event_name');
+    expect(group).toContain(
+      'github.event.pull_request.head.repo.full_name || github.repository',
+    );
+    expect(group).toContain('github.head_ref || github.ref');
+    expect(String(ci.concurrency['cancel-in-progress'])).toContain(
+      "github.ref != 'refs/heads/main'",
+    );
   });
 });
 
