@@ -7,7 +7,22 @@
 import { realpathSync, statSync } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { hasVerifiableInode } from '@qwen-code/qwen-code-core';
+
+/**
+ * True iff `ino` can be used as proof of file identity.
+ *
+ * Tighter than core's canonical `hasVerifiableInode` (`Number(ino) !== 0`)
+ * on purpose: `Stats.ino` carries the 64-bit NTFS file index rounded at the
+ * JS boundary, so two DISTINCT Windows files whose indices land in one
+ * double-rounding bucket surface with equal `ino` and would compare as one
+ * file here. Only safe positive values are exact identity proof; everything
+ * else degrades to the canonical-spelling comparison below. Core's looser
+ * predicate is deliberately left alone — tightening it would also flip
+ * `assertVerifiableTranscriptIdentity` on >2^53 Windows transcript inodes.
+ */
+function hasVerifiableInode(ino: number): boolean {
+  return Number.isSafeInteger(ino) && ino > 0;
+}
 
 function tryStat(path: string): Stats | undefined {
   try {
@@ -46,8 +61,9 @@ function identityOfAbsent(path: string): string {
  * decides: hard links and case-variant spellings are one file under names no
  * string compare sees through, and statSync follows a symlinked directory
  * component on the way to the file. Where inodes are unverifiable
- * (`hasVerifiableInode`: FAT/exFAT-style volumes reporting `ino === 0`),
- * dev/ino would collapse unrelated files onto one identity, so the
+ * (`hasVerifiableInode`: FAT/exFAT-style volumes reporting `ino === 0`, or
+ * Windows file IDs rounded past the safe-integer range), dev/ino would
+ * collapse unrelated files onto one identity, so the
  * comparison falls back to canonical spellings — losing hard-link identity
  * there, but never equating distinct files. Where a side is absent, the
  * deepest existing ancestor is canonicalised instead, keeping the comparison
