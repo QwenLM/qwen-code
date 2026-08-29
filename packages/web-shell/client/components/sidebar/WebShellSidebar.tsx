@@ -5413,11 +5413,24 @@ export function WebShellSidebar({
                                 // not mount a second autofocused input.
                                 // Channel mode has no Pinned section, so
                                 // the workspace row is the only copy and
-                                // must stay editable.
+                                // must stay editable. The suppression also
+                                // requires the Pinned section to actually
+                                // carry the member: `pinnedSessions` merges
+                                // only the pinned catalog pages and the
+                                // primary sessions page, never this
+                                // workspace's own page, so before the
+                                // pinned page settles (or while it errors)
+                                // this row is the only copy and must host
+                                // the form itself.
                                 renameFormDisabled:
                                   selectedSessionSource !== 'channel' &&
                                   Boolean(session.isPinned) &&
-                                  pinnedExpanded,
+                                  pinnedExpanded &&
+                                  pinnedSessions.some(
+                                    (candidate) =>
+                                      getIdentityForSession(candidate) ===
+                                      getIdentityForSession(session),
+                                  ),
                               },
                             )
                           }

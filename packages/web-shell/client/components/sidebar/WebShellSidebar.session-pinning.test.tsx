@@ -1479,4 +1479,111 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
         .length,
     ).toBe(1);
   });
+
+  it('mounts the rename form on the workspace row while the pinned page is absent', async () => {
+    // Cold-load race: the secondary workspace's own session page settles
+    // before the sidebar's secondary pinned catalog page (or the pinned
+    // query errors and retries only after 30s). `pinnedSessions` then lacks
+    // the member, so the Pinned section renders no host row for it — the
+    // workspace group row must host the rename form itself instead of being
+    // suppressed, otherwise double-click rename is a silent no-op.
+    connection.capabilities = {
+      ...organizationCapabilities,
+      features: [
+        ...organizationCapabilities.features,
+        'workspace_session_metadata',
+        'workspace_qualified_rest_core',
+      ],
+    };
+    workspace.capabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const designGroupCatalog = {
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    };
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    const member = makeSession('secondary-member', {
+      displayName: 'Secondary member',
+      workspaceCwd: '/tmp/other',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    // The secondary pinned catalog page never settles (absent query result),
+    // so `pinnedSessions` stays empty and the Pinned section never renders.
+    useSessionCatalogQueries.mockImplementation(
+      (_client: unknown, queries: Array<{ workspaceCwd: string }>) =>
+        queries.map(() => ({})),
+    );
+    // The secondary workspace section loads its own session page carrying
+    // the pinned member.
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => {
+      if (cwd === '/tmp/other') {
+        return {
+          listWorkspaceSessions: vi.fn().mockResolvedValue([member]),
+          listSessionGroups: vi.fn().mockResolvedValue(designGroupCatalog),
+        };
+      }
+      return {
+        listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+        listSessionGroups: vi.fn().mockResolvedValue({
+          groups: [],
+          colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+        }),
+      };
+    });
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    active.sessions = [];
+    active.data = active.sessions;
+    connection.sessionId = 'secondary-member';
+
+    renderSidebar();
+    await flushSidebar();
+    await flushSidebar();
+
+    // No host row exists in the Pinned section...
+    expect(pinnedListTitles()).not.toContain('Secondary member');
+    // ...so the only rendered copy is the workspace group row.
+    expect(sessionTitleCount('Secondary member')).toBe(1);
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    const groupRow = Array.from(
+      group!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Secondary member'));
+    expect(groupRow).not.toBeUndefined();
+    act(() => {
+      groupRow!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    expect(
+      container.querySelectorAll('input[aria-label="Rename: Secondary member"]')
+        .length,
+    ).toBe(1);
+  });
 });
