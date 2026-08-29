@@ -432,21 +432,10 @@ export async function executeSlashCommand(
   }
 
   const { command, args } = resolution;
-  if (!command.action) {
-    if (command.subCommands && command.subCommands.length > 0) {
-      const helpText = `Command '/${command.name}' requires a subcommand. Available:\n${command.subCommands
-        .map((sc) => `  - ${sc.name}: ${sc.description || ''}`)
-        .join('\n')}`;
-      return { kind: 'message', messageType: 'info', content: helpText };
-    }
-    return { kind: 'handled' };
-  }
 
-  // Telemetry parity (ink slashCommandProcessor): skill invocations feed
-  // /stats skills via recordSkillInvocation + recordAutoSkillCommandUsage,
-  // and every executed command logs a SUCCESS/ERROR slash-command event.
-  const isSkillCommand = command.kind === CommandKind.SKILL;
-  const skillName = command.skillDetail?.name ?? command.name;
+  // Telemetry parity (ink slashCommandProcessor): every executed command
+  // logs a SUCCESS/ERROR slash-command event, including parent commands
+  // that return early (help listing / bare handled).
   const subcommand =
     resolution.canonicalPath.length > 1
       ? resolution.canonicalPath.slice(1).join(' ')
@@ -462,6 +451,23 @@ export async function executeSlashCommand(
       }),
     );
   };
+
+  if (!command.action) {
+    if (command.subCommands && command.subCommands.length > 0) {
+      const helpText = `Command '/${command.name}' requires a subcommand. Available:\n${command.subCommands
+        .map((sc) => `  - ${sc.name}: ${sc.description || ''}`)
+        .join('\n')}`;
+      logEvent(SlashCommandStatus.SUCCESS);
+      return { kind: 'message', messageType: 'info', content: helpText };
+    }
+    logEvent(SlashCommandStatus.SUCCESS);
+    return { kind: 'handled' };
+  }
+
+  // Skill-specific telemetry: skill invocations feed /stats skills via
+  // recordSkillInvocation + recordAutoSkillCommandUsage.
+  const isSkillCommand = command.kind === CommandKind.SKILL;
+  const skillName = command.skillDetail?.name ?? command.name;
   const recordSkill = (success: boolean) => {
     if (env.config && isSkillCommand) {
       recordSkillInvocation(env.config, { skillName, success });
@@ -542,16 +548,18 @@ export async function executeSlashCommand(
     let result: SlashCommandActionReturn | void;
     if (env.abortSignal) {
       const signal = env.abortSignal;
-      // An already-aborted signal never fires addEventListener('abort'),
-      // so resolve immediately in that case instead of hanging.
-      const aborted = signal.aborted
-        ? Promise.resolve(undefined)
-        : new Promise<undefined>((resolve) => {
-            signal.addEventListener('abort', () => resolve(undefined), {
-              once: true,
-            });
+      if (signal.aborted) {
+        // Already aborted: skip the action entirely — its side effects
+        // (clear, persist, addItem) must not run on a cancelled submission.
+        result = undefined;
+      } else {
+        const aborted = new Promise<undefined>((resolve) => {
+          signal.addEventListener('abort', () => resolve(undefined), {
+            once: true,
           });
-      result = await Promise.race([command.action(context, args), aborted]);
+        });
+        result = await Promise.race([command.action(context, args), aborted]);
+      }
     } else {
       result = await command.action(context, args);
     }
