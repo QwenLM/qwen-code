@@ -9392,6 +9392,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
         content: '  Remember the workspace uses vitest.  ',
         contextMode: 'clean',
+        scope: 'project',
       }),
     ).resolves.toEqual({
       summary: 'saved',
@@ -9404,11 +9405,69 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         projectRoot: '/workspace',
         content: 'Remember the workspace uses vitest.',
         contextMode: 'clean',
+        scope: 'project',
         abortSignal: expect.any(AbortSignal),
       }),
     );
     expect(refreshHierarchicalMemory).not.toHaveBeenCalled();
     expect(refreshSystemInstruction).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('omits scope entirely from an unscoped workspace memory remember', async () => {
+    const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
+    const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      refreshHierarchicalMemory,
+      getLlmClient: vi.fn().mockReturnValue({
+        refreshSystemInstruction,
+      }),
+    });
+    mockRunManagedRememberByAgent.mockResolvedValue({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+        content: 'Remember the workspace uses vitest.',
+      }),
+    ).resolves.toEqual({
+      summary: 'saved',
+      filesTouched: ['/mem/MEMORY.md'],
+      touchedScopes: ['project'],
+    });
+    // The scoped twin above asserts through `objectContaining`, which cannot
+    // see an absent key — so the omitted arm of
+    // `...(rawScope ? { scope: rawScope } : {})` had no pin at all. An
+    // explicit `scope: undefined` reaching the helper reads as a requested
+    // scope to `params.scope &&` further down, which is what selects the
+    // mismatch guard over automatic scope routing.
+    const [args] = mockRunManagedRememberByAgent.mock.calls.at(-1)!;
+    expect(args).not.toHaveProperty('scope');
+    expect(args).toMatchObject({
+      config: mockConfig,
+      projectRoot: '/workspace',
+      content: 'Remember the workspace uses vitest.',
+      contextMode: 'workspace',
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -9676,6 +9735,38 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           contextMode: 'thread',
         }),
       ).rejects.toThrow('Invalid contextMode');
+      expect(mockRunManagedRememberByAgent).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('rejects workspace memory remember with an invalid scope', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember, {
+          content: 'Remember me.',
+          scope: 'global',
+        }),
+      ).rejects.toThrow('Invalid scope');
       expect(mockRunManagedRememberByAgent).not.toHaveBeenCalled();
     } finally {
       mockConnectionState.resolve();
@@ -10121,6 +10212,95 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
       abortSignal: expect.any(AbortSignal),
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('forwards a scoped workspace memory forget to the memory manager', async () => {
+    const forget = vi.fn().mockResolvedValue({
+      systemMessage: 'Forgot 1 entry.',
+      removedEntries: [
+        {
+          topic: 'user',
+          summary: 'old preference',
+          filePath: '/mem/user/shared.md',
+        },
+      ],
+      touchedTopics: ['user'],
+      touchedScopes: ['user'],
+    });
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getMemoryManager: vi.fn().mockReturnValue({ forget }),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget, {
+        query: 'old preference',
+        scope: 'user',
+      }),
+    ).resolves.toMatchObject({
+      summary: 'Forgot 1 entry.',
+      touchedScopes: ['user'],
+    });
+    expect(forget).toHaveBeenCalledWith('/workspace', 'old preference', {
+      config: expect.objectContaining({
+        getChatRecordingService: expect.any(Function),
+        getTranscriptPath: expect.any(Function),
+      }),
+      abortSignal: expect.any(AbortSignal),
+      scope: 'user',
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects workspace memory forget with an invalid scope', async () => {
+    const forget = vi.fn();
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getMemoryManager: vi.fn().mockReturnValue({ forget }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget, {
+        query: 'old preference',
+        scope: 'global',
+      }),
+    ).rejects.toThrow('Invalid scope');
+    expect(forget).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
