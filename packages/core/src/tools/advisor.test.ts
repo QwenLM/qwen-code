@@ -29,6 +29,9 @@ function makeConfig(history?: Content[]): Config {
   return {
     getModel: () => 'executor-model',
     getAdvisorModel: () => 'advisor-model',
+    getContentGeneratorConfig: () => undefined,
+    getFastModel: () => undefined,
+    getAllConfiguredModels: () => [],
     getGeminiClient: () => ({
       getChat: () => ({
         getGenerationConfig: () => ({
@@ -191,6 +194,20 @@ describe('AdvisorTool', () => {
       .build({})
       .execute(new AbortController().signal);
     expect(schemaFailure.error?.message).toContain('invalid structured output');
+  });
+
+  it('does not fall back to the executor when the Advisor model no longer resolves', async () => {
+    const config = {
+      ...makeConfig(),
+      getAdvisorModel: () => 'fast',
+    } as Config;
+
+    const result = await new AdvisorTool(config)
+      .build({})
+      .execute(new AbortController().signal);
+
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
+    expect(result.error?.message).toBe('Advisor model is no longer available.');
   });
 
   it('accepts structured Advisor JSON returned as text', async () => {

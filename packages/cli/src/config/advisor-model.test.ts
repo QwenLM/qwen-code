@@ -9,6 +9,23 @@ import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import { checkAdvisorModelAvailability } from './advisor-model.js';
 
 describe('checkAdvisorModelAvailability', () => {
+  it('rejects inheriting the executor model', () => {
+    const config = {
+      getModel: vi.fn(() => 'executor-model'),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'executor-model',
+      })),
+      getAllConfiguredModels: vi.fn(() => [
+        { id: 'executor-model', authType: AuthType.USE_OPENAI },
+      ]),
+    } as unknown as Config;
+
+    expect(checkAdvisorModelAvailability(config, 'inherit').available).toBe(
+      false,
+    );
+  });
+
   it('allows the active runtime model', () => {
     const config = {
       getModel: vi.fn(() => 'runtime-advisor'),

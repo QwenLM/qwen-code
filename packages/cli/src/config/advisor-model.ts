@@ -82,6 +82,9 @@ export function checkAdvisorModelAvailability(
   };
   let selector: ReturnType<typeof resolveModelId> | undefined;
   try {
+    if (modelName.trim() === 'inherit') {
+      throw new Error('Advisor cannot inherit the executor model.');
+    }
     selector = resolveModelId(modelName, context);
   } catch {
     selector = undefined;

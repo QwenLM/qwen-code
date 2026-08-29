@@ -8,6 +8,7 @@ import type { Content, Part } from '@google/genai';
 import { runForkedAgent } from '../agents/forkedAgent.js';
 import type { Config } from '../config/config.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
@@ -215,6 +216,18 @@ class AdvisorToolInvocation extends BaseToolInvocation<
     if (!model) return advisorErrorResult(new Error('Advisor is disabled.'));
 
     try {
+      const resolvedModel = resolveModelId(
+        model,
+        buildModelIdContext(this.config),
+      );
+      if (!resolvedModel) {
+        return advisorErrorResult(
+          new Error('Advisor model is no longer available.'),
+        );
+      }
+      const advisorModel = resolvedModel.authType
+        ? `${resolvedModel.authType}:${resolvedModel.modelId}`
+        : resolvedModel.modelId;
       const result = await subagentNameContext.run('advisor', () =>
         runForkedAgent({
           config: this.config,
@@ -228,7 +241,7 @@ class AdvisorToolInvocation extends BaseToolInvocation<
             version: 0,
           },
           jsonSchema: ADVISOR_REVIEW_SCHEMA,
-          model,
+          model: advisorModel,
           abortSignal: signal,
           disableModelFallbacks: true,
         }),

@@ -4631,6 +4631,22 @@ describe('Server Config (config.ts)', () => {
       expect(setTools).toHaveBeenCalledTimes(2);
     });
 
+    it('does not disturb Advisor registration while the tool is disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        disabledTools: [ToolNames.ADVISOR],
+      });
+      await config.initialize();
+      const registry = config.getToolRegistry();
+      vi.mocked(registry.unregisterTool).mockClear();
+      vi.mocked(registry.registerTool).mockClear();
+
+      await config.setAdvisorModel('advisor-model');
+
+      expect(registry.unregisterTool).not.toHaveBeenCalled();
+      expect(registry.registerTool).not.toHaveBeenCalled();
+    });
+
     it('does not register Advisor in safe mode', async () => {
       const config = new Config({
         ...baseParams,

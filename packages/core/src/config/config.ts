@@ -9125,15 +9125,17 @@ export class Config {
     registry: ToolRegistry,
     options?: { forSubAgent?: boolean },
   ): Promise<void> {
-    registry.unregisterTool(ToolNames.ADVISOR);
     if (
       !this.getAdvisorModel() ||
       this.getBareMode() ||
       this.isSafeMode() ||
       options?.forSubAgent
     ) {
+      registry.unregisterTool(ToolNames.ADVISOR);
       return;
     }
+
+    if (this.getDisabledTools().has(ToolNames.ADVISOR)) return;
 
     let enabled = true;
     try {
@@ -9147,9 +9149,15 @@ export class Config {
       );
       return;
     }
-    if (!enabled) return;
+    if (!enabled) {
+      registry.unregisterTool(ToolNames.ADVISOR);
+      return;
+    }
 
     const { AdvisorTool } = await import('../tools/advisor.js');
+    if (registry.getTool(ToolNames.ADVISOR) instanceof AdvisorTool) return;
+
+    registry.unregisterTool(ToolNames.ADVISOR);
     registry.registerTool(new AdvisorTool(this));
   }
 
