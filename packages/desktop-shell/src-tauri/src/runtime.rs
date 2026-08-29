@@ -62,8 +62,7 @@ impl DesktopRuntime {
             .env("QWEN_CODE_DESKTOP", "1")
             .env("QWEN_SERVER_TOKEN", &token);
 
-        let mut child = command
-            .group_spawn()
+        let mut child = spawn_runtime_group(&mut command)
             .map_err(|error| format!("Failed to start bundled Qwen Code runtime: {error}"))?;
         let Some(stdout) = child.inner().stdout.take() else {
             stop_runtime_child(&mut child);
@@ -124,10 +123,6 @@ impl DesktopRuntime {
         &self.base_url
     }
 
-    pub fn token(&self) -> &str {
-        &self.token
-    }
-
     pub fn authenticated_web_url(&self) -> Url {
         let mut url = self.base_url.clone();
         url.set_fragment(Some(&format!("token={}", self.token)));
@@ -139,6 +134,23 @@ impl Drop for DesktopRuntime {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+// Spawns the runtime child in its own process group. On Windows the bundled
+// Node.js binary is a console application, so creating it from the desktop
+// (a GUI application) without `CREATE_NO_WINDOW` allocates a visible terminal
+// window for it, and closing that window stops the runtime (#9043). The flag
+// must be set through the group builder: `group_spawn` replaces the command's
+// creation flags with the builder's own.
+#[cfg(windows)]
+fn spawn_runtime_group(command: &mut Command) -> std::io::Result<GroupChild> {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    command.group().creation_flags(CREATE_NO_WINDOW).spawn()
+}
+
+#[cfg(not(windows))]
+fn spawn_runtime_group(command: &mut Command) -> std::io::Result<GroupChild> {
+    command.group_spawn()
 }
 
 struct RuntimeLayout {
@@ -543,7 +555,7 @@ mod tests {
     #[cfg(unix)]
     use super::{stop_runtime_handle, wait_for_listening};
     #[cfg(windows)]
-    use super::layout_from_root;
+    use super::{layout_from_root, spawn_runtime_group};
     use std::path::Path;
     #[cfg(windows)]
     use std::path::PathBuf;
@@ -596,6 +608,40 @@ mod tests {
             .expect("cleanup long workspace");
         let error = result.expect_err("reject long workspace");
         assert!(error.contains("unsupported Windows extended-length form"));
+    }
+
+    // The bundled runtime is a console application, so it must be created
+    // with `CREATE_NO_WINDOW`: the probe child reports its own attached
+    // console window, and there must be none (#9043).
+    #[cfg(windows)]
+    #[test]
+    fn runtime_child_gets_no_windows_console() {
+        let probe = concat!(
+            "Add-Type -Namespace QwenDesktop -Name ConsoleProbe",
+            " -MemberDefinition '[DllImport(\"kernel32.dll\")]",
+            " public static extern IntPtr GetConsoleWindow();';",
+            " [QwenDesktop.ConsoleProbe]::GetConsoleWindow().ToInt64()",
+        );
+        let mut command = std::process::Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-Command", probe])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = spawn_runtime_group(&mut command)
+            .expect("spawn hidden runtime child")
+            .wait_with_output()
+            .expect("collect hidden runtime child output");
+        assert!(
+            output.status.success(),
+            "console probe child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "0",
+            "the runtime child must not receive a console window"
+        );
     }
 
     #[cfg(windows)]

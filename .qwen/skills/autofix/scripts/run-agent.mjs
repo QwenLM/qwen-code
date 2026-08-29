@@ -18,7 +18,11 @@ const skillPath = resolve(
   '..',
   'SKILL.md',
 );
-const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
+// Default absolute budget, 90m. Only the issue lane's `develop-issue` leg
+// relies on it (every other leg pins QWEN_TIMEOUT_MS in the workflow): at
+// the former 50m, 6 of the 13 develop attempts observed 2026-08-20..26 died
+// at the budget with the branch discarded, against 2 that published a PR.
+const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 90 * 60 * 1000;
 // Idle watchdog: a wedged sandbox produces NOTHING — four observed hangs
 // (#8663 x2, #8761 r3, #8763 r4) each printed their last byte at docker
 // container entry and then sat silent for the whole absolute budget,
@@ -28,8 +32,9 @@ const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
 // ~1M-token contexts, so twice that is the default. Distinct from
 // QWEN_TIMEOUT_MS so
 // the failure comment says which limit fired; a leg whose absolute budget is
-// shorter than this window (the review workflow's 18-minute repair pass)
-// always reaches the absolute timer first.
+// shorter than this window would always reach the absolute timer first
+// (none today — the shortest leg is the issue lane's 50-minute assess
+// pass).
 const parsedIdleTimeoutMs = Number(process.env.QWEN_IDLE_TIMEOUT_MS);
 // Reject negative/0/NaN: Number('-1') is truthy, so a bare `|| default`
 // guard would arm a sub-second window and kill every agent at the first
@@ -170,7 +175,12 @@ function recoverableApiError(output) {
 
 function writeHandoff(workdir, message) {
   mkdirSync(workdir, { recursive: true });
-  writeFileSync(file(workdir, 'handoff.md'), `${message}\n`);
+  const handoffPath = file(workdir, 'handoff.md');
+  // A non-empty handoff.md is an agent-written verdict — the same
+  // convention missing() and the gate's -s checks apply — and a verdict
+  // must not be reclassified by a synthesized note.
+  if (existsSync(handoffPath) && statSync(handoffPath).size > 0) return;
+  writeFileSync(handoffPath, `${message}\n`);
 }
 
 function isLoopGuardOutput(output) {
@@ -216,7 +226,7 @@ function runQwen(options, prompt) {
   let idleTimedOut = false;
   let lastOutputAt = Date.now();
   // The sandbox launcher prints the container name before the container
-  // starts (packages/cli/src/utils/sandbox.ts), so the FIRST match is this
+  // starts (packages/cli/src/serve/sandbox.ts), so the FIRST match is this
   // run's own container — the kill-path reap below relies on that ownership.
   let sandboxName = '';
   let lineCarry = '';
@@ -493,11 +503,20 @@ const presentOutputs = spec.outputs.filter(
 const hasOutputVerdict = spec.anyOutput
   ? presentOutputs.length > 0
   : missingOutputs.length === 0;
+// A zero-byte handoff.md is not a verdict — the same non-empty convention
+// missing() and the gate's -s checks apply, so the two layers cannot
+// classify an empty file oppositely.
+const hasHandoffVerdict = !missing(options.workdir, ['handoff.md']).includes(
+  'handoff.md',
+);
 const apiErrorWithoutVerdict =
   result.status === 0 &&
   result.apiError &&
   !hasOutputVerdict &&
-  !existsSync(file(options.workdir, 'failure.md'));
+  !existsSync(file(options.workdir, 'failure.md')) &&
+  // A handoff is a verdict too: an agent that reached its BLOCKED stop must
+  // not be reclassified as a bare API blip by an error render in the tail.
+  !hasHandoffVerdict;
 if (
   result.error ||
   result.signal ||
@@ -516,6 +535,22 @@ if (
             ? 'recoverable API error without an agent verdict'
             : `status ${String(result.status)}`;
   if (!existsSync(file(options.workdir, 'failure.md'))) {
+    if (hasHandoffVerdict) {
+      // A handoff is a verdict here too: the agent stopped under
+      // instruction and wrote its decision, then qwen died (crash,
+      // budget kill, loop guard). Synthesizing a failure.md would
+      // shadow the note — the gate reads failure.md first and would
+      // report a failed fix, and the timeout/api-error sentinels would
+      // re-hand the item the brake stopped on the next scan. Mirror the
+      // sibling arm that preserves an agent-written failure.md across
+      // the same crash, and exit 0 like the status-0 handoff path so
+      // the check color matches the outcome the gate reports from the
+      // preserved note.
+      console.error(
+        `Qwen failed during ${options.mode}: ${detail}; preserving agent-written handoff.md.`,
+      );
+      process.exit(0);
+    }
     if (result.loopDetected) {
       writeFailure(
         options.workdir,
@@ -583,6 +618,26 @@ if (existsSync(file(options.workdir, 'failure.md'))) {
     'The agent wrote failure.md; a human should take over this feedback batch.',
   );
   console.error(`Autofix agent wrote failure.md:\n${content}`);
+  process.exit(0);
+}
+
+// A handoff the AGENT itself wrote — the growth-brake BLOCKED stop: the
+// feedback told it to defer to a human, so the round ends without a fix
+// verdict. Same standing as failure.md: a real, human-facing outcome, NOT
+// the missing-output failure class (which once reported a deliberate stop as
+// "finished without required output file(s)" and buried the brake's decision
+// under a generic failure.md). Honored only when no spec output exists: if
+// address-summary.md or no-action.md coexists, the runner exits on that
+// verdict, and the GATE decides the round — its handoff branch runs before
+// the no-action branch, so a deliberate stop outranks a co-written
+// no-change verdict and cannot close silently as "no action needed".
+if (!hasOutputVerdict && hasHandoffVerdict) {
+  const content = readFileSync(file(options.workdir, 'handoff.md'), 'utf8');
+  // Neutralize `::` workflow commands in agent-written content before it
+  // reaches the step log ('Show run artifacts' does the same).
+  console.error(
+    `Autofix agent wrote handoff.md:\n${content.replaceAll('::', ';;')}`,
+  );
   process.exit(0);
 }
 

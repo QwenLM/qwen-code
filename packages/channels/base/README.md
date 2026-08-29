@@ -121,7 +121,7 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | `Envelope`           | Normalized inbound message format                                        |
 | `SenderPolicy`       | `'allowlist' \| 'pairing' \| 'open'`                                     |
 | `GroupPolicy`        | `'disabled' \| 'allowlist' \| 'pairing' \| 'open'`                       |
-| `SessionScope`       | `'user' \| 'thread' \| 'single'`                                         |
+| `SessionScope`       | `'user' \| 'chat_thread' \| 'single'`; legacy `'thread'` is deprecated   |
 | `GroupConfig`        | Per-group settings (e.g. `requireMention`)                               |
 | `SessionTarget`      | Maps a session back to its channel/sender/chat                           |
 | `ToolCallEvent`      | Agent tool-call event delivered to adapters                              |
@@ -197,7 +197,11 @@ interface ChannelAgentBridge {
   prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: {
+      images?: Array<{ data: string; mimeType: string }>; // ordered, preferred
+      imageBase64?: string; // legacy fallback (first image only)
+      imageMimeType?: string; // legacy fallback (first image only)
+    },
   ): Promise<string>;
   cancelSession(sessionId: string): Promise<void>;
   shellCommand?(
@@ -208,6 +212,8 @@ interface ChannelAgentBridge {
 }
 ```
 
+`prompt` carries images through `options.images` — an ordered array of `{ data, mimeType }` entries delivered to the model in array order. The legacy `imageBase64`/`imageMimeType` pair is a fallback that carries only the first image. Built-in bridges normalize MIME types before use: lowercased, parameters stripped (`image/png; charset=binary` → `image/png`), and the `image/jpg` alias mapped to `image/jpeg`. Daemon-backed bridges upload images to the daemon attachment store and restrict them to its supported subtypes (`image/bmp`, `image/gif`, `image/jpeg`, `image/png`, `image/webp`) and its per-item admission rule (non-empty and at most 8 MiB once decoded); daemons without attachment support take the same images inline in the prompt body, kept under an aggregate base64 budget. Images outside those limits are skipped with a log line instead of failing the turn, while `AcpBridge` delivers any normalized `image/*` inline.
+
 ### AcpBridge
 
 `AcpBridge` is the current implementation used by standalone `qwen channel start`. It manages the `qwen-code --acp` child process and implements `ChannelAgentBridge`.
@@ -216,14 +222,14 @@ interface ChannelAgentBridge {
 constructor(options: { cliEntryPath: string; cwd: string; model?: string })
 ```
 
-| Method                              | Description                                                                                                       |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `start()`                           | Spawn the agent process                                                                                           |
-| `stop()`                            | Kill the agent process                                                                                            |
-| `newSession(cwd)`                   | Create a new ACP session, returns `sessionId`                                                                     |
-| `loadSession(sessionId, cwd)`       | Restore an existing session                                                                                       |
-| `prompt(sessionId, text, options?)` | Send a message to the agent, returns the full response text. Supports optional `imageBase64` and `imageMimeType`. |
-| `isConnected`                       | Whether the agent process is alive                                                                                |
+| Method                              | Description                                                                                                                                                                                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `start()`                           | Spawn the agent process                                                                                                                                                                                                        |
+| `stop()`                            | Kill the agent process                                                                                                                                                                                                         |
+| `newSession(cwd)`                   | Create a new ACP session, returns `sessionId`                                                                                                                                                                                  |
+| `loadSession(sessionId, cwd)`       | Restore an existing session                                                                                                                                                                                                    |
+| `prompt(sessionId, text, options?)` | Send a message to the agent, returns the full response text. Supports an ordered `images` array (`{ data, mimeType }` per image, preferred), falling back to the legacy `imageBase64`/`imageMimeType` pair for a single image. |
+| `isConnected`                       | Whether the agent process is alive                                                                                                                                                                                             |
 
 **Events** (EventEmitter):
 

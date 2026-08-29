@@ -1,0 +1,1181 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type {
+  Config,
+  SessionMetrics,
+  AgentResultDisplay,
+} from '@qwen-code/qwen-code-core';
+import {
+  ToolErrorType,
+  MCPServerStatus,
+  getMCPServerStatus,
+  OutputFormat,
+} from '@qwen-code/qwen-code-core';
+import type { Part } from '@google/genai';
+import type { CLIUserMessage, PermissionMode } from './types.js';
+import type { JsonOutputAdapterInterface } from './io/BaseJsonOutputAdapter.js';
+import {
+  extractPartsFromUserMessage,
+  computeUsageFromMetrics,
+  buildSystemMessage,
+  createToolProgressHandler,
+  createAgentToolProgressHandler,
+  functionResponsePartsToString,
+  insertAfterFunctionResponses,
+} from './nonInteractiveHelpers.js';
+
+// Mock dependencies
+vi.mock('../nonInteractiveCliCommands.js', () => ({
+  getAvailableCommands: vi
+    .fn()
+    .mockImplementation(
+      async (_config: unknown, _signal: AbortSignal, mode: string = 'acp') => {
+        const allCommands = [
+          {
+            name: 'help',
+            supportedModes: ['interactive'] as const,
+          },
+          {
+            name: 'commit',
+            supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+          },
+          {
+            name: 'memory',
+            supportedModes: ['interactive'] as const,
+          },
+          {
+            name: 'init',
+            supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+          },
+          {
+            name: 'summary',
+            supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+          },
+          {
+            name: 'compress',
+            supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+          },
+        ] as const;
+
+        return allCommands.filter((cmd) =>
+          (cmd.supportedModes as readonly string[]).includes(mode),
+        );
+      },
+    ),
+}));
+
+vi.mock('../ui/utils/computeStats.js', () => ({
+  computeSessionStats: vi.fn().mockReturnValue({
+    totalPromptTokens: 100,
+    totalCachedTokens: 20,
+  }),
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    getMCPServerStatus: vi.fn(),
+  };
+});
+
+describe('extractPartsFromUserMessage', () => {
+  it('should return null for undefined message', () => {
+    expect(extractPartsFromUserMessage(undefined)).toBeNull();
+  });
+
+  it('should return null for null message', () => {
+    expect(
+      extractPartsFromUserMessage(null as unknown as undefined),
+    ).toBeNull();
+  });
+
+  it('should extract string content', () => {
+    const message: CLIUserMessage = {
+      type: 'user',
+      session_id: 'test-session',
+      message: {
+        role: 'user',
+        content: 'test message',
+      },
+      parent_tool_use_id: null,
+    };
+    expect(extractPartsFromUserMessage(message)).toBe('test message');
+  });
+
+  it('should extract text blocks from content array', () => {
+    const message: CLIUserMessage = {
+      type: 'user',
+      session_id: 'test-session',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'hello' },
+          { type: 'text', text: 'world' },
+        ],
+      },
+      parent_tool_use_id: null,
+    };
+    const result = extractPartsFromUserMessage(message);
+    expect(result).toEqual([{ text: 'hello' }, { text: 'world' }]);
+  });
+
+  it('should skip invalid blocks in content array', () => {
+    const message: CLIUserMessage = {
+      type: 'user',
+      session_id: 'test-session',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'valid' },
+          null as unknown as { type: 'text'; text: string },
+          { type: 'text', text: 'also valid' },
+        ],
+      },
+      parent_tool_use_id: null,
+    };
+    const result = extractPartsFromUserMessage(message);
+    expect(result).toEqual([{ text: 'valid' }, { text: 'also valid' }]);
+  });
+
+  it('should convert non-text blocks to JSON strings', () => {
+    const message: CLIUserMessage = {
+      type: 'user',
+      session_id: 'test-session',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'text block' },
+          { type: 'tool_use', id: '123', name: 'tool', input: {} },
+        ],
+      },
+      parent_tool_use_id: null,
+    };
+    const result = extractPartsFromUserMessage(message);
+    expect(result).toEqual([
+      { text: 'text block' },
+      {
+        text: JSON.stringify({
+          type: 'tool_use',
+          id: '123',
+          name: 'tool',
+          input: {},
+        }),
+      },
+    ]);
+  });
+
+  it('should return null for empty content array', () => {
+    const message: CLIUserMessage = {
+      type: 'user',
+      session_id: 'test-session',
+      message: {
+        role: 'user',
+        content: [],
+      },
+      parent_tool_use_id: null,
+    };
+    expect(extractPartsFromUserMessage(message)).toBeNull();
+  });
+
+  it('should return null when message has no content', () => {
+    const message: CLIUserMessage = {
+      type: 'user',
+      session_id: 'test-session',
+      message: {
+        role: 'user',
+        content: undefined as unknown as string,
+      },
+      parent_tool_use_id: null,
+    };
+    expect(extractPartsFromUserMessage(message)).toBeNull();
+  });
+});
+
+describe('computeUsageFromMetrics', () => {
+  it('should compute usage from SessionMetrics with single model', () => {
+    const metrics: SessionMetrics = {
+      models: {
+        'model-1': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 50,
+            candidates: 100,
+            total: 150,
+            cached: 10,
+            thoughts: 0,
+          },
+          bySource: {},
+        },
+      },
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        totalDecisions: {
+          accept: 0,
+          reject: 0,
+          modify: 0,
+          auto_accept: 0,
+        },
+        byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+      },
+    };
+    const result = computeUsageFromMetrics(metrics);
+    expect(result).toEqual({
+      input_tokens: 100,
+      output_tokens: 100,
+      cache_read_input_tokens: 20,
+      total_tokens: 150,
+    });
+  });
+
+  it('should aggregate usage across multiple models', () => {
+    const metrics: SessionMetrics = {
+      models: {
+        'model-1': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 50,
+            candidates: 100,
+            total: 150,
+            cached: 10,
+            thoughts: 0,
+          },
+          bySource: {},
+        },
+        'model-2': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 75,
+            candidates: 125,
+            total: 200,
+            cached: 15,
+            thoughts: 0,
+          },
+          bySource: {},
+        },
+      },
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        totalDecisions: {
+          accept: 0,
+          reject: 0,
+          modify: 0,
+          auto_accept: 0,
+        },
+        byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+      },
+    };
+    const result = computeUsageFromMetrics(metrics);
+    expect(result).toEqual({
+      input_tokens: 100,
+      output_tokens: 225,
+      cache_read_input_tokens: 20,
+      total_tokens: 350,
+    });
+  });
+
+  it('should not include total_tokens when it is 0', () => {
+    const metrics: SessionMetrics = {
+      models: {
+        'model-1': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 50,
+            candidates: 100,
+            total: 0,
+            cached: 10,
+            thoughts: 0,
+          },
+          bySource: {},
+        },
+      },
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        totalDecisions: {
+          accept: 0,
+          reject: 0,
+          modify: 0,
+          auto_accept: 0,
+        },
+        byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+      },
+    };
+    const result = computeUsageFromMetrics(metrics);
+    expect(result).not.toHaveProperty('total_tokens');
+    expect(result).toEqual({
+      input_tokens: 100,
+      output_tokens: 100,
+      cache_read_input_tokens: 20,
+    });
+  });
+
+  it('should handle empty models', () => {
+    const metrics: SessionMetrics = {
+      models: {},
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        totalDecisions: {
+          accept: 0,
+          reject: 0,
+          modify: 0,
+          auto_accept: 0,
+        },
+        byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+      },
+    };
+    const result = computeUsageFromMetrics(metrics);
+    expect(result).toEqual({
+      input_tokens: 100,
+      output_tokens: 0,
+      cache_read_input_tokens: 20,
+    });
+  });
+});
+
+describe('buildSystemMessage', () => {
+  let mockConfig: Config;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Mock getMCPServerStatus to return CONNECTED by default
+    vi.mocked(getMCPServerStatus).mockReturnValue(MCPServerStatus.CONNECTED);
+
+    mockConfig = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllToolNames: vi.fn().mockReturnValue(['tool1', 'tool2']),
+      }),
+      getMcpServers: vi.fn().mockReturnValue({
+        'mcp-server-1': {},
+        'mcp-server-2': {},
+      }),
+      getTargetDir: vi.fn().mockReturnValue('/test/dir'),
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      getDebugMode: vi.fn().mockReturnValue(false),
+    } as unknown as Config;
+  });
+
+  it('should build system message with all fields', async () => {
+    const result = await buildSystemMessage(
+      mockConfig,
+      'test-session-id',
+      'auto' as PermissionMode,
+    );
+
+    expect(result).toEqual({
+      type: 'system',
+      subtype: 'init',
+      uuid: 'test-session-id',
+      session_id: 'test-session-id',
+      cwd: '/test/dir',
+      tools: ['tool1', 'tool2'],
+      mcp_servers: [
+        { name: 'mcp-server-1', status: 'connected' },
+        { name: 'mcp-server-2', status: 'connected' },
+      ],
+      model: 'test-model',
+      permission_mode: 'auto',
+      slash_commands: ['commit', 'compress', 'init', 'summary'],
+      qwen_code_version: '1.0.0',
+      agents: [],
+    });
+  });
+
+  it('should handle empty tool registry', async () => {
+    const config = {
+      ...mockConfig,
+      getToolRegistry: vi.fn().mockReturnValue(null),
+    } as unknown as Config;
+
+    const result = await buildSystemMessage(
+      config,
+      'test-session-id',
+      'auto' as PermissionMode,
+    );
+
+    expect(result.tools).toEqual([]);
+  });
+
+  it('should handle empty MCP servers', async () => {
+    const config = {
+      ...mockConfig,
+      getMcpServers: vi.fn().mockReturnValue(null),
+    } as unknown as Config;
+
+    const result = await buildSystemMessage(
+      config,
+      'test-session-id',
+      'auto' as PermissionMode,
+    );
+
+    expect(result.mcp_servers).toEqual([]);
+  });
+
+  it('should use unknown version when getCliVersion returns null', async () => {
+    const config = {
+      ...mockConfig,
+      getCliVersion: vi.fn().mockReturnValue(null),
+    } as unknown as Config;
+
+    const result = await buildSystemMessage(
+      config,
+      'test-session-id',
+      'auto' as PermissionMode,
+    );
+
+    expect(result.qwen_code_version).toBe('unknown');
+  });
+
+  it('should include local commands with ACP supportedModes and prompt commands', async () => {
+    const result = await buildSystemMessage(
+      mockConfig,
+      'test-session-id',
+      'auto' as PermissionMode,
+    );
+
+    // Should include: 'commit' (prompt), 'compress', 'init', 'summary' (local+ACP)
+    // Should NOT include: 'help' (local-jsx), 'memory' (local without ACP supportedModes)
+    expect(result.slash_commands).toEqual([
+      'commit',
+      'compress',
+      'init',
+      'summary',
+    ]);
+  });
+
+  it('should exclude interactive-only commands from system message', async () => {
+    const result = await buildSystemMessage(
+      mockConfig,
+      'test-session-id',
+      'auto' as PermissionMode,
+    );
+
+    // 'help' (local-jsx) and 'memory' (local without ACP) should be excluded
+    expect(result.slash_commands).not.toContain('help');
+    expect(result.slash_commands).not.toContain('memory');
+  });
+});
+
+describe('createToolProgressHandler', () => {
+  const mockRequest = {
+    callId: 'tool-call-1',
+    name: 'mcp__echo-test__echo',
+    args: {},
+    isClientInitiated: false,
+    prompt_id: '',
+  };
+
+  it('should call emitToolProgress with request and McpToolProgressData', () => {
+    const mockAdapter = {
+      emitToolProgress: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+
+    const { handler } = createToolProgressHandler(mockRequest, mockAdapter);
+
+    const progressData = {
+      type: 'mcp_tool_progress' as const,
+      progress: 1,
+      total: 10,
+      message: 'Echo: 1',
+    };
+    handler('tool-call-1', progressData);
+
+    expect(mockAdapter.emitToolProgress).toHaveBeenCalledWith(
+      mockRequest,
+      progressData,
+    );
+  });
+
+  it('should not call emitToolProgress for non-McpToolProgressData output', () => {
+    const mockAdapter = {
+      emitToolProgress: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+
+    const { handler } = createToolProgressHandler(
+      { ...mockRequest, name: 'test_tool' },
+      mockAdapter,
+    );
+
+    // Pass a non-McpToolProgressData ToolResultDisplay (e.g., FileDiff)
+    handler('tool-call-1', {
+      fileDiff: 'diff',
+      fileName: 'test.ts',
+      originalContent: null,
+      newContent: 'new',
+    });
+
+    expect(mockAdapter.emitToolProgress).not.toHaveBeenCalled();
+
+    // Also test with a plain string — should not emit
+    handler('tool-call-1', 'plain string progress');
+
+    expect(mockAdapter.emitToolProgress).not.toHaveBeenCalled();
+  });
+
+  it('should forward shell heartbeats as tool progress', () => {
+    const mockAdapter = {
+      emitToolProgress: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+
+    const shellRequest = { ...mockRequest, name: 'run_shell_command' };
+    const { handler } = createToolProgressHandler(shellRequest, mockAdapter);
+
+    const heartbeat = {
+      type: 'shell_progress' as const,
+      elapsedMs: 10_000,
+      lastOutputAgeMs: 4_000,
+      timeoutMs: 120_000,
+    };
+    handler('tool-call-1', heartbeat);
+
+    expect(mockAdapter.emitToolProgress).toHaveBeenCalledWith(
+      shellRequest,
+      heartbeat,
+    );
+  });
+
+  it('should forward multiple progress updates', () => {
+    const mockAdapter = {
+      emitToolProgress: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+
+    const browserRequest = {
+      ...mockRequest,
+      name: 'mcp__browser__navigate',
+    };
+    const { handler } = createToolProgressHandler(browserRequest, mockAdapter);
+
+    const progress1 = {
+      type: 'mcp_tool_progress' as const,
+      progress: 1,
+      total: 3,
+      message: 'Navigating...',
+    };
+    const progress2 = {
+      type: 'mcp_tool_progress' as const,
+      progress: 2,
+      total: 3,
+      message: 'Loading page...',
+    };
+    const progress3 = {
+      type: 'mcp_tool_progress' as const,
+      progress: 3,
+      total: 3,
+      message: 'Complete',
+    };
+
+    handler('tool-call-1', progress1);
+    handler('tool-call-1', progress2);
+    handler('tool-call-1', progress3);
+
+    expect(mockAdapter.emitToolProgress).toHaveBeenCalledTimes(3);
+    expect(mockAdapter.emitToolProgress).toHaveBeenNthCalledWith(
+      1,
+      browserRequest,
+      progress1,
+    );
+    expect(mockAdapter.emitToolProgress).toHaveBeenNthCalledWith(
+      2,
+      browserRequest,
+      progress2,
+    );
+    expect(mockAdapter.emitToolProgress).toHaveBeenNthCalledWith(
+      3,
+      browserRequest,
+      progress3,
+    );
+  });
+});
+
+describe('createAgentToolProgressHandler', () => {
+  let mockAdapter: JsonOutputAdapterInterface;
+  let mockConfig: Config;
+
+  beforeEach(() => {
+    mockConfig = {
+      getDebugMode: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(false),
+      getOutputFormat: vi.fn().mockReturnValue(OutputFormat.JSON),
+    } as unknown as Config;
+
+    mockAdapter = {
+      processSubagentToolCall: vi.fn(),
+      emitSubagentErrorResult: vi.fn(),
+      emitToolResult: vi.fn(),
+      emitUserMessage: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+  });
+
+  it('should create handler that processes task tool calls', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    const taskDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: { arg1: 'value1' },
+          status: 'executing',
+        },
+      ],
+    };
+
+    handler('task-call-id', taskDisplay);
+
+    expect(mockAdapter.processSubagentToolCall).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'tool-1',
+        name: 'test_tool',
+        status: 'executing',
+      }),
+      'parent-tool-id',
+    );
+  });
+
+  it('should emit tool_result when tool call completes', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    const taskDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: { arg1: 'value1' },
+          status: 'success',
+          resultDisplay: 'Success result',
+        },
+      ],
+    };
+
+    handler('task-call-id', taskDisplay);
+
+    expect(mockAdapter.emitToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'tool-1',
+        name: 'test_tool',
+      }),
+      expect.objectContaining({
+        callId: 'tool-1',
+        resultDisplay: 'Success result',
+      }),
+      'parent-tool-id',
+    );
+  });
+
+  it('forwards subagent tool args and response parts for JSON output', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+    const responseParts: Part[] = [
+      {
+        functionResponse: {
+          name: 'test_tool',
+          id: 'tool-1',
+          response: { output: 'Success from responseParts' },
+        },
+      },
+    ];
+
+    const taskDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: { arg1: 'value1' },
+          status: 'success',
+          responseParts,
+          boundaryArtifact: { state: 'reusable', kinds: ['file'] },
+        },
+      ],
+    };
+
+    handler('task-call-id', taskDisplay);
+
+    expect(mockAdapter.processSubagentToolCall).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'tool-1',
+        name: 'test_tool',
+        args: { arg1: 'value1' },
+        status: 'executing',
+      }),
+      'parent-tool-id',
+    );
+    expect(mockAdapter.emitToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'tool-1',
+        name: 'test_tool',
+        args: { arg1: 'value1' },
+      }),
+      expect.objectContaining({
+        callId: 'tool-1',
+        responseParts,
+        boundaryArtifact: { state: 'reusable', kinds: ['file'] },
+      }),
+      'parent-tool-id',
+    );
+  });
+
+  it('should not duplicate tool_use emissions', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    const taskDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: {},
+          status: 'executing',
+        },
+      ],
+    };
+
+    // Call handler twice with same tool call
+    handler('task-call-id', taskDisplay);
+    handler('task-call-id', taskDisplay);
+
+    expect(mockAdapter.processSubagentToolCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not duplicate tool_result emissions', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    const taskDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: {},
+          status: 'success',
+          resultDisplay: 'Result',
+        },
+      ],
+    };
+
+    // Call handler twice with same completed tool call
+    handler('task-call-id', taskDisplay);
+    handler('task-call-id', taskDisplay);
+
+    expect(mockAdapter.emitToolResult).toHaveBeenCalledTimes(1);
+  });
+
+  it('should handle status transitions from executing to completed', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    // First: executing state
+    const executingDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: {},
+          status: 'executing',
+        },
+      ],
+    };
+
+    // Second: completed state
+    const completedDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: {},
+          status: 'success',
+          resultDisplay: 'Done',
+        },
+      ],
+    };
+
+    handler('task-call-id', executingDisplay);
+    handler('task-call-id', completedDisplay);
+
+    expect(mockAdapter.processSubagentToolCall).toHaveBeenCalledTimes(1);
+    expect(mockAdapter.emitToolResult).toHaveBeenCalledTimes(1);
+  });
+
+  it('should emit error result for failed task status', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    const runningDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [],
+    };
+
+    const failedDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'failed',
+      terminateReason: 'Task failed with error',
+      toolCalls: [],
+    };
+
+    handler('task-call-id', runningDisplay);
+    handler('task-call-id', failedDisplay);
+
+    expect(mockAdapter.emitSubagentErrorResult).toHaveBeenCalledWith(
+      'Task failed with error',
+      0,
+      'parent-tool-id',
+    );
+  });
+
+  it('should emit error result for cancelled task status', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    const runningDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [],
+    };
+
+    const cancelledDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'cancelled',
+      toolCalls: [],
+    };
+
+    handler('task-call-id', runningDisplay);
+    handler('task-call-id', cancelledDisplay);
+
+    expect(mockAdapter.emitSubagentErrorResult).toHaveBeenCalledWith(
+      'Task was cancelled',
+      0,
+      'parent-tool-id',
+    );
+  });
+
+  it('should not process non-task-execution displays', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    const nonTaskDisplay = {
+      type: 'other',
+      content: 'some content',
+    };
+
+    handler('call-id', nonTaskDisplay as unknown as AgentResultDisplay);
+
+    expect(mockAdapter.processSubagentToolCall).not.toHaveBeenCalled();
+    expect(mockAdapter.emitToolResult).not.toHaveBeenCalled();
+  });
+
+  it('should handle tool calls with failed status', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    const taskDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: {},
+          status: 'failed',
+          error: 'Tool execution failed',
+        },
+      ],
+    };
+
+    handler('task-call-id', taskDisplay);
+
+    expect(mockAdapter.emitToolResult).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        callId: 'tool-1',
+        error: expect.any(Error),
+        errorType: ToolErrorType.EXECUTION_FAILED,
+      }),
+      'parent-tool-id',
+    );
+  });
+
+  it('should handle tool calls without result content', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    const taskDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [
+        {
+          callId: 'tool-1',
+          name: 'test_tool',
+          args: {},
+          status: 'success',
+          resultDisplay: '',
+          responseParts: [],
+        },
+      ],
+    };
+
+    handler('task-call-id', taskDisplay);
+
+    // Should not emit tool_result if no content
+    expect(mockAdapter.emitToolResult).not.toHaveBeenCalled();
+  });
+
+  it('should work with adapter that does not support subagent APIs', () => {
+    const limitedAdapter = {
+      emitToolResult: vi.fn(),
+    } as unknown as JsonOutputAdapterInterface;
+
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      limitedAdapter,
+    );
+
+    const taskDisplay: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'test-agent',
+      taskDescription: 'Test task',
+      taskPrompt: 'Test prompt',
+      status: 'running',
+      toolCalls: [],
+    };
+
+    // Should not throw
+    expect(() => handler('task-call-id', taskDisplay)).not.toThrow();
+  });
+});
+
+describe('functionResponsePartsToString', () => {
+  it('should extract output from functionResponse parts', () => {
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          response: {
+            output: 'function output',
+          },
+        },
+      },
+    ];
+    expect(functionResponsePartsToString(parts)).toBe('function output');
+  });
+
+  it('should handle multiple functionResponse parts', () => {
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          response: {
+            output: 'output1',
+          },
+        },
+      },
+      {
+        functionResponse: {
+          response: {
+            output: 'output2',
+          },
+        },
+      },
+    ];
+    expect(functionResponsePartsToString(parts)).toBe('output1output2');
+  });
+
+  it('should return empty string for missing output', () => {
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          response: {},
+        },
+      },
+    ];
+    expect(functionResponsePartsToString(parts)).toBe('');
+  });
+
+  it('should JSON.stringify non-functionResponse parts', () => {
+    const parts: Part[] = [
+      { text: 'text part' },
+      {
+        functionResponse: {
+          response: {
+            output: 'function output',
+          },
+        },
+      },
+    ];
+    const result = functionResponsePartsToString(parts);
+    expect(result).toContain('function output');
+    expect(result).toContain('text part');
+  });
+
+  it('should handle empty array', () => {
+    expect(functionResponsePartsToString([])).toBe('');
+  });
+
+  it('should handle functionResponse with null response', () => {
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          response: null as unknown as Record<string, unknown>,
+        },
+      },
+    ];
+    expect(functionResponsePartsToString(parts)).toBe('');
+  });
+});
+
+describe('insertAfterFunctionResponses', () => {
+  const fr = (id: string): Part => ({
+    functionResponse: { id, name: 'tool', response: { ok: true } },
+  });
+
+  it('inserts additions before the first non-functionResponse part', () => {
+    const parts: Part[] = [fr('a'), { text: 'prompt' }];
+    const result = insertAfterFunctionResponses(parts, [{ text: 'reminder' }]);
+    expect(result).toEqual([fr('a'), { text: 'reminder' }, { text: 'prompt' }]);
+  });
+
+  it('appends additions when every part is a functionResponse', () => {
+    const parts: Part[] = [fr('a'), fr('b')];
+    const result = insertAfterFunctionResponses(parts, [{ text: 'reminder' }]);
+    expect(result).toEqual([fr('a'), fr('b'), { text: 'reminder' }]);
+  });
+
+  it('prepends additions when the first part is not a functionResponse', () => {
+    const parts: Part[] = [{ text: 'prompt' }];
+    const result = insertAfterFunctionResponses(parts, [{ text: 'reminder' }]);
+    expect(result).toEqual([{ text: 'reminder' }, { text: 'prompt' }]);
+  });
+
+  it('is a no-op shape with empty additions and does not mutate the input', () => {
+    const parts: Part[] = [fr('a'), { text: 'prompt' }];
+    const result = insertAfterFunctionResponses(parts, []);
+    expect(result).toEqual([fr('a'), { text: 'prompt' }]);
+    expect(result).not.toBe(parts);
+  });
+
+  it('returns just the additions for empty parts', () => {
+    expect(insertAfterFunctionResponses([], [{ text: 'reminder' }])).toEqual([
+      { text: 'reminder' },
+    ]);
+  });
+});

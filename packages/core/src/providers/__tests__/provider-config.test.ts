@@ -306,6 +306,16 @@ describe('specToModelConfig (via buildProviderTemplate)', () => {
 
     expect(buildProviderTemplate(config)[0]?.imageOnly).toBe(true);
   });
+
+  it('preserves image generation capability in the provider template', () => {
+    const config = makeConfig({
+      models: [{ id: 'dual-role-model', supportsImageGeneration: true }],
+    });
+
+    expect(buildProviderTemplate(config)[0]?.supportsImageGeneration).toBe(
+      true,
+    );
+  });
 });
 
 describe('resolveOwnsModel (via buildInstallPlan)', () => {

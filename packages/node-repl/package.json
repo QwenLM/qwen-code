@@ -1,0 +1,58 @@
+{
+  "name": "@qwen-code/node-repl-mcp",
+  "version": "0.1.1",
+  "description": "Standalone MCP server exposing a session-persistent Node.js REPL (node_repl) — independent of qwen-code core.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/node-repl"
+  },
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "node-repl-mcp": "dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "build:ts": "tsc --build tsconfig.build.json",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo tsconfig.build.tsbuildinfo",
+    "test": "vitest run",
+    "test:ci": "vitest run",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:mcp": "node scripts/mcp-smoke.mjs",
+    "smoke:lifecycle": "node scripts/lifecycle-smoke.mjs",
+    "typecheck": "tsc --noEmit",
+    "watch": "tsc --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.24.7",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.3.3",
+    "vitest": "^3.1.1"
+  },
+  "bugs": {
+    "url": "https://github.com/QwenLM/qwen-code/issues"
+  },
+  "homepage": "https://github.com/QwenLM/qwen-code/tree/main/packages/node-repl#readme"
+}

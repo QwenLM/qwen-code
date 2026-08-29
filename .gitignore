@@ -17,8 +17,6 @@
 # Dependency directory
 node_modules
 bower_components
-package-lock.json
-!packages/desktop-shell/package-lock.json
 
 # Editors
 .idea
@@ -141,3 +139,9 @@ tmp/
 # Auto-generated computer-use marker can also appear under nested packages.
 **/.qwen/computer-use/
 .playwright-mcp/
+
+# Tool state written to the repo root when $HOME is unset (e.g. gh CLI)
+.local/
+
+# Brand build workspaces (created by the desktop-brand-builder skill)
+brand-builds/

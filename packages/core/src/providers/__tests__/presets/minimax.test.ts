@@ -57,6 +57,31 @@ describe('minimaxProvider', () => {
     });
   });
 
+  it('includes image generation models as image-only entries', () => {
+    expect(minimaxProvider.models).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'image-01', imageOnly: true }),
+        expect.objectContaining({ id: 'image-01-live', imageOnly: true }),
+      ]),
+    );
+  });
+
+  it('creates an install plan with per-model metadata for known IDs', () => {
+    const plan = buildInstallPlan(minimaxProvider, {
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKey: 'sk-minimax',
+      modelIds: ['MiniMax-M2.5'],
+    });
+
+    const planModels = plan.modelProviders?.[0]?.models;
+    expect(planModels).toHaveLength(1);
+    expect(planModels?.[0]).toMatchObject({
+      id: 'MiniMax-M2.5',
+      name: '[MiniMax] MiniMax-M2.5',
+      generationConfig: { contextWindowSize: 196608 },
+    });
+  });
+
   it('selects each endpoint transport and its model metadata', () => {
     const endpoints = minimaxProvider.baseUrl;
     if (!Array.isArray(endpoints)) throw new Error('Expected endpoint options');

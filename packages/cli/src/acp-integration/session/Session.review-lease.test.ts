@@ -21,7 +21,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Session } from './Session.js';
-import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
+import type { Config, LlmChat } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
   AuthType,
@@ -64,7 +64,7 @@ describe('Session review-worktree lease sweep', () => {
 
   /** promptIdContext store observed inside each model send. */
   let observedPromptIds: Array<string | undefined>;
-  let mockChat: GeminiChat;
+  let mockChat: LlmChat;
   let mockConfig: Config;
   let mockClient: AgentSideConnection;
   let mockSettings: LoadedSettings;
@@ -83,15 +83,19 @@ describe('Session review-worktree lease sweep', () => {
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
 
-    const mockGeminiClient = {
+    const mockLlmClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      beginManagedAutoMemoryRecall: vi.fn(),
+      consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
+      finishManagedAutoMemoryRecall: vi.fn(),
+      recordCompletedToolCall: vi.fn(),
     };
 
     mockConfig = {
@@ -115,6 +119,12 @@ describe('Session review-worktree lease sweep', () => {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue({
+        getBranchCheckpointCursor: vi.fn().mockReturnValue({
+          recordId: null,
+          activeRecordCount: 0,
+          pendingToolCalls: [],
+        }),
+        recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
         recordUserMessage: vi.fn(),
         recordUiTelemetryEvent: vi.fn(),
         recordToolResult: vi.fn(),
@@ -137,7 +147,8 @@ describe('Session review-worktree lease sweep', () => {
       getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
-      getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(false),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -153,6 +164,9 @@ describe('Session review-worktree lease sweep', () => {
       }),
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
       }),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),

@@ -56,6 +56,8 @@ export const minimaxProvider: ProviderConfig = {
     { id: 'MiniMax-M2.7-highspeed', contextWindowSize: 204800 },
     { id: 'MiniMax-M2.5', contextWindowSize: 196608 },
     { id: 'MiniMax-M2.5-highspeed', contextWindowSize: 196608 },
+    { id: 'image-01', imageOnly: true },
+    { id: 'image-01-live', imageOnly: true },
   ],
   modelsEditable: true,
   modelNamePrefix: 'MiniMax',

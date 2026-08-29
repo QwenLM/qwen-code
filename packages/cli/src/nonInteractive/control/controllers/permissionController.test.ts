@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import {
+  ApprovalMode,
   InputFormat,
   ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core';
@@ -50,6 +51,42 @@ function createRegistry(): IPendingRequestRegistry {
 }
 
 describe('PermissionController', () => {
+  it.each([
+    [ApprovalMode.PLAN, 'allow'],
+    [ApprovalMode.DEFAULT, 'deny'],
+    [ApprovalMode.AUTO_EDIT, 'allow'],
+    [ApprovalMode.AUTO, 'allow'],
+    [ApprovalMode.YOLO, 'allow'],
+  ] as const)(
+    'checks %s permission mode for can_use_tool',
+    async (mode, behavior) => {
+      const context = createContext();
+      context.permissionMode = mode;
+      const controller = new PermissionController(
+        context,
+        createRegistry(),
+        'PermissionController',
+      );
+
+      await expect(
+        controller.handleRequest(
+          {
+            subtype: 'can_use_tool',
+            tool_name: 'read_file',
+            tool_use_id: `tool-${mode}`,
+            input: {},
+            permission_suggestions: null,
+            blocked_path: null,
+          },
+          `request-${mode}`,
+        ),
+      ).resolves.toMatchObject({
+        subtype: 'can_use_tool',
+        behavior,
+      });
+    },
+  );
+
   it('round-trips workflow approval through can_use_tool with updated input', async () => {
     const context = createContext(120_000);
     const resolvePendingApproval = vi.fn().mockResolvedValue(true);
@@ -503,6 +540,9 @@ describe('PermissionController', () => {
         callId: 'tool-call-answers',
         name: 'ask_user_question',
         args: { questions: [] } as Record<string, unknown>,
+      },
+      invocation: {
+        requiresUserInteraction: () => true,
       },
       confirmationDetails: {
         type: 'ask_user_question',

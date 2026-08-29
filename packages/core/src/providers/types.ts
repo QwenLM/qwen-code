@@ -24,6 +24,7 @@ export interface ModelSpec {
   thinkingMandatory?: boolean;
   modalities?: InputModalities;
   description?: string;
+  supportsImageGeneration?: boolean;
   imageOnly?: boolean;
 }
 
@@ -67,6 +68,9 @@ export interface ProviderConfig {
    * Defaults to `false` when `models` is set, ignored when `models` is `undefined`.
    */
   modelsEditable?: boolean;
+
+  /** Load the account's current model recommendations from `/models`. */
+  supportsModelDiscovery?: boolean;
 
   /** Display name prefix for model entries, or a function of baseUrl. */
   modelNamePrefix: string | ((baseUrl: string) => string);

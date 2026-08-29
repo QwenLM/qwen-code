@@ -49,7 +49,7 @@ describe('NotebookEditTool', () => {
       getFileReadCache: () => fileReadCache,
       getFileHistoryService: () => mockFileHistoryService,
       getFileReadCacheDisabled: () => false,
-      getGeminiClient: vi.fn(),
+      getLlmClient: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getIdeMode: () => false,
       getApiKey: () => 'test-api-key',
@@ -65,8 +65,8 @@ describe('NotebookEditTool', () => {
       getUserAgent: () => 'test-agent',
       getUserMemory: () => '',
       setUserMemory: vi.fn(),
-      getGeminiMdFileCount: () => 0,
-      setGeminiMdFileCount: vi.fn(),
+      getMemoryFileCount: () => 0,
+      setMemoryFileCount: vi.fn(),
       getToolRegistry: () => ({}) as never,
     } as unknown as Config;
     tool = new NotebookEditTool(config);

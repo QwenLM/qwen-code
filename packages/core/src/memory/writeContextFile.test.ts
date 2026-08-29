@@ -13,8 +13,8 @@ import {
   AGENT_CONTEXT_FILENAME,
   DEFAULT_CONTEXT_FILENAME,
   MEMORY_SECTION_HEADER,
-  setGeminiMdFilename,
-} from './const.js';
+  setMemoryFilename,
+} from '../utils/memory-constants.js';
 import { writeWorkspaceContextFile } from './writeContextFile.js';
 
 describe('writeWorkspaceContextFile', () => {
@@ -385,15 +385,15 @@ describe('writeWorkspaceContextFile', () => {
     await expect(fs.access(nested)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('honors setGeminiMdFilename overrides so POST targets the same file GET surfaces', async () => {
-    // Round-trip the `setGeminiMdFilename` override: with the prior
+  it('honors setMemoryFilename overrides so POST targets the same file GET surfaces', async () => {
+    // Round-trip the `setMemoryFilename` override: with the prior
     // `DEFAULT_CONTEXT_FILENAME` hard-code, a deployment that switched
     // the context filename to `AGENTS.md` saw GET list the new file
     // but POST keep writing to `QWEN.md`. The fix routes
-    // `resolveContextFilePath` through `getCurrentGeminiMdFilename()`
+    // `resolveContextFilePath` through `getCurrentMemoryFilename()`
     // so both surfaces agree.
     try {
-      setGeminiMdFilename(AGENT_CONTEXT_FILENAME);
+      setMemoryFilename(AGENT_CONTEXT_FILENAME);
       const result = await writeWorkspaceContextFile({
         scope: 'workspace',
         mode: 'append',
@@ -411,7 +411,7 @@ describe('writeWorkspaceContextFile', () => {
         fs.access(path.join(workspace, DEFAULT_CONTEXT_FILENAME)),
       ).rejects.toMatchObject({ code: 'ENOENT' });
     } finally {
-      setGeminiMdFilename(DEFAULT_CONTEXT_FILENAME);
+      setMemoryFilename(DEFAULT_CONTEXT_FILENAME);
     }
   });
 });
