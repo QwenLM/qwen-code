@@ -975,7 +975,7 @@ describe('DingtalkChannel prompt reactions', () => {
     vi.unstubAllEnvs();
   });
 
-  it('maps lifecycle start and terminal events to the eye reaction', () => {
+  it('keeps duplicate lifecycle events idempotent', async () => {
     const channel = createChannel();
     const attachReaction = vi.fn().mockResolvedValue(undefined);
     const recallReaction = vi.fn().mockResolvedValue(undefined);
@@ -1009,10 +1009,19 @@ describe('DingtalkChannel prompt reactions', () => {
     lifecycle({ ...event, type: 'failed', error: 'boom', phase: 'agent' });
     lifecycle({ ...event, type: 'completed' });
 
-    expect(attachReaction).toHaveBeenCalledOnce();
-    expect(attachReaction).toHaveBeenCalledWith('message-1', 'cid-123');
-    expect(recallReaction).toHaveBeenCalledOnce();
-    expect(recallReaction).toHaveBeenCalledWith('message-1', 'cid-123');
+    await vi.waitFor(() => {
+      expect(attachReaction).toHaveBeenCalledTimes(3);
+      expect(recallReaction).toHaveBeenCalledTimes(2);
+    });
+    expect(attachReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
+      '👀',
+      '🤔 Thinking',
+      '❌ Failed',
+    ]);
+    expect(recallReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
+      '🤔 Thinking',
+      '👀',
+    ]);
     expect(
       (
         channel as unknown as { mentionTargets: Map<string, string> }
@@ -1020,7 +1029,243 @@ describe('DingtalkChannel prompt reactions', () => {
     ).toBe(false);
   });
 
-  it('recalls again when a late lifecycle attach resolves after terminal cleanup', async () => {
+  it('keeps the eye while rotating status tags and leaves only Done', async () => {
+    const channel = createChannel();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      });
+    const base = {
+      channelName: 'dingtalk',
+      chatId: 'cid-123',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+
+    seedSeenMessage(channel, 'message-1');
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...base, type: 'started' });
+    lifecycle({
+      ...base,
+      type: 'tool_call',
+      toolCall: {
+        sessionId: 'session-1',
+        toolCallId: 'tool-1',
+        kind: 'read_file',
+        title: 'Read package.json',
+        status: 'in_progress',
+      },
+    });
+    lifecycle({ ...base, type: 'text_chunk', chunk: 'Answer' });
+    lifecycle({ ...base, type: 'completed' });
+
+    await vi.waitFor(() => {
+      const emotionCalls = fetchSpy.mock.calls.filter(([input]) =>
+        String(input).startsWith(
+          'https://api.dingtalk.com/v1.0/robot/emotion/',
+        ),
+      );
+      expect(
+        emotionCalls.map(([input, init]) => ({
+          action: new URL(String(input)).pathname.split('/').at(-1),
+          name: (
+            JSON.parse(String((init as RequestInit).body)) as {
+              emotionName: string;
+            }
+          ).emotionName,
+        })),
+      ).toEqual([
+        { action: 'reply', name: '👀' },
+        { action: 'reply', name: '🤔 Thinking' },
+        { action: 'recall', name: '🤔 Thinking' },
+        { action: 'reply', name: '📖 Reading' },
+        { action: 'recall', name: '📖 Reading' },
+        { action: 'reply', name: '✍️ Replying' },
+        { action: 'recall', name: '✍️ Replying' },
+        { action: 'recall', name: '👀' },
+        { action: 'reply', name: '✅ Done' },
+      ]);
+    });
+  });
+
+  it.each([
+    ['interactive status cards', {}],
+    ['block streaming cards', { blockStreaming: 'on' }],
+  ])('keeps lifecycle tags enabled for %s', async (_name, overrides) => {
+    const channel = createChannel(overrides);
+    const attachReaction = vi.fn().mockResolvedValue(undefined);
+    const recallReaction = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
+    const base = {
+      channelName: 'dingtalk',
+      chatId: 'cid-123',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+
+    seedSeenMessage(channel, 'message-1');
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...base, type: 'started' });
+    lifecycle({ ...base, type: 'text_chunk', chunk: 'Answer' });
+    lifecycle({ ...base, type: 'completed' });
+
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(4));
+    expect(attachReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
+      '👀',
+      '🤔 Thinking',
+      '✍️ Replying',
+      '✅ Done',
+    ]);
+  });
+
+  it.each([
+    { kind: 'read_file', status: 'in_progress', expected: '📖 Reading' },
+    { kind: 'search', status: 'in_progress', expected: '🔎 Searching' },
+    { kind: 'shell', status: 'in_progress', expected: '🖥️ Running' },
+    { kind: 'edit', status: 'in_progress', expected: '🛠️ Editing' },
+    { kind: 'other', status: 'in_progress', expected: '🛠️ Working' },
+    { kind: 'read_file', status: 'failed', expected: '⚠️ Retrying' },
+    { kind: 'read_file', status: 'completed', expected: '🤔 Thinking' },
+  ])(
+    'maps $kind/$status tool activity to $expected',
+    async ({ kind, status, expected }) => {
+      const channel = createChannel();
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation((input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+            return Promise.resolve(
+              Response.json({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+            );
+          }
+          return Promise.resolve(Response.json({}));
+        });
+      const base = {
+        channelName: 'dingtalk',
+        chatId: 'cid-123',
+        sessionId: 'session-1',
+        messageId: 'message-1',
+        identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+        memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+      } satisfies LifecycleBase;
+
+      seedSeenMessage(channel, 'message-1');
+      const lifecycle = getLifecycleHook(channel);
+      lifecycle({ ...base, type: 'started' });
+      lifecycle({
+        ...base,
+        type: 'tool_call',
+        toolCall: {
+          sessionId: 'session-1',
+          toolCallId: 'tool-1',
+          kind,
+          title: 'Tool activity',
+          status,
+        },
+      });
+
+      await vi.waitFor(() => {
+        const replies = fetchSpy.mock.calls
+          .filter(([input]) => String(input).endsWith('/emotion/reply'))
+          .map(
+            ([, init]) =>
+              JSON.parse(String((init as RequestInit).body)) as {
+                emotionName: string;
+              },
+          );
+        expect(replies.at(-1)?.emotionName).toBe(expected);
+      });
+    },
+  );
+
+  it.each([
+    { type: 'completed' as const, expected: '✅ Done' },
+    { type: 'failed' as const, expected: '❌ Failed' },
+    { type: 'cancelled' as const, expected: '⏹️ Stopped' },
+  ])('leaves only $expected after $type', async ({ type, expected }) => {
+    const channel = createChannel();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            Response.json({
+              errcode: 0,
+              access_token: 'proactive-token',
+              expires_in: 7200,
+            }),
+          );
+        }
+        return Promise.resolve(Response.json({}));
+      });
+    const base = {
+      channelName: 'dingtalk',
+      chatId: 'cid-123',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+    seedSeenMessage(channel, 'message-1');
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...base, type: 'started' });
+    if (type === 'failed') {
+      lifecycle({ ...base, type, error: 'boom', phase: 'agent' });
+    } else if (type === 'cancelled') {
+      lifecycle({ ...base, type, reason: 'cancel_command' });
+    } else {
+      lifecycle({ ...base, type });
+    }
+
+    await vi.waitFor(() => {
+      const replies = fetchSpy.mock.calls
+        .filter(([input]) => String(input).endsWith('/emotion/reply'))
+        .map(
+          ([, init]) =>
+            JSON.parse(String((init as RequestInit).body)) as {
+              emotionName: string;
+            },
+        );
+      expect(replies.at(-1)?.emotionName).toBe(expected);
+    });
+  });
+
+  it('serializes terminal cleanup after a pending attach', async () => {
     const channel = createChannel();
     const attach = deferredPromise<void>();
     const attachReaction = vi
@@ -1053,17 +1298,26 @@ describe('DingtalkChannel prompt reactions', () => {
     seedSeenMessage(channel, 'message-2');
     const lifecycle = getLifecycleHook(channel);
     lifecycle({ ...event, type: 'started' });
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledOnce());
     lifecycle({ ...event, type: 'cancelled', reason: 'cancel_command' });
 
-    expect(attachReaction).toHaveBeenNthCalledWith(1, 'message-2', 'cid-456');
-    expect(recallReaction).toHaveBeenNthCalledWith(1, 'message-2', 'cid-456');
+    expect(recallReaction).not.toHaveBeenCalled();
 
     attach.resolve();
 
     await vi.waitFor(() => {
-      expect(recallReaction).toHaveBeenNthCalledWith(2, 'message-2', 'cid-456');
+      expect(attachReaction).toHaveBeenCalledTimes(3);
       expect(recallReaction).toHaveBeenCalledTimes(2);
     });
+    expect(attachReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
+      '👀',
+      '🤔 Thinking',
+      '⏹️ Stopped',
+    ]);
+    expect(recallReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
+      '🤔 Thinking',
+      '👀',
+    ]);
   });
 
   it('does not attach lifecycle reactions without a conversation id', () => {
@@ -1086,15 +1340,28 @@ describe('DingtalkChannel prompt reactions', () => {
     expect(attachReaction).not.toHaveBeenCalled();
   });
 
-  it('clears active lifecycle reactions on disconnect', () => {
+  it('clears active lifecycle reactions on disconnect', async () => {
     const channel = createChannel();
     const attachReaction = vi.fn().mockResolvedValue(undefined);
+    const recallReaction = vi.fn().mockResolvedValue(undefined);
     (
-      channel as unknown as { attachReaction: typeof attachReaction }
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
     ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
     const activeReactionKeys = (
       channel as unknown as { activeReactionKeys: Set<string> }
     ).activeReactionKeys;
+    const reactionStates = (
+      channel as unknown as { reactionStates: Map<string, unknown> }
+    ).reactionStates;
 
     seedSeenMessage(channel, 'message-1');
     getLifecycleHook(channel)({
@@ -1107,10 +1374,17 @@ describe('DingtalkChannel prompt reactions', () => {
       memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
     });
     expect(activeReactionKeys.size).toBe(1);
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
 
     channel.disconnect();
 
     expect(activeReactionKeys.size).toBe(0);
+    expect(reactionStates.size).toBe(0);
+    await vi.waitFor(() => expect(recallReaction).toHaveBeenCalledTimes(2));
+    expect(recallReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
+      '🤔 Thinking',
+      '👀',
+    ]);
   });
 
   it('skips uppercase webhook URLs when starting a prompt', () => {
@@ -1129,7 +1403,7 @@ describe('DingtalkChannel prompt reactions', () => {
     expect(attachReaction).not.toHaveBeenCalled();
   });
 
-  it('still attaches reactions for conversation IDs', () => {
+  it('still attaches reactions for conversation IDs', async () => {
     const channel = createChannel();
     const attachReaction = vi.fn().mockResolvedValue(undefined);
     (
@@ -1143,7 +1417,11 @@ describe('DingtalkChannel prompt reactions', () => {
       'message-1',
     );
 
-    expect(attachReaction).toHaveBeenCalledWith('message-1', 'cid-123');
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
+    expect(attachReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
+      '👀',
+      '🤔 Thinking',
+    ]);
   });
 
   it('skips uppercase webhook URLs when ending a prompt', () => {
@@ -1225,15 +1503,60 @@ describe('DingtalkChannel prompt reactions', () => {
         'session-1',
         'message-1',
       );
-      expect(attachReaction).toHaveBeenCalledTimes(2);
+      await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(3));
     } finally {
       stderr.mockRestore();
     }
   });
 
+  it('drops queued status updates when the initial eye reaction is rejected', async () => {
+    const channel = createChannel();
+    const eye = deferredPromise<boolean>();
+    const attachReaction = vi
+      .fn()
+      .mockReturnValueOnce(eye.promise)
+      .mockResolvedValue(undefined);
+    (
+      channel as unknown as { attachReaction: typeof attachReaction }
+    ).attachReaction = attachReaction;
+    const activeReactionKeys = (
+      channel as unknown as { activeReactionKeys: Set<string> }
+    ).activeReactionKeys;
+    const base = {
+      channelName: 'dingtalk',
+      chatId: 'cid-123',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+
+    seedSeenMessage(channel, 'message-1');
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...base, type: 'started' });
+    lifecycle({
+      ...base,
+      type: 'tool_call',
+      toolCall: {
+        sessionId: 'session-1',
+        toolCallId: 'tool-1',
+        kind: 'read_file',
+        title: 'Read file',
+        status: 'in_progress',
+      },
+    });
+
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledOnce());
+    eye.resolve(false);
+    await vi.waitFor(() => expect(activeReactionKeys.size).toBe(0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(attachReaction).toHaveBeenCalledOnce();
+  });
+
   it.each(['completed', 'cancelled', 'failed'] as const)(
     'recalls the reaction on an isolated %s event',
-    (terminal) => {
+    async (terminal) => {
       const channel = createChannel();
       const attachReaction = vi.fn().mockResolvedValue(undefined);
       const recallReaction = vi.fn().mockResolvedValue(undefined);
@@ -1273,12 +1596,17 @@ describe('DingtalkChannel prompt reactions', () => {
         lifecycle({ ...base, type: terminal });
       }
 
-      expect(recallReaction).toHaveBeenCalledOnce();
-      expect(recallReaction).toHaveBeenCalledWith('message-1', 'cid-123');
+      await vi.waitFor(() => {
+        expect(recallReaction).toHaveBeenCalledTimes(2);
+      });
+      expect(recallReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
+        '🤔 Thinking',
+        '👀',
+      ]);
     },
   );
 
-  it('recalls reactions when the session dies without terminal events', () => {
+  it('recalls reactions when the session dies without terminal events', async () => {
     const channel = createChannel();
     const attachReaction = vi.fn().mockResolvedValue(undefined);
     const recallReaction = vi.fn().mockResolvedValue(undefined);
@@ -1309,11 +1637,16 @@ describe('DingtalkChannel prompt reactions', () => {
       memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
     });
     expect(activeReactionKeys.size).toBe(1);
+    await vi.waitFor(() => expect(attachReaction).toHaveBeenCalledTimes(2));
 
     channel.onSessionDied('session-1');
 
-    expect(recallReaction).toHaveBeenCalledWith('message-1', 'cid-123');
     expect(activeReactionKeys.size).toBe(0);
+    await vi.waitFor(() => expect(recallReaction).toHaveBeenCalledTimes(2));
+    expect(recallReaction.mock.calls.map(([, , tag]) => tag.name)).toEqual([
+      '🤔 Thinking',
+      '👀',
+    ]);
   });
 
   it('uses the app access token for emotion replies', async () => {

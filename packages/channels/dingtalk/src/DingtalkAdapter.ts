@@ -580,6 +580,10 @@ const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const ACK_REACTION_NAME = '👀';
 const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
+const STATUS_EMOTION_ID = '34019';
+const STATUS_EMOTION_BG_ID = 'im_bg_6';
+const DONE_EMOTION_ID = '54054';
+const DONE_EMOTION_BG_ID = 'im_bg_5';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 const EMOTION_MAX_ATTEMPTS = 3;
 const EMOTION_RETRY_BASE_DELAY_MS = 250;
@@ -622,6 +626,64 @@ interface CardRunCorrelation {
   ownerId: string;
   target: { chatId: string; isGroup: boolean };
   sender?: { senderName: string };
+}
+
+interface DingtalkEmotionTag {
+  name: string;
+  emotionId: string;
+  backgroundId: string;
+}
+
+interface DingtalkReactionState {
+  key: string;
+  messageId: string;
+  chatId: string;
+  sessionId?: string;
+  statusTag?: DingtalkEmotionTag;
+  tail: Promise<void>;
+}
+
+function statusEmotionTag(name: string): DingtalkEmotionTag {
+  return {
+    name,
+    emotionId: STATUS_EMOTION_ID,
+    backgroundId: STATUS_EMOTION_BG_ID,
+  };
+}
+
+const EYE_TAG: DingtalkEmotionTag = {
+  name: ACK_REACTION_NAME,
+  emotionId: ACK_EMOTION_ID,
+  backgroundId: ACK_EMOTION_BG_ID,
+};
+const THINKING_TAG = statusEmotionTag('🤔 Thinking');
+const READING_TAG = statusEmotionTag('📖 Reading');
+const SEARCHING_TAG = statusEmotionTag('🔎 Searching');
+const RUNNING_TAG = statusEmotionTag('🖥️ Running');
+const EDITING_TAG = statusEmotionTag('🛠️ Editing');
+const WORKING_TAG = statusEmotionTag('🛠️ Working');
+const RETRYING_TAG = statusEmotionTag('⚠️ Retrying');
+const REPLYING_TAG = statusEmotionTag('✍️ Replying');
+const DONE_TAG: DingtalkEmotionTag = {
+  name: '✅ Done',
+  emotionId: DONE_EMOTION_ID,
+  backgroundId: DONE_EMOTION_BG_ID,
+};
+const FAILED_TAG = statusEmotionTag('❌ Failed');
+const STOPPED_TAG = statusEmotionTag('⏹️ Stopped');
+
+function lifecycleStatusTag(
+  event: ChannelTaskLifecycleEvent,
+): DingtalkEmotionTag | undefined {
+  if (event.type === 'text_chunk') return REPLYING_TAG;
+  if (event.type !== 'tool_call') return undefined;
+  if (/fail|error/i.test(event.toolCall.status)) return RETRYING_TAG;
+  if (/complete|success/i.test(event.toolCall.status)) return THINKING_TAG;
+  if (/read/i.test(event.toolCall.kind)) return READING_TAG;
+  if (/search|browser|web/i.test(event.toolCall.kind)) return SEARCHING_TAG;
+  if (/shell|exec|command|run/i.test(event.toolCall.kind)) return RUNNING_TAG;
+  if (/edit|write|patch/i.test(event.toolCall.kind)) return EDITING_TAG;
+  return WORKING_TAG;
 }
 
 function collectNonBotMentionIds(data: DingTalkMessageData): string[] {
@@ -683,6 +745,7 @@ export class DingtalkChannel extends ChannelBase {
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
   private activeReactionKeys = new Set<string>();
+  private reactionStates = new Map<string, DingtalkReactionState>();
   /** sessionId → reaction keys, so a dead session's reactions can be recalled. */
   private sessionReactionKeys = new Map<
     string,
@@ -1453,14 +1516,15 @@ export class DingtalkChannel extends ChannelBase {
     endpoint: 'reply' | 'recall',
     msgId: string,
     conversationId: string,
-  ): Promise<void> {
+    tag: DingtalkEmotionTag,
+  ): Promise<boolean> {
     const robotCode = this.config.clientId;
-    if (!robotCode || !msgId || !conversationId) return;
+    if (!robotCode || !msgId || !conversationId) return false;
     try {
       const token = this.config.clientSecret
         ? await this.getProactiveToken()
         : this.getAccessToken();
-      if (!token) return;
+      if (!token) return false;
       for (let attempt = 0; attempt < EMOTION_MAX_ATTEMPTS; attempt++) {
         const resp = await fetch(`${EMOTION_API}/${endpoint}`, {
           method: 'POST',
@@ -1473,16 +1537,16 @@ export class DingtalkChannel extends ChannelBase {
             openMsgId: msgId,
             openConversationId: conversationId,
             emotionType: 2,
-            emotionName: ACK_REACTION_NAME,
+            emotionName: tag.name,
             textEmotion: {
-              emotionId: ACK_EMOTION_ID,
-              emotionName: ACK_REACTION_NAME,
-              text: ACK_REACTION_NAME,
-              backgroundId: ACK_EMOTION_BG_ID,
+              emotionId: tag.emotionId,
+              emotionName: tag.name,
+              text: tag.name,
+              backgroundId: tag.backgroundId,
             },
           }),
         });
-        if (resp.ok) return;
+        if (resp.ok) return true;
 
         const isTransient = resp.status === 429 || resp.status >= 500;
         if (isTransient && attempt < EMOTION_MAX_ATTEMPTS - 1) {
@@ -1497,33 +1561,40 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] emotion/${endpoint} failed after ${attempt + 1}/${EMOTION_MAX_ATTEMPTS} attempts: ${resp.status} ${detail}\n`,
         );
-        return;
+        return false;
       }
     } catch {
       // best-effort, don't break message flow
     }
+    return false;
   }
 
   private async attachReaction(
     msgId: string,
     conversationId: string,
-  ): Promise<void> {
-    await this.emotionApi('reply', msgId, conversationId);
+    tag: DingtalkEmotionTag = EYE_TAG,
+  ): Promise<boolean> {
+    return this.emotionApi('reply', msgId, conversationId, tag);
   }
 
   private async recallReaction(
     msgId: string,
     conversationId: string,
-  ): Promise<void> {
-    await this.emotionApi('recall', msgId, conversationId);
+    tag: DingtalkEmotionTag = EYE_TAG,
+  ): Promise<boolean> {
+    return this.emotionApi('recall', msgId, conversationId, tag);
   }
 
   disconnect(): void {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
     }
+    for (const state of this.reactionStates.values()) {
+      this.finishReaction(state.chatId, state.messageId, state.sessionId);
+    }
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
+    this.reactionStates.clear();
     if (this.connectionManager) {
       this.connectionManager.stop();
     } else {
@@ -1539,6 +1610,26 @@ export class DingtalkChannel extends ChannelBase {
 
   private reactionKey(messageId: string, conversationId: string): string {
     return `${conversationId}:${messageId}`;
+  }
+
+  private forgetReactionState(state: DingtalkReactionState): void {
+    this.activeReactionKeys.delete(state.key);
+    if (this.reactionStates.get(state.key) === state) {
+      this.reactionStates.delete(state.key);
+    }
+    if (!state.sessionId) return;
+    const keys = this.sessionReactionKeys.get(state.sessionId);
+    keys?.delete(state.key);
+    if (keys?.size === 0) this.sessionReactionKeys.delete(state.sessionId);
+  }
+
+  private enqueueReaction(
+    state: DingtalkReactionState,
+    operation: () => Promise<void>,
+  ): void {
+    state.tail = state.tail.then(operation).catch((err) => {
+      this.logReactionFailure('lifecycle tag update', err);
+    });
   }
 
   private rememberInboundMessageId(msgId: string): void {
@@ -1569,6 +1660,14 @@ export class DingtalkChannel extends ChannelBase {
     const key = this.reactionKey(messageId, chatId);
     if (this.activeReactionKeys.has(key)) return;
     this.activeReactionKeys.add(key);
+    const state: DingtalkReactionState = {
+      key,
+      messageId,
+      chatId,
+      ...(sessionId ? { sessionId } : {}),
+      tail: Promise.resolve(),
+    };
+    this.reactionStates.set(key, state);
     if (sessionId) {
       let keys = this.sessionReactionKeys.get(sessionId);
       if (!keys) {
@@ -1577,18 +1676,93 @@ export class DingtalkChannel extends ChannelBase {
       }
       keys.set(key, { messageId, chatId });
     }
-    this.attachReaction(messageId, chatId)
-      .then(() => {
-        if (!this.activeReactionKeys.has(key)) {
-          void this.recallReaction(messageId, chatId).catch((err) => {
-            this.logReactionFailure('late reaction recall', err);
-          });
+    this.enqueueReaction(state, async () => {
+      try {
+        if ((await this.attachReaction(messageId, chatId, EYE_TAG)) === false) {
+          this.forgetReactionState(state);
+          return;
         }
-      })
-      .catch((err) => {
-        this.activeReactionKeys.delete(key);
+        if (
+          (await this.attachReaction(messageId, chatId, THINKING_TAG)) !== false
+        ) {
+          state.statusTag = THINKING_TAG;
+        }
+      } catch (err) {
+        this.forgetReactionState(state);
         this.logReactionFailure('reaction attach', err);
-      });
+      }
+    });
+  }
+
+  private replaceStatusReaction(
+    chatId: string,
+    messageId: string | undefined,
+    tag: DingtalkEmotionTag,
+  ): void {
+    if (!messageId) return;
+    const state = this.reactionStates.get(this.reactionKey(messageId, chatId));
+    if (!state || !this.activeReactionKeys.has(state.key)) return;
+    this.enqueueReaction(state, async () => {
+      if (this.reactionStates.get(state.key) !== state) {
+        return;
+      }
+      if (state.statusTag?.name === tag.name) return;
+      if (
+        state.statusTag &&
+        (await this.recallReaction(
+          state.messageId,
+          state.chatId,
+          state.statusTag,
+        )) === false
+      ) {
+        return;
+      }
+      state.statusTag = undefined;
+      if (
+        (await this.attachReaction(state.messageId, state.chatId, tag)) !==
+        false
+      ) {
+        state.statusTag = tag;
+      }
+    });
+  }
+
+  private finishReaction(
+    chatId: string,
+    messageId: string | undefined,
+    sessionId: string | undefined,
+    terminalTag?: DingtalkEmotionTag,
+  ): void {
+    if (!messageId || !this.isStableTargetId(chatId)) return;
+    const key = this.reactionKey(messageId, chatId);
+    const state = this.reactionStates.get(key);
+    if (!state || !this.activeReactionKeys.delete(key)) return;
+    if (sessionId) {
+      const keys = this.sessionReactionKeys.get(sessionId);
+      keys?.delete(key);
+      if (keys?.size === 0) this.sessionReactionKeys.delete(sessionId);
+    }
+    this.enqueueReaction(state, async () => {
+      let cleared = true;
+      if (state.statusTag) {
+        cleared =
+          (await this.recallReaction(
+            state.messageId,
+            state.chatId,
+            state.statusTag,
+          )) !== false;
+        if (cleared) state.statusTag = undefined;
+      }
+      const eyeCleared =
+        (await this.recallReaction(state.messageId, state.chatId, EYE_TAG)) !==
+        false;
+      if (terminalTag && cleared && eyeCleared) {
+        await this.attachReaction(state.messageId, state.chatId, terminalTag);
+      }
+      if (this.reactionStates.get(key) === state) {
+        this.reactionStates.delete(key);
+      }
+    });
   }
 
   private stopReaction(
@@ -1596,19 +1770,7 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
     sessionId?: string,
   ): void {
-    if (!messageId || !this.isStableTargetId(chatId)) return;
-    const key = this.reactionKey(messageId, chatId);
-    if (sessionId) {
-      const keys = this.sessionReactionKeys.get(sessionId);
-      if (keys) {
-        keys.delete(key);
-        if (keys.size === 0) this.sessionReactionKeys.delete(sessionId);
-      }
-    }
-    if (!this.activeReactionKeys.delete(key)) return;
-    this.recallReaction(messageId, chatId).catch((err) => {
-      this.logReactionFailure('reaction recall', err);
-    });
+    this.finishReaction(chatId, messageId, sessionId);
   }
 
   /** Recall reactions left behind when a session dies without terminal lifecycle events. */
@@ -1636,12 +1798,8 @@ export class DingtalkChannel extends ChannelBase {
     const keys = this.sessionReactionKeys.get(sessionId);
     if (keys) {
       this.sessionReactionKeys.delete(sessionId);
-      for (const [key, { messageId, chatId }] of keys) {
-        if (this.activeReactionKeys.delete(key)) {
-          void this.recallReaction(messageId, chatId).catch((err) => {
-            this.logReactionFailure('session-death reaction recall', err);
-          });
-        }
+      for (const { messageId, chatId } of keys.values()) {
+        this.finishReaction(chatId, messageId, sessionId);
       }
     }
     super.onSessionDied(sessionId);
@@ -1672,9 +1830,23 @@ export class DingtalkChannel extends ChannelBase {
       }
       return;
     }
+    const statusTag = lifecycleStatusTag(event);
+    if (statusTag) {
+      this.replaceStatusReaction(event.chatId, event.messageId, statusTag);
+      return;
+    }
     if (isTerminalTaskLifecycleType(event.type)) {
       if (event.messageId) this.mentionTargets.delete(event.messageId);
-      this.stopReaction(event.chatId, event.messageId, event.sessionId);
+      this.finishReaction(
+        event.chatId,
+        event.messageId,
+        event.sessionId,
+        event.type === 'completed'
+          ? DONE_TAG
+          : event.type === 'failed'
+            ? FAILED_TAG
+            : STOPPED_TAG,
+      );
       if (event.runId) {
         this.deleteFileProjectorsForRun(event.runId);
         if (event.type === 'failed') {
