@@ -25,13 +25,20 @@ the other copies after persistence, in this order:
 4. clear per-model generator caches for future model-specific calls.
 
 The child command is workspace-global within one ACP channel. The existing
-unqualified provider-install and model-delete routes are legacy-primary routes,
-so they resolve the primary workspace's live runtime generation at invocation
-time. This is important when a trust change replaces that runtime: environment
-reload, child command, and generation guard must all belong to the replacement,
-not the daemon's startup generation. The internal command remains
-workspace-scoped so a future qualified mutation route can reuse it without
-falling back to the primary runtime.
+unqualified provider-install and model-delete routes remain legacy-primary for
+request ownership, trust, and persistence. After persistence, a workspace-owned
+provider registry synchronizes only the primary workspace's live runtime, while
+a user-owned registry synchronizes every active runtime because the same user
+settings feed all of them. The primary generation is resolved at invocation
+time so a trust replacement cannot redirect work to the daemon's startup
+generation. Transitioning and draining generations are excluded; their
+replacement or next child reads the persisted settings. The internal command
+remains workspace-scoped so a future qualified mutation route can reuse it
+without falling back to the primary runtime.
+
+Secondary runtimes rebuild only their runtime-local child-spawn environment
+snapshot. They do not apply their workspace overlays to the daemon's global
+`process.env`, which remains owned by the primary runtime.
 
 The command reads settings from disk. Provider configurations and API keys are
 not copied into ACP request parameters, events, or response bodies.
@@ -71,9 +78,13 @@ already-running Session away from its current generator.
 Provider persistence is not rolled back when runtime synchronization fails.
 Mutation responses report one of three additive states:
 
-- `applied`: parent environment and live child synchronization completed;
-- `deferred`: no child is live, and the next child will load the persisted state;
-- `failed`: persistence succeeded, but some runtime state could not be updated.
+- `applied`: every targeted parent environment was refreshed and every live
+  targeted child synchronized; targets without a live child are already ready
+  for their next child;
+- `deferred`: no targeted child is live, and every next child will load the
+  persisted state;
+- `failed`: persistence succeeded, but some targeted runtime state could not be
+  updated.
 
 An environment snapshot rebuild or env-file read failure counts as an
 incomplete parent refresh and therefore returns `failed`, even if the live ACP

@@ -7517,6 +7517,7 @@ describe('runQwenServe runtime startup failures', () => {
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
     let runtimeMounted = false;
+    let providerRuntimeMutation = false;
     let failEnvFileRead = false;
     vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
       (...args: Parameters<typeof settingsRuntime.loadSettings>) => {
@@ -7537,7 +7538,9 @@ describe('runQwenServe runtime startup failures', () => {
                 : 'QWEN_TEST_PRIMARY_ENV']: runtimeMounted
                 ? failEnvFileRead
                   ? 'partial'
-                  : 'reloaded'
+                  : providerRuntimeMutation
+                    ? 'provider-reloaded'
+                    : 'reloaded'
                 : 'boot',
             },
           },
@@ -7640,13 +7643,27 @@ describe('runQwenServe runtime startup failures', () => {
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
 
+      providerRuntimeMutation = true;
+      await expect(
+        secondaryRuntime!.workspaceService.reloadModelProviders({
+          route: 'POST /workspace/auth/provider',
+          workspaceCwd: secondary,
+        }),
+      ).resolves.toEqual({ status: 'applied' });
+      expect(reloadEnvironment).toHaveBeenCalledOnce();
+      expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe(
+        'provider-reloaded',
+      );
+
       failEnvFileRead = true;
       await secondaryRuntime!.workspaceService.reload({
         route: 'POST /workspace/reload',
         workspaceCwd: secondary,
       });
       expect(reloadEnvironment).toHaveBeenCalledOnce();
-      expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe('reloaded');
+      expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe(
+        'provider-reloaded',
+      );
       expect(env.envFileReadFailed).toBe(false);
       expect(env.envFileReadFailures).toEqual([]);
     } finally {

@@ -554,6 +554,16 @@ export interface DaemonWorkspaceServiceDeps {
     }
   >;
 
+  /** Refresh the runtime-local spawn environment for provider mutations. */
+  reloadModelProvidersDaemonEnv?: (
+    workspace: string,
+    assertGenerationOpen?: () => void,
+  ) => Promise<
+    EnvReloadResult & {
+      runtimeEnvironmentApplied?: boolean;
+    }
+  >;
+
   /** Eagerly start the ACP child/channel without creating a session. */
   preheatAcpChild?: () => Promise<void>;
 

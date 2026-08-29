@@ -1431,9 +1431,11 @@ export function createDaemonWorkspaceService(
     async reloadModelProviders(_ctx: WorkspaceRequestContext) {
       assertActiveGeneration();
       let failed = false;
-      if (deps.reloadDaemonEnv) {
+      const reloadModelProvidersDaemonEnv =
+        deps.reloadModelProvidersDaemonEnv ?? deps.reloadDaemonEnv;
+      if (reloadModelProvidersDaemonEnv) {
         try {
-          const result = await deps.reloadDaemonEnv(
+          const result = await reloadModelProvidersDaemonEnv(
             boundWorkspace,
             assertGenerationOpen,
           );

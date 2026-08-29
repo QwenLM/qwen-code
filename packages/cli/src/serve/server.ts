@@ -80,6 +80,7 @@ import {
   type ServeAuthProviderInstallResult,
   type ServeChannelSelection,
   type ChannelWebhookConfigSource,
+  type ServeModelProviderRuntimeSyncResult,
   type ServeOptions,
 } from './types.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
@@ -294,6 +295,7 @@ import {
 import { loadChannelsConfig } from '../commands/channel/runtime.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
+import { getModelProvidersOwnerScope } from '../config/modelProvidersScope.js';
 import { registerLiveRoutes } from './routes/live.js';
 import { registerLiveSetupRoutes } from './routes/live-setup.js';
 import { LiveHostCoordinator } from './live/live-host-coordinator.js';
@@ -2036,6 +2038,52 @@ export function createServeApp(
   );
 
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
+  const syncModelProvidersRuntime = async (
+    route: string,
+  ): Promise<ServeModelProviderRuntimeSyncResult> => {
+    const trusted = isPrimaryWorkspaceTrusted();
+    const settings = loadSettings(primaryBoundWorkspace, {
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: !trusted,
+      workspaceTrusted: trusted,
+    });
+    const scope = getModelProvidersOwnerScope(settings) ?? SettingScope.User;
+    const primaryContext = buildWorkspaceCtx(route);
+    const secondaryRuntimes =
+      scope === SettingScope.User
+        ? workspaceRegistry.listAll().filter((runtime) => !runtime.primary)
+        : [];
+    const [primaryResult, ...secondaryResults] = await Promise.allSettled([
+      primaryWorkspace.reloadModelProviders(primaryContext),
+      ...secondaryRuntimes.map((runtime) =>
+        runtime.workspaceService.reloadModelProviders({
+          ...primaryContext,
+          workspaceCwd: runtime.workspaceCwd,
+        }),
+      ),
+    ]);
+
+    if (primaryResult.status === 'rejected') throw primaryResult.reason;
+    if (
+      primaryResult.value.status === 'failed' ||
+      secondaryResults.some(
+        (result) =>
+          result.status === 'rejected' || result.value.status === 'failed',
+      )
+    ) {
+      return { status: 'failed' };
+    }
+    if (
+      primaryResult.value.status === 'applied' ||
+      secondaryResults.some(
+        (result) =>
+          result.status === 'fulfilled' && result.value.status === 'applied',
+      )
+    ) {
+      return { status: 'applied' };
+    }
+    return { status: 'deferred' };
+  };
 
   const acpHandleRef: { current?: AcpHttpHandle } = {};
   const workspaceRememberLane = new WorkspaceRememberTaskLane(
@@ -2576,9 +2624,7 @@ export function createServeApp(
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
       syncModelProvidersRuntime: () =>
-        primaryWorkspace.reloadModelProviders(
-          buildWorkspaceCtx('DELETE /workspace/models'),
-        ),
+        syncModelProvidersRuntime('DELETE /workspace/models'),
     });
   }
 
@@ -2614,9 +2660,7 @@ export function createServeApp(
     allowPrivateAuthBaseUrl: opts.allowPrivateAuthBaseUrl === true,
     installAuthProvider: deps.installAuthProvider,
     syncModelProvidersRuntime: () =>
-      primaryWorkspace.reloadModelProviders(
-        buildWorkspaceCtx('POST /workspace/auth/provider'),
-      ),
+      syncModelProvidersRuntime('POST /workspace/auth/provider'),
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
 

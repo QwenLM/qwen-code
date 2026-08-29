@@ -3535,6 +3535,34 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('reloadModelProviders', () => {
+    it('uses the provider-specific environment refresh when configured', async () => {
+      const reloadDaemonEnv = vi.fn();
+      const reloadModelProvidersDaemonEnv = vi.fn().mockResolvedValue({
+        updatedKeys: [],
+        removedKeys: [],
+        runtimeEnvironmentApplied: true,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          reloadDaemonEnv,
+          reloadModelProvidersDaemonEnv,
+          invokeWorkspaceCommand: vi.fn().mockResolvedValue({
+            configsRefreshed: 1,
+            configsFailed: 0,
+          }),
+        }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+        status: 'applied',
+      });
+      expect(reloadModelProvidersDaemonEnv).toHaveBeenCalledWith(
+        '/workspace',
+        undefined,
+      );
+      expect(reloadDaemonEnv).not.toHaveBeenCalled();
+    });
+
     it('refreshes the runtime environment before the ACP child', async () => {
       const reloadDaemonEnv = vi.fn().mockResolvedValue({
         updatedKeys: ['OPENAI_API_KEY'],

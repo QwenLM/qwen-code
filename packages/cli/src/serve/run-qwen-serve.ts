@@ -5723,6 +5723,93 @@ async function runQwenServeImpl(
       };
     };
 
+    const reloadRuntimeOverlaySnapshotForModelProviders = (
+      workspace: string,
+      trusted: boolean,
+      env: ReturnType<typeof createRuntimeEnvMetadata>,
+      assertGenerationOpen?: () => void,
+    ) =>
+      withSettingsLock(workspace, async () => {
+        assertGenerationOpen?.();
+        const fresh = settingsRuntime.settings.loadSettings(workspace, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: !trusted,
+          workspaceTrusted: trusted,
+        });
+        assertGenerationOpen?.();
+        let refreshedRuntimeEnv: ReturnType<
+          EnvironmentRuntime['buildRuntimeEnvironment']
+        >;
+        try {
+          refreshedRuntimeEnv =
+            settingsRuntime.environment.buildRuntimeEnvironment(
+              fresh.merged,
+              workspace,
+              daemonRuntimeBaseEnv,
+              trusted,
+            );
+        } catch (err) {
+          env.metadata.fallbackReason =
+            err instanceof Error ? err.message : String(err);
+          daemonLog.warn(
+            'failed to rebuild runtime overlay for model-provider reload; preserving previous runtime env',
+            { workspace, error: env.metadata.fallbackReason },
+          );
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          };
+        }
+        logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
+        if (refreshedRuntimeEnv.envFileReadFailed) {
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          };
+        }
+        assertGenerationOpen?.();
+        try {
+          env.replace(refreshedRuntimeEnv.effectiveEnv);
+          env.metadata.envFileReadFailed =
+            refreshedRuntimeEnv.envFileReadFailed;
+          env.metadata.envFileReadFailures.splice(
+            0,
+            env.metadata.envFileReadFailures.length,
+            ...refreshedRuntimeEnv.envFileReadFailures,
+          );
+          env.metadata.overlayKeys.splice(
+            0,
+            env.metadata.overlayKeys.length,
+            ...refreshedRuntimeEnv.overlayKeys,
+          );
+          env.metadata.envFilePaths.splice(
+            0,
+            env.metadata.envFilePaths.length,
+            ...refreshedRuntimeEnv.envFilePaths,
+          );
+          delete env.metadata.fallbackReason;
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: true,
+          };
+        } catch (err) {
+          env.metadata.fallbackReason =
+            err instanceof Error ? err.message : String(err);
+          daemonLog.warn(
+            'failed to apply runtime overlay for model-provider reload; preserving previous runtime env',
+            { workspace, error: env.metadata.fallbackReason },
+          );
+          return {
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          };
+        }
+      });
+
     const readLiveConversationScheduledTasks = async () => {
       if (!fs.existsSync(liveConversationWorkspace.rootPath)) return [];
       const { canonicalRoot } = await liveConversationWorkspace.revalidate();
@@ -6093,6 +6180,13 @@ async function runQwenServeImpl(
               return { ...result, runtimeEnvironmentApplied };
             }
           }),
+        reloadModelProvidersDaemonEnv: (workspace, assertGenerationOpen) =>
+          reloadRuntimeOverlaySnapshotForModelProviders(
+            workspace,
+            secondaryTrusted,
+            secondaryEnv,
+            assertGenerationOpen,
+          ),
         queryWorkspaceStatus: (method, idle) =>
           secondaryBridge.queryWorkspaceStatus(method, idle),
         invokeWorkspaceCommand: (method, params, invokeOpts) =>
@@ -6767,6 +6861,20 @@ async function runQwenServeImpl(
                 return { ...result, runtimeEnvironmentApplied };
               }
             }),
+          ...(buildOptions?.primary === true
+            ? {}
+            : {
+                reloadModelProvidersDaemonEnv: (
+                  workspace: string,
+                  assertGenerationOpen?: () => void,
+                ) =>
+                  reloadRuntimeOverlaySnapshotForModelProviders(
+                    workspace,
+                    trusted,
+                    wsEnv,
+                    assertGenerationOpen,
+                  ),
+              }),
           queryWorkspaceStatus: (method, idle) =>
             wsBridge.queryWorkspaceStatus(method, idle),
           invokeWorkspaceCommand: (method, params, invokeOpts) =>
