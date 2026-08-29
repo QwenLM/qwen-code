@@ -779,7 +779,7 @@
               "type": "number"
             },
             "streamIdleTimeoutMs": {
-              "description": "Maximum inactivity between streamed chunks for OpenAI-compatible models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.",
+              "description": "Maximum inactivity between streamed chunks for OpenAI-compatible and Anthropic models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.",
               "type": "integer",
               "minimum": 0,
               "maximum": 2147483647
