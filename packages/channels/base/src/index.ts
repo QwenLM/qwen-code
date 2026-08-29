@@ -5,6 +5,11 @@ export {
 } from './paths.js';
 export { PollingChannelBase } from './PollingChannelBase.js';
 export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
+export {
+  ACP_PRIVATE_PARENT_CAPABILITY_ENV,
+  ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+} from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
   BridgeSessionInfo,
@@ -33,7 +38,7 @@ export type {
 } from './DaemonChannelBridge.js';
 export { BlockStreamer } from './BlockStreamer.js';
 export type { BlockStreamerOptions } from './BlockStreamer.js';
-export { ChannelBase } from './ChannelBase.js';
+export { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 export {
   CHANNEL_PROACTIVE_DELIVERY_ERROR_CODE,
   ChannelProactiveDeliveryError,
@@ -88,8 +93,10 @@ export { SessionRouter } from './SessionRouter.js';
 export {
   sanitizeSenderName,
   sanitizePromptText,
+  sanitizeDisplayText,
   sanitizeLogText,
   truncateCodePoints,
+  truncateUtf16Units,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
 export type {

@@ -34,6 +34,7 @@ function runtime(
     trusted?: boolean;
     envMode?: 'parent-process' | 'runtime-overlay';
     effectiveEnv?: Readonly<Record<string, string | undefined>>;
+    provenance?: 'live-conversation';
   } = {},
 ): WorkspaceRuntime {
   return {
@@ -50,6 +51,7 @@ function runtime(
             effectiveEnv: opts.effectiveEnv ?? {},
           },
     bridge: { publishWorkspaceEvent: vi.fn() },
+    ...(opts.provenance ? { provenance: opts.provenance } : {}),
   } as unknown as WorkspaceRuntime;
 }
 
@@ -221,6 +223,26 @@ describe('workspace-qualified Voice routes', () => {
       body: { code: 'untrusted_workspace' },
     });
     expect(acquireVoiceLease).not.toHaveBeenCalled();
+  });
+
+  it('rejects the internal runtime by id and cwd without falling back', async () => {
+    const { app, registry, acquireVoiceLease, transcribe } = await createApp();
+    const liveCwd = path.join(homes.at(-1)!, 'conversations');
+    await fsp.mkdir(liveCwd, { recursive: true });
+    registry.add(
+      runtime('live-id', liveCwd, { provenance: 'live-conversation' }),
+    );
+
+    for (const selector of ['live-id', encodeURIComponent(liveCwd)]) {
+      await expect(
+        request(app).get(`/workspaces/${selector}/voice`),
+      ).resolves.toMatchObject({
+        status: 400,
+        body: { code: 'workspace_mismatch' },
+      });
+    }
+    expect(acquireVoiceLease).not.toHaveBeenCalled();
+    expect(transcribe).not.toHaveBeenCalled();
   });
 
   it('transcribes with the selected runtime cwd and effective environment', async () => {

@@ -208,15 +208,15 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 
 包含 `WebShell` 的所有 Props，加上 Provider 配置：
 
-| 属性                 | 类型      | 说明                                                                                 |
-| -------------------- | --------- | ------------------------------------------------------------------------------------ |
-| `baseUrl`            | `string`  | daemon API 地址，未传时使用 `window.location.origin`                                 |
-| `token`              | `string`  | daemon API Bearer token                                                              |
-| `sessionId`          | `string`  | 要连接的 session id；未传或 `undefined` 时保持空页面                                 |
-| `workspaceId`        | `string`  | 已注册工作区 id，主要用于定位已有 session；不会注册或锁定工作区                      |
-| `workspaceCwd`       | `string`  | 已注册工作区路径，语义同 `workspaceId`；不会注册或锁定工作区，且优先于 `workspaceId` |
-| `lockWorkspaceCwd`   | `string`  | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口   |
-| `restartSseOnPrompt` | `boolean` | 每次 prompt 被 daemon 接收后重建 SSE；默认关闭                                       |
+| 属性                 | 类型      | 说明                                                                                                    |
+| -------------------- | --------- | ------------------------------------------------------------------------------------------------------- |
+| `baseUrl`            | `string`  | daemon API 地址，未传时使用 `window.location.origin`                                                    |
+| `token`              | `string`  | daemon API Bearer token                                                                                 |
+| `sessionId`          | `string`  | 要连接的 session id；未传或 `undefined` 时保持空页面                                                    |
+| `workspaceId`        | `string`  | 已注册工作区 id，主要用于定位已有 session；不会注册或锁定工作区                                         |
+| `workspaceCwd`       | `string`  | 已注册工作区路径，语义同 `workspaceId`；不会注册或锁定工作区，且优先于 `workspaceId`                    |
+| `lockWorkspaceCwd`   | `string`  | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口                      |
+| `restartSseOnPrompt` | `boolean` | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭 |
 
 ### WebShell
 
@@ -245,6 +245,15 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 回调在主聊天和分屏聊天中都会触发，也可以在 daemon 断连时处理纯宿主操作。
 命令名后必须是空白或输入结束，因此 `/usr/local/bin/tool` 等绝对路径不会触发
 回调。如果回调抛出异常，Web Shell 会报告错误并继续执行默认命令流程。
+
+嵌入宿主只展示普通任务会话时，可以隐藏 Sidebar 的“任务 / 频道”来源切换：
+
+```tsx
+<WebShellWithProviders sidebar={{ showSessionSourceSwitch: false }} />
+```
+
+隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
+该选项的宿主仍默认展示来源切换。
 
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：
 

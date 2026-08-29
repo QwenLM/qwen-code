@@ -7,6 +7,9 @@
 import {
   EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
   type DaemonClient,
+  type GoalControlRequest,
+  type GoalSnapshotV2,
+  type GoalStateResponse,
 } from '@qwen-code/sdk/daemon';
 import { withActionTimeout } from '../timing.js';
 import type {
@@ -20,6 +23,22 @@ import type {
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
+
+function hasGoalSnapshot(value: unknown): value is DaemonGoal {
+  if (!value || typeof value !== 'object') return false;
+  const snapshot = (value as { snapshot?: unknown }).snapshot;
+  if (!snapshot || typeof snapshot !== 'object') return false;
+  const candidate = snapshot as Partial<GoalSnapshotV2>;
+  if (
+    candidate.v !== 2 ||
+    (candidate.activity !== 'idle' &&
+      candidate.activity !== 'running' &&
+      candidate.activity !== 'verifying')
+  ) {
+    return false;
+  }
+  return candidate.goal === null || typeof candidate.goal === 'object';
+}
 
 export interface CreateDaemonWorkspaceActionsArgs {
   getClient: () => DaemonClient | undefined;
@@ -782,15 +801,18 @@ export function createDaemonWorkspaceActions({
         throw new Error(await readDaemonError(res, 'GET /goals'));
       }
       const data = (await res.json()) as {
-        goals?: DaemonGoal[];
+        goals?: unknown[];
         droppedCount?: number;
       };
+      const rawGoals = Array.isArray(data.goals) ? data.goals : [];
+      const goals = rawGoals.filter(hasGoalSnapshot);
+      const droppedCount =
+        typeof data.droppedCount === 'number' && data.droppedCount > 0
+          ? data.droppedCount
+          : 0;
       return {
-        goals: Array.isArray(data.goals) ? data.goals : [],
-        droppedCount:
-          typeof data.droppedCount === 'number' && data.droppedCount > 0
-            ? data.droppedCount
-            : 0,
+        goals,
+        droppedCount: droppedCount + rawGoals.length - goals.length,
       };
     },
 
@@ -814,6 +836,24 @@ export function createDaemonWorkspaceActions({
         );
       }
       return (await res.json()) as { cleared: boolean };
+    },
+
+    async controlGoal(sessionId: string, request: GoalControlRequest) {
+      requireClient(getClient, 'Control goal failed');
+      const path = `/session/${encodeURIComponent(sessionId)}/goal`;
+      const url = createDaemonRequestUrl(baseUrl, path);
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'POST',
+          headers: createDaemonJsonHeaders(token),
+          body: JSON.stringify(request),
+        }),
+        'Control goal timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `POST ${path}`));
+      }
+      return (await res.json()) as GoalStateResponse;
     },
 
     async loadEnv() {

@@ -58,6 +58,7 @@ export interface SplitViewProps {
   onError?: (error: unknown, fallback: string) => void;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   onSlashCommand?: WebShellSlashCommandHandler;
+  onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
     task: DaemonSessionMonitorTaskStatus,
@@ -102,6 +103,7 @@ export function SplitView({
   onError,
   onImageIngestionNotice,
   onSlashCommand,
+  onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
   onPaneArtifactsChange,
@@ -504,11 +506,11 @@ export function SplitView({
                       onError={onError}
                       onImageIngestionNotice={onImageIngestionNotice}
                       onSlashCommand={onSlashCommand}
+                      onOpenGoals={onOpenGoals}
                       onRightPanelOpen={onRightPanelOpen}
                       onOpenMonitor={onOpenMonitor}
                       onPaneArtifactsChange={onPaneArtifactsChange}
                       messageTurnOutputs={messageTurnOutputs}
-                      restartSseOnPrompt={restartSseOnPrompt}
                       sessionWorkflowEnabled={sessionWorkflowEnabled}
                     />
                   </DaemonSessionProvider>

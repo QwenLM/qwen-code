@@ -11,8 +11,12 @@ import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
-} from '../utils/environmentContext.js';
-import { sanitizeTitle, tryGenerateSessionTitle } from './sessionTitle.js';
+} from '../core/environmentContext.js';
+import {
+  normalizeForEchoCompare,
+  sanitizeTitle,
+  tryGenerateSessionTitle,
+} from './sessionTitle.js';
 
 interface MockOptions {
   fastModel?: string | undefined;
@@ -35,7 +39,7 @@ function makeConfig(opts: MockOptions): {
   const config = {
     getFastModel: vi.fn(() => opts.fastModel ?? undefined),
     getModel: vi.fn(() => 'qwen-plus'),
-    getGeminiClient: vi.fn(() => ({
+    getLlmClient: vi.fn(() => ({
       getHistoryShallow: () => opts.history ?? [],
       getChat: () => ({
         getHistory: () => opts.history ?? [],
@@ -124,10 +128,12 @@ describe('tryGenerateSessionTitle', () => {
   });
 
   it('returns {ok:true, title, modelUsed} on success', async () => {
+    // Not one of the TITLE_SYSTEM_PROMPT "Good examples" — those are
+    // rejected as prompt echoes (see the #9706 tests below).
     const { config, generateJson } = makeConfig({
       fastModel: 'qwen-turbo',
       history: DIALOG_HISTORY,
-      generateJsonResult: { title: 'Fix login button on mobile' },
+      generateJsonResult: { title: 'Debug mobile login breakage' },
     });
     const outcome = await tryGenerateSessionTitle(
       config,
@@ -135,7 +141,7 @@ describe('tryGenerateSessionTitle', () => {
     );
     expect(outcome).toEqual({
       ok: true,
-      title: 'Fix login button on mobile',
+      title: 'Debug mobile login breakage',
       modelUsed: 'qwen-turbo',
     });
     // Schema call must use the fast model (not the main model) and the
@@ -155,6 +161,247 @@ describe('tryGenerateSessionTitle', () => {
     expect(callOpts.schema.required).toEqual(['title']);
     expect(callOpts.schema.properties.title.type).toBe('string');
     expect(callOpts.maxAttempts).toBe(1);
+  });
+
+  // #9706: when the recent conversation carries little topical signal
+  // (boilerplate-heavy channel sessions), the title model takes the cheapest
+  // schema-valid answer and parrots a TITLE_SYSTEM_PROMPT "Good example"
+  // back verbatim. Such canned titles say nothing about the session, so
+  // they must be treated like an empty result and let the caller fall back.
+  it('rejects a verbatim echo of a TITLE_SYSTEM_PROMPT example (#9706)', async () => {
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: DIALOG_HISTORY,
+      generateJsonResult: { title: 'Fix login button on mobile' },
+    });
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+    );
+    expect(outcome).toEqual({ ok: false, reason: 'empty_result' });
+  });
+
+  it('rejects case/punctuation variants of every prompt example (#9706)', async () => {
+    const echoes = [
+      // Case variants (incl. the prompt's own "Bad (wrong case)" example).
+      'Fix Login Button On Mobile',
+      'fix LOGIN button on mobile',
+      // Whitespace / residual punctuation that sanitizeTitle strips down to
+      // the bare example.
+      '  Add OAuth authentication flow  ',
+      'Debug failing CI pipeline tests.',
+      // The CJK example.
+      '重构用户鉴权中间件',
+    ];
+    for (const title of echoes) {
+      const { config } = makeConfig({
+        fastModel: 'qwen-turbo',
+        history: DIALOG_HISTORY,
+        generateJsonResult: { title },
+      });
+      const outcome = await tryGenerateSessionTitle(
+        config,
+        new AbortController().signal,
+      );
+      expect(outcome, `echo not rejected: ${JSON.stringify(title)}`).toEqual({
+        ok: false,
+        reason: 'empty_result',
+      });
+    }
+  });
+
+  it('rejects bracket-wrapped echoes of prompt examples (#9706)', async () => {
+    // sanitizeTitle keeps ASCII/full-width brackets (legitimate in titles
+    // like "(WIP) Fix build"), so the guard itself must see through a
+    // bracket wrapper around a canned example.
+    const wrapped = [
+      '(Fix login button on mobile)',
+      '[Add OAuth authentication flow]',
+      '{Debug failing CI pipeline tests}',
+      '（重构用户鉴权中间件）',
+      // Wrappers that survive sanitizeTitle with inner punctuation intact —
+      // the guard must not depend on an enumerated bracket family.
+      '["Fix login button on mobile"]',
+      '<Add OAuth authentication flow>',
+      '«Debug failing CI pipeline tests»',
+    ];
+    for (const title of wrapped) {
+      const { config } = makeConfig({
+        fastModel: 'qwen-turbo',
+        history: DIALOG_HISTORY,
+        generateJsonResult: { title },
+      });
+      const outcome = await tryGenerateSessionTitle(
+        config,
+        new AbortController().signal,
+      );
+      expect(
+        outcome,
+        `wrapped echo not rejected: ${JSON.stringify(title)}`,
+      ).toEqual({ ok: false, reason: 'empty_result' });
+    }
+  });
+
+  it('still accepts a genuine title wrapped in brackets (#9706)', async () => {
+    // The wrapper strip is comparison-only: a real title that happens to
+    // carry brackets must pass through unchanged, not be corrupted or
+    // rejected.
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: DIALOG_HISTORY,
+      generateJsonResult: { title: '(WIP) Fix build' },
+    });
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+    );
+    expect(outcome).toEqual({
+      ok: true,
+      title: '(WIP) Fix build',
+      modelUsed: 'qwen-turbo',
+    });
+  });
+
+  it('still accepts a topical title that merely resembles an example (#9706)', async () => {
+    // The guard must be an exact (normalized) match, not fuzzy: a session
+    // genuinely about a login button still gets a real, non-canned title.
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: DIALOG_HISTORY,
+      generateJsonResult: { title: 'Fix login button styling' },
+    });
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+    );
+    expect(outcome).toEqual({
+      ok: true,
+      title: 'Fix login button styling',
+      modelUsed: 'qwen-turbo',
+    });
+  });
+
+  it('uses the user-facing projection instead of hidden prompt context', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden channel instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      '你好',
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as {
+      contents: Content[];
+    };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('你好');
+    expect(prompt).not.toContain('hidden channel instructions');
+  });
+
+  it('projects every recorded user turn when retrying title generation', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden first instructions' }] },
+        { role: 'model', parts: [{ text: 'First reply' }] },
+        { role: 'user', parts: [{ text: 'hidden second instructions' }] },
+        { role: 'model', parts: [{ text: 'Second reply' }] },
+      ],
+      generateJsonResult: { title: 'Answer greetings' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      '你好',
+      '再见',
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('你好');
+    expect(prompt).toContain('再见');
+    expect(prompt).not.toContain('hidden first instructions');
+    expect(prompt).not.toContain('hidden second instructions');
+  });
+
+  it('treats an all-empty display projection as intentionally empty', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden channel instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Should never be used' },
+    });
+
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      ['', ''],
+    );
+
+    // `''` entries mean "projection recorded, user-authored text empty" —
+    // stay in projection mode (`empty_history`) instead of falling back to
+    // the raw history, which carries the hidden model context.
+    expect(outcome).toEqual({ ok: false, reason: 'empty_history' });
+    expect(generateJson).not.toHaveBeenCalled();
+  });
+
+  it('does not align a display projection onto an intervening system turn', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden channel instructions' }] },
+        { role: 'model', parts: [{ text: 'First reply' }] },
+        { role: 'user', parts: [{ text: 'internal cron prompt' }] },
+        { role: 'model', parts: [{ text: 'Cron reply' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      'visible channel message',
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('visible channel message');
+    expect(prompt).not.toContain('hidden channel instructions');
+    expect(prompt).not.toContain('internal cron prompt');
+  });
+
+  it('omits unprojected older user turns from resumed channel history', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'oldest hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Oldest reply' }] },
+        { role: 'user', parts: [{ text: 'older hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Older reply' }] },
+        { role: 'user', parts: [{ text: 'current hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Current reply' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    // Resumed sessions replay `undefined` for every user turn recorded before
+    // display-projection tracking existed; only the newest turn projects.
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      undefined,
+      undefined,
+      '当前消息',
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('当前消息');
+    expect(prompt).not.toContain('undefined');
+    expect(prompt).not.toContain('older hidden instructions');
+    expect(prompt).not.toContain('current hidden instructions');
   });
 
   it('sanitizes residual markdown and trailing punctuation from the model result', async () => {
@@ -210,7 +457,7 @@ describe('tryGenerateSessionTitle', () => {
     const config = {
       getFastModel: vi.fn(() => 'qwen-turbo'),
       getModel: vi.fn(() => 'qwen-plus'),
-      getGeminiClient: vi.fn(() => ({
+      getLlmClient: vi.fn(() => ({
         getHistoryShallow: () => history,
         getChat: () => ({
           getHistory: () => history,
@@ -392,7 +639,7 @@ describe('tryGenerateSessionTitle', () => {
     const config = {
       getFastModel: vi.fn(() => 'qwen-turbo'),
       getModel: vi.fn(() => 'qwen-plus'),
-      getGeminiClient: vi.fn(() => ({
+      getLlmClient: vi.fn(() => ({
         getHistoryShallow: () => history,
         getChat: () => ({
           getHistory: () => history,
@@ -455,5 +702,31 @@ describe('sanitizeTitle', () => {
     // High surrogate must not linger on its own.
     expect(sanitized).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
     expect(sanitized.length).toBeLessThanOrEqual(200);
+  });
+});
+
+describe('normalizeForEchoCompare', () => {
+  it('normalizes both sides of the echo comparison identically (#9772)', () => {
+    // An example with edge punctuation must compare equal to the echo that
+    // sanitizeTitle strips that punctuation off — otherwise the guard
+    // silently misses it.
+    expect(normalizeForEchoCompare('Fix CI!')).toBe(
+      normalizeForEchoCompare('Fix CI'),
+    );
+    expect(normalizeForEchoCompare('"Fix CI!"')).toBe(
+      normalizeForEchoCompare('fix ci'),
+    );
+    expect(normalizeForEchoCompare('重构鉴权！')).toBe(
+      normalizeForEchoCompare('重构鉴权'),
+    );
+  });
+
+  it('keeps interior punctuation so distinct titles stay distinct', () => {
+    expect(normalizeForEchoCompare('(WIP) Fix build')).not.toBe(
+      normalizeForEchoCompare('WIP Fix build'.toLowerCase()),
+    );
+    expect(normalizeForEchoCompare('Fix login button styling')).not.toBe(
+      normalizeForEchoCompare('Fix login button on mobile'),
+    );
   });
 });

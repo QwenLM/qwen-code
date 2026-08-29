@@ -70,8 +70,7 @@ export function runWithTimeout<T>(
     const timer = setTimeout(() => {
       reject(
         new Error(
-          `Timed out after ${timeoutMs}ms: ${label}. The MCP server may be ` +
-            `hung; pool will roll back the spawn/restart and free its budget slot.`,
+          `Timed out after ${timeoutMs}ms: ${label}. The MCP server may be hung.`,
         ),
       );
     }, timeoutMs);

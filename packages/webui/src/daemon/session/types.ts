@@ -15,6 +15,8 @@ import type {
   DaemonInputAnnotation,
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
+  DaemonSessionAttachmentReference,
+  DaemonSessionAttachmentData,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
@@ -32,13 +34,18 @@ import type {
   DaemonSessionTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionArtifactsEnvelope,
+  DaemonSkillToggleMutation,
   DaemonShellCommandResult,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceProvidersStatus,
   HeartbeatResult,
+  GoalControlRequest,
+  GoalSnapshotV2,
+  GoalStateResponse,
   PermissionResponse,
+  PromptContentBlock,
   PromptResult,
   SessionMetadataResult,
   SetModelResult,
@@ -51,25 +58,14 @@ export type DaemonConnectionStatus =
   | 'disconnected'
   | 'error';
 
-export interface DaemonSessionTransition {
-  phase: 'queued' | 'preparing' | 'failed';
-  operation: 'load' | 'resume';
-  origin: 'action' | 'controlled';
-  targetSessionId: string;
-  targetWorkspaceCwd?: string;
-  targetClientId?: string;
-  error?: {
-    message: string;
-    code?: string;
-    status?: number;
-  };
-}
 export interface DaemonSessionOwnerSnapshot {
   isCurrent(): boolean;
 }
+
 export interface DaemonSessionOwnerGuard {
   capture(): DaemonSessionOwnerSnapshot;
 }
+
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   sessionId?: string;
@@ -93,10 +89,13 @@ export interface DaemonConnectionState {
   skills?: string[];
   models?: DaemonModelInfo[];
   currentModel?: string;
+  reasoning?: DaemonReasoningControls;
   currentMode?: string;
   displayName?: string;
   /** Latest main-conversation model usage event. */
   tokenUsage?: DaemonTokenUsage;
+  /** Authoritative Goal v2 state for the current session. */
+  goalState?: GoalSnapshotV2;
   /** Current context-window occupancy, used with contextWindow for percentages. */
   tokenCount?: number;
   contextWindow?: number;
@@ -113,7 +112,14 @@ export interface DaemonConnectionState {
   errorStatus?: number;
   /** True only when the server confirmed the current session is missing. */
   missingSession?: boolean;
-  sessionTransition?: DaemonSessionTransition;
+}
+
+export interface DaemonReasoningControls {
+  enabled: boolean;
+  effort: string;
+  efforts: string[];
+  /** Defaults to true. False means effort is mutable but thinking is required. */
+  canDisable?: boolean;
 }
 
 export interface DaemonTokenUsage {
@@ -141,6 +147,14 @@ export interface DaemonSessionProviderProps {
   maxQueued?: number;
   /** Maximum normalized transcript blocks retained in memory. */
   maxBlocks?: number;
+  /**
+   * Maximum estimated bytes of transcript blocks retained in memory.
+   * Trimming evicts oldest blocks until the estimate is back under this
+   * budget; a block-count window alone is not a memory ceiling because
+   * blocks can carry large raw tool payloads. Defaults to the transcript
+   * store's built-in budget.
+   */
+  maxRetainedBytes?: number;
   /** Latest persisted records requested during an existing-session load. */
   historyPageSize?: number;
   /** Keep the full subagent transcript, or retain only bounded root summaries. */
@@ -153,7 +167,11 @@ export interface DaemonSessionProviderProps {
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
-  /** Restart the SSE event stream after each accepted prompt. */
+  /**
+   * Restart a live SSE event stream after each accepted prompt. A stream that
+   * is already down is always rebuilt immediately on prompt admission,
+   * regardless of this flag.
+   */
   restartEventStreamOnPrompt?: boolean;
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
@@ -172,10 +190,6 @@ export interface DaemonSessionProviderProps {
     /** Warning shown when session context metadata cannot be loaded. */
     context?: string;
   };
-  onSessionTransitionCommit?: (target: {
-    sessionId: string;
-    workspaceCwd?: string;
-  }) => void;
   /** React children rendered inside the daemon session contexts. */
   children: ReactNode;
 }
@@ -196,6 +210,7 @@ export type DaemonNoticeOperation =
   | 'send_prompt'
   | 'send_shell_command'
   | 'switch_model'
+  | 'set_reasoning_effort'
   | 'set_approval_mode'
   | 'submit_permission'
   | 'cancel_prompt'
@@ -211,7 +226,11 @@ export type DaemonNoticeOperation =
   | 'load_context_usage'
   | 'load_tasks'
   | 'load_artifacts'
+  | 'read_attachment'
+  | 'remove_attachment'
   | 'cancel_task'
+  | 'load_goal'
+  | 'control_goal'
   | 'clear_goal'
   | 'load_stats'
   | 'rewind_snapshots'
@@ -265,6 +284,7 @@ export interface DaemonModelInfo {
   baseUrl?: string;
   envKey?: string;
   isRuntime?: boolean;
+  reasoningPreview?: DaemonReasoningControls;
 }
 
 export interface DaemonCommandInfo {
@@ -278,6 +298,7 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   optimisticUserMessage?: boolean;
   images?: DaemonPromptImage[];
+  files?: DaemonPromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   /**
    * When true, the daemon strips orphaned user entries from the chat
@@ -312,6 +333,15 @@ export interface GetTasksActionOptions {
 
 export interface DaemonPromptImage {
   data: string;
+  mimeType?: string;
+  mediaType?: string;
+  media_type?: string;
+}
+
+export interface DaemonPromptFile {
+  name: string;
+  data?: Blob;
+  text?: string;
   mimeType?: string;
   mediaType?: string;
   media_type?: string;
@@ -358,6 +388,7 @@ export interface DaemonSessionActions {
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
+  setReasoningEffort(value: string): Promise<void>;
   setApprovalMode(
     mode: DaemonApprovalMode,
     opts?: { persist?: boolean },
@@ -438,14 +469,30 @@ export interface DaemonSessionActions {
     question: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult>;
+  uploadAttachment(
+    attachment: DaemonPromptImage | DaemonPromptFile,
+    opts?: { signal?: AbortSignal; sessionId?: string },
+  ): Promise<DaemonSessionAttachmentReference>;
+  readAttachment(attachmentId: string): Promise<DaemonSessionAttachmentData>;
+  removeAttachment(
+    attachmentId: string,
+    opts?: { sessionId?: string },
+  ): Promise<boolean>;
   /**
    * Queue a message typed while a turn is running. Calls without an id support
    * old daemons and are best-effort; calls with a stable `messageId` may reject
-   * on an ambiguous transport failure so the caller can reconcile.
+   * on an ambiguous transport failure so the caller can reconcile. `content`
+   * carries attachment blocks — pre-flight the daemon's
+   * `session_attachments` capability before attaching references.
    */
   enqueueMidTurnMessage(
     message: string,
-    opts?: { signal?: AbortSignal; messageId?: string },
+    opts?: {
+      signal?: AbortSignal;
+      messageId?: string;
+      content?: PromptContentBlock[];
+      onAdmissionStarted?: () => void;
+    },
   ): Promise<DaemonMidTurnMessageResult>;
   removeMidTurnMessage(
     messageId: string,
@@ -475,12 +522,26 @@ export interface DaemonSessionActions {
     taskId: string,
     kind: DaemonSessionTaskStatus['kind'],
   ): Promise<{ cancelled: boolean }>;
+  getGoal(): Promise<GoalStateResponse>;
+  controlGoal(request: GoalControlRequest): Promise<GoalStateResponse>;
+  /**
+   * Install a Goal snapshot obtained outside the session action layer — a
+   * workspace-scoped control against the session this connection is attached
+   * to — reconciled like any other snapshot. A no-op once the connection has
+   * moved to another session.
+   */
+  applyGoalSnapshot(sessionId: string, snapshot: GoalSnapshotV2): void;
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
   branchSession(
     name?: string,
-  ): Promise<{ sessionId: string; displayName: string }>;
+    atRecordId?: string,
+  ): Promise<{
+    sessionId: string;
+    displayName: string;
+    switchStarted: boolean;
+  }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 
@@ -496,6 +557,9 @@ export interface DaemonWorkspaceEventSignals {
   agentsVersion: number;
   toolsVersion: number;
   settingsVersion: number;
+  skillsVersion: number;
+  lastSkillMutation?: DaemonSkillToggleMutation;
+  skillMutationsByCwd?: Record<string, DaemonSkillToggleMutation[]>;
   mcpVersion: number;
   extensionsVersion: number;
   artifactsVersion: number;

@@ -6,7 +6,19 @@
 
 import { describe, expect, it } from 'vitest';
 import { AuthType } from '../core/contentGenerator.js';
-import { resolveModelId, stripRuntimeSnapshotPrefix } from './modelId.js';
+import {
+  buildRuntimeSnapshotId,
+  resolveModelId,
+  stripRuntimeSnapshotPrefix,
+} from './modelId.js';
+
+describe('buildRuntimeSnapshotId', () => {
+  it('builds the canonical $runtime|{auth}|{model} id', () => {
+    expect(buildRuntimeSnapshotId('openai', 'qwen3.6-27b-autoround')).toBe(
+      '$runtime|openai|qwen3.6-27b-autoround',
+    );
+  });
+});
 
 describe('stripRuntimeSnapshotPrefix', () => {
   it('returns bare model IDs unchanged', () => {
