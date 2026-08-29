@@ -13,6 +13,7 @@ import {
   createDebugLogger,
   getSubagentsRootDir,
   resolveOpenAILogDir,
+  sessionIdContext,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { DEFAULT_OPENAI_LOG_RETENTION_DAYS } from '../../config/settingsSchema.js';
@@ -193,27 +194,29 @@ export function startNonInteractiveOpenAILogHousekeeping(
 ): void {
   if (nonInteractiveStopping) return;
 
-  try {
-    const target = getOpenAILogCleanupTarget(config, settings);
-    if (!target || nonInteractiveJobs.has(target.logDir)) return;
+  sessionIdContext.exit(() => {
+    try {
+      const target = getOpenAILogCleanupTarget(config, settings);
+      if (!target || nonInteractiveJobs.has(target.logDir)) return;
 
-    const markerPath = getOpenAILogsMarkerPath(
-      Storage.getGlobalQwenDir(),
-      target.logDir,
-    );
-    const job: NonInteractiveOpenAILogJob = {
-      target,
-      markerPath,
-      queued: false,
-    };
-    nonInteractiveJobs.set(target.logDir, job);
-    enqueueNonInteractiveJob(job);
-  } catch (err) {
-    debugLogger.error(
-      'failed to start non-interactive OpenAI log cleanup; skipping',
-      err,
-    );
-  }
+      const markerPath = getOpenAILogsMarkerPath(
+        Storage.getGlobalQwenDir(),
+        target.logDir,
+      );
+      const job: NonInteractiveOpenAILogJob = {
+        target,
+        markerPath,
+        queued: false,
+      };
+      nonInteractiveJobs.set(target.logDir, job);
+      enqueueNonInteractiveJob(job);
+    } catch (err) {
+      debugLogger.error(
+        'failed to start non-interactive OpenAI log cleanup; skipping',
+        err,
+      );
+    }
+  });
 }
 
 export function stopNonInteractiveOpenAILogHousekeeping(): Promise<void> {
@@ -269,47 +272,49 @@ async function drainNonInteractiveQueue(): Promise<void> {
     const abortController = new AbortController();
     activeNonInteractiveAbortController = abortController;
 
-    try {
-      const result = await runOpenAILogCleanup(
-        job.target,
-        job.markerPath,
-        abortController.signal,
-      );
-      if (nonInteractiveStopping) continue;
+    await sessionIdContext.exit(async () => {
+      try {
+        const result = await runOpenAILogCleanup(
+          job.target,
+          job.markerPath,
+          abortController.signal,
+        );
+        if (nonInteractiveStopping) return;
 
-      switch (result.status) {
-        case 'completed':
-          scheduleNonInteractiveJob(job, RECURRING_INTERVAL_MS);
-          break;
-        case 'fresh':
-          scheduleNonInteractiveJob(
-            job,
-            Math.min(
-              RECURRING_INTERVAL_MS,
-              Math.max(NON_INTERACTIVE_LOCK_RETRY_MS, result.retryAfterMs),
-            ),
-          );
-          break;
-        case 'locked':
-          scheduleNonInteractiveJob(job, NON_INTERACTIVE_LOCK_RETRY_MS);
-          break;
-        case 'incomplete':
-          break;
-        default:
-          break;
+        switch (result.status) {
+          case 'completed':
+            scheduleNonInteractiveJob(job, RECURRING_INTERVAL_MS);
+            break;
+          case 'fresh':
+            scheduleNonInteractiveJob(
+              job,
+              Math.min(
+                RECURRING_INTERVAL_MS,
+                Math.max(NON_INTERACTIVE_LOCK_RETRY_MS, result.retryAfterMs),
+              ),
+            );
+            break;
+          case 'locked':
+            scheduleNonInteractiveJob(job, NON_INTERACTIVE_LOCK_RETRY_MS);
+            break;
+          case 'incomplete':
+            break;
+          default:
+            break;
+        }
+      } catch (err) {
+        debugLogger.error(
+          `non-interactive OpenAI log cleanup failed for ${job.target.logDir}`,
+          err,
+        );
+        if (!nonInteractiveStopping) {
+          scheduleNonInteractiveJob(job, NON_INTERACTIVE_FAILURE_RETRY_MS);
+        }
+      } finally {
+        activeNonInteractiveJob = undefined;
+        activeNonInteractiveAbortController = undefined;
       }
-    } catch (err) {
-      debugLogger.error(
-        `non-interactive OpenAI log cleanup failed for ${job.target.logDir}`,
-        err,
-      );
-      if (!nonInteractiveStopping) {
-        scheduleNonInteractiveJob(job, NON_INTERACTIVE_FAILURE_RETRY_MS);
-      }
-    } finally {
-      activeNonInteractiveJob = undefined;
-      activeNonInteractiveAbortController = undefined;
-    }
+    });
   }
 }
 
