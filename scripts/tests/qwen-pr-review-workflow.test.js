@@ -163,6 +163,11 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
           ATT: attemptFile,
           DUR: durationFile,
           PRM: promptFile,
+          // The step initializes PROXY_BIN before the retry loop and the
+          // agent invocation's decoy GITHUB_PATH/GITHUB_ENV wiring expands
+          // it; the extraction starts at OUTCOME='', past the init, so the
+          // harness must supply it (set -u would otherwise abort the loop).
+          PROXY_BIN: join(dir, 'proxy-bin'),
         },
       });
     } catch (e) {
@@ -1390,15 +1395,64 @@ describe('capture-tools step wiring', () => {
     );
   });
 
-  it('passes the assets-repo variable into the review step', () => {
-    // The CLI reads QWEN_REVIEW_ASSETS_REPO from the environment; the run:
-    // script never names it, so only this assertion sees a dropped or
-    // misspelled wiring line.
+  it('keeps review evidence branches out of the project repository', () => {
+    // The CLI reads QWEN_REVIEW_ASSETS_REPO from the environment. The workflow
+    // passes through only a dedicated external host, never this project repo.
     const doc = parse(workflow);
     expect(
       doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review').env
         .QWEN_REVIEW_ASSETS_REPO,
-    ).toBe('${{ vars.QWEN_REVIEW_ASSETS_REPO }}');
+    ).toBe(
+      "${{ vars.QWEN_REVIEW_ASSETS_REPO != github.repository && vars.QWEN_REVIEW_ASSETS_REPO || '' }}",
+    );
+  });
+
+  it('normalizes whitespace and case variants of the assets-repo designation', () => {
+    // The env-level guard compares the RAW variable, so padded or
+    // case-shifted self-references slip past it; the run body trims and
+    // re-checks before the CLI reads the value. Executed, not asserted as
+    // text: a dropped trim or a case-sensitive compare re-enables a
+    // self-targeting designation while every shape assertion stays green.
+    const run = runReviewStep();
+    const marker = '# Normalize the assets-repo designation';
+    const start = run.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    const endMarker = 'export QWEN_REVIEW_ASSETS_REPO';
+    const end = run.indexOf(endMarker, start);
+    expect(end).toBeGreaterThan(-1);
+    const fragment = run.slice(start, end + endMarker.length);
+
+    function normalize(value) {
+      return execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -euo pipefail',
+            'REPO="QwenLM/qwen-code"',
+            'QWEN_REVIEW_ASSETS_REPO="$DESIGNATION"',
+            fragment,
+            'printf "%s" "$QWEN_REVIEW_ASSETS_REPO"',
+          ].join('\n'),
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, DESIGNATION: value },
+        },
+      );
+    }
+
+    // Self-targeting in every disguise degrades to the empty designation.
+    expect(normalize('QwenLM/qwen-code')).toBe('');
+    expect(normalize(' QwenLM/qwen-code ')).toBe('');
+    expect(normalize('qwenlm/QWEN-CODE')).toBe('');
+    expect(normalize('\tQwenLM/qwen-code\n')).toBe('');
+    // An external host survives, trimmed.
+    expect(normalize('other-org/assets')).toBe('other-org/assets');
+    expect(normalize('  other-org/assets  ')).toBe('other-org/assets');
+    // Unset-ish values stay empty.
+    expect(normalize('')).toBe('');
+    expect(normalize('   ')).toBe('');
   });
 });
 
@@ -2533,6 +2587,55 @@ describe('bot comment markers', () => {
     expect(ackLine).toBeDefined();
     expect(ackLine).toContain('[workflow run](%s)');
     expect(ackLine).toContain('"$RUN_URL"');
+  });
+
+  describe('queued ack placement', () => {
+    // One ack per PR, but it has to land under the command that asked for
+    // it. The in-place PATCH kept the count at one and left the notice at
+    // the position of the FIRST request — comment #2 of 15 on #10259 — so
+    // a requester reading from the bottom saw nothing start. Delete the
+    // stale ack(s), then post: same count, right position. Nothing keys on
+    // the comment id (autofix filters and the bypass audit match the
+    // marker), so recreating is safe.
+    const ackRun = parse(workflow).jobs['ack-review-request'].steps[0].run;
+
+    it('deletes stale acks and posts a fresh one instead of editing in place', () => {
+      expect(ackRun).not.toContain('--method PATCH');
+      expect(ackRun).toContain(
+        '--method DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${STALE_ACK_ID}"',
+      );
+      // Every stale ack, not just the last: a PATCH-era thread can carry
+      // several after a failed delete, and `last` would leave the rest.
+      expect(ackRun).not.toMatch(/\|\s*last\s*\|/);
+      // The post is unconditional — no `else` branch that skips it when a
+      // stale ack existed.
+      const postIndex = ackRun.indexOf('gh pr comment "$PR_NUMBER"');
+      expect(postIndex).toBeGreaterThan(ackRun.indexOf('--method DELETE'));
+      expect(ackRun.slice(0, postIndex)).not.toMatch(/^\s*else\s*$/m);
+    });
+
+    it('reacts 👀 to the triggering comment, best effort', () => {
+      expect(ackRun).toContain('-f content=eyes');
+      expect(ackRun).toContain(
+        'repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions',
+      );
+      expect(ackRun).toContain(
+        'repos/${GITHUB_REPOSITORY}/pulls/comments/${COMMENT_ID}/reactions',
+      );
+      // A failed reaction must not abort the ack under `set -e`.
+      expect(ackRun).toMatch(/content=eyes[^\n]*\n\s*\|\| echo/);
+      expect(
+        parse(workflow).jobs['ack-review-request'].steps[0].env.COMMENT_ID,
+      ).toBe('${{ github.event.comment.id }}');
+    });
+
+    it('tells the requester the run is not a PR check', () => {
+      // A command-triggered run executes against the base branch, so its
+      // review-pr check never shows under the PR — the ack link is the only
+      // handle, and the copy has to say so or the requester keeps looking
+      // for a yellow dot.
+      expect(ackRun).toContain('not listed under the checks of this PR');
+    });
   });
 });
 

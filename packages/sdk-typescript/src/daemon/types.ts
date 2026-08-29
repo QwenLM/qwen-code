@@ -303,6 +303,8 @@ export interface DaemonGitBranchInfo {
   name: string;
   isHead: boolean;
   upstream?: string;
+  /** The configured upstream ref no longer exists (git's `[gone]` state). */
+  upstreamGone?: boolean;
   ahead: number;
   behind: number;
   /** Unix epoch seconds of the branch tip commit. */
@@ -1039,6 +1041,8 @@ export interface DaemonBranchInfo {
 export interface DaemonSessionPrInfo {
   number: number;
   url: string;
+  /** Snapshot of the PR's state at last bind/refresh; optional. */
+  state?: 'open' | 'merged' | 'closed';
 }
 
 /** Returned from `POST /session`. */
@@ -1881,7 +1885,10 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   installedPath?: string;
   argumentHint?: string;
   model?: string;
+  /** Canonical name of the extension that provides this skill. */
   extensionName?: string;
+  /** Localized presentation name; never use as an extension identity. */
+  extensionDisplayName?: string;
 }
 
 export interface DaemonWorkspaceSkillsStatus {
@@ -2013,6 +2020,7 @@ export interface DaemonWriteMemoryResult {
 }
 
 export type DaemonWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
+export type DaemonWorkspaceMemoryRememberTargetScope = 'project' | 'user';
 
 export type DaemonWorkspaceMemoryTaskStatus =
   | 'queued'
@@ -2039,6 +2047,7 @@ export interface DaemonWorkspaceMemoryRememberTask {
   taskId: string;
   status: DaemonWorkspaceMemoryTaskStatus;
   contextMode: DaemonWorkspaceMemoryRememberContextMode;
+  scope?: DaemonWorkspaceMemoryRememberTargetScope;
   createdAt: string;
   updatedAt: string;
   result?: DaemonWorkspaceMemoryRememberResult;
@@ -2051,6 +2060,7 @@ export interface DaemonWorkspaceMemoryRememberTask {
 
 export interface DaemonWorkspaceMemoryRememberOptions {
   contextMode?: DaemonWorkspaceMemoryRememberContextMode;
+  scope?: DaemonWorkspaceMemoryRememberTargetScope;
   clientId?: string;
 }
 
@@ -2070,6 +2080,7 @@ export interface DaemonWorkspaceMemoryForgetResult {
 export interface DaemonWorkspaceMemoryForgetTask {
   taskId: string;
   status: DaemonWorkspaceMemoryTaskStatus;
+  scope?: DaemonWorkspaceMemoryRememberTargetScope;
   createdAt: string;
   updatedAt: string;
   result?: DaemonWorkspaceMemoryForgetResult;
@@ -2081,6 +2092,7 @@ export interface DaemonWorkspaceMemoryForgetTask {
 }
 
 export interface DaemonWorkspaceMemoryForgetOptions {
+  scope?: DaemonWorkspaceMemoryRememberTargetScope;
   clientId?: string;
 }
 
@@ -2870,6 +2882,7 @@ export interface DaemonSkillToggleResult {
   sessionsFailed: number;
 }
 
+/** Per-target error codes returned by older daemon versions. */
 export type DaemonSkillBatchToggleErrorCode =
   | 'skill_not_found'
   | 'skill_not_toggleable'
@@ -4326,6 +4339,7 @@ export interface DaemonWorkspaceExtensionsStatus {
 }
 
 export interface ExtensionInstallRequest {
+  /** Git, GitHub, npm, or an absolute path on the daemon host. */
   source: string;
   credentialPersistence?: 'stored' | 'one_time';
   ref?: string;
