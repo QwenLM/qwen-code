@@ -233,7 +233,16 @@ describe('fake-shim call-record publication', () => {
   // ENOTEMPTY was the teardown race witnessed below, not this one.)
   async function witnessAtomicPublication(shimPath, records, env, argv) {
     const child = spawn(shimPath, argv, {
-      env: { ...process.env, ...env },
+      env: {
+        ...process.env,
+        // The fake gh appends its env token channels to gh-env.log on
+        // every call: pin the suite's fake-token channel here so a live
+        // ambient job token never lands in that record.
+        GITHUB_TOKEN: 'fake',
+        GH_TOKEN: '',
+        GH_ENTERPRISE_TOKEN: '',
+        ...env,
+      },
       stdio: 'ignore',
     });
     let exited = false;
@@ -287,6 +296,15 @@ describe('fake-shim call-record publication', () => {
       { GH_RECORD_DIR: gh.records },
       fillerArgv(),
     );
+    // The same call appends the gh-visible token channels to gh-env.log:
+    // witness the suite's fake-token pin from the shim's own record — a
+    // raw ambient merge would write a live job token to disk here.
+    const line = readFileSync(join(gh.records, 'gh-env.log'), 'utf8').trim();
+    assert.ok(
+      line.includes(' GITHUB_TOKEN=fake'),
+      `the witness env must pin the fake token channel: ${line}`,
+    );
+    assert.ok(line.endsWith(' GH_TOKEN= GH_ENTERPRISE_TOKEN='), line);
   });
 
   it('exposes a timeout call record only once its argv is complete', async () => {
