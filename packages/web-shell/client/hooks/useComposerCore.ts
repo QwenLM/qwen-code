@@ -2192,10 +2192,29 @@ export function useComposerCore(
 
   const openSlashMenu = useCallback(() => {
     const view = viewRef.current;
-    if (!view) return false;
+    if (
+      !view ||
+      disabledRef.current ||
+      shellModeRef.current ||
+      historyBrowseActiveRef.current
+    ) {
+      return false;
+    }
+    closeAtMenu();
+    let cursor = view.state.selection.main.head;
+    const line = view.state.doc.lineAt(cursor);
+    if (!line.text.startsWith('/')) {
+      if (view.state.doc.length > 0) return false;
+      view.dispatch({
+        changes: { from: cursor, to: cursor, insert: '/' },
+        selection: { anchor: cursor + 1 },
+        scrollIntoView: true,
+      });
+      cursor += 1;
+    }
     const result = getSlashCommandCompletionResult(
-      '/',
-      1,
+      view.state.doc.toString(),
+      cursor,
       commandsRef.current,
       skillsRef.current,
       languageRef.current,
@@ -2203,12 +2222,8 @@ export function useComposerCore(
       slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
     );
     if (!result) return false;
-    closeAtMenu();
-    const cursor = view.state.selection.main.head;
     setSlashMenu({
       ...result,
-      from: cursor,
-      to: cursor,
       selectedIndex: 0,
     });
     view.focus();
@@ -2890,6 +2905,27 @@ export function useComposerCore(
             return acceptSlashCompletion(undefined, true);
           }
           if (completionStatus(view.state) === 'active') return false;
+          const text = view.state.doc.toString();
+          const subcommandResult = getSlashCommandCompletionResult(
+            `${text} `,
+            text.length + 1,
+            commandsRef.current,
+            skillsRef.current,
+            languageRef.current,
+            (key) => tRef.current(key),
+            slashCommandCategoryOrderRef.current ??
+              DEFAULT_COMMAND_CATEGORY_ORDER,
+          );
+          if (
+            /^\/[^\s/]+$/.test(text) &&
+            subcommandResult?.kind === 'subcommand'
+          ) {
+            view.dispatch({
+              changes: { from: text.length, insert: ' ' },
+              selection: { anchor: text.length + 1 },
+            });
+            return true;
+          }
           const followup = followupStateRef.current;
           const hasInlineTags = hasInlineComposerTags(view);
           const followupCompletion = hasInlineTags
