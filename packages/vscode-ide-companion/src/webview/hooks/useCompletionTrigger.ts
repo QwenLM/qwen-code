@@ -29,6 +29,14 @@ export function useCompletionTrigger(
     trigger: '@' | '/',
     query: string,
   ) => Promise<CompletionItem[]>,
+  /**
+   * While suppressed the completion menu cannot open (and an open menu is
+   * closed). App sets this while the model selector is open: both menus
+   * anchor over the same area, and the selector's capture-phase document
+   * keydown listener would otherwise consume Enter for a menu the user may
+   * not even see. At most one key-consuming menu may be mounted at a time.
+   */
+  isSuppressed = false,
 ) {
   // Show immediate loading and provide a timeout fallback for slow sources
   const LOADING_ITEM = useMemo<CompletionItem>(
@@ -68,6 +76,13 @@ export function useCompletionTrigger(
     stateRef.current = state;
   }, [state]);
 
+  // Keep the suppression flag in a ref so openCompletion (a stable callback)
+  // can consult the latest value without re-registering listeners.
+  const suppressedRef = useRef(isSuppressed);
+  useEffect(() => {
+    suppressedRef.current = isSuppressed;
+  }, [isSuppressed]);
+
   const closeCompletion = useCallback(() => {
     // Clear pending timeout
     if (timeoutRef.current) {
@@ -84,12 +99,27 @@ export function useCompletionTrigger(
     });
   }, []);
 
+  // If suppression turns on while the menu is open (e.g. the model selector
+  // was just opened), close it so at most one key-consuming menu remains.
+  useEffect(() => {
+    if (isSuppressed) {
+      closeCompletion();
+    }
+  }, [isSuppressed, closeCompletion]);
+
   const openCompletion = useCallback(
     async (
       trigger: '@' | '/',
       query: string,
       position: { top: number; left: number },
     ) => {
+      // Gate every open path (typing a trigger and the programmatic opens
+      // for the command menu / skills picker) on suppression so completion
+      // can never coexist with the model selector.
+      if (suppressedRef.current) {
+        return;
+      }
+
       const requestId = requestIdRef.current + 1;
       requestIdRef.current = requestId;
       // Clear previous timeout if any
