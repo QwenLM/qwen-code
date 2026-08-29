@@ -18,7 +18,7 @@ import type { Content } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { tokenLimit } from '../core/tokenLimits.js';
-import type { GeminiChat } from '../core/geminiChat.js';
+import type { LlmChat } from '../core/llm-chat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type {
@@ -39,7 +39,7 @@ vi.mock('../telemetry/loggers.js');
 
 describe('ChatCompressionService', () => {
   let service: ChatCompressionService;
-  let mockChat: GeminiChat;
+  let mockChat: LlmChat;
   let mockConfig: Config;
   const mockPromptId = 'test-prompt-id';
   let mockGetHookSystem: ReturnType<typeof vi.fn>;
@@ -52,7 +52,7 @@ describe('ChatCompressionService', () => {
         mockChat.getHistory(curated),
       ),
       appendSystemInstruction: vi.fn(),
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     mockGetHookSystem = vi.fn().mockReturnValue({});
     mockConfig = {
       getChatCompression: vi.fn(),
@@ -219,7 +219,7 @@ describe('ChatCompressionService', () => {
           parts: [
             {
               functionCall: {
-                name: 'computer_use__get_app_state',
+                name: 'mcp__node-repl__node_repl',
                 args: { app: 'Safari' },
               },
             },
@@ -230,7 +230,7 @@ describe('ChatCompressionService', () => {
           parts: [
             {
               functionResponse: {
-                name: 'computer_use__get_app_state',
+                name: 'mcp__node-repl__node_repl',
                 response: { output: '' },
                 parts: imageParts,
               } as unknown as NonNullable<
@@ -1910,6 +1910,100 @@ describe('ChatCompressionService', () => {
       expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
     });
 
+    it('should return API error status when the compression side-query fails', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        100,
+      );
+      vi.mocked(tokenLimit).mockReturnValue(1000);
+
+      const warn = vi.fn();
+      (
+        mockConfig as unknown as {
+          getDebugLogger: () => {
+            warn: typeof warn;
+            debug: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getDebugLogger = () => ({
+        warn,
+        debug: vi.fn(),
+      });
+      vi.spyOn(sideQueryModule, 'runSideQuery').mockRejectedValue(
+        new Error('context window exceeded'),
+      );
+
+      const result = await service.compress(mockChat, {
+        promptId: mockPromptId,
+        force: true,
+        config: mockConfig,
+        consecutiveFailures: 0,
+        originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      });
+
+      expect(result.info.compressionStatus).toBe(
+        CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+      );
+      expect(result.info.newTokenCount).toBe(100);
+      expect(result.newHistory).toBeNull();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('compression side-query failed'),
+      );
+      expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
+    });
+
+    it('should rethrow aborts from the compression side-query', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        100,
+      );
+      vi.mocked(tokenLimit).mockReturnValue(1000);
+
+      const warn = vi.fn();
+      (
+        mockConfig as unknown as {
+          getDebugLogger: () => {
+            warn: typeof warn;
+            debug: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getDebugLogger = () => ({
+        warn,
+        debug: vi.fn(),
+      });
+      const controller = new AbortController();
+      vi.spyOn(sideQueryModule, 'runSideQuery').mockImplementation(() => {
+        controller.abort();
+        return Promise.reject(new Error('cancelled'));
+      });
+
+      await expect(
+        service.compress(mockChat, {
+          promptId: mockPromptId,
+          force: true,
+          config: mockConfig,
+          consecutiveFailures: 0,
+          originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow('cancelled');
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('compression side-query failed'),
+      );
+    });
+
     it('should handle PostCompact hook errors gracefully', async () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'msg1' }] },
@@ -2076,7 +2170,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     const mockChat = {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const mockConfig = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
@@ -2141,7 +2235,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     const mockChat = {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const warn = vi.fn();
     const mockConfig = {
       getChatCompression: vi.fn(),
@@ -2228,7 +2322,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     lastPromptTokenCountIsEstimated?: boolean;
     lastOutputTokenCount?: number;
   }): {
-    chat: GeminiChat;
+    chat: LlmChat;
     config: Config;
     generateText: ReturnType<typeof vi.fn>;
   } {
@@ -2262,7 +2356,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
       getLastOutputTokenCount: vi
         .fn()
         .mockReturnValue(options?.lastOutputTokenCount ?? 0),
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const config = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
@@ -2964,7 +3058,7 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
   // mockChat/mockConfig rather than shared factories, so we follow that
   // pattern here. getHistory(true) returns a non-empty array so the cheap-
   // gate flow can reach the spy when the threshold is crossed.
-  function makeFakeChat(): GeminiChat {
+  function makeFakeChat(): LlmChat {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -2973,7 +3067,7 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
     return {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
   }
 
   function makeFakeConfig(opts: { contextWindowSize: number }): Config {
@@ -3222,12 +3316,12 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
     vi.restoreAllMocks();
   });
 
-  function makeFakeChat(history: Content[]): GeminiChat {
+  function makeFakeChat(history: Content[]): LlmChat {
     const getHistoryMock = vi.fn().mockReturnValue(history);
     return {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
   }
 
   function makeFakeConfig(): Config {
@@ -3453,7 +3547,7 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     vi.restoreAllMocks();
   });
 
-  function makeFakeChat(): GeminiChat {
+  function makeFakeChat(): LlmChat {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -3462,7 +3556,7 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     return {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
   }
 
   function makeFakeConfig(opts: { contextWindowSize: number }): Config {
@@ -3576,7 +3670,7 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     vi.restoreAllMocks();
   });
 
-  function makeFakeChat(): GeminiChat {
+  function makeFakeChat(): LlmChat {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -3585,7 +3679,7 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     return {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
   }
 
   function makeFakeConfig(opts: { contextWindowSize: number }): Config {
@@ -3688,17 +3782,17 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
   });
 });
 
-describe('ChatCompressionService.compress — single-turn computer-use regression', () => {
+describe('ChatCompressionService.compress — single-turn Node REPL image regression', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  function makeFakeChat(history: Content[]): GeminiChat {
+  function makeFakeChat(history: Content[]): LlmChat {
     const getHistoryMock = vi.fn().mockReturnValue(history);
     return {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
   }
 
   function makeFakeConfig(): Config {
@@ -3738,7 +3832,7 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
       parts: [
         {
           functionResponse: {
-            name: 'computer_use__get_app_state',
+            name: 'mcp__node-repl__node_repl',
             response: { output: 'ok' },
             parts: [{ inlineData: { mimeType: 'image/png', data } }],
           } as unknown as NonNullable<
@@ -3752,7 +3846,7 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
       parts: [
         {
           functionCall: {
-            name: 'computer_use__get_app_state',
+            name: 'mcp__node-repl__node_repl',
             args: { app },
           },
         },
@@ -3821,7 +3915,7 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
     ).toEqual(['s3', 's4', 's5']);
 
     // Assertion 3: Image metadata header mentions the source tool and args.
-    expect(flatText).toContain('computer_use__get_app_state');
+    expect(flatText).toContain('mcp__node-repl__node_repl');
     expect(flatText).toContain('"app":"Safari"');
   });
 });
@@ -3858,7 +3952,7 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     const mockChat = {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const hookSystem = opts.hookSystem ?? {
       firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
       firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
@@ -3920,7 +4014,7 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     const mockChat = {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const mockConfig = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
@@ -4144,7 +4238,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     const mockChat = {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const mockConfig = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
@@ -4338,7 +4432,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     const mockChat = {
       getHistory: getHistoryMock,
       getHistoryShallow: getHistoryMock,
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     const mockConfig = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
@@ -4439,7 +4533,7 @@ const WINDOW = 65_536;
 
 describe('issue #7960: compression side-query output budget vs small windows', () => {
   let service: ChatCompressionService;
-  let mockChat: GeminiChat;
+  let mockChat: LlmChat;
   let mockConfig: Config;
   let capturedPromptTokens: number | undefined;
   let capturedMaxOutputTokens: number | undefined;
@@ -4455,7 +4549,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
       getHistoryShallow: vi.fn((curated?: boolean) =>
         mockChat.getHistory(curated),
       ),
-    } as unknown as GeminiChat;
+    } as unknown as LlmChat;
     mockConfig = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),

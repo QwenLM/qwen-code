@@ -42,10 +42,13 @@ import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   writeFileSync,
-  readFileSync,
-  existsSync,
   rmSync,
   statSync,
+  openSync,
+  fstatSync,
+  readSync,
+  closeSync,
+  constants,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -76,7 +79,7 @@ export interface DriveReport {
    * is not a weaker observation of the same thing, it is a different thing.
    */
   observed: boolean;
-  /** The driven script's exit code; null unless the sentinel was reached. */
+  /** The driven script's exit code; null unless `outcome` is `completed`. */
   exitCode: number | null;
   /** Milliseconds spent waiting for readiness — reported even when it arrived. */
   readyAfterMs: number | null;
@@ -155,7 +158,13 @@ export interface DriveArgs {
    */
   capture?: string[];
   /** Test seam — production shells out for real. */
-  exec?: (cmd: string, args: string[], input?: string) => ExecResult;
+  exec?: (
+    cmd: string,
+    args: string[],
+    input?: string,
+    timeoutMs?: number,
+    killSignal?: NodeJS.Signals,
+  ) => ExecResult;
   /** Test seam — production derives it from `server`. */
   logPath?: string;
 }
@@ -181,7 +190,10 @@ export interface ExecResult {
  * narrow makes quoting redundant, and redundant is the point — the next person
  * to widen the charset should not also have to notice the shell line.
  */
-const SERVER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// Exported (with the log cap and the two poll helpers below) for `ab-drive`,
+// which owns the same tmux/sentinel mechanics across two arms and must not
+// re-derive them — a second copy of a safety rule is where the two drift.
+export const SERVER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** Single-quote a path for `bash -lc`, closing over any embedded quote. */
 export function shellQuote(v: string): string {
@@ -385,9 +397,21 @@ export function extractCaptures(
  * a clean pass. A run this command had to stop is not a run that finished, so
  * it gets its own outcome and no exit code at all.
  */
-const LOG_MAX_BYTES = 8 * 1024 * 1024;
+export const LOG_MAX_BYTES = 8 * 1024 * 1024;
+/**
+ * A hard ceiling on how large a log file may be before the poll loop reads it
+ * at all. `LOG_MAX_BYTES` is the SOFT cap: a log over it is classified
+ * `overflowed`, but only AFTER the read, so the trimmed tail is still reported.
+ * A log can grow past V8's ~512 MiB string limit between polls, though, and
+ * then the read throws `ERR_STRING_TOO_LONG` — swallowed to '' by the ab-drive
+ * capture (a completed arm reporting an empty capture, two different arms
+ * comparing equal) or thrown out of the loop in drive. Set well under that
+ * limit, this bounds the allocation: past it the log is unreadable evidence
+ * anyway, so the loop classifies `overflowed` WITHOUT reading.
+ */
+export const MAX_READ_BYTES = 256 * 1024 * 1024;
 /** How often readiness is polled. Fast enough to measure, slow enough to be cheap. */
-const POLL_MS = 250;
+export const POLL_MS = 250;
 
 /**
  * Wait, without asking the platform for a fractional `sleep`.
@@ -405,7 +429,7 @@ const POLL_MS = 250;
  * no platform surface at all.
  */
 /** Size of the log so far; 0 when it is not there yet. */
-function logBytes(p: string): number {
+export function logBytes(p: string): number {
   try {
     return statSync(p).size;
   } catch {
@@ -413,15 +437,86 @@ function logBytes(p: string): number {
   }
 }
 
-function waitMs(ms: number): void {
+export function waitMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function run(cmd: string, args: string[], input?: string): ExecResult {
+/**
+ * Read a file bounded by its size AT open time, never following a concurrent
+ * writer. A `statSync`-then-`readFileSync` guard is check-then-use: readFileSync
+ * keeps reading a file that grows past the size it stat'd, so a log a
+ * backgrounded writer bursts mid-read can still exceed V8's ~512 MiB string
+ * limit and throw `ERR_STRING_TOO_LONG` — the exact throw the ceiling exists to
+ * prevent. Opening once, `fstat`-ing, and reading at most that many bytes caps
+ * the allocation at a size already accepted. `{ overflow: true }` when the file
+ * is already over `maxBytes` (the caller treats it as overflowed); an absent
+ * file reads as an empty snapshot, as before.
+ */
+export function readCapped(
+  path: string,
+  maxBytes: number,
+): { overflow: boolean; text: string } {
+  let fd: number;
+  try {
+    // O_NONBLOCK, mirroring readIfThere: an untrusted arm can swap its log for
+    // a writer-less FIFO (`rm log; mkfifo log` — it learns the path from its
+    // wrapper's command line), and a blocking open would then hang the poll
+    // loop FOREVER, past --timeout, with the finally kill-server never reached.
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  } catch {
+    return { overflow: false, text: '' }; // absent/unopenable → empty snapshot
+  }
+  try {
+    const st = fstatSync(fd);
+    // Only a regular file is a log. A DIRECTORY (`rm log; mkdir log`) would let
+    // openSync succeed and then throw EISDIR out of readSync into the poll
+    // loop; a FIFO/device is not a capture. Treat any non-regular file as an
+    // empty snapshot — the same guard readIfThere applies.
+    if (!st.isFile()) return { overflow: false, text: '' };
+    const size = st.size;
+    if (size > maxBytes) return { overflow: true, text: '' };
+    const buf = Buffer.allocUnsafe(size);
+    let off = 0;
+    // Read at most `size` bytes (from absolute positions), so a writer that
+    // grows the file after the fstat cannot enlarge this read.
+    while (off < size) {
+      const n = readSync(fd, buf, off, size - off, off);
+      if (n <= 0) break; // shrank or hit EOF early — keep what we have
+      off += n;
+    }
+    return { overflow: false, text: buf.toString('utf8', 0, off) };
+  } catch {
+    // fstat/read on a hostile special file must not escape into the handler
+    // catch-all (exit 1, the whole run's report — including the other arm's
+    // completed capture — discarded). Treat as an empty snapshot.
+    return { overflow: false, text: '' };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * The production exec: 30s hang guard, 64MB buffer, null-status-means-failure.
+ * Exported for `ab-drive`, which owns the same tmux mechanics across two arms
+ * — a second copy of these limits is where the two commands drift apart under
+ * the same failure.
+ */
+export function spawnExec(
+  cmd: string,
+  args: string[],
+  input?: string,
+  timeoutMs = 30_000,
+  killSignal?: NodeJS.Signals,
+): ExecResult {
   const r = spawnSync(cmd, args, {
     encoding: 'utf8',
     input,
-    timeout: 30_000,
+    timeout: timeoutMs,
+    // spawnSync's timeout kill defaults to SIGTERM, which untrusted code can
+    // trap — a probe that ignores it would block past its budget forever.
+    // Callers running disposable, untrusted work (readiness probes) pass
+    // SIGKILL so the budget is hard.
+    ...(killSignal ? { killSignal } : {}),
     maxBuffer: 64 * 1024 * 1024,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -459,11 +554,20 @@ export const DRIVE_SENTINEL = '__QWEN_REVIEW_DRIVE_DONE__';
  * not.
  */
 export function wrapScript(
-  script: string,
+  userScriptPath: string,
   sentinelPath: string,
   sentinel = DRIVE_SENTINEL,
 ): string {
-  return `trap '__qwen_rc=$?; echo "${sentinel} rc=\${__qwen_rc}" > ${shellQuote(sentinelPath)}' EXIT\nset +e\n${script}\n`;
+  // Run the user body from its OWN file (`bash <file>`), not inlined. Two
+  // properties fall out. `exec` in the body (`exec node server.js`) replaces
+  // only THAT child bash, so the trap-owning wrapper survives to write the
+  // sentinel — without this the arm would time out despite finishing. And a
+  // construct that swallows trailing text — an unterminated heredoc — is
+  // delimited by the END of the user file, so it cannot reach past it. An
+  // earlier inlined subshell `( … )` could not offer the second: a dangling
+  // heredoc consumed the closing paren, the compound never parsed, and the body
+  // silently did not run while the trap stamped the syntax-error rc.
+  return `trap '__qwen_rc=$?; echo "${sentinel} rc=\${__qwen_rc}" > ${shellQuote(sentinelPath)}' EXIT\nset +e\nbash ${shellQuote(userScriptPath)}\n`;
 }
 
 /** Parse the sentinel line back out of a capture. Null when it is not there. */
@@ -492,7 +596,7 @@ export function trimCapture(s: string): { text: string; truncated: boolean } {
 }
 
 export function runDrive(args: DriveArgs): DriveReport {
-  const exec = args.exec ?? run;
+  const exec = args.exec ?? spawnExec;
   const server = args.server;
   if (!SERVER_NAME_RE.test(server)) {
     return {
@@ -506,6 +610,34 @@ export function runDrive(args: DriveArgs): DriveReport {
       killedStale: false,
       note: `--server ${JSON.stringify(server)} is not a name this command will own: it becomes both a path under the temp dir and a word in the shell line tmux runs, so it is restricted to letters, digits, dot, dash and underscore (max 64). Nothing was started.`,
     };
+  }
+  // Non-finite or non-positive time budgets disable every deadline below
+  // (`Date.now() >= NaN` is never true) — and, since the readiness probe's
+  // budget is handed to spawnSync's `timeout` (validated as an unsigned
+  // integer), NaN / Infinity / a fraction would THROW ERR_OUT_OF_RANGE out of
+  // the ready loop into the handler catch-all: exit 1, no report. yargs
+  // `type:'number'` produces NaN from `--timeout abc`. Refuse up front, the
+  // same guard ab-drive applies.
+  for (const [flag, v] of [
+    ['--timeout', args.timeout],
+    ['--ready-timeout', args.readyTimeout],
+  ] as const) {
+    // Zero is a legitimate budget here ("one poll, then stop" — the suite
+    // drives timed-out shapes that way), so only NEGATIVE or non-finite is
+    // refused; the probe's budget is clamped to an integer below.
+    if (!Number.isFinite(v) || v < 0) {
+      return {
+        outcome: 'unavailable',
+        observed: false,
+        exitCode: null,
+        readyAfterMs: null,
+        droveForMs: 0,
+        output: '',
+        truncated: false,
+        killedStale: false,
+        note: `${flag} must be a non-negative, finite number of seconds (got ${v}) — nothing was started.`,
+      };
+    }
   }
   // Before anything is started, like the server-name check above: a caller who
   // asked for a capture wants it in the witness, and discovering the pattern
@@ -551,7 +683,24 @@ export function runDrive(args: DriveArgs): DriveReport {
   if (args.ready) {
     const deadline = started + args.readyTimeout * 1000;
     for (;;) {
-      if (exec('bash', ['-lc', args.ready]).status === 0) {
+      // Bound ONE probe by the remaining --ready-timeout budget, and kill it
+      // with SIGKILL — the same contract ab-drive's probeOnce applies. Without
+      // the budget a hanging probe spends the fixed 30s default per call, so
+      // any --ready-timeout under 30s is overrun by a single probe; without
+      // SIGKILL a probe that traps TERM (untrusted code the brief itself
+      // warns about) is waited on by spawnSync forever, hanging the CLI with
+      // no report and a leaked tmux server.
+      // Integer, and under spawnSync's int32 ceiling: its `timeout` is
+      // validated as an unsigned integer, so a fractional or huge budget would
+      // throw ERR_OUT_OF_RANGE out of this loop.
+      const budgetMs = Math.min(
+        Math.max(1, Math.trunc(deadline - Date.now())),
+        2 ** 31 - 1,
+      );
+      if (
+        exec('bash', ['-lc', args.ready], undefined, budgetMs, 'SIGKILL')
+          .status === 0
+      ) {
         readyAfterMs = Date.now() - started;
         break;
       }
@@ -576,15 +725,28 @@ export function runDrive(args: DriveArgs): DriveReport {
   const dir = join(tmpdir(), `qwen-review-drive-${server}`);
   mkdirSync(dir, { recursive: true });
   const scriptPath = join(dir, 'drive.sh');
+  const bodyPath = join(dir, 'drive.body.sh');
   const logPath = args.logPath ?? join(dir, 'drive.log');
   const sentinelPath = join(dir, 'drive.rc');
   rmSync(sentinelPath, { force: true });
-  writeFileSync(scriptPath, wrapScript(args.script, sentinelPath), 'utf8');
+  // The user body in its own file so wrapScript runs it with `bash <file>`.
+  writeFileSync(bodyPath, `${args.script}\n`, 'utf8');
+  writeFileSync(scriptPath, wrapScript(bodyPath, sentinelPath), 'utf8');
 
   const droveFrom = Date.now();
   let output = '';
   let exitCode: number | null = null;
   let outcome: DriveOutcome = 'timed-out';
+  // NOTE — deliberately NO signal handler here. The poll loop is fully
+  // synchronous (spawnSync + Atomics.wait + sync fs), so the event loop never
+  // turns during a drive, and a `process.on('SIGTERM')` callback is only ever
+  // delivered on an event-loop turn. Registering one would not run the
+  // teardown mid-loop AND would suppress Node's default terminate action — so
+  // SIGTERM/SIGINT/SIGHUP would be silently IGNORED for the whole --timeout
+  // (measured: the drive ran to completion and exited 0), strictly worse than
+  // the default. The keeper that a signalled process leaks (it setsids out of
+  // reach of a group kill) is the accepted same-uid teardown-reachability
+  // residual; closing it needs an async loop or an out-of-process watchdog.
   try {
     // The SCRIPT writes the log, not the pane. `pipe-pane` attaches after
     // `new-session` has already started the script, so a fast drive finishes —
@@ -616,10 +778,27 @@ export function runDrive(args: DriveArgs): DriveReport {
     }
     const deadline = droveFrom + args.timeout * 1000;
     for (;;) {
-      output = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
-      exitCode = existsSync(sentinelPath)
-        ? sentinelExitCode(readFileSync(sentinelPath, 'utf8'))
-        : null;
+      // Bounded read: `readCapped` opens once, fstats, and reads at most that
+      // many bytes, so a writer bursting the log past MAX_READ_BYTES mid-read
+      // cannot enlarge the allocation into an ERR_STRING_TOO_LONG throw. Over
+      // the ceiling is `overflowed`; the soft LOG_MAX_BYTES check below still
+      // trims an ordinary overflow.
+      const cap = readCapped(logPath, MAX_READ_BYTES);
+      if (cap.overflow) {
+        outcome = 'overflowed';
+        break;
+      }
+      output = cap.text;
+      // The sentinel is the one other arm-controlled path in this loop (the
+      // arm learns it from the wrapper it runs under): read it through the
+      // same bounded, non-blocking, regular-file-only helper as the log, so a
+      // `rm drive.rc; mkfifo drive.rc` cannot block the poll past --timeout, a
+      // >512 MiB sparse plant cannot throw ERR_STRING_TOO_LONG out of the
+      // loop, and a directory swap cannot throw EISDIR. Absent / non-file /
+      // over-cap all read as "no sentinel yet".
+      const sc = readCapped(sentinelPath, MAX_READ_BYTES);
+      exitCode =
+        sc.overflow || sc.text === '' ? null : sentinelExitCode(sc.text);
       if (exitCode !== null) {
         // Re-read the log now that the sentinel is there, because the read
         // above happened BEFORE it. The wrapper writes the sentinel from an
@@ -634,10 +813,20 @@ export function runDrive(args: DriveArgs): DriveReport {
         // sentinel write, so a read taken after it is complete. Kept to this
         // branch: the other exits stopped the run rather than observing it
         // finish, and have no such guarantee to lean on.
-        output = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
+        // Re-read (bounded) now the sentinel is there: a final burst past
+        // MAX_READ_BYTES between the top-of-iteration read and the sentinel is
+        // still classified overflowed rather than throwing.
+        const done = readCapped(logPath, MAX_READ_BYTES);
+        if (done.overflow) {
+          outcome = 'overflowed';
+          break;
+        }
+        output = done.text;
         outcome = 'completed';
         break;
       }
+      // Soft cap, after the read: an ordinary overflow keeps its trimmed tail
+      // (unlike the unread hard-ceiling break at the top of the loop).
       if (logBytes(logPath) > LOG_MAX_BYTES) {
         outcome = 'overflowed';
         break;
@@ -654,8 +843,15 @@ export function runDrive(args: DriveArgs): DriveReport {
     // invocation would otherwise leave its own directory behind: measured, six
     // runs left five. `output` is already in memory by here, so nothing the
     // caller needs is in this tree. A caller who passed `--log-path` owns that
-    // file and keeps it.
-    if (!args.logPath) rmSync(dir, { recursive: true, force: true });
+    // file and keeps it. Best-effort: an `ENOTEMPTY`/`EIO` from a degraded
+    // tmpdir must not throw the finished report away out of the finally.
+    if (!args.logPath) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
+    }
   }
 
   // From the untrimmed log, and on every outcome rather than only `completed`:
@@ -704,7 +900,14 @@ export function runDrive(args: DriveArgs): DriveReport {
   return {
     outcome,
     observed: outcome === 'completed',
-    exitCode,
+    // Null unless the run completed (the documented invariant): the poll loop
+    // reads the sentinel every iteration, and the sentinel branch's
+    // hard-ceiling break stops a run whose sentinel DID appear — the very
+    // iteration the log crossed MAX_READ_BYTES. Returning that value beside
+    // the overflowed note contradicts the note, and a caller branching on
+    // `exitCode !== null` as the completion signal would treat a stopped,
+    // unread run as completed. ab-drive's twin masks this the same way.
+    exitCode: outcome === 'completed' ? exitCode : null,
     readyAfterMs,
     droveForMs,
     output: text,

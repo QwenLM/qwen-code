@@ -21,7 +21,7 @@ import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { Buffer } from 'node:buffer';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
-import { observeAcpToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
+import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { HistoryReplayer } from './history-replayer.js';
 import type { PendingReplayToolCall } from './history-replayer.js';
 import type { CumulativeUsage, SessionEmitterContext } from './types.js';
@@ -254,6 +254,7 @@ export async function collectHistoryReplayUpdates({
   goalBootstrap,
   limits,
   suppressRestoreAskUserQuestion,
+  finalizeDangling,
 }: {
   sessionId: string;
   config?: Config;
@@ -270,6 +271,14 @@ export async function collectHistoryReplayUpdates({
    * so the replayed card doesn't spin forever with no restore prompt coming.
    */
   suppressRestoreAskUserQuestion?: boolean;
+  /**
+   * Ungated live-session loads (qwen/session/loadUpdates) while the
+   * session still has an active turn must not finalize dangling calls: a
+   * trailing unmatched call is in-flight, not abandoned, and its result
+   * arrives through the live stream (#9704). The gated live loadSession
+   * path and non-live loads pass true.
+   */
+  finalizeDangling?: boolean;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
   try {
@@ -283,7 +292,7 @@ export async function collectHistoryReplayUpdates({
       suppressRestoreAskUserQuestion !== true &&
       config?.getRestoreAskUserQuestion?.() === true
     ) {
-      const replayClient = config.getGeminiClient?.();
+      const replayClient = config.getLlmClient?.();
       const lastHistoryContent =
         replayClient?.isInitialized?.() === true
           ? (replayClient.getChat?.()?.peekLastHistoryEntry?.() ??
@@ -299,6 +308,7 @@ export async function collectHistoryReplayUpdates({
       ...(initial.goalCause ? { initialGoalCause: initial.goalCause } : {}),
       ...(goalBootstrap ? { goalBootstrap } : {}),
       ...(skipFinalizeCallIds ? { skipFinalizeCallIds } : {}),
+      ...(finalizeDangling === undefined ? {} : { finalizeDangling }),
     });
   } catch (error) {
     if (error instanceof HistoryReplayLimitError) throw error;

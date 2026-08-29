@@ -419,7 +419,7 @@ not be re-plumbed through a running session.
 ### Decision: Reuse the schema's `requiresRestart` flag (single source of truth)
 
 `settingsSchema.ts` already declares `requiresRestart: boolean` on **every** key,
-and `packages/cli/src/utils/settingsUtils.ts` already exposes the lookups:
+and `packages/cli/src/config/settingsUtils.ts` already exposes the lookups:
 
 - `requiresRestart(key: string): boolean` — flag for a dot-path key
 - `getFlattenedSchema()` — full flattened `key → definition` map

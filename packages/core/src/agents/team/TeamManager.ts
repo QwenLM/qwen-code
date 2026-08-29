@@ -19,6 +19,7 @@ import { randomBytes } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { escapeJsonTagCharacters } from '../../utils/formatters.js';
 import { escapeXml } from '../../utils/xml.js';
 import { ApprovalMode } from '../../config/config.js';
 import type {
@@ -27,7 +28,11 @@ import type {
   TeamAgentHandle,
 } from '../backends/types.js';
 import { PermissionMode } from '../../hooks/types.js';
-import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
+import {
+  AgentStatus,
+  isTerminalStatus,
+  lastVisibleAnswer,
+} from '../runtime/agent-types.js';
 import { AgentEventType } from '../runtime/agent-events.js';
 import type {
   AgentRoundTextEvent,
@@ -75,6 +80,7 @@ import {
 import { buildTeammatePromptAddendum } from './promptAddendum.js';
 import { runWithTeammateIdentity } from './identity.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
+import type { SubagentModelRoute } from '../../subagents/types.js';
 import type { ToolConfig } from '../runtime/agent-types.js';
 import { runOutsideAgentContext } from '../runtime/agent-context.js';
 import { READ_ONLY_INSPECTION_TOOLS } from '../runtime/subagent-plan-tool-policy.js';
@@ -87,6 +93,14 @@ const debug = createDebugLogger('AGENTS_TEAM_MANAGER');
 // `TeamAgentHandle` is re-exported below so existing callers that
 // imported it from this module keep compiling.
 export type { TeamAgentHandle };
+
+/** Delivery outcome of a {@link TeamManager.broadcast} call. */
+export interface BroadcastResult {
+  /** Number of recipients the broadcast attempted (sender excluded). */
+  total: number;
+  /** Names of recipients whose delivery was rejected. */
+  failedRecipients: string[];
+}
 
 /** Configuration for spawning a teammate. */
 export interface TeammateSpawnConfig {
@@ -147,6 +161,23 @@ interface PendingPlanApproval {
   onAbort?: () => void;
 }
 
+interface ShutdownOutstandingToken {
+  kind: 'delivered' | 'marker';
+  reservations: number;
+  consumed: boolean;
+}
+
+interface ShutdownLedger {
+  inFlightWrites: number;
+  outstandingTokens: ShutdownOutstandingToken[];
+  responsesInFlight: number;
+}
+
+interface ShutdownResponseReservation {
+  ledger: ShutdownLedger;
+  token: ShutdownOutstandingToken;
+}
+
 /**
  * The stable tag wrapping teammate→leader messages in the leader's
  * conversation. No secret/nonce: forgery is prevented structurally by
@@ -175,6 +206,33 @@ export class TeamManager {
   private readonly backend: Backend;
   private teamFile: TeamFile;
   private readonly teamEventEmitter = new TeamEventEmitter();
+
+  /**
+   * Per-TeamManager write queue serializing every roster write
+   * (the success-path write and the failed-spawn compensating
+   * write in `spawnTeammate`). Each queued task snapshots
+   * `teamFile` when it RUNS, not when it is enqueued, so
+   * commits land in call order and a compensating write queued
+   * after a stale snapshot always lands last. Without this, two
+   * unsynchronized writers can reorder — a slow atomic rename
+   * for the stale snapshot landing after the compensating write
+   * — and re-persist exactly the ghost member #10208 removes.
+   */
+  private teamFileWriteQueue: Promise<void> = Promise.resolve();
+
+  /**
+   * Count of roster writes that have started (reached their snapshot
+   * point) in `persistTeamFile`'s queue. Because each queued write
+   * snapshots the roster synchronously when it RUNS, a member pushed
+   * after the last started write cannot be on disk yet. The failed-spawn
+   * compensating write compares this counter against the value captured
+   * at push time and skips when no write could have persisted the
+   * failed member — writing anyway would serialize the live roster and
+   * persist sibling members whose own spawn is still pending, widening
+   * the #10208 ghost window in the "no write has landed yet"
+   * interleaving.
+   */
+  private teamFileWritesStarted = 0;
 
   /**
    * Cap on per-agent pending messages. Each message can be up to the
@@ -220,14 +278,17 @@ export class TeamManager {
     | ((message: string, display: string) => void)
     | null = null;
 
-  /** Names of teammates with a pending leader-requested shutdown.
-   *  Gates both the per-idle mailbox read in flushNextMessage and
-   *  the shutdown_approved abort path in sendMessage. Tracked
-   *  per-agent (rather than as a sticky boolean) so a free-text
-   *  match in an unrelated teammate's reply cannot abort them, and
-   *  so an impersonation-forged shutdown can't widen the blast
-   *  radius across the rest of the session. */
-  private readonly _shutdownPending = new Set<string>();
+  /**
+   * Shutdown state is isolated per teammate, so one teammate's writes or
+   * responses cannot gate assignments or consume requests for another.
+   * Each successful request write adds exactly one delivered token, while
+   * repeated test markers share at most one marker token. A response reserves
+   * a specific token before its mailbox write; the reservation keeps the gate
+   * closed until settlement, a successful settlement consumes that token at
+   * most once, and a failed settlement leaves it available. A ledger is
+   * removed only after all writes, tokens, and response reservations settle.
+   */
+  private readonly shutdownLedgers = new Map<string, ShutdownLedger>();
 
   /** Per-agent last activity timestamp (updated on events). */
   private readonly lastActivityAt = new Map<string, number>();
@@ -276,6 +337,36 @@ export class TeamManager {
   // ─── Teammate lifecycle ─────────────────────────────────
 
   /**
+   * Queue a team-file write behind any in-flight roster write and
+   * return its promise. The snapshot is taken when the queued task
+   * runs (see `teamFileWriteQueue`), so the last queued write always
+   * commits the newest in-memory state. A rejected write does not
+   * poison the queue — the chain survives for subsequent writes.
+   */
+  private persistTeamFile(): Promise<void> {
+    const write = this.teamFileWriteQueue.then(() => {
+      // Snapshot point for `teamFileWritesStarted`: the roster snapshot
+      // below is taken synchronously here, so any member already pushed
+      // could land on disk through this write. Counted before the
+      // write runs (not after it resolves) so an in-flight write that
+      // started inside a failed member's window still counts — the
+      // compensating write queues behind it and repairs whatever it
+      // persisted.
+      this.teamFileWritesStarted++;
+      // Snapshot synchronously at the counted point, before any await:
+      // `writeTeamFile` awaits `fs.mkdir` before stringifying its
+      // argument, so handing it the live roster would let a member
+      // pushed during that fs hop land on disk through a write this
+      // gate counts as pre-push — the failed member's compensating
+      // write would then be skipped and the ghost persisted (#10208).
+      const snapshot = structuredClone(this.teamFile);
+      return writeTeamFile(this.teamFile.name, snapshot);
+    });
+    this.teamFileWriteQueue = write.catch(() => {});
+    return write;
+  }
+
+  /**
    * Spawn a new teammate. Adds the member to the team file,
    * spawns via backend, and sets up the event bridge.
    */
@@ -286,6 +377,13 @@ export class TeamManager {
       );
     }
 
+    // Normalize the spawn-time model override once: an empty string
+    // means "no override", same as undefined. The guards below used to
+    // mix `??` (nullish) and `!` (falsy), so `model: ''` kept the
+    // empty override for the model while the route guard saw it as
+    // absent — the two halves of the spawn disagreed.
+    const effectiveModel = config.model || undefined;
+
     const name = generateUniqueTeammateName(config.name, this.teamFile.members);
     const agentId = formatAgentId(name, this.teamFile.name);
     const color = assignTeammateColor(this.teamFile.members);
@@ -295,7 +393,7 @@ export class TeamManager {
       agentId,
       name,
       agentType: config.agentType,
-      model: config.model,
+      model: effectiveModel,
       prompt: config.prompt,
       color,
       joinedAt: Date.now(),
@@ -326,6 +424,11 @@ export class TeamManager {
     this.pendingMessages.set(agentId, []);
     this.lastActivityAt.set(agentId, Date.now());
     this.agentIdentities.set(agentId, identity);
+
+    // Roster writes that started before this push cannot have persisted
+    // the member; the compensating write after a failed spawn compares
+    // against this to decide whether anything on disk needs repairing.
+    const writesStartedAtPush = this.teamFileWritesStarted;
 
     let agentSpawned = false;
     let eventBridgeAttached = false;
@@ -362,6 +465,7 @@ export class TeamManager {
       // definition so the teammate behaves like that agent type.
       let subagentPrompt: string | undefined;
       let subagentModel: string | undefined;
+      let subagentModelRoute: SubagentModelRoute | undefined;
       let subagentRunConfig: Record<string, unknown> | undefined;
       let toolConfig: ToolConfig | undefined;
       if (config.agentType && this.subagentManager) {
@@ -377,6 +481,18 @@ export class TeamManager {
         subagentModel = runtimeCfg.modelConfig.model;
         subagentRunConfig = runtimeCfg.runConfig as Record<string, unknown>;
         toolConfig = runtimeCfg.toolConfig;
+        // Resolve the definition's model selector with the runtime context,
+        // the same way the ordinary-subagent path does (#10071).
+        // convertToRuntimeConfig is called without a context, so it keeps
+        // only a bare model ID and cannot resolve `fast`; both the
+        // selector's authType and the resolved model ID are needed below
+        // to give the teammate the definition's provider route instead of
+        // the leader's.
+        subagentModelRoute =
+          this.subagentManager.resolveSubagentModelRoute(subagentConfig);
+        if (subagentModelRoute) {
+          subagentModel = subagentModelRoute.modelId;
+        }
         // Ensure team coordination tools are always available,
         // even when the subagent defines a restricted tool set.
         if (toolConfig) {
@@ -437,6 +553,17 @@ export class TeamManager {
         ? `${basePrompt}\n\n${addendum}`
         : addendum;
 
+      // Reflect the model the teammate will actually run on — including a
+      // model selected by the definition's frontmatter (#10071), not just
+      // an explicit spawn-time override — in the team file and join event.
+      member.model = effectiveModel ?? subagentModel;
+
+      // The definition's resolved route is applied only when the leader
+      // did not override the model at spawn time. Computed once so the
+      // authOverrides build below and the post-spawn route verification
+      // cannot drift apart (#10071).
+      const dedicatedRoute = !effectiveModel ? subagentModelRoute : undefined;
+
       // Build spawn config for the backend.
       const spawnConfig: AgentSpawnConfig = {
         agentId,
@@ -457,12 +584,22 @@ export class TeamManager {
                 '(status: "in_progress"), do the work, report ' +
                 'via send_message(to: "leader"), then mark ' +
                 'completed with task_update.'),
+          // The definition's resolved provider route (#10071). InProcess
+          // backends build a dedicated per-agent ContentGenerator only
+          // when authOverrides.authType is present; without this the
+          // teammate falls back to the leader's generator and streams the
+          // definition's model ID over the leader's route. Skipped when
+          // the leader overrode the model at spawn time — the definition
+          // does not vouch for the route of a model it did not select.
+          authOverrides: dedicatedRoute
+            ? { authType: dedicatedRoute.authType }
+            : undefined,
           runtimeConfig: {
             promptConfig: {
               systemPrompt,
             },
             modelConfig: {
-              model: config.model ?? subagentModel,
+              model: effectiveModel ?? subagentModel,
             },
             runConfig: {
               ...subagentRunConfig,
@@ -497,6 +634,43 @@ export class TeamManager {
         throw new Error(`Teammate "${name}" failed to start: ${reason}`);
       }
 
+      // A healthy spawn is not proof the requested route materialized:
+      // InProcessBackend swallows per-agent ContentGenerator creation
+      // failures into a debug log and falls back to the leader's
+      // generator (#10071). Without this check the teammate would join
+      // while streaming the definition's model ID over the leader's
+      // route — the exact misrouting this PR fixes. Verify the
+      // dedicated generator exists and fail loudly so `rollback` tears
+      // the teammate down, matching the ordinary-subagent path, which
+      // surfaces the same failure as a spawn error.
+      if (dedicatedRoute) {
+        // A backend that omits the accessor cannot prove the route
+        // materialized. Fail loudly with the real cause instead of
+        // treating a missing method like a generator-creation failure
+        // (which would send maintainers hunting for a missing API key)
+        // or, worse, letting the teammate join on the leader's
+        // generator — the silent misrouting this PR fixes (#10071).
+        if (typeof this.backend.getAgentContentGenerator !== 'function') {
+          throw new Error(
+            `Teammate "${name}" failed to start: the active backend ` +
+              `does not support dedicated per-agent ContentGenerators ` +
+              `required by model "${dedicatedRoute.modelId}" ` +
+              `(${dedicatedRoute.authType})`,
+          );
+        }
+        const routeGenerator = this.backend.getAgentContentGenerator(agentId);
+        if (!routeGenerator) {
+          const cause = this.backend.getAgentContentGeneratorError?.(agentId);
+          throw new Error(
+            `Teammate "${name}" failed to start: could not create a ` +
+              `dedicated ContentGenerator for model ` +
+              `"${dedicatedRoute.modelId}" ` +
+              `(${dedicatedRoute.authType})` +
+              (cause ? `: ${cause}` : ''),
+          );
+        }
+      }
+
       this.setupEventBridge(agentId, name);
       eventBridgeAttached = true;
 
@@ -504,9 +678,50 @@ export class TeamManager {
       // EACCES, ...), `rollback` tears down the just-spawned agent
       // and event bridge so we don't leave a running teammate that
       // no team file knows about.
-      await writeTeamFile(this.teamFile.name, this.teamFile);
+      await this.persistTeamFile();
     } catch (err) {
       rollback();
+      // Compensating write: if another concurrent spawn already
+      // persisted this member in config.json, rewrite the file so
+      // persisted membership matches the post-rollback in-memory
+      // state. Best-effort — the original error is more important.
+      // Gated on `teamFileWritesStarted`: if no roster write started
+      // while the member was in the roster, nothing on disk can
+      // contain it, and writing anyway would serialize the live roster
+      // — persisting sibling members whose own spawn is still pending
+      // and widening the ghost window #10208 removes in the "failed
+      // spawn is the first write" interleaving.
+      if (this.teamFileWritesStarted > writesStartedAtPush) {
+        try {
+          await this.persistTeamFile();
+        } catch (writeErr) {
+          // Best-effort — the original error takes precedence, but
+          // leave a trail so a resurfaced ghost member can be told
+          // apart from a compensating write that itself failed.
+          debug.warn(
+            `Compensating team-file write after failed spawn of ` +
+              `${agentId} failed: ${getErrorMessage(writeErr)}`,
+          );
+          // Beyond the debug log (which is off in production), surface
+          // the failure to the leader as well, mirroring `fireAndForget`:
+          // the persisted roster may now keep a ghost member (#10208),
+          // and the leader is the only production-visible observer.
+          try {
+            this.leaderMessageCallback?.(
+              `<team_error>Compensating team-file write after failed ` +
+                `spawn of ${agentId} failed: ` +
+                `${getErrorMessage(writeErr)}</team_error>`,
+              `Team roster write after failed spawn of "${name}" failed`,
+            );
+          } catch (cbErr) {
+            const cbMsg = getErrorMessage(cbErr);
+            debug.warn(
+              `Compensating-write failure notice: leader message ` +
+                `callback threw: ${cbMsg}`,
+            );
+          }
+        }
+      }
       throw err;
     }
 
@@ -544,61 +759,58 @@ export class TeamManager {
       toName.toLowerCase() === LEADER_NAME ||
       toName === this.teamFile.leadAgentId
     ) {
-      // Classify a shutdown response up front, but only for a teammate
-      // the leader actually asked to shut down (the gate) and only when
-      // the reply *leads* with the structured token — not merely
-      // mentions it in prose. The resulting type is carried on the
-      // message and drives the abort decision below, instead of
-      // re-scanning the free-text body. This is what keeps a
-      // pending-shutdown teammate that mentions "shutdown_approved"
-      // mid-report (e.g. while reviewing shutdown code) from being
-      // aborted, and a non-requested teammate from ever triggering one.
       const sender = from
         ? findMemberByName(this.teamFile.members, from)
         : undefined;
-      const shutdownResponse =
-        sender && !automatic && this._shutdownPending.has(sender.name)
-          ? classifyShutdownResponse(message)
+      const responseCandidate =
+        sender && !automatic ? classifyShutdownResponse(message) : undefined;
+      const shutdownReservation =
+        sender && responseCandidate
+          ? this.reserveShutdownResponse(sender.name)
           : undefined;
+      const shutdownResponse = shutdownReservation
+        ? responseCandidate
+        : undefined;
+      let consumedShutdownToken = false;
 
-      await writeMessage(this.teamFile.name, LEADER_NAME, {
-        from: from ?? 'unknown',
-        text: message,
-        summary,
-        timestamp: new Date().toISOString(),
-        read: false,
-        type: shutdownResponse,
-      });
+      try {
+        await writeMessage(this.teamFile.name, LEADER_NAME, {
+          from: from ?? 'unknown',
+          text: message,
+          summary,
+          timestamp: new Date().toISOString(),
+          read: false,
+          type: shutdownResponse,
+        });
+      } catch (error) {
+        if (sender && shutdownReservation) {
+          this.settleShutdownResponse(sender.name, shutdownReservation, false);
+        }
+        throw error;
+      }
+      if (sender && shutdownResponse && shutdownReservation) {
+        consumedShutdownToken = this.settleShutdownResponse(
+          sender.name,
+          shutdownReservation,
+          true,
+        );
+      }
       if (sender && !automatic) {
         this.explicitLeaderReports.add(sender.agentId);
       }
-      this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
-        from: from ?? 'unknown',
-        to: LEADER_NAME,
-        message,
-        timestamp: Date.now(),
-      });
-
-      // Act on the typed shutdown response. Approval aborts the
-      // teammate so it actually retires; rejection just clears the
-      // pending flag — leaving it set would keep the teammate excluded
-      // from auto-claim (scanIdleAgentsForTasks skips pending-shutdown
-      // members) and kill-armed. Either way the reply text still
-      // reaches the leader through the inbox write above.
-      //
-      // Re-check the pending flag here, after the await: the response
-      // was classified before `writeMessage`, so a concurrent reply from
-      // the same teammate could have cleared the flag in between. Acting
-      // on the stale capture would abort a teammate whose latest reply
-      // was a rejection — so gate the act on the flag still being set,
-      // keeping check-and-act atomic as the pre-refactor path was.
-      if (
-        sender &&
-        shutdownResponse &&
-        this._shutdownPending.has(sender.name)
-      ) {
-        this._shutdownPending.delete(sender.name);
-        if (shutdownResponse === 'shutdown_approved') {
+      try {
+        this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
+          from: from ?? 'unknown',
+          to: LEADER_NAME,
+          message,
+          timestamp: Date.now(),
+        });
+      } finally {
+        if (
+          sender &&
+          shutdownResponse === 'shutdown_approved' &&
+          consumedShutdownToken
+        ) {
           this.getAgentFromBackend(sender.agentId)?.abort();
         }
       }
@@ -653,31 +865,38 @@ export class TeamManager {
   /**
    * Broadcast a message to all teammates and the leader
    * (except the sender).
+   *
+   * Returns the delivery outcome so the caller can distinguish complete
+   * success from partial/total failure instead of assuming every
+   * delivery landed.
    */
-  async broadcast(message: string, fromName: string): Promise<void> {
-    const promises = this.teamFile.members
+  async broadcast(message: string, fromName: string): Promise<BroadcastResult> {
+    const recipients = this.teamFile.members
       .filter((m) => m.name.toLowerCase() !== fromName.toLowerCase())
-      .map((m) => this.sendMessage(m.name, message, fromName));
+      .map((m) => m.name);
 
     // Also deliver to leader inbox if sender is not the leader.
     if (fromName.toLowerCase() !== LEADER_NAME) {
-      promises.push(this.sendMessage(LEADER_NAME, message, fromName));
+      recipients.push(LEADER_NAME);
     }
 
     // allSettled, not all: a single recipient that terminated between
     // the member snapshot and the send throws (its queue is gone), and
     // Promise.all would reject the whole broadcast — making the leader
     // think every recipient failed when the rest were delivered fine.
-    const results = await Promise.allSettled(promises);
-    const failures = results.filter(
-      (r): r is PromiseRejectedResult => r.status === 'rejected',
+    const results = await Promise.allSettled(
+      recipients.map((name) => this.sendMessage(name, message, fromName)),
     );
-    if (failures.length > 0) {
+    const failedRecipients = recipients.filter(
+      (_, i) => results[i]?.status === 'rejected',
+    );
+    if (failedRecipients.length > 0) {
       debug.warn(
-        `Broadcast: ${failures.length}/${results.length} send(s) failed ` +
+        `Broadcast: ${failedRecipients.length}/${results.length} send(s) failed ` +
           `(recipient likely terminated).`,
       );
     }
+    return { total: recipients.length, failedRecipients };
   }
 
   /**
@@ -690,18 +909,37 @@ export class TeamManager {
       throw new Error(`Teammate "${name}" not found.`);
     }
 
-    this._shutdownPending.add(member.name);
-
-    await sendStructuredMessage(this.teamFile.name, member.name, {
-      from: LEADER_NAME,
-      type: 'shutdown_request',
-      text:
-        'The team leader has requested that you shut down. ' +
-        'Please finish your current work and use ' +
-        'send_message to reply to "leader" with either ' +
-        '"shutdown_approved" or "shutdown_rejected: <reason>".',
-      summary: 'Shutdown requested by leader',
-    });
+    const ledger = this.getOrCreateShutdownLedger(member.name);
+    ledger.inFlightWrites += 1;
+    try {
+      await sendStructuredMessage(this.teamFile.name, member.name, {
+        from: LEADER_NAME,
+        type: 'shutdown_request',
+        text:
+          'The team leader has requested that you shut down. ' +
+          'Please finish your current work and use ' +
+          'send_message to reply to "leader" with either ' +
+          '"shutdown_approved" or "shutdown_rejected: <reason>".',
+        summary: 'Shutdown requested by leader',
+      });
+      if (this.shutdownLedgers.get(member.name) === ledger) {
+        ledger.outstandingTokens.push({
+          kind: 'delivered',
+          reservations: 0,
+          consumed: false,
+        });
+        debug.debug(
+          `shutdown[${member.name}]: minted delivered token ` +
+            `(tokens=${ledger.outstandingTokens.length}, ` +
+            `inFlightWrites=${ledger.inFlightWrites})`,
+        );
+      }
+    } finally {
+      if (this.shutdownLedgers.get(member.name) === ledger) {
+        ledger.inFlightWrites -= 1;
+        this.cleanupShutdownLedger(member.name, ledger);
+      }
+    }
 
     // If agent is idle, flush immediately (shutdown has
     // highest priority and will be picked up from mailbox).
@@ -1017,9 +1255,8 @@ export class TeamManager {
       originalRequest: request.originalRequest,
       researchSummary: request.researchSummary,
     };
-    const escapedJson = JSON.stringify(payload, null, 2).replace(
-      /</g,
-      '\\u003c',
+    const escapedJson = escapeJsonTagCharacters(
+      JSON.stringify(payload, null, 2),
     );
     return [
       `<team_plan_approval_request request_id="${escapeXml(requestId)}" from="${escapeXml(request.teammateName)}">`,
@@ -1322,7 +1559,94 @@ export class TeamManager {
    *  that inject the structured shutdown message directly without
    *  going through `requestShutdown`. */
   markShutdownRequested(name: string): void {
-    this._shutdownPending.add(name);
+    const ledger = this.getOrCreateShutdownLedger(name);
+    const hasMarker = ledger.outstandingTokens.some(
+      (token) => token.kind === 'marker' && !token.consumed,
+    );
+    if (!hasMarker) {
+      ledger.outstandingTokens.push({
+        kind: 'marker',
+        reservations: 0,
+        consumed: false,
+      });
+    }
+  }
+
+  private getOrCreateShutdownLedger(name: string): ShutdownLedger {
+    let ledger = this.shutdownLedgers.get(name);
+    if (!ledger) {
+      ledger = {
+        inFlightWrites: 0,
+        outstandingTokens: [],
+        responsesInFlight: 0,
+      };
+      this.shutdownLedgers.set(name, ledger);
+    }
+    return ledger;
+  }
+
+  private hasShutdownWork(name: string): boolean {
+    const ledger = this.shutdownLedgers.get(name);
+    return Boolean(
+      ledger &&
+        (ledger.inFlightWrites > 0 ||
+          ledger.outstandingTokens.some((token) => !token.consumed) ||
+          ledger.responsesInFlight > 0),
+    );
+  }
+
+  private reserveShutdownResponse(
+    name: string,
+  ): ShutdownResponseReservation | undefined {
+    const ledger = this.shutdownLedgers.get(name);
+    if (!ledger) return undefined;
+
+    const token =
+      ledger.outstandingTokens.find(
+        (candidate) => !candidate.consumed && candidate.reservations === 0,
+      ) ?? ledger.outstandingTokens.find((candidate) => !candidate.consumed);
+    if (!token) return undefined;
+
+    token.reservations += 1;
+    ledger.responsesInFlight += 1;
+    return { ledger, token };
+  }
+
+  private settleShutdownResponse(
+    name: string,
+    reservation: ShutdownResponseReservation,
+    succeeded: boolean,
+  ): boolean {
+    if (this.shutdownLedgers.get(name) !== reservation.ledger) return false;
+
+    reservation.ledger.responsesInFlight -= 1;
+    reservation.token.reservations -= 1;
+    const consumed = succeeded && !reservation.token.consumed;
+    if (consumed) {
+      reservation.token.consumed = true;
+    }
+    debug.debug(
+      `shutdown[${name}]: settled response (succeeded=${succeeded}, ` +
+        `consumedToken=${consumed}, ` +
+        `responsesInFlight=${reservation.ledger.responsesInFlight})`,
+    );
+    this.cleanupShutdownLedger(name, reservation.ledger);
+    return consumed;
+  }
+
+  private cleanupShutdownLedger(name: string, ledger: ShutdownLedger): void {
+    ledger.outstandingTokens = ledger.outstandingTokens.filter(
+      (token) => !token.consumed || token.reservations > 0,
+    );
+    if (
+      this.shutdownLedgers.get(name) === ledger &&
+      ledger.inFlightWrites === 0 &&
+      ledger.outstandingTokens.length === 0 &&
+      ledger.responsesInFlight === 0
+    ) {
+      this.shutdownLedgers.delete(name);
+      debug.debug(`shutdown[${name}]: ledger drained and removed`);
+    }
   }
 
   /**
@@ -1528,7 +1852,7 @@ export class TeamManager {
         this.explicitLeaderReports.delete(agentId);
         this.lastActivityAt.delete(agentId);
         this.agentIdentities.delete(agentId);
-        this._shutdownPending.delete(agentName);
+        this.shutdownLedgers.delete(agentName);
         this.rejectPendingPlanApprovalsForTeammate(
           agentName,
           new Error(
@@ -1593,10 +1917,54 @@ export class TeamManager {
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
     });
 
-    // Reconcile: if agent already reached IDLE before we
-    // attached, flush now.
+    // Reconcile state reached before we attached. The emitter does
+    // not buffer for late subscribers, and the in-process run loop
+    // can settle the initial round while spawnAgent() is still
+    // resolving — those events never reach the bridge.
     const currentStatus = agent.getStatus();
-    if (currentStatus === AgentStatus.IDLE) {
+
+    // Round text emitted before attach survives only in the agent's
+    // message history (AgentCore appends an assistant message per
+    // ROUND_TEXT). Recover the last model-visible answer — mirroring
+    // onRoundText's last-non-empty-text-wins semantics — so the
+    // settlement below reports it instead of the no-visible-answer
+    // fallback. Live ROUND_TEXT events after attach overwrite this
+    // seed as usual; RUNNING/terminal handlers clear it like any
+    // pending report.
+    const preAttachReport = this.lastVisibleAnswer(agent);
+    if (preAttachReport !== undefined) {
+      this.pendingFinalReports.set(agentId, preAttachReport);
+      // Mirror onRoundText: visible round text supersedes any
+      // explicit send_message(to: leader) flag set earlier in this
+      // round. sendMessage sets that flag synchronously — no event
+      // bridge needed — so a pre-attach explicit progress note would
+      // otherwise survive until the replayed IDLE settlement below,
+      // which would then skip this recovered answer and leave the
+      // leader with zero automatic reports. Erring toward one extra
+      // delivery (when the last visible text preceded the explicit
+      // send) matches the "exactly once, not zero" intent.
+      this.explicitLeaderReports.delete(agentId);
+      debug.info(
+        `setupEventBridge: recovered pre-attach round text for "${agentName}" (${agentId}); seeding pending report (${preAttachReport.length} chars) from message history.`,
+      );
+    }
+
+    if (currentStatus === AgentStatus.IDLE && preAttachReport !== undefined) {
+      // The initial round already settled to IDLE before attach.
+      // Replay the STATUS_CHANGE through the same handler the live
+      // path uses so its final report and message flush happen
+      // exactly once. Without pre-attach round text there is no
+      // completed round to report — keep the flush-only behavior.
+      debug.info(
+        `setupEventBridge: replaying missed IDLE settlement for "${agentName}" (${agentId}); the initial round settled before the event bridge attached.`,
+      );
+      onStatusChange({
+        agentId,
+        previousStatus: AgentStatus.RUNNING,
+        newStatus: AgentStatus.IDLE,
+        timestamp: Date.now(),
+      } as AgentStatusChangeEvent);
+    } else if (currentStatus === AgentStatus.IDLE) {
       this.fireAndForget(
         `flushNextMessage(${agentId})`,
         this.flushNextMessage(agentId, agentName),
@@ -1614,6 +1982,18 @@ export class TeamManager {
         timestamp: Date.now(),
       } as AgentStatusChangeEvent);
     }
+  }
+
+  /**
+   * The last model-visible answer in an agent handle's message
+   * history, or undefined when there is none. Mirrors the live
+   * ROUND_TEXT → pendingFinalReports semantics: the most recent
+   * non-empty, non-thought assistant text wins.
+   */
+  private lastVisibleAnswer(agent: TeamAgentHandle): string | undefined {
+    const messages = agent.getMessages?.();
+    if (!messages) return undefined;
+    return lastVisibleAnswer(messages);
   }
 
   // ─── Private: Permission fallback ───────────────────────
@@ -1665,14 +2045,16 @@ export class TeamManager {
     //    Only read the mailbox if this specific teammate has had
     //    a shutdown queued — avoids a per-idle inbox round-trip
     //    for everyone whenever any shutdown is in flight.
-    if (this._shutdownPending.has(agentName)) {
+    if (this.hasShutdownWork(agentName)) {
       const shutdowns = await consumeUnread(
         this.teamFile.name,
         agentName,
         'shutdown_request',
       );
       if (shutdowns.length > 0) {
-        this.enqueueWithIdentity(agentId, agent, shutdowns[0]!.text);
+        for (const shutdown of shutdowns) {
+          this.enqueueWithIdentity(agentId, agent, shutdown.text);
+        }
         return;
       }
     }
@@ -1747,7 +2129,7 @@ export class TeamManager {
     if (!agent) return;
     if (agent.getStatus() !== AgentStatus.IDLE) return;
     if (findMemberByName(this.teamFile.members, agentName)?.readOnly) return;
-    if (this._shutdownPending.has(agentName)) return;
+    if (this.hasShutdownWork(agentName)) return;
 
     const pendingTasks =
       pending ??
@@ -1760,7 +2142,7 @@ export class TeamManager {
     for (const task of pendingTasks) {
       if (task.owner) continue;
       if (task.blockedBy.length > 0) continue;
-      if (this._shutdownPending.has(agentName)) return;
+      if (this.hasShutdownWork(agentName)) return;
 
       const claimed = await claimTask(this.teamFile.name, task.id, agentId, {
         checkAgentBusy: true,
@@ -1835,7 +2217,7 @@ export class TeamManager {
         `Spawn the teammate first or choose an existing one.`
       );
     }
-    if (this._shutdownPending.has(member.name)) {
+    if (this.hasShutdownWork(member.name)) {
       return (
         `Cannot assign to "${ownerName}": shutdown is already pending ` +
         `for that teammate.`
@@ -1865,7 +2247,7 @@ export class TeamManager {
     if (task.status !== 'in_progress' || !task.owner) return false;
     const member = findMemberByName(this.teamFile.members, task.owner);
     if (!member) return false;
-    if (this._shutdownPending.has(member.name)) return false;
+    if (this.hasShutdownWork(member.name)) return false;
     const agent = this.getAgentFromBackend(member.agentId);
     if (!agent) return false;
     if (isTerminalStatus(agent.getStatus())) return false;
@@ -1887,7 +2269,7 @@ export class TeamManager {
       // Don't auto-claim a task for a teammate the leader is shutting
       // down — it would start work it's about to abandon. tryAutoClaimTask
       // repeats this check after async task reads for both claim paths.
-      if (this._shutdownPending.has(member.name)) return false;
+      if (this.hasShutdownWork(member.name)) return false;
       const queue = this.pendingMessages.get(member.agentId) ?? [];
       return queue.length === 0;
     });

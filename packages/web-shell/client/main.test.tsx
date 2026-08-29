@@ -19,7 +19,7 @@ vi.mock('react-dom/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react-dom/client')>()),
   default: { createRoot: () => ({ render: vi.fn() }) },
 }));
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonWorkspaceProvider: ({ children }: { children: ReactNode }) => children,
 }));
 vi.mock('./components/WorkspaceSessionProvider', () => ({
@@ -72,5 +72,8 @@ describe('StandaloneApp', () => {
     expect(new URLSearchParams(window.location.search).get('workspace')).toBe(
       'workspace-1',
     );
+    expect(
+      testState.props?.webShellProps.composerToolbarAdditionalActions,
+    ).toEqual(['addMenu']);
   });
 });

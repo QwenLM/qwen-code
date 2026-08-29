@@ -1133,6 +1133,7 @@ function collapseItems(
     waitForUnmatchedAgentCompletions: boolean;
     terminalBackgroundShellTaskIds: ReadonlySet<string>;
     automaticallyExpandedAgentKeys: ReadonlySet<string>;
+    paginatedExpanded: ReadonlySet<string>;
     enabled: boolean;
   }> = {},
 ): DisplayItem[] {
@@ -1145,6 +1146,7 @@ function collapseItems(
       opts.waitForUnmatchedAgentCompletions ?? true,
     terminalBackgroundShellTaskIds: opts.terminalBackgroundShellTaskIds,
     automaticallyExpandedAgentKeys: opts.automaticallyExpandedAgentKeys,
+    paginatedExpanded: opts.paginatedExpanded,
     enabled: opts.enabled ?? true,
   });
 }
@@ -1190,6 +1192,80 @@ describe('applyTurnCollapse', () => {
     expect(collapseOf(out, 1)).toBeUndefined();
   });
 
+  it('folds vision bridge notices and restores them when expanded', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      {
+        id: 'vision-notice',
+        role: 'system',
+        content: 'Vision bridge cancelled.',
+        variant: 'info',
+        source: 'vision_bridge_notice',
+      },
+      makeAssistantMessage('a1'),
+    ]);
+
+    const collapsed = collapseItems(items);
+    expect(rowIds(collapsed)).toEqual(['u1', 'tc-u1', 'a1']);
+    expect(collapseOf(collapsed, 0)).toMatchObject({
+      collapsed: true,
+      hiddenCount: 1,
+    });
+
+    const expanded = collapseItems(items, {
+      overrides: new Map([['u1', true]]),
+    });
+    expect(rowIds(expanded)).toEqual(['u1', 'tc-u1', 'vision-notice', 'a1']);
+    expect(collapseOf(expanded, 0)).toMatchObject({
+      collapsed: false,
+      hiddenCount: 1,
+    });
+  });
+
+  it('keeps a turn expanded when its tail was shown before pagination completed its head', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+      makeUserMessage('u2'),
+      makeMultiToolGroup('g2'),
+      makeAssistantMessage('a2'),
+    ]);
+    const out = collapseItems(items, {
+      paginatedExpanded: new Set(['u1']),
+    });
+    // The pagination-completed turn stays open (its steps are visible); the
+    // following complete turn still collapses as usual.
+    expect(rowIds(out)).toEqual([
+      'u1',
+      'tc-u1',
+      'g1',
+      'a1',
+      'u2',
+      'tc-u2',
+      'a2',
+    ]);
+    expect(collapseOf(out, 0)).toMatchObject({
+      collapsed: false,
+      hiddenCount: 1,
+    });
+    expect(collapseOf(out, 4)).toMatchObject({ collapsed: true });
+  });
+
+  it('lets an explicit user toggle override the pagination keep-open', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items, {
+      paginatedExpanded: new Set(['u1']),
+      overrides: new Map([['u1', false]]),
+    });
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1']);
+    expect(collapseOf(out, 0)).toMatchObject({ collapsed: true });
+  });
+
   it('keeps every row but still tags the head when the turn is expanded', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
@@ -1206,6 +1282,39 @@ describe('applyTurnCollapse', () => {
       hiddenCount: 1,
       toolCallCount: 2,
     });
+  });
+
+  it('keeps a completed turn with an MCP App expanded by default', () => {
+    const appToolGroup: Extract<Message, { role: 'tool_group' }> = {
+      id: 'g1',
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'call-app',
+          toolName: 'mcp__demo__dashboard',
+          status: 'completed',
+          rawOutput: {
+            type: 'mcp_app',
+            serverName: 'demo',
+            resourceUri: 'ui://demo/dashboard',
+            html: '<main>Dashboard</main>',
+            toolResult: { content: [] },
+            toolArguments: {},
+            fallbackText: 'Dashboard ready',
+          },
+        },
+      ],
+    };
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      appToolGroup,
+      makeAssistantMessage('a1'),
+    ]);
+
+    const out = collapseItems(items);
+
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'a1']);
+    expect(collapseOf(out, 0)?.collapsed).toBe(false);
   });
 
   it('keeps narration followed by a tool visible when expanded', () => {

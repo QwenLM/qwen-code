@@ -25,7 +25,6 @@ import { hasOwnModelProviders } from './modelProvidersScope.js';
 import {
   type Settings,
   type MemoryImportFormat,
-  type MergeStrategy,
   type SettingsSchema,
   type SettingDefinition,
   getSettingsSchema,
@@ -34,8 +33,8 @@ import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
   setNestedPropertySafe,
   WORKSPACE_RESTRICTED_SETTINGS,
-} from '../utils/settingsUtils.js';
-import { customDeepMerge } from '../utils/deepMerge.js';
+} from './settingsUtils.js';
+import { customDeepMerge, type MergeStrategy } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
 import { runMigrations, needsMigration } from './migration/index.js';
 import {
@@ -118,6 +117,17 @@ export const SETTINGS_VERSION_KEY = '$version';
  *   tools.exclude  → permissions.deny  (block tools)
  *   tools.core     → permissions.allow (only listed tools enabled)
  *                    + permissions.deny with a wildcard deny-all if needed
+ *
+ * DELIBERATELY UNWIRED — nothing calls this, and settings.md documents the
+ * legacy keys as "not automatically migrated; still honoured at startup".
+ * Do not wire it up as written: the `tools.core` → `permissions.allow` arm
+ * below encodes exactly the conflation #10075 was reported for and #10098
+ * removed. `permissions.allow` is pure auto-approval and cannot restrict
+ * registration, so that arm would delete a user's `tools.core` allowlist
+ * and silently replace it with a no-op. A real migration maps `tools.core`
+ * to `tools.eager` (defer unlisted tools) or `permissions.deny` (remove
+ * them) — see the migration table in
+ * docs/users/configuration/settings.md.
  *
  * Returns the updated settings object, or null if no migration is needed.
  */
@@ -377,7 +387,6 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
       );
     }
   }
-
   return [...warningSet];
 }
 

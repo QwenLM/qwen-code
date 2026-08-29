@@ -11,7 +11,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   getStartupContextLength,
   stripSystemReminderBlocks,
-} from '../utils/environmentContext.js';
+} from '../core/environmentContext.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
 import { SESSION_TITLE_MAX_LENGTH } from './sessionService.js';
@@ -89,7 +89,7 @@ const TRAILING_PAIRED_BRACKETS_RE =
  *
  * - `no_fast_model`: config.getFastModel() returned undefined.
  *   User needs to configure one via `/model --fast <name>`.
- * - `no_client`: BaseLlmClient or GeminiClient not yet initialized. Rare,
+ * - `no_client`: BaseLlmClient or LlmClient not yet initialized. Rare,
  *   usually means the session hasn't authenticated yet.
  * - `empty_history`: the conversation has fewer than 2 turns of usable text.
  *   User should send at least one message before asking for a title.
@@ -129,10 +129,10 @@ export async function tryGenerateSessionTitle(
     const model = config.getFastModel();
     if (!model) return { ok: false, reason: 'no_fast_model' };
 
-    const geminiClient = config.getGeminiClient();
-    if (!geminiClient) return { ok: false, reason: 'no_client' };
+    const llmClient = config.getLlmClient();
+    if (!llmClient) return { ok: false, reason: 'no_client' };
 
-    const fullHistory = geminiClient.getHistoryShallow();
+    const fullHistory = llmClient.getHistoryShallow();
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
 
     const hasDisplayProjection = userDisplayTexts.some(
@@ -239,23 +239,31 @@ export function sanitizeTitle(s: string): string {
  * that merely resembles an example still passes. Also catches the prompt's
  * "Bad (wrong case)" variant of the first example.
  *
- * Wrapper characters are stripped for the comparison only: `sanitizeTitle`
- * keeps ASCII/full-width brackets because real titles use them (e.g.
- * "(WIP) Fix build"), but `(Fix login button on mobile)` is the same canned
- * echo as the bare example and must not slip past the guard. The strip is
- * Unicode-aware (any leading/trailing non-letter/non-digit run) so the next
- * wrapper family — `["..."]`, `<...>`, `«...»` — cannot bypass it by
- * falling outside an enumerated character class.
+ * Both sides of the comparison go through `normalizeForEchoCompare`, so an
+ * example carrying edge punctuation (e.g. "Fix CI!") cannot slip past the
+ * guard just because `sanitizeTitle` strips that punctuation off the
+ * candidate (#9772).
  */
 function isPromptExampleEcho(title: string): boolean {
-  const normalized = title
+  const normalized = normalizeForEchoCompare(title);
+  return TITLE_PROMPT_EXAMPLE_TITLES.some(
+    (example) => normalizeForEchoCompare(example) === normalized,
+  );
+}
+
+/**
+ * Normal form for echo comparison: trimmed, lowercased, with leading/trailing
+ * runs of non-letter/non-digit characters stripped. The strip is Unicode-aware
+ * so no wrapper family — `(...)`, `["..."]`, `<...>`, `«...»` — can bypass it
+ * by falling outside an enumerated character class. Comparison-only: the title
+ * shown to the user is never rewritten by it. Exported for unit tests.
+ */
+export function normalizeForEchoCompare(s: string): string {
+  return s
     .trim()
     .toLowerCase()
     .replace(/^[^\p{L}\p{N}]+/u, '')
     .replace(/[^\p{L}\p{N}]+$/u, '');
-  return TITLE_PROMPT_EXAMPLE_TITLES.some(
-    (example) => example.toLowerCase() === normalized,
-  );
 }
 
 /**
