@@ -151,6 +151,16 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/native-directory-picker.ts',
+    {
+      reason:
+        'Picker availability probes process-scoped host session state ' +
+        '(SSH markers, display server, Windows session name), so embedded ' +
+        'callers may omit the environment argument.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/pem-certificate-blocks.ts',
     {
       reason:
