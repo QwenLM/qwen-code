@@ -907,6 +907,33 @@ describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', 
   });
 });
 
+describe('qwen-triage: maintainer resolver heredoc vs the backtick deny rule', () => {
+  it('keeps the resolver bash block backtick-free so the deny rule never fires', () => {
+    // The triage lane's permissions.deny includes run_shell_command(*`*):
+    // any command text containing a backtick is EXECUTION_DENIED before
+    // approval. A template literal (or a backticked comment) inside the
+    // resolver heredoc would therefore kill the whole command, and
+    // deferrals would silently lose their deterministic assignee.
+    const settings = assertSettingsContract(triageStep, 'triage settings');
+    const deny = settings.permissions?.deny ?? [];
+    assert.ok(
+      deny.includes('run_shell_command(*`*)'),
+      'permissions.deny must keep the backtick rule',
+    );
+    const blocks = [...prSkill.matchAll(/```bash\n([\s\S]*?)\n```/g)].map(
+      (m) => m[1],
+    );
+    const resolver = blocks.find(
+      (b) => b.includes("<<'EOF'") && b.includes('collaborators'),
+    );
+    assert.ok(resolver, 'maintainer resolver heredoc block must exist');
+    assert.ok(
+      !resolver.includes('`'),
+      'resolver block must contain no backtick, or the deny rule blocks it',
+    );
+  });
+});
+
 describe('qwen-code-pr-review.yml: ownership recovery is unconditional', () => {
   it('restores ownership without probe gating or rename-aside', () => {
     assertUnconditional(
