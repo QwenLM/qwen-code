@@ -1200,6 +1200,27 @@ describe('Settings Loading and Merging', () => {
       expect(visible).toHaveLength(3);
     });
 
+    it('should let a workspace tools.eager list replace the user list', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const userSettings = {
+        tools: { eager: ['ReadFile', 'Edit'] },
+      };
+      const workspaceSettings = {
+        tools: { eager: [] },
+      };
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return JSON.stringify(userSettings);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettings);
+          return '{}';
+        },
+      );
+
+      expect(loadSettings(MOCK_WORKSPACE_DIR).merged.tools?.eager).toEqual([]);
+    });
+
     it('should merge all settings files with the correct precedence', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const systemDefaultsContent = {
@@ -2222,7 +2243,7 @@ describe('Settings Loading and Merging', () => {
       const warnings = getSettingsWarnings(result);
 
       // Corruption warning no longer goes through migrationWarnings —
-      // it is emitted via settings.corruptedPath check in gemini.tsx
+      // it is emitted via settings.corruptedPath check in llm.tsx
       // early stderr path instead. Verify corruptedPath is set.
       expect(result.corruptedPath).toBeDefined();
       expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);
@@ -4881,6 +4902,7 @@ describe('Settings Loading and Merging', () => {
         delete process.env['QWEN_RUNTIME_DIR'];
         delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
         delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+        delete process.env['QWEN_CODE_WARNINGS_FILE'];
 
         const cwdSpy = vi
           .spyOn(process, 'cwd')
@@ -4903,6 +4925,7 @@ describe('Settings Loading and Merging', () => {
                 'QWEN_RUNTIME_DIR=/tmp/hijack-runtime',
                 'QWEN_CODE_MCP_APPROVALS_PATH=/tmp/preapproved.json',
                 'QWEN_CODE_TRUSTED_FOLDERS_PATH=/tmp/trusted.json',
+                'QWEN_CODE_WARNINGS_FILE=/tmp/sensitive.txt',
                 'OTHER_VAR=ok',
               ].join('\n');
             return '{}';
@@ -4916,6 +4939,7 @@ describe('Settings Loading and Merging', () => {
         expect(process.env['QWEN_RUNTIME_DIR']).toBeUndefined();
         expect(process.env['QWEN_CODE_MCP_APPROVALS_PATH']).toBeUndefined();
         expect(process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']).toBeUndefined();
+        expect(process.env['QWEN_CODE_WARNINGS_FILE']).toBeUndefined();
         // Other vars from the same project .env still load.
         expect(process.env['OTHER_VAR']).toEqual('ok');
 
