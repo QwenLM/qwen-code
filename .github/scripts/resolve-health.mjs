@@ -76,39 +76,50 @@ export function classifyResult(body) {
   if (!body.includes(RESULT_MARKER)) {
     return null;
   }
-  if (body.includes('could not run conflict resolution')) {
+  // Classify the first non-marker line only. `Report result` appends
+  // agent-authored text after its fixed sentence (address-summary.md, up to
+  // 6000 bytes; no-action.md; failure.md), and that text can quote any of
+  // the sentences below — an agent describing an earlier failed run, or
+  // conflicting-file content an attacker chose. The fixed sentence is always
+  // the first line; nothing after it may change the verdict.
+  const line = firstLine(body);
+  if (line.includes('could not run conflict resolution')) {
     return 'infra_failed';
   }
-  if (body.includes('did not complete successfully')) {
+  if (line.includes('did not complete successfully')) {
     return 'agent_failed';
   }
-  if (body.includes('and pushed the branch update')) {
+  if (line.includes('and pushed the branch update')) {
     return 'pushed';
   }
-  if (body.includes('in dry-run mode')) {
+  if (line.includes('in dry-run mode')) {
     return 'dry_run';
   }
-  if (body.includes('head branch changed while resolving')) {
+  if (line.includes('head branch changed while resolving')) {
     return 'resolved_moved';
   }
-  if (body.includes('resolved the merge conflicts, but')) {
+  if (line.includes('resolved the merge conflicts, but')) {
     return 'push_failed';
   }
-  if (body.includes('did not push changes')) {
+  if (line.includes('did not push changes')) {
     return 'noop';
   }
-  if (body.includes('did not run conflict resolution')) {
+  if (line.includes('did not run conflict resolution')) {
     return 'skipped';
   }
   return 'unknown';
 }
 
-function headline(body) {
+function firstLine(body) {
   const line = body
     .split('\n')
     .map((l) => l.trim())
     .find((l) => l && !l.startsWith('<!--'));
-  return (line ?? '').slice(0, 160);
+  return line ?? '';
+}
+
+function headline(body) {
+  return firstLine(body).slice(0, 160);
 }
 
 // prs: [{ number, state, comments: [{ id, user, created_at, updated_at, body, html_url }] }]
@@ -194,6 +205,7 @@ export function assess(prs, options = {}) {
   }
   const streakItems = attempts.slice(attempts.length - streak);
   const infra = streakItems.filter((r) => r.kind === 'infra_failed').length;
+  const pushFailed = streakItems.filter((r) => r.kind === 'push_failed').length;
   return {
     windowStart,
     results,
@@ -201,6 +213,7 @@ export function assess(prs, options = {}) {
     streak,
     streakItems,
     infraInStreak: infra,
+    pushFailedInStreak: pushFailed,
     unanswered,
     latestAttempt: attempts.at(-1) ?? null,
     alarm:
@@ -208,12 +221,27 @@ export function assess(prs, options = {}) {
   };
 }
 
+// The state a tick records on the issue, compared by the next tick to decide
+// whether the picture moved. `unanswered` is the MEMBERSHIP (request ids),
+// not the count: during a never-ran outage one request gets answered by a
+// skip while another ages past the stale window, the count holds and the
+// roster the issue shows would otherwise freeze on week one. Kept single-line
+// (STATE_RE) — JSON.stringify of a flat object never emits a newline.
 function stateOf(assessment) {
   return {
     streak: assessment.streak,
-    unanswered: assessment.unanswered.length,
+    unanswered: assessment.unanswered.map((u) => u.id),
     latest: assessment.latestAttempt?.id ?? null,
   };
+}
+
+function sameState(previous, current) {
+  return (
+    previous !== null &&
+    previous.streak === current.streak &&
+    previous.latest === current.latest &&
+    JSON.stringify(previous.unanswered) === JSON.stringify(current.unanswered)
+  );
 }
 
 export function readState(issueBodyAndComments) {
@@ -243,10 +271,17 @@ export function renderReport(assessment, options = {}) {
   const opts = { ...DEFAULTS, ...options };
   const lines = [];
   const recent = assessment.attempts.slice(-opts.recentLimit).reverse();
+  // Split by kind, so the headline sends the reader to the right place: an
+  // agent that never ran (install/model/infra), a push that was rejected
+  // (credentials, fork permissions), or the agent itself giving up.
+  const gaveUp =
+    assessment.streak -
+    assessment.infraInStreak -
+    assessment.pushFailedInStreak;
   lines.push(
     `**Trailing failures:** ${assessment.streak} in a row` +
       (assessment.streak
-        ? ` (${assessment.infraInStreak} never reached the agent's verdict, ${assessment.streak - assessment.infraInStreak} were the agent giving up)`
+        ? ` (${assessment.infraInStreak} never reached the agent's verdict, ${assessment.pushFailedInStreak} resolved the conflict but the push was rejected, ${gaveUp} were the agent giving up or an unrecognised result)`
         : ''),
   );
   lines.push(
@@ -330,12 +365,7 @@ export function decide(assessment, existing, options = {}) {
     } else {
       const previous = readState(existing.texts);
       const current = stateOf(assessment);
-      const changed =
-        !previous ||
-        previous.streak !== current.streak ||
-        previous.unanswered !== current.unanswered ||
-        previous.latest !== current.latest;
-      if (changed) {
+      if (!sameState(previous, current)) {
         actions.push({
           type: 'comment',
           number: existing.number,
