@@ -82,6 +82,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.2.0",
+    "jsdom": "^26.1.0",
     "postcss": "^8.5.17",
     "postcss-selector-parser": "^7.1.4",
     "react": "^19.2.0",
