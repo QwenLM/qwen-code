@@ -56,6 +56,7 @@ import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../live/capture-screen-context.js';
 import { SPEAK_TO_USER_TOOL_NAME } from '../live/live-speak-to-user.js';
 import {
@@ -2970,6 +2971,237 @@ describe('Session', () => {
 
     expect(observedStarts).toEqual([runtimeDir, runtimeDir]);
     expect(observedStops).toEqual([runtimeDir]);
+  });
+
+  it('dispatches a per-run scheduled task into a fresh daemon session', async () => {
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            name: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            name: 'Review PRs',
+            prompt: 'review the next PR',
+            cronExpr: '0 * * * *',
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+      sessionId: 'child-session',
+    });
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        {
+          prompt: expect.stringMatching(
+            /^Scheduled task: Review PRs\nTask ID: task-1\nSchedule: 0 \* \* \* \*\nTriggered at: 1970-01-01T00:00:00\.123Z\nTrigger: scheduled\nSession: new chat for this run\n\nThis is a scheduled task run\. Execute the instructions below now\. Do not create or modify a schedule unless the instructions explicitly ask you to\.\n\nreview the next PR$/,
+          ),
+          completion: 'sent',
+          name: expect.stringMatching(/^Review PRs · \d{2}-\d{2} \d{2}:\d{2}$/),
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+          callerSessionId: 'test-session-id',
+        },
+      );
+    });
+    await vi.waitFor(() => {
+      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
+        sessionId: 'child-session',
+      });
+    });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('runs a per-run scheduled task in the task session when the daemon cannot create a fresh one', async () => {
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            prompt: 'review the next PR',
+            cronExpr: '0 * * * *',
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    vi.mocked(mockClient.extMethod).mockRejectedValueOnce(
+      new Error('Method not found'),
+    );
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        // Untitled task: the child is named from the task prompt, never from
+        // the execution-context header.
+        expect.objectContaining({
+          name: expect.stringMatching(
+            /^review the next PR · \d{2}-\d{2} \d{2}:\d{2}$/,
+          ),
+        }),
+      );
+    });
+    // The fire is not lost: it runs here, and the run record says so.
+    await vi.waitFor(() => {
+      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
+        sessionId: 'test-session-id',
+        dispatchFailed: true,
+      });
+    });
+    await vi.waitFor(() => {
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls[0]),
+    ).toContain('review the next PR');
+    expect(
+      JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls[0]),
+    ).not.toContain('Scheduled task:');
+  });
+
+  it('enqueues a missed one-shot carrier instead of dispatching it headless', async () => {
+    // The scheduler synthesises a carrier for a missed one-shot whose prompt is
+    // the confirm-first notification ("ask the user before running it"). It
+    // inherits sessionMode from the task it stands for, so a per_run task's
+    // carrier must NOT be wrapped in the execute-now header and run in a fresh
+    // child with nobody attached to answer the confirmation.
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+            missed: true;
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            prompt:
+              'Do NOT execute this prompt yet. First ask the user whether to run it now: review the next PR',
+            cronExpr: '0 * * * *',
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+            missed: true,
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+      SERVE_CONTROL_EXT_METHODS.createSubSession,
+      expect.anything(),
+    );
+    const enqueued = JSON.stringify(
+      vi.mocked(mockChat.sendMessageStream).mock.calls[0],
+    );
+    expect(enqueued).toContain('First ask the user whether to run it now');
+    expect(enqueued).not.toContain('Execute the instructions below now');
+  });
+
+  it('attributes a slow per-run dispatch to the fire that started it', async () => {
+    // processJob re-stamps the live jobs-map entry every matching minute. A
+    // spawn round-trip that outlasts one interval must still annotate the run
+    // record of the fire it was dispatched for, not the next one's.
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const job = {
+      id: 'task-1',
+      prompt: 'review the next PR',
+      cronExpr: '* * * * *',
+      lastFiredAt: 123,
+      sessionMode: 'per_run' as const,
+    };
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn((callback: (fire: typeof job) => void) => {
+        callback(job);
+      }),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    let releaseSpawn!: () => void;
+    const spawned = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    vi.mocked(mockClient.extMethod).mockImplementationOnce(async () => {
+      // The next tick lands while the spawn RPC is still in flight.
+      job.lastFiredAt = 456;
+      await spawned;
+      return { sessionId: 'child-session' };
+    });
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(mockClient.extMethod).toHaveBeenCalled();
+    });
+    releaseSpawn();
+
+    await vi.waitFor(() => {
+      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
+        sessionId: 'child-session',
+      });
+    });
   });
 
   it('does not resume automatic turns until an aborted prompt settles', async () => {

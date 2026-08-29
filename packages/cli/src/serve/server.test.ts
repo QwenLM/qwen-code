@@ -566,7 +566,10 @@ const EXPECTED_STAGE1_FEATURES = [
   'auth_provider_install',
   'workspace_memory',
   'workspace_memory_remember',
+  'workspace_memory_remember_project_scope',
+  'workspace_memory_remember_user_scope',
   'workspace_memory_forget',
+  'workspace_memory_forget_scope',
   'workspace_memory_dream',
   'workspace_agents',
   'workspace_agent_generate',
@@ -4026,6 +4029,46 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it('advertises the scoped workspace-memory tags on the wire', async () => {
+      // The three tags this PR adds are pinned against a real `/capabilities`
+      // body only in integration-tests/cli/qwen-serve-routes.test.ts, which no
+      // workspace test command collects and which CI skipped at this PR's
+      // head — so a descriptor that never reached the envelope would have
+      // shipped green. The registry assertions in 'serve capability registry'
+      // prove the entries exist; this proves the daemon advertises them, in
+      // the order a client reading the list positionally expects.
+      const res = await request(
+        createServeApp(baseOpts, undefined, { bridge: fakeBridge() }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      const features = res.body.features as string[];
+      expect(features).toEqual(
+        expect.arrayContaining([
+          'workspace_memory_remember_project_scope',
+          'workspace_memory_remember_user_scope',
+          'workspace_memory_forget_scope',
+        ]),
+      );
+      // Each scoped tag sits directly behind the unscoped tag it refines, so
+      // a client that feature-detects `workspace_memory_remember` and then
+      // reads forward finds the scope support without a second lookup.
+      const window = features.slice(
+        features.indexOf('workspace_memory'),
+        features.indexOf('workspace_memory_dream') + 1,
+      );
+      expect(window).toEqual([
+        'workspace_memory',
+        'workspace_memory_remember',
+        'workspace_memory_remember_project_scope',
+        'workspace_memory_remember_user_scope',
+        'workspace_memory_forget',
+        'workspace_memory_forget_scope',
+        'workspace_memory_dream',
+      ]);
+    });
+
     it('advertises the effective session restore timeout', async () => {
       const defaultResponse = await request(
         createServeApp(baseOpts, undefined, { bridge: fakeBridge() }),
@@ -8140,6 +8183,7 @@ describe('createServeApp', () => {
               persistence: expected,
             },
           });
+          expect(captured?.installMetadata).not.toHaveProperty('networkPolicy');
           await vi.waitFor(() =>
             expect(bridge.extensionEvents.at(-1)).toMatchObject({
               status: 'installed',
