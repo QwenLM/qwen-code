@@ -748,8 +748,15 @@ function setupAcpTest(
       })) as { sessionId: string };
       expect(newSession.sessionId).toBeTruthy();
 
-      // Wait for available_commands_update to be received
-      await delay(1000);
+      await rig.poll(
+        () =>
+          sessionUpdates.some(
+            (update) =>
+              update.update?.sessionUpdate === 'available_commands_update',
+          ),
+        5000,
+        100,
+      );
 
       // Verify available_commands_update is received
       const commandsUpdate = sessionUpdates.find(
@@ -791,20 +798,26 @@ function setupAcpTest(
     // Track which permission requests we've seen
     const planModeRequests: PermissionRequest[] = [];
 
-    const { sendRequest, cleanup, stderr, sessionUpdates, permissionRequests, agent } =
-      setupAcpTest(rig, {
-        permissionHandler: (request) => {
-          // Track all permission requests for later verification
-          // Auto-approve exit plan mode requests with "proceed_always" to trigger auto-edit mode
-          if (request.toolCall?.kind === 'switch_mode') {
-            planModeRequests.push(request);
-            // Return proceed_always to switch to auto-edit mode
-            return { optionId: 'proceed_always' };
-          }
-          // Auto-approve all other requests
-          return { optionId: 'proceed_once' };
-        },
-      });
+    const {
+      sendRequest,
+      cleanup,
+      stderr,
+      sessionUpdates,
+      permissionRequests,
+      agent,
+    } = setupAcpTest(rig, {
+      permissionHandler: (request) => {
+        // Track all permission requests for later verification
+        // Auto-approve exit plan mode requests with "proceed_always" to trigger auto-edit mode
+        if (request.toolCall?.kind === 'switch_mode') {
+          planModeRequests.push(request);
+          // Return proceed_always to switch to auto-edit mode
+          return { optionId: 'proceed_always' };
+        }
+        // Auto-approve all other requests
+        return { optionId: 'proceed_once' };
+      },
+    });
 
     try {
       // Initialize
@@ -1120,6 +1133,84 @@ function setupAcpTest(
     } catch (e) {
       if (stderr.length) console.error('Agent stderr:', stderr.join(''));
       throw e;
+    } finally {
+      await cleanup();
+      await fakeServer.close();
+    }
+  });
+
+  it('injects managed auto-memory into the first ACP model request', async () => {
+    const marker = 'ACP-MEMORY-ZEPHYR-4207';
+    const prompt = 'What is the ACP zephyr codeword?';
+    const fakeServer = await startFakeOpenAIServer(async ({ body }) => {
+      // Keep the model selector outside the initial Recall budget. The
+      // deterministic match must still reach the main streamed request.
+      if (body['stream'] !== true) await delay(250);
+      return { content: 'done' };
+    });
+    const rig = new TestRig();
+    await rig.setup('acp managed auto-memory recall', {
+      settings: {
+        memory: {
+          enableManagedAutoMemory: true,
+          enableManagedAutoDream: false,
+        },
+      },
+    });
+    const memoryDir = join(rig.testDir!, '.qwen', 'memory', 'project');
+    mkdirSync(memoryDir, { recursive: true });
+    writeFileSync(
+      join(memoryDir, 'acp-zephyr.md'),
+      [
+        '---',
+        'type: project',
+        'name: ACP Zephyr Codeword',
+        `description: The ACP zephyr codeword is ${marker}.`,
+        '---',
+        '',
+        `The ACP zephyr codeword is ${marker}.`,
+      ].join('\n'),
+      'utf8',
+    );
+
+    const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
+      env: {
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        QWEN_CODE_MEMORY_LOCAL: '1',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+      },
+    });
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
+      });
+      await sendRequest('authenticate', { methodId: 'openai' });
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: prompt }],
+      });
+
+      const mainRequest = fakeServer.requests.find(
+        ({ body }) =>
+          body['stream'] === true &&
+          JSON.stringify(body['messages']).includes(prompt),
+      );
+      expect(mainRequest).toBeDefined();
+      expect(JSON.stringify(mainRequest?.body['messages'])).toContain(marker);
+    } catch (error) {
+      if (stderr.length) console.error('Agent stderr:', stderr.join(''));
+      throw error;
     } finally {
       await cleanup();
       await fakeServer.close();

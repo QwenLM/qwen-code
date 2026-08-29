@@ -19,9 +19,15 @@ import {
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import { refreshMemoryInstruction } from './refresh.js';
+import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
+}));
+
+vi.mock('../agents/forkedAgent.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../agents/forkedAgent.js')>()),
+  getCacheSafeParamsSessionId: vi.fn(),
 }));
 
 vi.mock('./indexer.js', () => ({
@@ -75,6 +81,7 @@ describe('auto-memory extraction', () => {
       getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
     } as unknown as Config;
     vi.clearAllMocks();
+    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue('session-1');
   });
 
   afterEach(async () => {
@@ -123,6 +130,65 @@ describe('auto-memory extraction', () => {
 
     expect(cursor.sessionId).toBe('session-1');
     expect(cursor.processedOffset).toBe(2);
+  });
+
+  it('skips a session mismatch without advancing the cursor', async () => {
+    vi.mocked(getCacheSafeParamsSessionId)
+      .mockReturnValueOnce('session-1')
+      .mockReturnValueOnce('session-2');
+    const cursorBefore = await fs.readFile(
+      getAutoMemoryExtractCursorPath(projectRoot),
+      'utf-8',
+    );
+
+    const result = await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+    });
+
+    expect(result.skippedReason).toBe('session_mismatch');
+    expect(result.cursor.processedOffset).toBeUndefined();
+    expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
+    expect(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ).toBe(cursorBefore);
+  });
+
+  it('skips an existing session mismatch before scaffold IO', async () => {
+    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue('session-2');
+    const uncreatedProjectRoot = path.join(tempDir, 'not-created');
+
+    const result = await runAutoMemoryExtract({
+      projectRoot: uncreatedProjectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+    });
+
+    expect(result.skippedReason).toBe('session_mismatch');
+    await expect(fs.stat(uncreatedProjectRoot)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
+  });
+
+  it('preserves the empty-cache failure path', async () => {
+    vi.mocked(getCacheSafeParamsSessionId).mockReturnValue(undefined);
+    vi.mocked(runAutoMemoryExtractionByAgent).mockRejectedValueOnce(
+      new Error('no cache-safe params'),
+    );
+
+    await expect(
+      runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+      }),
+    ).rejects.toThrow('no cache-safe params');
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledOnce();
   });
 
   it('throws when config is missing because heuristic fallback was removed', async () => {

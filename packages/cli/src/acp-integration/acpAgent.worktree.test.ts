@@ -49,7 +49,8 @@ const { mockConnectionState } = vi.hoisted(() => {
   return { mockConnectionState: state };
 });
 
-vi.mock('@agentclientprotocol/sdk', () => ({
+vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@agentclientprotocol/sdk')>()),
   AgentSideConnection: vi.fn().mockImplementation(() => ({
     get closed() {
       return mockConnectionState.promise;
@@ -104,7 +105,7 @@ const { mockRestoreWorktreeContext, mockWithDaemonSpan } = vi.hoisted(() => {
   };
 });
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   createDebugLogger: () => ({
     debug: vi.fn(),
     error: vi.fn(),
@@ -151,6 +152,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     YOLO: 'yolo',
     PLAN: 'plan',
   },
+  OutputFormat: {
+    TEXT: 'text',
+    JSON: 'json',
+    STREAM_JSON: 'stream-json',
+  },
   Kind: {
     Read: 'read',
     Edit: 'edit',
@@ -172,6 +178,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     _args: args,
   })),
   SessionService: vi.fn(),
+  SessionIdCaseConflictError: class SessionIdCaseConflictError extends Error {
+    override readonly name = 'SessionIdCaseConflictError';
+  },
   Storage: {
     getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
   },
@@ -227,6 +236,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     TodoCreated: 'TodoCreated',
     TodoCompleted: 'TodoCompleted',
   },
+  // Real pass-through: newSessionConfig binds the session's debug-log context
+  // via sessionIdContext.run, so the mock must expose the actual store.
+  sessionIdContext: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).sessionIdContext,
 }));
 
 vi.mock('./runtimeOutputDirContext.js', () => ({
@@ -271,8 +285,14 @@ vi.mock('../config/settings-cache.js', async () => {
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  // newSessionConfig's catch narrows on this class; without the export an
+  // unrelated error in the try block surfaces as a confusing mock error.
+  SessionIdConflictError: class SessionIdConflictError extends Error {},
 }));
-vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
+vi.mock('./session/Session.js', () => ({
+  Session: vi.fn(),
+  registerCreateSubSessionTool: vi.fn().mockResolvedValue(undefined),
+}));
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
@@ -324,6 +344,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
   function makeInnerConfig() {
     const mockSessionService = {
       sessionExists: vi.fn().mockResolvedValue(true),
+      findSessionIdIgnoringCase: vi.fn().mockResolvedValue(SESSION_ID),
       getWorktreeSessionPath: vi.fn().mockReturnValue(SIDECAR_PATH),
     };
     vi.mocked(SessionService).mockImplementation(
@@ -344,7 +365,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
-      getGeminiClient: vi.fn().mockReturnValue({
+      getLlmClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
@@ -444,6 +465,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
     vi.mocked(Session).mockImplementation(() => {
       const mock = {
         getId: vi.fn().mockReturnValue(SESSION_ID),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(innerConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),

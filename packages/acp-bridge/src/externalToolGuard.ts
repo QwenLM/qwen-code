@@ -13,6 +13,18 @@ export const PRIVATE_EXTERNAL_TOOL_GUARD_ENV =
   'QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD';
 
 /**
+ * Private, non-secret marker passed from `qwen serve` to its ACP child only
+ * when a real external tool guard provider is attached. Without it the child
+ * still installs the managed guard plumbing (the daemon's built-in policy
+ * needs it), but resolves every non-shell tool locally and keeps `/fork` and
+ * agent-backed workspace memory available: those features are only disabled
+ * for the external provider's v1 contract, which cannot observe hidden-agent
+ * execution.
+ */
+export const PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV =
+  'QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER';
+
+/**
  * ACP initialize-response metadata proving that the child consumed the
  * private activation marker and installed the required executor callback.
  */
@@ -25,6 +37,26 @@ export const EXTERNAL_TOOL_GUARD_READY_META_KEY =
  * value `qwen serve` passes to the child, when the guard is required.
  */
 export const EXTERNAL_TOOL_GUARD_REQUIRED_VALUE = 'required-v1';
+
+/**
+ * The provider-attached marker value `qwen serve` passes to the child when a
+ * real external tool guard provider is configured.
+ */
+export const EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE = 'attached-v1';
+
+/**
+ * Tools whose arguments carry a shell command line the host runs on the
+ * session's behalf. The daemon's built-in policy inspects exactly these, and
+ * the ACP child resolves every other tool locally when no external provider
+ * is attached. Pinned to `ToolNames.SHELL`/`ToolNames.MONITOR` in
+ * `@qwen-code/qwen-code-core`, which this package deliberately does not
+ * depend on; `daemon-git-worktree-guard.test.ts` asserts the values still
+ * match so a rename cannot silently unhook a tool from the guard.
+ */
+export const SHELL_EXECUTING_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'monitor',
+  'run_shell_command',
+]);
 
 /** Daemon-local bearer token for the loopback external Tool Guard provider. */
 export const EXTERNAL_TOOL_GUARD_TOKEN_ENV =

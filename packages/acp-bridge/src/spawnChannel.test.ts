@@ -35,17 +35,24 @@
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
+import { ClientSideConnection } from '@agentclientprotocol/sdk';
 import { ProcessRegistry } from './process-registry.js';
 import { createChildHeapPolicy } from './child-heap-policy.js';
 import { resolveDaemonMemoryBudget } from './daemon-memory-budget.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mockSpawn = vi.hoisted(() => vi.fn());
+const { mockExecFile, mockSpawn, mockSpawnSync } = vi.hoisted(() => ({
+  mockExecFile: vi.fn(),
+  mockSpawn: vi.fn(),
+  mockSpawnSync: vi.fn(),
+}));
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
+    execFile: mockExecFile,
     spawn: mockSpawn,
+    spawnSync: mockSpawnSync,
   };
 });
 
@@ -58,15 +65,65 @@ import {
 } from './spawnChannel.js';
 
 function createFakeChildProcess(): ChildProcess {
-  return Object.assign(new EventEmitter(), {
+  const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(),
     stdout: new PassThrough(),
     stderr: new PassThrough(),
     pid: 12345,
     exitCode: null,
     signalCode: null,
-    kill: vi.fn(() => true),
-  }) as unknown as ChildProcess;
+    kill: vi.fn(),
+  });
+  child.kill.mockImplementation((signal?: NodeJS.Signals | number) => {
+    const signalCode = typeof signal === 'string' ? signal : 'SIGTERM';
+    child.emit('exit', null, signalCode);
+    return true;
+  });
+  return child as unknown as ChildProcess;
+}
+
+beforeEach(() => {
+  mockExecFile.mockImplementation((...args: unknown[]) => {
+    const callback = args[3] as (
+      error: Error | null,
+      stdout: string,
+      stderr: string,
+    ) => void;
+    callback(
+      Object.assign(new Error('mock process lookup failure'), {
+        code: 'ENOENT',
+      }),
+      '',
+      '',
+    );
+    return new EventEmitter();
+  });
+  mockSpawnSync.mockReturnValue({
+    error: Object.assign(new Error('mock process lookup failure'), {
+      code: 'ENOENT',
+    }),
+    status: null,
+    stderr: '',
+    stdout: '',
+  });
+  vi.spyOn(process, 'kill').mockImplementation(((pid: number) => {
+    if (pid < 0) {
+      throw Object.assign(new Error('missing fake process group'), {
+        code: 'ESRCH',
+      });
+    }
+    return true;
+  }) as typeof process.kill);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  mockExecFile.mockReset();
+  mockSpawnSync.mockReset();
+});
+
+function expectedTreeFallbackSignal(): NodeJS.Signals {
+  return process.platform === 'win32' ? 'SIGKILL' : 'SIGTERM';
 }
 
 describe('createSpawnChannelFactory env policy', () => {
@@ -130,8 +187,14 @@ describe('createSpawnChannelFactory env policy', () => {
     });
 
     const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
-      | { env?: NodeJS.ProcessEnv }
+      | {
+          detached?: boolean;
+          env?: NodeJS.ProcessEnv;
+          windowsHide?: boolean;
+        }
       | undefined;
+    expect(spawnOptions?.windowsHide).toBe(true);
+    expect(spawnOptions?.detached).toBe(process.platform !== 'win32');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_CODE_SIMPLE');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
     expect(spawnOptions?.env).not.toHaveProperty(
@@ -150,6 +213,33 @@ describe('createSpawnChannelFactory env policy', () => {
       | { env?: NodeJS.ProcessEnv }
       | undefined;
     expect(spawnOptions?.env?.['QWEN_CODE_SERVE']).toBe('1');
+  });
+
+  it('attaches the spawned ACP child as an owned process tree', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const registry = new ProcessRegistry();
+    const reserve = registry.reserve.bind(registry);
+    let attachmentOptions:
+      | Parameters<ReturnType<ProcessRegistry['reserve']>['attach']>[1]
+      | undefined;
+    vi.spyOn(registry, 'reserve').mockImplementation(() => {
+      const reservation = reserve();
+      const attach = reservation.attach.bind(reservation);
+      vi.spyOn(reservation, 'attach').mockImplementation(
+        (attachedChild, options) => {
+          attachmentOptions = options;
+          return attach(attachedChild, options);
+        },
+      );
+      return reservation;
+    });
+
+    await createSpawnChannelFactory({ processRegistry: registry })(
+      '/tmp/project',
+    );
+
+    expect(attachmentOptions).toEqual({ ownsProcessTree: true });
   });
 
   it('passes optional child args after --acp', async () => {
@@ -244,8 +334,204 @@ describe('createSpawnChannelFactory env policy', () => {
     (child.stdout as PassThrough).write('x'.repeat(17));
 
     await expect(reader.closed).resolves.toBeUndefined();
-    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_frame_too_large',
+    });
+    await vi.waitFor(() =>
+      expect(child.kill).toHaveBeenCalledWith(expectedTreeFallbackSignal()),
+    );
     reader.releaseLock();
+  });
+
+  it('rejects invalid known-method params before ACP SDK validation', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 4096,
+        maxQueuedMessages: 4,
+        maxQueuedBytes: 16_384,
+      },
+    })('/tmp/project');
+    const connection = new ClientSideConnection(
+      () => ({}) as never,
+      channel.stream,
+    );
+
+    (child.stdout as PassThrough).write(
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'terminal/create',
+        params: { command: 'true', sessionId: 'session', args: [1] },
+      })}\n`,
+    );
+
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_invalid_message',
+    });
+    await expect(connection.closed).resolves.toBeUndefined();
+    expect(stderr).toHaveBeenCalledOnce();
+    expect(stderr.mock.calls[0]?.[0]).toBe('Failed to parse JSON message:');
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain(
+      'Error handling request',
+    );
+    stderr.mockRestore();
+  });
+
+  it('terminates a bounded child that closes stdout without exiting', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 4096,
+        maxQueuedMessages: 4,
+        maxQueuedBytes: 16_384,
+      },
+    })('/tmp/project');
+    const connection = new ClientSideConnection(
+      () => ({}) as never,
+      channel.stream,
+    );
+
+    (child.stdout as PassThrough).end();
+
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_unexpected_eof',
+    });
+    await expect(connection.closed).resolves.toBeUndefined();
+    await vi.waitFor(() =>
+      expect(child.kill).toHaveBeenCalledWith(expectedTreeFallbackSignal()),
+    );
+  });
+
+  it('terminates the tracked child when outbound serialization fails', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const factory = createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 1024,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 2048,
+      },
+    });
+    const channel = await factory('/tmp/project');
+    const writer = channel.stream.writable.getWriter();
+    const cyclic: Record<string, unknown> = {
+      jsonrpc: '2.0',
+      method: 'cycle',
+    };
+    cyclic['self'] = cyclic;
+
+    await expect(writer.write(cyclic as never)).rejects.toBeInstanceOf(
+      TypeError,
+    );
+    await vi.waitFor(() =>
+      expect(child.kill).toHaveBeenCalledWith(expectedTreeFallbackSignal()),
+    );
+    writer.releaseLock();
+  });
+
+  it('holds prepared response bytes until the response is written', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const factory = createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 4096,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 5000,
+      },
+    });
+    const channel = await factory('/tmp/project');
+    const writer = channel.stream.writable.getWriter();
+    const first = { text: 'x'.repeat(1000) };
+    const second = { text: 'y'.repeat(1000) };
+    const third = { text: 'z'.repeat(1000) };
+
+    const releaseOutbound = channel.transportGuard?.reserveOutboundOperation([
+      'method',
+      { optional: undefined },
+    ]);
+    releaseOutbound?.();
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(first),
+    ).not.toThrow();
+    await writer.write({ jsonrpc: '2.0', id: 1, result: first });
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(second),
+    ).not.toThrow();
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(third),
+    ).toThrow('NDJSON decoded queue is full');
+
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+    });
+    await vi.waitFor(() =>
+      expect(child.kill).toHaveBeenCalledWith(expectedTreeFallbackSignal()),
+    );
+    writer.releaseLock();
+  });
+
+  it('stops estimating a large response once its byte budget is exceeded', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 64_000,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 5_000,
+      },
+    })('/tmp/project');
+    let elementReads = 0;
+    const response = new Proxy(
+      Array.from({ length: 10_000 }, () => 0),
+      {
+        get(target, property, receiver) {
+          if (typeof property === 'string' && /^\d+$/u.test(property)) {
+            elementReads++;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+        getOwnPropertyDescriptor(target, property) {
+          if (typeof property === 'string' && /^\d+$/u.test(property)) {
+            elementReads++;
+          }
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        },
+      },
+    );
+
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(response),
+    ).toThrow('NDJSON decoded queue is full');
+    expect(elementReads).toBeLessThan(1_000);
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+    });
+  });
+
+  it('charges JSON string escaping before admitting prepared responses', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 64_000,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 6_000,
+      },
+    })('/tmp/project');
+    const response = {
+      content: '\u0001'.repeat(700),
+    };
+
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(response),
+    ).toThrow('NDJSON decoded queue is full');
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+    });
   });
 
   it('keeps the default factory unbounded and validates opt-in limits early', () => {

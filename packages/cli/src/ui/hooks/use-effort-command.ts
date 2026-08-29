@@ -10,7 +10,7 @@ import { applyReasoningEffort } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
-import { t } from '../../i18n/index.js';
+import { formatEffortChangeMessage } from '../commands/effort-utils.js';
 
 interface UseEffortCommandReturn {
   isEffortDialogOpen: boolean;
@@ -38,7 +38,7 @@ export const useEffortCommand = (
         }
         // Apply at runtime (next turn) and persist for future sessions; provider
         // adapters clamp the tier to what the active model supports.
-        const applied = applyReasoningEffort(config, effort);
+        applyReasoningEffort(config, effort);
         loadedSettings.setValue(
           getPersistScopeForModelSelection(loadedSettings),
           'model.reasoningEffort',
@@ -50,29 +50,16 @@ export const useEffortCommand = (
         // for future sessions, but say it won't take effect until thinking is
         // re-enabled.
         if (addItem) {
-          if (!applied) {
-            addItem(
-              {
-                type: MessageType.INFO,
-                text: t(
-                  'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
-                  { tier: effort },
-                ),
-              },
-              Date.now(),
-            );
-          } else {
-            addItem(
-              {
-                type: MessageType.INFO,
-                text: t(
-                  'Reasoning effort: {{tier}} (requested; the effective tier depends on the active provider/model).',
-                  { tier: effort },
-                ),
-              },
-              Date.now(),
-            );
-          }
+          const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
+            type: MessageType.INFO,
+            text: formatEffortChangeMessage(config, effort),
+          };
+          addItem(feedbackItem, Date.now());
+          config.getChatRecordingService?.()?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: '/effort',
+            outputHistoryItems: [feedbackItem],
+          });
         }
       } finally {
         setIsEffortDialogOpen(false);

@@ -9,8 +9,9 @@
 // The iterative reverse audit (Step 5) is the one stage of a review whose cost
 // is open-ended: each round is a fan-out (one auditor per chunk on a 3B plan),
 // each round's findings go back through verification, and the loop runs until
-// two consecutive dry rounds or the plan's round cap (5, or 3 for a huge
-// diff). On a PR where every round
+// two consecutive dry rounds or the plan's round cap (one value per topology:
+// 10 on a 3A diff, 5 on a 3B one, and 3 when huge — but only where a deadline
+// exists, since that reduction answers a ceiling; 5 when huge without one). On a PR where every round
 // finds something, that is the whole budget. Measured on a real CI run
 // (#8368, +1699 lines): the audit loop ran to the 5-round cap, consumed 3.5 of
 // the job's 4 budgeted hours, and the outer GNU-timeout kill arrived while
@@ -47,7 +48,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { promptRecordDir } from './prompt-record.js';
+import { parsePositiveIntegerEnv } from '@qwen-code/qwen-code-core';
+import { promptRecordDir, runEpochMs } from './prompt-record.js';
 
 /** Unix seconds at which the review process will be killed. Set by CI. */
 export const DEADLINE_ENV = 'QWEN_REVIEW_DEADLINE_EPOCH';
@@ -138,6 +140,16 @@ export const DEFAULT_ROUND_SECONDS = 1800;
 /** Floor for an observed round cost — a quick same-round rebuild is not a round. */
 const MIN_OBSERVED_ROUND_SECONDS = 600;
 
+/**
+ * The runtime's concurrent-agent slots — the pool every fan-out launch
+ * shares. The core tool scheduler runs the orchestrator's parallel `agent`
+ * calls under this cap (default 10), the review workflow does not override
+ * it, and an `agent-prompt` subprocess inherits the orchestrator's
+ * environment — so the gate and the launches it gates read the same pool.
+ */
+export const TOOL_CONCURRENCY_ENV = 'QWEN_CODE_MAX_TOOL_CONCURRENCY';
+export const DEFAULT_TOOL_CONCURRENCY = 10;
+
 interface RoundStamp {
   round: number | null;
   atMs: number;
@@ -147,35 +159,91 @@ const STAMPS_FILE = 'budget-rounds.json';
 const STOP_FILE = 'budget-stop.json';
 
 /**
- * Slack for the run-epoch fence below: absorbs the sub-millisecond skew
- * between a file mtime (fractional) and `Date.now()` (integral) when a
- * record is written moments after the plan. Real cross-run gaps are minutes
- * to hours; two seconds is noise against them.
+ * Claim the retirement-degradation NOTE's slot for `round`, this run:
+ * `true` at most once per round per run, across PROCESSES — Step 3B
+ * builds each chunk in its own CLI process, and the claim file's atomic
+ * `wx` create is the inter-process exclusion a read-modify-write sidecar
+ * does not have (#9272: 24 concurrent builds all claimed one slot, and
+ * the JSON tore). One claim file per round, fenced to the run by its
+ * mtime against the plan's epoch — a previous run's claim must not
+ * silence this run's channel; the stale-claim remove-then-create window
+ * can double-print, which is the verbose side and accepted. Every other
+ * failure fails toward PRINTING: the note is the diagnostic, and silence
+ * is the only wrong answer here (#9206).
  */
-const RUN_EPOCH_SLACK_MS = 2000;
-
-/**
- * The run's epoch: records older than this predate the run and are ignored.
- *
- * The stamps and the stop marker key on the plan path, which is stable per
- * PR — but every run rewrites the plan at its Step 1 capture (`fetch-pr` /
- * `plan-diff` / `capture-local`), so the plan's own mtime dates the run. A
- * budgeted run killed by the outer deadline leaves its records behind (the
- * Step 9 cleanup never ran, and the workflow's start-of-run sweep removes
- * worktrees, not these files); without the fence the next review of the
- * same PR would price its rounds off the previous run's stamps (an
- * hours-old stamp reads as an hours-long round and refuses round 1 of a
- * fresh budget) and cap its verdict on a stop that did not happen in this
- * run. An unstatable plan disables the fence — fail open, like every other
- * malformed input this module reads.
- */
-function runEpochMs(planPath: string): number {
+export function claimRetirementDegradeNote(
+  planPath: string,
+  round: number | undefined,
+): boolean {
+  const dir = promptRecordDir(planPath);
+  const file = join(dir, `retirement-degrade-note-round-${round ?? 'x'}.json`);
   try {
-    return statSync(planPath).mtimeMs - RUN_EPOCH_SLACK_MS;
+    mkdirSync(dir, { recursive: true });
   } catch {
-    return Number.NEGATIVE_INFINITY;
+    // An uncreatable record dir is not a claim — the note must still
+    // print. A recursive mkdir throws EEXIST when the path exists but is
+    // NOT a directory, and the create's catch below reads only the `wx`
+    // EEXIST as "claimed already"; conflating the two silenced the note
+    // on every round of a run whose record path was a regular file
+    // (#9272).
+    return true;
+  }
+  // A previous-run claim must be reclaimed. Fence it by SHAPE and by its
+  // own `atMs` vs the strict plan epoch (#9272 — file mtimes are not
+  // reliable across runners, so the fence reads the claim's CONTENT).
+  // `recursive` so a directory occupant clears. A non-file, an
+  // unreadable/corrupt claim, and a readable claim older than the epoch
+  // are all NOT this run's claim and are removed; the absence case (no
+  // occupant) needs no removal.
+  try {
+    const st = statSync(file);
+    let stale: boolean;
+    if (!st.isFile()) {
+      stale = true;
+    } else {
+      try {
+        stale =
+          JSON.parse(readFileSync(file, 'utf8')).atMs <
+          statSync(planPath).mtimeMs;
+      } catch {
+        // Corrupt/unreadable content is not a claim — a torn concurrent
+        // write would otherwise sit at the path and EEXIST-silence the
+        // note forever (#9272).
+        stale = true;
+      }
+    }
+    if (stale) {
+      rmSync(file, { force: true, recursive: true });
+    }
+  } catch {
+    // Absent occupant — the create below is the claimant.
+  }
+  try {
+    writeFileSync(
+      file,
+      JSON.stringify({ round: round ?? null, atMs: Date.now() }),
+      { flag: 'wx' },
+    );
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return true;
+    // EEXIST: claimed already this run — but only when the occupant is
+    // the claim FILE. A directory or other non-file at the claim path
+    // holds no claim, and treating it as one silences the NOTE forever —
+    // the only wrong answer here (#9272).
+    try {
+      return !statSync(file).isFile();
+    } catch {
+      return true;
+    }
   }
 }
+
+// The run-epoch fence is shared with every other per-run artifact (the
+// prompt records, the transcripts, the session ledger) — one definition in
+// `prompt-record.ts`, so a change to it cannot apply to some readers and not
+// others. The stamps and the stop marker key on the plan path, which is
+// stable per PR; its mtime dates the run.
 
 /**
  * The admission stamps written so far THIS RUN, oldest first. Unreadable →
@@ -227,6 +295,27 @@ export function stampRound(
 }
 
 /**
+ * The costliest of `stamps`' admission-to-admission spans — each span ends
+ * at the next stamp, the last at `endMs` — floored at the observation
+ * floor; `null` when there are no stamps.
+ */
+function costliestSpanSeconds(
+  stamps: RoundStamp[],
+  endMs: number,
+): number | null {
+  if (stamps.length === 0) return null;
+  let maxSeconds = 0;
+  for (let i = 0; i < stamps.length; i++) {
+    const end = i + 1 < stamps.length ? stamps[i + 1].atMs : endMs;
+    maxSeconds = Math.max(
+      maxSeconds,
+      Math.round((end - stamps[i].atMs) / 1000),
+    );
+  }
+  return Math.max(MIN_OBSERVED_ROUND_SECONDS, maxSeconds);
+}
+
+/**
  * What the round about to be admitted is expected to cost, in seconds: the
  * COSTLIEST round the run has measured (admission-to-admission — its audit
  * fan-out and the orchestration around it; under the pipelined loop a
@@ -249,16 +338,70 @@ export function expectedRoundSeconds(
   const stamps = readRoundStamps(planPath).filter(
     (s) => round === undefined || s.round !== round,
   );
-  if (stamps.length === 0) return DEFAULT_ROUND_SECONDS;
-  let maxSeconds = 0;
-  for (let i = 0; i < stamps.length; i++) {
-    const end = i + 1 < stamps.length ? stamps[i + 1].atMs : nowMs;
-    maxSeconds = Math.max(
-      maxSeconds,
-      Math.round((end - stamps[i].atMs) / 1000),
-    );
+  return costliestSpanSeconds(stamps, nowMs) ?? DEFAULT_ROUND_SECONDS;
+}
+
+/**
+ * What the ADMISSION itself commits, in seconds — `expectedRoundSeconds`,
+ * except when the round being admitted launches while its predecessor is
+ * still in flight: the convergence pair's second member, built in the same
+ * response as the first. The predecessor's stamp is fresher than the
+ * observation floor — nothing has measured the round yet, and no elapsed
+ * time has paid for it — so the admission must cover BOTH members' wall,
+ * not just its own. That wall is the pair's two fan-outs sharing the
+ * tool-concurrency pool: ceil(2C/N) waves against one round's ceil(C/N),
+ * for C auditors on a pool of N, and the first never exceeds twice the
+ * second — so the price is the single-round estimate scaled by exactly
+ * those waves: one round's price when the pool holds both members at once
+ * (the 3A shape, and a 3B pair whose chunks fit), more as the pool
+ * serializes them, and never beyond the two-round bound whatever the pool.
+ * Pricing the second member off the just-written first stamp instead — a
+ * seconds-old span clamped to the floor — committed the pair at one
+ * round's price for up to two rounds' wall, and near the deadline the
+ * pair consumed the reserve and hit the outer timeout before posting.
+ *
+ * The price deliberately covers the pair's AUDITOR fan-outs only: the pair
+ * launches in the same response as the Step 4 verifier shards, which share
+ * the same pool waves, and if they stretch the batch past the priced waves
+ * the extra wall is bounded by the verifier batch's own wave count — one
+ * wave for any normal finding set — which the reserve the gate holds ahead
+ * of every admission is there to carry.
+ *
+ * One ledger shape the price does not correct: the pair stamps rounds 1
+ * and 2 seconds apart, so after the pair returns, the span from round 2's
+ * stamp to the next admission covers the pair's whole wall, and every solo
+ * round after it prices at up to twice its true cost. Accepted
+ * conservatism: an over-priced gate refuses a round near the deadline that
+ * would have fit — a capped verdict that still posts — never the
+ * killed-before-compose shape the gate exists to prevent.
+ */
+export function expectedAdmissionSeconds(
+  planPath: string,
+  round: number | undefined,
+  fanOutWidth: number,
+  env: NodeJS.ProcessEnv,
+  nowMs: number = Date.now(),
+): number {
+  const stamps = readRoundStamps(planPath).filter(
+    (s) => round === undefined || s.round !== round,
+  );
+  const last = stamps.length > 0 ? stamps[stamps.length - 1] : undefined;
+  const predecessorInFlight =
+    last !== undefined && nowMs - last.atMs < MIN_OBSERVED_ROUND_SECONDS * 1000;
+  if (!predecessorInFlight) {
+    return expectedRoundSeconds(planPath, round, nowMs);
   }
-  return Math.max(MIN_OBSERVED_ROUND_SECONDS, maxSeconds);
+  const single =
+    costliestSpanSeconds(stamps.slice(0, -1), last.atMs) ??
+    DEFAULT_ROUND_SECONDS;
+  const pool = parsePositiveIntegerEnv(
+    env[TOOL_CONCURRENCY_ENV],
+    DEFAULT_TOOL_CONCURRENCY,
+  );
+  const width = Math.max(1, Math.floor(fanOutWidth));
+  const pairWaves = Math.ceil((2 * width) / pool);
+  const roundWaves = Math.ceil(width / pool);
+  return Math.ceil((single * pairWaves) / roundWaves);
 }
 
 export interface BudgetExhausted {
@@ -282,6 +425,25 @@ function readDeadlineSeconds(env: NodeJS.ProcessEnv): number | null {
   const deadline = Number(raw);
   if (!Number.isFinite(deadline) || deadline <= 0) return null;
   return deadline;
+}
+
+/**
+ * Does this run have a clock at all?
+ *
+ * The budget's huge-diff round reduction is a *finishability* ruling — five
+ * ~90-minute rounds do not fit a six-hour CI ceiling — and a ruling about
+ * fitting inside a wall is meaningless where there is no wall. This is how the
+ * capture commands ask, and it deliberately reuses the same parse both gates
+ * read from, so "has a deadline" and "the gate will enforce a deadline" cannot
+ * come apart: a malformed value leaves the review ungated here exactly as it
+ * leaves it ungated there.
+ *
+ * The env, not `process.env`, for the reason every other function in this file
+ * takes it: a test must be able to ask the question without editing the
+ * process it runs in.
+ */
+export function hasReviewDeadline(env: NodeJS.ProcessEnv): boolean {
+  return readDeadlineSeconds(env) !== null;
 }
 
 /**
@@ -426,12 +588,25 @@ export interface BudgetStop {
 }
 
 /**
- * The phrase that identifies the budget-stop disclosure wherever it is
- * relayed. Exported so `compose-review` dedups the orchestrator's copy
- * against the marker's by the same text the entry itself is spelled with —
- * a reword of the entry moves its key along with it.
+ * The phrase the budget-stop entry is spelled with — interpolated into the
+ * disclosure below, so a reword changes every rendering in one place.
+ *
+ * NOT a dedup key: `compose-review` once spliced relayed copies by this
+ * substring, and the phrase alone also matched genuine free-form
+ * line-coverage disclosures that merely mention the budget — those were
+ * silently dropped from the posted body. The splice now keys on the FULL
+ * canonical entry text (`budgetStopEntry`/`budgetStopEntryZh`), so a
+ * phrase-only relay is no longer deduped: it renders beside the structural
+ * stop line, which is the honest outcome for text the machinery did not
+ * mint.
  */
 export const BUDGET_STOP_PHRASE = 'review time budget';
+/** The Chinese pair, spelled into `budgetStopEntryZh`. Same non-dedup-key
+ *  status as the English phrase above: the splice reads the full canonical
+ *  entry in BOTH languages (a relayed Chinese entry checked against only
+ *  the English text once survived and double-rendered), never the bare
+ *  phrase. */
+export const BUDGET_STOP_PHRASE_ZH = '评审时间预算';
 
 /**
  * The disclosure as structural parts, both languages: compose-review renders
@@ -450,7 +625,7 @@ export function budgetStopDisclosure(round: number | undefined): {
     subject: 'reverse audit',
     reason: `stopped before ${which} by the ${BUDGET_STOP_PHRASE}`,
     subjectZh: '反向审计',
-    reasonZh: `评审时间预算不足，未能开始${whichZh}`,
+    reasonZh: `${BUDGET_STOP_PHRASE_ZH}不足，未能开始${whichZh}`,
   };
 }
 
@@ -467,11 +642,13 @@ export function budgetStopEntryZh(round: number | undefined): string {
 }
 
 /**
- * The phrase identifying a ROUND-CAP disclosure wherever it is relayed —
- * the cap analogue of `BUDGET_STOP_PHRASE`, so `compose-review` dedups the
- * orchestrator's relayed copy against the marker's by shared text.
+ * The phrase the round-cap entry is spelled with — the cap analogue of
+ * `BUDGET_STOP_PHRASE`, and like it NOT a dedup key: `compose-review`
+ * splices relays by the full canonical entry text, never this substring.
  */
 export const ROUND_CAP_PHRASE = 'reverse-audit round cap';
+/** The Chinese pair, spelled into the zh entry — same non-dedup-key status. */
+export const ROUND_CAP_PHRASE_ZH = '反审轮数上限';
 
 /**
  * The round-cap disclosure as structural parts, both languages — the
@@ -488,7 +665,7 @@ export function roundCapStopDisclosure(cap: number): {
     subject: 'reverse audit',
     reason: `did not converge within the ${ROUND_CAP_PHRASE} of ${cap}`,
     subjectZh: '反向审计',
-    reasonZh: `在 ${cap} 轮的反审轮数上限内未收敛`,
+    reasonZh: `在 ${cap} 轮的${ROUND_CAP_PHRASE_ZH}内未收敛`,
   };
 }
 
@@ -576,14 +753,17 @@ export function writeBudgetStop(
 }
 
 /**
- * The budget-stop marker, if THIS RUN wrote one. Unreadable → null; so is a
- * marker older than the plan's own capture — a previous run's refusal, left
- * behind by a kill before cleanup, must not cap a verdict on a stop that
- * did not happen in this run (see `runEpochMs`). A marker without a numeric
- * `atMs` cannot prove which run it belongs to and is treated the same way —
- * only this module writes markers, and it always dates them.
+ * The budget-stop marker on disk, whichever run wrote it — shape-checked,
+ * never fenced. A marker without a string `entry` and numeric `atMs` cannot
+ * prove what it is and reads as none; only this module writes markers, and
+ * it always dates them.
+ *
+ * The verdict consumers read through the fenced `readBudgetStop` below;
+ * this unfenced read exists for the one consumer whose purpose is the
+ * OPPOSITE of the fence — cleanup's retention, where a previous run's
+ * marker is exactly the evidence to keep (#9213 on #9206).
  */
-export function readBudgetStop(planPath: string): BudgetStop | null {
+export function readBudgetStopUnfenced(planPath: string): BudgetStop | null {
   try {
     const raw = readFileSync(
       join(promptRecordDir(planPath), STOP_FILE),
@@ -594,8 +774,7 @@ export function readBudgetStop(planPath: string): BudgetStop | null {
       typeof parsed !== 'object' ||
       parsed === null ||
       typeof (parsed as BudgetStop).entry !== 'string' ||
-      typeof (parsed as BudgetStop).atMs !== 'number' ||
-      (parsed as BudgetStop).atMs < runEpochMs(planPath)
+      typeof (parsed as BudgetStop).atMs !== 'number'
     ) {
       return null;
     }
@@ -606,19 +785,55 @@ export function readBudgetStop(planPath: string): BudgetStop | null {
 }
 
 /**
- * Remove any stop marker beside the prompt records. Called when the loop
- * reaches a clean end that outranks an earlier same-run refusal — a
+ * The budget-stop marker, if THIS RUN wrote one. Unreadable → null; so is a
+ * marker older than the plan's own capture — a previous run's refusal, left
+ * behind by a kill before cleanup, must not cap a verdict on a stop that
+ * did not happen in this run (see `runEpochMs`).
+ */
+export function readBudgetStop(planPath: string): BudgetStop | null {
+  const stop = readBudgetStopUnfenced(planPath);
+  if (stop === null || stop.atMs < runEpochMs(planPath)) return null;
+  return stop;
+}
+
+/**
+ * Remove THIS RUN's stop marker beside the prompt records. Called when the
+ * loop reaches a clean end that outranks an earlier same-run refusal — a
  * CONVERGED exit after an over-cap round was refused: the marker would
  * otherwise survive (nothing else unlinks it) and cap a verdict the audit
- * legitimately converged. Missing file and unlink errors are swallowed —
- * the file was the thing to be rid of.
+ * legitimately converged. A marker a PREVIOUS run wrote is left alone: a
+ * converged RE-REVIEW must not unlink the very evidence the next cleanup
+ * keys its retention on (#9213 on #9206) — the verdict side is already
+ * safe from it (the fenced reader drops it), so keeping it costs nothing.
+ * An undateable marker cannot prove it belongs to this run and stays too.
+ * Missing file and unlink errors are swallowed — the file was the thing to
+ * be rid of.
  */
 export function clearBudgetStop(planPath: string): void {
   try {
+    const stop = readBudgetStopUnfenced(planPath);
+    if (stop === null || stop.atMs < runEpochMs(planPath)) return;
     rmSync(join(promptRecordDir(planPath), STOP_FILE), { force: true });
   } catch {
     // Best-effort: a marker we could not remove still only caps a verdict,
     // never corrupts one, and the converged stderr is the load-bearing half.
+  }
+}
+
+/**
+ * Remove the admission stamps beside the prompt records. Called by the
+ * `--resume` path in `fetch-pr`: the span from the interrupted attempt's last
+ * stamp to the continuation's first admission contains the death gap and the
+ * retry backoff, which would price a "round" at hours and refuse round 1 of a
+ * fresh deadline. Without stamps the gate falls back to its conservative
+ * constant — the failure direction is an early stop with a disclosure, never
+ * a kill-before-compose. Errors are swallowed like `clearBudgetStop`'s.
+ */
+export function clearRoundStamps(planPath: string): void {
+  try {
+    rmSync(join(promptRecordDir(planPath), STAMPS_FILE), { force: true });
+  } catch {
+    // Best-effort: stale stamps only make the gate MORE conservative.
   }
 }
 

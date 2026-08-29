@@ -119,7 +119,7 @@ describe('repository context validation', () => {
     expect(() =>
       validateRepositoryContext({
         ...valid,
-        domains: Array.from({ length: 129 }, (_, index) => `d${index}`),
+        domains: Array.from({ length: 257 }, (_, index) => `d${index}`),
       }),
     ).toThrow('domains is invalid');
   });
@@ -210,13 +210,13 @@ describe('repository context validation', () => {
   });
 
   it('accepts the item-count bound exactly', () => {
-    // The reject side pins 129 items; this accept pin sits exactly at
+    // The reject side pins 257 items; this accept pin sits exactly at
     // MAX_ARRAY_ITEMS, where a `>` → `>=` regression would reject the
     // maximum valid manifest at the documented bound.
     const atBound = {
       ...valid,
       domains: Array.from(
-        { length: 128 },
+        { length: 256 },
         (_, index) => `d-${String(index).padStart(3, '0')}`,
       ),
     };

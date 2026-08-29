@@ -456,8 +456,8 @@ describe('MonitorRegistry', () => {
     }
   });
 
-  it('truncateDescription caps output at MAX_DESCRIPTION_LENGTH including ellipsis', () => {
-    // MAX_DESCRIPTION_LENGTH is a private constant but its value (80) is
+  it('caps notification descriptions at the label max length including ellipsis', () => {
+    // The 80-char cap (NOTIFICATION_LABEL_MAX_LENGTH in terminalSafe.ts) is
     // documented in the tool schema and mirrored by the Monitor tool. Verify
     // that descriptions longer than the cap are truncated to exactly 80
     // chars total (ellipsis included), not 83.

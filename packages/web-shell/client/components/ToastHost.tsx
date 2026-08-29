@@ -6,6 +6,24 @@ import styles from './ToastHost.module.css';
 
 export type ToastTone = 'info' | 'warning' | 'error' | 'success';
 
+/** Window event that asks the app-level toast host to show a toast. Lets
+ * deeply nested components (markdown links, artifact actions) report failures
+ * without prop-drilling the toast callback. */
+export const TOAST_REQUEST_EVENT = 'qwen:toast-request';
+
+export interface ToastRequestDetail {
+  tone: ToastTone;
+  message: string;
+}
+
+export function requestToast(tone: ToastTone, message: string): void {
+  window.dispatchEvent(
+    new CustomEvent<ToastRequestDetail>(TOAST_REQUEST_EVENT, {
+      detail: { tone, message },
+    }),
+  );
+}
+
 export interface WebShellToast {
   id: string;
   tone: ToastTone;

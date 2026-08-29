@@ -136,13 +136,14 @@ import type {
   MemoryRecallDeliveryEvent,
 } from './types.js';
 import type { HookCallEvent } from './types.js';
-import type { UiEvent } from './uiTelemetry.js';
+import type { UiEvent, UiSubagentIdentity } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
 import { apiActivityTracker } from './api-activity-tracker.js';
 import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
 import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { emitSessionEnd, emitSessionStart } from './session-events.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -204,6 +205,7 @@ function runToolTelemetrySink(sink: () => void): void {
 export function logStartSession(
   config: Config,
   event: StartSessionEvent,
+  previousSessionId?: string,
 ): void {
   QwenLogger.getInstance(config)?.logStartSessionEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -238,6 +240,12 @@ export function logStartSession(
     attributes,
   };
   logger.emit(logRecord);
+  emitSessionStart(config.getSessionId(), previousSessionId);
+}
+
+export function logSessionEnd(config: Config): void {
+  if (!isTelemetrySdkInitialized()) return;
+  emitSessionEnd(config.getSessionId());
 }
 
 export function logUserPrompt(config: Config, event: UserPromptEvent): void {
@@ -418,13 +426,18 @@ export function logFileOperation(
   });
 }
 
-export function logApiRequest(config: Config, event: ApiRequestEvent): void {
+export function logApiRequest(
+  config: Config,
+  event: ApiRequestEvent,
+  sessionId?: string,
+): void {
   // QwenLogger.getInstance(config)?.logApiRequestEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'event.name': EVENT_API_REQUEST,
     'event.timestamp': new Date().toISOString(),
   };
@@ -505,9 +518,21 @@ export function logRipgrepRuntimeRecovery(
   logger.emit(logRecord);
 }
 
-export function logApiError(config: Config, event: ApiErrorEvent): void {
+export function logApiError(
+  config: Config,
+  event: ApiErrorEvent,
+  sessionId?: string,
+  uiSubagentIdentity?: UiSubagentIdentity,
+): void {
   const uiEvent = {
     ...event,
+    ...(uiSubagentIdentity
+      ? {
+          subagent_id: uiSubagentIdentity.id,
+          subagent_type: uiSubagentIdentity.type,
+          subagent_task_name: uiSubagentIdentity.taskName,
+        }
+      : {}),
     'event.name': EVENT_API_ERROR,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
@@ -524,6 +549,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'event.name': EVENT_API_ERROR,
     'event.timestamp': new Date().toISOString(),
     ['error.message']: event.error_message,
@@ -577,9 +603,21 @@ export function logApiCancel(config: Config, event: ApiCancelEvent): void {
   logger.emit(logRecord);
 }
 
-export function logApiResponse(config: Config, event: ApiResponseEvent): void {
+export function logApiResponse(
+  config: Config,
+  event: ApiResponseEvent,
+  sessionId?: string,
+  uiSubagentIdentity?: UiSubagentIdentity,
+): void {
   const uiEvent = {
     ...event,
+    ...(uiSubagentIdentity
+      ? {
+          subagent_id: uiSubagentIdentity.id,
+          subagent_type: uiSubagentIdentity.type,
+          subagent_task_name: uiSubagentIdentity.taskName,
+        }
+      : {}),
     'event.name': EVENT_API_RESPONSE,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
@@ -595,6 +633,7 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'event.name': EVENT_API_RESPONSE,
     'event.timestamp': new Date().toISOString(),
   };
@@ -945,7 +984,7 @@ export function logContentRetryFailure(
 /**
  * Phase 4b — Emits an HTTP-status retry event fired from `retryWithBackoff`
  * at an LLM call site (via the `onRetry` callback opt-in). Distinct from
- * `logContentRetry`, which is fired by `geminiChat`'s content-recovery loop.
+ * `logContentRetry`, which is fired by `llmChat`'s content-recovery loop.
  *
  * Fan-out (sink 0 fires first, before the SDK guard, so retries are counted
  * even with telemetry off; sinks 1–3 match the `logContentRetry` shape):
