@@ -240,6 +240,8 @@ export {
   FINDING_CONFIDENCES,
   FINDING_OUTCOMES,
   FINDING_SOURCES,
+  FINDING_DIRECTIONS,
+  FINDING_BASELINES,
   REPORT_FINDINGS_LEVELS,
   compressFindingSummary,
 } from './tools/report-findings.js';
@@ -250,6 +252,8 @@ export type {
   FindingConfidence,
   FindingOutcome,
   FindingSource,
+  FindingDirection,
+  FindingBaseline,
   ReportFindingsLevel,
 } from './tools/report-findings.js';
 export { CreateSubSessionTool } from './tools/create-sub-session.js';
@@ -299,6 +303,7 @@ export type {
   CronTaskDelivery,
   DurableCronTask,
   CronTaskRun,
+  CronRunSessionOutcome,
 } from './services/cronTasksFile.js';
 export {
   readCronTasks,
@@ -307,6 +312,7 @@ export {
   getCronFilePath,
   generateCronTaskId,
   appendCronRun,
+  annotateCronRunSession,
   taskHasLegacyCondition,
   MAX_TASK_RUNS,
   MAX_CHANNEL_DELIVERY_NAME_LENGTH,

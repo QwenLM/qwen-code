@@ -50,6 +50,10 @@ export const toolsCommand: SlashCommand = {
         name: tool.name,
         displayName: tool.displayName,
         description: tool.description,
+        // Surface the deferred/eager split so a `tools.eager` allowlist is
+        // visible rather than silently reshaping the model's toolset — the
+        // user-facing half of #10075.
+        deferred: toolRegistry.isDeferredAndHidden(tool.name),
       })),
       showDescriptions: useShowDescriptions,
     };
