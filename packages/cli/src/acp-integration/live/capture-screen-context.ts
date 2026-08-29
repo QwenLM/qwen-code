@@ -11,6 +11,7 @@ import { dirname, join, resolve } from 'node:path';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
+  escapeJsonTagCharacters,
   Kind,
   type PermissionDecision,
   type ToolInvocation,
@@ -113,11 +114,13 @@ class CaptureScreenContextInvocation extends BaseToolInvocation<
       signal.throwIfAborted();
       const screenshot = await readPrivatePng(screenshotPath);
       signal.throwIfAborted();
-      const serializedContext = JSON.stringify({
-        appName: result.appName,
-        ...(result.windowTitle ? { windowTitle: result.windowTitle } : {}),
-        accessibilityText: result.accessibilityText,
-      }).replace(/</gu, '\\u003c');
+      const serializedContext = escapeJsonTagCharacters(
+        JSON.stringify({
+          appName: result.appName,
+          ...(result.windowTitle ? { windowTitle: result.windowTitle } : {}),
+          accessibilityText: result.accessibilityText,
+        }),
+      );
       return {
         llmContent: [
           {
