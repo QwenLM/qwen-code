@@ -9,11 +9,14 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { FileTextIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarClockIcon, RefreshCwIcon } from 'lucide-react';
+import { FileTypeIcon } from '../FileTypeIcon';
+import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
   getComposerTagIconUrl,
   getComposerTagViewModel,
   isBuiltinComposerTagIconUrl,
+  isPreviewableFileComposerTag,
   parseUserMessageContentSafely,
   splitComposerTagContentByAnnotations,
 } from '../../utils/composerTag';
@@ -26,6 +29,7 @@ import type {
   WebShellComposerTag,
   WebShellComposerTagIconMap,
 } from '../../customization';
+import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
 import {
   getComposerTagDisplay,
   getComposerTagLabel,
@@ -44,6 +48,9 @@ interface UserMessageImage {
 interface UserMessageFile {
   name: string;
   mimeType: string;
+  data?: Blob;
+  text?: string;
+  attachmentId?: string;
 }
 
 interface UserMessageProps {
@@ -56,6 +63,102 @@ interface UserMessageProps {
   onRetrySend?: () => void;
   /** Click an uploaded image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+}
+
+interface ScheduledTaskRunContent {
+  name: string;
+  id: string;
+  cron: string;
+  triggeredAt: string;
+  trigger: 'scheduled' | 'manual';
+  prompt: string;
+}
+
+// Mirrors `SCHEDULED_TASK_RUN_INSTRUCTION` in cli/src/runtime/scheduled-task-run.ts
+// (the client cannot import that package): the header `buildScheduledTaskRunPrompt`
+// puts ahead of the task's own instructions. Change both together.
+const SCHEDULED_TASK_RUN_INSTRUCTION =
+  'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.';
+
+function parseScheduledTaskRunContent(
+  content: string,
+): ScheduledTaskRunContent | null {
+  const separator = `\n\n${SCHEDULED_TASK_RUN_INSTRUCTION}\n\n`;
+  const separatorIndex = content.indexOf(separator);
+  if (separatorIndex < 0) return null;
+  const lines = content.slice(0, separatorIndex).split('\n');
+  if (lines.length !== 6 || lines[5] !== 'Session: new chat for this run') {
+    return null;
+  }
+  const values = [
+    ['Scheduled task: ', lines[0]],
+    ['Task ID: ', lines[1]],
+    ['Schedule: ', lines[2]],
+    ['Triggered at: ', lines[3]],
+    ['Trigger: ', lines[4]],
+  ] as const;
+  if (values.some(([prefix, line]) => !line?.startsWith(prefix))) return null;
+  const trigger = lines[4]!.slice('Trigger: '.length);
+  if (trigger !== 'scheduled' && trigger !== 'manual') return null;
+  return {
+    name: lines[0]!.slice('Scheduled task: '.length),
+    id: lines[1]!.slice('Task ID: '.length),
+    cron: lines[2]!.slice('Schedule: '.length),
+    triggeredAt: lines[3]!.slice('Triggered at: '.length),
+    trigger,
+    prompt: content.slice(separatorIndex + separator.length),
+  };
+}
+
+function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
+  const { language, t } = useI18n();
+  const triggeredAt = new Date(run.triggeredAt);
+  const triggeredAtLabel = Number.isNaN(triggeredAt.getTime())
+    ? run.triggeredAt
+    : triggeredAt.toLocaleString(language);
+  return (
+    <div
+      className={styles.scheduledTaskRun}
+      data-web-shell-scheduled-task-run-message
+    >
+      <div className={styles.scheduledTaskHeader}>
+        <span className={styles.scheduledTaskIcon} aria-hidden="true">
+          <CalendarClockIcon />
+        </span>
+        <span className={styles.scheduledTaskHeading}>
+          <span className={styles.scheduledTaskEyebrow}>
+            {t('scheduledTasks.runContext.title')}
+          </span>
+          <strong className={styles.scheduledTaskName}>{run.name}</strong>
+        </span>
+      </div>
+      <div className={styles.scheduledTaskMeta}>
+        <span className={styles.scheduledTaskMetaItem} title={run.cron}>
+          <span>{t('scheduledTasks.runContext.schedule')}</span>
+          <code>{describeCron(run.cron, t)}</code>
+        </span>
+        <span className={styles.scheduledTaskMetaItem}>
+          <span>{t('scheduledTasks.runContext.triggeredAt')}</span>
+          <time dateTime={run.triggeredAt}>{triggeredAtLabel}</time>
+        </span>
+        <span className={styles.scheduledTaskBadge}>
+          {t(
+            run.trigger === 'manual'
+              ? 'scheduledTasks.runContext.trigger.manual'
+              : 'scheduledTasks.runContext.trigger.scheduled',
+          )}
+        </span>
+        <span className={styles.scheduledTaskBadge}>
+          {t('scheduledTasks.sessionMode.perRun')}
+        </span>
+      </div>
+      <div className={styles.scheduledTaskId}>
+        {t('scheduledTasks.runContext.taskId')}: <code>{run.id}</code>
+      </div>
+      <div className={styles.scheduledTaskPrompt}>{run.prompt}</div>
+    </div>
+  );
 }
 
 function DefaultUserMessageContent({
@@ -63,6 +166,7 @@ function DefaultUserMessageContent({
   content,
   inputAnnotations,
   onComposerTagClick,
+  onFileTagClick,
   renderComposerTag,
   renderComposerTagTooltip,
 }: {
@@ -70,6 +174,7 @@ function DefaultUserMessageContent({
   content: string;
   inputAnnotations?: readonly DaemonInputAnnotation[];
   onComposerTagClick?: ComposerTagClickHandler;
+  onFileTagClick?: ComposerTagClickHandler;
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
 }) {
@@ -88,7 +193,13 @@ function DefaultUserMessageContent({
           <ReadonlyComposerTag
             composerTagIcons={composerTagIcons}
             key={`${segment.tag.id}:${index}`}
-            onComposerTagClick={onComposerTagClick}
+            onComposerTagClick={
+              segment.tag.kind === 'file'
+                ? isPreviewableFileComposerTag(segment.tag)
+                  ? onFileTagClick
+                  : onComposerTagClick
+                : onComposerTagClick
+            }
             renderComposerTag={renderComposerTag}
             renderComposerTagTooltip={renderComposerTagTooltip}
             tag={segment.tag}
@@ -110,6 +221,7 @@ export const UserMessage = memo(function UserMessage({
   sendFailed = false,
   onRetrySend,
   onImagePreview,
+  onAttachmentPreview,
 }: UserMessageProps) {
   const { t } = useI18n();
   const {
@@ -123,7 +235,30 @@ export const UserMessage = memo(function UserMessage({
   const contentRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [heightOverflowing, setHeightOverflowing] = useState(false);
+  const handleComposerTagClick = useCallback<ComposerTagClickHandler>(
+    (info) => {
+      if (isPreviewableFileComposerTag(info.tag)) {
+        onAttachmentPreview?.({
+          name: info.tag.value.split(/[\\/]/).pop() ?? info.tag.value,
+          workspacePath: info.tag.value,
+        });
+      }
+      onComposerTagClick?.(info);
+    },
+    [onAttachmentPreview, onComposerTagClick],
+  );
+  const fileTagClick =
+    onAttachmentPreview || onComposerTagClick
+      ? handleComposerTagClick
+      : undefined;
+  const scheduledTaskRun = useMemo(
+    () => parseScheduledTaskRunContent(content),
+    [content],
+  );
   const renderedContent = useMemo(() => {
+    if (scheduledTaskRun) {
+      return <ScheduledTaskRunMessage run={scheduledTaskRun} />;
+    }
     const explicit = renderUserMessageContent?.({
       content,
       images,
@@ -138,6 +273,7 @@ export const UserMessage = memo(function UserMessage({
           content={content}
           inputAnnotations={inputAnnotations}
           onComposerTagClick={onComposerTagClick}
+          onFileTagClick={fileTagClick}
           renderComposerTag={renderComposerTag}
           renderComposerTagTooltip={renderComposerTagTooltip}
         />
@@ -158,7 +294,13 @@ export const UserMessage = memo(function UserMessage({
           composerTagIcons={composerTagIcons}
           renderComposerTag={renderComposerTag}
           renderComposerTagTooltip={renderComposerTagTooltip}
-          onComposerTagClick={onComposerTagClick}
+          onComposerTagClick={
+            part.tag.kind === 'file'
+              ? isPreviewableFileComposerTag(part.tag)
+                ? fileTagClick
+                : onComposerTagClick
+              : onComposerTagClick
+          }
         />
       );
     });
@@ -167,12 +309,14 @@ export const UserMessage = memo(function UserMessage({
     images,
     files,
     inputAnnotations,
+    fileTagClick,
     onComposerTagClick,
     parseUserMessageContent,
     composerTagIcons,
     renderComposerTag,
     renderComposerTagTooltip,
     renderUserMessageContent,
+    scheduledTaskRun,
   ]);
 
   const measureOverflow = useCallback(() => {
@@ -196,94 +340,132 @@ export const UserMessage = memo(function UserMessage({
 
   return (
     <div className={styles.chatMessageRow}>
-      <div className={styles.chatMessageColumn}>
-        <div
-          className={`${styles.chatBubble}${
-            isLocateFlashing ? ` ${flashStyles.flash}` : ''
-          }`}
-        >
-          <div
-            ref={contentRef}
-            className={`${styles.chatContent} ${
-              heightOverflowing && !expanded ? styles.chatContentCollapsed : ''
-            }`}
-          >
-            {images && images.length > 0 && (
-              <div className={styles.chatImages}>
-                {images.map((img, index) => {
-                  const src = img.data.startsWith('data:')
-                    ? img.data
-                    : `data:${img.mimeType};base64,${img.data}`;
-                  if (!isSafeImageSrc(src)) return null;
-                  return (
-                    <img
-                      key={index}
-                      src={src}
-                      alt={t('user.uploadedImage', { index: index + 1 })}
-                      className={`${styles.chatImageThumb}${
-                        onImagePreview
-                          ? ` ${styles.chatImageThumbInteractive}`
-                          : ''
-                      }`}
-                      onClick={
-                        onImagePreview
-                          ? () =>
-                              onImagePreview(
-                                src,
-                                t('user.uploadedImage', { index: index + 1 }),
-                              )
-                          : undefined
-                      }
-                      onLoad={measureOverflow}
-                    />
-                  );
-                })}
-              </div>
-            )}
-            {files && files.length > 0 && (
-              <div className={styles.chatFiles}>
-                {files.map((file, index) => (
-                  <span
-                    key={`${file.name}-${index}`}
-                    className={styles.chatFileChip}
-                  >
-                    <FileTextIcon size={13} aria-hidden="true" />
-                    <span className={styles.chatFileName}>{file.name}</span>
-                  </span>
-                ))}
-              </div>
-            )}
-            {renderedContent}
-          </div>
-          {heightOverflowing && (
-            <button
-              type="button"
-              className={styles.toggleButton}
-              onClick={() => setExpanded((value) => !value)}
-            >
-              <span>
-                {expanded
-                  ? t('userMessage.showLess')
-                  : t('userMessage.showMore')}
-              </span>
-              <svg
-                className={`${styles.toggleIcon} ${
-                  expanded ? styles.toggleIconExpanded : ''
-                }`}
-                viewBox="0 0 16 16"
-                aria-hidden="true"
-              >
-                <path
-                  d="m4 6 4 4 4-4"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
+      <div
+        className={`${styles.chatMessageColumn}${
+          isLocateFlashing && content.trim().length === 0
+            ? ` ${flashStyles.flash}`
+            : ''
+        }`}
+      >
+        {images && images.length > 0 && (
+          <div className={styles.chatImages} data-web-shell-user-images>
+            {images.map((img, index) => {
+              const src = img.data.startsWith('data:')
+                ? img.data
+                : `data:${img.mimeType};base64,${img.data}`;
+              if (!isSafeImageSrc(src)) return null;
+              return (
+                <img
+                  key={index}
+                  src={src}
+                  alt={t('user.uploadedImage', { index: index + 1 })}
+                  className={`${styles.chatImageThumb}${
+                    onImagePreview ? ` ${styles.chatImageThumbInteractive}` : ''
+                  }`}
+                  onClick={
+                    onImagePreview
+                      ? () =>
+                          onImagePreview(
+                            src,
+                            t('user.uploadedImage', { index: index + 1 }),
+                          )
+                      : undefined
+                  }
                 />
-              </svg>
-            </button>
-          )}
-        </div>
+              );
+            })}
+          </div>
+        )}
+        {files && files.length > 0 && (
+          <div className={styles.chatFiles} data-web-shell-user-files>
+            {files.map((file, index) => {
+              const previewable = Boolean(
+                onAttachmentPreview &&
+                  (file.data !== undefined ||
+                    file.text !== undefined ||
+                    file.attachmentId),
+              );
+              return (
+                <span
+                  key={`${file.name}-${index}`}
+                  className={`${styles.chatFileChip}${
+                    previewable ? ` ${styles.chatFileChipPreviewable}` : ''
+                  }`}
+                  role={previewable ? 'button' : undefined}
+                  tabIndex={previewable ? 0 : undefined}
+                  onClick={
+                    previewable ? () => onAttachmentPreview?.(file) : undefined
+                  }
+                  onKeyDown={(event) => {
+                    if (
+                      previewable &&
+                      (event.key === 'Enter' || event.key === ' ')
+                    ) {
+                      event.preventDefault();
+                      onAttachmentPreview?.(file);
+                    }
+                  }}
+                >
+                  <FileTypeIcon
+                    name={file.name}
+                    mimeType={file.mimeType}
+                    size={16}
+                    className={styles.chatFileIcon}
+                    aria-hidden="true"
+                  />
+                  <span className={styles.chatFileName}>{file.name}</span>
+                </span>
+              );
+            })}
+          </div>
+        )}
+        {content.trim().length > 0 && (
+          <div
+            className={`${styles.chatBubble}${
+              scheduledTaskRun ? ` ${styles.scheduledTaskBubble}` : ''
+            }${isLocateFlashing ? ` ${flashStyles.flash}` : ''}`}
+            data-web-shell-user-bubble
+          >
+            <div
+              ref={contentRef}
+              className={`${styles.chatContent} ${
+                heightOverflowing && !expanded
+                  ? styles.chatContentCollapsed
+                  : ''
+              }`}
+            >
+              {renderedContent}
+            </div>
+            {heightOverflowing && (
+              <button
+                type="button"
+                className={styles.toggleButton}
+                onClick={() => setExpanded((value) => !value)}
+              >
+                <span>
+                  {expanded
+                    ? t('userMessage.showLess')
+                    : t('userMessage.showMore')}
+                </span>
+                <svg
+                  className={`${styles.toggleIcon} ${
+                    expanded ? styles.toggleIconExpanded : ''
+                  }`}
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="m4 6 4 4 4-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            )}
+          </div>
+        )}
         {sendFailed && onRetrySend && (
           <div className={styles.sendFailure}>
             <span>{t('userMessage.sendFailed')}</span>

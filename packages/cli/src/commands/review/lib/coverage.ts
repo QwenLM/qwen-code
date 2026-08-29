@@ -391,7 +391,13 @@ function publicRoleLabelZh(req: RequiredAgent): string | undefined {
   return req.file ? `${base}（${req.file}）` : base;
 }
 
-/** Something a reader can act on. `agentName` is `general-purpose` for all of them. */
+/**
+ * Something a reader can act on. `agentName` is the launched subagent type,
+ * so it is uniformly uninformative here but not a fixed string: `review-agent`
+ * on runs since the review skill switched types, `general-purpose` on records
+ * written before it. Do not match on either value — the identity line below is
+ * what names an agent.
+ */
 function label(rec: AgentRecord, chunk: number | null): string {
   if (chunk !== null) return `chunk ${chunk}`;
   // The identity line names the agent wherever it sits: launchers prepend

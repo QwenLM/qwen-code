@@ -14,8 +14,10 @@ import { AnsiOutputText, ShellStatsBar } from '../AnsiOutput.js';
 import type { ShellStatsBarProps } from '../AnsiOutput.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
+import { FindingsDisplay } from '../FindingsDisplay.js';
 import type {
   TodoResultDisplay,
+  FindingsResultDisplay,
   AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutput,
@@ -172,6 +174,7 @@ function sliceTextForMaxHeight(
 type DisplayRendererResult =
   | { type: 'none' }
   | { type: 'todo'; data: TodoResultDisplay }
+  | { type: 'findings'; data: FindingsResultDisplay }
   | { type: 'plan'; data: PlanResultDisplay }
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
@@ -204,6 +207,19 @@ const useResultDisplayRenderer = (
       return {
         type: 'todo',
         data: resultDisplay as TodoResultDisplay,
+      };
+    }
+
+    // Check for FindingsResultDisplay
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      resultDisplay.type === 'findings_list'
+    ) {
+      return {
+        type: 'findings',
+        data: resultDisplay as FindingsResultDisplay,
       };
     }
 
@@ -289,6 +305,20 @@ const useResultDisplayRenderer = (
       return { type: 'none' };
     }
 
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      resultDisplay.type === 'mcp_app' &&
+      'fallbackText' in resultDisplay &&
+      typeof resultDisplay.fallbackText === 'string'
+    ) {
+      return {
+        type: 'string',
+        data: resultDisplay.fallbackText,
+      };
+    }
+
     // Default to string — safeguard against non-string objects
     return {
       type: 'string',
@@ -304,7 +334,12 @@ const useResultDisplayRenderer = (
  */
 const TodoResultRenderer: React.FC<{ data: TodoResultDisplay }> = ({
   data,
-}) => <TodoDisplay todos={data.todos} />;
+}) => {
+  if (data.unchanged) {
+    return null;
+  }
+  return <TodoDisplay todos={data.todos} />;
+};
 
 const PlanResultRenderer: React.FC<{
   data: PlanResultDisplay;
@@ -930,6 +965,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
           <Box flexDirection="column">
             {effectiveDisplayRenderer.type === 'todo' && (
               <TodoResultRenderer data={effectiveDisplayRenderer.data} />
+            )}
+            {effectiveDisplayRenderer.type === 'findings' && (
+              <FindingsDisplay data={effectiveDisplayRenderer.data} />
             )}
             {effectiveDisplayRenderer.type === 'plan' && (
               <PlanResultRenderer

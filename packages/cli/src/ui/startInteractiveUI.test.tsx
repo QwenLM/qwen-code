@@ -48,12 +48,24 @@ vi.mock('../utils/earlyInputCapture.js', () => ({
   stopAndGetCapturedInput: vi.fn(() => ''),
 }));
 
+const peerMessagingStart = vi.hoisted(() => vi.fn());
+
+vi.mock('../peerMessaging/peer-messaging.js', () => ({
+  PeerMessaging: {
+    start: (...args: unknown[]) => peerMessagingStart(...args),
+  },
+}));
+
 const { startInteractiveUI } = await import('./startInteractiveUI.js');
 
-function makeConfig(): Config & {
+type TestConfig = Config & {
   trackSessionRegistration: ReturnType<typeof vi.fn>;
   unregisterSessionRegistry: ReturnType<typeof vi.fn>;
-} {
+  whenSessionRegistered: ReturnType<typeof vi.fn>;
+  updateSessionRegistryIpcPath: ReturnType<typeof vi.fn>;
+};
+
+function makeConfig(): TestConfig {
   const trackSessionRegistration = vi.fn((registration: Promise<boolean>) => {
     void registration.catch(() => undefined);
   });
@@ -63,12 +75,12 @@ function makeConfig(): Config & {
     getScreenReader: () => false,
     getChatRecordingService: () => undefined,
     isTelemetryInitializationDeferred: () => false,
+    getApprovalMode: () => 'default',
     trackSessionRegistration,
+    whenSessionRegistered: vi.fn().mockResolvedValue(true),
+    updateSessionRegistryIpcPath: vi.fn().mockResolvedValue(undefined),
     unregisterSessionRegistry: vi.fn().mockResolvedValue(undefined),
-  } as unknown as Config & {
-    trackSessionRegistration: ReturnType<typeof vi.fn>;
-    unregisterSessionRegistry: ReturnType<typeof vi.fn>;
-  };
+  } as unknown as TestConfig;
 }
 
 const settings = {
@@ -79,17 +91,14 @@ const initializationResult = {
   authError: null,
   themeError: null,
   shouldOpenAuthDialog: false,
-  geminiMdFileCount: 0,
+  memoryFileCount: 0,
 } as InitializationResult;
 
-async function start(config: Config = makeConfig()): Promise<void> {
-  await startInteractiveUI(
-    config,
-    settings,
-    [],
-    '/work/app',
-    initializationResult,
-  );
+async function start(
+  config: Config = makeConfig(),
+  used: LoadedSettings = settings,
+): Promise<void> {
+  await startInteractiveUI(config, used, [], '/work/app', initializationResult);
 }
 
 describe('startInteractiveUI session registration', () => {
@@ -147,5 +156,105 @@ describe('startInteractiveUI session registration', () => {
 
     await expect(start(config)).resolves.toBeUndefined();
     expect(config.trackSessionRegistration).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('startInteractiveUI cross-session messaging', () => {
+  const enabledSettings = {
+    merged: {
+      ui: { hideWindowTitle: true },
+      agents: { crossSessionMessaging: true },
+    },
+  } as unknown as LoadedSettings;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    registerSession.mockResolvedValue(true);
+    peerMessagingStart.mockResolvedValue({
+      close: vi.fn().mockResolvedValue(undefined),
+    });
+  });
+
+  it('does not bind an inbox unless the setting is on', async () => {
+    const config = makeConfig();
+
+    await start(config);
+    await vi.waitFor(() =>
+      expect(config.trackSessionRegistration).toHaveBeenCalled(),
+    );
+
+    expect(config.whenSessionRegistered).not.toHaveBeenCalled();
+    expect(peerMessagingStart).not.toHaveBeenCalled();
+    // No inbox, no extra teardown: the registry pair is still all there is.
+    expect(registerCleanup).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for registration to be queued before binding', async () => {
+    // The inbox advertises itself by patching the session's registry
+    // record, and a patch against a record that does not exist yet is
+    // dropped silently. Binding before registration is queued would
+    // therefore leave the session unreachable with no error anywhere.
+    const config = makeConfig();
+    let trackedFirst = false;
+    config.whenSessionRegistered.mockImplementation(async () => {
+      trackedFirst = config.trackSessionRegistration.mock.calls.length > 0;
+      return true;
+    });
+
+    await start(config, enabledSettings);
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalledTimes(1));
+
+    expect(trackedFirst).toBe(true);
+  });
+
+  it('skips the inbox when the session never registered', async () => {
+    const config = makeConfig();
+    config.whenSessionRegistered.mockResolvedValue(false);
+
+    await start(config, enabledSettings);
+    await vi.waitFor(() =>
+      expect(config.whenSessionRegistered).toHaveBeenCalled(),
+    );
+
+    expect(peerMessagingStart).not.toHaveBeenCalled();
+  });
+
+  it('closes the inbox from exit cleanup', async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    peerMessagingStart.mockResolvedValue({ close });
+    const config = makeConfig();
+
+    await start(config, enabledSettings);
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
+
+    expect(registerCleanup).toHaveBeenCalledTimes(3);
+    const closeInbox = registerCleanup.mock
+      .calls[1]?.[0] as () => Promise<void> | void;
+    await closeInbox();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not start an inbox after exit cleanup begins', async () => {
+    let finishRegistration!: (registered: boolean) => void;
+    const config = makeConfig();
+    config.whenSessionRegistered.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishRegistration = resolve;
+        }),
+    );
+
+    await start(config, enabledSettings);
+    await vi.waitFor(() =>
+      expect(config.whenSessionRegistered).toHaveBeenCalled(),
+    );
+
+    const closeInbox = registerCleanup.mock
+      .calls[1]?.[0] as () => Promise<void> | void;
+    const cleanup = Promise.resolve(closeInbox());
+    finishRegistration(true);
+    await cleanup;
+
+    expect(peerMessagingStart).not.toHaveBeenCalled();
   });
 });

@@ -554,6 +554,157 @@ describe('useWorkspaceSessionLiveState', () => {
     expect(container.textContent).toBe('false:false:no-group');
   });
 
+  it('lets an explicit refresh bypass live-state error backoff', async () => {
+    await renderProbe();
+    getLiveState.mockRejectedValueOnce(new Error('offline'));
+
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getLiveState).toHaveBeenCalledTimes(3);
+    expect(listSessions).toHaveBeenCalledTimes(1);
+
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getLiveState).toHaveBeenCalledTimes(5);
+    expect(listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps internal fresh loads behind live-state error backoff', async () => {
+    getLiveState.mockRejectedValueOnce(new Error('offline'));
+    await renderProbe();
+    const liveRequests = getLiveState.mock.calls.length;
+    const catalogRequests = listSessions.mock.calls.length;
+
+    act(() => {
+      void getSessionCatalogStore(client)
+        .refresh(query)
+        .catch(() => undefined);
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getLiveState).toHaveBeenCalledTimes(liveRequests);
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
+  });
+
+  it('preserves an explicit refresh while a live-state request is in flight', async () => {
+    await renderProbe();
+    let rejectInFlight!: (error: Error) => void;
+    getLiveState.mockImplementationOnce(
+      () =>
+        new Promise<DaemonWorkspaceSessionLiveState>((_resolve, reject) => {
+          rejectInFlight = reject;
+        }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      rejectInFlight(new Error('offline'));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getLiveState).toHaveBeenCalledTimes(5);
+    expect(listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it('lets an explicit refresh bypass reconciliation error backoff', async () => {
+    await renderProbe();
+    listSessions.mockRejectedValueOnce(new Error('catalog offline'));
+
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(listSessions).toHaveBeenCalledTimes(2);
+
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getLiveState).toHaveBeenCalledTimes(5);
+    expect(listSessions).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps internal fresh loads behind reconciliation error backoff', async () => {
+    await renderProbe();
+    listSessions.mockRejectedValueOnce(new Error('catalog offline'));
+
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const catalogRequests = listSessions.mock.calls.length;
+
+    act(() => {
+      void getSessionCatalogStore(client)
+        .refresh(query)
+        .catch(() => undefined);
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
+  });
+
+  it('preserves an explicit refresh during an in-flight live request', async () => {
+    await renderProbe();
+    listSessions.mockRejectedValueOnce(new Error('catalog offline'));
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const catalogRequests = listSessions.mock.calls.length;
+
+    let resolveInFlight!: (value: DaemonWorkspaceSessionLiveState) => void;
+    getLiveState.mockImplementationOnce(
+      () =>
+        new Promise<DaemonWorkspaceSessionLiveState>((resolve) => {
+          resolveInFlight = resolve;
+        }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      resolveInFlight(liveState(1));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
+  });
+
   it('keeps polling volatile state while catalog reconciliation is backed off', async () => {
     let revision = 1;
     let active = false;

@@ -108,6 +108,7 @@ export class MissingCliEntryError extends Error {
 }
 
 export const SERVE_STATUS_EXT_METHODS = {
+  channelPing: 'qwen/status/channel/ping',
   workspaceMcp: 'qwen/status/workspace/mcp',
   workspaceMcpTools: 'qwen/status/workspace/mcp/tools',
   workspaceMcpResources: 'qwen/status/workspace/mcp/resources',
@@ -175,6 +176,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
+  sessionGoalControl: 'qwen/control/session/goal/control',
   sessionGoalClear: 'qwen/control/session/goal/clear',
   /**
    * Read a live session's `/goal` state. The active goal lives only in the
@@ -211,6 +213,10 @@ export const SERVE_CONTROL_EXT_METHODS = {
    */
   externalToolGuardPrepare: 'qwen/control/external_tool_guard/prepare',
   sessionCd: 'qwen/control/session/cd',
+  sessionManagedConversationBindingCommit:
+    'qwen/control/session/managed-conversation-binding/commit',
+  sessionManagedConversationBindingRelease:
+    'qwen/control/session/managed-conversation-binding/release',
   /**
    * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
    * `create_sub_session` tool, running inside a child's agent turn, asks the
@@ -220,6 +226,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `first-turn` mode, which waits for the sub-session's first turn to finish).
    */
   createSubSession: 'qwen/control/create-sub-session',
+  createCurrentSessionScheduledTask:
+    'qwen/control/scheduled-task/create-current',
   liveCaptureScreenContext: 'qwen/control/live/capture-screen-context',
   liveTaskTool: 'qwen/control/live/task-tool',
   liveSpeakToUser: 'qwen/control/live/speak-to-user',
@@ -472,7 +480,10 @@ export interface ServeWorkspaceSkillStatus extends ServeStatusCell {
   installedPath?: string;
   argumentHint?: string;
   model?: string;
+  /** Canonical name of the extension that provides this skill. */
   extensionName?: string;
+  /** Localized presentation name; never use as an extension identity. */
+  extensionDisplayName?: string;
 }
 
 export interface ServeWorkspaceSkillsRefreshResult {
@@ -517,6 +528,7 @@ export interface ServeWorkspaceProviderModel {
   envKey?: string;
   isCurrent: boolean;
   isRuntime: boolean;
+  configOptions?: unknown[];
 }
 
 export interface ServeWorkspaceProviderStatus extends ServeStatusCell {
@@ -734,9 +746,12 @@ export interface ServeSessionStatsModelMetrics {
   };
   tokens: {
     prompt: number;
+    /** Provider-reported candidate tokens; may already include reasoning. */
     candidates: number;
+    /** Prompt plus all generated output, with reasoning counted once. */
     total: number;
     cached: number;
+    /** Reasoning tokens, shown as a subset of generated output. */
     thoughts: number;
   };
 }
@@ -760,6 +775,17 @@ export interface ServeSessionStatsSkillByName {
   fail: number;
 }
 
+/** One subagent invocation's token consumption, with readable labels. */
+export interface ServeSessionStatsSource {
+  /** Unique invocation id of the subagent. */
+  id: string;
+  /** Agent type name (e.g. "general-purpose"). */
+  type: string;
+  /** Business/task name for this invocation. */
+  name: string;
+  tokens: ServeSessionStatsModelMetrics['tokens'];
+}
+
 export interface ServeSessionStatsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
@@ -768,6 +794,11 @@ export interface ServeSessionStatsStatus {
   durationMs: number;
   promptCount: number;
   models: Record<string, ServeSessionStatsModelMetrics>;
+  /**
+   * Per-subagent-invocation token totals, sorted by total tokens desc.
+   * `main` conversation calls are excluded — they are the aggregate remainder.
+   */
+  sources: ServeSessionStatsSource[];
   tools: {
     totalCalls: number;
     totalSuccess: number;

@@ -477,9 +477,12 @@ describe('the bundled skill stops on what this module prints', () => {
       const services = join(root, 'packages', 'cli', 'src', 'services');
       mkdirSync(services, { recursive: true });
       writeFileSync(join(services, 'review-worktree-lease.ts'), 'leases');
+      // No `findings.ts` under `utils/`: it moved back under
+      // `commands/review/` (#9146), which the directory root already covers
+      // via `drive.ts`. No root digests `utils/` wholesale, so the materialized
+      // tree mirrors `reviewSourceRoots` exactly.
       const utils = join(root, 'packages', 'cli', 'src', 'utils');
       mkdirSync(utils, { recursive: true });
-      writeFileSync(join(utils, 'findings.ts'), 'validates');
       writeFileSync(join(utils, 'shell-args.ts'), 'tokenizes');
       writeFileSync(join(utils, 'paths.ts'), 'flattens');
       const skillDir = join(
@@ -586,12 +589,9 @@ describe('reviewSourceRoots', () => {
         ),
         kind: 'code',
       },
-      // The review helpers lifted out of `commands/review/`; the digest
-      // covered them there before the lift.
-      {
-        path: join('/w', 'packages', 'cli', 'src', 'utils', 'findings.ts'),
-        kind: 'code',
-      },
+      // The helpers of the findings validator live in `utils/`, outside the
+      // `review/` directory root; the validator itself lives back under
+      // `commands/review/` (#9146), which the directory root covers.
       {
         path: join('/w', 'packages', 'cli', 'src', 'utils', 'shell-args.ts'),
         kind: 'code',

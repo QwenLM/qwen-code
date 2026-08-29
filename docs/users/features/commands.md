@@ -101,7 +101,7 @@ Commands for managing AI tools and models.
 | `/model --voice`      | Set the model used for voice transcription                                            | `/model --voice <model-id>`                                                                               |
 | `/model --vision`     | Set the vision-bridge model used to transcribe images for a text-only main model      | `/model --vision <model-id>`                                                                              |
 | `/model --compaction` | Set the model used for chat compression                                               | `/model --compaction <model-id>`, `/model --compaction clear`                                             |
-| `/model --image`      | Set an image-only model for the built-in image generation tool                        | `/model --image <model-id>`                                                                               |
+| `/model --image`      | Set an image-generation-capable model for the built-in image generation tool          | `/model --image <model-id>`                                                                               |
 | `/effort`             | Set reasoning effort for thinking-capable models                                      | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
 | `/extensions`         | Manage extensions                                                                     | `/extensions list`, `/extensions manage`                                                                  |
 | → `list`              | List installed extensions                                                             | `/extensions list`                                                                                        |
@@ -117,7 +117,7 @@ Commands for managing AI tools and models.
 | `/permissions`        | Manage permission rules                                                               | `/permissions`                                                                                            |
 | `/agents`             | Manage subagents                                                                      | `/agents manage`, `/agents create`                                                                        |
 | `/arena`              | Manage Arena sessions                                                                 | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
-| `/goal`               | Set a goal — keep working until condition met                                         | `/goal <condition>`, `/goal clear`                                                                        |
+| `/goal`               | Set a goal — keep working until condition met (see [Goals](./goals.md))               | `/goal <condition>`, `/goal clear`                                                                        |
 | `/tasks`              | List background tasks                                                                 | `/tasks`                                                                                                  |
 | `/workflows`          | Inspect workflow runs; cooperatively pause/resume a background run                    | `/workflows`, `/workflows <runId>`, `/workflows p <runId>`                                                |
 | `/lsp`                | Show LSP server status                                                                | `/lsp`                                                                                                    |
@@ -133,7 +133,7 @@ Commands for managing AI tools and models.
 
 > [!note]
 >
-> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. When disabled they won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
+> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
 
 ### 1.5 Built-in Skills
 
@@ -144,6 +144,7 @@ These commands invoke bundled skills that provide specialized workflows.
 | `/review`     | Multi-agent code review (12 parallel agents at high effort)   | `/review`, `/review 123`, `/review 123 --comment`, `/review --effort low` |
 | `/coordinate` | Coordinate read-only workers and one optional worktree writer | `/coordinate investigate and fix the authentication regression`           |
 | `/loop`       | Run a prompt on a recurring schedule                          | `/loop 5m check the build`                                                |
+| `/goal-draft` | Turn a fuzzy intention into a verifiable `/goal` objective    | `/goal-draft make the auth tests pass`                                    |
 | `/simplify`   | Review recent changes and apply safe cleanup edits directly   | `/simplify`, `/simplify focus on duplication`                             |
 | `/qc-helper`  | Answer questions about Qwen Code usage and configuration      | `/qc-helper how do I configure MCP?`                                      |
 

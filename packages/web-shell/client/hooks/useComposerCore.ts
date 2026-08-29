@@ -81,6 +81,7 @@ import {
   getComposerTagIconUrl,
   getComposerTagSerialized,
   isBuiltinComposerTagIconUrl,
+  isPreviewableFileComposerTag,
   parseUserMessageContentSafely,
 } from '../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
@@ -101,13 +102,15 @@ import type {
 import { useWebShellPortalRoot } from '../portalRoot';
 import {
   dedupeAttachmentName,
+  extractFiles,
   extractFileTransfer,
   hasFileTransferPayload,
   MAX_IMAGE_ATTACHMENT_DATA_BYTES,
-  MAX_TEXT_ATTACHMENT_DATA_BYTES,
+  MAX_FILE_ATTACHMENT_DATA_BYTES,
   readImageTransfer,
-  readTextTransfer,
+  readFileTransfer,
   sanitizeAttachmentName,
+  type ExtractedFileTransfer,
 } from '../utils/imageIngestion';
 
 const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
@@ -1127,6 +1130,7 @@ export interface UseComposerCoreOptions {
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
+  onFileTagClick?: ComposerTagClickHandler;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /**
    * Invoked when the user selects the @ panel's "Upload file" item, with the
@@ -1329,6 +1333,7 @@ function createImageIngestionLane(generation: number): ImageIngestionLane {
 export interface UseComposerCoreReturn {
   containerRef: React.RefObject<HTMLDivElement | null>;
   viewRef: React.RefObject<EditorView | null>;
+  workspaceActionsRef: React.RefObject<AtMentionWorkspaceActions | undefined>;
   mobileComposer: MobileComposerBackend | null;
   focus: () => void;
   submitText: () => void;
@@ -1341,6 +1346,7 @@ export interface UseComposerCoreReturn {
   pendingImageBatchCount: number;
   imageDragActive: boolean;
   clearImageDragState: () => void;
+  ingestFiles: (files: readonly File[]) => boolean;
   imageTransferHandlers: ComposerImageTransferHandlers;
   handle: EditorHandle;
   pastedImages: PromptImage[];
@@ -1421,6 +1427,7 @@ export function useComposerCore(
     renderComposerTag,
     renderComposerTagTooltip,
     onComposerTagClick,
+    onFileTagClick,
     onImageIngestionNotice,
     onFileUploadRequest,
     workspaceUploadBusy = false,
@@ -1596,6 +1603,8 @@ export function useComposerCore(
   renderComposerTagTooltipRef.current = renderComposerTagTooltip;
   const onComposerTagClickRef = useRef(onComposerTagClick);
   onComposerTagClickRef.current = onComposerTagClick;
+  const onFileTagClickRef = useRef(onFileTagClick);
+  onFileTagClickRef.current = onFileTagClick;
   const resolveComposerTagIcon = useCallback(
     (tag: WebShellComposerTag): InlineComposerTag => {
       const iconUrl =
@@ -1616,6 +1625,12 @@ export function useComposerCore(
         typeof tooltip === 'string' || typeof tooltip === 'number'
           ? String(tooltip)
           : undefined;
+      const onClick =
+        tag.kind === 'file'
+          ? isPreviewableFileComposerTag(tag)
+            ? (onFileTagClickRef.current ?? onComposerTagClickRef.current)
+            : onComposerTagClickRef.current
+          : onComposerTagClickRef.current;
       return {
         ...tag,
         ...(iconUrl ? { iconUrl } : {}),
@@ -1624,9 +1639,7 @@ export function useComposerCore(
           : {}),
         ...(tooltip !== undefined && tooltip !== null ? { tooltip } : {}),
         ...(tooltipText ? { tooltipText } : {}),
-        ...(onComposerTagClickRef.current
-          ? { onClick: onComposerTagClickRef.current }
-          : {}),
+        ...(onClick ? { onClick } : {}),
       };
     },
     [],
@@ -1745,9 +1758,8 @@ export function useComposerCore(
     },
     [],
   );
-  const enqueueImageTransfer = useCallback(
-    (dataTransfer: DataTransfer, source: 'paste' | 'drop') => {
-      const transfer = extractFileTransfer(dataTransfer, source);
+  const enqueueExtractedTransfer = useCallback(
+    (transfer: ExtractedFileTransfer) => {
       if (!transfer.claimed) return false;
       if (disabledRef.current) return true;
 
@@ -1767,27 +1779,12 @@ export function useComposerCore(
             transfer.imageCandidates,
             {
               ...readerLifecycle,
-              maxEncodedBytes: Math.max(
-                0,
-                MAX_IMAGE_ATTACHMENT_DATA_BYTES -
-                  pastedImagesRef.current.reduce(
-                    (total, image) => total + image.data.length,
-                    0,
-                  ),
-              ),
+              maxBytes: MAX_IMAGE_ATTACHMENT_DATA_BYTES,
             },
           );
           if (imageIngestionLaneRef.current !== lane) return;
-          const textResult = await readTextTransfer(transfer.textCandidates, {
-            ...readerLifecycle,
-            maxEncodedBytes: Math.max(
-              0,
-              MAX_TEXT_ATTACHMENT_DATA_BYTES -
-                pastedFilesRef.current.reduce(
-                  (total, file) => total + (file.size ?? file.text.length),
-                  0,
-                ),
-            ),
+          const fileResult = await readFileTransfer(transfer.fileCandidates, {
+            maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
           });
           if (imageIngestionLaneRef.current !== lane) return;
           if (imageResult.accepted.length > 0) {
@@ -1795,11 +1792,11 @@ export function useComposerCore(
             pastedImagesRef.current = next;
             setPastedImages(next);
           }
-          if (textResult.accepted.length > 0) {
+          if (fileResult.accepted.length > 0) {
             const taken = new Set(
               pastedFilesRef.current.map((file) => file.name),
             );
-            const named = textResult.accepted.map((file) => {
+            const named = fileResult.accepted.map((file) => {
               const name = dedupeAttachmentName(
                 sanitizeAttachmentName(file.name),
                 taken,
@@ -1814,7 +1811,7 @@ export function useComposerCore(
           const rejected = [
             ...transfer.rejected,
             ...imageResult.rejected,
-            ...textResult.rejected,
+            ...fileResult.rejected,
           ];
           const skipped = rejected.filter(
             ({ reason }) => reason !== 'read-failed' && reason !== 'too-large',
@@ -1860,6 +1857,15 @@ export function useComposerCore(
       return true;
     },
     [emitImageIngestionNotice],
+  );
+  const enqueueImageTransfer = useCallback(
+    (dataTransfer: DataTransfer, source: 'paste' | 'drop') =>
+      enqueueExtractedTransfer(extractFileTransfer(dataTransfer, source)),
+    [enqueueExtractedTransfer],
+  );
+  const ingestFiles = useCallback(
+    (files: readonly File[]) => enqueueExtractedTransfer(extractFiles(files)),
+    [enqueueExtractedTransfer],
   );
   const imageTransferHandlers = useMemo<ComposerImageTransferHandlers>(
     () => ({
@@ -3151,8 +3157,11 @@ export function useComposerCore(
       }
     });
 
+    const initialDraft =
+      loadComposerDraft(draftIdentityRef.current.storageKey) ?? '';
     const state = EditorState.create({
-      doc: loadComposerDraft(draftIdentityRef.current.storageKey) ?? '',
+      doc: initialDraft,
+      selection: { anchor: initialDraft.length },
       extensions: [
         Prec.highest(submitKeymap),
         minimalSetup,
@@ -4375,6 +4384,7 @@ export function useComposerCore(
   return {
     containerRef,
     viewRef,
+    workspaceActionsRef,
     mobileComposer: isTouchComposer
       ? {
           textareaRef: mobileTextareaRef,
@@ -4403,6 +4413,7 @@ export function useComposerCore(
     pendingImageBatchCount,
     imageDragActive,
     clearImageDragState,
+    ingestFiles,
     imageTransferHandlers,
     handle,
     pastedImages,

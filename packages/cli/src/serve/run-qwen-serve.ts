@@ -5,9 +5,11 @@
  */
 
 import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import * as https from 'node:https';
+import { isIP } from 'node:net';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
@@ -78,9 +80,15 @@ import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // the run-qwen-serve chunk. The launcher is only needed after listen().
 import { PathMutexRegistry } from './fs/path-mutex-registry.js';
 import { isDeepHealthQuery } from './health-query.js';
-import { isLoopbackBind } from './loopback-binds.js';
+import {
+  hostAssignsIpv6Loopback,
+  isOwnInterfaceAddress,
+} from './local-bind-addresses.js';
+import { isHostGateLoopback, isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
+import { resolveServeToken } from './serve-token.js';
+import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -104,6 +112,7 @@ import {
   getServeProtocolVersions,
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import {
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
@@ -126,6 +135,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import type { SessionArchiveCoordinator } from './server/session-archive.js';
 import type {
   DaemonTrustPolicySnapshot,
   DaemonWorkspaceTrustDecision,
@@ -148,6 +158,7 @@ import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import type {
   ChannelDeliveryHandler,
   ChannelDeliveryHostResult,
+  CurrentSessionScheduledTaskCreateHandler,
   ExternalToolGuardHandler,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import { getCliVersion } from '../utils/version.js';
@@ -175,6 +186,10 @@ import type {
   ChannelWorkerSnapshot,
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
+import {
+  ExtraCaInspectionError,
+  loadableCertificates,
+} from './pem-certificate-blocks.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import {
@@ -407,6 +422,7 @@ const WORKSPACE_SETTING_SCOPE =
 type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
   token?: string;
   workspace?: string | string[];
+  requireWebShell?: boolean;
 };
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
@@ -667,20 +683,1024 @@ function workspaceRuntimeEffectiveEnv(
   return runtime.env.effectiveEnv ?? daemonEnv;
 }
 
+function canonicalIpLiteral(host: string): string | undefined {
+  const inner =
+    host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  try {
+    const hostname = new URL(
+      `http://${inner.includes(':') ? `[${inner}]` : inner}`,
+    ).hostname;
+    const canonical =
+      hostname.startsWith('[') && hostname.endsWith(']')
+        ? hostname.slice(1, -1)
+        : hostname;
+    return isIP(canonical) === 0 ? undefined : canonical;
+  } catch {
+    return undefined;
+  }
+}
+
 export function formatChannelWorkerDaemonUrl(
   host: string,
   port: number,
+  tls = false,
+  boundFamily?: 'IPv4' | 'IPv6',
+  ipv6LoopbackAssigned: boolean = hostAssignsIpv6Loopback(),
 ): string {
+  const scheme = tls ? 'https' : 'http';
   const normalized = host.trim().toLowerCase();
-  if (
-    normalized === '' ||
-    normalized === '0.0.0.0' ||
-    normalized === '::' ||
-    normalized === '[::]'
-  ) {
-    return `http://127.0.0.1:${port}`;
+  const canonicalIp = canonicalIpLiteral(normalized);
+  // R7-7: the loopback an IPv6 wildcard bind is dialled back on follows what
+  // the host ASSIGNS, not the bind spelling. Node keeps such sockets
+  // dual-stack (libuv pins `IPV6_V6ONLY=0` unless `ipv6Only` is requested,
+  // so `net.ipv6.bindv6only` never reaches this listener), so both loopbacks
+  // usually reach it — but an IPv4-less host has only `::1`, and a host that
+  // binds `::` while its loopback carries no `::1` (e.g.
+  // `net.ipv6.conf.lo.disable_ipv6=1`) has only `127.0.0.1`. The old
+  // spelling-based rule handed the latter `[::1]`, and the first worker's
+  // `fetch failed` exited the daemon. The v4 wildcard keeps v4 loopback:
+  // measured against `0.0.0.0`, `dial ::1` is ECONNREFUSED.
+  //
+  // An EMPTY --hostname decides by the socket that actually bound, not by
+  // spelling (R10-1): Node's `_listen2` tries the IPv6 unspecified address
+  // for it and falls back to `0.0.0.0` when IPv6 is unavailable, so on the
+  // fallback host the socket is IPv4 while the spelling said IPv6 — handing
+  // workers `[::1]` there dialled an address nothing listens on, and the
+  // first worker's failure exited the daemon. Explicit `::`/`[::]` and
+  // `0.0.0.0` keep their spelling-based family mapping: those binds fail
+  // loud when their family is unavailable, so the spelling cannot lie about
+  // them.
+  const v6Loopback = ipv6LoopbackAssigned
+    ? `${scheme}://[::1]:${port}`
+    : `${scheme}://127.0.0.1:${port}`;
+  if (normalized === '') {
+    return boundFamily === 'IPv4'
+      ? `${scheme}://127.0.0.1:${port}`
+      : v6Loopback;
   }
-  return `http://${formatHostForUrl(host)}:${port}`;
+  if (canonicalIp === '::') {
+    return v6Loopback;
+  }
+  // The v4 wildcard's IPv4-mapped spelling `::ffff:0.0.0.0` canonicalizes to
+  // `::ffff:0:0` (WHATWG URL serializes the mapped form by dropping the
+  // dotted quad), so it matches neither wildcard above. Node binds it as a
+  // WORKING wildcard (R14-2): measured on this Node, the socket reports
+  // family IPv6 yet serves v4 loopback — `dial 127.0.0.1` -> ok while
+  // `dial ::1` -> ECONNREFUSED — so it maps to v4 loopback, NOT `[::1]`,
+  // and an operator who copied the address from `ss`/`netstat` (which render
+  // v4 connections on dual-stack sockets as `::ffff:...`) gets channels
+  // that start instead of a boot refusal.
+  if (canonicalIp === '0.0.0.0' || canonicalIp === '::ffff:0:0') {
+    return `${scheme}://127.0.0.1:${port}`;
+  }
+  return `${scheme}://${formatHostForUrl(host)}:${port}`;
+}
+
+/**
+ * Refuse a channel boot whose worker URL this host cannot answer.
+ *
+ * Workers run on the daemon's own machine and dial the address it actually
+ * bound. Loopback is not a fallback: `--hostname 192.168.1.100` binds that
+ * socket ONLY, so a worker sent to `127.0.0.1` gets `ECONNREFUSED`. A bind
+ * this host cannot certify as its own — a DNS name, or a literal on no local
+ * interface — passes every other boot check and then throws inside each
+ * worker: the first one's failure exits the daemon, and channels added later
+ * restart-loop while `/health` stays green. Name it once, at boot.
+ */
+export function assertChannelWorkerDaemonUrlIsLocal(
+  workerDaemonUrl: string,
+  hostname: string,
+): void {
+  let host: string;
+  try {
+    host = new URL(workerDaemonUrl).hostname;
+  } catch {
+    // A zone-scoped bind (`fe80::1%eth0`) arrives percent-encoded and WHATWG
+    // URL rejects zone IDs outright, so the worker pipeline cannot carry it
+    // even though this host answers on the address — refuse with the named
+    // boot diagnostic instead of a raw ERR_INVALID_URL.
+    throw new Error(
+      `Channels cannot start: --hostname "${hostname}" cannot be carried in ` +
+        `a worker URL (a zone-scoped address has no spelling the URL parser ` +
+        `accepts). Bind to loopback, to the wildcard (0.0.0.0 / ::), or to ` +
+        `a zone-less literal address of one of this machine's interfaces.`,
+    );
+  }
+  if (isHostGateLoopback(host)) return;
+  if (isLoopbackBind(host)) {
+    // A wide 127/8 bind passes `isLoopbackBind` and the kernel routes it to
+    // loopback, but the primary Host gate answers only the spellings in
+    // `LOOPBACK_BINDS` — every other 127.x.y.z gets 403 before a route.
+    // Order matters: this refusal must run BEFORE the own-interface escape
+    // below — a wide loopback address can be assigned to a local interface
+    // (`ip addr add 127.0.0.2/8 dev lo`), and the gate 403s it either way.
+    throw new Error(
+      `Channels cannot start: --hostname "${hostname}" is a loopback ` +
+        `address the daemon's Host header gate refuses (it answers only ` +
+        `127.0.0.1, localhost, and [::1]), so channel workers cannot reach ` +
+        `the daemon on it. Bind to one of those spellings, to the wildcard ` +
+        `(0.0.0.0 / ::), or to a literal address of one of this machine's ` +
+        `interfaces.`,
+    );
+  }
+  if (isOwnInterfaceAddress(host)) return;
+  throw new Error(
+    `Channels cannot start: --hostname "${hostname}" is not a loopback bind ` +
+      `and does not name an address on this host, so channel workers have no ` +
+      `local URL to reach the daemon on. Bind to loopback, to the wildcard ` +
+      `(0.0.0.0 / ::), or to a literal address of one of this machine's ` +
+      `interfaces.`,
+  );
+}
+
+export interface WorkerTlsTrustFailure {
+  code: string;
+  message: string;
+}
+
+const WORKER_TLS_TRUST_PROBE = `
+import { isIP } from 'node:net';
+import * as tls from 'node:tls';
+const url = new URL(process.argv[1]);
+const timeoutMs = Number(process.argv[2]);
+const hostname = url.hostname.replace(/^\\[|\\]$/g, '');
+let socket;
+let settled = false;
+const finish = (result) => {
+  if (settled) return;
+  settled = true;
+  process.stdout.write(JSON.stringify(result));
+  socket?.destroy();
+};
+try {
+  socket = tls.connect({
+    host: hostname,
+    port: Number(url.port || '443'),
+    rejectUnauthorized: true,
+    ...(isIP(hostname) === 0 ? { servername: hostname } : {}),
+  }, () => finish({ ok: true }));
+  socket.once('error', (error) => finish({
+    ok: false,
+    code: error.code ?? 'WORKER_TLS_VERIFY_FAILED',
+    message: error.message,
+  }));
+  socket.setTimeout(timeoutMs, () => finish({
+    ok: false,
+    code: 'WORKER_TLS_VERIFY_TIMEOUT',
+    message: 'TLS verification probe timed out.',
+  }));
+} catch (error) {
+  finish({
+    ok: false,
+    code: error.code ?? 'WORKER_TLS_VERIFY_FAILED',
+    message: error.message,
+  });
+}
+`;
+
+export async function verifyWorkerTlsTrust(opts: {
+  daemonUrl: string;
+  caCertPath: string;
+  timeoutMs?: number;
+}): Promise<WorkerTlsTrustFailure | undefined> {
+  const timeoutMs = opts.timeoutMs ?? 5_000;
+  return new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      [
+        '--input-type=module',
+        '--eval',
+        WORKER_TLS_TRUST_PROBE,
+        opts.daemonUrl,
+        String(timeoutMs),
+      ],
+      {
+        env: {
+          ...process.env,
+          NODE_EXTRA_CA_CERTS: opts.caCertPath,
+        },
+        encoding: 'utf8',
+        timeout: timeoutMs + 1_000,
+      },
+      (error, stdout) => {
+        try {
+          const result = JSON.parse(stdout) as
+            | { ok: true }
+            | { ok: false; code: string; message: string };
+          resolve(result.ok ? undefined : result);
+        } catch {
+          const failure = error as NodeJS.ErrnoException | null;
+          resolve({
+            code:
+              failure?.code != null
+                ? String(failure.code)
+                : 'WORKER_TLS_VERIFY_FAILED',
+            message: failure?.message ?? 'TLS verification probe failed.',
+          });
+        }
+      },
+    );
+  });
+}
+
+/**
+ * Two TLS misconfigurations boot green and break only the channel workers:
+ * a serving cert that is not its own trust anchor (workers fail
+ * `UNABLE_TO_VERIFY_LEAF_SIGNATURE`) and one whose SANs do not cover the
+ * loopback host workers dial (`ERR_TLS_CERT_ALTNAME_INVALID`). In both cases
+ * the daemon listens, browsers connect and `/health` stays green while every
+ * worker restart-loops, so name them at boot the way the expiry guard does.
+ */
+export function describeWorkerTlsTrustGaps(opts: {
+  cert: Buffer;
+  certPath: string;
+  /** Existing source file for loader inspection; omit for in-memory callers. */
+  certSourcePath?: string;
+  daemonUrl: string;
+  operatorCaCertPath?: string;
+  /** Existing operator source file for loader inspection. */
+  operatorCaCertSourcePath?: string;
+  /**
+   * Contents of `operatorCaCertPath`, when it was readable. A path alone says
+   * nothing — a typo'd, unrelated or unloadable NODE_EXTRA_CA_CERTS anchors
+   * exactly as little as no CA at all, and treating "the variable is set" as
+   * coverage is what silenced the warning in the cases it was written for.
+   */
+  operatorCaCert?: Buffer;
+  /**
+   * The error code from reading `operatorCaCertPath`, when the read failed.
+   * Passing the path through as if its contents had been inspected is how the
+   * gap below came to assert an unknowable content fact ("does not carry a
+   * certificate that anchors it") and prescribe an action the operator had
+   * already taken, when the file holds exactly the issuing CA and only its
+   * permissions are wrong.
+   */
+  operatorCaCertReadError?: string;
+}): string[] {
+  // A serving file is routinely a fullchain (leaf + issuing CA in one PEM),
+  // and the supervisor injects the whole file as the workers'
+  // NODE_EXTRA_CA_CERTS — so the trust question is about the file, not about
+  // its first block alone.
+  const chain = parseCertChain(opts.cert);
+  // The leaf is whatever BOOT parsed, not whatever the loose split matched
+  // first. `parseCertChain`'s regex is unanchored, so an indented leading
+  // block — prose to the column-0 readers, i.e. to `new X509Certificate` here
+  // and to the workers' loader — still matched it, and every leaf-dependent
+  // check below (SAN gap, expiry skip, issuer message) then judged a
+  // certificate the daemon never serves: measured `gaps: []` at boot against
+  // ERR_TLS_CERT_ALTNAME_INVALID on every worker handshake.
+  const x509 = bootParsedLeaf(opts.cert);
+  if (!x509) {
+    // Boot validation already rejected unparseable certs with a better message.
+    return [];
+  }
+  const gaps: string[] = [];
+  // Exactly what a worker gets: the serving file merged with the operator's
+  // CA file (see resolveWorkerCaCertPath in channel-worker-supervisor.ts).
+  //
+  // The merge is all-or-nothing, and judges both files with the loader's own
+  // rules — so an operator file Node cannot load contributes NOTHING to the
+  // workers' trust and makes the merge hand them the daemon cert alone.
+  // Judging it here with the looser `parseCertChain` (which also falls back to
+  // DER, a format NODE_EXTRA_CA_CERTS never reads) is how a fused or DER
+  // operator bundle got counted as an anchor at boot: the daemon log stayed
+  // clean while every worker handshake failed UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+  const operatorChain = opts.operatorCaCert
+    ? loadableCertificates(
+        opts.operatorCaCert.toString('utf8'),
+        opts.operatorCaCertSourcePath,
+      )
+    : undefined;
+  // Same rule for the serving file — and when it fails, the merge does NOT
+  // merge. `resolveWorkerCaCertPath` finds `daemonBlocks === undefined`,
+  // discards the operator CA and hands workers the serving file alone, so
+  // modelling a merged store here would report no gap while every worker
+  // handshake fails. (A serving file that fails extraction can still serve:
+  // `createSecureContext` accepts shapes the loader's framing rejects, so the
+  // "it would have thrown at boot" premise this fallback used to carry was
+  // false.)
+  const servingBlocks = loadableCertificates(
+    opts.cert.toString('utf8'),
+    opts.certSourcePath,
+  );
+  // An unreadable serving file is a gap on its own terms: the workers receive
+  // it as their whole bundle and their loader takes NOTHING from it, whether
+  // or not an operator CA was set. Gating this on `operatorChain` reported
+  // zero gaps on the no-operator path while every worker restart-looped —
+  // the same hole that was closed, and tested, only for the with-operator case.
+  const operatorDiscarded = !servingBlocks && operatorChain !== undefined;
+  // The fallback keeps a leaf to reason about rather than reporting phantom
+  // gaps, but it must not pretend the operator CA reached the workers — and it
+  // must reason from the SAME leaf boot parsed, so the loose split only ever
+  // supplies the rest of the chain.
+  const servingChain =
+    servingBlocks === undefined
+      ? [
+          x509,
+          ...chain.filter(
+            (member) => member.fingerprint256 !== x509.fingerprint256,
+          ),
+        ]
+      : // The loader can read blocks out of the file and still not read the
+        // block the daemon SERVES — a leaf exported by `openssl x509
+        // -trustout` carries the `TRUSTED CERTIFICATE` label, which is not one
+        // the loader takes a certificate from, so a `trusted leaf + plain root`
+        // serving file yields `servingBlocks = [root]`. Starting the walk at
+        // that root put it at depth 0, where the leaf-depth exemption below
+        // waives the CA-capability check, and the walk returned anchored with
+        // zero gaps: measured `gaps: []` at boot for a CA:FALSE root
+        // (handshake INVALID_PURPOSE) and for a CA:TRUE root without
+        // keyCertSign (handshake UNSPECIFIED), while `createSecureContext`
+        // accepts the file and the daemon boots green and silent.
+        //
+        // So anchor the walk at the certificate boot parsed, the way the
+        // `servingBlocks === undefined` fallback above already does; the
+        // remaining blocks supply the rest of the chain.
+        servingBlocks.some(
+            (block) => block.fingerprint256 === x509.fingerprint256,
+          )
+        ? servingBlocks
+        : [x509, ...servingBlocks];
+  // Whether the leaf the walk starts from is one the workers' loader actually
+  // gives them. It is not when the block the daemon serves is a block the
+  // loader skips and the leaf had to be prepended above — a distinction that
+  // only bites a SELF-SIGNED leaf, which anchors nothing it is absent from.
+  const leafHeldByWorkers =
+    servingBlocks !== undefined &&
+    servingBlocks.some((block) => block.fingerprint256 === x509.fingerprint256);
+  const workerTrustStore =
+    operatorChain && servingBlocks
+      ? [...operatorChain, ...servingChain]
+      : servingChain;
+  // A leaf in NODE_EXTRA_CA_CERTS is a usable trust anchor only when it signed
+  // itself: chain verification has no PARTIAL_CHAIN flag here, so a CA-issued
+  // leaf (what the `mkcert` flow this project documents produces) never
+  // terminates the chain — unless something else in the worker's bundle
+  // carries the issuer that does.
+  const anchorPath = walkWorkerAnchorPath(
+    x509,
+    workerTrustStore,
+    // The `servingBlocks === undefined` fallback prepends the leaf too, but
+    // that file already reports its own gap below and the workers receive it
+    // verbatim; only the partial-read case needs the distinction.
+    servingBlocks === undefined || leafHeldByWorkers,
+  );
+  // R7-2: this gap is pushed only after the anchor walk, because the read
+  // error alone does not decide the outcome. `resolveWorkerCaCertPath`'s catch
+  // hands the workers the SERVING file as their extra-CA store, and a
+  // fullchain (certbot/mkcert's normal shape) anchors itself through it — the
+  // walk above returns `anchored: true` for exactly that shape while this
+  // message used to announce a certain UNABLE_TO_VERIFY_LEAF_SIGNATURE outage
+  // that never happens.
+  if (opts.operatorCaCertReadError !== undefined) {
+    // The reassurance is only true when the fallback the workers get is
+    // loadable: with `servingBlocks === undefined` the merge hands them the
+    // serving file itself, their loader takes nothing from it, and
+    // `anchored: true` above judged a certificate they never receive.
+    const servingFallbackAnchors =
+      anchorPath.anchored && servingBlocks !== undefined;
+    gaps.push(
+      `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" could not be read by ` +
+        `the daemon (${opts.operatorCaCertReadError}), so channel workers ` +
+        `receive no CA from it — a root-owned or mode-600 file is the usual ` +
+        `cause, and its contents are not the problem. ` +
+        (servingFallbackAnchors
+          ? `--tls-cert "${opts.certPath}" carries an anchor of its own, and ` +
+            `that file is what the workers fall back to, so their trust does ` +
+            `not rest on this one today — whatever it was meant to add ` +
+            `reaches nobody. Fix that file's permissions or path and restart.`
+          : servingBlocks === undefined
+            ? `--tls-cert "${opts.certPath}" itself holds no block the ` +
+              `workers' loader can read, so their fallback bundle is that ` +
+              `file alone and it anchors nothing — fixing this CA file's ` +
+              `permissions changes nothing; re-export the serving file as ` +
+              `the gap below describes and restart.`
+            : `Every worker handshake to the daemon will fail ` +
+              `UNABLE_TO_VERIFY_LEAF_SIGNATURE unless the issuing CA is ` +
+              `already in the workers' default trust store. Fix that file's ` +
+              `permissions or path and restart.`),
+    );
+  } else if (opts.operatorCaCert && !operatorChain) {
+    gaps.push(
+      `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" holds no PEM ` +
+        `certificate block Node's loader can read — every ` +
+        `-----BEGIN/END CERTIFICATE----- marker must sit alone on its own ` +
+        `line and every block must decode, and a DER file is never read at ` +
+        `all. Channel workers therefore receive the daemon cert alone and ` +
+        `anchor nothing through this file. Re-export it as PEM and restart.`,
+    );
+  }
+  if (!servingBlocks) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" holds no PEM certificate block Node's ` +
+        `loader can read, so ` +
+        (operatorDiscarded
+          ? `the channel workers' bundle cannot be merged: they receive that ` +
+            `file alone and NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" ` +
+            `is discarded. `
+          : `the channel workers receive a bundle their loader takes nothing ` +
+            `from. `) +
+        `Every worker handshake to the daemon will fail ` +
+        `UNABLE_TO_VERIFY_LEAF_SIGNATURE. Re-export --tls-cert as PEM with ` +
+        `every -----BEGIN/END CERTIFICATE----- marker alone on its own line ` +
+        `and restart.`,
+    );
+  }
+  const leafPurposeDefect = tlsServerPurposeDefect(x509);
+  if (leafPurposeDefect) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" cannot be used as a TLS server ` +
+        `certificate because ${leafPurposeDefect}. Every worker handshake ` +
+        `to the daemon will fail INVALID_PURPOSE. Reissue the leaf with a ` +
+        `TLS-server keyUsage and serverAuth extendedKeyUsage, then restart.`,
+    );
+  }
+  if (anchorPath.nonCaTerminator) {
+    // `cannotIssueCertificates` refuses a terminator for THREE independent
+    // reasons, and naming only the basicConstraints one sent the operator of a
+    // CA:TRUE root whose keyUsage omits keyCertSign round a reissue/restart
+    // loop: it was told its root "carries basicConstraints CA:FALSE" (false),
+    // that handshakes fail INVALID_PURPOSE (measured: "key usage does not
+    // include certificate signing"), and to reissue with CA:TRUE — which it
+    // already is. Same split the sibling `incapableIssuer` branch makes.
+    const terminatorSubject = anchorPath.nonCaTerminator.subject.replace(
+      /\r?\n/g,
+      ', ',
+    );
+    gaps.push(
+      issuerRefusedForKeyUsage(anchorPath.nonCaTerminator)
+        ? `--tls-cert "${opts.certPath}" chains up to ` +
+            `"${terminatorSubject}", which is self-signed but whose keyUsage ` +
+            `does not include keyCertSign, so OpenSSL refuses to let it issue ` +
+            `the certificates below it however its basicConstraints reads. ` +
+            `Every worker handshake to the daemon will fail "key usage does ` +
+            `not include certificate signing" even though the chain terminates ` +
+            `on a self-signed certificate. Reissue that certificate with ` +
+            `keyCertSign in its keyUsage and restart — CA:TRUE alone does not ` +
+            `fix it, and no NODE_EXTRA_CA_CERTS can anchor a self-signed ` +
+            `certificate through anything but itself.`
+        : `--tls-cert "${opts.certPath}" chains up to ` +
+            `"${terminatorSubject}", which is self-signed but is not a CA — it ` +
+            `carries basicConstraints CA:FALSE or, as an X.509 v3 certificate, ` +
+            `no basicConstraints at all, and OpenSSL refuses to let it issue ` +
+            `the certificates below it, so every worker handshake to the ` +
+            `daemon will fail INVALID_PURPOSE ("unsuitable certificate ` +
+            `purpose"). Reissue that certificate with CA:TRUE, or point ` +
+            `NODE_EXTRA_CA_CERTS at a real CA that anchors the chain, and ` +
+            `restart.`,
+    );
+  } else if (anchorPath.incapableIssuer) {
+    const keyUsageIsTheCause = issuerRefusedForKeyUsage(
+      anchorPath.incapableIssuer,
+    );
+    gaps.push(
+      `--tls-cert "${opts.certPath}" chains through ` +
+        `"${anchorPath.incapableIssuer.subject.replace(/\r?\n/g, ', ')}", ` +
+        (keyUsageIsTheCause
+          ? `whose keyUsage does not include keyCertSign, so OpenSSL refuses ` +
+            `to let it issue the certificate below it however its ` +
+            `basicConstraints reads. Every worker handshake to the daemon ` +
+            `will fail with an invalid-CA error even though the chain looks ` +
+            `complete, and the issuing CA IS in their bundle. Reissue that ` +
+            `intermediate with keyCertSign in its keyUsage and restart — ` +
+            `pointing NODE_EXTRA_CA_CERTS elsewhere cannot fix it.`
+          : `which is not a CA — it carries basicConstraints CA:FALSE or, as ` +
+            `an X.509 v3 certificate, no basicConstraints at all, and ` +
+            `OpenSSL refuses to let it issue the certificate below it. Every ` +
+            `worker handshake to the daemon will fail INVALID_PURPOSE or ` +
+            `INVALID_CA even though the chain looks complete. Reissue that ` +
+            `intermediate with CA:TRUE, or point NODE_EXTRA_CA_CERTS at a ` +
+            `chain whose intermediates are real CAs, and restart.`),
+    );
+  } else if (anchorPath.pathLengthViolation) {
+    const { cert, constraint } = anchorPath.pathLengthViolation;
+    gaps.push(
+      `--tls-cert "${opts.certPath}" chains through ` +
+        `"${cert.subject.replace(/\r?\n/g, ', ')}", whose basicConstraints ` +
+        `carries pathlen:${constraint} — it permits at most ${constraint} ` +
+        `intermediate CA${constraint === 1 ? '' : 's'} below it, and this ` +
+        `chain has more. Every worker handshake to the daemon will fail ` +
+        `PATH_LENGTH_EXCEEDED even though every certificate in the bundle ` +
+        `verifies. Reissue that CA with a pathlen that covers the chain, or ` +
+        `shorten the chain, and restart.`,
+    );
+  } else if (anchorPath.unheldSelfSignedLeaf) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" serves a self-signed certificate whose ` +
+        `own PEM block is not one Node's NODE_EXTRA_CA_CERTS loader takes ` +
+        `(a -----BEGIN TRUSTED CERTIFICATE----- block, as \`openssl x509 ` +
+        `-trustout\` writes, is the usual cause), so the channel workers ` +
+        `never receive that certificate — and a self-signed certificate ` +
+        `verifies only when it is itself in the trust store. The daemon ` +
+        `serves it fine, but every worker handshake will fail ` +
+        `DEPTH_ZERO_SELF_SIGNED_CERT with nothing logged. Re-export ` +
+        `--tls-cert with a plain -----BEGIN CERTIFICATE----- block and ` +
+        `restart.`,
+    );
+  } else if (!anchorPath.anchored) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" is issued by another CA ` +
+        `(${x509.issuer.replace(/\r?\n/g, ', ')}), not self-signed, and ` +
+        `${
+          !opts.operatorCaCertPath
+            ? `no NODE_EXTRA_CA_CERTS is set`
+            : opts.operatorCaCertReadError !== undefined
+              ? `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" could not ` +
+                `be read, so whatever it carries reached nobody`
+              : operatorDiscarded
+                ? `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" was ` +
+                  `discarded together with the unloadable serving file ` +
+                  `above, whatever it carries`
+                : `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" does not ` +
+                  `carry a certificate that anchors it`
+        }, so nothing in the channel workers' bundle anchors their trust — ` +
+        `every worker handshake to the daemon will fail ` +
+        `UNABLE_TO_VERIFY_LEAF_SIGNATURE unless the issuing CA is already in ` +
+        `the workers' default trust store. ` +
+        (operatorDiscarded
+          ? `Re-export --tls-cert as described above and restart; ` +
+            `NODE_EXTRA_CA_CERTS is not the file to change.`
+          : opts.operatorCaCertReadError !== undefined
+            ? `Make NODE_EXTRA_CA_CERTS readable by the daemon as described ` +
+              `above and restart.`
+            : `Point NODE_EXTRA_CA_CERTS at the issuing CA (for mkcert: ` +
+              `"$(mkcert -CAROOT)/rootCA.pem") and restart.`),
+    );
+  }
+  // `X509Certificate.verify` checks signatures only and never consults dates,
+  // so an expired root or intermediate anchors "fine" here while every worker
+  // handshake fails CERT_HAS_EXPIRED. Boot validation covers the leaf alone.
+  const now = Date.now();
+  for (const member of anchorPath.path) {
+    if (member.fingerprint256 === x509.fingerprint256) continue;
+    const subject = member.subject.replace(/\r?\n/g, ', ');
+    // OpenSSL applies the server-purpose test to EVERY chain member, not
+    // just the leaf (`check_purpose_ssl_server`), and `anyExtendedKeyUsage`
+    // does not satisfy it in-chain — measured on Node v22.23.2: a CA:TRUE
+    // keyCertSign intermediate carrying only clientAuth walks to anchored
+    // here while every worker handshake fails INVALID_PURPOSE. `keyUsage`
+    // is undefined when the certificate carries no extendedKeyUsage at all,
+    // which OpenSSL accepts in a CA.
+    if (member.keyUsage && !member.keyUsage.includes(TLS_SERVER_AUTH_OID)) {
+      gaps.push(
+        `--tls-cert "${opts.certPath}" chains through "${subject}", whose ` +
+          `extendedKeyUsage does not include serverAuth — every worker ` +
+          `handshake to the daemon will fail INVALID_PURPOSE. Reissue that ` +
+          `chain member with serverAuth in its extendedKeyUsage and ` +
+          `restart.`,
+      );
+      continue;
+    }
+    if (new Date(member.validTo).getTime() < now) {
+      gaps.push(
+        `--tls-cert "${opts.certPath}" chains through "${subject}", which ` +
+          `expired on ${member.validTo} — every worker handshake to the ` +
+          `daemon will fail CERT_HAS_EXPIRED. Renew that chain member and ` +
+          `restart.`,
+      );
+    } else if (new Date(member.validFrom).getTime() > now) {
+      gaps.push(
+        `--tls-cert "${opts.certPath}" chains through "${subject}", which is ` +
+          `not yet valid (validFrom: ${member.validFrom}) — every worker ` +
+          `handshake to the daemon will fail CERT_NOT_YET_VALID. Check that ` +
+          `chain member's notBefore date or the system clock.`,
+      );
+    }
+  }
+  const host = workerDialHost(opts.daemonUrl);
+  if (host && !certCoversHost(x509, host)) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" has no subjectAltName covering ` +
+        `"${host}", the host channel workers dial — every worker handshake ` +
+        `will fail ERR_TLS_CERT_ALTNAME_INVALID. Reissue the certificate ` +
+        `with that host in its SANs and restart.`,
+    );
+  }
+  return gaps;
+}
+
+/** basicConstraints, 2.5.29.19, as the contents of its OBJECT IDENTIFIER. */
+const BASIC_CONSTRAINTS_OID = Buffer.from([0x55, 0x1d, 0x13]);
+/** keyUsage, 2.5.29.15, likewise. */
+const KEY_USAGE_OID = Buffer.from([0x55, 0x1d, 0x0f]);
+/** `keyCertSign` is bit 5 of the keyUsage BIT STRING, counted from the MSB. */
+const KEY_CERT_SIGN_MASK = 0x04;
+/** TLS server key usages: digitalSignature, keyEncipherment, keyAgreement. */
+const TLS_SERVER_KEY_USAGE_MASK = 0xa8;
+const TLS_SERVER_AUTH_OID = '1.3.6.1.5.5.7.3.1';
+/** `[0] EXPLICIT Version DEFAULT v1` — the first TBSCertificate member. */
+const VERSION_TAG = 0xa0;
+/** `[3] EXPLICIT Extensions OPTIONAL` — the last one. */
+const EXTENSIONS_TAG = 0xa3;
+const SEQUENCE_TAG = 0x30;
+const BOOLEAN_TAG = 0x01;
+const INTEGER_TAG = 0x02;
+
+/** The tag of the DER element at `at`, and the `[start, end)` of its contents. */
+function derElementAt(
+  der: Buffer,
+  at: number,
+): { tag: number; start: number; end: number } | undefined {
+  const tag = der[at];
+  const header = der[at + 1];
+  if (tag === undefined || header === undefined) return undefined;
+  let start = at + 2;
+  let length = header & 0x7f;
+  if ((header & 0x80) !== 0) {
+    // Long form: the low bits count the length's own bytes. Certificates use
+    // neither the indefinite form (zero bytes) nor more than four.
+    if (length === 0 || length > 4) return undefined;
+    let value = 0;
+    for (let index = 0; index < length; index += 1) {
+      const byte = der[start + index];
+      if (byte === undefined) return undefined;
+      value = value * 0x100 + byte;
+    }
+    start += length;
+    length = value;
+  }
+  const end = start + length;
+  return end <= der.length ? { tag, start, end } : undefined;
+}
+
+/** The TBSCertificate of `cert`: the first member of the outer SEQUENCE. */
+function tbsCertificateOf(
+  cert: X509Certificate,
+): { tag: number; start: number; end: number } | undefined {
+  const certificate = derElementAt(cert.raw, 0);
+  if (certificate?.tag !== SEQUENCE_TAG) return undefined;
+  const tbs = derElementAt(cert.raw, certificate.start);
+  return tbs?.tag === SEQUENCE_TAG ? tbs : undefined;
+}
+
+/**
+ * The value bytes of `cert`'s `oid` extension, or `undefined` when it carries
+ * none. Searching `cert.raw` for the OID bytes instead — what this file did
+ * for basicConstraints — also matches them inside a signature or a key.
+ */
+function certificateExtension(
+  cert: X509Certificate,
+  oid: Buffer,
+): Buffer | undefined {
+  const der = cert.raw;
+  const tbs = tbsCertificateOf(cert);
+  if (!tbs) return undefined;
+  let at = tbs.start;
+  while (at < tbs.end) {
+    const member = derElementAt(der, at);
+    if (!member) return undefined;
+    if (member.tag !== EXTENSIONS_TAG) {
+      at = member.end;
+      continue;
+    }
+    const list = derElementAt(der, member.start);
+    if (list?.tag !== SEQUENCE_TAG) return undefined;
+    let entry = list.start;
+    while (entry < list.end) {
+      // Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE,
+      // extnValue OCTET STRING }.
+      const extension = derElementAt(der, entry);
+      if (extension?.tag !== SEQUENCE_TAG) return undefined;
+      const id = derElementAt(der, extension.start);
+      if (!id) return undefined;
+      let valueAt = id.end;
+      const critical = derElementAt(der, valueAt);
+      if (critical?.tag === BOOLEAN_TAG) valueAt = critical.end;
+      const value = derElementAt(der, valueAt);
+      if (!value) return undefined;
+      if (der.subarray(id.start, id.end).equals(oid)) {
+        return der.subarray(value.start, value.end);
+      }
+      entry = extension.end;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Whether a keyUsage extension whose value is `der` allows `keyCertSign`.
+ * The value wraps `BIT STRING { unusedBits, bits… }`; a certificate that
+ * encodes no bit at all cannot allow it.
+ */
+function keyUsageAllowsCertSign(der: Buffer): boolean {
+  const bits = derElementAt(der, 0);
+  if (!bits) return false;
+  const first = der[bits.start + 1];
+  return first !== undefined && (first & KEY_CERT_SIGN_MASK) !== 0;
+}
+
+function tlsServerPurposeDefect(cert: X509Certificate): string | undefined {
+  const keyUsage = certificateExtension(cert, KEY_USAGE_OID);
+  if (keyUsage !== undefined) {
+    const bits = derElementAt(keyUsage, 0);
+    const first = bits ? keyUsage[bits.start + 1] : undefined;
+    if (first === undefined || (first & TLS_SERVER_KEY_USAGE_MASK) === 0) {
+      return 'its keyUsage permits none of digitalSignature, keyEncipherment, or keyAgreement';
+    }
+  }
+  if (cert.keyUsage && !cert.keyUsage.includes(TLS_SERVER_AUTH_OID)) {
+    return 'its extendedKeyUsage does not include serverAuth';
+  }
+  return undefined;
+}
+
+/**
+ * Whether `cert` is an X.509 v1 certificate. `version` is `[0] EXPLICIT …
+ * DEFAULT v1`, and DER omits a member at its default, so a v1 certificate's
+ * TBSCertificate opens straight on the serial number.
+ */
+function isV1Certificate(cert: X509Certificate): boolean {
+  const tbs = tbsCertificateOf(cert);
+  return tbs !== undefined && cert.raw[tbs.start] !== VERSION_TAG;
+}
+
+/**
+ * Whether OpenSSL would refuse to let the SELF-SIGNED `cert` issue the
+ * certificate below it — `check_ca()` in `v3_purp.c`, in the same order.
+ *
+ * `X509Certificate.ca` alone is not that answer: it is `false` for an explicit
+ * `basicConstraints CA:FALSE`, for an X.509 v1 / no-extension root (old
+ * internal PKIs, `openssl x509 -req -signkey`) that OpenSSL accepts, and for a
+ * v3 root carrying only `keyUsage keyCertSign` that OpenSSL also accepts.
+ * Reading basicConstraints' presence alone is not it either: a v3 root with
+ * other extensions but no basicConstraints and no keyCertSign is one OpenSSL
+ * refuses, and this diagnostic reported it anchored.
+ *
+ * Every branch is measured on Node v22.23.0 / OpenSSL 3.0.13 as a real
+ * `tls.connect` against a server holding a leaf the root signed, with the
+ * fullchain as the trust store — the shape a channel worker gets:
+ *
+ * - v3, subjectKeyIdentifier only …………………… INVALID_PURPOSE  (refused)
+ * - v3, keyUsage keyCertSign, no basicConstraints … authorized (accepted)
+ * - v3, basicConstraints CA:TRUE + keyCertSign …… authorized (accepted)
+ * - v1, no extensions ……………………………………… authorized (accepted)
+ * - v3, CA:TRUE but keyUsage WITHOUT keyCertSign … refused (keyUsage first)
+ * - v3, CA:FALSE but keyUsage WITH keyCertSign …… INVALID_PURPOSE (refused)
+ */
+function cannotIssueCertificates(cert: X509Certificate): boolean {
+  const keyUsage = certificateExtension(cert, KEY_USAGE_OID);
+  // keyUsage, where present, must allow certificate signing whatever
+  // basicConstraints goes on to say.
+  if (keyUsage !== undefined && !keyUsageAllowsCertSign(keyUsage)) return true;
+  if (certificateExtension(cert, BASIC_CONSTRAINTS_OID) !== undefined) {
+    return !cert.ca;
+  }
+  // No basicConstraints: a self-signed v1 root is still a CA (`X509_check_ca`
+  // returns 3), and so is a certificate whose keyUsage allows certificate
+  // signing (4). Nothing else is.
+  return !isV1Certificate(cert) && keyUsage === undefined;
+}
+
+function isSelfSignedCert(x509: X509Certificate): boolean {
+  if (x509.subject !== x509.issuer) return false;
+  try {
+    return x509.verify(x509.publicKey);
+  } catch {
+    // Unsupported key type: assume self-signed rather than warn on a guess.
+    return true;
+  }
+}
+
+// Base64 never contains `-`, so the body match cannot run past its own
+// end marker and cannot backtrack.
+const PEM_CERTIFICATE_BLOCK =
+  /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g;
+
+/**
+ * Every certificate in a PEM serving file, leaf first. `X509Certificate` reads
+ * only the first block of a bundle, so a fullchain file has to be split before
+ * any of it past the leaf can be reasoned about. A non-PEM (DER) buffer has no
+ * blocks to split and is handed over whole.
+ */
+function parseCertChain(cert: Buffer): X509Certificate[] {
+  const blocks = cert.toString('utf8').match(PEM_CERTIFICATE_BLOCK);
+  if (!blocks) {
+    try {
+      return [new X509Certificate(cert)];
+    } catch {
+      return [];
+    }
+  }
+  const chain: X509Certificate[] = [];
+  for (const block of blocks) {
+    try {
+      chain.push(new X509Certificate(block));
+    } catch {
+      // One malformed block does not make the rest of the file unusable.
+    }
+  }
+  return chain;
+}
+
+/**
+ * The leaf boot validation and the workers' loader both read out of a serving
+ * file: `X509Certificate` takes the FIRST column-0 block and nothing else.
+ * `parseCertChain` deliberately reads more loosely so the rest of the chain can
+ * be reasoned about; only this is the certificate the daemon actually serves.
+ */
+function bootParsedLeaf(cert: Buffer): X509Certificate | undefined {
+  try {
+    return new X509Certificate(cert);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether `issuer` signed `cert` — name match plus signature, the two questions
+ * OpenSSL asks before it asks whether the issuer is ALLOWED to issue.
+ *
+ * `X509Certificate.checkIssued` folds the third question in: it enforces the
+ * issuer's keyUsage and returns false for an issuer whose keyUsage lacks
+ * `keyCertSign`. Using it as the search predicate meant such an issuer was
+ * never FOUND, so the walk fell through to the generic unanchored gap, whose
+ * cause, predicted error code and remedy are all wrong for that shape (the
+ * issuing chain IS in the bundle, the handshake fails `key usage does not
+ * include certificate signing`, and no NODE_EXTRA_CA_CERTS change can fix it).
+ * Splitting the questions lets `cannotIssueAsIntermediate` name it instead.
+ */
+function certIssuedBy(cert: X509Certificate, issuer: X509Certificate): boolean {
+  try {
+    return cert.issuer === issuer.subject && cert.verify(issuer.publicKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Why OpenSSL refuses to let `cert` issue the certificate below it — the two
+ * causes `X509Certificate.ca === false` folds together, which the gap message
+ * has to tell apart because they take different fixes.
+ *
+ * Measured on Node v22.23.0 / OpenSSL 3.0.13 as real worker-shape handshakes:
+ * a CA:TRUE intermediate whose keyUsage omits `keyCertSign` reports
+ * `ca === false` and fails `invalid CA certificate` — reissuing it "with
+ * CA:TRUE", what this message used to advise, changes nothing.
+ */
+function issuerRefusedForKeyUsage(cert: X509Certificate): boolean {
+  const keyUsage = certificateExtension(cert, KEY_USAGE_OID);
+  return keyUsage !== undefined && !keyUsageAllowsCertSign(keyUsage);
+}
+
+/**
+ * The `pathLenConstraint` of `cert`'s basicConstraints, or `undefined` when it
+ * carries none. `BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE,
+ * pathLenConstraint INTEGER (0..MAX) OPTIONAL }`, and DER omits `cA` at its
+ * default — so the INTEGER is either the first member or the second.
+ */
+function pathLengthConstraint(cert: X509Certificate): number | undefined {
+  const value = certificateExtension(cert, BASIC_CONSTRAINTS_OID);
+  if (!value) return undefined;
+  const sequence = derElementAt(value, 0);
+  if (sequence?.tag !== SEQUENCE_TAG) return undefined;
+  let at = sequence.start;
+  const first = derElementAt(value, at);
+  if (!first) return undefined;
+  if (first.tag === BOOLEAN_TAG) at = first.end;
+  const integer = derElementAt(value, at);
+  if (integer?.tag !== INTEGER_TAG) return undefined;
+  let length = 0;
+  for (let index = integer.start; index < integer.end; index += 1) {
+    const byte = value[index];
+    if (byte === undefined) return undefined;
+    length = length * 0x100 + byte;
+  }
+  return length;
+}
+
+/**
+ * Walks the leaf up through the certificates the workers actually hold, and
+ * reports both whether the walk terminated on a self-signed anchor and the
+ * certificates it relied on. Workers get the whole bundle as their trust
+ * store, so a fullchain that walks up to a self-signed root anchors fine even
+ * though the leaf never could alone — and every member the walk leaned on is
+ * a member whose own validity window the handshake will enforce.
+ */
+function walkWorkerAnchorPath(
+  leaf: X509Certificate,
+  chain: readonly X509Certificate[],
+  /**
+   * Whether `leaf` is a certificate the workers' loader actually hands them.
+   * It is not when the caller had to PREPEND the boot-parsed leaf because the
+   * serving file's own block is not one the loader takes.
+   */
+  leafHeldByWorkers = true,
+): {
+  anchored: boolean;
+  path: readonly X509Certificate[];
+  /** Set when the walk terminated on a self-signed cert that is not a CA. */
+  nonCaTerminator?: X509Certificate;
+  /** Set when the walk reached an issuer OpenSSL will not let issue. */
+  incapableIssuer?: X509Certificate;
+  /** Set when a CA's basicConstraints pathLenConstraint is exceeded. */
+  pathLengthViolation?: { cert: X509Certificate; constraint: number };
+  /**
+   * Set when the walk would have terminated on a self-signed LEAF the workers
+   * do not hold — an anchor that exists only in this model.
+   */
+  unheldSelfSignedLeaf?: X509Certificate;
+} {
+  let next: X509Certificate | undefined = leaf;
+  const walked = new Set<string>();
+  const path: X509Certificate[] = [];
+  let pathLengthViolation:
+    | { cert: X509Certificate; constraint: number }
+    | undefined;
+  while (next) {
+    const current: X509Certificate = next;
+    path.push(current);
+    // `pathLenConstraint` caps how many intermediates may sit BELOW this CA.
+    // It rides inside the same basicConstraints value the capability checks
+    // already read, and went unread: a `pathlen:0` root over one intermediate
+    // walked to `anchored: true` with zero gaps while every worker handshake
+    // failed PATH_LENGTH_EXCEEDED (measured, exact worker shape).
+    if (path.length > 1 && pathLengthViolation === undefined) {
+      const constraint = pathLengthConstraint(current);
+      const intermediatesBelow = path.length - 2;
+      if (constraint !== undefined && intermediatesBelow > constraint) {
+        pathLengthViolation = { cert: current, constraint };
+      }
+    }
+    if (isSelfSignedCert(current)) {
+      // OpenSSL applies its CA test to certificates that sign OTHER
+      // certificates, not to a self-signed leaf trusted at depth 0. Measured
+      // on Node 22: a CA:FALSE self-signed leaf in its own trust store
+      // handshakes fine, while the same shape used as an issuer fails
+      // INVALID_PURPOSE — so the constraint binds only past the leaf.
+      if (path.length > 1 && cannotIssueCertificates(current)) {
+        return { anchored: false, path, nonCaTerminator: current };
+      }
+      // R8-1: a self-signed certificate verifies only when it is ITSELF in
+      // the trust store, so a leaf the workers never receive cannot terminate
+      // their walk — however completely it terminates this one. The
+      // fingerprint check upstream only decides whether to prepend it; once
+      // prepended it self-anchored at path length 1 and boot reported zero
+      // gaps. Measured on Node v22.23.0: a self-signed loopback leaf exported
+      // with `openssl x509 -trustout` (a `TRUSTED CERTIFICATE` block, which
+      // `createSecureContext` accepts and the loader skips) plus an unrelated
+      // root is served green while every worker handshake fails
+      // DEPTH_ZERO_SELF_SIGNED_CERT with an EMPTY stderr — the silent-green
+      // outage this diagnostic exists to catch.
+      if (path.length === 1 && !leafHeldByWorkers) {
+        return { anchored: false, path, unheldSelfSignedLeaf: current };
+      }
+      return pathLengthViolation
+        ? { anchored: false, path, pathLengthViolation }
+        : { anchored: true, path };
+    }
+    walked.add(current.fingerprint256);
+    const issuer: X509Certificate | undefined = chain.find(
+      (candidate) =>
+        !walked.has(candidate.fingerprint256) &&
+        certIssuedBy(current, candidate),
+    );
+    // `certIssuedBy` asks only "did this sign that": name match plus signature.
+    // OpenSSL asks a second question of every certificate it uses AS an issuer,
+    // and answering only the first is how a chain that walks THROUGH an
+    // incapable intermediate got reported anchored while every worker
+    // handshake failed. Measured on Node 22 / OpenSSL 3 with real handshakes:
+    // an explicit CA:FALSE intermediate and a v3 intermediate with no
+    // basicConstraints both fail INVALID_PURPOSE, and a keyCertSign-only v3
+    // intermediate fails INVALID_CA.
+    if (issuer && !isSelfSignedCert(issuer) && !issuer.ca) {
+      return { anchored: false, path, incapableIssuer: issuer };
+    }
+    next = issuer;
+  }
+  return pathLengthViolation
+    ? { anchored: false, path, pathLengthViolation }
+    : { anchored: false, path };
+}
+
+/**
+ * WHATWG `URL.hostname` keeps the brackets on an IPv6 literal (`[::1]`), and
+ * `isIP` does not recognise the bracketed form — so an unstripped host falls
+ * through to the DNS-name branch of the SAN check, where it can never match
+ * the iPAddress SAN such a certificate actually carries.
+ */
+function workerDialHost(daemonUrl: string): string | undefined {
+  try {
+    const hostname = new URL(daemonUrl).hostname;
+    if (!hostname) return undefined;
+    return hostname.startsWith('[') && hostname.endsWith(']')
+      ? hostname.slice(1, -1)
+      : hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+function certCoversHost(x509: X509Certificate, host: string): boolean {
+  try {
+    // IP literals need an iPAddress SAN — checkServerIdentity has no CN
+    // fallback for them — while names go through the normal host match.
+    return isIP(host)
+      ? Boolean(x509.checkIP(host))
+      : Boolean(x509.checkHost(host));
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -693,9 +1713,10 @@ export function formatChannelWorkerDaemonUrl(
  *   - array → first non-empty string element after trim, or undefined
  *   - anything else (object, number, boolean, undefined) → undefined
  *
- * Returning `undefined` is the bridge's signal to use its own
- * `getCurrentGeminiMdFilename()` default — so a malformed value
- * keeps the daemon alive rather than producing a garbage filename.
+ * Returning `undefined` leaves the workspace on the daemon's init-default
+ * chain — the primary workspace's configured `context.fileName` snapshot
+ * (`contextFilenameForInit`), then the hard-coded `QWEN.md` — so a malformed
+ * value keeps the daemon alive rather than producing a garbage filename.
  */
 export function extractContextFilename(value: unknown): string | undefined {
   if (typeof value === 'string') {
@@ -868,6 +1889,10 @@ type ChannelWorkerRuntime = {
     opts: CreateChannelWorkerManagerOptions,
   ) => ChannelWorkerManager;
   findCliEntryPath(): string;
+  resolveWorkerCaCertPath(
+    daemonCertPath: string,
+    existing: string | undefined,
+  ): string;
 };
 
 let channelWorkerRuntimePromise: Promise<ChannelWorkerRuntime> | undefined;
@@ -890,6 +1915,7 @@ async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
         workerManager,
       ]) => ({
         createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
+        resolveWorkerCaCertPath: supervisor.resolveWorkerCaCertPath,
         channelServicePidfile: pidfile,
         loadChannelsConfig: channelRuntime.loadChannelsConfig,
         createChannelWorkerGroup: workerGroup.createChannelWorkerGroup,
@@ -1062,6 +2088,15 @@ export interface RunQwenServeDeps {
   channelWorkerSupervisorFactory?: (
     opts: CreateChannelWorkerSupervisorOptions,
   ) => ChannelWorkerSupervisor;
+  workerTlsTrustVerifier?: typeof verifyWorkerTlsTrust;
+  /**
+   * Test/embed override for the boot-time certification that the channel
+   * worker daemon URL is local to this host. Production refuses a bind the
+   * host cannot answer through `assertChannelWorkerDaemonUrlIsLocal`; tests
+   * inject a recorder to pin that boot runs the certification before
+   * starting workers.
+   */
+  channelWorkerUrlCertifier?: typeof assertChannelWorkerDaemonUrlIsLocal;
   channelServicePidfile?: ChannelServicePidfile;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   /** Test/embed override; production uses the private user Conversations root. */
@@ -1178,6 +2213,7 @@ async function loadServeRuntimeModules() {
     workspaceSkillsStatusModule,
     totalSessionAdmissionModule,
     workspaceRegistryModule,
+    promptLedgerModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -1190,6 +2226,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-skills-status.js'),
     import('./total-session-admission.js'),
     import('./workspace-registry.js'),
+    import('./prompt-terminal-ledger.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -1204,8 +2241,6 @@ async function loadServeRuntimeModules() {
     createDaemonWorkspaceService: workspaceModule.createDaemonWorkspaceService,
     WorkspaceSettingsPartialPersistError:
       workspaceTypesModule.WorkspaceSettingsPartialPersistError,
-    WorkspaceSkillNotToggleableError:
-      workspaceTypesModule.WorkspaceSkillNotToggleableError,
     createDaemonStatusProvider:
       daemonStatusProviderModule.createDaemonStatusProvider,
     createWorkspaceProvidersStatusProvider:
@@ -1219,6 +2254,7 @@ async function loadServeRuntimeModules() {
       workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
     createWorkspaceGenerationGuard:
       workspaceRegistryModule.createWorkspaceGenerationGuard,
+    createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
   };
 }
 
@@ -1252,7 +2288,9 @@ function currentServeFeaturesForRunQwenServe(
   opts: ServeOptions,
   sessionShellCommandEnabled: boolean,
   sessionArtifactsPersistenceAvailable: boolean,
+  currentSessionSchedulingAvailable: boolean,
   env: Readonly<Record<string, string | undefined>>,
+  nativeDirectoryPickerAvailable: boolean,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -1270,6 +2308,7 @@ function currentServeFeaturesForRunQwenServe(
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
+    currentSessionSchedulingAvailable,
     workspaceGenerationAvailable: true,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
@@ -1278,8 +2317,10 @@ function currentServeFeaturesForRunQwenServe(
     channelManagementAvailable: true,
     persistentWorkspaceRegistrationAvailable: true,
     workspaceRuntimeRemovalAvailable: true,
-    // Advertise the same WS feature flags as the runtime path (serve-features.ts)
-    // so the bootstrap `/capabilities` window doesn't briefly under-report them.
+    // Advertise the same host-conditional and WS feature flags as the runtime
+    // path (serve-features.ts) so the bootstrap `/capabilities` window doesn't
+    // briefly under-report them.
+    nativeDirectoryPickerAvailable,
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
     browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
@@ -1292,8 +2333,10 @@ function createBootstrapCapabilities(input: {
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
+  currentSessionSchedulingAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   env: Readonly<Record<string, string | undefined>>;
+  nativeDirectoryPickerAvailable: boolean;
 }): CapabilitiesEnvelope {
   return {
     v: CAPABILITIES_SCHEMA_VERSION,
@@ -1306,7 +2349,9 @@ function createBootstrapCapabilities(input: {
       input.opts,
       input.sessionShellCommandEnabled,
       input.sessionArtifactsPersistenceAvailable,
+      input.currentSessionSchedulingAvailable,
       input.env,
+      input.nativeDirectoryPickerAvailable,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -1499,6 +2544,7 @@ function createBootstrapServeApp(input: {
   qwenCodeVersion?: string;
   sessionShellCommandEnabled: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
+  currentSessionSchedulingAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   multiWorkspaceCapabilitiesRequireRuntime: boolean;
   getRuntimeError: () => string | undefined;
@@ -1517,6 +2563,7 @@ function createBootstrapServeApp(input: {
     qwenCodeVersion,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    currentSessionSchedulingAvailable,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime,
     getRuntimeError,
@@ -1525,6 +2572,11 @@ function createBootstrapServeApp(input: {
     onHealthServed,
   } = input;
   const app = express();
+  // The probe stats `/dev/console` (macOS) or scans `PATH` for `zenity`
+  // (Linux), and both bootstrap endpoints below rebuild their envelope per
+  // request, so evaluate it once here — the runtime path likewise probes once,
+  // at `createApp` time (server.ts).
+  const nativeDirectoryPickerAvailable = isNativeDirectoryPickerAvailable();
 
   installSameOriginOriginStrip(app, getPort);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
@@ -1582,8 +2634,10 @@ function createBootstrapServeApp(input: {
         qwenCodeVersion,
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
+        currentSessionSchedulingAvailable,
         permissionPolicy,
         env: process.env,
+        nativeDirectoryPickerAvailable,
       }),
     );
   });
@@ -1721,7 +2775,9 @@ function createBootstrapServeApp(input: {
           opts,
           sessionShellCommandEnabled,
           sessionArtifactsPersistenceAvailable,
+          currentSessionSchedulingAvailable,
           process.env,
+          nativeDirectoryPickerAvailable,
         ),
       },
       runtime: {
@@ -2236,17 +3292,7 @@ async function runQwenServeImpl(
   };
   loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
-  // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
-  // token.txt)` keeps the file's trailing `\n` in the env value, so the
-  // hashed-then-compared token never matches what well-behaved clients
-  // send. Every request returns the generic 401 with no breadcrumb
-  // pointing at the whitespace, and operators chase ghosts. Trim once
-  // at boot so the comparison is over what humans intended to set.
-  const rawToken = optsIn.token ?? process.env[QWEN_SERVER_TOKEN_ENV];
-  const token =
-    typeof rawToken === 'string' && rawToken.trim().length > 0
-      ? rawToken.trim()
-      : undefined;
+  const token = resolveServeToken(optsIn.token);
   const channelDeliveryDiagnosticRedaction: WorkerDiagnosticRedactionOptions = {
     workerEnv: daemonRuntimeBaseEnv,
     ...(token ? { daemonToken: token } : {}),
@@ -2415,6 +3461,7 @@ async function runQwenServeImpl(
   // downgrade would serve the web shell over an insecure transport they
   // believe is encrypted.
   let tlsOptions: { cert: Buffer; key: Buffer } | undefined;
+  let tlsCertPath: string | undefined;
   if ((opts.tlsCert && !opts.tlsKey) || (!opts.tlsCert && opts.tlsKey)) {
     throw new Error(
       `--tls-cert and --tls-key must be provided together (got only ` +
@@ -2473,6 +3520,10 @@ async function runQwenServeImpl(
       );
     }
     tlsOptions = { cert, key };
+    // Workers are forked with `cwd: opts.workspace`, so a relative --tls-cert
+    // would resolve against the worker's cwd instead of the daemon's and load
+    // nothing. Resolve once here, against the cwd the daemon just read it with.
+    tlsCertPath = path.resolve(opts.tlsCert);
   }
 
   if (!isLoopbackBind(opts.hostname) && !token) {
@@ -3122,6 +4173,9 @@ async function runQwenServeImpl(
   // with a breadcrumb rather than failing the boot.
   const webShellDir =
     opts.serveWebShell === false ? undefined : resolveWebShellDir();
+  if (optsIn.requireWebShell && !webShellDir) {
+    throw new Error('--open-with-auth requires built Web Shell assets.');
+  }
   if (opts.serveWebShell !== false) {
     if (!webShellDir) {
       writeStderrLine(
@@ -3199,6 +4253,12 @@ async function runQwenServeImpl(
   // bucket plus the window-scoped event-loop histogram it resets each seal.
   // Torn down together with the event-loop monitor on runtime restart/stop.
   let daemonMetricsSampler: { dispose(): void } | undefined;
+  // Low-frequency sweep refreshing bound-PR state snapshots (open → merged).
+  // The refresh module loads via dynamic import (see start site) because it
+  // pulls the SessionService chain, which must stay out of the pre-listen
+  // static closure; the generation guards dispose-vs-async-start races.
+  let sessionPrRefreshTimer: { dispose(): void } | undefined;
+  let sessionPrRefreshGeneration = 0;
   let runtimeStartupError: string | undefined;
   let runtimeStarting: Promise<void> | undefined;
   let markRuntimeReady!: () => void;
@@ -3218,6 +4278,10 @@ async function runQwenServeImpl(
     daemonEventLoopMonitor = undefined;
     const metricsSampler = daemonMetricsSampler;
     daemonMetricsSampler = undefined;
+    const prRefreshTimer = sessionPrRefreshTimer;
+    sessionPrRefreshTimer = undefined;
+    sessionPrRefreshGeneration += 1;
+    prRefreshTimer?.dispose();
     try {
       eventLoopMonitor?.dispose();
     } catch (err) {
@@ -3443,6 +4507,7 @@ async function runQwenServeImpl(
       stopScheduledTaskKeepalive?: () => void;
       stopWorkspaceGitState?: () => void;
       stopLiveCoordinator?: () => void;
+      stopWebTerminalRegistry?: () => void;
       subSessionStoppers?: Array<() => void>;
     };
     const stopSafely = (name: string, stop: (() => void) | undefined) => {
@@ -3459,6 +4524,7 @@ async function runQwenServeImpl(
     stopSafely('scheduled-task keepalive', locals.stopScheduledTaskKeepalive);
     stopSafely('workspace git state', locals.stopWorkspaceGitState);
     stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
+    stopSafely('web terminal registry', locals.stopWebTerminalRegistry);
     stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {
       stopSafely('sub-session launcher', stop);
@@ -3692,6 +4758,14 @@ async function runQwenServeImpl(
       runtimeBootSettings,
       runtimeEnvSnapshot.effectiveEnv,
     );
+    const sessionAttachmentsRoot = (
+      workspace: string,
+      runtimeBaseDir: string,
+    ): string =>
+      path.join(
+        new core.Storage(workspace, runtimeBaseDir).getProjectTempDir(),
+        'attachments',
+      );
     const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
       ...runtimeEnvSnapshot.effectiveEnv,
       QWEN_RUNTIME_DIR: primarySessionRuntimeBaseDir,
@@ -3969,8 +5043,8 @@ async function runQwenServeImpl(
             message,
           }),
       },
-      ...(opts.experimentalLsp === true
-        ? { extraArgs: ['--experimental-lsp'] }
+      ...(acpChildExtraArgs(opts)
+        ? { extraArgs: acpChildExtraArgs(opts) }
         : {}),
     });
     const statusProvider = runtime.createDaemonStatusProvider({
@@ -4062,15 +5136,6 @@ async function runQwenServeImpl(
         const fresh = loadSettingsForPersistence(workspace);
         const normalizedName = skillName.trim().toLowerCase();
         const resolved = resolveSkillSettings(fresh);
-        const disablement = resolved.disablements.get(normalizedName);
-        if (disablement?.reason === 'hard' && disablement.lockedScope) {
-          throw new runtime.WorkspaceSkillNotToggleableError(
-            skillName,
-            'locked',
-            disablement.lockedScope,
-          );
-        }
-
         const workspaceDisabled = skillSettingStrings(
           fresh,
           WORKSPACE_SETTING_SCOPE,
@@ -4155,18 +5220,6 @@ async function runQwenServeImpl(
 
         for (const skillName of skillNames) {
           const normalizedName = skillName.trim().toLowerCase();
-          const disablement = resolved.disablements.get(normalizedName);
-          if (disablement?.reason === 'hard' && disablement.lockedScope) {
-            outcomes.push({
-              skillName,
-              error: new runtime.WorkspaceSkillNotToggleableError(
-                skillName,
-                'locked',
-                disablement.lockedScope,
-              ),
-            });
-            continue;
-          }
           const updated = updateWorkspaceSkillSettingLists(
             next,
             skillName,
@@ -4274,9 +5327,55 @@ async function runQwenServeImpl(
     // from a child's agent turn and (for 'first-turn') return its result.
     // Dynamic-imported (not at module scope) so the serve fast-path bundle
     // closure check doesn't trace create-sub-session's transitive deps.
-    const { createSubSessionLauncher } = await import(
-      './create-sub-session.js'
-    );
+    const [{ createSubSessionLauncher }, scheduledTaskRoutes] =
+      await Promise.all([
+        import('./create-sub-session.js'),
+        import('./routes/scheduled-tasks.js'),
+      ]);
+    const createCurrentSessionScheduledTaskHandler =
+      (
+        workspaceCwd: string,
+        runtimeBaseDir: string,
+        getBridge: () => AcpSessionBridge | undefined,
+        assertGenerationOpen: () => void,
+      ): CurrentSessionScheduledTaskCreateHandler =>
+      async ({
+        callerSessionId,
+        cron,
+        prompt,
+        recurring,
+        assertCallerPromptActive,
+      }) => {
+        const targetBridge = getBridge();
+        if (!targetBridge) {
+          throw new Error(
+            'Current-session scheduling is unavailable while the workspace runtime is starting.',
+          );
+        }
+        const task =
+          await scheduledTaskRoutes.createScheduledTaskWithExistingSession(
+            {
+              workspaceCwd,
+              runtimeBaseDir,
+              bridge: targetBridge,
+              assertGenerationOpen,
+              resolveLiveSessionOwner: (sessionId) =>
+                workspaceRegistryForPersistence.current === undefined
+                  ? { kind: 'unavailable' }
+                  : workspaceRegistryForPersistence.current.resolveLiveSessionOwner(
+                      sessionId,
+                    ),
+            },
+            {
+              sessionId: callerSessionId,
+              cron,
+              prompt,
+              recurring,
+            },
+            { source: 'cron-tool', assertCallerPromptActive },
+          );
+        return { id: task.id, cron: task.cron };
+      };
     // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
     // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)
     // brings its own options.
@@ -4290,10 +5389,21 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        sessionAttachmentsRoot: sessionAttachmentsRoot(
+          boundWorkspace,
+          primarySessionRuntimeBaseDir,
+        ),
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         onCreateSubSession: subSessionLauncher.launch,
+        onCreateCurrentSessionScheduledTask:
+          createCurrentSessionScheduledTaskHandler(
+            boundWorkspace,
+            primarySessionRuntimeBaseDir,
+            () => bridgeRef,
+            () => primaryGenerationGuard.assertOpen(),
+          ),
         onChannelDelivery: createBoundChannelDeliveryHandler(
           boundWorkspace,
           () => channelWorkerManager,
@@ -4302,6 +5412,9 @@ async function runQwenServeImpl(
           channelDeliveryDiagnosticRedaction,
         ),
         maxSessions: opts.maxSessions,
+        ...(opts.restoreAskUserQuestion === true
+          ? { restoreAskUserQuestion: true }
+          : {}),
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: (event) => {
           if (event.type === 'registered' && primaryGenerationGuard.closed) {
@@ -4348,6 +5461,12 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace,
+        // Prompt terminal ledger: persisted beside the transcript so a
+        // restarted daemon can reconcile dangling prompts on cold load.
+        promptLedger: runtime.createPromptLedgerSink(
+          boundWorkspace,
+          primarySessionRuntimeBaseDir,
+        ),
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory,
@@ -4589,6 +5708,29 @@ async function runQwenServeImpl(
       };
     };
 
+    const readLiveConversationScheduledTasks = async () => {
+      if (!fs.existsSync(liveConversationWorkspace.rootPath)) return [];
+      const { canonicalRoot } = await liveConversationWorkspace.revalidate();
+      let settings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
+      try {
+        settings = settingsRuntime.settings.loadSettings(canonicalRoot, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: false,
+          workspaceTrusted: true,
+        });
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: could not read full settings for Conversations ` +
+            `(${err instanceof Error ? err.message : String(err)}); falling back to defaults.`,
+        );
+      }
+      const env = createRuntimeEnvMetadata(canonicalRoot, settings, true);
+      return core.Storage.runWithResolvedRuntimeBaseDir(
+        env.sessionRuntimeBaseDir,
+        () => core.readCronTasks(canonicalRoot),
+      );
+    };
+
     // Collects stop() callbacks from every per-workspace sub-session launcher
     // (primary + secondaries). Called during shutdown so no new sub-sessions
     // are admitted while bridges are being torn down.
@@ -4681,8 +5823,8 @@ async function runQwenServeImpl(
               message,
             }),
         },
-        ...(opts.experimentalLsp === true
-          ? { extraArgs: ['--experimental-lsp'] }
+        ...(acpChildExtraArgs(opts)
+          ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
       });
       const secondaryClientMcpSenderRegistry = new ClientMcpSenderRegistry();
@@ -4701,8 +5843,19 @@ async function runQwenServeImpl(
         ),
       });
       const secondaryBridge = runtime.createAcpSessionBridge({
+        sessionAttachmentsRoot: sessionAttachmentsRoot(
+          workspaceInput.cwd,
+          secondaryEnv.sessionRuntimeBaseDir,
+        ),
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
+        onCreateCurrentSessionScheduledTask:
+          createCurrentSessionScheduledTaskHandler(
+            workspaceInput.cwd,
+            secondaryEnv.sessionRuntimeBaseDir,
+            () => secondaryBridgeRef,
+            () => secondaryGenerationGuard.assertOpen(),
+          ),
         onChannelDelivery: createBoundChannelDeliveryHandler(
           workspaceInput.cwd,
           () => channelWorkerManager,
@@ -4711,6 +5864,9 @@ async function runQwenServeImpl(
           channelDeliveryDiagnosticRedaction,
         ),
         maxSessions: opts.maxSessions,
+        ...(opts.restoreAskUserQuestion === true
+          ? { restoreAskUserQuestion: true }
+          : {}),
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: (event) => {
           if (event.type === 'registered' && secondaryGenerationGuard.closed) {
@@ -4757,6 +5913,10 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace: workspaceInput.cwd,
+        promptLedger: runtime.createPromptLedgerSink(
+          workspaceInput.cwd,
+          secondaryEnv.sessionRuntimeBaseDir,
+        ),
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory: secondaryChannelFactory,
@@ -5117,6 +6277,43 @@ async function runQwenServeImpl(
       },
     };
 
+    // Same lifecycle as the metrics sampler above: retire any prior timer
+    // before starting a new one (buildRuntime re-entry), unref'd inside.
+    // Dynamic import on purpose: session-pr-refresh statically pulls the
+    // SessionService chain (glob et al.), which the serve fast-path bundle
+    // closure check forbids in this pre-listen root's static closure.
+    sessionPrRefreshTimer?.dispose();
+    const refreshGeneration = ++sessionPrRefreshGeneration;
+    void import('./server/session-pr-refresh.js')
+      .then((mod) => {
+        if (refreshGeneration !== sessionPrRefreshGeneration) return;
+        sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
+          workspaceRegistry,
+          // The coordinator lives on the serve app (createServeApp below),
+          // which is built after this timer starts; read it per tick like
+          // the metrics sampler reads `acpHandle`.
+          getArchiveCoordinator: () =>
+            (
+              app.locals as {
+                sessionArchiveCoordinator?: SessionArchiveCoordinator;
+              }
+            ).sessionArchiveCoordinator,
+        });
+      })
+      .catch((error) => {
+        // Degrade to "no PR-state sweep" instead of leaking an unhandled
+        // rejection: the serve fast path installs no process-level
+        // unhandledRejection handler before this runs, and Node's default
+        // for one is to exit — a failed chunk load (e.g. an in-place
+        // upgrade replacing dist/ under the running daemon) would take
+        // down every runtime, session, and connection the daemon serves.
+        daemonLog.warn(
+          `session-pr-refresh load failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
+
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     interface WorkspaceRuntimeBuildOptions {
       readonly provenance?: WorkspaceRuntimeProvenance;
@@ -5228,8 +6425,8 @@ async function runQwenServeImpl(
               message,
             }),
         },
-        ...(opts.experimentalLsp === true
-          ? { extraArgs: ['--experimental-lsp'] }
+        ...(acpChildExtraArgs(opts)
+          ? { extraArgs: acpChildExtraArgs(opts) }
           : {}),
       });
       const wsClientMcpRegistry = new ClientMcpSenderRegistry();
@@ -5243,6 +6440,10 @@ async function runQwenServeImpl(
         ...(provenance === 'live-conversation'
           ? {
               notifySentCompletion: true,
+              getStandaloneSessionService: () =>
+                (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+                  'standaloneSessionService'
+                ],
               isolatedWorkspace: {
                 materializeDirectory: (sessionId: string) =>
                   liveConversationWorkspace.materializeConversationDirectory(
@@ -5262,8 +6463,19 @@ async function runQwenServeImpl(
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {
         wsBridge = runtime.createAcpSessionBridge({
+          sessionAttachmentsRoot: sessionAttachmentsRoot(
+            cwd,
+            wsEnv.sessionRuntimeBaseDir,
+          ),
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
+          onCreateCurrentSessionScheduledTask:
+            createCurrentSessionScheduledTaskHandler(
+              cwd,
+              wsEnv.sessionRuntimeBaseDir,
+              () => wsBridgeRef,
+              () => generationGuard.assertOpen(),
+            ),
           onChannelDelivery: createBoundChannelDeliveryHandler(
             cwd,
             () => channelWorkerManager,
@@ -5272,6 +6484,9 @@ async function runQwenServeImpl(
             channelDeliveryDiagnosticRedaction,
           ),
           maxSessions: opts.maxSessions,
+          ...(opts.restoreAskUserQuestion === true
+            ? { restoreAskUserQuestion: true }
+            : {}),
           freshSessionAdmission: totalSessionAdmission.admit,
           sessionLifecycle: (event) => {
             if (event.type === 'registered' && generationGuard.closed) return;
@@ -5316,6 +6531,16 @@ async function runQwenServeImpl(
             ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
             : {}),
           boundWorkspace: cwd,
+          // Live-conversation workspaces keep transcripts outside the
+          // runtime storage layout, so no ledger sink is wired there.
+          ...(provenance === 'live-conversation'
+            ? {}
+            : {
+                promptLedger: runtime.createPromptLedgerSink(
+                  cwd,
+                  wsEnv.sessionRuntimeBaseDir,
+                ),
+              }),
           sessionShellCommandEnabled,
           childEnvOverrides,
           channelFactory: wsChannelFactory,
@@ -5553,13 +6778,6 @@ async function runQwenServeImpl(
     } = { current: undefined };
     const workspaceRuntimeRemoval = {
       async runtimeAdded(runtimeAdded: WorkspaceRuntime): Promise<void> {
-        if (runtimeAdded.provenance === 'live-conversation') return;
-        channelWebhookEnvByWorkspace.set(
-          runtimeAdded.workspaceCwd,
-          workspaceRuntimeEffectiveEnv(runtimeAdded, daemonRuntimeBaseEnv),
-        );
-        channelWebhookConfigVersion += 1;
-        refreshChannelWebhookConfigs?.();
         const app =
           serveAppForRuntimeLifecycle.current ??
           runtimeApp ??
@@ -5568,6 +6786,13 @@ async function runQwenServeImpl(
           'startScheduledTaskKeepaliveForWorkspace'
         ] as ((runtime: WorkspaceRuntime) => void) | undefined;
         startScheduledTaskKeepaliveForWorkspace?.(runtimeAdded);
+        if (runtimeAdded.provenance === 'live-conversation') return;
+        channelWebhookEnvByWorkspace.set(
+          runtimeAdded.workspaceCwd,
+          workspaceRuntimeEffectiveEnv(runtimeAdded, daemonRuntimeBaseEnv),
+        );
+        channelWebhookConfigVersion += 1;
+        refreshChannelWebhookConfigs?.();
         if (!channelWorkerManager) return;
         try {
           if (runtimeAdded.trusted) {
@@ -5759,6 +6984,9 @@ async function runQwenServeImpl(
             const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
               'stopScheduledTaskKeepaliveForWorkspace'
             ] as ((workspaceCwd: string) => void) | undefined;
+            const releaseWebTerminalsForWorkspace = app?.locals?.[
+              'releaseWebTerminalsForWorkspace'
+            ] as ((workspaceCwd: string) => void) | undefined;
             try {
               stopWorkspaceGitStateForWorkspace?.(runtimeToDrain.workspaceCwd);
             } catch (err) {
@@ -5774,6 +7002,14 @@ async function runQwenServeImpl(
             } catch (err) {
               daemonLog.error(
                 'workspace scheduled-task cleanup error',
+                err instanceof Error ? err : null,
+              );
+            }
+            try {
+              releaseWebTerminalsForWorkspace?.(runtimeToDrain.workspaceCwd);
+            } catch (err) {
+              daemonLog.error(
+                'workspace web-terminal cleanup error',
                 err instanceof Error ? err : null,
               );
             }
@@ -5931,6 +7167,7 @@ async function runQwenServeImpl(
         : {}),
       managedScratchRoot,
       liveConversationWorkspace,
+      readLiveConversationScheduledTasks,
       workspaceRegistrationStore,
       workspaceRuntimeRemoval,
       workspaceTrustHotReloadAvailable,
@@ -5944,6 +7181,7 @@ async function runQwenServeImpl(
       // (keepalive) and reloads them on boot (rehydration). Off by default so
       // direct createServeApp embeds/tests don't spawn sessions.
       manageScheduledTaskSessions: true,
+      currentSessionSchedulingAvailable: deps.bridge === undefined,
       fsFactory: routeFsFactory,
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
@@ -6312,6 +7550,7 @@ async function runQwenServeImpl(
     qwenCodeVersion: cliVersion,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
+    currentSessionSchedulingAvailable: false,
     permissionPolicy,
     multiWorkspaceCapabilitiesRequireRuntime: workspaceInputs.length > 1,
     getRuntimeError: () => runtimeStartupError,
@@ -7109,6 +8348,107 @@ async function runQwenServeImpl(
             );
           }
           const workerRuntime = await ensureChannelRuntime();
+          const workerDaemonUrl = formatChannelWorkerDaemonUrl(
+            opts.hostname,
+            actualPort,
+            tlsOptions !== undefined,
+            typeof addr === 'object' &&
+              addr &&
+              (addr.family === 'IPv4' || addr.family === 'IPv6')
+              ? addr.family
+              : undefined,
+          );
+
+          (
+            deps.channelWorkerUrlCertifier ??
+            assertChannelWorkerDaemonUrlIsLocal
+          )(workerDaemonUrl, opts.hostname);
+          if (
+            tlsOptions &&
+            tlsCertPath &&
+            process.env['NODE_TLS_REJECT_UNAUTHORIZED'] === '0'
+          ) {
+            // Workers inherit this variable unscrubbed and dial via fetch,
+            // which honors it — but the handshake probe hardcodes strict
+            // verification, so under ='0' it would fail while every worker
+            // connects fine: a certain-outage log for an outage that never
+            // happens.
+            daemonLog.warn(
+              `NODE_TLS_REJECT_UNAUTHORIZED=0 disables certificate ` +
+                `verification for channel workers; skipping the worker TLS ` +
+                `trust check.`,
+            );
+          } else if (tlsOptions && tlsCertPath) {
+            const operatorCaCertPath = process.env['NODE_EXTRA_CA_CERTS'];
+            let operatorCaCert: Buffer | undefined;
+            let operatorCaCertReadError: string | undefined;
+            if (operatorCaCertPath) {
+              try {
+                operatorCaCert = fs.readFileSync(operatorCaCertPath);
+              } catch (error) {
+                // Unreadable anchors nothing — but WHY it anchors nothing is
+                // not something the contents can say. Swallowing the error
+                // sent the operator after a file that already holds exactly
+                // the issuing CA and is only unreadable (root-owned, mode
+                // 600), with a remedy they had already applied.
+                operatorCaCertReadError =
+                  (error as NodeJS.ErrnoException)?.code ?? 'read failed';
+              }
+            }
+            let predictedGaps: string[] = [];
+            try {
+              predictedGaps = describeWorkerTlsTrustGaps({
+                cert: tlsOptions.cert,
+                certPath: tlsCertPath,
+                certSourcePath: tlsCertPath,
+                daemonUrl: workerDaemonUrl,
+                ...(operatorCaCertPath ? { operatorCaCertPath } : {}),
+                ...(operatorCaCert
+                  ? {
+                      operatorCaCert,
+                      operatorCaCertSourcePath: operatorCaCertPath,
+                    }
+                  : {}),
+                ...(operatorCaCertReadError ? { operatorCaCertReadError } : {}),
+              });
+            } catch (error) {
+              if (!(error instanceof ExtraCaInspectionError)) throw error;
+              // A verdict the inspection cannot reach must not become a boot
+              // failure: the live handshake probe below and the supervisor's
+              // warned fallback still run; only the static prediction is lost.
+              daemonLog.warn(
+                `Channel worker TLS trust-gap inspection could not run: ` +
+                  `${error.message} Continuing with the live handshake ` +
+                  `probe only.`,
+              );
+            }
+            const workerCaCertPath = workerRuntime.resolveWorkerCaCertPath(
+              tlsCertPath,
+              operatorCaCertPath,
+            );
+            const trustFailure = await (
+              deps.workerTlsTrustVerifier ?? verifyWorkerTlsTrust
+            )({
+              daemonUrl: workerDaemonUrl,
+              caCertPath: workerCaCertPath,
+            });
+            if (shuttingDown || runtimeStartupError !== undefined) {
+              throw new Error(
+                'Daemon stopped while the channel worker TLS trust check was running.',
+              );
+            }
+            if (trustFailure) {
+              if (predictedGaps.length > 0) {
+                for (const gap of predictedGaps) daemonLog.warn(gap);
+              } else {
+                daemonLog.warn(
+                  `Channel worker TLS verification failed against the exact ` +
+                    `CA bundle workers receive (${sanitizeLogText(normalizeWorkerDiagnostic(trustFailure.code), 80)}): ` +
+                    `${sanitizeLogText(normalizeWorkerDiagnostic(trustFailure.message), 300)}`,
+                );
+              }
+            }
+          }
           const createSupervisor =
             deps.channelWorkerSupervisorFactory ??
             workerRuntime.createChannelWorkerSupervisor;
@@ -7119,11 +8459,9 @@ async function runQwenServeImpl(
               createSupervisor,
               shared: {
                 cliEntryPath: workerRuntime.findCliEntryPath(),
-                daemonUrl: formatChannelWorkerDaemonUrl(
-                  opts.hostname,
-                  actualPort,
-                ),
+                daemonUrl: workerDaemonUrl,
                 ...(token ? { daemonToken: token } : {}),
+                ...(tlsCertPath ? { workerTlsCaCertPath: tlsCertPath } : {}),
               },
               onReady: (snapshot) => {
                 if (runtimeStartupError !== undefined) return;
@@ -7440,7 +8778,7 @@ async function runQwenServeImpl(
             clearRuntimeStartAfterHealthTimer();
             clearRuntimeStartFallbackTimer();
             cancelDeferredRuntimeStartup();
-            // NOTE: the SIGINT/SIGTERM handlers stay attached during the
+            // NOTE: the shutdown signal handlers stay attached during the
             // drain so a second signal can take the explicit force-exit path
             // above. Detaching them up front would leave Node's default signal
             // behavior in charge and could orphan agent children. We detach
@@ -7473,6 +8811,7 @@ async function runQwenServeImpl(
               if (!preserveSignalHandlers) {
                 process.removeListener('SIGINT', onSignal);
                 process.removeListener('SIGTERM', onSignal);
+                process.removeListener('SIGHUP', onSignal);
               }
               process.removeListener(
                 'uncaughtExceptionMonitor',
@@ -7778,6 +9117,7 @@ async function runQwenServeImpl(
 
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
+      process.on('SIGHUP', onSignal);
       process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
       // The per-attempt boot-error listener was removed by handleListening.
