@@ -24,11 +24,11 @@ jobs:
           node-version: 22.23.2
           cache: npm
 
-      - name: Install dependencies
-        run: npm ci
-
       - name: Apply reviewed source patch
         run: python3 scripts/pr10212-review-fixes.py
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Format changed sources
         run: |
