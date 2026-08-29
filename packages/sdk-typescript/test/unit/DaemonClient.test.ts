@@ -607,6 +607,103 @@ describe('DaemonClient', () => {
       );
     });
 
+    it('reads text files with a relative base URL', async () => {
+      const payload = {
+        kind: 'file',
+        path: 'src/a.ts',
+        content: 'export {}\n',
+        encoding: 'utf-8',
+        bom: false,
+        lineEnding: 'lf',
+        sizeBytes: 10,
+        returnedBytes: 10,
+        truncated: false,
+        hash: 'sha256:' + 'a'.repeat(64),
+        matchedIgnore: null,
+        originalLineCount: null,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: '/daemon', fetch });
+
+      await expect(
+        client.readWorkspaceFile('src/a.ts', { line: 2, limit: 3 }),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe('/daemon/file?path=src%2Fa.ts&line=2&limit=3');
+
+      // maxBytes is the one GET /file option no test pinned on either base URL:
+      // deleting its branch left the whole suite green.
+      await expect(
+        client.readWorkspaceFile('src/a.ts', {
+          maxBytes: 100,
+          line: 2,
+          limit: 3,
+        }),
+      ).resolves.toEqual(payload);
+      expect(calls[1]?.url).toBe(
+        '/daemon/file?path=src%2Fa.ts&maxBytes=100&line=2&limit=3',
+      );
+    });
+
+    it('stats files with a relative base URL', async () => {
+      const payload = { kind: 'stat', path: 'src/a.ts', sizeBytes: 10 };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: '/daemon', fetch });
+
+      await expect(client.fileStat('src/a.ts')).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe('/daemon/stat?path=src%2Fa.ts');
+    });
+
+    it('lists directories with a relative base URL', async () => {
+      const payload = { kind: 'list', path: 'src', entries: [] };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: '/daemon', fetch });
+
+      await expect(client.dirList('src')).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe('/daemon/list?path=src');
+    });
+
+    it('suggests workspace paths with a relative base URL', async () => {
+      const payload = { suggestions: [] };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: '/daemon', fetch });
+
+      await expect(
+        client.workspacePathSuggestions('/home/user'),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe(
+        '/daemon/workspace-path-suggestions?prefix=%2Fhome%2Fuser',
+      );
+    });
+
+    it('globs with a relative base URL', async () => {
+      const payload = { matches: [] };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: '/daemon', fetch });
+
+      await expect(client.glob('**/*.ts')).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe('/daemon/glob?pattern=**%2F*.ts');
+    });
+
+    it('uploads files with a relative base URL', async () => {
+      const payload = {
+        kind: 'file_upload' as const,
+        path: 'bin.dat',
+        sizeBytes: 2,
+        hash: 'sha256:' + 'a'.repeat(64),
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: '/daemon', fetch });
+
+      await expect(
+        client.uploadWorkspaceFile({
+          path: 'bin.dat',
+          data: new Uint8Array([1, 2]),
+        }),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('/daemon/file/upload?path=bin.dat');
+    });
+
     it('writes and edits files with JSON bodies and client identity', async () => {
       const writeResult = {
         kind: 'file_write',

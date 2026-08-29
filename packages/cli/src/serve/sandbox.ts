@@ -672,6 +672,14 @@ export async function start_sandbox(
       )}`,
     );
   }
+  if (process.env['QWEN_CODE_WARNINGS_FILE']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_WARNINGS_FILE=${getContainerPath(
+        process.env['QWEN_CODE_WARNINGS_FILE'],
+      )}`,
+    );
+  }
 
   // copy GEMINI_API_KEY(s)
   if (process.env['GEMINI_API_KEY']) {
