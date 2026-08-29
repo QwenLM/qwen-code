@@ -58,6 +58,8 @@ import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
 const HEAD_SHA = '1111111111111111111111111111111111111111';
 const AMENDED_SHA = '2222222222222222222222222222222222222222';
 const STALE_SHA = '3333333333333333333333333333333333333333';
+const UPPER_HEAD_SHA = 'ABCDEF0123456789ABCDEF0123456789ABCDEF01';
+const LOWER_HEAD_SHA = UPPER_HEAD_SHA.toLowerCase();
 
 describe('parseRemoteUrl hardening', () => {
   it('discards an explicit port instead of folding it into the path', () => {
@@ -493,6 +495,18 @@ describe('aoneReader.getPrMeta — the live-head read behind meta.headSha', () =
     expect(gitMock).not.toHaveBeenCalled();
   });
 
+  it('normalizes an uppercase AGit head without consulting git', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: UPPER_HEAD_SHA,
+        detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+      },
+    });
+
+    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe(LOWER_HEAD_SHA);
+    expect(gitMock).not.toHaveBeenCalled();
+  });
+
   it('trims a padded sourceBranch — one normalization for every head read', () => {
     // Step 7's reviewed-SHA fallback reads meta.headSha while presubmit's
     // drift check compares the TRIMMED live head; the pre-fix untrimmed
@@ -517,12 +531,12 @@ describe('aoneReader.getPrMeta — the live-head read behind meta.headSha', () =
         return 'git@gitlab.alibaba-inc.com:g/p.git';
       }
       if (args[0] === 'ls-remote') {
-        return `${HEAD_SHA}\trefs/merge-requests/7/head`;
+        return `${UPPER_HEAD_SHA}\trefs/merge-requests/7/head`;
       }
       throw new Error(`unexpected git call: ${args.join(' ')}`);
     });
 
-    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe(HEAD_SHA);
+    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe(LOWER_HEAD_SHA);
     expect(gitMock).toHaveBeenNthCalledWith(1, 'remote', 'get-url', 'origin');
     expect(gitMock).toHaveBeenNthCalledWith(
       2,
@@ -532,6 +546,40 @@ describe('aoneReader.getPrMeta — the live-head read behind meta.headSha', () =
       'origin',
       'refs/merge-requests/7/head',
     );
+  });
+
+  it('resolves a branch when owner/repo is the only repository identity', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: 'feature/fix-loop' },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote') {
+        return 'git@gitlab.alibaba-inc.com:g/p.git';
+      }
+      if (args[0] === 'ls-remote') {
+        return `${HEAD_SHA}\trefs/merge-requests/7/head`;
+      }
+      throw new Error(`unexpected git call: ${args.join(' ')}`);
+    });
+
+    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe(HEAD_SHA);
+  });
+
+  it('reports the head as unavailable when ls-remote fails', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'feature/fix-loop',
+        detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+      },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote') {
+        return 'git@gitlab.alibaba-inc.com:g/p.git';
+      }
+      throw new Error('ls-remote failed');
+    });
+
+    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe('');
   });
 
   it('reports a branch head as unavailable outside the target clone', () => {
@@ -1400,6 +1448,23 @@ describe('aoneReader.fetchDiff', () => {
     expect(gitRawMock).not.toHaveBeenCalled();
   });
 
+  it('refuses a nested-group origin when the MR has no detailUrl', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: 'sha', targetBranch: 'master' },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote') {
+        return 'git@gitlab.alibaba-inc.com:team-x/nested/g/p.git';
+      }
+      return '';
+    });
+
+    expect(() => aoneReader.fetchDiff(7, 'g/p')).toThrow(
+      /not g\/p — run from inside a clone of the target repo/,
+    );
+    expect(gitRawMock).not.toHaveBeenCalled();
+  });
+
   it('accepts the matching nested-group clone via the detailUrl full path', () => {
     a1JsonMock.mockReturnValue({
       mergeRequest: {
@@ -1694,6 +1759,15 @@ describe('submitAoneReview (the a1 write path)', () => {
     const result = submitAoneReview(req());
     expect(result.postedInline).toBe(2);
     expect(result.headMovedDuringPost).toBe(false);
+  });
+
+  it('normalizes an uppercase AGit head and commit id before comparison', () => {
+    mrView(UPPER_HEAD_SHA);
+
+    const result = submitAoneReview(req({ commitId: UPPER_HEAD_SHA }));
+    expect(result.postedInline).toBe(2);
+    expect(result.headMovedDuringPost).toBe(false);
+    expect(gitMock).not.toHaveBeenCalled();
   });
 
   it('refuses a moved branch head before any write', () => {

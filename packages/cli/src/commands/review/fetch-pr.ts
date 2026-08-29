@@ -1881,7 +1881,7 @@ export const fetchPrCommand: CommandModule = {
         type: 'string',
         default: 'origin',
         describe:
-          'Git remote to fetch from (use "upstream" for fork-based workflows)',
+          'Git remote to fetch from (use "upstream" for GitHub fork workflows; Aone branch-based MRs require the target repository at "origin")',
       })
       .option('out', {
         type: 'string',

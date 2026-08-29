@@ -104,7 +104,9 @@ semantics (head-drift refusal, partial-post reporting, host binding).
   from the exact MR ref only after the cwd `origin` is proven to be the target
   Aone repository. Clone-less reads report the SHA as unavailable, while
   presubmit/comment-status and posting fail closed when a known branch cannot
-  be resolved.
+  be resolved. The `fetch-pr --remote` override may name another fetch remote,
+  but branch-head identity remains origin-bound; the target Aone repository
+  must therefore be configured as `origin` for branch-based MRs.
 
 ## Files affected
 
