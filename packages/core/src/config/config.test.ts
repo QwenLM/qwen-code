@@ -680,6 +680,80 @@ describe('Server Config (config.ts)', () => {
     }
   });
 
+  it('claims the global debug fallback on un-contexted rotation (single-session CLI)', async () => {
+    // The other direction of the guard above: a single-session CLI /clear
+    // rotates the Config OUTSIDE any sessionIdContext, and the process-wide
+    // debug session must follow the rotated id — otherwise post-rotation
+    // logs keep landing in the pre-rotation session's file.
+    const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+    const previousSessionIdEnv = process.env['QWEN_CODE_SESSION_ID'];
+    const initialSessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const rotatedSessionId = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const mkdirSpy = vi
+      .spyOn(fs.promises, 'mkdir')
+      .mockResolvedValue(undefined);
+    const appendFileSpy = vi
+      .spyOn(fs.promises, 'appendFile')
+      .mockResolvedValue(undefined);
+    const unlinkSpy = vi
+      .spyOn(fs.promises, 'unlink')
+      .mockResolvedValue(undefined);
+    const symlinkSpy = vi
+      .spyOn(fs.promises, 'symlink')
+      .mockResolvedValue(undefined);
+
+    try {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+      resetDebugLoggingState();
+      // The fallback holds a live Config reference, so rotating the SAME
+      // Config reroutes writes even without the rotation-time claim. The
+      // claim is load-bearing for RE-claiming: another Config (transcript
+      // replay, bootstrap) may have taken the fallback since, and an
+      // un-contexted rotation must hand it back to the rotating CLI Config.
+      const cliConfig = new Config({
+        ...baseParams,
+        sessionId: initialSessionId,
+      });
+      const interloperSessionId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      new Config({ ...baseParams, sessionId: interloperSessionId });
+
+      cliConfig.startNewSession(rotatedSessionId);
+
+      process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+      createDebugLogger('CLI_ROTATION').info('post-rotation message');
+
+      await vi.waitFor(() =>
+        expect(appendFileSpy).toHaveBeenCalledWith(
+          Storage.getDebugLogPath(rotatedSessionId),
+          expect.stringContaining('[CLI_ROTATION] post-rotation message'),
+          'utf8',
+        ),
+      );
+      expect(appendFileSpy).not.toHaveBeenCalledWith(
+        Storage.getDebugLogPath(interloperSessionId),
+        expect.stringContaining('[CLI_ROTATION] post-rotation message'),
+        'utf8',
+      );
+    } finally {
+      mkdirSpy.mockRestore();
+      appendFileSpy.mockRestore();
+      unlinkSpy.mockRestore();
+      symlinkSpy.mockRestore();
+      resetDebugLoggingState();
+      setDebugLogSession(null);
+      if (previousDebugLogFileEnv === undefined) {
+        delete process.env['QWEN_DEBUG_LOG_FILE'];
+      } else {
+        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+      }
+      if (previousSessionIdEnv === undefined) {
+        delete process.env['QWEN_CODE_SESSION_ID'];
+      } else {
+        process.env['QWEN_CODE_SESSION_ID'] = previousSessionIdEnv;
+      }
+    }
+  });
+
   describe('shell execution config', () => {
     it('allows explicitly clearing the configured pager', () => {
       const config = new Config(baseParams);
