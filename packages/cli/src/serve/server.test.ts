@@ -70,6 +70,7 @@ import {
   SERVE_CAPABILITY_REGISTRY,
   type ServeProtocolVersion,
 } from './capabilities.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import type {
   CancelNotification,
   PromptRequest,
@@ -165,10 +166,7 @@ import { isValidSessionId } from '../config/config.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import { getRateLimiter } from './rate-limit.js';
-import {
-  WorkspaceSkillNotToggleableError,
-  type DaemonWorkspaceService,
-} from './workspace-service/types.js';
+import type { DaemonWorkspaceService } from './workspace-service/types.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   createWorkspaceGenerationGuard,
@@ -568,7 +566,10 @@ const EXPECTED_STAGE1_FEATURES = [
   'auth_provider_install',
   'workspace_memory',
   'workspace_memory_remember',
+  'workspace_memory_remember_project_scope',
+  'workspace_memory_remember_user_scope',
   'workspace_memory_forget',
+  'workspace_memory_forget_scope',
   'workspace_memory_dream',
   'workspace_agents',
   'workspace_agent_generate',
@@ -617,8 +618,8 @@ const EXPECTED_STAGE1_FEATURES = [
   // init scaffold, and MCP server restart).
   'session_approval_mode_control',
   'workspace_tool_toggle',
-  'workspace_skill_toggle',
-  'workspace_skill_batch_toggle',
+  'workspace_skill_settings_toggle',
+  'workspace_skill_settings_batch_toggle',
   'extension_batch_activation_v2',
   'workspace_skill_manage',
   'workspace_permissions',
@@ -779,6 +780,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_display_name',
   'scratch_workspace_registration',
   'workspace_runtime_removal',
+  'native_directory_picker',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
   'workspace_qualified_memory',
@@ -796,6 +798,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'browser_automation_mcp',
   'voice_transcribe',
   'realtime_voice',
+  'web_terminal',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -2787,9 +2790,7 @@ describe('createServeApp', () => {
       // Conditional tags (currently `require_auth`) are absent unless
       // a runtime toggle is supplied; this is the "no toggles passed"
       // baseline that older clients see on a default-loopback daemon.
-      expect(getAdvertisedServeFeatures()).toEqual([
-        ...EXPECTED_STAGE1_FEATURES,
-      ]);
+      expect(getAdvertisedServeFeatures()).toEqual(EXPECTED_STAGE1_FEATURES);
       expect(getServeFeatures()).toEqual(getAdvertisedServeFeatures());
     });
 
@@ -2824,6 +2825,15 @@ describe('createServeApp', () => {
           voiceWsAvailable: true,
         }),
       ).toContain('voice_transcribe');
+    });
+
+    it('advertises `web_terminal` only with the ACP HTTP surface', () => {
+      expect(
+        getAdvertisedServeFeatures(undefined, { acpHttpEnabled: true }),
+      ).toContain('web_terminal');
+      expect(
+        getAdvertisedServeFeatures(undefined, { acpHttpEnabled: false }),
+      ).not.toContain('web_terminal');
     });
 
     it('honors every entry in CONDITIONAL_SERVE_FEATURES (PR #4236 review #3254467192 — drift insurance)', () => {
@@ -3240,6 +3250,24 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'native_directory_picker') {
+          expect(predicate({ nativeDirectoryPickerAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({ nativeDirectoryPickerAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              nativeDirectoryPickerAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_trust_hot_reload') {
           expect(predicate({ workspaceTrustHotReloadAvailable: true })).toBe(
             true,
@@ -3434,6 +3462,18 @@ describe('createServeApp', () => {
               acpHttpEnabled: true,
               realtimeVoiceEnabled: true,
             }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, { acpHttpEnabled: false }),
+          ).not.toContain(feature);
+          continue;
+        }
+        if (feature === 'web_terminal') {
+          expect(predicate({ acpHttpEnabled: true })).toBe(true);
+          expect(predicate({ acpHttpEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { acpHttpEnabled: true }),
           ).toContain(feature);
           expect(
             getAdvertisedServeFeatures(undefined, { acpHttpEnabled: false }),
@@ -3989,6 +4029,46 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it('advertises the scoped workspace-memory tags on the wire', async () => {
+      // The three tags this PR adds are pinned against a real `/capabilities`
+      // body only in integration-tests/cli/qwen-serve-routes.test.ts, which no
+      // workspace test command collects and which CI skipped at this PR's
+      // head — so a descriptor that never reached the envelope would have
+      // shipped green. The registry assertions in 'serve capability registry'
+      // prove the entries exist; this proves the daemon advertises them, in
+      // the order a client reading the list positionally expects.
+      const res = await request(
+        createServeApp(baseOpts, undefined, { bridge: fakeBridge() }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      const features = res.body.features as string[];
+      expect(features).toEqual(
+        expect.arrayContaining([
+          'workspace_memory_remember_project_scope',
+          'workspace_memory_remember_user_scope',
+          'workspace_memory_forget_scope',
+        ]),
+      );
+      // Each scoped tag sits directly behind the unscoped tag it refines, so
+      // a client that feature-detects `workspace_memory_remember` and then
+      // reads forward finds the scope support without a second lookup.
+      const window = features.slice(
+        features.indexOf('workspace_memory'),
+        features.indexOf('workspace_memory_dream') + 1,
+      );
+      expect(window).toEqual([
+        'workspace_memory',
+        'workspace_memory_remember',
+        'workspace_memory_remember_project_scope',
+        'workspace_memory_remember_user_scope',
+        'workspace_memory_forget',
+        'workspace_memory_forget_scope',
+        'workspace_memory_dream',
+      ]);
+    });
+
     it('advertises the effective session restore timeout', async () => {
       const defaultResponse = await request(
         createServeApp(baseOpts, undefined, { bridge: fakeBridge() }),
@@ -4127,6 +4207,9 @@ describe('createServeApp', () => {
             sessionGenerationAvailable: true,
             workspaceGenerationAvailable: true,
             acpHttpEnabled: true,
+            // Mirror the server.ts probe so the expectation matches on both
+            // GUI and headless hosts.
+            nativeDirectoryPickerAvailable: isNativeDirectoryPickerAvailable(),
           }),
         );
         expect(res.body.modelServices).toEqual([]);
@@ -4138,6 +4221,30 @@ describe('createServeApp', () => {
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
       }
+    });
+
+    it('forwards the native directory picker probe result to capabilities', async () => {
+      // M5 witness (#9406): the envelope mirror above calls the same probe
+      // as the product path, so on a headless host both sides say "tag
+      // absent" even when server.ts stops wiring the flag. Inject the probe
+      // result instead so the wiring is assertable on every host.
+      const enabled = await request(
+        createServeApp(baseOpts, undefined, {
+          nativeDirectoryPickerAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(enabled.body.features).toContain('native_directory_picker');
+
+      const disabled = await request(
+        createServeApp(baseOpts, undefined, {
+          nativeDirectoryPickerAvailable: false,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(disabled.body.features).not.toContain('native_directory_picker');
     });
 
     it('omits artifact persistence when the durable sink is unavailable', async () => {
@@ -8076,6 +8183,7 @@ describe('createServeApp', () => {
               persistence: expected,
             },
           });
+          expect(captured?.installMetadata).not.toHaveProperty('networkPolicy');
           await vi.waitFor(() =>
             expect(bridge.extensionEvents.at(-1)).toMatchObject({
               status: 'installed',
@@ -13916,32 +14024,36 @@ describe('createServeApp', () => {
       });
     });
 
-    it('503s fresh session work while restore cleanup is quarantined', async () => {
-      const bridge = fakeBridge({
-        resumeImpl: async () => {
-          throw new BridgeChannelQuarantinedError(
-            'restore_settlement_overdue',
-            90,
-          );
-        },
-      });
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      const res = await request(app)
-        .post('/session/persisted-quarantined/resume')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({});
+    it('503s fresh session work for every channel quarantine reason', async () => {
+      for (const reason of [
+        'restore_cleanup_failed',
+        'restore_settlement_overdue',
+        'new_session_cleanup_failed',
+        'new_session_settlement_overdue',
+      ] as const) {
+        const bridge = fakeBridge({
+          resumeImpl: async () => {
+            throw new BridgeChannelQuarantinedError(reason, 90);
+          },
+        });
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session/persisted-quarantined/resume')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
 
-      expect(res.status).toBe(503);
-      // Quarantine lasts until the channel drains — strictly longer than the
-      // fence — and a fresh-id caller never sees the 409 that would tell it so.
-      expect(res.headers['retry-after']).toBe('90');
-      expect(res.body).toMatchObject({
-        code: 'acp_channel_unavailable',
-        errorKind: 'acp_channel_unavailable',
-        retryable: true,
-        reason: 'restore_settlement_overdue',
-        retryAfterSeconds: 90,
-      });
+        expect(res.status).toBe(503);
+        // Fresh-id callers never see the same-id 409, so the 503 must carry the
+        // operation-budget-scale retry hint itself.
+        expect(res.headers['retry-after']).toBe('90');
+        expect(res.body).toMatchObject({
+          code: 'acp_channel_unavailable',
+          errorKind: 'acp_channel_unavailable',
+          retryable: true,
+          reason,
+          retryAfterSeconds: 90,
+        });
+      }
     });
 
     it('400 workspace_mismatch before touching the bridge for non-primary cwd', async () => {
@@ -23810,7 +23922,7 @@ describe('createServeApp', () => {
       expect(badBody.body.code).toBe('invalid_enabled_flag');
     });
 
-    it('returns the canonical name and deferred activation without a child', async () => {
+    it('trims and returns the requested name with deferred activation without a child', async () => {
       const bridge = fakeBridge({
         workspaceSkillsImpl: async () => ({
           v: 1,
@@ -23830,12 +23942,12 @@ describe('createServeApp', () => {
         primaryWorkspaceTrusted: true,
       });
       const res = await auth(
-        request(app).post('/workspace/skills/ReViEw/enable'),
+        request(app).post('/workspace/skills/%20ReViEw%20/enable'),
       ).send({ enabled: false });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
-        skillName: 'review',
+        skillName: 'ReViEw',
         enabled: false,
         changed: true,
         activation: 'deferred',
@@ -23844,14 +23956,17 @@ describe('createServeApp', () => {
       });
       expect(persistDisabledSkills).toHaveBeenCalledWith(
         WS_BOUND,
-        'review',
+        'ReViEw',
         false,
         undefined,
       );
     });
 
-    it('returns 404 for an unknown skill', async () => {
-      const persistDisabledSkills = vi.fn();
+    it('persists an unknown Skill name without catalog validation', async () => {
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['missing'],
+      });
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge({
           workspaceSkillsImpl: async () => ({
@@ -23861,15 +23976,25 @@ describe('createServeApp', () => {
             skills: [reviewSkill],
           }),
         }),
+        boundWorkspace: WS_BOUND,
         persistDisabledSkills,
         primaryWorkspaceTrusted: true,
       });
       const res = await auth(
         request(app).post('/workspace/skills/missing/enable'),
       ).send({ enabled: false });
-      expect(res.status).toBe(404);
-      expect(res.body.code).toBe('skill_not_found');
-      expect(persistDisabledSkills).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        skillName: 'missing',
+        enabled: false,
+        changed: true,
+      });
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        WS_BOUND,
+        'missing',
+        false,
+        undefined,
+      );
     });
 
     it('rejects an unknown workspace client id before persistence', async () => {
@@ -23889,8 +24014,11 @@ describe('createServeApp', () => {
       expect(persistDisabledSkills).not.toHaveBeenCalled();
     });
 
-    it('returns 409 without persisting a non-user-invocable skill', async () => {
-      const persistDisabledSkills = vi.fn();
+    it('persists a non-user-invocable Skill name without catalog validation', async () => {
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['review'],
+      });
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge({
           workspaceSkillsImpl: async () => ({
@@ -23900,22 +24028,32 @@ describe('createServeApp', () => {
             skills: [{ ...reviewSkill, userInvocable: false }],
           }),
         }),
+        boundWorkspace: WS_BOUND,
         persistDisabledSkills,
         primaryWorkspaceTrusted: true,
       });
       const res = await auth(
         request(app).post('/workspace/skills/review/enable'),
       ).send({ enabled: false });
-      expect(res.status).toBe(409);
+      expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
-        code: 'skill_not_toggleable',
-        reason: 'not_user_invocable',
+        skillName: 'review',
+        enabled: false,
+        changed: true,
       });
-      expect(persistDisabledSkills).not.toHaveBeenCalled();
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        WS_BOUND,
+        'review',
+        false,
+        undefined,
+      );
     });
 
-    it('returns a dedicated code for an inactive extension skill', async () => {
-      const persistDisabledSkills = vi.fn();
+    it('persists an inactive Extension Skill name without catalog validation', async () => {
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: false,
+        disabled: [],
+      });
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge({
           workspaceSkillsImpl: async () => ({
@@ -23927,6 +24065,7 @@ describe('createServeApp', () => {
             ],
           }),
         }),
+        boundWorkspace: WS_BOUND,
         persistDisabledSkills,
         primaryWorkspaceTrusted: true,
       });
@@ -23934,40 +24073,18 @@ describe('createServeApp', () => {
         request(app).post('/workspace/skills/review/enable'),
       ).send({ enabled: true });
 
-      expect(res.status).toBe(409);
+      expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
-        code: 'skill_inactive_extension',
-        reason: 'inactive_extension',
+        skillName: 'review',
+        enabled: true,
+        changed: false,
       });
-      expect(persistDisabledSkills).not.toHaveBeenCalled();
-    });
-
-    it('returns the locked scope from persistence validation', async () => {
-      const app = createServeApp(tokenOpts, undefined, {
-        bridge: fakeBridge({
-          workspaceSkillsImpl: async () => ({
-            v: 1,
-            workspaceCwd: WS_BOUND,
-            initialized: true,
-            skills: [reviewSkill],
-          }),
-        }),
-        persistDisabledSkills: vi
-          .fn()
-          .mockRejectedValue(
-            new WorkspaceSkillNotToggleableError('review', 'locked', 'user'),
-          ),
-        primaryWorkspaceTrusted: true,
-      });
-      const res = await auth(
-        request(app).post('/workspace/skills/review/enable'),
-      ).send({ enabled: true });
-      expect(res.status).toBe(409);
-      expect(res.body).toMatchObject({
-        code: 'skill_not_toggleable',
-        reason: 'locked',
-        lockedScope: 'user',
-      });
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        WS_BOUND,
+        'review',
+        true,
+        undefined,
+      );
     });
 
     it('rejects writes to an untrusted primary workspace', async () => {
