@@ -578,6 +578,9 @@ jobs:
             if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               chmod -R u+w "$stale_qwen" 2>/dev/null || true
             fi
+            # If a foreign-owned directory cannot move to a different parent,
+            # quarantine the runner-owned workspace and recreate the checkout
+            # root. Warm contents are lost only on this unrecoverable path.
             rm -rf -- "$stale_qwen" 2>/dev/null ||
               sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
               {
@@ -587,7 +590,15 @@ jobs:
                 if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
                   echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
                 else
-                  echo "::warning::leaked $stale_name; runner needs manual cleanup"
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
                 fi
               }
           done

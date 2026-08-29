@@ -193,6 +193,11 @@ function expectQuarantineFallback(run) {
   expect(code).toMatch(
     /rm -rf -- "\$stale_qwen"[\s\S]*?sudo -n rm -rf -- "\$stale_qwen"[\s\S]*?mv -- "\$stale_qwen"/,
   );
+  expect(code).toMatch(
+    /mv -- "\$stale_qwen"[\s\S]*?mv -- "\$GITHUB_WORKSPACE"/,
+  );
+  expect(code).toContain('mkdir -p "$GITHUB_WORKSPACE"');
+  expect(code).toContain('cd "$GITHUB_WORKSPACE"');
   // Same filesystem by construction — a cross-device `mv` degrades to
   // copy-then-unlink, which fails on exactly the residue this exists for.
   expect(code).toContain(
@@ -201,7 +206,9 @@ function expectQuarantineFallback(run) {
   // The quarantined tree still needs a human: the warning must name where
   // it went, and the terminal warning must survive for the case where even
   // the rename fails.
-  expect(code).toContain('leaked $stale_name; runner needs manual cleanup');
+  expect(code).toContain(
+    'leaked $stale_name survived every recovery; runner needs manual cleanup',
+  );
 }
 
 function expectHardenedGit(run) {
@@ -651,35 +658,26 @@ describe('review worktree cleanup steps', () => {
     },
   );
 
-  it.skipIf(!permissionFixturesAvailable)(
-    'the pre-checkout sweep moves residue it cannot delete out of the workspace',
+  it.skipIf(!sweepToolsAvailable || process.platform === 'win32')(
+    'the pre-checkout sweep quarantines the workspace when the residue itself cannot move',
     () => {
       for (const { id, run } of executableCleanCopies) {
-        // The incident this exists for: residue whose containing directory
-        // denies the unlink, so `rm -rf` fails and actions/checkout dies
-        // wiping the workspace (measured, run 32621267802 — two unrelated
-        // PRs failed at Checkout on the same runner). Reproduced here with
-        // a write-denied parent rather than a foreign uid, which needs
-        // root: the failing syscall and the recovery are the same, and the
-        // sweep's own chmod is stepped over so it cannot repair the fixture
-        // away.
         const root = mkdtempSync(join(tmpdir(), 'ci-quarantine-'));
         const workspace = join(root, 'repo', 'repo');
-        const poison = join(
-          workspace,
-          `${toPosix(REVIEW_TMP_DIR)}/review-pr-9748-scratch-verify--round-1--x`,
-        );
-        const locked = join(poison, 'probe-ws/.qwen/tmp');
+        const residue = join(workspace, '.qwen.root-orig');
+        const marker = join(workspace, 'warm-cache-marker');
         try {
-          mkdirSync(join(locked, 'review-pr-666'), { recursive: true });
-          chmodSync(locked, 0o500);
+          mkdirSync(residue, { recursive: true });
+          writeFileSync(join(residue, 'review-context.json'), '{}\n');
+          writeFileSync(marker, 'warm\n');
           const out = spawnSync(
             'bash',
             [
               '-c',
-              // Neutralise the sweep's own chmod and any sudo: this models
-              // the pool member that cannot repair the residue at all.
-              `set -euo pipefail\nchmod() { return 1; }\nsudo() { return 1; }\n${run}`,
+              // Model the incident runner: delete/permission repair fail and
+              // the foreign-owned residue cannot cross to another parent,
+              // while the runner-owned workspace itself still can.
+              `set -euo pipefail\nrm() { return 1; }\nchmod() { return 1; }\nsudo() { return 1; }\nmv() {\n  if [ "$2" = "$GITHUB_WORKSPACE/.qwen.root-orig" ]; then return 1; fi\n  command mv "$@"\n}\n${run}\nprintf '::cwd::%s\\n' "$PWD"`,
               'clean-stale-qwen',
             ],
             {
@@ -689,27 +687,29 @@ describe('review worktree cleanup steps', () => {
             },
           );
           expect(out.status, `${id}: ${out.stderr}`).toBe(0);
-          // The workspace is clear, so the checkout that follows has
-          // nothing to trip on …
-          expect(existsSync(join(workspace, '.qwen')), id).toBe(false);
-          // … and the residue was moved, not deleted: it still needs a
-          // human, and the warning says where it went.
           const quarantine = join(root, 'repo', '_qwen-quarantine');
           expect(existsSync(quarantine), id).toBe(true);
           expect(readdirSync(quarantine), id).toHaveLength(1);
+          const movedWorkspace = join(quarantine, readdirSync(quarantine)[0]);
+          expect(
+            readFileSync(join(movedWorkspace, 'warm-cache-marker'), 'utf8'),
+            id,
+          ).toBe('warm\n');
+          expect(
+            readFileSync(
+              join(movedWorkspace, '.qwen.root-orig/review-context.json'),
+              'utf8',
+            ),
+            id,
+          ).toBe('{}\n');
+          expect(readdirSync(workspace), id).toEqual([]);
+          expect(out.stdout, id).toContain(`::cwd::${workspace}`);
           const warnings = out.stdout
             .split('\n')
             .filter((line) => line.startsWith('::warning::'));
           expect(warnings, id).toHaveLength(1);
-          expect(warnings[0], id).toContain('_qwen-quarantine');
+          expect(warnings[0], id).toContain('moved the whole workspace');
         } finally {
-          // The locked directory has usually MOVED by now (that is the
-          // point), so repair the whole fixture by path rather than the
-          // original one.
-          spawnSync('bash', [
-            '-c',
-            `chmod -R u+rwX "${root}" 2>/dev/null || true`,
-          ]);
           rmSync(root, { recursive: true, force: true });
         }
       }
