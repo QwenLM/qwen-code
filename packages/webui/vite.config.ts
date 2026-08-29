@@ -14,7 +14,6 @@ import { resolve } from 'path';
  *
  * Build outputs:
  * - Main entry:    dist/index.js, dist/index.cjs, dist/index.d.ts
- * - Advanced entry: dist/advanced.js, dist/advanced.cjs, dist/advanced.d.ts
  * - CSS: dist/styles.css
  */
 export default defineConfig(({ command }) => ({
@@ -47,7 +46,6 @@ export default defineConfig(({ command }) => ({
     lib: {
       entry: {
         index: resolve(__dirname, 'src/index.ts'),
-        'daemon-react-sdk': resolve(__dirname, 'src/daemon-react-sdk.ts'),
       },
       formats: ['es', 'cjs'],
     },

@@ -105,7 +105,11 @@ import {
   makeChatCompressionEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
+import {
+  type ChatCompressionInfo,
+  CompressionStatus,
+  isCompressionFailureStatus,
+} from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import {
   getStartupContextLength,
@@ -331,15 +335,6 @@ export function redactStructuredOutputArgsForRecording(
   };
 }
 
-function isCompressionFailureStatus(status: CompressionStatus): boolean {
-  return (
-    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
-    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
-    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
-    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED
-  );
-}
-
 function shouldStopAfterHardRescue(
   shouldForceFromHard: boolean,
   hardLimit: number,
@@ -457,6 +452,24 @@ export interface LlmChatSendOptions {
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
 export type GeminiChatSendOptions = LlmChatSendOptions;
+
+/**
+ * Symbol key under which `sendMessageStream` publishes this send's
+ * acceptance snapshot on the caller's request-parts array immediately
+ * before pushing it into history (array requests only; string requests
+ * cannot carry it — and cannot carry a steer/teammate settlement carrier
+ * either). A caller settling an attached carrier compares the global
+ * user-content push counter against THIS snapshot so the comparison
+ * window around the push is empty: a snapshot taken on the caller side
+ * would still cover the send-lock and `tryCompress` awaits ahead of the
+ * push, where a concurrently admitted send can push and supply the
+ * observed counter growth for a send that then exits before its own
+ * push. Absence of a published snapshot means this send never reached
+ * its push site.
+ */
+export const userContentPushSnapshotKey = Symbol(
+  'LlmChat.userContentPushSnapshot',
+);
 
 interface TryCompressOptions {
   /**
@@ -2956,6 +2969,18 @@ export class LlmChat {
         }
       }
 
+      // Publish the acceptance snapshot for a caller-side settlement
+      // carrier (see `userContentPushSnapshotKey`) immediately before the
+      // push — no await between the snapshot and this push, so no
+      // concurrent send can supply the counter growth it observes.
+      // `params.message` is the caller's own request array (Turn passes
+      // it through unchanged), so the publication reaches the caller even
+      // though this method never returns on the pre-push error paths.
+      if (Array.isArray(params.message)) {
+        (params.message as unknown as Record<PropertyKey, unknown>)[
+          userContentPushSnapshotKey
+        ] = this.userContentPushCount;
+      }
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
       currentUserContent = userContent;

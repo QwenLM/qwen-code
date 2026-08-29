@@ -59,6 +59,7 @@ import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
+  isCompressionFailureStatus,
   RUNTIME_SNAPSHOT_PREFIX,
   detectLoopSentinel,
   detectAutonomousSentinel,
@@ -381,6 +382,7 @@ const permissionRequestTails = new WeakMap<
   AgentSideConnection,
   Promise<void>
 >();
+const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
@@ -458,15 +460,6 @@ function isTodoStopGuardPromptText(text: unknown): text is string {
   );
 }
 
-function isCompressionFailureStatus(status: CompressionStatus): boolean {
-  return (
-    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
-    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
-    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
-    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED
-  );
-}
-
 /** Finalizes preparations without allowing ACP cleanup to change the stream outcome. */
 async function finalizeToolCallPreparations(
   tracker: ToolCallPreparationTracker,
@@ -491,7 +484,11 @@ function maskApiKeyForDisplay(apiKey: string | undefined): string {
 }
 
 type AutoCompressionSendResult =
-  | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
+  | {
+      responseStream: AsyncGenerator<StreamEvent>;
+      requestRouteKey: string;
+      stopReason?: never;
+    }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
 function getAbortAwareEndTurnStopReason(
@@ -1947,6 +1944,14 @@ export class Session implements SessionContext {
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: LlmChat | null = null;
+  // Private ACP fallback cache, bounded like LlmChat without exposing a
+  // cross-package route resolver just for this closeout.
+  private readonly lastPromptTokenCountsByRouteKey = new Map<string, number>();
+  // The model route that produced `lastPromptTokenCount` (Config
+  // .getModelRouteIdentity). ACP model switches keep the same LlmChat, so
+  // the chat-instance check alone never invalidates the count on a route
+  // change (#9529, follow-up to #9454/#9506).
+  private lastPromptTokenCountRouteKey: string | undefined = undefined;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
   // ACP can continue one logical conversation through prompt, cron, and
@@ -5514,6 +5519,10 @@ export class Session implements SessionContext {
                   | ChannelDeliveryResponseBlock
                   | undefined;
                 let channelDeliveryCheckpoint = 0;
+                // The send result assigns this before any read; null-stream
+                // paths return before the record site, so a pre-send route
+                // computation here would only be discarded.
+                let requestRouteKey = '';
 
                 try {
                   // Set where the model request is actually issued, not at
@@ -5564,6 +5573,7 @@ export class Session implements SessionContext {
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
                   }
+                  requestRouteKey = sendResult.requestRouteKey;
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
                   channelDeliveryResponseBlock =
@@ -5646,6 +5656,15 @@ export class Session implements SessionContext {
                           `main prompt ${resp.type}`,
                         );
                         functionCalls.length = 0;
+                      }
+                      if (resp.type === StreamEventType.COMPRESSED) {
+                        // In-send compression rewrote the shared history;
+                        // invalidate every retained route count (the
+                        // pre-send hook never sees this path).
+                        this.#recordCompressionTokenCount(
+                          resp.info,
+                          requestRouteKey,
+                        );
                       }
                     }
                   } catch (error) {
@@ -5739,7 +5758,7 @@ export class Session implements SessionContext {
                 );
 
                 if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata);
+                  this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
                   // Kick off rewrite in background (non-blocking, runs parallel to tools)
                   if (this.messageRewriter) {
                     this.messageRewriter.flushTurn(pendingSend.signal);
@@ -6323,6 +6342,10 @@ export class Session implements SessionContext {
       let channelDeliveryCheckpoint = 0;
       let providerSendChat: LlmChat | undefined;
       let userContentPushCountBeforeSend = 0;
+      // The send result assigns this before any read; null-stream paths
+      // return before the record site, so a pre-send route computation here
+      // would only be discarded.
+      let requestRouteKey = '';
 
       try {
         const sendResult = await this.#sendMessageStreamWithAutoCompression(
@@ -6616,6 +6639,7 @@ export class Session implements SessionContext {
           };
         }
 
+        requestRouteKey = sendResult.requestRouteKey;
         const responseStream = sendResult.responseStream;
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
@@ -6712,6 +6736,12 @@ export class Session implements SessionContext {
             );
             functionCalls.length = 0;
           }
+          if (response.type === StreamEventType.COMPRESSED) {
+            // In-send compression rewrote the shared history; invalidate
+            // every retained route count (the pre-send hook never sees
+            // this path).
+            this.#recordCompressionTokenCount(response.info, requestRouteKey);
+          }
         }
       } catch (error) {
         streamFailed = true;
@@ -6786,7 +6816,7 @@ export class Session implements SessionContext {
       );
 
       if (usageMetadata) {
-        this.#recordPromptTokenCount(usageMetadata);
+        this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
         const durationMs = Date.now() - streamStartTime;
         await this.messageEmitter.emitUsageMetadata(
           usageMetadata,
@@ -7193,7 +7223,6 @@ export class Session implements SessionContext {
           abortSignal,
         );
         compressionInfo = compressed;
-        this.#recordCompressionTokenCount(compressed);
         compressionFailed = isCompressionFailureStatus(
           compressed.compressionStatus,
         );
@@ -7246,18 +7275,38 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    if (!compressionInfo) {
-      this.#syncPromptTokenCountWithCurrentChat();
+    const model =
+      options.getModelOverride?.() ??
+      options.modelOverride ??
+      this.config.getModel();
+    const requestRouteKey = await this.#requestRouteKeyForModel(model);
+    if (abortSignal.aborted) {
+      debugLogger.debug(
+        `Send aborted after request route key resolution for prompt ${promptId}`,
+      );
+      return { responseStream: null, stopReason: 'cancelled' };
+    }
+    // Recorded with the resolved request route key: a COMPRESSED result
+    // must invalidate every retained route count, not just the active
+    // route's (see #invalidateRouteTokenCountsForCompression).
+    if (compressionInfo) {
+      this.#recordCompressionTokenCount(compressionInfo, requestRouteKey);
+    } else {
+      this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
     }
 
     const sessionTokenLimit = this.config.getSessionTokenLimit();
     if (sessionTokenLimit > 0) {
-      const lastPromptTokenCount =
-        this.#getPostCompressionTokenCount(compressionInfo);
+      const lastPromptTokenCount = this.#getPostCompressionTokenCount(
+        compressionInfo,
+        requestRouteKey,
+      );
       if (lastPromptTokenCount > sessionTokenLimit) {
         debugLogger.warn(
           `Session token limit exceeded for prompt ${promptId}: ` +
-            `${lastPromptTokenCount} > ${sessionTokenLimit}. Send dropped.`,
+            `${lastPromptTokenCount} > ${sessionTokenLimit}. ` +
+            `requestRoute=${requestRouteKey}, activeModel=${this.config.getModel()}. ` +
+            'Send dropped.',
         );
         await this.#emitAgentDiagnosticMessageSafely(
           `Session token limit exceeded: ${lastPromptTokenCount} tokens > ${sessionTokenLimit} limit. ` +
@@ -7308,10 +7357,6 @@ export class Session implements SessionContext {
     }
 
     const chat = this.#getCurrentChat();
-    const model =
-      options.getModelOverride?.() ??
-      options.modelOverride ??
-      this.config.getModel();
     const request = {
       message,
       config: {
@@ -7322,7 +7367,7 @@ export class Session implements SessionContext {
     const responseStream = goalPermit
       ? await chat.sendMessageStream(model, request, promptId, goalPermit)
       : await chat.sendMessageStream(model, request, promptId);
-    return { responseStream };
+    return { responseStream, requestRouteKey };
   }
 
   #clearPendingRestoreNotices(): void {
@@ -7522,31 +7567,75 @@ export class Session implements SessionContext {
     };
   }
 
-  #recordCompressionTokenCount(info: ChatCompressionInfo): void {
-    this.#syncPromptTokenCountWithCurrentChat();
+  #recordCompressionTokenCount(
+    info: ChatCompressionInfo,
+    requestRouteKey: string,
+  ): void {
+    if (info.compressionStatus === CompressionStatus.COMPRESSED) {
+      this.#invalidateRouteTokenCountsForCompression(info, requestRouteKey);
+      return;
+    }
+    this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
     const tokenCount = this.#extractCompressionTokenCount(info);
     if (tokenCount !== null && tokenCount > 0) {
-      this.lastPromptTokenCount = tokenCount;
+      this.#setLastPromptTokenCount(requestRouteKey, tokenCount);
     }
+  }
+
+  /**
+   * Compression rewrote the shared history, so EVERY retained route-keyed
+   * count is stale — not just the request route's. Drop them all and
+   * re-record the fresh post-compression count under the request route,
+   * retaining it under the active route too when the two differ (the
+   * compressed history is shared, so the count anchors both routes' next
+   * gate reads). Mirrors LlmChat clearing its keyed counts in the
+   * COMPRESSED branch of tryCompress; without this, in-send compressions
+   * (LlmChat.sendMessageStream's hard-tier rescue and reactive-overflow
+   * paths, surfaced as StreamEventType.COMPRESSED) would leave this cache
+   * holding pre-compression sizes and the gate would drop a returning
+   * route's send that fits the compressed history (#9529).
+   */
+  #invalidateRouteTokenCountsForCompression(
+    info: ChatCompressionInfo,
+    requestRouteKey: string,
+  ): void {
+    this.lastPromptTokenCountsByRouteKey.clear();
+    const tokenCount = this.#extractCompressionTokenCount(info);
+    if (tokenCount !== null && tokenCount > 0) {
+      this.#setLastPromptTokenCount(requestRouteKey, tokenCount);
+      const activeRouteKey = this.#currentRouteKey();
+      if (activeRouteKey !== requestRouteKey) {
+        this.lastPromptTokenCountsByRouteKey.set(activeRouteKey, tokenCount);
+      }
+    } else {
+      this.lastPromptTokenCount = 0;
+      this.lastPromptTokenCountRouteKey = requestRouteKey;
+    }
+    this.lastPromptTokenCountChat = this.#getCurrentChat();
   }
 
   #recordPromptTokenCount(
     usageMetadata: GenerateContentResponseUsageMetadata,
+    routeKey = this.#currentRouteKey(),
   ): void {
-    this.#syncPromptTokenCountWithCurrentChat();
+    this.#syncPromptTokenCountWithCurrentChat(routeKey);
     const tokenCount =
       usageMetadata.promptTokenCount ?? usageMetadata.totalTokenCount;
     if (tokenCount !== undefined && tokenCount > 0) {
-      this.lastPromptTokenCount = tokenCount;
+      this.#setLastPromptTokenCount(routeKey, tokenCount);
     }
   }
 
-  #getPostCompressionTokenCount(info: ChatCompressionInfo | null): number {
+  #getPostCompressionTokenCount(
+    info: ChatCompressionInfo | null,
+    routeKey = this.#currentRouteKey(),
+  ): number {
     const tokenCount = this.#extractCompressionTokenCount(info);
     if (tokenCount !== null) {
       return tokenCount;
     }
 
+    this.#syncPromptTokenCountWithCurrentChat(routeKey);
     return this.lastPromptTokenCount;
   }
 
@@ -7566,15 +7655,71 @@ export class Session implements SessionContext {
     return tokenCount;
   }
 
-  #syncPromptTokenCountWithCurrentChat(): void {
-    const chat = this.#getCurrentChat();
+  #currentRouteKey(): string {
+    // Optional chaining keeps partial Config test mocks from throwing; a
+    // missing identity degrades to one stable key, i.e. no route-change
+    // invalidation (mirrors LlmChat.currentRouteKey, #9454).
+    return this.config.getModelRouteIdentity?.() ?? '';
+  }
+
+  async #requestRouteKeyForModel(model: string): Promise<string> {
+    if (!this.config.getModelRouteIdentity) {
+      return '';
+    }
+    if (!model.endsWith('\0')) {
+      return this.config.getModelRouteIdentity(model);
+    }
+    const runtimeView = await this.config
+      .getBaseLlmClient()
+      .resolveForModel(model.slice(0, -1), { failClosed: true });
+    return this.config.getModelRouteIdentity(
+      runtimeView.model,
+      runtimeView.contentGeneratorConfig,
+    );
+  }
+
+  #setLastPromptTokenCount(routeKey: string, tokenCount: number): void {
+    this.lastPromptTokenCount = tokenCount;
+    this.lastPromptTokenCountRouteKey = routeKey;
     if (
-      this.lastPromptTokenCountChat &&
-      this.lastPromptTokenCountChat !== chat
+      !this.lastPromptTokenCountsByRouteKey.has(routeKey) &&
+      this.lastPromptTokenCountsByRouteKey.size >=
+        MAX_RETAINED_SESSION_ROUTE_COUNTS
     ) {
+      const oldestKey = this.lastPromptTokenCountsByRouteKey
+        .keys()
+        .next().value;
+      if (oldestKey !== undefined) {
+        this.lastPromptTokenCountsByRouteKey.delete(oldestKey);
+      }
+    }
+    this.lastPromptTokenCountsByRouteKey.set(routeKey, tokenCount);
+  }
+
+  #syncPromptTokenCountWithCurrentChat(
+    routeKey = this.#currentRouteKey(),
+  ): void {
+    const chat = this.#getCurrentChat();
+    const chatChanged =
+      this.lastPromptTokenCountChat && this.lastPromptTokenCountChat !== chat;
+    if (chatChanged) {
+      this.lastPromptTokenCountsByRouteKey.clear();
       this.lastPromptTokenCount = 0;
+    } else if (this.lastPromptTokenCountRouteKey !== routeKey) {
+      if (
+        this.lastPromptTokenCountRouteKey !== undefined &&
+        this.lastPromptTokenCount > 0
+      ) {
+        this.lastPromptTokenCountsByRouteKey.set(
+          this.lastPromptTokenCountRouteKey,
+          this.lastPromptTokenCount,
+        );
+      }
+      this.lastPromptTokenCount =
+        this.lastPromptTokenCountsByRouteKey.get(routeKey) ?? 0;
     }
     this.lastPromptTokenCountChat = chat;
+    this.lastPromptTokenCountRouteKey = routeKey;
   }
 
   #isAbortError(error: unknown): boolean {
@@ -8452,6 +8597,7 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
+                const requestRouteKey = sendResult.requestRouteKey;
                 const channelDeliveryResponseBlock:
                   | ChannelDeliveryResponseBlock
                   | undefined =
@@ -8543,6 +8689,15 @@ export class Session implements SessionContext {
                       );
                       functionCalls.length = 0;
                     }
+                    if (resp.type === StreamEventType.COMPRESSED) {
+                      // In-send compression rewrote the shared history;
+                      // invalidate every retained route count (the
+                      // pre-send hook never sees this path).
+                      this.#recordCompressionTokenCount(
+                        resp.info,
+                        requestRouteKey,
+                      );
+                    }
                   }
                 } catch (error) {
                   streamFailed = true;
@@ -8568,7 +8723,7 @@ export class Session implements SessionContext {
                 );
 
                 if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata);
+                  this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
                   if (this.messageRewriter) {
                     this.messageRewriter.flushTurn(ac.signal);
                   }
@@ -9146,6 +9301,7 @@ export class Session implements SessionContext {
             }
 
             const responseStream = sendResult.responseStream;
+            const requestRouteKey = sendResult.requestRouteKey;
             nextMessage = null;
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
@@ -9206,6 +9362,12 @@ export class Session implements SessionContext {
                   );
                   functionCalls.length = 0;
                 }
+                if (resp.type === StreamEventType.COMPRESSED) {
+                  // In-send compression rewrote the shared history;
+                  // invalidate every retained route count (the pre-send
+                  // hook never sees this path).
+                  this.#recordCompressionTokenCount(resp.info, requestRouteKey);
+                }
               }
             } catch (error) {
               streamFailed = true;
@@ -9237,7 +9399,7 @@ export class Session implements SessionContext {
             }
 
             if (usageMetadata) {
-              this.#recordPromptTokenCount(usageMetadata);
+              this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
               const durationMs = Date.now() - streamStartTime;
               await this.messageEmitter.emitUsageMetadata(
                 usageMetadata,
