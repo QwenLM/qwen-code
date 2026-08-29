@@ -86,8 +86,14 @@ jobs:
           # this step exists to clear can wedge it — rm -rf dies with EACCES
           # descending into a 555 dir that still has children, and the
           # workspace ownership heal touches only $GITHUB_WORKSPACE. The
-          # sudo -n fallback matches the pool's sudo allowlist (rm).
-          chmod -R u+rwX "${RUNNER_TEMP}/web-shell-visuals" "${RUNNER_TEMP}/web-shell-before" 2>/dev/null || true
+          # sudo -n fallback matches the pool's sudo allowlist (rm). Skip
+          # the chmod heal on a symlinked operand: GNU chmod has no -P and
+          # chmod -R dereferences the operand, so a planted link would have
+          # the heal flip modes recursively through it, outside the runner
+          # temp — rm removes a link regardless of its own mode.
+          for d in "${RUNNER_TEMP}/web-shell-visuals" "${RUNNER_TEMP}/web-shell-before"; do
+            [ -L "$d" ] || chmod -R u+rwX "$d" 2>/dev/null || true
+          done
           rm -rf "${RUNNER_TEMP}/web-shell-visuals" "${RUNNER_TEMP}/web-shell-before" || sudo -n rm -rf "${RUNNER_TEMP}/web-shell-visuals" "${RUNNER_TEMP}/web-shell-before"
 
       # Pre-checkout heal, mirroring ci.yml: a previous containerised job on
@@ -98,12 +104,33 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           set -uo pipefail
+          # Neutralize the runner user's global/system git config for every
+          # later step of this job: $HOME persists across jobs on the pool,
+          # every pool job may have run attacker code, and actions/checkout
+          # COPIES ~/.gitconfig into its temp HOME rather than isolating
+          # from it — a planted core.hooksPath or include.path would fire
+          # inside this job's own wipe and checkout git calls. Publish
+          # through GITHUB_ENV so the wipe and both checkouts see it (a
+          # step-level export does not reach later steps); the env bypass
+          # also closes /etc/gitconfig, which the sudo-less wipe cannot
+          # scrub. Same shape as qwen-autofix.yml's pool lanes.
+          echo "GIT_CONFIG_GLOBAL=/dev/null" >> "${GITHUB_ENV}"
+          echo "GIT_CONFIG_SYSTEM=/dev/null" >> "${GITHUB_ENV}"
           RUNNER_UID="$(id -u)"
           RUNNER_GID="$(id -g)"
-          if [ "$RUNNER_UID" != "0" ]; then
-            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          # Gate the recursion on a real directory: GNU chmod has no -P and
+          # with -R dereferences a symlink OPERAND, so a workspace a
+          # previous job replaced with a symlink — the plant class the wipe
+          # below heals — would be chmodded recursively through the link,
+          # out of bounds, before the heal unlinks it. The heal's fresh
+          # directory needs no ownership repair. chown -R defaults to -P
+          # and stays behind the same gate for the one shape both share.
+          if [ -d "$GITHUB_WORKSPACE" ] && [ ! -L "$GITHUB_WORKSPACE" ]; then
+            if [ "$RUNNER_UID" != "0" ]; then
+              chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+            fi
+            chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
           fi
-          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
       - name: 'Wipe stale workspace except the shared .git before checkout'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -139,6 +166,16 @@ jobs:
             /*) ;;
             *) echo "::error::refusing to wipe relative runner workspace path: ${RWS}"; exit 1 ;;
           esac
+          # Refuse '..' components on the RAW runner workspace before any
+          # canonicalization: the daemon supplies clean absolute paths, so a
+          # '..' spelling is always mangled input (#9220, #9265), and
+          # realpath would silently re-root the containment allowlist above
+          # the real runner workspace (/home/runner/_work/../.. -> /home).
+          # Climb and descent are indistinguishable once canonicalized —
+          # both collapse to a prefix of $WS — so both are refused.
+          case "$RWS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
           # Heal the runner-workspace ROOT before anything canonicalizes it:
           # realpath -m resolves THROUGH a planted root link, so every later
           # containment check would then bound the wipe to the link's target
@@ -153,7 +190,6 @@ jobs:
           # unlink acts on the literal entry only, never following it.
           if [ -L "$RWS" ] || [ ! -d "$RWS" ]; then
             case "$RWS" in
-              */..|*/../*) echo "::error::refusing to heal runner workspace path containing '..': ${RWS}"; exit 1 ;;
               /|/home|/root|/usr*|/etc*|/var) echo "::error::refusing to heal suspicious runner workspace path: ${RWS}"; exit 1 ;;
             esac
             if [ -L "$RWS" ]; then
@@ -191,8 +227,18 @@ jobs:
           # containment pattern below into the match-all "/*".
           RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
           while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
+          # A runner workspace that collapses to '/' only AFTER
+          # canonicalization passes every raw guard above, and the empty
+          # canonical root would turn every containment pattern below into
+          # the match-all '/*'. The raw '-z' check cannot see this spelling.
+          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          # The allowlist root itself must not sit on a sensitive root:
+          # RUNNER_WORKSPACE=/home plus any GITHUB_WORKSPACE below it admits
+          # the wipe tautologically — the #9220/#9265 incident class the
+          # guard exists for. Exact '/home' (never /home*) so the daemon's
+          # legitimate /home/<user>/... roots still pass.
           case "$RWS" in
-            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+            /home|/root|/usr*|/etc*|/var|/tmp|/opt|/boot*|/dev|/proc|/sys|/run|/srv|/mnt*|/lib*) echo "::error::refusing suspicious runner workspace path: ${RWS}"; exit 1 ;;
           esac
           # Heal a symlinked component BETWEEN the runner workspace and the
           # workspace: the heal below only fires when the LAST component is
@@ -210,6 +256,15 @@ jobs:
               case "$HEAL_REL" in
                 */*) HEAL_REL="${HEAL_REL%/*}" ;;
                 *) HEAL_REL='' ;;
+              esac
+              # Refuse '..' on the RAW workspace path before the walk: the
+              # prefixes resolve '..' through the kernel while the match
+              # above compared strings, so $RWS/x/../pivot unlinks and
+              # recreates OUTSIDE the runner workspace mid-walk. The heal
+              # must act on raw paths and refuse, never resolve through,
+              # the very plant being judged.
+              case "$HEAL_REL" in
+                ..|../*|*/..|*/../*) echo "::error::refusing to heal workspace path containing '..': ${WS}"; exit 1 ;;
               esac
               HEAL_PREFIX="$RWS"
               while [ -n "$HEAL_REL" ]; do
@@ -409,15 +464,30 @@ jobs:
         run: |-
           cache_dir="${HOME}/.cache/qwen-code/npm"
           # The cache dir outlives a run on the pool: a previous job can
-          # plant the leaf as a file (mkdir -p then wedges every later job
-          # here) or a symlink (every later job's cache writes land at the
-          # link's target). Heal the pathological spellings before use —
-          # the cache is an optimization, not a gate, so fail open.
-          if [ -L "${cache_dir}" ] || { [ -e "${cache_dir}" ] && [ ! -d "${cache_dir}" ]; }; then
+          # plant ANY component below ${HOME} as a symlink (every later
+          # job's cache writes then land at the link's target — a leaf-only
+          # check never sees an intermediate plant), the leaf as a file
+          # (mkdir -p then wedges every later job here), or permissions
+          # that deny the next npm ci. Heal the pathological spellings
+          # before use, then gate the export on a real write probe — the
+          # cache is an optimization, not a gate, so fail open. The rm
+          # stays tolerated under the wrapper's bash -e: a step that dies
+          # here is a permanent wedge, and an unhealable leaf degrades to
+          # the default cache below instead.
+          HEAL_PREFIX="${HOME}"
+          for HEAL_COMP in .cache qwen-code npm; do
+            HEAL_PREFIX="${HEAL_PREFIX}/${HEAL_COMP}"
+            if [ -L "${HEAL_PREFIX}" ]; then
+              echo "::warning::healing planted npm cache path: ${HEAL_PREFIX}"
+              rm -f -- "${HEAL_PREFIX}" 2>/dev/null || sudo -n rm -f -- "${HEAL_PREFIX}" 2>/dev/null || true
+            fi
+          done
+          if [ -e "${cache_dir}" ] && [ ! -d "${cache_dir}" ]; then
             echo "::warning::healing planted npm cache path: ${cache_dir}"
-            rm -f -- "${cache_dir}"
+            rm -f -- "${cache_dir}" 2>/dev/null || sudo -n rm -f -- "${cache_dir}" 2>/dev/null || true
           fi
-          if mkdir -p "${cache_dir}"; then
+          chmod -R u+rwX "${cache_dir}" 2>/dev/null || true
+          if mkdir -p "${cache_dir}" && probe_file="$(mktemp -- "${cache_dir}/.write-probe.XXXXXX" 2>/dev/null)" && rm -f -- "${probe_file}"; then
             echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
             echo "Using persistent npm cache at ${cache_dir}"
           else

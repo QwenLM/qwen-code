@@ -409,7 +409,9 @@ function initProbeRepo(home, dir) {
 
 // Executes the REAL wipe step under GitHub's default bash wrapper with the
 // runner env it reads, against a fixture workspace the caller planted.
-function runWipeStep(runText, { home, ws, rws }) {
+// extraEnv merges earlier-step publications (e.g. the ownership step's
+// GITHUB_ENV exports) into the step env, as Actions would.
+function runWipeStep(runText, { home, ws, rws, extraEnv }) {
   const bashPath = hostToolPath('bash');
   assert.ok(bashPath, 'bash must be resolvable to execute the wipe step');
   assert.ok(realGit, 'git must be resolvable to execute the wipe step');
@@ -443,6 +445,7 @@ function runWipeStep(runText, { home, ws, rws }) {
       timeout: 15000,
       env: {
         ...wipeGitEnv(home),
+        ...(extraEnv ?? {}),
         GITHUB_WORKSPACE: ws,
         RUNNER_WORKSPACE: rws,
       },
@@ -992,8 +995,8 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     assert.match(
       steps[clear].run,
-      /chmod -R u\+rwX "\$\{RUNNER_TEMP\}\/web-shell-visuals" "\$\{RUNNER_TEMP\}\/web-shell-before" 2>\/dev\/null \|\| true/,
-      'a read-only leftover must be healed before the rm — the exact class this step clears wedges rm -rf with EACCES otherwise',
+      /\[ -L "\$d" \] \|\| chmod -R u\+rwX "\$d" 2>\/dev\/null \|\| true/,
+      'a read-only leftover must be healed before the rm — but a symlinked operand is skipped: chmod -R has no -P and would flip modes recursively through the link, outside the runner temp',
     );
     assert.match(
       steps[clear].run,
@@ -1062,6 +1065,60 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     }
   });
 
+  it('leaves a symlinked capture-dir target untouched by the chmod heal', () => {
+    // GNU chmod has no -P: chmod -R dereferences a symlinked OPERAND, so a
+    // planted link would have the heal flip modes recursively through it,
+    // outside the runner temp, before the rm removes the link. The heal
+    // skips link operands — rm unlinks them regardless of their own mode.
+    const clear = visualsCaptureJob.steps.find(
+      (s) => s.name === 'Clear stale capture dirs',
+    );
+    const bashPath = hostToolPath('bash');
+    const root = mkdtempSync(join(tmpdir(), 'visuals-clear-symlink-'));
+    const outside = join(root, 'outside');
+    try {
+      const runnerTemp = join(root, 'runner-temp');
+      mkdirSync(runnerTemp);
+      mkdirSync(outside);
+      mkdirSync(join(outside, 'deep'));
+      writeFileSync(join(outside, 'victim.txt'), 'x\n');
+      chmodSync(join(outside, 'victim.txt'), 0o000);
+      chmodSync(join(outside, 'deep'), 0o555);
+      symlinkSync(outside, join(runnerTemp, 'web-shell-visuals'));
+      mkdirSync(join(runnerTemp, 'web-shell-before', 'junk'), {
+        recursive: true,
+      });
+      const res = spawnSync(
+        bashPath,
+        ['--noprofile', '--norc', '-eo', 'pipefail', '-c', clear.run],
+        {
+          encoding: 'utf8',
+          env: { PATH: process.env.PATH, RUNNER_TEMP: runnerTemp },
+        },
+      );
+      assert.equal(
+        res.status,
+        0,
+        `the clear must survive a symlinked operand: ${res.stdout}${res.stderr}`,
+      );
+      assert.ok(
+        !existsSync(join(runnerTemp, 'web-shell-visuals')),
+        'the planted link must be removed',
+      );
+      assert.ok(
+        !existsSync(join(runnerTemp, 'web-shell-before')),
+        'the ordinary leftover must still be removed',
+      );
+      assert.equal(statSync(join(outside, 'victim.txt')).mode & 0o777, 0);
+      assert.equal(statSync(join(outside, 'deep')).mode & 0o777, 0o555);
+    } finally {
+      if (existsSync(join(outside, 'deep'))) {
+        chmodSync(join(outside, 'deep'), 0o755);
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('heals workspace ownership before the first checkout', () => {
     const steps = visualsCaptureJob.steps;
     const heal = steps.findIndex(
@@ -1075,6 +1132,68 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     assert.match(steps[heal].run, /chown -R .* "\$GITHUB_WORKSPACE"/);
     assert.match(steps[heal].run, /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/);
     assert.ok(heal < checkout, 'the heal must precede the checkout');
+  });
+
+  it('leaves a symlinked workspace target untouched by the ownership heal', () => {
+    // GNU chmod has no -P: with -R it dereferences a symlink OPERAND and
+    // recurses into the target. The heal gates the recursion on a real
+    // directory and lets the wipe own the planted case. The same step
+    // publishes the GIT_CONFIG_GLOBAL/SYSTEM neutralization the
+    // neutralization witness below consumes the way Actions would.
+    const heal = visualsCaptureJob.steps.find(
+      (s) => s.name === 'Restore workspace ownership',
+    );
+    const bashPath = hostToolPath('bash');
+    const root = mkdtempSync(join(tmpdir(), 'visuals-ownership-link-'));
+    const outside = join(root, 'outside');
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      mkdirSync(outside);
+      mkdirSync(join(outside, 'sub'));
+      writeFileSync(join(outside, 'canary'), 'x\n');
+      chmodSync(join(outside, 'canary'), 0o000);
+      writeFileSync(join(outside, 'sub', 'deep'), 'x\n');
+      chmodSync(join(outside, 'sub', 'deep'), 0o000);
+      const rws = join(root, 'rws');
+      mkdirSync(rws);
+      const ws = join(rws, 'qwen-code');
+      symlinkSync(outside, ws);
+      const envFile = join(root, 'github_env');
+      writeFileSync(envFile, '');
+      const res = spawnSync(
+        bashPath,
+        ['--noprofile', '--norc', '-eo', 'pipefail', '-c', heal.run],
+        {
+          encoding: 'utf8',
+          env: {
+            PATH: process.env.PATH,
+            HOME: home,
+            GITHUB_WORKSPACE: ws,
+            GITHUB_ENV: envFile,
+          },
+        },
+      );
+      assert.equal(
+        res.status,
+        0,
+        `the heal must skip a symlinked operand: ${res.stdout}${res.stderr}`,
+      );
+      assert.ok(
+        lstatSync(ws).isSymbolicLink(),
+        'the plant must stay for the wipe heal to own',
+      );
+      assert.equal(statSync(join(outside, 'canary')).mode & 0o777, 0);
+      assert.equal(statSync(join(outside, 'sub', 'deep')).mode & 0o777, 0);
+      // The GIT_CONFIG bypasses must reach every later step of the job.
+      const envText = readFileSync(envFile, 'utf8');
+      assert.match(envText, /^GIT_CONFIG_GLOBAL=\/dev\/null$/m);
+      assert.match(envText, /^GIT_CONFIG_SYSTEM=\/dev\/null$/m);
+    } finally {
+      chmodSync(join(outside, 'canary'), 0o644);
+      chmodSync(join(outside, 'sub', 'deep'), 0o644);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('wipes the reused workspace except the shared root .git before checking out PR code', () => {
@@ -1856,6 +1975,72 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     }
   });
 
+  it("refuses to heal a workspace path spelled with '..' before the walk resolves outside", () => {
+    // The intermediate heal acts on the RAW $WS and its prefixes resolve
+    // '..' through the kernel while the containment match compares strings:
+    // $RWS/../pivot/repo matches "$RWS"/* and the walk would unlink the
+    // pivot symlink OUTSIDE the runner workspace, logging it as a heal.
+    const root = mkdtempSync(join(tmpdir(), 'visuals-wipe-wsdotdot-'));
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      const rws = join(root, 'rws');
+      mkdirSync(rws);
+      const outside = join(root, 'outside');
+      mkdirSync(outside);
+      writeFileSync(join(outside, 'victim.txt'), 'x\n');
+      const pivot = join(root, 'pivot');
+      symlinkSync(outside, pivot);
+      // Not join(): join() normalizes '..' away before the step sees it.
+      const ws = `${rws}/../pivot/repo`;
+      const res = runWipeStep(wipeStep.run, { home, ws, rws });
+      assert.notEqual(
+        res.status,
+        0,
+        `a '..' workspace path must fail the heal closed: ${res.stdout}${res.stderr}`,
+      );
+      assert.match(
+        res.stdout,
+        /::error::refusing to heal workspace path containing '\.\.'/,
+      );
+      assert.ok(
+        lstatSync(pivot).isSymbolicLink(),
+        'the outside plant must stay a symlink — refuse, never resolve',
+      );
+      assert.ok(existsSync(join(outside, 'victim.txt')));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a runner workspace sitting on a sensitive containment root', () => {
+    // RUNNER_WORKSPACE=/tmp plus a GITHUB_WORKSPACE below it admits the
+    // wipe tautologically: the denylist guards $WS, but a plain-directory
+    // RWS at a sensitive root was never judged. Exact '/tmp' — never
+    // '/tmp*' — so the suite's mkdtemp fixtures under /tmp/... still pass.
+    const root = mkdtempSync(join(tmpdir(), 'visuals-wipe-rwsroot-'));
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      const victim = join(root, 'victim');
+      mkdirSync(victim);
+      writeFileSync(join(victim, 'canary'), 'x\n');
+      const res = runWipeStep(wipeStep.run, { home, ws: victim, rws: '/tmp' });
+      assert.notEqual(
+        res.status,
+        0,
+        `a sensitive containment root must fail the wipe closed: ${res.stdout}${res.stderr}`,
+      );
+      assert.match(
+        res.stdout,
+        /::error::refusing suspicious runner workspace path: \/tmp/,
+      );
+      assert.ok(existsSync(join(victim, 'canary')));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('sweeps a planted symlink under the kept .git instead of carrying it', () => {
     // A previous job linking .git/objects outside the workspace makes the
     // next job's fetch write loose objects through the link to an
@@ -2117,6 +2302,100 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     }
   });
 
+  it('neutralizes the runner global git config before the wipe and the checkout', () => {
+    // $HOME persists across jobs on the pool and actions/checkout COPIES
+    // ~/.gitconfig into its temp HOME rather than isolating from it: a
+    // previous job planting core.hooksPath there fires inside THIS job's
+    // own git calls — cross-job code execution before npm ci. This witness
+    // runs the ownership step and the wipe the way Actions sequences them
+    // and asserts the planted hook never fires; wipeGitEnv leaves the
+    // global scope live until the step's own publication neutralizes it.
+    const heal = visualsCaptureJob.steps.find(
+      (s) => s.name === 'Restore workspace ownership',
+    );
+    const bashPath = hostToolPath('bash');
+    const root = mkdtempSync(join(tmpdir(), 'visuals-wipe-globalcfg-'));
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      const hooksDir = join(root, 'evil-hooks');
+      mkdirSync(hooksDir);
+      const marker = join(root, 'hook-fired');
+      writeFileSync(
+        join(hooksDir, 'post-checkout'),
+        `#!/bin/sh\ntouch '${marker}'\n`,
+      );
+      chmodSync(join(hooksDir, 'post-checkout'), 0o755);
+      writeFileSync(
+        join(home, '.gitconfig'),
+        `[core]\n\thooksPath = ${hooksDir}\n`,
+      );
+      const rws = join(root, 'rws');
+      const ws = join(rws, 'qwen-code');
+      initProbeRepo(home, ws);
+      // Job step 1: the ownership heal publishes the neutralization.
+      const envFile = join(root, 'github_env');
+      writeFileSync(envFile, '');
+      const healRes = spawnSync(
+        bashPath,
+        ['--noprofile', '--norc', '-eo', 'pipefail', '-c', heal.run],
+        {
+          encoding: 'utf8',
+          env: {
+            PATH: process.env.PATH,
+            HOME: home,
+            GITHUB_WORKSPACE: ws,
+            GITHUB_ENV: envFile,
+          },
+        },
+      );
+      assert.equal(healRes.status, 0, `heal failed: ${healRes.stderr}`);
+      const published = Object.fromEntries(
+        readFileSync(envFile, 'utf8')
+          .split('\n')
+          .filter((l) => l.includes('='))
+          .map((l) => [
+            l.slice(0, l.indexOf('=')),
+            l.slice(l.indexOf('=') + 1),
+          ]),
+      );
+      // Job step 2: the wipe runs with the publication in its env.
+      const res = runWipeStep(wipeStep.run, {
+        home,
+        ws,
+        rws,
+        extraEnv: published,
+      });
+      assert.equal(res.status, 0, `wipe failed: ${res.stdout}${res.stderr}`);
+      // The next job's checkout, same env — the planted hook must not fire.
+      const checkout = spawnSync(
+        realGit,
+        [
+          '--git-dir',
+          join(ws, '.git'),
+          '--work-tree',
+          ws,
+          'checkout',
+          '-q',
+          '-f',
+          'HEAD',
+        ],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: { ...wipeGitEnv(home), ...published },
+        },
+      );
+      assert.equal(checkout.status, 0, `checkout failed: ${checkout.stderr}`);
+      assert.ok(
+        !existsSync(marker),
+        'the planted global hooksPath must not fire in the wipe or the checkout',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('resolves the witness git through the fleet wrapper convention', () => {
     // On wrapper-env machines the PATH git execs $QWEN_CI_REAL_GIT; the
     // witnesses must spawn the real binary, not the wrapper — and the
@@ -2217,8 +2496,13 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     assert.match(
       steps[cache].run,
-      /if mkdir -p "\$\{cache_dir\}"; then/,
-      'the NPM_CONFIG_CACHE export must ride only on a successful mkdir — the cache is an optimization, so a failure degrades to the default cache',
+      /for HEAL_COMP in \.cache qwen-code npm/,
+      'every component below ${HOME} must be judged, not only the leaf — a symlink on an intermediate component exports the cache through the attacker tree',
+    );
+    assert.match(
+      steps[cache].run,
+      /if mkdir -p "\$\{cache_dir\}" && probe_file="\$\(mktemp -- "\$\{cache_dir\}\//,
+      'the NPM_CONFIG_CACHE export must ride on a successful mkdir AND a real write probe inside the tree — the cache is an optimization, so an unusable tree degrades to the default cache',
     );
     assert.ok(
       npmCi !== -1 && cache < npmCi,
@@ -2236,20 +2520,49 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       (s) => s.name === 'Configure persistent npm cache (self-hosted)',
     );
     const bashPath = hostToolPath('bash');
-    for (const plant of ['file', 'symlink', 'parent-file']) {
+    // Plant shapes a previous pool job can leave: leaf file/symlink, a
+    // parent that is a file, a symlink on the INTERMEDIATE component, an
+    // unremovable leaf under a 555 parent (the rm must be tolerated — the
+    // contract is fail open), a mode-000 leaf dir, and a hostile-permission
+    // subtree below a healthy leaf. Only unhealable shapes skip the export;
+    // every one leaves the step at exit 0.
+    for (const plant of [
+      'file',
+      'symlink',
+      'parent-file',
+      'intermediate-symlink',
+      'unremovable-leaf',
+      'mode-000-leaf',
+      'hostile-subtree',
+    ]) {
       const root = mkdtempSync(join(tmpdir(), `visuals-npmcache-${plant}-`));
+      const home = join(root, 'home');
+      const cacheDir = join(home, '.cache', 'qwen-code', 'npm');
       try {
-        const home = join(root, 'home');
-        const cacheDir = join(home, '.cache', 'qwen-code', 'npm');
         mkdirSync(dirname(cacheDir), { recursive: true });
         const outside = join(root, 'outside');
         if (plant === 'file') {
           writeFileSync(cacheDir, 'plant');
         } else if (plant === 'symlink') {
           symlinkSync(outside, cacheDir);
-        } else {
+        } else if (plant === 'parent-file') {
           rmSync(dirname(cacheDir), { recursive: true, force: true });
           writeFileSync(dirname(cacheDir), 'plant');
+        } else if (plant === 'intermediate-symlink') {
+          mkdirSync(outside);
+          rmSync(dirname(cacheDir), { recursive: true, force: true });
+          mkdirSync(dirname(dirname(cacheDir)), { recursive: true });
+          symlinkSync(outside, dirname(cacheDir));
+        } else if (plant === 'unremovable-leaf') {
+          writeFileSync(cacheDir, 'plant');
+          chmodSync(dirname(cacheDir), 0o555);
+        } else if (plant === 'mode-000-leaf') {
+          mkdirSync(cacheDir, { recursive: true });
+          chmodSync(cacheDir, 0o000);
+        } else {
+          mkdirSync(join(cacheDir, '_cacache'), { recursive: true });
+          writeFileSync(join(cacheDir, '_cacache', 'index-v5'), 'x');
+          chmodSync(join(cacheDir, '_cacache'), 0o000);
         }
         const envFile = join(root, 'github_env');
         writeFileSync(envFile, '');
@@ -2267,7 +2580,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
           0,
           `the cache step must survive the ${plant} plant: ${res.stdout}${res.stderr}`,
         );
-        if (plant === 'parent-file') {
+        if (plant === 'parent-file' || plant === 'unremovable-leaf') {
           assert.ok(
             !envText.includes('NPM_CONFIG_CACHE'),
             'a cache that cannot be prepared must degrade to the default cache, not export the plant',
@@ -2283,12 +2596,30 @@ describe('web-shell-visuals.yml capture runner routing', () => {
               !lstatSync(cacheDir).isSymbolicLink(),
             `the leaf must heal to a real directory (${plant})`,
           );
-          assert.ok(
-            !existsSync(outside),
-            `nothing may be written through the plant (${plant})`,
-          );
+          if (plant === 'intermediate-symlink') {
+            assert.deepEqual(
+              readdirSync(outside),
+              [],
+              'nothing may be written through the intermediate plant',
+            );
+          } else if (plant !== 'mode-000-leaf' && plant !== 'hostile-subtree') {
+            assert.ok(
+              !existsSync(outside),
+              `nothing may be written through the plant (${plant})`,
+            );
+          }
         }
       } finally {
+        // Restore healable modes so the fixture teardown can descend.
+        for (const d of [
+          dirname(cacheDir),
+          cacheDir,
+          join(cacheDir, '_cacache'),
+        ]) {
+          if (existsSync(d) && lstatSync(d).isDirectory()) {
+            chmodSync(d, 0o755);
+          }
+        }
         rmSync(root, { recursive: true, force: true });
       }
     }

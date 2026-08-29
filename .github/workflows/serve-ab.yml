@@ -81,6 +81,17 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           set -uo pipefail
+          # Neutralize the runner user's global/system git config for every
+          # later step of this job — the same persistent-HOME exec surface
+          # the visuals lane heals: a planted core.hooksPath or include.path
+          # fires inside this job's own wipe and checkout git calls, and
+          # actions/checkout copies ~/.gitconfig into its temp HOME rather
+          # than isolating from it. Publish through GITHUB_ENV so the wipe
+          # and both checkouts see it (a step-level export does not reach
+          # later steps); the env bypass also closes /etc/gitconfig, which
+          # the sudo-less wipe cannot scrub.
+          echo "GIT_CONFIG_GLOBAL=/dev/null" >> "${GITHUB_ENV}"
+          echo "GIT_CONFIG_SYSTEM=/dev/null" >> "${GITHUB_ENV}"
           RUNNER_UID="$(id -u)"
           RUNNER_GID="$(id -g)"
           if [ "$RUNNER_UID" != "0" ]; then
@@ -122,6 +133,16 @@ jobs:
             /*) ;;
             *) echo "::error::refusing to wipe relative runner workspace path: ${RWS}"; exit 1 ;;
           esac
+          # Refuse '..' components on the RAW runner workspace before any
+          # canonicalization: the daemon supplies clean absolute paths, so a
+          # '..' spelling is always mangled input (#9220, #9265), and
+          # realpath would silently re-root the containment allowlist above
+          # the real runner workspace (/home/runner/_work/../.. -> /home).
+          # Climb and descent are indistinguishable once canonicalized —
+          # both collapse to a prefix of $WS — so both are refused.
+          case "$RWS" in
+            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+          esac
           # Heal the runner-workspace ROOT before anything canonicalizes it:
           # realpath -m resolves THROUGH a planted root link, so every later
           # containment check would then bound the wipe to the link's target
@@ -136,7 +157,6 @@ jobs:
           # unlink acts on the literal entry only, never following it.
           if [ -L "$RWS" ] || [ ! -d "$RWS" ]; then
             case "$RWS" in
-              */..|*/../*) echo "::error::refusing to heal runner workspace path containing '..': ${RWS}"; exit 1 ;;
               /|/home|/root|/usr*|/etc*|/var) echo "::error::refusing to heal suspicious runner workspace path: ${RWS}"; exit 1 ;;
             esac
             if [ -L "$RWS" ]; then
@@ -174,8 +194,18 @@ jobs:
           # containment pattern below into the match-all "/*".
           RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${RUNNER_WORKSPACE}"; exit 1; }
           while [ "${RWS%/}" != "$RWS" ]; do RWS="${RWS%/}"; done
+          # A runner workspace that collapses to '/' only AFTER
+          # canonicalization passes every raw guard above, and the empty
+          # canonical root would turn every containment pattern below into
+          # the match-all '/*'. The raw '-z' check cannot see this spelling.
+          if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+          # The allowlist root itself must not sit on a sensitive root:
+          # RUNNER_WORKSPACE=/home plus any GITHUB_WORKSPACE below it admits
+          # the wipe tautologically — the #9220/#9265 incident class the
+          # guard exists for. Exact '/home' (never /home*) so the daemon's
+          # legitimate /home/<user>/... roots still pass.
           case "$RWS" in
-            ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': ${RWS}"; exit 1 ;;
+            /home|/root|/usr*|/etc*|/var|/tmp|/opt|/boot*|/dev|/proc|/sys|/run|/srv|/mnt*|/lib*) echo "::error::refusing suspicious runner workspace path: ${RWS}"; exit 1 ;;
           esac
           # Heal a symlinked component BETWEEN the runner workspace and the
           # workspace: the heal below only fires when the LAST component is
@@ -193,6 +223,15 @@ jobs:
               case "$HEAL_REL" in
                 */*) HEAL_REL="${HEAL_REL%/*}" ;;
                 *) HEAL_REL='' ;;
+              esac
+              # Refuse '..' on the RAW workspace path before the walk: the
+              # prefixes resolve '..' through the kernel while the match
+              # above compared strings, so $RWS/x/../pivot unlinks and
+              # recreates OUTSIDE the runner workspace mid-walk. The heal
+              # must act on raw paths and refuse, never resolve through,
+              # the very plant being judged.
+              case "$HEAL_REL" in
+                ..|../*|*/..|*/../*) echo "::error::refusing to heal workspace path containing '..': ${WS}"; exit 1 ;;
               esac
               HEAL_PREFIX="$RWS"
               while [ -n "$HEAL_REL" ]; do
