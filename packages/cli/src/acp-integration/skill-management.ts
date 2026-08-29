@@ -86,11 +86,9 @@ function validateSkillSlug(slug: string): void {
   ) {
     throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
   }
-  // The reinstall swap stages files at `<slug>.installing-<pid>-<timestamp>`
-  // and parks the previous copy at `<slug>.backup-<pid>-<timestamp>`, and
-  // the skill loaders skip entries shaped exactly like those artifacts.
-  // Reserve the suffix here so an install can never produce a skill
-  // directory that the loaders silently skip.
+}
+
+function rejectInstallArtifactSlug(slug: string): void {
   if (/\.(backup|installing)-\d+-\d+$/.test(slug)) {
     throw RequestError.invalidParams(
       undefined,
@@ -106,6 +104,7 @@ function readSkillInstallRequest(
   const input = Object.keys(skillParams).length > 0 ? skillParams : params;
   const slug = readRequiredString(input['slug'], 'skill.slug');
   validateSkillSlug(slug);
+  rejectInstallArtifactSlug(slug);
 
   const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
   if (scope !== 'global') {

@@ -186,6 +186,37 @@ describe('managed Skill mutations', () => {
     }
   });
 
+  it('can disable and delete a legacy artifact-shaped global Skill', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const slug = 'foo.backup-1-2';
+    const { skillDir, skillFile } = await writeSkill(tempHome, 'skills', slug);
+    const manager = managerFor(slug);
+    const config = configWith(manager);
+
+    try {
+      await expect(
+        setManagedSkillEnabled(config, {
+          skill: { slug, enabled: false },
+        }),
+      ).resolves.toMatchObject({
+        slug,
+        enabled: false,
+        installedPath: skillFile,
+      });
+      await expect(fs.readFile(skillFile, 'utf8')).resolves.toContain(
+        'disable-model-invocation: true',
+      );
+
+      await expect(
+        deleteManagedSkill(config, { skill: { slug } }),
+      ).resolves.toEqual({ slug, deleted: true });
+      await expect(fs.stat(skillDir)).rejects.toThrow();
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
   it('preserves comments and nested hooks when toggling frontmatter', async () => {
     const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
     vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
@@ -505,6 +536,28 @@ describe('managed Skill mutations', () => {
       }
       expect(downloadSkillMock).not.toHaveBeenCalled();
       await expect(fs.readdir(path.join(tempHome, 'skills'))).rejects.toThrow();
+
+      for (const slug of ['foo.backup-1-2-extra', 'foo-backup-1-2']) {
+        downloadSkillMock.mockResolvedValueOnce({
+          skillContent: `---\nname: ${slug}\n---\nBody\n`,
+          files: [
+            {
+              relativePath: 'SKILL.md',
+              content: Buffer.from(`---\nname: ${slug}\n---\nBody\n`),
+            },
+          ],
+        });
+
+        await expect(
+          installManagedSkill(configWith(managerFor(slug)), {
+            skill: {
+              slug,
+              sourceUrl:
+                'https://github.com/anthropics/skills/blob/main/SKILL.md',
+            },
+          }),
+        ).resolves.toMatchObject({ slug, installed: true });
+      }
     } finally {
       await fs.rm(tempHome, { recursive: true, force: true });
     }

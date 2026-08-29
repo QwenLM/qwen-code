@@ -66,17 +66,16 @@ export function validateWorkspaceSkillName(name: string): string {
   ) {
     skillError('invalid_skill_name', 'Invalid skill name');
   }
-  // Reserve the reinstall-artifact suffix (`.backup-<pid>-<timestamp>` /
-  // `.installing-<pid>-<timestamp>`): the skill loaders skip directories
-  // shaped exactly like those artifacts, so a name ending in that shape
-  // would install yet never load.
-  if (/\.(backup|installing)-\d+-\d+$/.test(normalized)) {
+  return normalized;
+}
+
+function rejectInstallArtifactSkillName(name: string): void {
+  if (/\.(backup|installing)-\d+-\d+$/.test(name)) {
     skillError(
       'invalid_skill_name',
       'Skill name ends with a reserved install-artifact suffix',
     );
   }
-  return normalized;
 }
 
 function decodeBase64(value: string): Buffer {
@@ -773,6 +772,7 @@ export async function installWorkspaceSkill(
 ): Promise<WorkspaceSkillMutationResult> {
   assertGenerationOpen?.();
   const skillName = validateWorkspaceSkillName(request.name);
+  rejectInstallArtifactSkillName(skillName);
   const files = await filesFromSource(request.source, githubToken);
   const baseDir = skillBaseDir(workspace, request.scope);
   assertGenerationOpen?.();

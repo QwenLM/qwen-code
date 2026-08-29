@@ -331,8 +331,7 @@ describe('workspace Skill management', () => {
 
   it('rejects install-artifact-shaped Skill names before reading their source', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
-    const source = await temporaryDirectory('qwen-skill-source-');
-    await fs.writeFile(path.join(source, 'SKILL.md'), skillMarkdown('demo'));
+    const source = path.join(workspace, 'missing-source');
 
     // Names shaped exactly like reinstall artifacts are skipped by the
     // skill loaders, so creating one must fail loudly instead of reporting
@@ -348,6 +347,23 @@ describe('workspace Skill management', () => {
         code: 'invalid_skill_name',
         message: expect.stringContaining('reserved install-artifact suffix'),
       });
+    }
+  });
+
+  it('accepts non-artifact Skill names near the reserved install suffix', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+
+    for (const name of ['foo.backup-1-2-extra', 'foo-backup-1-2']) {
+      await fs.writeFile(path.join(source, 'SKILL.md'), skillMarkdown(name));
+
+      await expect(
+        installWorkspaceSkill(workspace, {
+          name,
+          scope: 'workspace',
+          source: { type: 'folder', path: source },
+        }),
+      ).resolves.toMatchObject({ skillName: name });
     }
   });
 
@@ -549,6 +565,24 @@ describe('workspace Skill management', () => {
     await expect(
       fs.readFile(installed.installedPath!, 'utf8'),
     ).resolves.toContain('name: stable-skill');
+  });
+
+  it('deletes legacy install-artifact-shaped Skill directories', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const name = 'foo.backup-1-2';
+    const skillDir = path.join(workspace, '.qwen', 'skills', name);
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(skillFile, skillMarkdown(name));
+
+    await expect(
+      deleteWorkspaceSkill(workspace, 'workspace', name, skillFile),
+    ).resolves.toEqual({
+      skillName: name,
+      scope: 'workspace',
+      deleted: true,
+    });
+    await expect(fs.stat(skillDir)).rejects.toThrow();
   });
 
   it('keeps a committed replacement when backup cleanup fails', async () => {
