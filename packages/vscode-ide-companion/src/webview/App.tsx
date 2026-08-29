@@ -172,6 +172,10 @@ export const App: React.FC = () => {
   const [availableSkills, setAvailableSkills] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [showModelSelector, setShowModelSelector] = useState(false);
+  const [modelSelectorClearance, setModelSelectorClearance] = useState(0);
+  const handleModelSelectorClearanceChange = useCallback((heightPx: number) => {
+    setModelSelectorClearance(heightPx);
+  }, []);
   const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
   // /insight feedback: latest structured progress update and the generated
   // report path, surfaced by the extension via insightProgress /
@@ -307,7 +311,11 @@ export const App: React.FC = () => {
     [fileContext, availableCommands, availableSkills, modelInfo?.name],
   );
 
-  const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
+  const completion = useCompletionTrigger(
+    inputFieldRef,
+    getCompletionItems,
+    showModelSelector,
+  );
   const {
     isOpen: completionIsOpen,
     triggerChar: completionTriggerChar,
@@ -495,6 +503,64 @@ export const App: React.FC = () => {
     return () => clearTimeout(timeout);
   }, [isAuthenticated]);
 
+  // Single source of truth for "a fixed overlay layer is mounted". Besides
+  // the modal dialogs (PermissionDrawer / AskUserQuestionDialog /
+  // AccountInfoDialog) this includes webui's SessionSelector, whose backdrop
+  // and dropdown are also fixed z-[999]/z-[1000] layers. Both the
+  // close-effect below and the /model open gate must use this one predicate:
+  // the selector paints beneath every one of these layers, so the two must
+  // never be mounted together in either direction. Keeping the check in one
+  // place is what prevents the two call sites from drifting apart.
+  const isOverlayActive = Boolean(
+    permissionRequest ||
+      askUserQuestionRequest ||
+      // accountInfo doubles as the AccountInfoDialog visibility flag: it is
+      // only set by the on-demand accountInfo message and reset by the
+      // dialog's onClose, so truthy here means "the dialog is up".
+      accountInfo ||
+      sessionManagement.showSessionSelector,
+  );
+
+  // Close the model selector when an overlay takes over: while open the
+  // selector consumes Enter/Escape/arrow keys via a capture-phase document
+  // listener, and since it paints below the overlays those keystrokes must
+  // reach the visible overlay instead. The /model open path is gated on the
+  // same isOverlayActive predicate.
+  //
+  // useLayoutEffect, not useEffect: the close must land inside the same
+  // commit as the overlay's arrival. A passive effect would leave one commit
+  // in which the overlay and the selector are mounted together, with the
+  // selector's capture-phase keydown listener still armed beneath the
+  // visible overlay — an Enter in that window silently switches the model
+  // instead of answering the overlay.
+  React.useLayoutEffect(() => {
+    if (showModelSelector && isOverlayActive) {
+      setShowModelSelector(false);
+    }
+  }, [showModelSelector, isOverlayActive]);
+
+  // Close the model selector on session takeover: the selector belongs to the
+  // previous conversation, and a session switch/load/clear is an
+  // overlay-equivalent takeover. A non-gesture takeover (e.g.
+  // conversationLoaded on startup/reconnect) fires no mousedown, so the
+  // outside-click close never runs and a stale selector would keep owning
+  // Enter/Escape/arrows over the new conversation.
+  useEffect(() => {
+    const closeSelectorOnSessionTakeover = (event: MessageEvent) => {
+      const message = event.data as { type?: string } | undefined;
+      if (
+        message?.type === 'conversationLoaded' ||
+        message?.type === 'qwenSessionSwitched' ||
+        message?.type === 'conversationCleared'
+      ) {
+        setShowModelSelector(false);
+      }
+    };
+    window.addEventListener('message', closeSelectorOnSessionTakeover);
+    return () =>
+      window.removeEventListener('message', closeSelectorOnSessionTakeover);
+  }, []);
+
   // Handle permission response
   const handlePermissionResponse = useCallback(
     (optionId: string) => {
@@ -612,19 +678,30 @@ export const App: React.FC = () => {
           }
         };
 
-        // Client-side commands that trigger extension actions directly
-        // instead of being sent to the agent as messages.
-        const clientActions: Record<string, () => void> = {
-          auth: () => vscode.postMessage({ type: 'auth', data: {} }),
-          account: () =>
-            vscode.postMessage({ type: 'getAccountInfo', data: {} }),
-          model: () => setShowModelSelector(true),
+        const clientActions: Record<string, () => boolean> = {
+          auth: () => {
+            vscode.postMessage({ type: 'auth', data: {} });
+            return true;
+          },
+          account: () => {
+            vscode.postMessage({ type: 'getAccountInfo', data: {} });
+            return true;
+          },
+          model: () => {
+            if (isOverlayActive) {
+              return false;
+            }
+            setShowModelSelector(true);
+            return true;
+          },
         };
 
         const clientAction = clientActions[itemId];
         if (clientAction) {
+          if (!clientAction()) {
+            return;
+          }
           clearTriggerText();
-          clientAction();
           closeCompletion();
           return;
         }
@@ -799,6 +876,7 @@ export const App: React.FC = () => {
       completionTriggerChar,
       fileContext,
       inputFieldRef,
+      isOverlayActive,
       openCompletion,
       setInputText,
       vscode,
@@ -845,17 +923,22 @@ export const App: React.FC = () => {
   // Handle Tab key to cycle approval modes when input is focused
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (e.key === 'Tab' && !e.shiftKey && showModelSelector) {
+        e.preventDefault();
+        return;
+      }
       if (
         e.key === 'Tab' &&
         !e.shiftKey &&
         !isComposing &&
-        !completion.isOpen
+        !completion.isOpen &&
+        !showModelSelector
       ) {
         e.preventDefault();
         handleToggleEditMode();
       }
     },
-    [completion.isOpen, handleToggleEditMode, isComposing],
+    [completion.isOpen, handleToggleEditMode, isComposing, showModelSelector],
   );
 
   const handleToggleThinking = useCallback(() => {
@@ -1085,16 +1168,16 @@ export const App: React.FC = () => {
                 // collapsing until a live isResponding prop is plumbed
                 // through; the pre-PR timeline was always fully expanded.
                 collapseCompletedTurns={false}
-                // The composer is an absolutely-positioned overlay at the
-                // bottom of the chat container; MessageList reserves
-                // clearance through --web-shell-bottom-panel-inset (padding
-                // and scroll-padding bottom). Nothing else in this package
-                // sets the variable, so the transcript tail would be hidden
-                // under the input box. 140px restores the pb-[140px]
-                // clearance the old scroll container provided.
+                // InputForm is now an in-flow sibling, so the transcript only
+                // needs extra clearance while the selector overlaps it. The
+                // WebShell list already contributes 8px of base padding; add
+                // the dropdown height plus another 8px above it.
                 style={
                   {
-                    '--web-shell-bottom-panel-inset': '140px',
+                    '--web-shell-bottom-panel-inset':
+                      showModelSelector && modelSelectorClearance > 0
+                        ? `${modelSelectorClearance + 8}px`
+                        : '0px',
                   } as React.CSSProperties
                 }
               />
@@ -1104,9 +1187,14 @@ export const App: React.FC = () => {
         {(localNotices.length > 0 || insightProgress || insightReportPath) && (
           <div
             data-testid="local-message-notices"
-            // Above the 140px composer clearance so the notices sit right
-            // over the input box without covering transcript content.
-            className="absolute bottom-[150px] left-0 right-0 z-20 mx-auto flex w-full max-w-[600px] flex-col gap-1 px-4"
+            // The InputForm wrapper is now an in-flow sibling, so this
+            // container's bottom edge IS the form's top edge. Anchor the
+            // notices just above that edge so they sit right over the input
+            // box without covering transcript content. z-20 keeps them above
+            // the transcript but below the open model-selector dropdown
+            // (z-30, see InputForm) — matching the pre-PR stacking where the
+            // dropdown painted over the notices.
+            className="absolute bottom-2 left-0 right-0 z-20 mx-auto flex w-full max-w-[600px] flex-col gap-1 px-4"
           >
             {insightProgress && (
               <div data-testid="insight-progress">
@@ -1235,6 +1323,7 @@ export const App: React.FC = () => {
           currentModelId={modelInfo?.modelId}
           onSelectModel={handleModelSelect}
           onCloseModelSelector={() => setShowModelSelector(false)}
+          onModelSelectorClearance={handleModelSelectorClearanceChange}
         />
       )}
 

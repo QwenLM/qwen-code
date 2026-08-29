@@ -1472,6 +1472,8 @@ function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
  * Options for Config.initialize()
  */
 export interface ConfigInitializeOptions {
+  /** Cancels request-scoped initialization without becoming a session signal. */
+  signal?: AbortSignal;
   /**
    * Callback for sending MCP messages to SDK servers via control plane.
    * Required for SDK MCP server support in SDK mode.
@@ -2893,6 +2895,7 @@ export class Config {
     if (this.shutdownRequested) {
       throw Error('Config is shutting down');
     }
+    options?.signal?.throwIfAborted();
     this.initialized = true;
     const initialization = this.initializeOnce(options);
     this.initializationPromise = initialization;
@@ -2945,6 +2948,7 @@ export class Config {
           this.sessionWriterActivationPromise = undefined;
         }
       }
+      options?.signal?.throwIfAborted();
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
       await this.initializeInternal(options);
@@ -2957,6 +2961,16 @@ export class Config {
       try {
         await this.closeSessionWriter();
       } catch (closeError) {
+        if (
+          options?.signal?.aborted &&
+          containsErrorByIdentity(error, options.signal.reason)
+        ) {
+          this.debugLogger.warn(
+            'Chat recording close failed after initialization was aborted:',
+            closeError,
+          );
+          options.signal.throwIfAborted();
+        }
         if (containsErrorByIdentity(error, closeError)) {
           throw error;
         }
@@ -2976,6 +2990,7 @@ export class Config {
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
+    options?.signal?.throwIfAborted();
     if (options?.skipFileCheckpointing === true) {
       this.fileCheckpointingEnabled = false;
       this.fileHistoryService = undefined;
@@ -3004,6 +3019,7 @@ export class Config {
       });
     }
     recordStartupEvent('config_initialize_extensions_initial_end');
+    options?.signal?.throwIfAborted();
     this.debugLogger.debug('Extension manager initialized');
 
     // Bare mode and read-only replay helpers skip all hook loading and execution.
@@ -3260,6 +3276,7 @@ export class Config {
       this.debugLogger.debug('Hook system disabled, skipping initialization');
     }
     recordStartupEvent('config_initialize_hooks_end');
+    options?.signal?.throwIfAborted();
 
     this.subagentManager = new SubagentManager(this);
     recordStartupEvent('config_initialize_skills_start');
@@ -3296,6 +3313,7 @@ export class Config {
       this.debugLogger.debug('Skill manager skipped');
     }
     recordStartupEvent('config_initialize_skills_end');
+    options?.signal?.throwIfAborted();
 
     this.memoryPressureConfig = loadMemoryPressureConfig();
     this.memoryPressureMonitor = new MemoryPressureMonitor(
@@ -3317,13 +3335,15 @@ export class Config {
       await this.extensionManager.refreshCache();
     }
     recordStartupEvent('config_initialize_extensions_final_end');
+    options?.signal?.throwIfAborted();
 
     if (!this.provisionalWorkspace) {
       recordStartupEvent('config_initialize_hierarchical_memory_start');
-      await this.refreshHierarchicalMemory('session_start');
+      await this.refreshHierarchicalMemory('session_start', options?.signal);
       recordStartupEvent('config_initialize_hierarchical_memory_end');
       this.debugLogger.debug('Hierarchical memory loaded');
     }
+    options?.signal?.throwIfAborted();
 
     // Progressive MCP availability: skip MCP discovery in the synchronous
     // tool-registry construction path and kick it off in the background
@@ -3350,6 +3370,7 @@ export class Config {
       options?.sendSdkMcpMessage,
       skipInlineMcpDiscovery ? { skipDiscovery: true } : undefined,
     );
+    options?.signal?.throwIfAborted();
     recordStartupEvent('config_initialize_tool_registry_end');
     recordStartupEvent('tool_registry_created', {
       toolCount: this.toolRegistry.getAllToolNames().length,
@@ -3363,7 +3384,7 @@ export class Config {
       !(options?.skipLlmInitialization ?? options?.skipGeminiInitialization) &&
       !this.provisionalWorkspace
     ) {
-      await this.llmClient.initialize();
+      await this.llmClient.initialize(undefined, options?.signal);
       this.debugLogger.info('LLM client initialized');
     } else {
       this.debugLogger.info('LLM client initialization skipped');
@@ -3382,6 +3403,7 @@ export class Config {
       await this.toolRegistry.warmAll({
         strict: options?.lenientToolWarmup !== true,
       });
+      options?.signal?.throwIfAborted();
       recordStartupEvent('config_initialize_tool_warmup_end');
     }
 
@@ -3419,6 +3441,7 @@ export class Config {
     }
 
     if (!this.provisionalWorkspace) {
+      options?.signal?.throwIfAborted();
       logStartSession(this, new StartSessionEvent(this));
     }
     this.debugLogger.info('Config initialization completed');
@@ -3779,6 +3802,7 @@ export class Config {
 
   async refreshHierarchicalMemory(
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
+    signal?: AbortSignal,
   ): Promise<void> {
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
@@ -3811,6 +3835,7 @@ export class Config {
         loadReason,
         onInstructionsLoaded: createInstructionsLoadedCallback(
           () => this.hookSystem,
+          signal,
         ),
       },
     );
