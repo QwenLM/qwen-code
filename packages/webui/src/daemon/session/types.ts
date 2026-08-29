@@ -205,7 +205,7 @@ export interface DaemonPromptSettledEvent {
   sessionId: string;
   promptId: string;
   outcome: DaemonPromptSettlementOutcome;
-  /** Daemon terminal reason. Present for `turn_complete` settlements. */
+  /** Daemon terminal reason. Present for completed and cancelled settlements. */
   stopReason?: string;
   /** Terminal SSE cursor when available; not a replacement for the idempotency key. */
   eventId?: number;

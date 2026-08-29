@@ -12840,12 +12840,20 @@ describe('App session callbacks', () => {
       },
       {
         ...base,
+        id: 'assistant-empty-tail',
+        kind: 'assistant',
+        text: '   ',
+        streaming: false,
+        serverTimestamp: 43,
+      },
+      {
+        ...base,
         id: 'assistant-subagent',
         kind: 'assistant',
         parentToolCallId: 'call-1',
         text: 'Subagent internal answer',
         streaming: false,
-        serverTimestamp: 43,
+        serverTimestamp: 44,
       },
     ];
     const onAssistantTurnSettled = vi.fn();

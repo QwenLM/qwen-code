@@ -169,6 +169,12 @@ interface LiveJournalRepairEpisode {
   controller?: AbortController;
 }
 
+interface RestoredActivePromptTracking {
+  sessionId: string;
+  promptId?: string;
+  replayDegraded: boolean;
+}
+
 interface TranscriptHistoryMaterialization {
   blocks: readonly DaemonTranscriptBlock[];
   nextOrdinal: number;
@@ -193,6 +199,7 @@ const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
 const CLIENT_IDENTITY_FEATURE = 'client_identity';
 const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
 const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
+const MAX_PUBLISHED_PROMPT_SETTLEMENTS = 1024;
 // Cap the daemon-advertised restore retry delay: an unbounded value overflows
 // setTimeout's 2^31-1 ms limit (firing instantly, retry storm) or leaves the
 // UI stuck connecting for hours.
@@ -277,6 +284,39 @@ function promptSettledFromTurnEvent(
     transcriptComplete,
     error: { message, ...(code ? { code } : {}) },
   };
+}
+
+function findReplayActivePromptId(
+  events: readonly DaemonEvent[],
+): string | undefined {
+  let activePromptId: string | undefined;
+  for (const event of events) {
+    const promptId = eventPromptId(event);
+    if (!promptId) continue;
+    if (event.type === 'turn_complete' || event.type === 'turn_error') {
+      if (activePromptId === promptId) activePromptId = undefined;
+      continue;
+    }
+    // Keep the first unresolved prompt. Later events can describe queued
+    // prompts while the restored turn is still running and must not steal its
+    // terminal correlation.
+    activePromptId ??= promptId;
+  }
+  return activePromptId;
+}
+
+function findLastReplayTerminalPromptId(
+  events: readonly DaemonEvent[],
+): string | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== 'turn_complete' && event?.type !== 'turn_error') {
+      continue;
+    }
+    const promptId = eventPromptId(event);
+    if (promptId) return promptId;
+  }
+  return undefined;
 }
 
 function getPersistedReplayRecordId(event: DaemonEvent): string | undefined {
@@ -1019,6 +1059,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const key = getPromptSettledKey(event.sessionId, event.promptId);
       if (publishedPromptSettlementsRef.current.has(key)) return;
       publishedPromptSettlementsRef.current.add(key);
+      if (
+        publishedPromptSettlementsRef.current.size >
+        MAX_PUBLISHED_PROMPT_SETTLEMENTS
+      ) {
+        const oldestKey = publishedPromptSettlementsRef.current
+          .values()
+          .next().value;
+        if (oldestKey !== undefined) {
+          publishedPromptSettlementsRef.current.delete(oldestKey);
+        }
+      }
       const listeners = [...promptSettlementListenersRef.current];
       if (listeners.length === 0) return;
       queueMicrotask(() => {
@@ -1064,6 +1115,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const settledRestoredActivePromptSessionsRef = useRef<
     WeakSet<DaemonSessionClient>
   >(new WeakSet());
+  const restoredActivePromptTrackingRef = useRef<
+    RestoredActivePromptTracking | undefined
+  >(undefined);
   const eventOptionsRef = useRef({ suppressOwnUserEcho, includeRawEvent });
   const reconnectConfigRef = useRef({ reconnectDelayMs, maxReconnectDelayMs });
   // Aborts the reconnect backoff wait so a caller can force an immediate SSE
@@ -1796,6 +1850,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               previousSessionId !== undefined &&
               nextSession.sessionId !== previousSessionId
             ) {
+              restoredActivePromptTrackingRef.current = undefined;
               setPromptStatus('idle');
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
               needsStoreReset = true;
@@ -1850,8 +1905,26 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // up) does not get mistaken for `turn_complete` (prompt finished).
           const restoredActivePromptSettled =
             settledRestoredActivePromptSessionsRef.current.has(activeSession);
-          let restoredActivePrompt =
+          const previouslyTrackedRestoredPrompt =
+            restoredActivePromptTrackingRef.current?.sessionId ===
+            activeSession.sessionId
+              ? restoredActivePromptTrackingRef.current
+              : undefined;
+          if (
             activeSession.hasActivePrompt === true &&
+            !restoredActivePromptSettled
+          ) {
+            restoredActivePromptTrackingRef.current = {
+              sessionId: activeSession.sessionId,
+              ...(previouslyTrackedRestoredPrompt?.promptId
+                ? { promptId: previouslyTrackedRestoredPrompt.promptId }
+                : {}),
+              replayDegraded: activeSession.replayDegraded === true,
+            };
+          }
+          let restoredActivePrompt =
+            (activeSession.hasActivePrompt === true ||
+              previouslyTrackedRestoredPrompt !== undefined) &&
             !restoredActivePromptSettled;
           const settleRestoredActivePrompt = () => {
             // `hasActivePrompt` is a load/resume snapshot on this session client.
@@ -1859,6 +1932,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // reconnects for the same client; later prompts from this page are
             // still tracked independently in activePromptsRef.
             settledRestoredActivePromptSessionsRef.current.add(activeSession);
+            if (
+              restoredActivePromptTrackingRef.current?.sessionId ===
+              activeSession.sessionId
+            ) {
+              restoredActivePromptTrackingRef.current = undefined;
+            }
             restoredActivePrompt = false;
           };
           const hasSessionActivePrompt = () =>
@@ -1888,6 +1967,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
+          if (
+            restoredActivePrompt &&
+            activeSession.hasActivePrompt === true &&
+            restoredActivePromptTrackingRef.current?.sessionId ===
+              activeSession.sessionId
+          ) {
+            const replayPromptId = findReplayActivePromptId(replayEvents);
+            if (replayPromptId) {
+              restoredActivePromptTrackingRef.current.promptId = replayPromptId;
+            }
+          }
+          const catchUpRestoredPromptId =
+            restoredActivePrompt && activeSession.hasActivePrompt !== true
+              ? (restoredActivePromptTrackingRef.current?.promptId ??
+                findLastReplayTerminalPromptId(replayEvents))
+              : undefined;
           const markerStillVisible =
             repairingEpisode?.markerBlockId !== undefined &&
             store
@@ -2288,6 +2383,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               });
             }
             for (const replayEvent of replayEvents) {
+              const replayPromptId = eventPromptId(replayEvent);
               const activePromptSettled = settleActivePromptFromTurnEvent(
                 activePromptsRef.current,
                 settledPromptsRef.current,
@@ -2298,10 +2394,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 passiveAssistantDoneTimerRef,
                 { requireBoundPromptId: true },
               );
-              if (activePromptSettled && restoredActivePrompt) {
+              const restoredPromptSettled =
+                !activePromptSettled &&
+                restoredActivePrompt &&
+                catchUpRestoredPromptId !== undefined &&
+                replayPromptId === catchUpRestoredPromptId &&
+                (replayEvent.type === 'turn_complete' ||
+                  replayEvent.type === 'turn_error');
+              if (
+                (activePromptSettled || restoredPromptSettled) &&
+                restoredActivePrompt
+              ) {
                 settleRestoredActivePrompt();
               }
-              if (!activePromptSettled) continue;
+              if (!activePromptSettled && !restoredPromptSettled) continue;
               const settlement = promptSettledFromTurnEvent(
                 activeSession.sessionId,
                 replayEvent,
@@ -2793,6 +2899,32 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ) {
                 flushTranscriptSync();
               }
+              const terminalPromptId = eventPromptId(event);
+              const trackedRestoredPrompt =
+                restoredActivePromptTrackingRef.current?.sessionId ===
+                activeSession.sessionId
+                  ? restoredActivePromptTrackingRef.current
+                  : undefined;
+              if (
+                restoredActivePrompt &&
+                terminalPromptId &&
+                event.type !== 'turn_complete' &&
+                event.type !== 'turn_error' &&
+                trackedRestoredPrompt !== undefined &&
+                trackedRestoredPrompt.promptId === undefined
+              ) {
+                trackedRestoredPrompt.promptId = terminalPromptId;
+              }
+              const settlesTrackedRestoredPrompt =
+                restoredActivePrompt &&
+                terminalPromptId !== undefined &&
+                (event.type === 'turn_complete' ||
+                  event.type === 'turn_error') &&
+                (trackedRestoredPrompt?.promptId === undefined ||
+                  trackedRestoredPrompt.promptId === terminalPromptId);
+              const restoredPromptReplayDegraded =
+                settlesTrackedRestoredPrompt &&
+                trackedRestoredPrompt?.replayDegraded === true;
               const activePromptSettled = settleActivePromptFromTurnEvent(
                 activePromptsRef.current,
                 settledPromptsRef.current,
@@ -2802,15 +2934,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 setPromptStatus,
                 passiveAssistantDoneTimerRef,
               );
-              if (activePromptSettled && restoredActivePrompt) {
+              if (activePromptSettled && settlesTrackedRestoredPrompt) {
                 settleRestoredActivePrompt();
               }
               let restoredPromptSettled = false;
-              if (
-                !activePromptSettled &&
-                restoredActivePrompt &&
-                (event.type === 'turn_complete' || event.type === 'turn_error')
-              ) {
+              if (!activePromptSettled && settlesTrackedRestoredPrompt) {
                 // A refreshed page restores an already-running prompt without a
                 // local ActivePrompt entry or prompt promise to settle. The daemon
                 // terminal event is still authoritative, so end the restored
@@ -2954,10 +3082,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // exposing settlement to subscribers.
                 flushTranscriptSync();
               }
-              const settlement = promptSettledFromTurnEvent(
+              const rawSettlement = promptSettledFromTurnEvent(
                 activeSession.sessionId,
                 event,
               );
+              const settlement =
+                rawSettlement && restoredPromptReplayDegraded
+                  ? { ...rawSettlement, transcriptComplete: false }
+                  : rawSettlement;
               const pendingRepair = liveJournalRepairRef.current;
               let settlementDelayedForRepair = false;
               if (

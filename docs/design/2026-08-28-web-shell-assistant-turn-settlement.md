@@ -12,7 +12,9 @@ The callback is a generic Web Shell lifecycle contract. It is not tied to any em
 
 - `sessionId` and daemon-assigned `promptId`; their tuple is the stable idempotency key;
 - `outcome`: `completed`, `cancelled`, or `failed`;
-- the daemon `stopReason` when a turn completed;
+- the daemon `stopReason` for completed and cancelled turns;
+- `error` (`{ message, code? }`) for failed turns; when no assistant content exists, this is the settlement's only failure diagnostic;
+- `eventId`, the terminal SSE event cursor when available (it is not part of the idempotency key);
 - `transcriptComplete`, which is false when replay integrity is degraded or bounded live-journal repair could not restore the complete turn before failing or being discarded;
 - the final visible assistant message when it remains available in the committed current-session transcript; turns without assistant content and events delivered across a session switch omit it, while cancelled and failed turns may carry partial content.
 
@@ -32,7 +34,7 @@ The daemon session provider publishes a settlement only after it has:
 
 Ordinary session load, branch/split transcript replay, and older-history pagination never publish settlements. A terminal received while reconnecting an already active prompt may publish because it is a previously unseen live lifecycle transition, not history playback.
 
-Duplicate terminal delivery is suppressed for the lifetime of a mounted session provider using `(sessionId, promptId)`. Hosts must use the same key for durable idempotency across remounts.
+Recent duplicate terminal delivery is suppressed by a bounded in-memory window in the mounted session provider using `(sessionId, promptId)`. Hosts must use the same key for durable idempotency across remounts and long-lived sessions.
 
 `prompt_cancelled` is a cancellation request, not a confirmed prompt terminal, and does not publish a settlement by itself. Waiting for permission or `ask_user_question` also does not publish.
 

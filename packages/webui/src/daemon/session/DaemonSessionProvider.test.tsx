@@ -6040,6 +6040,177 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('publishes an incomplete settlement before replacing a repair episode', async () => {
+    const terminalGate = createDeferred<void>();
+    const repairLoad = createDeferred<MockSession>();
+    const terminalEvent: DaemonEvent = {
+      id: 10,
+      v: 1,
+      type: 'turn_complete',
+      promptId: 'prompt-first',
+      data: { promptId: 'prompt-first', stopReason: 'end_turn' },
+    };
+    const initialSession = createMockSession({
+      sessionId: 'session-live-repair-replaced',
+      hasActivePrompt: true,
+      lastEventId: 9,
+      replaySnapshot: {
+        compactedReplay: [],
+        liveJournal: [
+          {
+            id: 8,
+            v: 1,
+            type: 'history_truncated',
+            promptId: 'prompt-first',
+            data: {
+              reason: 'replay_window_exceeded',
+              scope: 'live_journal',
+              truncatedEvents: 8,
+              retainedEvents: 1,
+              maxBytes: 1024,
+              maxEvents: 1,
+              fullTranscriptAvailable: true,
+            },
+          },
+          {
+            id: 9,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-first',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'partial first answer' },
+              },
+            },
+          },
+        ],
+      },
+      events: async function* terminalEvents(
+        options: { signal?: AbortSignal } = {},
+      ) {
+        await terminalGate.promise;
+        if (options.signal?.aborted) return;
+        yield terminalEvent;
+        await new Promise<void>((resolve) =>
+          options.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        );
+      },
+    });
+    const replacementSession = createMockSession({
+      sessionId: initialSession.sessionId,
+      hasActivePrompt: true,
+      lastEventId: 13,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-first',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'first prompt' },
+              },
+            },
+          },
+          {
+            id: 2,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-first',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'complete first answer' },
+              },
+            },
+          },
+          terminalEvent,
+          {
+            id: 11,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-second',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'second prompt' },
+              },
+            },
+          },
+        ],
+        liveJournal: [
+          {
+            id: 12,
+            v: 1,
+            type: 'history_truncated',
+            promptId: 'prompt-second',
+            data: {
+              reason: 'replay_window_exceeded',
+              scope: 'live_journal',
+              truncatedEvents: 12,
+              retainedEvents: 1,
+              maxBytes: 1024,
+              maxEvents: 1,
+              fullTranscriptAvailable: true,
+            },
+          },
+          {
+            id: 13,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-second',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'partial second answer' },
+              },
+            },
+          },
+        ],
+      },
+    });
+    sdkMocks.sessions.push(initialSession);
+
+    const settlements: DaemonPromptSettledEvent[] = [];
+    function Harness() {
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+      async (client: unknown): Promise<MockSession> => {
+        const replacement = await repairLoad.promise;
+        replacement.client = client as MockClient;
+        return replacement;
+      },
+    );
+    await act(async () => {
+      terminalGate.resolve();
+      await flushPromises();
+    });
+    expect(settlements).toEqual([]);
+
+    await act(async () => {
+      repairLoad.resolve(replacementSession);
+      await vi.waitFor(() => expect(settlements).toHaveLength(1));
+      await flushPromises();
+    });
+    expect(settlements).toEqual([
+      expect.objectContaining({
+        sessionId: initialSession.sessionId,
+        promptId: 'prompt-first',
+        outcome: 'completed',
+        transcriptComplete: false,
+      }),
+    ]);
+  });
+
   it('does not repair a live marker for a non-matching queued terminal', async () => {
     const terminalGate = createDeferred<void>();
     const session = createMockSession({
@@ -11969,6 +12140,159 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('marks a live restored-prompt terminal incomplete after a degraded load', async () => {
+    const terminalDelivered = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-degraded-restored-live',
+      hasActivePrompt: true,
+      replayDegraded: true,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 11,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-1',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'partial restored answer' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: async function* terminalEvents() {
+        yield {
+          id: 12,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-1',
+          data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        terminalDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    const settlements: DaemonPromptSettledEvent[] = [];
+    function Harness() {
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await terminalDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      expect.objectContaining({
+        sessionId: session.sessionId,
+        promptId: 'prompt-1',
+        outcome: 'completed',
+        transcriptComplete: false,
+      }),
+    ]);
+  });
+
+  it('publishes a restored prompt terminal received in a reconnect replay', async () => {
+    const ringEvicted = createDeferred<void>();
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-restored-catchup',
+      hasActivePrompt: true,
+      lastEventId: 10,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 10,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-1',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'answer before reconnect' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: async function* ringEvictedEvents() {
+        await ringEvicted.promise;
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 10,
+            earliestAvailableId: 12,
+          },
+        } satisfies DaemonEvent;
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: firstSession.sessionId,
+      hasActivePrompt: false,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 11,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-1',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'final replayed answer' },
+              },
+            },
+          },
+          {
+            id: 12,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-1',
+            data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: createPendingEvents(reloaded),
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+
+    const settlements: DaemonPromptSettledEvent[] = [];
+    function Harness() {
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      ringEvicted.resolve();
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      expect.objectContaining({
+        sessionId: firstSession.sessionId,
+        promptId: 'prompt-1',
+        outcome: 'completed',
+        transcriptComplete: true,
+      }),
+    ]);
+  });
+
   it('defers catch-up settlement until a truncated replay is repaired', async () => {
     const ringEvicted = createDeferred<void>();
     const repairLoad = createDeferred<MockSession>();
@@ -12210,10 +12534,12 @@ describe('DaemonSessionProvider', () => {
     let actions: DaemonUiSessionActions | undefined;
     let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    const settlements: DaemonPromptSettledEvent[] = [];
     function Harness() {
       actions = useDaemonActions();
       streamingState = useDaemonStreamingState();
       blocks = useDaemonTranscriptBlocks();
+      useDaemonPromptSettled((event) => settlements.push(event));
       return null;
     }
 
@@ -12265,6 +12591,16 @@ describe('DaemonSessionProvider', () => {
         }),
       ]),
     );
+    expect(settlements).toEqual([
+      {
+        sessionId: firstSession.sessionId,
+        promptId: 'prompt-1',
+        outcome: 'failed',
+        eventId: 13,
+        transcriptComplete: true,
+        error: { message: 'model overloaded', code: 'overloaded' },
+      },
+    ]);
   });
 
   it('does not settle unaccepted prompts from historical replay turns', async () => {
@@ -15768,6 +16104,63 @@ describe('DaemonSessionProvider', () => {
         }),
       ]),
     );
+  });
+
+  it('bounds prompt settlement duplicate retention', async () => {
+    const streamCompleted = createDeferred<void>();
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* manyTerminalEvents() {
+          for (let index = 0; index <= 1024; index += 1) {
+            yield {
+              id: index + 1,
+              v: 1,
+              type: 'turn_complete',
+              promptId: `prompt-${index}`,
+              data: {
+                promptId: `prompt-${index}`,
+                stopReason: 'end_turn',
+              },
+            } satisfies DaemonEvent;
+          }
+          yield {
+            id: 1026,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-0',
+            data: { promptId: 'prompt-0', stopReason: 'end_turn' },
+          } satisfies DaemonEvent;
+          yield {
+            id: 1027,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-1024',
+            data: { promptId: 'prompt-1024', stopReason: 'end_turn' },
+          } satisfies DaemonEvent;
+          streamCompleted.resolve();
+        },
+      }),
+    );
+    const settlements: DaemonPromptSettledEvent[] = [];
+
+    function Harness() {
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await streamCompleted.promise;
+      await flushPromises();
+    });
+
+    expect(settlements).toHaveLength(1026);
+    expect(
+      settlements.filter((event) => event.promptId === 'prompt-0'),
+    ).toHaveLength(2);
+    expect(
+      settlements.filter((event) => event.promptId === 'prompt-1024'),
+    ).toHaveLength(1);
   });
 
   it('isolates prompt settlement listener failures', async () => {

@@ -195,7 +195,8 @@ export function App() {
 宿主仍应使用该键做持久化幂等。
 
 `outcome` 为 `completed`、`cancelled` 或 `failed`。取消和失败可能没有 Assistant
-消息，也可能携带终止前的部分内容。`transcriptComplete: false` 表示 Web Shell 已收到
+消息，也可能携带终止前的部分内容；失败时 `error` 提供 daemon 终止原因，即使没有
+Assistant 消息也会保留该诊断。`transcriptComplete: false` 表示 Web Shell 已收到
 终态，但 replay 已被标记为不完整，或受限 live journal 的修复在失败、会话切换或
 repair episode 被替换前未能恢复完整 transcript。等待 permission 或
 `ask_user_question` 不属于终态。Artifact 和 workspace projection 有各自的生命周期，
