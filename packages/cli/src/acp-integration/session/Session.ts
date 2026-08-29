@@ -31,6 +31,7 @@ import type {
   HookExecutionResponse,
   MessageBus,
   StreamEvent,
+  StreamEventType,
   ChatCompressionInfo,
   AutoModeDecision,
   AutoModeOutcome,
