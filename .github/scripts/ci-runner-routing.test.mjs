@@ -224,6 +224,46 @@ describe('ci.yml classify_pr runner routing', () => {
     );
   });
 
+  it('a push to main reaches ECS, and the kill-switch still wins', () => {
+    // The post-merge fast signal (Classify PR + Test on `main`) runs the same
+    // ten-plus-minute Test job a pull request does, in the most trusted
+    // context there is: the code is already merged and the YAML is main's
+    // own. Route it to the pool instead of spending a scarce hosted Linux
+    // runner on every merge. A push carries no author association, so this
+    // arm is necessarily event-based.
+    assert.equal(
+      runPickRunner({
+        ecsDisabled: false,
+        sameRepo: false,
+        assoc: '',
+        eventName: 'push',
+      }),
+      ECS,
+    );
+    assert.equal(
+      runPickRunner({
+        ecsDisabled: true,
+        sameRepo: false,
+        assoc: '',
+        eventName: 'push',
+      }),
+      HOSTED,
+      'kill-switch must revert post-merge runs to hosted',
+    );
+  });
+
+  it('keeps the push arm out of the classify runs-on expression', () => {
+    // classify_pr routes twice, and on a push the two halves deliberately
+    // disagree: the shell step sends downstream Linux jobs to ECS while this
+    // expression leaves classify_pr itself hosted. Pin the asymmetry so a
+    // future "drift fix" has to read why first — this expression is the
+    // canonical association-routing text that sdk-java.yml and serve-ab.yml
+    // mirror, a push has no association to route on, and classify_pr is a
+    // seconds-long job whose pool costs nothing either way. The drift guard
+    // above evaluates both halves on pull_request, where they must agree.
+    assert.doesNotMatch(classifyRunsOn, /github\.event_name == 'push'/);
+  });
+
   it('the runs-on expression keeps the trusted clause and kill-switch', () => {
     // Structural pins for the expression half of the drift guard — the
     // simulation above re-implements it, so pin the real text too.

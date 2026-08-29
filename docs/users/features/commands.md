@@ -96,6 +96,7 @@ Commands for managing AI tools and models.
 | → `auto-edit`         | Auto-approve edits (trusted environment)                                              | `/approval-mode auto-edit`                                                                                |
 | → `auto`              | Classifier-evaluated approval (autonomous)                                            | `/approval-mode auto`                                                                                     |
 | → `yolo`              | Auto-approve everything (quick prototyping)                                           | `/approval-mode yolo`                                                                                     |
+| `/peers`              | Review messages held from other Qwen Code sessions on this machine                    | `/peers`, `/peers accept <id>`, `/peers deny all`                                                         |
 | `/model`              | Switch model used in current session                                                  | `/model`, `/model <model-id>` (switch immediately)                                                        |
 | `/model --fast`       | Set a lighter model for prompt suggestions                                            | `/model --fast qwen3-coder-flash`                                                                         |
 | `/model --voice`      | Set the model used for voice transcription and audio bridging                         | `/model --voice <model-id>`                                                                               |
@@ -795,3 +796,43 @@ qwen sessions ps
 # raw-data note above); pipe through a sanitizer if the path is untrusted.
 qwen sessions ps --json | jq -r .cwd
 ```
+
+## 6. Messaging Another Running Session
+
+Two interactive sessions on the same machine can send each other
+messages. The feature is experimental and **off by default**; turn it on
+in `settings.json` and restart:
+
+```json
+{ "agents": { "crossSessionMessaging": true } }
+```
+
+Once on, the model in one session can discover the others with
+`list_agents` — each appears under `sessions` with the `name` that
+`qwen sessions ps --json` records (the table view may truncate long
+names) — and address one with `send_message` using
+that name as `to`. When two sessions share a name, `list_agents` shows
+each with a short `[ref]` and the send must include it (`name [ref]`); a
+bare name that could mean either is refused rather than guessed.
+`list_agents` also reports the session's own name under `self`, and
+`to: "*"` still means "my Agent Team teammates" and never reaches other
+sessions.
+
+A message arrives in the other session marked as coming from another
+session, not from its user, and carries none of your authority there:
+the receiving session acts on it only within its own permission settings.
+Its user can choose what happens to incoming messages with
+`agents.crossSessionInbound` (`accept`, `hold`, or `refuse`). When unset,
+a message is delivered if the receiving session still reviews each
+action (default or plan mode), or if both sessions are in a mode that
+applies actions without per-action review; otherwise it is held for
+review. Held messages are listed and released with `/peers` in the
+receiving session.
+
+The `send_message` call only confirms the message was handed to the other
+session. What became of it arrives later as a receipt: if it was held,
+declined, expired, or misaddressed (the address changed hands — list the
+agents again) — or released after a hold — a notice appears in the
+sending session's transcript (`Message to <name>: …`). The model that
+sent it is not told; if the other session replies, the reply arrives as a
+cross-session message.
