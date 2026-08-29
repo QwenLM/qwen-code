@@ -318,10 +318,13 @@ export function EmbeddedApp() {
   const [switchingSessionId, setSwitchingSessionId] = useState<string>();
   const [creatingSession, setCreatingSession] = useState(false);
   const [editingMessage, setEditingMessage] = useState<EditingMessage>();
-  const latestSubmittedPromptRef = useRef<{
-    sessionId: string;
-    prompt: string;
-  } | undefined>(undefined);
+  const latestSubmittedPromptRef = useRef<
+    | {
+        sessionId: string;
+        prompt: string;
+      }
+    | undefined
+  >(undefined);
   const sessionSwitchStartedAtRef = useRef(0);
   const sessionSwitchTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined

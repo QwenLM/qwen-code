@@ -5530,7 +5530,6 @@ export const MessageList = memo(
         historyPaginationError,
         generateContent,
         headerOffset,
-        hasOlderHistory,
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
