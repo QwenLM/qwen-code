@@ -521,6 +521,14 @@ export class SkillManager {
    * (#9408). Unambiguous names keep their manifest form, so existing
    * references and settings keep matching. gemini-cli#23566 always
    * qualifies; this qualifies on collision only.
+   *
+   * A rename is applied only when its target is free. `:` is a legal skill-name
+   * character, so `<owner>:<name>` can be a name an extension author wrote
+   * literally rather than one this pass manufactures, and name lookup is
+   * exact-match first-wins. Qualifying into an occupied name would register two
+   * skills under one name and silently drop or misroute one of them, so the
+   * skill keeps its bare name and precedence shadows it, which is the behaviour
+   * #9408 replaced for colliding *bare* names.
    */
   private qualifyCollidingExtensionSkills(
     skillsCache: Map<SkillLevel, SkillConfig[]>,
@@ -541,11 +549,29 @@ export class SkillManager {
       counts.set(bare, (counts.get(bare) ?? 0) + 1);
     }
 
+    // Names a qualified form may not land on: every name the registry already
+    // holds, whether another level owns it or an extension author wrote it
+    // literally. Seeded before any rename so the decision does not depend on
+    // iteration order, then extended with each qualified form handed out.
+    const occupied = new Set<string>(claimed);
+    for (const skill of extensionSkills) {
+      occupied.add(skill.name.toLowerCase());
+    }
+
     for (const skill of extensionSkills) {
       const bare = skill.name.toLowerCase();
-      if ((counts.get(bare) ?? 0) > 1 || claimed.has(bare)) {
-        skill.name = `${skill.extensionName}:${skill.name}`;
+      if ((counts.get(bare) ?? 0) <= 1 && !claimed.has(bare)) continue;
+      const qualified = `${skill.extensionName}:${skill.name}`;
+      const target = qualified.toLowerCase();
+      if (occupied.has(target)) {
+        debugLogger.warn(
+          `Keeping extension skill "${skill.name}" of extension "${skill.extensionName}" unqualified: ` +
+            `"${qualified}" is already a skill name.`,
+        );
+        continue;
       }
+      occupied.add(target);
+      skill.name = qualified;
     }
   }
 

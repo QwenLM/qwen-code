@@ -1165,6 +1165,129 @@ Body`);
       });
     });
 
+    it('does not qualify onto a name an extension wrote literally', async () => {
+      const skill = (extension: string, name: string, description: string) => ({
+        name,
+        description,
+        body: 'Body',
+        filePath: `/extensions/${extension}/skills/${name}/SKILL.md`,
+        level: 'extension' as const,
+      });
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'rust',
+          name: 'rust',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/rust',
+          config: { name: 'rust', version: '1.0.0' },
+          contextFiles: [],
+          skills: [
+            skill('rust', 'chat', 'rust chat'),
+            skill('rust', 'rust:chat', 'literal chat'),
+          ],
+        },
+        {
+          id: 'docs',
+          name: 'docs',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/docs',
+          config: { name: 'docs', version: '1.0.0' },
+          contextFiles: [],
+          skills: [skill('docs', 'chat', 'docs chat')],
+        },
+      ]);
+
+      const skills = await manager.listSkills({
+        level: 'extension',
+        force: true,
+      });
+
+      // `:` is legal in a skill name, so `rust:chat` is the second skill's own
+      // name rather than a qualified form. The colliding `chat` keeps its bare
+      // name: qualifying it onto `rust:chat` would register two skills under
+      // one name, and exact-match first-wins would silently drop or misroute
+      // one of them.
+      expect(skills.map((s) => s.name)).toEqual([
+        'chat',
+        'docs:chat',
+        'rust:chat',
+      ]);
+      await expect(manager.loadSkill('rust:chat')).resolves.toMatchObject({
+        description: 'literal chat',
+        extensionName: 'rust',
+      });
+      await expect(
+        manager.loadSkill('chat', 'extension'),
+      ).resolves.toMatchObject({ description: 'rust chat' });
+    });
+
+    it('does not qualify an extension skill onto a user skill written with a colon', async () => {
+      const userQwenSkillsDir = path.join(TEST_HOME, '.qwen', 'skills');
+      mockParseYaml.mockImplementation((yamlString: string) =>
+        yaml.parse(yamlString),
+      );
+      vi.mocked(fs.readdir).mockReset();
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        if (String(dirPath) === userQwenSkillsDir) {
+          return Promise.resolve(
+            ['pdf', 'rust:pdf'].map((name) => ({
+              name,
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            })) as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+          );
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+      vi.mocked(fs.readFile).mockImplementation((filePath) =>
+        Promise.resolve(
+          String(filePath).includes('rust:pdf')
+            ? '---\nname: rust:pdf\ndescription: User literal\n---\nBody'
+            : '---\nname: pdf\ndescription: User pdf\n---\nBody',
+        ),
+      );
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'rust',
+          name: 'rust',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/rust',
+          config: { name: 'rust', version: '1.0.0' },
+          contextFiles: [],
+          skills: [
+            {
+              name: 'pdf',
+              description: 'Rust pdf skill',
+              body: 'Body',
+              filePath: '/extensions/rust/skills/pdf/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+
+      const skills = await manager.listSkills({ force: true });
+
+      // The user owns the literal name, so the extension copy stays bare and
+      // the user skill shadows it in the listing, exactly as it did before
+      // #9408. Both stay resolvable at their own level instead of one being
+      // deduplicated away under a manufactured name.
+      expect(skills.map((s) => s.name)).toEqual(['pdf', 'rust:pdf']);
+      await expect(manager.loadSkill('rust:pdf')).resolves.toMatchObject({
+        level: 'user',
+        description: 'User literal',
+      });
+      await expect(
+        manager.loadSkill('pdf', 'extension'),
+      ).resolves.toMatchObject({ description: 'Rust pdf skill' });
+    });
+
     it('uses the canonical extension name for extension-owned skills', async () => {
       vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
         {
