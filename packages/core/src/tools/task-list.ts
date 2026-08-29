@@ -18,7 +18,7 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { getTeamName, resolveActiveTeamName } from '../agents/team/identity.js';
 import { sanitizeName } from '../agents/team/teamHelpers.js';
-import { listTasks } from '../agents/team/tasks.js';
+import { assertValidTaskId, listTasks } from '../agents/team/tasks.js';
 
 export interface TaskListParams {
   status?: 'pending' | 'in_progress' | 'completed';
@@ -42,10 +42,10 @@ class TaskListInvocation extends BaseToolInvocation<
     if (this.params.status) {
       filters.push(`status=${this.params.status}`);
     }
-    if (this.params.owner) {
+    if (this.params.owner?.trim()) {
       filters.push(`owner=${this.params.owner}`);
     }
-    if (this.params.blockedBy) {
+    if (this.params.blockedBy?.trim()) {
       filters.push(`blockedBy=${this.params.blockedBy}`);
     }
     return filters.length > 0
@@ -85,10 +85,19 @@ class TaskListInvocation extends BaseToolInvocation<
       }
     }
 
-    const blockedByFilter =
-      this.params.blockedBy !== undefined && this.params.blockedBy.trim() !== ''
-        ? this.params.blockedBy
-        : undefined;
+    const blockedByFilter = this.params.blockedBy?.trim().replace(/^#/, '');
+    if (blockedByFilter) {
+      try {
+        assertValidTaskId(blockedByFilter);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+    }
 
     const tasks = await listTasks(teamName, {
       status: this.params.status,

@@ -169,6 +169,7 @@ describe('TaskListTool', () => {
       const result = await invocation.execute(new AbortController().signal);
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Owned');
+      expect(invocation.getDescription()).toBe('List all tasks');
     });
 
     it('treats an empty blockedBy filter as no filter', async () => {
@@ -193,6 +194,7 @@ describe('TaskListTool', () => {
       const result = await invocation.execute(new AbortController().signal);
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Task A');
+      expect(invocation.getDescription()).toBe('List all tasks');
     });
 
     it('still filters precisely by a non-empty blockedBy', async () => {
@@ -216,6 +218,18 @@ describe('TaskListTool', () => {
       expect(result.llmContent).toContain('Blocked');
       expect(result.llmContent).not.toContain('Blocker');
       expect(result.llmContent).not.toContain('Free');
+
+      const formatted = tool.build({ blockedBy: ` #${blocker.id} ` });
+      const formattedResult = await formatted.execute(
+        new AbortController().signal,
+      );
+      expect(formattedResult.error).toBeUndefined();
+      expect(formattedResult.llmContent).toContain('Blocked');
+
+      const invalid = await tool
+        .build({ blockedBy: 'task-1' })
+        .execute(new AbortController().signal);
+      expect(invalid.error).toBeDefined();
     });
   });
 
