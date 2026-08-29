@@ -228,10 +228,11 @@ export interface DaemonScheduledTaskRun {
   /** `'scheduled'` (on-time), `'catch-up'` (fired late), or `'manual'` (user
    * "run now"); absent = scheduled. */
   kind?: 'scheduled' | 'catch-up' | 'manual';
-  /** The session the fire ran in, when the task is bound to one. Mirrors the
-   * daemon's `CronTaskRun.sessionId` so run-attribution isn't silently dropped
-   * on the client (not surfaced in the UI yet). */
+  /** The session the fire ran in, when present. Mirrors the daemon's
+   * `CronTaskRun.sessionId` so the UI can open the run conversation. */
   sessionId?: string;
+  /** The daemon could not create the fresh session requested for this run. */
+  sessionDispatchFailed?: boolean;
   /** READ-ONLY legacy compat: a pre-removal version stamped this on a fire whose
    * precondition withheld the prompt. Never written now, but kept so the UI can
    * still mark such stored entries "skipped" instead of showing them as ordinary
@@ -254,6 +255,9 @@ export interface DaemonScheduledTask {
   /** Id of the dedicated session this task is bound to — its transcript is the
    * task's run history. Null for unbound tool-created/legacy tasks. */
   sessionId: string | null;
+  /** `persistent` reuses the task's bound session; `per_run` creates a fresh
+   * child session for every scheduled or manual fire. */
+  sessionMode?: 'persistent' | 'per_run';
   /** Bounded, newest-last history of recent fires. Empty for tasks that have
    * not fired (and, by nature, for one-shots — they are deleted on fire). */
   runs: DaemonScheduledTaskRun[];
@@ -277,6 +281,8 @@ export interface DaemonCreateScheduledTaskRequest {
   enabled?: boolean;
   /** Reuse an existing live, idle session instead of creating one. */
   sessionId?: string | null;
+  /** Defaults to `persistent` when omitted. */
+  sessionMode?: 'persistent' | 'per_run';
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -287,6 +293,7 @@ export interface DaemonUpdateScheduledTaskRequest {
   name?: string | null;
   recurring?: boolean;
   enabled?: boolean;
+  sessionMode?: 'persistent' | 'per_run';
 }
 
 export interface DaemonAddWorkspaceResult {
@@ -537,8 +544,8 @@ export interface DaemonWorkspaceActions {
     patch: DaemonUpdateScheduledTaskRequest,
     workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
-  /** Record a manual run (updates lastFiredAt + appends a 'manual' run). The
-   * prompt itself is executed by the caller in the task's bound session. */
+  /** Run now. Persistent tasks are only recorded here and are executed by the
+   * caller; per-run tasks are dispatched into a fresh daemon session. */
   runScheduledTask(
     id: string,
     workspaceId?: string,

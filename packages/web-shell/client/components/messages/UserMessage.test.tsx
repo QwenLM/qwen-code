@@ -85,6 +85,40 @@ describe('UserMessage', () => {
     expect(container.textContent).toContain('full exported prompt');
   });
 
+  it('renders scheduled-task context as a compact localized card', () => {
+    const renderUserMessageContent = vi.fn(() => <span>custom message</span>);
+    const content =
+      'Scheduled task: Review PRs\n' +
+      'Task ID: task-1\n' +
+      'Schedule: 0 * * * *\n' +
+      'Triggered at: 2026-08-26T07:27:00.000Z\n' +
+      'Trigger: scheduled\n' +
+      'Session: new chat for this run\n\n' +
+      'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.\n\n' +
+      'review the next PR';
+    const container = render(
+      <I18nProvider language="zh-CN">
+        <WebShellCustomizationProvider value={{ renderUserMessageContent }}>
+          <UserMessage content={content} />
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+
+    expect(
+      container.querySelector('[data-web-shell-scheduled-task-run-message]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('定时任务运行');
+    expect(container.textContent).toContain('Review PRs');
+    expect(container.textContent).toContain('任务 ID: task-1');
+    expect(container.textContent).toContain('定时触发');
+    expect(container.textContent).toContain('每次新会话');
+    expect(container.textContent).toContain('review the next PR');
+    expect(container.textContent).not.toContain(
+      'Do not create or modify a schedule',
+    );
+    expect(renderUserMessageContent).not.toHaveBeenCalled();
+  });
+
   it('renders an accessible retry action for a failed send', () => {
     const onRetrySend = vi.fn();
     const container = render(

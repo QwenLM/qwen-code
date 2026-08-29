@@ -9264,6 +9264,41 @@ describe('parallel subAgent text interleaving fix', () => {
     });
   });
 
+  it('retains executionMode in compacted task_execution output', () => {
+    let state = createDaemonTranscriptState({
+      now: 1,
+      retainSubagentBlocks: false,
+    });
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-task-mode',
+        toolName: 'agent',
+        status: 'running',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'running',
+          executionMode: 'background',
+          subagentName: 'probe',
+        },
+      },
+    ] as DaemonUiEvent[]);
+
+    // Web Shell classification treats executionMode as authoritative from
+    // the first running update; summary-mode compaction must not drop it.
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolCallId: 'agent-task-mode',
+      rawOutput: {
+        type: 'task_execution',
+        status: 'running',
+        executionMode: 'background',
+        subagentName: 'probe',
+      },
+    });
+  });
+
   it('keeps subagent block filtering enabled after store reset', () => {
     const store = createDaemonTranscriptStore({ retainSubagentBlocks: false });
     store.reset();

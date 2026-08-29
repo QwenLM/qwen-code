@@ -4218,7 +4218,11 @@ describe('transcriptBlocksToDaemonMessages', () => {
       toolBlock('agent-end', 'agent-1', 'completed', 20, {
         title: 'Agent: work done',
         toolName: 'agent',
-        rawOutput: { type: 'task_execution', totalTokens: 500 },
+        rawOutput: {
+          type: 'task_execution',
+          executionMode: 'background',
+          totalTokens: 500,
+        },
         updatedAt: 25,
       }),
     ]);
@@ -4229,10 +4233,56 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(tool?.title).toBe('Agent: work done');
     expect(tool?.status).toBe('completed');
     expect(tool?.endTime).toBe(25);
+    expect(tool?.executionMode).toBe('background');
     expect(tool?.rawOutput).toEqual({
       type: 'task_execution',
+      executionMode: 'background',
       totalTokens: 500,
     });
+  });
+
+  it('rejects an unknown executionMode literal from task_execution rawOutput', () => {
+    // Only the two known literals may flow through as authoritative; any
+    // other value (corrupted recording, future runtime mode) must fall back
+    // to the compatibility heuristic instead of forcing a classification.
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: work',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+        rawOutput: { type: 'task_execution', executionMode: 'detached' },
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.executionMode).toBeUndefined();
+    expect(tool?.rawOutput).toEqual({
+      type: 'task_execution',
+      executionMode: 'detached',
+    });
+  });
+
+  it('accepts the foreground executionMode literal over the frozen heuristic', () => {
+    // Shaped as a downgraded nested agent's block in the child session's
+    // transcript: top-level-shaped (no parentToolCallId) with an empty arg
+    // object. Without the authoritative literal, the frozen compatibility
+    // heuristic's defaultsToBackground branch would classify exactly this
+    // block background and hide the inline result — the literal must win so
+    // the downgrade direction stays pinned end-to-end.
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: work',
+        toolName: 'agent',
+        rawInput: {},
+        rawOutput: { type: 'task_execution', executionMode: 'foreground' },
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.executionMode).toBe('foreground');
+    expect(tool?.status).toBe('in_progress');
   });
 
   it('does not merge assistant across error block', () => {

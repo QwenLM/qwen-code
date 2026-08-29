@@ -30,10 +30,12 @@ interface MockTask {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
+  sessionMode?: 'persistent' | 'per_run';
   runs: Array<{
     at: number;
     kind?: 'scheduled' | 'catch-up';
     sessionId?: string;
+    sessionDispatchFailed?: boolean;
   }>;
 }
 
@@ -176,6 +178,12 @@ function findFrequencySelect(): HTMLSelectElement | undefined {
   );
 }
 
+function findSessionModeSelect(): HTMLSelectElement | undefined {
+  return Array.from(document.querySelectorAll('select')).find(
+    (select) => !!select.querySelector('option[value="per_run"]'),
+  );
+}
+
 function deferred<T = unknown>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
@@ -247,7 +255,7 @@ describe('ScheduledTasksDialog editing', () => {
     expect(document.body.textContent).not.toContain('Current conversation');
   });
 
-  it('defaults to a dedicated task conversation and omits sessionId', async () => {
+  it('defaults to a fresh conversation per run and omits sessionId', async () => {
     actions.createScheduledTask.mockResolvedValue(baseTask({}));
     await mount([], {
       currentSession,
@@ -258,12 +266,15 @@ describe('ScheduledTasksDialog editing', () => {
     const sessionSelect = Array.from(document.querySelectorAll('select')).find(
       (select) => select.querySelector('option[value="current"]'),
     );
-    expect(sessionSelect?.value).toBe('dedicated');
+    expect(sessionSelect?.value).toBe('per_run');
     await enterPromptAndCreate('continue later');
 
     expect(actions.createScheduledTask).toHaveBeenCalledWith(
-      expect.not.objectContaining({ sessionId: expect.anything() }),
+      expect.objectContaining({ sessionMode: 'per_run' }),
       undefined,
+    );
+    expect(actions.createScheduledTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      'sessionId',
     );
   });
 
@@ -285,12 +296,15 @@ describe('ScheduledTasksDialog editing', () => {
     await enterPromptAndCreate('continue later');
 
     expect(actions.createScheduledTask).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionId: currentSession.sessionId }),
+      expect.objectContaining({
+        sessionId: currentSession.sessionId,
+        sessionMode: 'persistent',
+      }),
       undefined,
     );
   });
 
-  it('returns to a dedicated session when the capability disappears', async () => {
+  it('returns to a fresh session per run when the capability disappears', async () => {
     actions.createScheduledTask.mockResolvedValue(baseTask({}));
     const { rerender } = await mount([], {
       currentSession,
@@ -310,8 +324,11 @@ describe('ScheduledTasksDialog editing', () => {
     await enterPromptAndCreate('continue later');
 
     expect(actions.createScheduledTask).toHaveBeenCalledWith(
-      expect.not.objectContaining({ sessionId: expect.anything() }),
+      expect.objectContaining({ sessionMode: 'per_run' }),
       undefined,
+    );
+    expect(actions.createScheduledTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      'sessionId',
     );
   });
 
@@ -392,6 +409,22 @@ describe('ScheduledTasksDialog editing', () => {
     },
   );
 
+  it('uses flat icons for task actions and session mode status', async () => {
+    await mount([baseTask({ sessionMode: 'per_run' })]);
+
+    for (const label of ['Run now', 'Edit', 'Delete']) {
+      const action = document.querySelector(`[aria-label="${label}"]`);
+      expect(action?.querySelector('svg')).not.toBeNull();
+      expect(action?.textContent?.trim()).toBe('');
+    }
+    expect(
+      document
+        .querySelector(
+          '[title="Each run gets a clean context and its own conversation."]',
+        )
+        ?.querySelector('svg'),
+    ).not.toBeNull();
+  });
   it('keeps the prompt placeholder outside the editable textbox', async () => {
     await mount([]);
 
@@ -403,6 +436,31 @@ describe('ScheduledTasksDialog editing', () => {
       'What should this task do?',
     );
     expect(document.body.textContent).toContain('What should this task do?');
+  });
+
+  it('defaults new tasks to a fresh session for every run', async () => {
+    actions.createScheduledTask.mockResolvedValue(
+      baseTask({ sessionMode: 'per_run' }),
+    );
+    await mount([]);
+    click(findButton('New scheduled task'));
+
+    expect(findSessionModeSelect()?.value).toBe('per_run');
+    const prompt = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    act(() => {
+      prompt.textContent = 'review pull requests';
+      prompt.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+    click(findButton('Create'));
+    await flush();
+
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: 'review pull requests',
+        sessionMode: 'per_run',
+      }),
+      undefined,
+    );
   });
 
   it('prefills the form from the task and saves via updateScheduledTask', async () => {
@@ -433,6 +491,7 @@ describe('ScheduledTasksDialog editing', () => {
         cron: '30 12 * * 1-5',
         prompt: 'summarize the day',
         name: 'Digest',
+        sessionMode: 'persistent',
       },
       undefined,
     );
@@ -919,6 +978,25 @@ describe('ScheduledTasksDialog run history', () => {
 });
 
 describe('ScheduledTasksDialog run now', () => {
+  it('lets the daemon run a per-run task without enqueueing its controller session', async () => {
+    const onRunPrompt = vi.fn();
+    await mount(
+      [
+        baseTask({
+          sessionId: 'controller-1',
+          sessionMode: 'per_run',
+          prompt: 'do it',
+        }),
+      ],
+      { onRunPrompt },
+    );
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
+    expect(onRunPrompt).not.toHaveBeenCalled();
+  });
+
   it('records the run and executes the prompt in the task’s bound session', async () => {
     const onRunPrompt = vi.fn();
     await mount([baseTask({ sessionId: 'sess-9', prompt: 'do it' })], {
@@ -1105,6 +1183,31 @@ describe('ScheduledTasksDialog far-future countdown', () => {
 });
 
 describe('ScheduledTasksDialog view-history (bound session)', () => {
+  it('opens the individual child session for a per-run history entry', async () => {
+    const onOpenSession = vi.fn();
+    await mount(
+      [
+        baseTask({
+          sessionId: 'controller-1',
+          sessionMode: 'per_run',
+          runs: [
+            {
+              at: 1_700_000_100_000,
+              kind: 'scheduled',
+              sessionId: 'child-1',
+            },
+          ],
+        }),
+      ],
+      { onOpenSession },
+    );
+
+    expect(findButton('View conversation (1)')).toBeUndefined();
+    click(findButton('Run history (1)'));
+    click(document.querySelector('[title="Open this run session"]'));
+    expect(onOpenSession).toHaveBeenCalledWith('child-1');
+  });
+
   it('opens the bound session when its history control is clicked', async () => {
     const onOpenSession = vi.fn();
     await mount(

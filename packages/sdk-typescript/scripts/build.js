@@ -119,7 +119,8 @@ const rootDir = join(__dirname, '..');
 // response validation, and outcome-unknown recovery surface.
 // Bumped from 215KB to 218KB after merging stable transcript identity and safe
 // preview projection with the standalone-session surface.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 218 * 1024;
+// Bumped from 218KB to 219KB after adding the shared task execution-mode guard.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 219 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't
