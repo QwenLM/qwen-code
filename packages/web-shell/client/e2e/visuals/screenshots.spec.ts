@@ -10,6 +10,7 @@ import {
   assistantTextEvent,
   createWebShellDaemonScenario,
   permissionRequestEvent,
+  toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
 } from '../utils/mockDaemon';
@@ -71,22 +72,13 @@ for (const theme of THEMES) {
         id: number,
         toolCallId: string,
         description: string,
-      ): DaemonEvent => ({
-        id,
-        v: 1,
-        type: 'session_update',
-        data: {
-          update: {
-            sessionUpdate: 'tool_call',
-            toolCallId,
-            toolName: 'Agent',
-            title: 'Agent',
-            kind: 'other',
-            status: 'completed',
-            rawInput: { description, run_in_background: true },
-          },
-        },
-      });
+      ): DaemonEvent =>
+        toolCallEvent(
+          toolCallId,
+          'Agent',
+          { description, run_in_background: true },
+          { id },
+        );
       const scenario = createWebShellDaemonScenario({
         events: [
           userTextEvent('Split the migration across parallel agents.', {
@@ -831,7 +823,12 @@ for (const theme of THEMES) {
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the
       // screenshot and the capture differs between runs.
-      await expect(sidebar.getByText(primarySessionName)).toBeVisible();
+      await expect(
+        sidebar.getByRole('button', {
+          name: primarySessionName,
+          exact: true,
+        }),
+      ).toBeVisible();
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
@@ -1038,26 +1035,12 @@ for (const theme of THEMES) {
         },
         events: [
           userTextEvent('Review my changes and save the report.', { id: 1 }),
-          {
-            id: 2,
-            v: 1,
-            type: 'session_update',
-            data: {
-              update: {
-                sessionUpdate: 'tool_call',
-                toolCallId: 'call-record-review',
-                toolName: 'record_artifact',
-                title: 'record_artifact',
-                kind: 'other',
-                status: 'completed',
-                rawInput: {
-                  title: 'Code review result',
-                  workspacePath: reviewPath,
-                },
-                rawOutput: { recorded: true },
-              },
-            },
-          },
+          toolCallEvent(
+            'call-record-review',
+            'record_artifact',
+            { title: 'Code review result', workspacePath: reviewPath },
+            { id: 2, rawOutput: { recorded: true } },
+          ),
           assistantTextEvent('Review saved to the workspace.', { id: 3 }),
           turnCompleteEvent('prompt-review', { id: 4 }),
         ],
@@ -1161,26 +1144,12 @@ for (const theme of THEMES) {
         },
         events: [
           userTextEvent('Open the saved report.', { id: 1 }),
-          {
-            id: 2,
-            v: 1,
-            type: 'session_update',
-            data: {
-              update: {
-                sessionUpdate: 'tool_call',
-                toolCallId: 'call-record-report',
-                toolName: 'record_artifact',
-                title: 'record_artifact',
-                kind: 'other',
-                status: 'completed',
-                rawInput: {
-                  title: 'Summary report',
-                  workspacePath: reportPath,
-                },
-                rawOutput: { recorded: true },
-              },
-            },
-          },
+          toolCallEvent(
+            'call-record-report',
+            'record_artifact',
+            { title: 'Summary report', workspacePath: reportPath },
+            { id: 2, rawOutput: { recorded: true } },
+          ),
           assistantTextEvent('Report saved to the workspace.', { id: 3 }),
           turnCompleteEvent('prompt-drawer', { id: 4 }),
         ],

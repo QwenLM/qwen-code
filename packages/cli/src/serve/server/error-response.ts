@@ -9,6 +9,7 @@ import {
   InvalidSessionTranscriptCursorError,
   recordDaemonBridgeError,
   recordDaemonError,
+  SessionIdCaseConflictError,
   SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
@@ -21,6 +22,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   BranchWhilePromptActiveError,
   BridgeChannelQuarantinedError,
+  BridgeTimeoutError,
   CancelSentinelCollisionError,
   CdWhilePromptActiveError,
   InvalidClientIdError,
@@ -57,6 +59,8 @@ import type { DaemonLogger } from '../daemon-logger.js';
 import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import { DaemonDrainingError } from './session-archive.js';
+import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -210,6 +214,18 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof BridgeTimeoutError && err.label === 'newSession') {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.set('Retry-After', String(restoreRetryAfterSeconds(err.timeoutMs)));
+    res.status(504).json({
+      error: err.message,
+      code: 'init_timeout',
+      errorKind: 'init_timeout',
+      retryable: true,
+      timeoutMs: err.timeoutMs,
+    });
+    return;
+  }
   if (err instanceof BridgeChannelQuarantinedError) {
     recordExpectedBridgeError(err, ctx, daemonLog);
     // Quarantine lasts until the channel drains, which is strictly longer than
@@ -234,7 +250,51 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof ConversationRuntimeOwnershipError) {
+    res.status(err.status).json({
+      error: err.message,
+      code: err.code,
+      retryable: err.retryable,
+    });
+    return;
+  }
+  if (err instanceof StandaloneSessionServiceError) {
+    const status =
+      err.code === 'invalid_request'
+        ? 400
+        : err.code === 'standalone_session_not_found'
+          ? 404
+          : err.code === 'standalone_creation_outcome_unknown' ||
+              err.code === 'standalone_creation_rolled_back' ||
+              err.code === 'standalone_session_operation_failed' ||
+              err.code === 'transcript_deletion_failed' ||
+              err.code === 'transcript_deletion_outcome_unknown' ||
+              err.code === 'working_directory_recovery_failed'
+            ? 500
+            : 409;
+    if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
+    if (err.retryable) res.set('Retry-After', '5');
+    res.status(status).json({
+      error: err.message,
+      code: err.code,
+      errorKind: err.code,
+      retryable: err.retryable,
+      ...(err.sessionId !== undefined ? { sessionId: err.sessionId } : {}),
+    });
+    return;
+  }
   if (sendGenerationClosedError(res, err)) return;
+  if (
+    err instanceof Error &&
+    'code' in err &&
+    (err.code === 'session_attachment_gone' ||
+      err.code === 'invalid_session_attachment_reference')
+  ) {
+    res
+      .status(err.code === 'session_attachment_gone' ? 410 : 400)
+      .json({ error: err.message, code: err.code });
+    return;
+  }
   if (err instanceof SessionWriterError) {
     res.status(err.httpStatus).json({
       error: err.message,
@@ -245,9 +305,7 @@ export function sendBridgeError(
   }
   const skillError = mapWorkspaceSkillToggleError(err);
   if (skillError) {
-    res
-      .status(skillError.code === 'skill_not_found' ? 404 : 409)
-      .json(skillError);
+    res.status(404).json(skillError);
     return;
   }
   if (err instanceof InvalidSessionTranscriptCursorError) {
@@ -412,6 +470,14 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof SessionConflictError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_conflict',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionIdCaseConflictError) {
     res.status(409).json({
       error: err.message,
       code: 'session_conflict',
@@ -604,6 +670,8 @@ export function sendBridgeError(
     res.status(409).json({
       error: err.message,
       code: 'session_busy',
+      errorKind: 'session_busy',
+      retryable: true,
       sessionId: err.sessionId,
     });
     return;
@@ -622,6 +690,35 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      if (kind === 'session_busy') {
+        res.set('Retry-After', '5');
+        res.status(409).json({
+          error: 'The session is busy.',
+          code: kind,
+          errorKind: kind,
+          retryable: true,
+          ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        });
+        return;
+      }
+      if (
+        kind === 'working_directory_missing' ||
+        kind === 'working_directory_compromised'
+      ) {
+        const retryable = kind === 'working_directory_missing';
+        if (retryable) res.set('Retry-After', '5');
+        res.status(409).json({
+          error:
+            kind === 'working_directory_missing'
+              ? 'The standalone working directory is missing.'
+              : 'The standalone working directory identity is compromised.',
+          code: kind,
+          errorKind: kind,
+          retryable,
+          ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        });
+        return;
+      }
       if (
         kind === 'session_writer_conflict' ||
         kind === 'session_writer_lost' ||
@@ -639,6 +736,26 @@ export function sendBridgeError(
           error: SESSION_WRITER_ERROR_MESSAGES[kind],
           code: kind,
           errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'untrusted_workspace') {
+        res.status(403).json({
+          error: errorMessage(err),
+          code: kind,
+        });
+        return;
+      }
+      if (
+        kind === 'goal_conflict' ||
+        kind === 'goal_invalid_transition' ||
+        kind === 'goal_persist_failed'
+      ) {
+        const d = data as { current?: unknown };
+        res.status(kind === 'goal_persist_failed' ? 500 : 409).json({
+          error: errorMessage(err),
+          code: kind,
+          ...(d.current !== undefined ? { current: d.current } : {}),
         });
         return;
       }

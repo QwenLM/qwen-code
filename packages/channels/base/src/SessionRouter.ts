@@ -11,7 +11,10 @@ import {
 import { dirname, join } from 'node:path';
 import process from 'node:process';
 import type { SessionScope, SessionTarget } from './types.js';
-import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
+import type {
+  ChannelAgentBridge,
+  ChannelAgentBridgeSessionOptions,
+} from './ChannelAgentBridge.js';
 import { sanitizeLogText } from './sanitize.js';
 
 interface PersistedEntry {
@@ -60,6 +63,7 @@ export class SessionRouter {
   private defaultScope: SessionScope;
   private channelScopes: Map<string, SessionScope> = new Map();
   private channelApprovalModes: Map<string, string> = new Map();
+  private readonly channelsWithoutLoops = new Set<string>();
   private persistPath: string | undefined;
   private readonly recoveryMode: SessionRecoveryMode;
 
@@ -80,6 +84,7 @@ export class SessionRouter {
   /** Replace the bridge instance (used after crash recovery restart). */
   setBridge(bridge: ChannelAgentBridge): void {
     this.bridge = bridge;
+    this.liveSessionIds.clear();
   }
 
   /** Set scope override for a specific channel. */
@@ -95,6 +100,14 @@ export class SessionRouter {
       this.channelApprovalModes.set(channelName, approvalMode);
     } else {
       this.channelApprovalModes.delete(channelName);
+    }
+  }
+
+  setChannelLoopsEnabled(channelName: string, enabled: boolean): void {
+    if (enabled) {
+      this.channelsWithoutLoops.delete(channelName);
+    } else {
+      this.channelsWithoutLoops.add(channelName);
     }
   }
 
@@ -122,9 +135,14 @@ export class SessionRouter {
 
   private sessionOptions(
     channelName: string,
-  ): { approvalMode?: string } | undefined {
+  ): ChannelAgentBridgeSessionOptions {
     const approvalMode = this.channelApprovalModes.get(channelName);
-    return approvalMode ? { approvalMode } : undefined;
+    const loopsDisabled = this.channelsWithoutLoops.has(channelName);
+    return {
+      ...(approvalMode ? { approvalMode } : {}),
+      ...(loopsDisabled ? { enableChannelLoops: false } : {}),
+      sourceId: channelName,
+    };
   }
 
   async resolve(
@@ -242,7 +260,6 @@ export class SessionRouter {
         key,
         this.sessionOptions(input.channelName),
         operation,
-        input.channelName,
       );
       try {
         this.assertOperationCurrent(operation);
@@ -326,7 +343,6 @@ export class SessionRouter {
             key,
             this.sessionOptions(input.channelName),
             operation,
-            input.channelName,
           );
           try {
             this.assertOperationCurrent(operation);
@@ -403,6 +419,163 @@ export class SessionRouter {
       }
     }
     return false;
+  }
+
+  getSessionCwd(sessionId: string): string | undefined {
+    return this.toCwd.get(sessionId);
+  }
+
+  async createManagedSession(
+    target: SessionTarget,
+    cwd: string,
+  ): Promise<string> {
+    const loadWindow = this.beginSessionLoad();
+    const lifecycleGeneration = this.lifecycleGeneration;
+    const bridge = this.bridge;
+    const bindingToken = {};
+    try {
+      let lastDeadSessionId: string | undefined;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const sessionId = await bridge.newSession(
+          cwd,
+          {
+            ...this.sessionOptions(target.channelName),
+            sourceId: target.channelName,
+          },
+          bindingToken,
+        );
+        if (
+          lifecycleGeneration !== this.lifecycleGeneration ||
+          bridge !== this.bridge
+        ) {
+          this.scheduleManagedDiscard(bridge, sessionId, bindingToken);
+          throw new Error('Managed session creation was invalidated');
+        }
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw new Error('Invalid session ID from bridge');
+        }
+        if (loadWindow.delete(sessionId)) {
+          lastDeadSessionId = sessionId;
+          await bridge.discardSession?.(sessionId, bindingToken);
+          continue;
+        }
+        this.toTarget.set(sessionId, target);
+        this.toCwd.set(sessionId, cwd);
+        this.liveSessionIds.add(sessionId);
+        return sessionId;
+      }
+      throw new Error(
+        `Managed session ${lastDeadSessionId ?? 'unknown'} died before creation completed`,
+      );
+    } finally {
+      this.endSessionLoad(loadWindow);
+    }
+  }
+
+  async loadManagedSession(
+    sessionId: string,
+    target: SessionTarget,
+    cwd: string,
+  ): Promise<{ loaded: boolean }> {
+    if (this.liveSessionIds.has(sessionId)) {
+      this.toTarget.set(sessionId, target);
+      this.toCwd.set(sessionId, cwd);
+      return { loaded: false };
+    }
+
+    const loadWindow = this.beginSessionLoad();
+    const lifecycleGeneration = this.lifecycleGeneration;
+    const bridge = this.bridge;
+    const bindingToken = {};
+    let loadedSessionId: string | undefined;
+    try {
+      loadedSessionId = await bridge.loadSession(
+        sessionId,
+        cwd,
+        this.sessionOptions(target.channelName),
+        bindingToken,
+      );
+      if (
+        lifecycleGeneration !== this.lifecycleGeneration ||
+        bridge !== this.bridge
+      ) {
+        this.scheduleManagedDiscard(bridge, loadedSessionId, bindingToken);
+        loadedSessionId = undefined;
+        throw new Error('Managed session load was invalidated');
+      }
+      if (loadedSessionId !== sessionId) {
+        const unexpectedSessionId = loadedSessionId;
+        await bridge.discardSession?.(unexpectedSessionId, bindingToken);
+        loadedSessionId = undefined;
+        throw new Error(
+          `Bridge returned session ${unexpectedSessionId || 'unknown'} while loading ${sessionId}`,
+        );
+      }
+      if (loadWindow.delete(sessionId)) {
+        throw new Error(
+          `Managed session ${sessionId} died before loading completed`,
+        );
+      }
+      this.toTarget.set(sessionId, target);
+      this.toCwd.set(sessionId, cwd);
+      this.liveSessionIds.add(sessionId);
+      return { loaded: true };
+    } catch (error) {
+      if (loadedSessionId) {
+        await bridge
+          .discardSession?.(loadedSessionId, bindingToken)
+          .catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      this.endSessionLoad(loadWindow);
+    }
+  }
+
+  activateManagedSession(
+    sessionId: string,
+    target: SessionTarget,
+    cwd: string,
+  ): void {
+    const key = this.routingKey(
+      target.channelName,
+      target.senderId,
+      target.chatId,
+      target.threadId,
+    );
+    if (this.toSession.get(key) === sessionId) return;
+    this.invalidateRouteOperation(key);
+    this.toSession.set(key, sessionId);
+    this.toTarget.set(sessionId, target);
+    this.toCwd.set(sessionId, cwd);
+    this.persist();
+  }
+
+  forgetManagedSession(sessionId: string): void {
+    let changed = false;
+    for (const [key, mappedSessionId] of this.toSession) {
+      if (mappedSessionId !== sessionId) continue;
+      this.invalidateRouteOperation(key);
+      this.toSession.delete(key);
+      changed = true;
+    }
+    changed = this.toTarget.delete(sessionId) || changed;
+    changed = this.toCwd.delete(sessionId) || changed;
+    changed = this.liveSessionIds.delete(sessionId) || changed;
+    if (changed) this.persist();
+  }
+
+  async detachManagedSession(sessionId: string): Promise<void> {
+    try {
+      if (this.liveSessionIds.has(sessionId)) {
+        if (!this.bridge.discardSession) {
+          throw new Error('Managed session detach is not supported');
+        }
+        await this.bridge.discardSession(sessionId);
+      }
+    } finally {
+      this.forgetManagedSession(sessionId);
+    }
   }
 
   /**
@@ -616,6 +789,7 @@ export class SessionRouter {
           this.toSession.set(key, sessionId);
           this.toTarget.set(sessionId, entry.target);
           this.toCwd.set(sessionId, entry.cwd);
+          this.liveSessionIds.add(sessionId);
           reservation.resolve(sessionId);
           if (sessionId !== entry.sessionId) {
             changed = true;
@@ -802,18 +976,13 @@ export class SessionRouter {
     cwd: string,
     loadWindow: SessionLoadWindow,
     routingKey: string,
-    options: { approvalMode?: string } | undefined,
+    options: ChannelAgentBridgeSessionOptions,
     operation: SessionOperation,
-    sourceId: string,
   ): Promise<string> {
     const maxAttempts = 2;
     let lastDeadSessionId: string | undefined;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const sessionId = await this.bridge.newSession(
-        cwd,
-        { ...options, sourceId },
-        operation,
-      );
+      const sessionId = await this.bridge.newSession(cwd, options, operation);
       try {
         this.assertOperationCurrent(operation);
       } catch (error) {
@@ -922,6 +1091,20 @@ export class SessionRouter {
         .catch(() => undefined);
     } catch {
       // Best-effort cleanup must not replace the terminal invalidation.
+    }
+  }
+
+  private scheduleManagedDiscard(
+    bridge: ChannelAgentBridge,
+    sessionId: string,
+    bindingToken: object,
+  ): void {
+    try {
+      void bridge
+        .discardSession?.(sessionId, bindingToken)
+        .catch(() => undefined);
+    } catch {
+      // Best-effort cleanup must not block bridge recovery.
     }
   }
 

@@ -29,7 +29,7 @@ const sdkMock = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useActions: () => sdkMock.actions,
   useDaemonSessionOwnerGuard: () => sdkMock.ownerGuard,
 }));

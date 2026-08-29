@@ -51,6 +51,7 @@ describe('getVersion', () => {
     if (command.includes('deprecated')) return '';
 
     // Git Tag Mocks
+    if (command.includes("git tag -l 'v*'")) return 'v0.6.0\nv0.6.1';
     if (command.includes("git tag -l 'v[0-9].[0-9].[0-9]'")) return 'v0.6.1';
     if (command.includes("git tag -l 'v*-preview*'")) return 'v0.7.0-preview.1';
     if (command.includes("git tag -l 'v*-nightly*'"))
@@ -225,6 +226,8 @@ describe('getVersion', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         if (command.includes('npm view') && command.includes('--tag=latest'))
           return '0.8.0';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v0.6.0\nv0.6.1\nv0.8.0';
         return mockExecSync(command);
       });
 
@@ -238,6 +241,8 @@ describe('getVersion', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         if (command.includes('npm view') && command.includes('--tag=latest'))
           return '0.9.0';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v0.6.0\nv0.6.1\nv0.9.0';
         return mockExecSync(command);
       });
 
@@ -251,6 +256,8 @@ describe('getVersion', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         if (command.includes('npm view') && command.includes('--tag=latest'))
           return '0.7.9';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v0.6.0\nv0.6.1\nv0.7.9';
         return mockExecSync(command);
       });
 
@@ -258,6 +265,68 @@ describe('getVersion', () => {
       expect(result.releaseVersion).toBe('0.8.0-preview.0');
       expect(result.npmTag).toBe('preview');
       expect(result.previousReleaseTag).toBe('v0.7.9');
+    });
+
+    it('should fall back to the latest existing git tag when the npm baseline has no tag (half-shipped release)', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          // Published to npm, but its release run failed before the git
+          // tag was created, so the base mock's tag list lacks v0.6.2.
+          return '0.6.2';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should skip unparseable tags (e.g. leading zeros) when resolving the previous release tag', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.6.2';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v01.2.3\nv0.6.0\nv0.6.1';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should sort tags by semver order, not lexicographic order', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes("git tag -l 'v*'")) return 'v0.9.0\nv0.10.0';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      // semver descending: v0.10.0 > v0.9.0 (lexicographic would pick v0.9.0)
+      expect(result.previousReleaseTag).toBe('v0.10.0');
+    });
+
+    it('should keep the npm-derived previous tag when git tag listing fails', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes("git tag -l 'v*'")) {
+          throw new Error('git not available');
+        }
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should return an empty previous tag when no stable git tags exist', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes("git tag -l 'v*'")) {
+          // Only prerelease tags exist; the stable filter drops them all.
+          return 'v0.7.0-preview.1\nv0.8.0-nightly.20250916.abcdef';
+        }
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('');
     });
 
     it('should fall back to package.json when no nightly dist-tag exists (preview)', () => {
@@ -672,6 +741,7 @@ describe('assertVersionUnreleased', () => {
       '@qwen-code/audio-capture',
       '@qwen-code/channel-base',
       '@qwen-code/channel-dingtalk',
+      '@qwen-code/channel-dws',
       '@qwen-code/channel-feishu',
       '@qwen-code/channel-github',
       '@qwen-code/channel-qqbot',

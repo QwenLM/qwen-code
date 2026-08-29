@@ -89,17 +89,46 @@ describe('removeInjectedFromQueue', () => {
     ).toEqual(['other']);
   });
 
-  it('never matches an image-bearing entry (images are not pushed mid-turn)', () => {
+  it('never matches an image-bearing entry on the TEXT fallback', () => {
     const prompts = [q('with image', [{ data: 'x' }]), q('with image')];
     const next = removeInjectedFromQueue(
       prompts,
       [batch('s', 'with image')],
       's',
     );
-    // The text-only one is removed; the image-bearing one stays.
+    // The text-only one is removed; the image-bearing one stays — a text
+    // comparison can't verify its attachments.
     expect(next).not.toBeNull();
     expect(next).toHaveLength(1);
     expect(next?.[0].images).toEqual([{ data: 'x' }]);
+  });
+
+  it('removes an image-bearing entry on a strict id match', () => {
+    const imageRow = q('with image', [{ data: 'x' }]);
+    const prompts = [q('keep'), imageRow];
+    const next = removeInjectedFromQueue(
+      prompts,
+      [batchWithIds('s', ['with image'], [imageRow.midTurnMessageId!])],
+      's',
+    );
+    expect(next?.map((p) => p.text)).toEqual(['keep']);
+  });
+
+  it('removes an in-flight explicit insert on a strict id match', () => {
+    // An explicitly inserted row carries no `midTurnState` until its admission
+    // response lands, so the strict-id pass must reach it through
+    // `isInserting` — otherwise the injection echo leaves it queued twice.
+    const inserting = {
+      ...q('explicit insert', [{ data: 'x' }]),
+      midTurnState: undefined,
+      isInserting: true,
+    };
+    const next = removeInjectedFromQueue(
+      [inserting, q('keep')],
+      [batchWithIds('s', ['explicit insert'], [inserting.midTurnMessageId!])],
+      's',
+    );
+    expect(next?.map((p) => p.text)).toEqual(['keep']);
   });
 
   it('never matches a file-bearing entry (files are not pushed mid-turn)', () => {
@@ -147,6 +176,19 @@ describe('removeInjectedFromQueue', () => {
     const next = removeInjectedFromQueue(
       [submitting],
       [batchWithIds('s', ['early injection'], ['mid-early'])],
+      's',
+    );
+    expect(next).toEqual([]);
+  });
+
+  it('matches an explicit insert before its admission response arrives', () => {
+    const inserting = {
+      text: 'early explicit insert',
+      isInserting: true,
+    };
+    const next = removeInjectedFromQueue(
+      [inserting],
+      [batch('s', 'early explicit insert')],
       's',
     );
     expect(next).toEqual([]);

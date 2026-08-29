@@ -17,12 +17,13 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
+  useDaemonSessionOwnerGuard,
   useStreamingState,
   useTranscriptHistory,
   useTranscriptStore,
   useWorkspace,
   type DaemonSessionActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   type DaemonSessionArtifact,
   type DaemonSessionMonitorTaskStatus,
@@ -37,11 +38,12 @@ import {
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
 } from '../constants/sessions';
-import { useAnimationFrameTranscriptBlocks } from '../hooks/useAnimationFrameTranscriptBlocks';
+import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
+import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type {
   ComposerSubmitCommit,
   ComposerSubmitMetadata,
@@ -52,6 +54,7 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
+import { base64ToBlob } from '../utils/base64';
 import { isDefinitelyRejectedPromptAdmission } from '../utils/promptAdmission';
 import {
   getActiveTodosForPlanRevision,
@@ -59,6 +62,9 @@ import {
 } from '../utils/todos';
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
+import { parseWebShellGoalCommand } from '../utils/goalCondition';
+import { buildGoalControlRequest } from '../utils/goalControlRequest';
+import { isGoalGateBlocked } from '../utils/goalGate';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import {
@@ -76,18 +82,26 @@ import {
   skillDescriptionKey,
 } from '../constants/localCommands';
 import { mergeCommands } from '../hooks/daemonSessionMappers';
-import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
+import {
+  useSessionCatalogController,
+  useSessionHasActivePrompt,
+} from '../session-catalog/session-catalog-hooks';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
+import { GoalStatusStrip } from './GoalStatusStrip';
+import composerStatusStyles from './ComposerStatusStack.module.css';
+import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
+import { serializeContextUsageMessage } from './messages/ContextUsageMessage';
 import type {
   TurnOutputKind,
   TurnOutputOpenRequest,
 } from './artifacts/TurnOutputs';
 import { TURN_OUTPUT_KINDS } from './artifacts/TurnOutputs';
+import { useArtifactWorkspaceTarget } from './artifacts/useArtifactWorkspaceTarget';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -97,12 +111,12 @@ import { PaneHeaderActions } from './PaneHeaderActions';
 import styles from './ChatPane.module.css';
 import accentStyles from './WorkspaceAccent.module.css';
 
-// Split-view panes get the same interactive composer controls as the main chat,
-// each scoped to the pane's own session: the approval-mode and model pickers,
-// plus voice dictation. The width toggle is omitted (panes size themselves); the
-// slash menu is populated from the session's own command list (see below).
+// Split-view panes get the same session-scoped composer controls as the main
+// chat. The width toggle is omitted because panes size themselves.
 const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
+  'addMenu',
   'approvalMode',
+  'contextUsage',
   'model',
   'voice',
 ];
@@ -127,6 +141,8 @@ function OptionalMonitorDetailsProvider({
 export interface PaneHeaderActionsInfo {
   sessionId: string;
   workspaceCwd?: string;
+  /** The pane's own session actions; lets an action drive session data. */
+  sessionActions?: DaemonSessionActions;
 }
 
 export type PaneHeaderActionsRenderer = (
@@ -179,6 +195,7 @@ export interface ChatPaneProps {
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
+  onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
     task: DaemonSessionMonitorTaskStatus,
@@ -190,8 +207,6 @@ export interface ChatPaneProps {
     artifacts: readonly DaemonSessionArtifact[],
   ) => void;
   messageTurnOutputs?: readonly TurnOutputKind[];
-  /** Allow prompt admission to recover a disconnected SSE stream. */
-  restartSseOnPrompt?: boolean;
   /** Render inside a parent surface that already provides its own frame. */
   embedded?: boolean;
   onFirstPromptAdmitted?: (text: string) => void;
@@ -222,11 +237,11 @@ export function ChatPane({
   onError,
   onImageIngestionNotice,
   onSlashCommand,
+  onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
   onPaneArtifactsChange,
   messageTurnOutputs,
-  restartSseOnPrompt = false,
   embedded = false,
   onFirstPromptAdmitted,
   reportCatalogTurnCompletion = true,
@@ -237,19 +252,63 @@ export function ChatPane({
   sessionWorkflowEnabled = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
-  const { renderComposerFooter: CustomComposerFooter } =
+  const { renderComposerFooter: CustomComposerFooter, askUserFreeTextLabel } =
     useWebShellCustomization();
   const connection = useConnection();
   const actions = useActions();
+  const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const workspace = useWorkspace();
+  const attachmentWorkspaceTarget = useArtifactWorkspaceTarget(
+    connection.workspaceCwd,
+  );
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
-  const blocks = useAnimationFrameTranscriptBlocks();
-  const messages = useMessagesFromBlocks(t, blocks);
+  const sessionHasActivePrompt = useSessionHasActivePrompt(
+    workspace.client,
+    workspaceCwd ?? connection.workspaceCwd,
+    connection.sessionId,
+  );
+  const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
+  sessionHasActivePromptRef.current = sessionHasActivePrompt;
+  const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
+  const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
+  const [goalControlBusy, setGoalControlBusy] = useState(false);
+  const goalControlOpSeqRef = useRef(0);
+  const goalControlOwnerRef = useRef<
+    { opId: number; sessionId: string | undefined } | undefined
+  >(undefined);
+  const [goalEditOpen, setGoalEditOpen] = useState(false);
+  const [goalEditError, setGoalEditError] = useState<string | null>(null);
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
+  const connectionGoalComplete =
+    connection.goalState?.goal?.status === 'complete';
+  const liveGoalSnapshot = connectionGoalComplete
+    ? undefined
+    : connection.goalState;
+  useEffect(() => {
+    const owner = goalControlOwnerRef.current;
+    // Release the busy latch only when no control operation owns it, or when
+    // its owner belongs to a session we have left (that operation's `finally`
+    // can no longer release it here). Releasing it while an operation is still
+    // in flight — which a server-side goal replacement would otherwise do —
+    // re-enables the strip and lets a second control dispatch against the same
+    // expected revision, so one of the two loses with a 409.
+    if (!owner || owner.sessionId !== connection.sessionId) {
+      goalControlOwnerRef.current = undefined;
+      setGoalControlBusy(false);
+    }
+    setGoalEditOpen(false);
+    setGoalEditError(null);
+  }, [
+    connection.goalState?.goal?.goalId,
+    connection.sessionId,
+    connectionGoalComplete,
+  ]);
   const { artifacts } = useSessionArtifacts();
   const openSubagentDetails = useCallback(
     (tool: ACPToolCall) => {
@@ -360,7 +419,10 @@ export function ChatPane({
       catalogOwnerCwd === catalogStreamingWorkspaceCwdRef.current &&
       reportCatalogTurnCompletion
     ) {
-      sessionCatalogController.turnCompleted(catalogOwnerCwd);
+      sessionCatalogController.turnCompleted(
+        catalogOwnerCwd,
+        connection.sessionId,
+      );
     }
   }, [
     catalogOwnerCwd,
@@ -525,16 +587,17 @@ export function ChatPane({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canInjectMidTurnMedia =
+    connection.capabilities?.features.includes('session_attachments') === true;
   const {
     queuedPrompts,
     queuedTexts,
     enqueuePrompt,
     removeQueuedPrompt,
+    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
-    restoreUnknownQueuedPrompt,
-    discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected: connection.status === 'connected',
     sessionId: connection.sessionId,
@@ -542,7 +605,10 @@ export function ChatPane({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canInjectMidTurnMedia,
+    workspaceFileActions: attachmentWorkspaceTarget?.actions,
     streamingState,
+    sessionHasActivePrompt,
     sessionActions: actions,
     store,
     editorRef,
@@ -562,6 +628,86 @@ export function ChatPane({
     return undefined;
   }, [messages, isResponding]);
 
+  const controlGoal = useCallback(
+    async (
+      action: 'replace' | 'edit' | 'pause' | 'resume' | 'clear',
+      objective?: string,
+    ) => {
+      const busyOwner = sessionOwnerGuard.capture();
+      const busySessionId = connectionRef.current.sessionId;
+      const expectedGoalId = connectionRef.current.goalState?.goal?.goalId;
+      const opId = ++goalControlOpSeqRef.current;
+      goalControlOwnerRef.current = { opId, sessionId: busySessionId };
+      setGoalControlBusy(true);
+      try {
+        const snapshot = (await actions.getGoal()).snapshot;
+        const goal = snapshot.goal;
+        if (
+          (action === 'replace' || action === 'edit') &&
+          goal?.goalId !== expectedGoalId
+        ) {
+          throw new Error(t('goals.error.goalUnavailable'));
+        }
+        const request = buildGoalControlRequest(action, goal, objective, {
+          emptyObjective: t('goals.error.emptyCondition'),
+          goalUnavailable: t('goals.error.goalUnavailable'),
+        });
+        if (!busyOwner.isCurrent()) {
+          throw new Error(t('goals.error.goalUnavailable'));
+        }
+        try {
+          return await actions.controlGoal(request);
+        } catch (error) {
+          await actions.getGoal().catch(() => undefined);
+          throw error;
+        }
+      } finally {
+        // A newer operation (or a session change) owns the latch now; leave it
+        // to whoever owns it rather than releasing it under them.
+        if (goalControlOwnerRef.current?.opId === opId) {
+          goalControlOwnerRef.current = undefined;
+          if (connectionRef.current.sessionId === busySessionId) {
+            setGoalControlBusy(false);
+          }
+        }
+      }
+    },
+    [actions, sessionOwnerGuard, t],
+  );
+
+  const runGoalControl = useCallback(
+    (action: 'pause' | 'resume' | 'clear') => {
+      const owner = sessionOwnerGuard.capture();
+      void controlGoal(action).catch((error: unknown) => {
+        // A control dropped because the pane moved to another session is not a
+        // failure the user needs to see — `handleGoalEditSave` and the main
+        // composer swallow the same race.
+        if (!owner.isCurrent()) return;
+        reportError(error, t(`goals.error.${action}Failed`));
+      });
+    },
+    [controlGoal, reportError, sessionOwnerGuard, t],
+  );
+
+  const handleGoalEditSave = useCallback(
+    (objective: string) => {
+      const owner = sessionOwnerGuard.capture();
+      setGoalEditError(null);
+      void controlGoal('edit', objective)
+        .then(() => {
+          if (owner.isCurrent()) setGoalEditOpen(false);
+        })
+        .catch((error: unknown) => {
+          if (!owner.isCurrent()) return;
+          setGoalEditError(
+            error instanceof Error ? error.message : String(error),
+          );
+          reportError(error, t('goals.error.editFailed'));
+        });
+    },
+    [controlGoal, reportError, sessionOwnerGuard, t],
+  );
+
   const handleSubmit = useCallback(
     (
       text: string,
@@ -574,17 +720,73 @@ export function ChatPane({
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
         return false;
       if (admissionPayloadLocked) return false;
+      // The host handler is documented as running before Web Shell handles a
+      // slash command, so it gets `/goal` first here exactly as it does in the
+      // main composer — otherwise an override works on one surface only.
       if (
         trimmed &&
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
         return true;
       }
+      if (/^\/goal(?:\s|$)/i.test(trimmed)) {
+        // The same guard App.tsx applies before any slash handling: a control
+        // that cannot reach the daemon must leave the text in the composer
+        // instead of consuming it, appending a transcript entry, and failing
+        // later at `requireSessionForAction` with only a toast.
+        if (
+          shouldBlockComposerSubmit({
+            connectionStatus: connection.status,
+            hasSession: Boolean(connection.sessionId),
+          })
+        ) {
+          return false;
+        }
+        if (
+          (images?.length ?? 0) > 0 ||
+          (files?.length ?? 0) > 0 ||
+          (metadata?.inputAnnotations?.length ?? 0) > 0
+        ) {
+          const message = t('goals.error.attachmentsUnsupported');
+          reportError(new Error(message), message);
+          return false;
+        }
+        const operation = parseWebShellGoalCommand(trimmed);
+        if (operation.kind === 'status') {
+          // A pane without a Goals surface (the side-task pane passes no
+          // handler) would otherwise consume the text and open nothing.
+          if (!onOpenGoals) {
+            reportError(
+              new Error(t('goals.error.goalsUnavailable')),
+              t('goals.error.goalsUnavailable'),
+            );
+            return false;
+          }
+          onOpenGoals();
+          return true;
+        }
+        if (operation.kind === 'error') {
+          const message = t('goals.error.requiresObjective', {
+            keyword: operation.keyword,
+          });
+          reportError(new Error(message), message);
+          return false;
+        }
+        const action = operation.kind === 'set' ? 'replace' : operation.kind;
+        const objective =
+          operation.kind === 'set' || operation.kind === 'edit'
+            ? operation.objective
+            : undefined;
+        store.appendLocalUserMessage(text);
+        void controlGoal(action, objective).catch((error: unknown) => {
+          reportError(error, `Failed to ${operation.kind} /goal`);
+        });
+        return true;
+      }
       if (
         shouldBlockComposerSubmit({
           connectionStatus: connection.status,
           hasSession: Boolean(connection.sessionId),
-          restartSseOnPrompt,
         })
       ) {
         return false;
@@ -600,7 +802,17 @@ export function ChatPane({
           onFirstPromptAdmitted(trimmed);
         }
       };
-      if (streamingStateRef.current === 'idle') {
+      const commandBlockedByGoal =
+        trimmed.startsWith('/') &&
+        isGoalGateBlocked({
+          sessionId: connection.sessionId,
+          goalState: connection.goalState,
+        });
+      if (commandBlockedByGoal) return false;
+      if (
+        streamingStateRef.current === 'idle' &&
+        !sessionHasActivePromptRef.current
+      ) {
         const admissionOwner = admissionOwnerRef.current;
         let admissionStarted = false;
         let admitted = false;
@@ -673,14 +885,17 @@ export function ChatPane({
       admissionPayloadLocked,
       catalogOwnerCwd,
       clearFollowup,
+      connection.goalState,
       connection.sessionId,
       connection.status,
+      controlGoal,
       enqueuePrompt,
       onFirstPromptAdmitted,
       onImageIngestionNotice,
+      onOpenGoals,
       reportError,
-      restartSseOnPrompt,
       sessionCatalogController,
+      store,
       t,
     ],
   );
@@ -719,6 +934,9 @@ export function ChatPane({
     },
     [connection.sessionId, onRightPanelOpen],
   );
+  const paneWorkspaceCwd = workspaceCwd ?? connection.workspaceCwd;
+  const previewSessionIdRef = useRef(connection.sessionId);
+  previewSessionIdRef.current = connection.sessionId;
 
   const handleImagePreview = useCallback(
     (src: string, alt?: string) => {
@@ -733,6 +951,57 @@ export function ChatPane({
       });
     },
     [connection.sessionId, handleRightPanelOpen, t],
+  );
+  const handleAttachmentPreview = useCallback(
+    (file: AttachmentPreviewRequest) => {
+      const sessionId = connection.sessionId;
+      if (!sessionId) return;
+      const open = (resolvedFile: AttachmentPreviewRequest) =>
+        handleRightPanelOpen({
+          id: `attachment:${resolvedFile.attachmentId ?? resolvedFile.workspacePath ?? resolvedFile.name}`,
+          kind: 'attachment',
+          title: resolvedFile.name,
+          turnId: sessionId,
+          ...(resolvedFile.mimeType ? { mimeType: resolvedFile.mimeType } : {}),
+          ...(resolvedFile.data ? { data: resolvedFile.data } : {}),
+          ...(resolvedFile.text !== undefined
+            ? { text: resolvedFile.text }
+            : {}),
+          ...(paneWorkspaceCwd ? { workspaceCwd: paneWorkspaceCwd } : {}),
+          ...(resolvedFile.workspacePath
+            ? { workspacePath: resolvedFile.workspacePath }
+            : {}),
+        });
+      if (
+        file.attachmentId &&
+        file.text === undefined &&
+        file.data === undefined
+      ) {
+        void actions
+          .readAttachment(file.attachmentId)
+          .then((attachment) => {
+            if (previewSessionIdRef.current !== sessionId) return;
+            open({
+              ...file,
+              data: base64ToBlob(attachment.data, attachment.mimeType),
+              mimeType: attachment.mimeType,
+            });
+          })
+          .catch((error: unknown) => {
+            if (previewSessionIdRef.current !== sessionId) return;
+            reportError(error, 'Failed to preview attachment');
+          });
+        return;
+      }
+      open(file);
+    },
+    [
+      actions,
+      connection.sessionId,
+      handleRightPanelOpen,
+      paneWorkspaceCwd,
+      reportError,
+    ],
   );
 
   // Composer wiring, all scoped to THIS pane's own DaemonSession context. The
@@ -754,6 +1023,60 @@ export function ChatPane({
       };
     });
   }, [connection.commands, t]);
+  const skills = useMemo(() => {
+    const commandsByName = new Map(
+      commands.map((command) => [command.name.toLowerCase(), command]),
+    );
+    return (connection.skills ?? [])
+      .map((name) => {
+        const command = commandsByName.get(name.toLowerCase());
+        return {
+          name,
+          description: command?.description ?? '',
+          ...(command?.argumentHint
+            ? { argumentHint: command.argumentHint }
+            : {}),
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [commands, connection.skills]);
+  const handleShowContextUsage = useCallback(() => {
+    if (
+      shouldBlockComposerSubmit({
+        connectionStatus: connection.status,
+        hasSession: Boolean(connection.sessionId),
+      })
+    ) {
+      return;
+    }
+    const owner = sessionOwnerGuard.capture();
+    if (streamingStateRef.current === 'idle') {
+      store.appendLocalUserMessage('/context');
+    }
+    actions
+      .getContextUsage({ detail: false })
+      .then((result) => {
+        if (!owner.isCurrent()) return;
+        store.dispatch([
+          {
+            type: 'status',
+            text: serializeContextUsageMessage(result),
+            clearActiveText: false,
+          },
+        ]);
+      })
+      .catch((error: unknown) => {
+        if (!owner.isCurrent()) return;
+        reportError(error, 'Failed to load context usage');
+      });
+  }, [
+    actions,
+    connection.sessionId,
+    connection.status,
+    reportError,
+    sessionOwnerGuard,
+    store,
+  ]);
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
@@ -829,7 +1152,6 @@ export function ChatPane({
   // toolbar chip (next to where the git-branch chip sits), so it's clear which
   // workspace a message goes to. Multi-workspace-ness comes from the shared
   // workspace provider (the pane's own session connection may not carry it).
-  const paneWorkspaceCwd = workspaceCwd ?? connection.workspaceCwd;
   const showWorkspaceChip =
     hasMultipleWorkspaces(workspace.capabilities) && !!paneWorkspaceCwd;
   // Memoized so the array identity is stable across renders — `ChatEditor` is
@@ -846,6 +1168,7 @@ export function ChatPane({
       ? renderHeaderActions({
           sessionId: connection.sessionId,
           workspaceCwd: paneWorkspaceCwd || undefined,
+          sessionActions: actions,
         })
       : null;
 
@@ -875,6 +1198,19 @@ export function ChatPane({
       data-testid="chat-pane"
       aria-label={headerLabel}
     >
+      {goalEditOpen && connection.goalState?.goal && (
+        <GoalEditDialog
+          objective={connection.goalState.goal.objective}
+          saving={goalControlBusy}
+          error={goalEditError}
+          onSave={handleGoalEditSave}
+          onClose={() => {
+            if (goalControlBusy) return;
+            setGoalEditOpen(false);
+            setGoalEditError(null);
+          }}
+        />
+      )}
       {!embedded && (
         <header
           className={`${styles.header} ${workspaceAccentClass ?? ''}`.trim()}
@@ -1009,6 +1345,7 @@ export function ChatPane({
               }
               onTurnOutputOpen={handleRightPanelOpen}
               onImagePreview={handleImagePreview}
+              onAttachmentPreview={handleAttachmentPreview}
               onError={reportError}
               generateContent={
                 connection.capabilities?.features.includes('session_generation')
@@ -1044,84 +1381,124 @@ export function ChatPane({
               onError={reportError}
               variant="floating"
               keyboardActive={false}
+              customInputLabel={askUserFreeTextLabel}
             />
           </div>
         )}
-        {/* Panes keep the composer status compact: spinner + elapsed time +
-            token count + cancel hint, but no rotating "witty" loading phrase. */}
-        <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
-        <QueuedPromptDisplay
-          prompts={queuedPrompts}
-          t={t}
-          canMutateMidTurn={canMutateMidTurn}
-          onDelete={removeQueuedPrompt}
-          onEdit={editQueuedPrompt}
-          onRestoreUnknown={restoreUnknownQueuedPrompt}
-          onDiscardUnknown={discardUnknownQueuedPrompt}
-        />
-        {unknownPromptAdmission && (
-          <div
-            className={styles.admissionUnknown}
-            role="status"
-            data-testid="pane-prompt-admission-unknown"
-          >
-            <span>{t('queue.admissionUnknown')}</span>
-            {unknownPromptAdmission.payloadAvailable && (
-              <span className={styles.admissionUnknownActions}>
-                <button type="button" onClick={continueEditingUnknownPrompt}>
-                  {t('queue.continueEditing')}
-                </button>
-                <button type="button" onClick={discardUnknownPromptPayload}>
-                  {t('queue.discardUnknown')}
-                </button>
-              </span>
-            )}
-          </div>
-        )}
-        <ChatEditor
-          ref={editorRef}
-          onSubmit={handleSubmit}
-          onCancel={handleCancel}
-          isRunning={isResponding}
-          commands={commands}
-          queuedMessages={queuedTexts}
-          onPopQueuedMessages={editLastQueuedPrompt}
-          onClearQueuedMessages={clearQueuedPrompts}
-          visibleToolbarActions={paneToolbarActions}
-          workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
-          workspaceTitle={paneWorkspaceCwd}
-          workspaceColor={workspaceAccent}
-          currentMode={connection.currentMode ?? 'default'}
-          sessionWorkflowEnabled={sessionWorkflowEnabled}
-          currentModel={connection.currentModel ?? ''}
-          availableModels={availableModels}
-          onSelectMode={handleSelectMode}
-          onSelectModel={handleSelectModel}
-          reasoning={connection.reasoning}
-          onSelectReasoningEffort={handleSelectReasoningEffort}
-          dialogOpen={approvalActive}
-          disabled={approvalActive || admissionPayloadLocked}
-          voiceTarget={hidden ? undefined : voiceTarget}
-          voiceStatusRevision={voiceStatusRevision}
-          followupState={followupState}
-          onAcceptFollowup={onAcceptFollowup}
-          onDismissFollowup={onDismissFollowup}
-          onImageIngestionNotice={onImageIngestionNotice}
-          sessionId={connection.sessionId}
-          onImagePreview={handleImagePreview}
-          atWorkspaceCwd={paneWorkspaceCwd}
-          placeholderText={t('splitView.composerPlaceholder')}
-          animatePlaceholder={false}
-        />
-        {CustomComposerFooter && (
-          <CustomComposerFooter
-            disabled={approvalActive || admissionPayloadLocked}
-            isRunning={isResponding}
-            currentMode={connection.currentMode ?? 'default'}
-            currentModel={connection.currentModel ?? ''}
-            sessionName={connection.displayName}
+        {/* A pending approval owns the pane footer: the status/queue/editor
+            area below the approval drops out of layout (kept mounted so the
+            draft survives) instead of leaving a live input under the
+            dialog. */}
+        <div className={approvalActive ? styles.composerHidden : undefined}>
+          {/* Panes keep the composer status compact: spinner + elapsed time +
+              token count + cancel hint, but no rotating "witty" loading
+              phrase. */}
+          <StreamingStatus
+            startedAt={activeTurnStartedAt}
+            showPhrase={false}
+            hasActivePrompt={sessionHasActivePrompt}
           />
-        )}
+          {(queuedPrompts.length > 0 || liveGoalSnapshot?.goal) && (
+            <div
+              className={composerStatusStyles.root}
+              data-testid="composer-status-stack"
+            >
+              <QueuedPromptDisplay
+                prompts={queuedPrompts}
+                t={t}
+                canMutateMidTurn={canMutateMidTurn}
+                canInsertMidTurn={
+                  streamingState !== 'idle' || sessionHasActivePrompt
+                }
+                onDelete={removeQueuedPrompt}
+                onInsert={insertQueuedPrompt}
+                onEdit={editQueuedPrompt}
+                onImagePreview={handleImagePreview}
+                onAttachmentPreview={handleAttachmentPreview}
+              />
+              {liveGoalSnapshot?.goal && (
+                <GoalStatusStrip
+                  snapshot={liveGoalSnapshot}
+                  busy={goalControlBusy}
+                  onEdit={() => {
+                    setGoalEditError(null);
+                    setGoalEditOpen(true);
+                  }}
+                  onPause={() => runGoalControl('pause')}
+                  onResume={() => runGoalControl('resume')}
+                  onClear={() => runGoalControl('clear')}
+                />
+              )}
+            </div>
+          )}
+          {unknownPromptAdmission && (
+            <div
+              className={styles.admissionUnknown}
+              role="status"
+              data-testid="pane-prompt-admission-unknown"
+            >
+              <span>{t('queue.admissionUnknown')}</span>
+              {unknownPromptAdmission.payloadAvailable && (
+                <span className={styles.admissionUnknownActions}>
+                  <button type="button" onClick={continueEditingUnknownPrompt}>
+                    {t('queue.continueEditing')}
+                  </button>
+                  <button type="button" onClick={discardUnknownPromptPayload}>
+                    {t('queue.discardUnknown')}
+                  </button>
+                </span>
+              )}
+            </div>
+          )}
+          <ChatEditor
+            ref={editorRef}
+            onSubmit={handleSubmit}
+            onCancel={handleCancel}
+            isRunning={isResponding || sessionHasActivePrompt}
+            commands={commands}
+            skills={skills}
+            queuedMessages={queuedTexts}
+            onPopQueuedMessages={editLastQueuedPrompt}
+            onClearQueuedMessages={clearQueuedPrompts}
+            visibleToolbarActions={paneToolbarActions}
+            tokenCount={connection.tokenCount ?? 0}
+            contextWindow={connection.contextWindow ?? 0}
+            onShowContextUsage={handleShowContextUsage}
+            workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
+            workspaceTitle={paneWorkspaceCwd}
+            workspaceColor={workspaceAccent}
+            currentMode={connection.currentMode ?? 'default'}
+            sessionWorkflowEnabled={sessionWorkflowEnabled}
+            currentModel={connection.currentModel ?? ''}
+            availableModels={availableModels}
+            onSelectMode={handleSelectMode}
+            onSelectModel={handleSelectModel}
+            reasoning={connection.reasoning}
+            onSelectReasoningEffort={handleSelectReasoningEffort}
+            dialogOpen={approvalActive}
+            disabled={approvalActive || admissionPayloadLocked}
+            voiceTarget={hidden ? undefined : voiceTarget}
+            voiceStatusRevision={voiceStatusRevision}
+            followupState={followupState}
+            onAcceptFollowup={onAcceptFollowup}
+            onDismissFollowup={onDismissFollowup}
+            onImageIngestionNotice={onImageIngestionNotice}
+            sessionId={connection.sessionId}
+            onImagePreview={handleImagePreview}
+            onAttachmentPreview={handleAttachmentPreview}
+            atWorkspaceCwd={paneWorkspaceCwd}
+            placeholderText={t('splitView.composerPlaceholder')}
+          />
+          {CustomComposerFooter && (
+            <CustomComposerFooter
+              disabled={approvalActive || admissionPayloadLocked}
+              isRunning={isResponding || sessionHasActivePrompt}
+              currentMode={connection.currentMode ?? 'default'}
+              currentModel={connection.currentModel ?? ''}
+              sessionName={connection.displayName}
+            />
+          )}
+        </div>
       </div>
     </section>
   );

@@ -254,7 +254,7 @@ describe('scheduled-task keepalive', () => {
     });
     await ka.tick();
     ka.stop();
-    expect(names).toEqual([]); // legacy task never gets the ⏰ rename
+    expect(names).toEqual([]); // legacy task is never renamed
   });
 
   it('heartbeats nothing (and does not throw) when there are no tasks', async () => {
@@ -693,14 +693,19 @@ describe('scheduled-task keepalive', () => {
     });
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');
-    expect(names[0]![1].displayName).toContain('⏰');
+    expect(names[0]![1].displayName).toBe('check build');
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('new-sess-1');
   });
 
-  it('renames a bound session without ⏰ prefix exactly once', async () => {
+  it('renames task-owned sessions once without renaming caller-owned ones', async () => {
     await updateCronTasks(workspace, () => [
       task({ id: 'bound-1', sessionId: 'existing-sess', prompt: 'lint' }),
+      task({
+        id: 'caller-bound',
+        sessionId: 'caller-sess',
+        sessionOwnedByTask: false,
+      }),
     ]);
     const names: Array<[string, { displayName?: string }]> = [];
     const naming = {
@@ -719,7 +724,7 @@ describe('scheduled-task keepalive', () => {
     ka.stop();
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('existing-sess');
-    expect(names[0]![1].displayName).toContain('⏰');
+    expect(names[0]![1].displayName).toBe('lint');
   });
 
   it('does not bind disabled unbound tasks', async () => {
@@ -787,6 +792,7 @@ describe('scheduled-task keepalive', () => {
       closeSession: async (id: string) => {
         closed.push(id);
       },
+      markSessionCatalogChanged: vi.fn(),
       updateSessionMetadata: () => {},
     };
     await updateCronTasks(workspace, () => [
@@ -801,6 +807,8 @@ describe('scheduled-task keepalive', () => {
     ka.stop();
     expect(closed).toContain('orphan-sess');
     expect(removeSpy).toHaveBeenCalledWith('orphan-sess');
+    // The persisted removal succeeded, so the catalog clock advances.
+    expect(rollbackBridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
     removeSpy.mockRestore();
   });
 
@@ -825,6 +833,7 @@ describe('scheduled-task keepalive', () => {
       closeSession: async (id: string) => {
         closed.push(id);
       },
+      markSessionCatalogChanged: vi.fn(),
       updateSessionMetadata: () => {},
     };
     await updateCronTasks(workspace, () => [
@@ -838,6 +847,8 @@ describe('scheduled-task keepalive', () => {
     await ka.tick();
     ka.stop();
     expect(closed).toContain('our-orphan');
+    // The persisted removal succeeded, so the catalog clock advances.
+    expect(raceBridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
     // The other process's sessionId is preserved.
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('other-sess');

@@ -454,6 +454,47 @@ interface DaemonStatusRuntimeMemory {
      * every contributor predates the field, so `null` never means "fresh".
      */
     oldestReadingAgeMs: number | null;
+    /**
+     * Lifetime V8 old-generation high-water marks across the sampled children,
+     * as a **maximum, not a sum**. A heap ceiling applies per child, and the
+     * peaks were reached at different times, so a total answers no question
+     * anybody has; each field is an independent maximum, not a portrait of
+     * one child. A per-child ceiling is judged against each axis on its own.
+     *
+     * `null` — never a zeroed object — when no sampled child reported. The
+     * gating on `childRssCoverage` makes this the common case rather than an
+     * edge one: with no SSE/WS watcher attached the daemon takes no sample at
+     * all while children keep running. Publishing zeros there would assert
+     * that no child needs any heap.
+     *
+     * Observational. Nothing here sizes a child or refuses a spawn; see
+     * `limits.memory.enforced`, which stays `false`.
+     */
+    heap: {
+      /** Committed high-water. Rises with the ceiling the child was given, so
+       *  it bounds what the workload needs rather than stating it. */
+      peakOldGenerationBytes: number;
+      /** Retained-after-major-GC high-water, independent of the ceiling. The
+       *  figure able to say a child cannot fit one. */
+      peakLiveSetBytes: number;
+      /** `total_heap_size` high-water. Includes the young generation. */
+      peakTotalHeapBytes: number;
+      majorGcCount: number;
+      majorGcMs: number;
+      /**
+       * Union across the sampled children of heap spaces none of them could
+       * classify. Non-empty means the byte figures are incomplete and must not
+       * be read as a full measurement — a V8 taxonomy change is the way this
+       * goes wrong, and it under-counts, making a child look like it fits.
+       */
+      unclassifiedSpaceNames: string[];
+      /**
+       * How many of `children.sampled` contributed a heap report. Below
+       * `sampled` when some children predate the fields, so the maxima above
+       * cover only part of the sampled set.
+       */
+      reported: number;
+    } | null;
   };
   /**
    * Modeled per-child shares. Advisory; nothing applies them. Each is capped
@@ -650,6 +691,16 @@ export async function buildDaemonStatusResponse(
     let childRssBytesTotal = 0;
     let childRssSampled = 0;
     let oldestChildReadingAgeMs: number | null = null;
+    // Maxima, not running totals — see the `heap` field docs. `heapReported`
+    // is tracked separately from `childRssSampled` because a sampled child
+    // that predates the fields contributes rss but no heap.
+    let heapReported = 0;
+    let peakOldGenerationBytes = 0;
+    let peakLiveSetBytes = 0;
+    let peakTotalHeapBytes = 0;
+    let heapMajorGcCount = 0;
+    let heapMajorGcMs = 0;
+    const heapUnclassified = new Set<string>();
     for (const runtime of managedRuntimes ?? []) {
       // Gate on the same predicate `activeAcpChildCount` used, rather than
       // trusting `getChildResourceSnapshot` to return nothing for a dead
@@ -670,6 +721,28 @@ export async function buildDaemonStatusResponse(
           snapshot.ageMs,
         );
       }
+      // Absent on a child spawned without the daemon marker or predating the
+      // fields. Skipped rather than counted as zero, so `reported` stays an
+      // honest denominator for the maxima.
+      const heap = snapshot.heap;
+      if (!heap) continue;
+      heapReported += 1;
+      peakOldGenerationBytes = Math.max(
+        peakOldGenerationBytes,
+        heap.peakOldGenerationBytes,
+      );
+      peakLiveSetBytes = Math.max(peakLiveSetBytes, heap.peakLiveSetBytes);
+      peakTotalHeapBytes = Math.max(
+        peakTotalHeapBytes,
+        heap.peakTotalHeapBytes,
+      );
+      heapMajorGcCount = Math.max(heapMajorGcCount, heap.majorGcCount);
+      heapMajorGcMs = Math.max(heapMajorGcMs, heap.majorGcMs);
+      // Union, not max: one child seeing an unknown space is enough to make
+      // the aggregate incomplete, and naming which space is the whole point.
+      for (const name of heap.unclassifiedSpaceNames) {
+        heapUnclassified.add(name);
+      }
     }
     const pressureMode = input.opts.memoryPressureMode ?? 'observe';
     // One reading for the two figures of a single ratio. Reading twice would
@@ -689,6 +762,20 @@ export async function buildDaemonStatusResponse(
         rssBytes: childRssBytesTotal,
         sampled: childRssSampled,
         oldestReadingAgeMs: oldestChildReadingAgeMs,
+        // `null` on zero reporters, so an unmeasured daemon never publishes a
+        // zeroed object that reads as "no child needs any heap".
+        heap:
+          heapReported > 0
+            ? {
+                peakOldGenerationBytes,
+                peakLiveSetBytes,
+                peakTotalHeapBytes,
+                majorGcCount: heapMajorGcCount,
+                majorGcMs: heapMajorGcMs,
+                unclassifiedSpaceNames: [...heapUnclassified],
+                reported: heapReported,
+              }
+            : null,
       },
       modeled: {
         recommendedShareAtRegisteredMb:

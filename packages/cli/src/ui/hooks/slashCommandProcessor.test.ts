@@ -27,7 +27,7 @@ import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import {
-  type GeminiClient,
+  type LlmClient,
   SlashCommandStatus,
   ToolConfirmationOutcome,
   makeFakeConfig,
@@ -252,7 +252,7 @@ describe('useSlashCommandProcessor', () => {
         false, // isProcessing
         setIsProcessing,
         isIdleRef,
-        vi.fn(), // setGeminiMdFileCount
+        vi.fn(), // setMemoryFileCount
         createMockActions(),
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
@@ -489,6 +489,7 @@ describe('useSlashCommandProcessor', () => {
           evidenceCursor: { recordId: 'record-ui' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 1,
         },
@@ -567,6 +568,7 @@ describe('useSlashCommandProcessor', () => {
           evidenceCursor: { recordId: 'record-status' },
           turnCount: 1,
           activeTimeMs: 5,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 2,
         },
@@ -1404,8 +1406,8 @@ describe('useSlashCommandProcessor', () => {
     it('should handle "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
-      } as unknown as GeminiClient;
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
+      } as unknown as LlmClient;
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(mockClient);
 
       const command = createTestCommand({
         name: 'load',
@@ -1432,8 +1434,8 @@ describe('useSlashCommandProcessor', () => {
     it('should preserve thoughts when handling "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
-      } as unknown as GeminiClient;
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
+      } as unknown as LlmClient;
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(mockClient);
 
       const historyWithThoughts = [
         {
@@ -2350,7 +2352,7 @@ describe('useSlashCommandProcessor', () => {
           false, // isProcessing
           vi.fn(), // setIsProcessing
           { current: true }, // isIdleRef
-          vi.fn(), // setGeminiMdFileCount
+          vi.fn(), // setMemoryFileCount
           createMockActions(),
           new Map(), // extensionsUpdateState
           true, // isConfigInitialized
@@ -3167,6 +3169,51 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(recorder.recordSlashCommand).not.toHaveBeenCalled();
+    });
+
+    it('does not record /advisor via the chat recorder', async () => {
+      const advisorCmd = createTestCommand({
+        name: 'advisor',
+        action: vi.fn().mockResolvedValue(undefined),
+      });
+      const result = setupProcessorHook([advisorCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      recorder.recordSlashCommand.mockClear();
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/advisor check my work');
+      });
+
+      expect(advisorCmd.action).toHaveBeenCalled();
+      expect(recorder.recordSlashCommand).not.toHaveBeenCalled();
+    });
+
+    it('records a user command shadowing the advisor name', async () => {
+      const shadowCmd = createTestCommand(
+        {
+          name: 'advisor',
+          action: vi.fn().mockResolvedValue(undefined),
+        },
+        CommandKind.FILE,
+      );
+      const result = setupProcessorHook([shadowCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      recorder.recordSlashCommand.mockClear();
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/advisor check my work');
+      });
+
+      expect(shadowCmd.action).toHaveBeenCalled();
+      expect(recorder.recordSlashCommand).toHaveBeenCalledTimes(2);
     });
 
     it('still records unrelated commands via the chat recorder (control)', async () => {

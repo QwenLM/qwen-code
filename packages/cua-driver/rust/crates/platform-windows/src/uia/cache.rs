@@ -112,6 +112,8 @@ pub struct CachedSnapshot {
     /// `None` for UIA-walked entries). The click tool reads this to gate
     /// right-edge dispatch on `ROLE_SYSTEM_BUTTONDROPDOWN` etc.
     pub msaa_roles: Vec<Option<i32>>,
+    /// element_index → semantic actions advertised by the captured provider.
+    pub actions: Vec<Vec<String>>,
 }
 
 impl Drop for CachedSnapshot {
@@ -171,6 +173,7 @@ impl ElementCache {
             .collect();
         let rects: Vec<Option<(i32, i32, i32, i32)>> = actionable.iter().map(|n| n.rect).collect();
         let msaa_roles: Vec<Option<i32>> = actionable.iter().map(|n| n.msaa_role).collect();
+        let actions = actionable.iter().map(|node| node.actions.clone()).collect();
         self.core.insert(
             CacheKey { pid, hwnd },
             CachedSnapshot {
@@ -179,6 +182,7 @@ impl ElementCache {
                 centers,
                 rects,
                 msaa_roles,
+                actions,
             },
         );
     }
@@ -312,6 +316,23 @@ impl ElementCache {
                 Some((s.kind, role))
             })
             .flatten()
+    }
+
+    pub fn get_element_actions(
+        &self,
+        pid: u32,
+        hwnd: u64,
+        element_index: usize,
+    ) -> Option<Vec<String>> {
+        self.core
+            .with_snapshot(&CacheKey { pid, hwnd }, |snapshot| {
+                snapshot.actions.get(element_index).cloned()
+            })
+            .flatten()
+    }
+
+    pub fn clear_target(&self, pid: u32, hwnd: u64) {
+        self.core.remove(&CacheKey { pid, hwnd });
     }
 
     pub fn element_count(&self, pid: u32, hwnd: u64) -> usize {

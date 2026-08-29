@@ -105,6 +105,13 @@ export function projectChatRecordsToDaemonTranscript(
   let truncated = false;
   let state = createDaemonTranscriptState({
     maxBlocks,
+    // Trim-free by bytes: this offline/export projection's only documented
+    // truncation knob is `maxBlocks`. The retention byte budget exists for
+    // the LIVE session window; applying it here would silently evict older
+    // blocks from rendered/exported transcripts whose `maxBlocks` never
+    // limited them, and the truncation diagnostic would misname maxBlocks as
+    // the cause.
+    maxRetainedBytes: Number.POSITIVE_INFINITY,
     now: 0,
     onTruncation: (detail) => {
       truncated = true;

@@ -57,11 +57,8 @@
 import { statSync, readFileSync } from 'node:fs';
 import { readRunTranscripts } from './transcripts.js';
 import { bakedRanges, openedTheTerritory } from './retirement.js';
-import {
-  readRecordedPrompts,
-  wasDeliveredVerbatim,
-  briefPath,
-} from './prompt-record.js';
+import { readRecordedPrompts, wasDeliveredVerbatim } from './prompt-record.js';
+import { readBrief } from './certification.js';
 import {
   repositoryContextOf,
   type RepositoryContext,
@@ -141,13 +138,9 @@ function readReverseAuditReturns(
         matched = key;
       }
       if (matched === null) return false;
-      const needle = JSON.stringify(briefPath(planPath, matched));
-      // READ, not named: `successfulCallArgs` covers every successful
-      // tool, so a grep or listing whose args merely CONTAIN the brief
-      // path cleared this — an auditor that never opened its instructions
-      // supplied a receipt. Only a successful `read_file` of the exact
-      // brief is opening it.
-      return t.successfulReadFileArgs.some((a) => a.includes(needle));
+      // READ, not named — the `readBrief` atom: only a successful
+      // `read_file` of the exact brief is opening it.
+      return readBrief(t, planPath, matched);
     };
     const corroborated = auditors
       .filter(

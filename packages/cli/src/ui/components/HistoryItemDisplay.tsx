@@ -56,6 +56,7 @@ import { DoctorReport } from './views/DoctorReport.js';
 import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
+import { AdvisorMessage } from './messages/AdvisorMessage.js';
 import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
@@ -82,7 +83,7 @@ interface HistoryItemDisplayProps {
   commands?: readonly SlashCommand[];
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
-  availableTerminalHeightGemini?: number;
+  availableTerminalHeightLlm?: number;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
   /** Force thinking blocks expanded (e.g. in SessionPreview). */
   thoughtExpanded?: boolean;
@@ -211,6 +212,7 @@ function getHistoryItemMarginTop(item: HistoryItem): number {
     case 'summary':
     case 'insight_progress':
     case 'btw':
+    case 'advisor':
     case 'away_recap':
     case 'user':
     case 'user_prompt_submit_blocked':
@@ -235,7 +237,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   isFocused = true,
   activeShellPtyId,
   embeddedShellFocused,
-  availableTerminalHeightGemini,
+  availableTerminalHeightLlm,
   sourceCopyIndexOffsets,
   thoughtExpanded,
   fullDetail = false,
@@ -304,7 +306,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
             omittedImageCount={itemForDisplay.omittedImageCount}
             isPending={isPending}
             availableTerminalHeight={
-              availableTerminalHeightGemini ?? availableTerminalHeight
+              availableTerminalHeightLlm ?? availableTerminalHeight
             }
             contentWidth={contentWidth}
             sourceCopyIndexOffsets={sourceCopyIndexOffsets}
@@ -318,7 +320,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           omittedImageCount={itemForDisplay.omittedImageCount}
           isPending={isPending}
           availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
+            availableTerminalHeightLlm ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
@@ -330,7 +332,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           isPending={isPending}
           expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
+            availableTerminalHeightLlm ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
           durationMs={itemForDisplay.durationMs}
@@ -343,7 +345,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           isPending={isPending}
           expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
+            availableTerminalHeightLlm ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
         />
@@ -479,6 +481,13 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'btw' && itemForDisplay.btw && (
         <BtwMessage btw={itemForDisplay.btw} containerWidth={contentWidth} />
+      )}
+      {itemForDisplay.type === 'advisor' && (
+        <AdvisorMessage
+          text={itemForDisplay.text}
+          model={itemForDisplay.model}
+          containerWidth={contentWidth}
+        />
       )}
       {itemForDisplay.type === 'user_prompt_submit_blocked' && (
         <Box flexDirection="column">

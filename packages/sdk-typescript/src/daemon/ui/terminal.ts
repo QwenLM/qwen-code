@@ -240,6 +240,8 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       return '';
     case 'user.image.delta':
       return `[image: ${sanitizeTerminalText(event.mimeType)}]`;
+    case 'user.file.delta':
+      return `[file: ${sanitizeTerminalText(event.name)}]`;
     default:
       return assertNever(event);
   }
