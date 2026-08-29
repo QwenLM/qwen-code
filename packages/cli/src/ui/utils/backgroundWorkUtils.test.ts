@@ -152,6 +152,7 @@ function createEnumeratingMockConfig(overrides?: {
   monitors?: unknown[];
   shells?: unknown[];
   workflows?: unknown[];
+  startingWorkflows?: string[];
 }): Config {
   return {
     getBackgroundTaskRegistry: () => ({
@@ -165,6 +166,7 @@ function createEnumeratingMockConfig(overrides?: {
     }),
     getWorkflowRunRegistry: () => ({
       list: () => overrides?.workflows ?? [],
+      listStartingRunIds: () => overrides?.startingWorkflows ?? [],
     }),
   } as unknown as Config;
 }
@@ -282,6 +284,16 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
     expect(joined).not.toContain('shell_2');
     expect(joined).not.toContain('wf_3');
     expect(summary?.hasTaskEntries).toBe(true);
+    expect(summary?.hasWorkflowRuns).toBe(true);
+  });
+
+  it('lists workflow runs that are still starting', () => {
+    const summary = describeBlockingBackgroundWork(
+      createEnumeratingMockConfig({ startingWorkflows: ['wf_starting'] }),
+    );
+
+    expect(summary?.lines).toEqual(['  [wf_starting] wf_starting (starting)']);
+    expect(summary?.hasTaskEntries).toBe(false);
     expect(summary?.hasWorkflowRuns).toBe(true);
   });
 

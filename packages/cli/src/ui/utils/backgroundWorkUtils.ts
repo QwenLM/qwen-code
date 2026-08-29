@@ -74,10 +74,10 @@ export interface BlockingBackgroundWork {
  * Enumerates the entries that make `hasBlockingBackgroundWork()` true,
  * mirroring its per-registry predicate exactly (background agents:
  * `isBackgrounded` + `running`; monitors: `running`; shells: `running`;
- * workflow runs: `running` or `pausing`). Returns `undefined` when nothing
- * is enumerated — e.g. an entry settled between the gate check and this
- * call — so callers fall back to their base message instead of rendering
- * an empty list.
+ * workflow runs: `starting`, `running`, or `pausing`). Returns `undefined`
+ * when nothing is enumerated — e.g. an entry settled between the gate check
+ * and this call — so callers fall back to their base message instead of
+ * rendering an empty list.
  */
 export function describeBlockingBackgroundWork(
   config: Config,
@@ -89,6 +89,7 @@ export function describeBlockingBackgroundWork(
     label: string;
     status: TaskStatus | WorkflowStatus;
     isWorkflowRun: boolean;
+    isStarting?: boolean;
   }> = [];
 
   for (const entry of config.getBackgroundTaskRegistry().getAll()) {
@@ -130,6 +131,16 @@ export function describeBlockingBackgroundWork(
       isWorkflowRun: true,
     });
   }
+  for (const runId of config.getWorkflowRunRegistry().listStartingRunIds()) {
+    entries.push({
+      startTime: now,
+      id: runId,
+      label: runId,
+      status: 'running',
+      isWorkflowRun: true,
+      isStarting: true,
+    });
+  }
 
   if (entries.length === 0) return undefined;
 
@@ -140,6 +151,7 @@ export function describeBlockingBackgroundWork(
       stripUnsafeCharacters(entry.label).replace(/[\r\n]+/g, ' '),
       MAX_BLOCKING_LABEL_WIDTH,
     );
+    if (entry.isStarting) return `  [${entry.id}] ${label} (starting)`;
     return `  [${entry.id}] ${label} (${entry.status} ${formatDuration(
       now - entry.startTime,
       { hideTrailingZeros: true },

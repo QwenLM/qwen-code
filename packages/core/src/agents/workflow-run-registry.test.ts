@@ -1817,10 +1817,13 @@ describe('WorkflowRunRegistry', () => {
     expect(r.get(held.runId)).toBe(held);
     expect(r.list()).toHaveLength(MAX_RETAINED_TERMINAL_WORKFLOWS + 1);
 
+    const statusChange = vi.fn();
+    r.setStatusChangeCallback(statusChange);
     r.releaseHandle(held.runId, handle);
 
     expect(r.get(held.runId)).toBeUndefined();
     expect(r.list()).toHaveLength(MAX_RETAINED_TERMINAL_WORKFLOWS);
+    expect(statusChange.mock.calls).toEqual([[undefined]]);
   });
 
   it('active entries are never evicted', () => {

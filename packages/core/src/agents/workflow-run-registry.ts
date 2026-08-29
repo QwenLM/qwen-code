@@ -761,7 +761,7 @@ export class WorkflowRunRegistry {
   releaseHandle(runId: string, handle: WorkflowRunHandle): void {
     if (this.handles.get(runId) !== handle) return;
     this.handles.delete(runId);
-    this.evictTerminal();
+    if (this.evictTerminal()) this.emitStatusChange();
   }
 
   bridgeApprovalEvents(
@@ -1527,13 +1527,13 @@ export class WorkflowRunRegistry {
    * Active entries are always retained. Oldest terminal entries
    * (by `endTime`) are evicted first.
    */
-  private evictTerminal(): void {
+  private evictTerminal(): boolean {
     const terminal = this.list().filter(
       (entry) =>
         isTerminalWorkflowStatus(entry.status) &&
         !this.handles.has(entry.runId),
     );
-    if (terminal.length <= MAX_RETAINED_TERMINAL_WORKFLOWS) return;
+    if (terminal.length <= MAX_RETAINED_TERMINAL_WORKFLOWS) return false;
     terminal.sort((a, b) => (a.endTime ?? 0) - (b.endTime ?? 0));
     const toEvict = terminal.slice(
       0,
@@ -1542,6 +1542,7 @@ export class WorkflowRunRegistry {
     for (const e of toEvict) {
       this.entries.delete(e.runId);
     }
+    return true;
   }
 
   private emitStatusChange(entry?: WorkflowTask): void {
