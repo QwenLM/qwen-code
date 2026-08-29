@@ -24,7 +24,7 @@
 // degrades to the full capture, with the reason said out loud.
 
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
+import { lstatSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { gitOpt, gitRaw, gitWithInput, gitWithInputRaw } from './git.js';
 import { LITERAL_PATHSPECS } from './diff-flags.js';
@@ -40,6 +40,25 @@ import { LITERAL_PATHSPECS } from './diff-flags.js';
  */
 export const UNHASHABLE = 'unhashable';
 
+/**
+ * Fail-closed absence probe: may return true ONLY for a path that is
+ * genuinely gone — every other shape (unreadable, unstatable, running
+ * through a regular-file component) is UNMEASURABLE and must re-enter scope.
+ *
+ * The leaf must fail lstat with ENOENT; any other errno refuses. On POSIX
+ * that suffices — a regular-file intermediate raises ENOTDIR. Windows
+ * reports ENOENT for that same shape (the R19-3 incident), so the nearest
+ * existing ancestor is probed: absence is provable only when that ancestor
+ * is a DIRECTORY; a regular-file ancestor keeps the path unmeasurable.
+ *
+ * The ancestor probe deliberately uses statSync, not lstatSync: a symlink
+ * resolving to a directory is traversable, so an ENOENT leaf below it is
+ * genuinely absent. lstatSync reads the link itself, reports "not a
+ * directory", and would turn every deleted path under a symlinked
+ * intermediate into permanent re-review. A symlink to a file still resolves
+ * to a non-directory (refused), and a broken link throws ENOENT, which
+ * continues the walk upward.
+ */
 export function isPathProvablyAbsent(
   repoRoot: string,
   relativePath: string,
@@ -55,7 +74,7 @@ export function isPathProvablyAbsent(
   let ancestor = dirname(candidate);
   for (;;) {
     try {
-      return lstatSync(ancestor).isDirectory();
+      return statSync(ancestor).isDirectory();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
     }
