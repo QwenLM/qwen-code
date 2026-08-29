@@ -793,8 +793,8 @@ describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', 
     );
     assert.match(
       ciCleanStep.run,
-      /\[ ! -L "\$GITHUB_WORKSPACE\/\.qwen" \]/,
-      'cleanup must not follow a symlinked .qwen: chmod -R dereferences a symlinked argument and would widen an outside tree',
+      /\[ -d "\$stale_qwen" \] && \[ ! -L "\$stale_qwen" \]/,
+      'cleanup must not follow a symlinked qwen state: chmod -R dereferences a symlinked argument and would widen an outside tree',
     );
     assert.doesNotMatch(
       ciCleanStep.run,
