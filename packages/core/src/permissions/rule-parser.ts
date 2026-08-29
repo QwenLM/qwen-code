@@ -315,7 +315,9 @@ const WEBFETCH_TOOLS = new Set(['web_fetch']);
  * (e.g. MCP tool names are kept as-is).
  */
 export function resolveToolName(rawName: string): string {
-  return TOOL_NAME_ALIASES[rawName] ?? rawName;
+  return Object.hasOwn(TOOL_NAME_ALIASES, rawName)
+    ? TOOL_NAME_ALIASES[rawName]!
+    : rawName;
 }
 
 /**

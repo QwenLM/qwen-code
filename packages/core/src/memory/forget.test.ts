@@ -311,6 +311,204 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     }
   });
 
+  it('scopes the unconfirmed forget entry point through the model path', async () => {
+    // forgetManagedAutoMemoryEntries forwards scope to the selector only via
+    // the options spread; pin that a scoped call through this destructive
+    // entry point never offers or deletes the excluded store's entries.
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'forget-scoped-model-'),
+    );
+    const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'memory');
+    clearAutoMemoryRootCache();
+    try {
+      const projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      const projectFile = path.join(
+        getAutoMemoryRoot(projectRoot),
+        'reference',
+        'codeword.md',
+      );
+      const userFile = path.join(
+        getUserAutoMemoryRoot(),
+        'user',
+        'codeword.md',
+      );
+      await fs.mkdir(path.dirname(projectFile), { recursive: true });
+      await fs.mkdir(path.dirname(userFile), { recursive: true });
+      const body = 'the saved codeword is forgettable-zephyr-9';
+      const fileContents = [
+        '---',
+        'type: reference',
+        'name: Codeword',
+        '---',
+        '',
+        body,
+      ].join('\n');
+      await fs.writeFile(projectFile, fileContents, 'utf-8');
+      await fs.writeFile(userFile, fileContents, 'utf-8');
+      vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
+        {
+          scope: 'project',
+          type: 'reference',
+          filePath: projectFile,
+          relativePath: 'reference/codeword.md',
+          filename: 'codeword.md',
+          title: 'Codeword',
+          description: 'Matching',
+          category: 'uncategorized',
+          keywords: [],
+          usageScenarios: [],
+          body,
+          mtimeMs: 1,
+        },
+      ]);
+      vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
+        {
+          scope: 'user',
+          type: 'user',
+          filePath: userFile,
+          relativePath: 'user/codeword.md',
+          filename: 'codeword.md',
+          title: 'Codeword',
+          description: 'Matching',
+          category: 'uncategorized',
+          keywords: [],
+          usageScenarios: [],
+          body,
+          mtimeMs: 2,
+        },
+      ]);
+      let selectionPrompt = '';
+      vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
+        selectionPrompt = options.contents[0]?.parts?.[0]?.text ?? '';
+        return { selectedCandidateIds: ['user:user/codeword.md'] };
+      });
+
+      const result = await forgetManagedAutoMemoryEntries(
+        projectRoot,
+        'forgettable-zephyr-9',
+        { config: mockConfig, scope: 'user' },
+      );
+
+      expect(selectionPrompt).toContain('id: user:user/codeword.md');
+      expect(selectionPrompt).not.toContain(
+        'id: project:reference/codeword.md',
+      );
+      expect(result.removedEntries).toHaveLength(1);
+      expect(result.touchedScopes).toEqual(['user']);
+      await expect(fs.stat(userFile)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(fs.readFile(projectFile, 'utf-8')).resolves.toBe(
+        fileContents,
+      );
+    } finally {
+      if (originalMemoryBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+      }
+      clearAutoMemoryRootCache();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('scopes the unconfirmed forget entry point on the heuristic fallback', async () => {
+    // Same spread pin, heuristic path: with the model down, a scoped call
+    // must neither scan nor delete the excluded store.
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'forget-scoped-heuristic-'),
+    );
+    const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'memory');
+    clearAutoMemoryRootCache();
+    try {
+      const projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      const projectFile = path.join(
+        getAutoMemoryRoot(projectRoot),
+        'reference',
+        'codeword.md',
+      );
+      const userFile = path.join(
+        getUserAutoMemoryRoot(),
+        'user',
+        'codeword.md',
+      );
+      await fs.mkdir(path.dirname(projectFile), { recursive: true });
+      await fs.mkdir(path.dirname(userFile), { recursive: true });
+      const body = 'the saved codeword is forgettable-zephyr-9';
+      const fileContents = [
+        '---',
+        'type: reference',
+        'name: Codeword',
+        '---',
+        '',
+        body,
+      ].join('\n');
+      await fs.writeFile(projectFile, fileContents, 'utf-8');
+      await fs.writeFile(userFile, fileContents, 'utf-8');
+      vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
+        {
+          scope: 'project',
+          type: 'reference',
+          filePath: projectFile,
+          relativePath: 'reference/codeword.md',
+          filename: 'codeword.md',
+          title: 'Codeword',
+          description: 'Matching',
+          category: 'uncategorized',
+          keywords: [],
+          usageScenarios: [],
+          body,
+          mtimeMs: 1,
+        },
+      ]);
+      vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
+        {
+          scope: 'user',
+          type: 'user',
+          filePath: userFile,
+          relativePath: 'user/codeword.md',
+          filename: 'codeword.md',
+          title: 'Codeword',
+          description: 'Matching',
+          category: 'uncategorized',
+          keywords: [],
+          usageScenarios: [],
+          body,
+          mtimeMs: 2,
+        },
+      ]);
+      vi.mocked(runSideQuery).mockRejectedValue(new Error('side query failed'));
+
+      const result = await forgetManagedAutoMemoryEntries(
+        projectRoot,
+        'forgettable-zephyr-9',
+        { config: mockConfig, scope: 'user' },
+      );
+
+      expect(scanAllAutoMemoryTopicDocuments).not.toHaveBeenCalled();
+      expect(result.removedEntries).toHaveLength(1);
+      expect(result.touchedScopes).toEqual(['user']);
+      await expect(fs.stat(userFile)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(fs.readFile(projectFile, 'utf-8')).resolves.toBe(
+        fileContents,
+      );
+    } finally {
+      if (originalMemoryBase === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBase;
+      }
+      clearAutoMemoryRootCache();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('splits the prompt evenly when both scopes are over quota', async () => {
     // Both scopes over the 200 quota, so no spare is redistributed and the
     // quota itself decides the split. Mutating the quota changes these counts.
@@ -569,12 +767,9 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
         mtimeMs: 1,
       },
     ]);
+    let selectionPrompt: string | undefined;
     vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
-      const prompt = options.contents[0]?.parts?.[0]?.text ?? '';
-      expect(prompt).toContain('id: user:user/note.md');
-      expect(prompt).toContain('scope: user');
-      expect(prompt).toContain('id: project:user/note.md');
-      expect(prompt).toContain('scope: project');
+      selectionPrompt = options.contents[0]?.parts?.[0]?.text ?? '';
       return {
         selectedCandidateIds: ['user:user/note.md', 'project:user/note.md'],
       };
@@ -586,6 +781,14 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       { config: mockConfig },
     );
 
+    // Asserted out here rather than inside the mock: a run that never
+    // reached the selector would have skipped every in-mock expect() and
+    // still reported a pass.
+    expect(selectionPrompt).toBeDefined();
+    expect(selectionPrompt).toContain('id: user:user/note.md');
+    expect(selectionPrompt).toContain('scope: user');
+    expect(selectionPrompt).toContain('id: project:user/note.md');
+    expect(selectionPrompt).toContain('scope: project');
     expect(result.matches).toEqual([
       {
         topic: 'user',
@@ -600,6 +803,87 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
         entryIndex: 0,
       },
     ]);
+  });
+
+  it('limits destructive selection to the requested memory scope', async () => {
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
+      {
+        scope: 'user',
+        type: 'user',
+        filePath: '/tmp/user/memories/user/shared.md',
+        relativePath: 'user/shared.md',
+        filename: 'shared.md',
+        title: 'Shared',
+        description: 'Shared preference',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: 'Use concise summaries everywhere',
+        mtimeMs: 2,
+      },
+    ]);
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
+      {
+        scope: 'project',
+        type: 'project',
+        filePath: '/tmp/project/memory/project/local.md',
+        relativePath: 'project/local.md',
+        filename: 'local.md',
+        title: 'Local',
+        description: 'Local preference',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: 'Use concise summaries in this project',
+        mtimeMs: 1,
+      },
+    ]);
+    let selectionPrompt: string | undefined;
+    vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
+      selectionPrompt = options.contents[0]?.parts?.[0]?.text ?? '';
+      return { selectedCandidateIds: ['user:user/shared.md'] };
+    });
+
+    const result = await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'concise summaries',
+      { config: mockConfig, scope: 'user' },
+    );
+
+    // Same reason as the twin above — and it matters more here, because the
+    // load-bearing claim is a NEGATIVE one: 'the excluded store never
+    // reaches the prompt' is exactly what an unreached mock also reports.
+    expect(selectionPrompt).toBeDefined();
+    expect(selectionPrompt).toContain('id: user:user/shared.md');
+    expect(selectionPrompt).not.toContain('id: project:project/local.md');
+    expect(result.matches).toEqual([
+      {
+        topic: 'user',
+        summary: 'Use concise summaries everywhere',
+        filePath: '/tmp/user/memories/user/shared.md',
+        entryIndex: 0,
+      },
+    ]);
+  });
+
+  it('does not scan the store a scoped forget excludes', async () => {
+    vi.mocked(runSideQuery).mockResolvedValue({ selectedCandidateIds: [] });
+
+    await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'tabs preference',
+      { config: mockConfig, scope: 'project' },
+    );
+    expect(scanAllAutoMemoryTopicDocuments).toHaveBeenCalledTimes(1);
+    expect(scanAllUserAutoMemoryTopicDocuments).not.toHaveBeenCalled();
+
+    await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'tabs preference',
+      { config: mockConfig, scope: 'user' },
+    );
+    expect(scanAllAutoMemoryTopicDocuments).toHaveBeenCalledTimes(1);
+    expect(scanAllUserAutoMemoryTopicDocuments).toHaveBeenCalledTimes(1);
   });
 
   it('can select user-level memories through heuristic search', async () => {

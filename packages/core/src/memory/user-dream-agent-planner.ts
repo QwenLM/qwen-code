@@ -89,7 +89,7 @@ export async function planUserAutoMemoryDreamByAgent(
   const docs = await scanUserAutoMemoryTopicDocuments().catch(() => []);
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
     includeUserMemory: true,
-    userMemoryOnly: true,
+    includeProjectMemory: false,
     restrictReadsToMemoryPaths: true,
     protectPinnedMemory: true,
   });
