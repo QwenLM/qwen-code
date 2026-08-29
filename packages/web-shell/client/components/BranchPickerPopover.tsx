@@ -33,11 +33,12 @@ import { deriveStatus, hasComputedTreeSummary } from './GitBranchIndicator';
 import styles from './BranchPickerPopover.module.css';
 
 // The daemon's stash/force pull flows chain git commands, each with its own
-// 30s budget — the stash flow's failure path runs up to 13 of them (guards,
-// listings, push, pull, abort, apply, drop, store). Size the client fetch
-// timeout above that worst case so the request is not aborted while the
-// daemon is still restoring the repository.
-const GIT_PULL_FETCH_TIMEOUT_MS = 420_000;
+// 30s budget. The stash flow's worst case is 16 of them (guards, fetch,
+// upstream check, listings, push, pull, abort, apply, list, drop, and the
+// drop-shift compensation's log + store) = 480s; size the client fetch
+// timeout above that so the request is not aborted while the daemon is
+// still restoring the repository.
+const GIT_PULL_FETCH_TIMEOUT_MS = 600_000;
 
 function daemonErrorBody(err: unknown): Record<string, unknown> | undefined {
   if (!(err instanceof DaemonHttpError)) return undefined;

@@ -33,6 +33,7 @@ const {
   workspaceGitCreateBranch,
   workspaceGitPull,
   workspaceGitCheckout,
+  workspaceGitPush,
   workspaceGit,
   workspaceClient,
 } = vi.hoisted(() => {
@@ -40,6 +41,7 @@ const {
   const workspaceGitCreateBranch = vi.fn();
   const workspaceGitPull = vi.fn();
   const workspaceGitCheckout = vi.fn();
+  const workspaceGitPush = vi.fn();
   const workspaceGit = vi.fn();
   // A stable client so the popover's memoized workspace handle (and thus its
   // fetch effect) stays referentially stable across renders.
@@ -49,9 +51,7 @@ const {
       workspaceGit,
       workspaceGitCheckout,
       workspaceGitCreateBranch,
-      workspaceGitPush: vi
-        .fn()
-        .mockResolvedValue({ success: true, output: '' }),
+      workspaceGitPush,
       workspaceGitPull,
     }),
   };
@@ -60,6 +60,7 @@ const {
     workspaceGitCreateBranch,
     workspaceGitPull,
     workspaceGitCheckout,
+    workspaceGitPush,
     workspaceGit,
     workspaceClient,
   };
@@ -176,6 +177,8 @@ afterEach(() => {
   workspaceGitPull.mockReset();
   workspaceGitCheckout.mockReset();
   workspaceGitCheckout.mockResolvedValue(undefined);
+  workspaceGitPush.mockReset();
+  workspaceGitPush.mockResolvedValue({ success: true, output: '' });
   // Default: the popover's own status fetch yields nothing, so hints derive
   // from the caller's `status` prop alone unless a test resolves it.
   workspaceGit.mockRejectedValue(new Error('no status'));
@@ -261,7 +264,7 @@ describe('BranchPickerPopover actions', () => {
     expect(workspaceGitPull).toHaveBeenLastCalledWith(
       { stash: true },
       undefined,
-      420_000,
+      600_000,
     );
     expect(footerText()).not.toContain('Stash Changes and Update');
     expect(footerText()).toContain('ok');
@@ -288,7 +291,7 @@ describe('BranchPickerPopover actions', () => {
     expect(workspaceGitPull).toHaveBeenLastCalledWith(
       { force: true },
       undefined,
-      420_000,
+      600_000,
     );
   });
 
@@ -395,6 +398,85 @@ describe('BranchPickerPopover actions', () => {
     mount({ open: true });
     await flush();
 
+    expect(footerText()).not.toContain('Stash Changes and Update');
+    // The non-sticky blocked line is reset too, not just the panel.
+    expect(footerText()).not.toContain('Update blocked by uncommitted changes');
+  });
+
+  it('backs out of the discard confirmation via Cancel without pulling', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('Discard Changes and Update');
+    await flush();
+    expect(footerText()).toContain('This cannot be undone');
+
+    clickButton('Cancel');
+    await flush();
+
+    expect(workspaceGitPull).toHaveBeenCalledTimes(1);
+    expect(footerText()).not.toContain('This cannot be undone');
+    expect(footerText()).toContain('Stash Changes and Update');
+  });
+
+  it('clears the panel when a competing push runs, showing its outcome', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitPush.mockResolvedValueOnce({
+      success: true,
+      output: 'pushed to origin',
+    });
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    expect(footerText()).toContain('Stash Changes and Update');
+
+    clickButton('Push');
+    await flush();
+
+    expect(workspaceGitPush).toHaveBeenCalledTimes(1);
+    expect(footerText()).not.toContain('Stash Changes and Update');
+    expect(footerText()).toContain('pushed to origin');
+  });
+
+  it('clears the panel when a valid new branch is created', async () => {
+    workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());
+    workspaceGitCreateBranch.mockResolvedValueOnce(undefined);
+    mountWithBranches();
+    await flush();
+
+    clickButton('Update Project');
+    await flush();
+    clickButton('New Branch');
+    await flush();
+
+    const input = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Branch name"]',
+    );
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    await act(async () => {
+      nativeSetter?.call(input, 'feature/ok');
+      input?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flush();
+
+    expect(workspaceGitCreateBranch).toHaveBeenCalledWith(
+      'feature/ok',
+      undefined,
+      undefined,
+    );
     expect(footerText()).not.toContain('Stash Changes and Update');
   });
 
@@ -525,7 +607,7 @@ describe('BranchPickerPopover actions', () => {
     expect(workspaceGitPull).toHaveBeenLastCalledWith(
       { force: true },
       undefined,
-      420_000,
+      600_000,
     );
     expect(footerText()).toContain(
       'cannot discard changes: the workspace is a subdirectory',

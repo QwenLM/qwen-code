@@ -23,32 +23,34 @@ accept two new boolean options (both default false, mutually exclusive —
 sending both is a 400). They are the two things a user would do in a
 terminal, and nothing more:
 
-- `stash`: `git stash push --include-untracked`, run the same `git pull`
-  as before, then restore the entry. If the pull fails, the merge or
-  rebase it started is aborted and the entry is restored, so the
-  workspace is back in its pre-pull state; the response is `409
-pull_failed` carrying git's message — also when there was nothing to
-  stash (edits hidden by `skip-worktree`, a diverged clean tree), so the
-  client shows git's reason instead of re-offering the same resolution.
-  If git refuses the stash itself (an intent-to-add entry, for example),
-  nothing has been touched and the refusal is `409 pull_failed` as well.
-  If the pull succeeds but the restore does not (a conflict, or an
-  incoming file at a path the stash holds untracked), the response is
-  still a success with `stashRestoreConflict: true` and `stashSha`; git
-  keeps the entry, and `output` names it.
-- `force`: `git reset --hard` + `git clean -fd` (ignored files are kept),
-  then `git merge --ff-only @{upstream}`. Destructive, so the update is
-  validated before anything is discarded: the branch is fetched first
-  (`--prune`, so a branch deleted on the remote does not pass on its
-  stale tracking ref — that case is refused as `409 pull_failed` with
-  nothing discarded) and a diverged branch is refused (`409 diverged`)
-  while the local changes are still intact. The merge integrates exactly
-  the tip that was validated rather than fetching again, so a push
-  landing between the check and the merge cannot turn the validated
-  fast-forward into a refusal after the discard. `force` is refused
-  (`409 force_unsupported`) when the workspace cwd is below the
-  repository root, because `git reset --hard` acts on the whole
-  repository and would erase changes outside the workspace.
+- `stash`: fetch (`--prune`, so a tracking ref pruned earlier is back if
+  the remote branch exists again), check the upstream, `git stash push
+--include-untracked`, run the same `git pull` as before, then restore
+  the entry. If the pull fails, the merge or rebase it started is aborted
+  and the entry is restored, so the workspace is back in its pre-pull
+  state; the response is `409 pull_failed` carrying git's message — also
+  when there was nothing to stash (edits hidden by `skip-worktree`, a
+  diverged clean tree), so the client shows git's reason instead of
+  re-offering the same resolution. If git refuses the stash itself (an
+  intent-to-add entry, a wedged index lock), nothing has been touched and
+  the refusal is `409 pull_failed` as well. If the pull succeeds but the
+  restore does not (a conflict, or an incoming file at a path the stash
+  holds untracked), the response is still a success with
+  `stashRestoreConflict: true` and `stashSha`; git keeps the entry, and
+  `output` names it.
+- `force`: fetch (`--prune`), check the upstream, refuse unless the update
+  is a fast-forward, then `git reset --hard` + `git clean -fd` (ignored
+  files are kept) and `git merge --ff-only <validated sha>`. Destructive,
+  so everything is validated before anything is discarded: a branch
+  deleted on the remote is refused as `409 pull_failed` with nothing
+  discarded, a diverged branch as `409 diverged` while the local changes
+  are still intact. The merge integrates the exact commit that was
+  validated, by SHA: neither a push landing between the check and the
+  merge nor a concurrent fetch moving `@{upstream}` can turn the validated
+  fast-forward into a refusal after the discard. `force` is refused (`409
+force_unsupported`) when the workspace cwd is below the repository root,
+  because `git reset --hard` acts on the whole repository and would erase
+  changes outside the workspace.
 
 Both options are refused (`409 operation_in_progress`) while a merge,
 cherry-pick, revert, rebase or am is parked in the worktree: `git stash
@@ -57,20 +59,30 @@ uncommitted merge lives only in `MERGE_HEAD`. The probe runs immediately
 before each of those two commands, so the window in which a terminal can
 park an operation unseen is the command itself. The states are read
 through `git rev-parse --git-path`, so linked worktrees resolve correctly
-and a branch named `MERGE_HEAD` cannot shadow them. The failure recovery
-aborts a merge or rebase only when its `MERGE_HEAD` / `rebase-*/onto`
-points at the upstream tip the pull was integrating — the identity of the
-pull's own state — so an operation a terminal parked meanwhile is left
-alone (the restore then fails and reports the entry as kept).
+and a branch named `MERGE_HEAD` cannot shadow them.
+
+The failure recovery aborts only the merge or rebase the pull itself
+created, and its provenance comes from git: when such a state already
+exists, `git pull` exits 128 before touching the tree, so a merge or
+rebase present after an exit of 1 (git attempted the integration and
+stopped on conflicts) is the pull's own. It must also point at the
+upstream tip the pull integrated. Anything else — a merge a terminal
+parked meanwhile, whatever its tip — is left in place, and the failure
+names the stash entry that still holds the user's changes. The recovery
+helpers are best-effort end to end: a probe or listing failure never
+turns a recovered state into an unclassified error.
 
 The stash entry is identified by provenance and SHA, never by position:
 the listing is compared before and after the push and the entry chosen is
 the new one carrying the auto-stash message (a terminal push landing in
-between sits above it and is left alone); the restore is `git stash apply
-<sha>`; the drop names the slot resolved right before it and then checks
-the SHA git reports as dropped — git has no identity-addressed drop — and
-if the slots shifted under it, the other entry is `git stash store`d back
-and ours is reported as kept.
+between sits above it and is left alone; if that re-listing fails, the
+refusal points at the entry by its message); the restore is `git stash
+apply <sha>`; the drop names the slot resolved right before it and then
+checks the SHA git reports as dropped — git has no identity-addressed
+drop — and if the slots shifted under it, the other entry is `git stash
+store`d back and ours is reported as kept; should even that store fail,
+the displaced entry's SHA and the command that brings it back are in the
+output. Every notice about a kept entry carries its SHA.
 
 A plain pull — no option — is byte-for-byte the previous behavior.
 
@@ -129,8 +141,8 @@ instead of the SDK's route label.
 
 The SDK's `workspaceGitPull` takes an optional per-call timeout so the
 popover can outsize the client's default fetch budget: the stash flow's
-failure path chains up to 13 git commands, each with its own 30s limit,
-so the popover allows 420s.
+failure path chains up to 16 git commands, each with its own 30s limit,
+so the popover allows 600s.
 
 ## Ownership
 

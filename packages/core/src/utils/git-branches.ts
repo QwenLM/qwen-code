@@ -578,6 +578,9 @@ function gitDetail(err: unknown): string {
     const e = err as { stdout?: string; stderr?: string };
     const detail = `${e.stdout ?? ''}\n${e.stderr ?? ''}`.trim();
     if (detail) return detail;
+    // Some git commands exit silently against a stale lock; say so rather
+    // than surfacing only the command line.
+    return 'git exited without diagnostic output; a stale lock file (e.g. .git/index.lock) or another git process is the usual cause';
   }
   return err instanceof Error ? err.message : String(err);
 }
@@ -671,41 +674,52 @@ function readTrimmed(file: string): string {
 }
 
 /**
- * Abort a merge or rebase only if it is the one this pull started: the
- * state must point at the upstream tip the pull was integrating. A merge
- * or rebase a terminal parked meanwhile targets something else and is left
- * alone (the stash restore then fails and reports the entry as kept).
+ * Abort the merge or rebase a failed `git pull` left behind — and only that
+ * one. Provenance comes from git itself: when a merge or rebase already
+ * exists, `git pull` exits 128 before touching the tree, so a state that
+ * is present after an exit of 1 (git attempted the integration and stopped
+ * on conflicts) was created by the pull. The state must also point at the
+ * upstream tip the pull integrated. Anything else — a merge a terminal
+ * parked meanwhile, whatever its tip — is left alone; the caller then
+ * reports the stash entry as kept. Best-effort: a probe failure aborts
+ * nothing, so the caller still reaches its typed failure.
  */
 async function abortOwnPullState(
   cwd: string,
+  pullExitCode: number | undefined,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<void> {
-  const [mergeHead, rebaseMergeDir, rebaseApplyDir] = await gitPaths(
-    cwd,
-    ['MERGE_HEAD', 'rebase-merge', 'rebase-apply'],
-    env,
-  );
-  if (fs.existsSync(mergeHead!)) {
-    // A merge keeps HEAD on the branch, so its upstream resolves directly.
-    const upstream = await upstreamSha(cwd, env);
-    if (upstream && readTrimmed(mergeHead!) === upstream) {
-      await runGit(cwd, ['merge', '--abort'], env).catch(() => {});
-    }
-    return;
-  }
-  for (const dir of [rebaseMergeDir!, rebaseApplyDir!]) {
-    if (!fs.existsSync(dir)) continue;
-    // A rebase detaches HEAD; the branch being replayed is recorded in
-    // head-name, and its upstream is what the pull rebased onto.
-    const headName = readTrimmed(path.join(dir, 'head-name')).replace(
-      /^refs\/heads\//,
-      '',
+  if (pullExitCode !== 1) return;
+  try {
+    const [mergeHead, rebaseMergeDir, rebaseApplyDir] = await gitPaths(
+      cwd,
+      ['MERGE_HEAD', 'rebase-merge', 'rebase-apply'],
+      env,
     );
-    const upstream = headName ? await upstreamSha(cwd, env, headName) : '';
-    if (upstream && readTrimmed(path.join(dir, 'onto')) === upstream) {
-      await runGit(cwd, ['rebase', '--abort'], env).catch(() => {});
+    if (fs.existsSync(mergeHead!)) {
+      // A merge keeps HEAD on the branch, so its upstream resolves directly.
+      const upstream = await upstreamSha(cwd, env);
+      if (upstream && readTrimmed(mergeHead!) === upstream) {
+        await runGit(cwd, ['merge', '--abort'], env);
+      }
+      return;
     }
-    return;
+    for (const dir of [rebaseMergeDir!, rebaseApplyDir!]) {
+      if (!fs.existsSync(dir)) continue;
+      // A rebase detaches HEAD; the branch being replayed is recorded in
+      // head-name, and its upstream is what the pull rebased onto.
+      const headName = readTrimmed(path.join(dir, 'head-name')).replace(
+        /^refs\/heads\//,
+        '',
+      );
+      const upstream = headName ? await upstreamSha(cwd, env, headName) : '';
+      if (upstream && readTrimmed(path.join(dir, 'onto')) === upstream) {
+        await runGit(cwd, ['rebase', '--abort'], env);
+      }
+      return;
+    }
+  } catch {
+    // Leave whatever is there; the restore step reports the entry as kept.
   }
 }
 
@@ -749,7 +763,9 @@ interface StashRestore {
  * identity-addressed drop, so the drop names the slot resolved right before
  * it and then checks the SHA git reports as dropped: if a concurrent push
  * shifted the slots and a different entry went, that entry is stored back
- * and ours is reported as kept.
+ * and ours is reported as kept. Every step after the apply is best-effort
+ * and reports what it could not do, naming the entry by SHA — the changes
+ * are in the tree by then, so nothing here may turn into a failure.
  */
 async function restoreStash(
   cwd: string,
@@ -764,7 +780,15 @@ async function restoreStash(
   } catch (err) {
     return { restored: false, output: gitDetail(err) };
   }
-  const entries = await stashEntries(cwd, env);
+  let entries: StashEntry[];
+  try {
+    entries = await stashEntries(cwd, env);
+  } catch (err) {
+    return {
+      restored: true,
+      output: `restored, but stash entry ${sha} was kept because the stash could not be listed:\n${gitDetail(err)}`,
+    };
+  }
   const index = entries.findIndex((entry) => entry.sha === sha);
   if (index === -1) return { restored: true, output };
   const slot = `stash@{${index}}`;
@@ -776,7 +800,7 @@ async function restoreStash(
   } catch (err) {
     return {
       restored: true,
-      output: `restored, but stash entry ${slot} could not be dropped:\n${gitDetail(err)}`,
+      output: `restored, but stash entry ${slot} (${sha}) could not be dropped:\n${gitDetail(err)}`,
     };
   }
   if (dropped !== undefined && dropped !== sha) {
@@ -790,8 +814,12 @@ async function restoreStash(
     const storeArgs = ['stash', 'store', '--quiet'];
     if (subject) storeArgs.push('-m', subject);
     storeArgs.push(dropped);
-    await runGit(cwd, storeArgs, env).catch(() => {});
-    output = `restored; stash entry ${sha} was kept because the stash changed while dropping it`;
+    const stored = await runGit(cwd, storeArgs, env)
+      .then(() => true)
+      .catch(() => false);
+    output = stored
+      ? `restored; stash entry ${sha} was kept because the stash changed while dropping it`
+      : `restored; stash entry ${sha} was kept because the stash changed while dropping it, and the displaced entry ${dropped} could not be stored back — recover it with: git stash store ${dropped}`;
   }
   return { restored: true, output };
 }
@@ -802,13 +830,51 @@ function pullArgs(opts?: GitPullOptions): string[] {
   return args;
 }
 
-async function requireUpstream(
+/** The upstream ref configured for the checked-out branch, or ''. */
+async function configuredUpstream(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<void> {
-  // Fails with git's own "no upstream configured" message before anything
-  // is stashed or discarded, so the caller classifies it as it always has.
+): Promise<string> {
+  try {
+    const branch = (
+      await runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'], env)
+    ).trim();
+    return (
+      await runGit(
+        cwd,
+        ['for-each-ref', '--format=%(upstream)', `refs/heads/${branch}`],
+        env,
+      )
+    ).trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * SHA of the upstream tip, resolved after the flow's own fetch (so a
+ * tracking ref pruned earlier is back if the remote branch exists again).
+ * A branch with no upstream configured fails with git's own message, as a
+ * plain pull always has; a configured upstream whose remote branch is
+ * gone is a typed refusal — nothing has been touched at this point.
+ */
+async function validatedUpstream(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  const sha = await upstreamSha(cwd, env);
+  if (sha) return sha;
+  if (await configuredUpstream(cwd, env)) {
+    throw new GitPullFailure(
+      'pull_failed',
+      'cannot update: the upstream branch no longer exists on the remote; nothing was changed',
+    );
+  }
   await runGit(cwd, ['rev-parse', '--abbrev-ref', '@{upstream}'], env);
+  throw new GitPullFailure(
+    'pull_failed',
+    'cannot update: the upstream branch could not be resolved; nothing was changed',
+  );
 }
 
 /**
@@ -838,7 +904,18 @@ async function pushAutoStash(
       `cannot stash the local changes, so the update was not attempted:\n${gitDetail(err)}`,
     );
   }
-  const created = (await stashEntries(cwd, env)).filter(
+  let after: StashEntry[];
+  try {
+    after = await stashEntries(cwd, env);
+  } catch (err) {
+    // The changes are in the stash but the entry's SHA was never learned:
+    // point at it by its message and stop before pulling.
+    throw new GitPullFailure(
+      'pull_failed',
+      `cannot identify the auto-stash entry, so the update was not attempted; your changes are in the entry labelled "${AUTO_STASH_MESSAGE}" in git stash list:\n${gitDetail(err)}`,
+    );
+  }
+  const created = after.filter(
     (e) => !before.has(e.sha) && e.subject.endsWith(AUTO_STASH_MESSAGE),
   );
   // Listing is newest-first; ours is the oldest of the new entries.
@@ -851,7 +928,8 @@ async function stashPull(
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<GitPullResult> {
   await refuseOperationInProgress(cwd, env);
-  await requireUpstream(cwd, env);
+  await runGit(cwd, ['fetch', '--prune'], env);
+  await validatedUpstream(cwd, env);
   const stashed = await pushAutoStash(cwd, env);
 
   let output: string;
@@ -859,7 +937,7 @@ async function stashPull(
     output = (await runGit(cwd, pullArgs(opts), env)).trim();
   } catch (err) {
     const detail = gitDetail(err);
-    await abortOwnPullState(cwd, env);
+    await abortOwnPullState(cwd, exitCode(err), env);
     if (stashed === undefined) {
       // Nothing to restore, but the update still failed under the stash
       // flow — report it as such so the client shows git's reason instead
@@ -867,11 +945,13 @@ async function stashPull(
       throw new GitPullFailure('pull_failed', `update failed:\n${detail}`);
     }
     const restore = await restoreStash(cwd, stashed, env);
+    // The kept-entry notice, when there is one, leads: it is what the user
+    // needs first, and the route caps the message length.
     throw new GitPullFailure(
       'pull_failed',
       restore.restored
-        ? `update failed; your local changes were restored:\n${detail}`
-        : `update failed and your local changes could not be restored automatically; they are kept in stash entry ${stashed}:\n${detail}\n${restore.output}`,
+        ? `update failed; your local changes were restored${restore.output ? ` (${restore.output})` : ''}:\n${detail}`
+        : `update failed and your local changes could not be restored automatically; they are kept in stash entry ${stashed}:\n${restore.output}\n${detail}`,
     );
   }
   if (stashed === undefined) return { success: true, output };
@@ -906,24 +986,14 @@ async function forcePull(
       'cannot discard changes: the workspace is a subdirectory of its repository, so discarding would also reset changes outside the workspace; resolve them from a terminal',
     );
   }
-  await requireUpstream(cwd, env);
   // Validate before destroying anything: fetch (pruning, so a branch deleted
   // on the remote does not pass the check on its stale tracking ref), then
   // refuse unless the update is a fast-forward. A diverged branch would need
   // a merge that could stop on conflicts after the local changes were gone.
   await runGit(cwd, ['fetch', '--prune'], env);
-  if (!(await upstreamSha(cwd, env))) {
-    throw new GitPullFailure(
-      'pull_failed',
-      'cannot update: the upstream branch no longer exists on the remote; nothing was discarded',
-    );
-  }
+  const validated = await validatedUpstream(cwd, env);
   try {
-    await runGit(
-      cwd,
-      ['merge-base', '--is-ancestor', 'HEAD', '@{upstream}'],
-      env,
-    );
+    await runGit(cwd, ['merge-base', '--is-ancestor', 'HEAD', validated], env);
   } catch (err) {
     if (exitCode(err) === 1) {
       throw new GitPullFailure(
@@ -936,12 +1006,13 @@ async function forcePull(
   await refuseOperationInProgress(cwd, env);
   await runGit(cwd, ['reset', '--hard'], env);
   await runGit(cwd, ['clean', '-fd'], env);
-  // Integrate exactly the tip that was validated: `git pull` would fetch
-  // again, and a push landing in between could turn the validated
-  // fast-forward into a refusal after the local changes are already gone.
-  // A fast-forward is the same commit whether merged or rebased, so the
-  // `rebase` option has nothing to add here.
-  const output = await runGit(cwd, ['merge', '--ff-only', '@{upstream}'], env);
+  // Integrate exactly the commit that was validated, by SHA: `git pull`
+  // would fetch again, and even the symbolic `@{upstream}` can move under a
+  // concurrent fetch — either could turn the validated fast-forward into a
+  // refusal after the local changes are already gone. A fast-forward is
+  // the same commit whether merged or rebased, so the `rebase` option has
+  // nothing to add here.
+  const output = await runGit(cwd, ['merge', '--ff-only', validated], env);
   return { success: true, output: output.trim() };
 }
 

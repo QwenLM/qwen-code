@@ -351,6 +351,9 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.stashRestoreConflict).toBe(true);
+    expect(response.body.stashSha).toBe(
+      git(dir, 'rev-parse', 'refs/stash').trim(),
+    );
     expect(git(dir, 'stash', 'list')).toContain('auto-stash before pull');
   });
 
@@ -461,6 +464,10 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
 
       expect(response.status).toBe(200);
       expect(response.body.output).toContain('could not be dropped');
+      // The kept entry is named by SHA, not only by its volatile slot.
+      expect(response.body.output).toContain(
+        git(dir, 'rev-parse', 'refs/stash').trim(),
+      );
       expect(response.body.output).toContain('<workspace>');
       expect(JSON.stringify(response.body)).not.toContain(dir);
     },
