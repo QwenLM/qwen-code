@@ -24211,4 +24211,20 @@ describe('App connection error reporting (#10406)', () => {
 
     expect(calls).toEqual(['daemon unreachable', 'daemon unreachable']);
   });
+
+  it('delivers a persistent error once when the host attaches onError after it appears', async () => {
+    // onError is optional: a host may mount while a connection error is
+    // already active and only attach its handler on a later render. The
+    // pending error must still be delivered exactly once.
+    mockConnection.error = 'daemon unreachable';
+    const calls: string[] = [];
+    const { rerender } = renderApp({});
+    await flush();
+    expect(calls).toEqual([]);
+
+    rerender({ onError: (error) => calls.push(error.message) });
+    await flush();
+
+    expect(calls).toEqual(['daemon unreachable']);
+  });
 });

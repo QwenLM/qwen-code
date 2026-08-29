@@ -8152,8 +8152,9 @@ export function App({
       return;
     }
     if (lastReportedConnectionErrorRef.current === connection.error) return;
+    if (!onError) return;
     lastReportedConnectionErrorRef.current = connection.error;
-    onError?.(new Error(connection.error));
+    onError(new Error(connection.error));
   }, [connection.error, onError]);
 
   useLayoutEffect(() => {
