@@ -2946,12 +2946,17 @@ describe('WebShellSidebar workspace removal', () => {
     const trigger = workspaceAction('/tmp/other');
     expect(trigger).toBeDefined();
     act(() => click(trigger!));
+    // Positive half first: the menu really opened with the surviving actions.
+    expect(menuItemLabels()).toEqual([
+      'Copy path',
+      'New task',
+      'Reload runtime',
+    ]);
     expect(
       document.body.querySelector(
         '[aria-label="Remove workspace: /tmp/other"]',
       ),
     ).toBeNull();
-    expect(menuItemLabels()).not.toContain('Remove workspace');
     // An untrusted row has nothing but removal to offer.
     expect(workspaceAction('/tmp/danger')).toBeUndefined();
   });
@@ -3284,6 +3289,116 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     expect(container.textContent).toContain('custom header');
+    expect(workspaceAction('/tmp/other')).toBeUndefined();
+    expect(workspaceGit).not.toHaveBeenCalled();
+  });
+
+  it('keeps the action wrapper visible while its menu is open', () => {
+    renderSidebar();
+    const trigger = workspaceAction('/tmp/other')!;
+    const wrapper = trigger.closest<HTMLElement>(
+      '[class*="workspaceHeaderActions"]',
+    )!;
+    const row = wrapper.parentElement!;
+    // React synthesizes onMouseEnter/onMouseLeave from mouseover/mouseout.
+    const hover = (over: boolean) =>
+      act(() => {
+        row.dispatchEvent(
+          new MouseEvent(over ? 'mouseover' : 'mouseout', {
+            bubbles: true,
+            relatedTarget: null,
+          }),
+        );
+      });
+    hover(true);
+    expect(wrapper.style.visibility).toBe('visible');
+    act(() => click(trigger));
+    expect(menuItemLabels().length).toBeGreaterThan(0);
+    // The pointer moves onto the portalled menu and focus leaves the row.
+    hover(false);
+    act(() => {
+      trigger.dispatchEvent(
+        new FocusEvent('focusout', { bubbles: true, relatedTarget: null }),
+      );
+    });
+    expect(wrapper.style.visibility).toBe('visible');
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(menuItemLabels()).toEqual([]);
+    hover(false);
+    act(() => {
+      trigger.dispatchEvent(
+        new FocusEvent('focusout', { bubbles: true, relatedTarget: null }),
+      );
+    });
+    expect(wrapper.style.visibility).toBe('hidden');
+  });
+
+  it('guards the worktree task against double submission and refreshes on success', async () => {
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceGit: vi
+        .fn()
+        .mockResolvedValue({ v: 2, workspaceCwd: cwd, branch: 'main' }),
+    }));
+    let resolveCreate: (created: boolean) => void = () => {};
+    const onNewWorktreeSession = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    renderSidebar({ onNewWorktreeSession });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const clickWorktree = () => {
+      act(() => click(workspaceAction('/tmp/other')!));
+      const item = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((element) => element.textContent === 'New worktree task');
+      expect(item).toBeDefined();
+      act(() => click(item!));
+    };
+    clickWorktree();
+    clickWorktree();
+    expect(onNewWorktreeSession).toHaveBeenCalledTimes(1);
+    expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/other');
+    const catalogCallsBefore = refreshWorkspaceSessionCatalog.mock.calls.length;
+    await act(async () => {
+      resolveCreate(true);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(refreshWorkspaceSessionCatalog.mock.calls.length).toBeGreaterThan(
+      catalogCallsBefore,
+    );
+    expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
+      '/tmp/other',
+    );
+  });
+
+  it('polls no git status for a locked workspace without a diff handler', async () => {
+    const workspaceGit = vi
+      .fn()
+      .mockResolvedValue({ v: 2, workspaceCwd: '/tmp/other', branch: 'main' });
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceGit,
+    }));
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      onNewWorktreeSession: vi.fn(),
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // No menu under lock, so no consumer of the branch: nothing polled.
     expect(workspaceAction('/tmp/other')).toBeUndefined();
     expect(workspaceGit).not.toHaveBeenCalled();
   });

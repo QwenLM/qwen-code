@@ -217,6 +217,51 @@ describe('WorkspaceMenu', () => {
     expect(onOpenChange).toHaveBeenLastCalledWith(false);
   });
 
+  it('renders the management section as one flat group', async () => {
+    await render(
+      <WorkspaceMenu
+        workspace={workspace}
+        actions={{ copyPath: vi.fn(), openManagement: vi.fn() }}
+      />,
+    );
+    await open();
+    expect(
+      document.body.querySelectorAll('[role="group"] [role="group"]').length,
+    ).toBe(0);
+    expect(document.body.textContent).toContain('Manage');
+  });
+
+  it('keeps the full action set in its documented order', async () => {
+    await render(
+      <WorkspaceMenu
+        workspace={workspace}
+        actions={{
+          rename: vi.fn(),
+          copyPath: vi.fn(),
+          newSession: vi.fn(),
+          newWorktreeSession: vi.fn(),
+          openManagement: vi.fn(),
+          reload: vi.fn(),
+          remove: vi.fn(),
+        }}
+      />,
+    );
+    const items = await open();
+    expect(labels(items)).toEqual([
+      'Rename…',
+      'Copy path',
+      'New task',
+      'New worktree task',
+      'MCP',
+      'Skills',
+      'Extensions',
+      'Channels',
+      'Settings',
+      'Reload runtime',
+      'Remove workspace',
+    ]);
+  });
+
   it('disables the trigger', async () => {
     await render(
       <WorkspaceMenu

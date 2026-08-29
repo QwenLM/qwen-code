@@ -144,6 +144,7 @@ function renderSection(
     renderSessions: boolean;
     excludePinned: boolean;
     searchQuery: string;
+    gitBranchWanted: boolean;
   }> = {},
 ): void {
   act(() => {
@@ -179,6 +180,7 @@ function renderSection(
           headerActions={overrides.headerActions}
           sessionStats={overrides.sessionStats}
           renderSessions={overrides.renderSessions}
+          gitBranchWanted={overrides.gitBranchWanted}
         />
       </I18nProvider>,
     );
@@ -1393,7 +1395,11 @@ describe('WorkspaceSection overview gates', () => {
       branch: 'main',
     });
     const headerActions = vi.fn(() => null);
-    renderSection({ client: makeOverviewClient(), headerActions });
+    renderSection({
+      client: makeOverviewClient(),
+      headerActions,
+      gitBranchWanted: true,
+    });
     await flush();
     expect(workspaceGit).toHaveBeenCalled();
     const branches = headerActions.mock.calls.map(
@@ -1402,6 +1408,19 @@ describe('WorkspaceSection overview gates', () => {
     expect(branches).toContain('main');
     // The chip itself still needs the diff handler.
     expect(gitChip()).toBeNull();
+  });
+
+  it('skips the git poll when no header action reads the branch', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+    });
+    const headerActions = vi.fn(() => null);
+    renderSection({ client: makeOverviewClient(), headerActions });
+    await flush();
+    expect(workspaceGit).not.toHaveBeenCalled();
+    expect(headerActions).toHaveBeenCalled();
   });
 
   it('shows no counts while parent-owned stats are loading', async () => {

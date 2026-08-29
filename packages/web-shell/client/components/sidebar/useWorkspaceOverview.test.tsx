@@ -218,6 +218,95 @@ describe('useWorkspaceOverview', () => {
     expect(latest?.overview?.context).toBeUndefined();
   });
 
+  it('keeps other facets when one answers with a malformed body', async () => {
+    // A reduced 200 body makes the summarizer throw; that facet stays
+    // unknown and the healthy ones still land.
+    workspaceChannels.mockResolvedValue({});
+    await render(makeClient(fullHandle), '/w', {
+      enabled: true,
+      items: ['mcp', 'channels'],
+    });
+    await flush();
+    expect(latest?.overview?.mcp).toBeDefined();
+    expect(latest?.overview?.channels).toBeUndefined();
+  });
+
+  it('fetches a facet added to the requested set', async () => {
+    const client = makeClient(fullHandle);
+    await render(client, '/w', { enabled: true, items: ['mcp'] });
+    await flush();
+    expect(workspaceSkills).not.toHaveBeenCalled();
+    await render(client, '/w', { enabled: true, items: ['mcp', 'skills'] });
+    await flush();
+    expect(workspaceSkills).toHaveBeenCalledTimes(1);
+    expect(latest?.overview?.skills?.total).toBe(1);
+    await render(client, '/w', { enabled: true, items: [] });
+    await flush();
+    expect(latest?.overview).toBeUndefined();
+  });
+
+  it('refetches for a new cwd and discards the old cwd round still in flight', async () => {
+    let resolveOld: (value: unknown) => void = () => {};
+    const oldMcp = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    const newMcp = vi.fn().mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/w2',
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [],
+    });
+    workspaceByCwd.mockImplementation((cwd: string) =>
+      cwd === '/w2' ? { workspaceMcp: newMcp } : { workspaceMcp: oldMcp },
+    );
+    const client = { workspaceByCwd } as unknown as DaemonClient;
+    await render(client, '/w', { enabled: true, items: ['mcp'] });
+    await flush();
+    expect(oldMcp).toHaveBeenCalledTimes(1);
+    await render(client, '/w2', { enabled: true, items: ['mcp'] });
+    await flush();
+    expect(workspaceByCwd).toHaveBeenCalledWith('/w2');
+    expect(latest?.overview?.mcp?.configured).toBe(0);
+    await act(async () => {
+      resolveOld({
+        v: 1,
+        workspaceCwd: '/w',
+        initialized: true,
+        discoveryState: 'completed',
+        servers: [
+          {
+            kind: 'mcp_server',
+            name: 'stale',
+            status: 'ok',
+            transport: 'stdio',
+            disabled: false,
+            mcpStatus: 'connected',
+          },
+        ],
+      });
+    });
+    await flush();
+    expect(latest?.overview?.mcp?.configured).toBe(0);
+  });
+
+  it('refetches as soon as it is enabled again', async () => {
+    const client = makeClient(fullHandle);
+    await render(client, '/w', { enabled: true, items: ['mcp'] });
+    await flush();
+    expect(latest?.overview?.mcp).toBeDefined();
+    await render(client, '/w', { enabled: false, items: ['mcp'] });
+    await flush();
+    expect(latest?.overview).toBeUndefined();
+    await render(client, '/w', { enabled: true, items: ['mcp'] });
+    await flush();
+    expect(workspaceMcp).toHaveBeenCalledTimes(2);
+    expect(latest?.overview?.mcp).toBeDefined();
+  });
+
   it('keeps the last known value of a facet across a transient failure', async () => {
     await render(makeClient(fullHandle), '/w', {
       enabled: true,

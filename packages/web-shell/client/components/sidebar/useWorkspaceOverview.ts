@@ -62,21 +62,38 @@ export async function fetchWorkspaceOverview(
           .then(call)
           .catch(() => undefined)
       : Promise.resolve(undefined);
-  const [mcp, skills, extensions, channels, memory, hooks] = await Promise.all([
-    facet(items.has('mcp'), () => handle.workspaceMcp()),
-    facet(items.has('skills'), () => handle.workspaceSkills()),
-    facet(items.has('extensions'), () => handle.workspaceExtensions()),
-    facet(items.has('channels'), () => handle.workspaceChannels()),
-    facet(items.has('context'), () => handle.workspaceMemory()),
-    facet(items.has('hooks'), () => handle.workspaceHooks()),
-  ]);
+  // Summarizing inside the wrapper keeps a malformed body (an intermediary
+  // or mixed-version daemon answering 200 with a reduced shape) as isolated
+  // as a rejected call: that facet stays unknown, the others still land.
+  const [mcp, skills, extensions, channels, context, hooks] = await Promise.all(
+    [
+      facet(items.has('mcp'), async () =>
+        summarizeMcp(await handle.workspaceMcp()),
+      ),
+      facet(items.has('skills'), async () =>
+        summarizeSkills(await handle.workspaceSkills()),
+      ),
+      facet(items.has('extensions'), async () =>
+        summarizeExtensions(await handle.workspaceExtensions()),
+      ),
+      facet(items.has('channels'), async () =>
+        summarizeChannels(await handle.workspaceChannels()),
+      ),
+      facet(items.has('context'), async () =>
+        summarizeContext(await handle.workspaceMemory()),
+      ),
+      facet(items.has('hooks'), async () =>
+        summarizeHooks(await handle.workspaceHooks()),
+      ),
+    ],
+  );
   return {
-    ...(mcp ? { mcp: summarizeMcp(mcp) } : {}),
-    ...(skills ? { skills: summarizeSkills(skills) } : {}),
-    ...(extensions ? { extensions: summarizeExtensions(extensions) } : {}),
-    ...(channels ? { channels: summarizeChannels(channels) } : {}),
-    ...(memory ? { context: summarizeContext(memory) } : {}),
-    ...(hooks ? { hooks: summarizeHooks(hooks) } : {}),
+    ...(mcp ? { mcp } : {}),
+    ...(skills ? { skills } : {}),
+    ...(extensions ? { extensions } : {}),
+    ...(channels ? { channels } : {}),
+    ...(context ? { context } : {}),
+    ...(hooks ? { hooks } : {}),
     fetchedAt: Date.now(),
   };
 }

@@ -145,6 +145,12 @@ interface WorkspaceSectionProps {
   /** Narrow sidebar: chips drop their text labels. */
   compact?: boolean;
   /**
+   * A header action reads the polled git branch (the worktree entry), so the
+   * poll must run even without the diff-chip handler. Off when no consumer
+   * of `gitBranch` is wired.
+   */
+  gitBranchWanted?: boolean;
+  /**
    * Session counts for the header. The primary workspace's sessions are
    * listed by the sidebar itself, so it passes them in; other workspaces
    * count their own catalog page. `null` means the parent owns the counts
@@ -197,6 +203,7 @@ export function WorkspaceSection({
   overviewEnabled = false,
   overviewItems = DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
   compact = false,
+  gitBranchWanted = false,
   sessionStats,
   onRenameGroup,
   onDeleteGroup,
@@ -422,8 +429,9 @@ export function WorkspaceSection({
   const gitPollCwd = isAbsolutePath(workspace.cwd) ? workspace.cwd : undefined;
   // The poll feeds the header chip (needs the diff handler) and the header
   // actions' git-gated entries (a worktree task needs a branch), so it runs
-  // when either consumer is wired.
-  const gitStatusEnabled = Boolean(onOpenGitDiff) || Boolean(headerActions);
+  // when either consumer is wired — the caller says so explicitly, since a
+  // header-actions closure is also passed for rows that render no git entry.
+  const gitStatusEnabled = Boolean(onOpenGitDiff) || gitBranchWanted;
 
   // Log a poll failure only on the success→failure transition, not on every
   // 60s/focus tick, so an unreachable workspace doesn't spam a long-lived tab.

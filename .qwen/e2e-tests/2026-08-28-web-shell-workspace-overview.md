@@ -35,8 +35,10 @@ Expected:
   Extensions n · Channels n · Context n`. The MCP chip is warning-toned and
   its tooltip names the failed server count.
 - Before the ACP child has initialized (fresh daemon, no session yet) the
-  MCP / Skills / Context chips show `—` with tooltip "not initialized yet",
-  never `0`.
+  MCP / Skills chips show `—` with tooltip "not initialized yet", never `0`.
+  The Context chip is answered by the daemon from disk and settles at its
+  file count (`0` for a workspace without a QWEN.md) as soon as the first
+  round lands.
 
 ### Request gating
 

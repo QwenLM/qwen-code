@@ -1214,6 +1214,12 @@ export function WebShellSidebar({
   const exportingSessionIdsRef = useRef<Set<string>>(new Set());
   const [creatingSession, setCreatingSession] = useState(false);
   const creatingSessionRef = useRef(false);
+  // The workspace whose header menu is open: its action wrapper must stay
+  // visible while the (portalled) menu holds hover and focus, or Escape
+  // would return focus to a hidden trigger and strand it on the body.
+  const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(
+    null,
+  );
   const [deleteCandidate, setDeleteCandidate] =
     useState<DaemonSessionSummary | null>(null);
   const [groupMenu, setGroupMenu] = useState<GroupMenuState | null>(null);
@@ -2654,6 +2660,44 @@ export function WebShellSidebar({
       bumpWorkspaceReload,
       onError,
       onNewSession,
+      primaryWorkspaceCwd,
+      sessionCatalogController,
+      t,
+    ],
+  );
+
+  // Same re-entrancy guard, busy state and catalog invalidation as a plain
+  // new task; only the creation callback differs.
+  const handleNewWorktreeSession = useCallback(
+    (workspaceCwd?: string) => {
+      if (!onNewWorktreeSession || creatingSessionRef.current) return;
+
+      creatingSessionRef.current = true;
+      setCreatingSession(true);
+      void (async () => {
+        try {
+          const created = await onNewWorktreeSession(workspaceCwd);
+          if (created) {
+            bumpWorkspaceReload();
+            const ownerCwd = workspaceCwd ?? primaryWorkspaceCwd;
+            if (ownerCwd) {
+              sessionCatalogController.refreshWorkspace(ownerCwd);
+            }
+          }
+        } catch (err) {
+          if (!isAbortError(err)) {
+            onError(err, t('sidebar.newSessionFailed'));
+          }
+        } finally {
+          creatingSessionRef.current = false;
+          setCreatingSession(false);
+        }
+      })();
+    },
+    [
+      bumpWorkspaceReload,
+      onError,
+      onNewWorktreeSession,
       primaryWorkspaceCwd,
       sessionCatalogController,
       t,
@@ -5627,6 +5671,9 @@ export function WebShellSidebar({
                           overviewEnabled={workspaceOverviewEnabled}
                           overviewItems={workspaceOverviewItems}
                           compact={footerTight}
+                          gitBranchWanted={
+                            Boolean(onNewWorktreeSession) && !lockedWorkspaceCwd
+                          }
                           sessionStats={
                             ws.primary
                               ? (primarySessionStats ?? null)
@@ -5684,7 +5731,7 @@ export function WebShellSidebar({
                                     gitBranch
                                       ? {
                                           newWorktreeSession: () =>
-                                            void onNewWorktreeSession(wsCwd),
+                                            handleNewWorktreeSession(wsCwd),
                                         }
                                       : {}),
                                     ...(canManage
@@ -5715,9 +5762,11 @@ export function WebShellSidebar({
                                     <div
                                       className={styles.workspaceHeaderActions}
                                       style={{
-                                        visibility: visible
-                                          ? 'visible'
-                                          : 'hidden',
+                                        visibility:
+                                          visible ||
+                                          openWorkspaceMenuId === ws.id
+                                            ? 'visible'
+                                            : 'hidden',
                                       }}
                                     >
                                       {ws.trusted && (
@@ -5792,9 +5841,16 @@ export function WebShellSidebar({
                                           contentStyle={
                                             SESSION_MENU_PORTAL_STYLE
                                           }
-                                          onOpenChange={
-                                            handleSessionMenuOpenChange
-                                          }
+                                          onOpenChange={(open) => {
+                                            handleSessionMenuOpenChange(open);
+                                            setOpenWorkspaceMenuId((current) =>
+                                              open
+                                                ? ws.id
+                                                : current === ws.id
+                                                  ? null
+                                                  : current,
+                                            );
+                                          }}
                                           onPointerDownOutside={
                                             handleSessionMenuPointerDownOutside
                                           }

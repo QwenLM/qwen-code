@@ -254,6 +254,24 @@ describe('summarizeSkills / summarizeExtensions / summarizeChannels', () => {
     ).toEqual({ initialized: true, total: 2, enabled: 1 });
   });
 
+  it('keeps an uninitialized skills placeholder unknown', () => {
+    const idle = summarizeSkills({
+      v: 1,
+      workspaceCwd: '/w',
+      initialized: false,
+      skills: [],
+    });
+    expect(isOverviewFacetKnown({ skills: idle, fetchedAt: 1 }, 'skills')).toBe(
+      false,
+    );
+    expect(
+      isOverviewFacetKnown(
+        { skills: { initialized: true, total: 0, enabled: 0 }, fetchedAt: 1 },
+        'skills',
+      ),
+    ).toBe(true);
+  });
+
   it('counts active extensions from the projection', () => {
     expect(
       summarizeExtensions({
@@ -319,6 +337,30 @@ describe('mergeOverviewSnapshots', () => {
       skills: next.skills,
       fetchedAt: 2,
     });
+  });
+
+  it('lets a fresh idle placeholder overwrite a previously known facet', () => {
+    // The ACP child died: the daemon now answers the placeholder, and the
+    // chip must go back to unknown rather than freeze on the old count.
+    const previous: WorkspaceOverviewSnapshot = {
+      mcp: {
+        initialized: true,
+        configured: 2,
+        connected: 2,
+        failed: 0,
+        disabled: 0,
+      },
+      fetchedAt: 1,
+    };
+    const next: WorkspaceOverviewSnapshot = {
+      mcp: summarizeMcp(
+        mcpStatus({ initialized: false, discoveryState: undefined }),
+      ),
+      fetchedAt: 2,
+    };
+    const merged = mergeOverviewSnapshots(previous, next, new Set(['mcp']));
+    expect(merged.mcp?.initialized).toBe(false);
+    expect(isOverviewFacetKnown(merged, 'mcp')).toBe(false);
   });
 
   it('drops facets that are no longer requested', () => {

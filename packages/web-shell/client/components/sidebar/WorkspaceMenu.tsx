@@ -153,35 +153,37 @@ export function WorkspaceMenu({
 
   const openManagement = actions.openManagement;
   if (openManagement) {
+    // The section wrapper below supplies the group role; a nested group here
+    // would only add an unlabeled boundary for assistive tech.
     sections.push([
-      <DropdownMenuGroup key="manage">
-        <DropdownMenuLabel>{t('sidebar.manageWorkspace')}</DropdownMenuLabel>
-        {MANAGEMENT_ENTRIES.map(({ target, Icon }) => {
-          const count =
-            target === 'settings'
-              ? undefined
-              : formatOverviewValue(overview, target);
-          return (
-            <DropdownMenuItem
-              key={target}
-              onSelect={() => openManagement(target)}
-            >
-              <Icon />
-              {t(
-                `sidebar.overview.${target === 'settings' ? 'settings' : target}`,
-              )}
-              {count !== undefined && (
-                <span
-                  className="text-muted-foreground ml-auto pl-3 text-xs tabular-nums"
-                  aria-hidden="true"
-                >
-                  {count}
-                </span>
-              )}
-            </DropdownMenuItem>
-          );
-        })}
-      </DropdownMenuGroup>,
+      <DropdownMenuLabel key="manage-label">
+        {t('sidebar.manageWorkspace')}
+      </DropdownMenuLabel>,
+      ...MANAGEMENT_ENTRIES.map(({ target, Icon }) => {
+        const count =
+          target === 'settings'
+            ? undefined
+            : formatOverviewValue(overview, target);
+        return (
+          <DropdownMenuItem
+            key={target}
+            onSelect={() => openManagement(target)}
+          >
+            <Icon />
+            {t(
+              `sidebar.overview.${target === 'settings' ? 'settings' : target}`,
+            )}
+            {count !== undefined && (
+              <span
+                className="text-muted-foreground ml-auto pl-3 text-xs tabular-nums"
+                aria-hidden="true"
+              >
+                {count}
+              </span>
+            )}
+          </DropdownMenuItem>
+        );
+      }),
     ]);
   }
 
