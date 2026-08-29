@@ -6953,14 +6953,21 @@ class QwenAgent implements Agent {
         const configOptions =
           model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
             ? undefined
-            : buildModelReasoningConfigPreview(model.id, {
-                thinkingMandatory:
-                  config.getResolvedModelConfig?.(
-                    model.authType,
-                    model.id,
-                    model.registryBaseUrl ?? model.baseUrl,
-                  )?.generationConfig.thinkingMandatory === true,
-              });
+            : buildModelReasoningConfigPreview(
+                model.id,
+                {
+                  thinkingMandatory:
+                    config.getResolvedModelConfig?.(
+                      model.authType,
+                      model.id,
+                      model.registryBaseUrl ?? model.baseUrl,
+                    )?.generationConfig.thinkingMandatory === true,
+                },
+                {
+                  authType: model.authType,
+                  baseUrl: model.registryBaseUrl ?? model.baseUrl,
+                },
+              );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),

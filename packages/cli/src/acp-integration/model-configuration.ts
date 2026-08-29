@@ -115,9 +115,10 @@ export function buildModelReasoningConfigOption(
 export function buildModelReasoningConfigPreview(
   modelId: string | undefined,
   state: ModelReasoningConfigState = {},
+  route?: { readonly authType?: AuthType; readonly baseUrl?: string },
 ): SessionConfigOption[] | undefined {
-  const reasoning = getModelConfiguration(modelId)?.reasoning;
+  const reasoning = getModelConfiguration(modelId, route)?.reasoning;
   if (!reasoning?.thinking || reasoning.toggleOnly) return undefined;
-  const option = buildModelReasoningConfigOption(modelId, state);
+  const option = buildModelReasoningConfigOption(modelId, state, route);
   return option ? [option] : undefined;
 }

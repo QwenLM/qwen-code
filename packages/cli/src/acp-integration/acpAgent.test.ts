@@ -7685,7 +7685,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('projects reasoning preview only for stable non-runtime qwen3.8-max', async () => {
+  it('projects stable and provider-aware reasoning previews', async () => {
     mockConfig = {
       ...mockConfig,
       getTargetDir: vi.fn().mockReturnValue('/work/status'),
@@ -7727,6 +7727,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           authType: 'qwen',
           isRuntimeModel: true,
         },
+        {
+          id: 'kimi-k3',
+          label: 'Kimi K3',
+          authType: 'openai',
+          baseUrl: 'https://api.moonshot.ai/v1',
+        },
       ]),
     } as unknown as Config;
 
@@ -7760,6 +7766,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       (model) =>
         model.baseModelId === 'qwen3.8-max' && model.isRuntime === false,
     );
+    const kimi = models.find((model) => model.baseModelId === 'kimi-k3');
 
     expect(stable?.configOptions).toMatchObject([
       {
@@ -7774,9 +7781,22 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       },
     ]);
+    expect(kimi?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: 'max',
+        options: [{ value: 'low' }, { value: 'high' }, { value: 'max' }],
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'max',
+            canDisable: false,
+          },
+        },
+      },
+    ]);
     expect(
       models
-        .filter((model) => model !== stable)
+        .filter((model) => model !== stable && model !== kimi)
         .every((model) => model.configOptions === undefined),
     ).toBe(true);
     expect(

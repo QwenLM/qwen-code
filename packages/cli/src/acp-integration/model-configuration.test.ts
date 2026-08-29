@@ -100,6 +100,17 @@ describe('model configuration manifest', () => {
     ]);
   });
 
+  it('projects provider-aware reasoning in the workspace preview', () => {
+    const route = {
+      authType: OPENAI,
+      baseUrl: 'https://api.moonshot.ai/v1',
+    };
+
+    expect(buildModelReasoningConfigPreview('kimi-k3', {}, route)).toEqual([
+      buildModelReasoningConfigOption('kimi-k3', {}, route),
+    ]);
+  });
+
   it.each([
     'qwen3.5-plus',
     'qwen3.6-plus',
