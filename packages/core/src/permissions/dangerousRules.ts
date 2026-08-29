@@ -13,6 +13,7 @@
  */
 
 import { ToolNames } from '../tools/tool-names.js';
+import { stripLeadingVariableAssignments } from './rule-parser.js';
 import type { PermissionRule } from './types.js';
 
 /**
@@ -171,7 +172,9 @@ export function isDangerousBashRule(rule: PermissionRule): boolean {
 
   if (!rule.specifier || rule.specifier === '*') return true;
 
-  const content = rule.specifier.trim().toLowerCase();
+  const content = stripLeadingVariableAssignments(rule.specifier)
+    .trim()
+    .toLowerCase();
   if (content === '' || content === '*') return true;
 
   // Treat whitespace as the first-token delimiter; matcher-colon form is
