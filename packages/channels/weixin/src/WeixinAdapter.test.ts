@@ -117,6 +117,24 @@ describe('WeixinChannel', () => {
     );
   });
 
+  it('attributes images when markdown projection leaves no visible text', async () => {
+    const channel = createChannel();
+
+    await channel.sendAttributed(
+      'user-1',
+      '```\n```\n[IMAGE: example.png]',
+      '[review]',
+    );
+
+    expect(sendMocks.sendText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'user-1',
+        text: '[review]',
+      }),
+    );
+    expect(sendMocks.sendImage).toHaveBeenCalled();
+  });
+
   it('preserves underscores in attributed task names', async () => {
     const channel = createChannel();
 

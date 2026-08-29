@@ -6685,6 +6685,50 @@ describe('FeishuChannel', () => {
       expect(finalText.startsWith('```\n')).toBe(true);
       expect(finalText).toContain('内容过长，已截断早期内容');
     });
+
+    it('renders one truncation marker through the real card update path', async () => {
+      const channel = createChannel();
+      const patchInteractiveCard = vi.fn().mockResolvedValue(true);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        patchInteractiveCard,
+      });
+      const cardState = {
+        messageId: 'om_stream',
+        created: true,
+        creating: false,
+        stopped: false,
+        finalizing: false,
+        accumulatedText: `HEAD${'x'.repeat(21_000)}TAIL`,
+        sourceLabel: '[review_task]',
+        lastUpdateAt: Date.now(),
+      };
+      getPrivateMethod<Map<string, typeof cardState>>(
+        channel,
+        'cardSessions',
+      ).set('inbound_1', cardState);
+
+      await getPrivateMethod<
+        (inboundMsgId: string, state: typeof cardState) => Promise<void>
+      >(channel, 'runThrottledCardUpdate').call(
+        channel,
+        'inbound_1',
+        cardState,
+      );
+
+      expect(patchInteractiveCard).toHaveBeenCalledTimes(1);
+      const renderedCard = patchInteractiveCard.mock.calls[0]?.[1] as {
+        body: { elements: Array<{ tag: string; content?: string }> };
+      };
+      const markdown =
+        renderedCard.body.elements.find((element) => element.tag === 'markdown')
+          ?.content ?? '';
+      expect(markdown.length).toBeLessThanOrEqual(20_000);
+      expect(markdown.match(/内容过长，已截断早期内容/gu)).toHaveLength(1);
+      expect(markdown.match(/\\\[review\\_task\\\]/gu)).toHaveLength(1);
+      expect(markdown.match(/运行中\.\.\./gu)).toHaveLength(1);
+      expect(markdown).not.toContain('HEAD');
+      expect(markdown).toContain('TAIL');
+    });
   });
 
   describe('auxiliary map lifecycle', () => {

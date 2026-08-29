@@ -2523,9 +2523,10 @@ export class FeishuChannel extends ChannelBase {
     const MAX_CARD_CHARS = 20_000;
     if (text.length + reservedChars <= MAX_CARD_CHARS) return text;
     const marker = '\n\n_(内容过长，已截断早期内容)_';
+    const body = text.endsWith(marker) ? text.slice(0, -marker.length) : text;
     const fenceReserve = 4; // potential '```\n' prepend for fence rebalancing
     let truncated =
-      text.slice(
+      body.slice(
         -(MAX_CARD_CHARS - marker.length - fenceReserve - reservedChars),
       ) + marker;
     // Re-balance code fences after truncation

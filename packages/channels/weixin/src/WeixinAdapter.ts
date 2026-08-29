@@ -285,8 +285,9 @@ export class WeixinChannel extends ChannelBase {
     // Clean up double blank lines left by removed markers
     cleanedText = cleanedText.replace(/\n{3,}/g, '\n\n').trim();
 
-    const visibleText = cleanedText
-      ? this.formatAttributedText(markdownToPlainText(cleanedText), sourceLabel)
+    const plainText = cleanedText ? markdownToPlainText(cleanedText) : '';
+    const visibleText = plainText
+      ? this.formatAttributedText(plainText, sourceLabel)
       : parsedImages.length > 0
         ? sourceLabel
         : undefined;
