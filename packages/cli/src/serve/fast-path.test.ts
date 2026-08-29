@@ -396,8 +396,8 @@ describe('CLI entry import boundary', () => {
   it('does not statically import the full gemini entry before the serve fast path can run', () => {
     const cliSource = readFileSync('src/cli.ts', 'utf8');
 
-    expect(cliSource).not.toContain("import './gemini.js'");
-    expect(cliSource).not.toContain("import { main } from './gemini.js'");
+    expect(cliSource).not.toContain("import './llm.js'");
+    expect(cliSource).not.toContain("import { main } from './llm.js'");
     expect(cliSource).not.toContain("process.argv[2] === 'serve'");
     expect(cliSource).toContain("await import('./serve/fast-path.js')");
   });
@@ -536,6 +536,7 @@ describe('serve fast path argument parsing', () => {
 
     expect(parsed).toEqual({
       kind: 'serve',
+      openWithAuth: false,
       httpBridge: true,
       open: false,
       options: {
@@ -691,7 +692,9 @@ describe('serve fast path argument parsing', () => {
       ['tls-key', ['--tls-key', '/tmp/key.pem']],
       ['web', ['--no-web']],
       ['open', ['--open']],
+      ['open-with-auth', ['--open-with-auth']],
       ['local-control', ['--local-control']],
+      ['local-control-address', ['--local-control-address', '192.168.1.2']],
       ['http-bridge', ['--no-http-bridge']],
       ['memory-budget-mb', ['--memory-budget-mb', '8192']],
       ['memory-pressure-mode', ['--memory-pressure-mode', 'observe']],
@@ -717,6 +720,7 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['restore-ask-user-question', ['--restore-ask-user-question']],
       ['external-tool-guard-mode', ['--external-tool-guard-mode', 'off']],
       [
         'external-tool-guard-endpoint',
@@ -737,6 +741,7 @@ describe('serve fast path argument parsing', () => {
       'external-tool-guard-timeout-ms',
       'help',
       'local-control',
+      'local-control-address',
       'version',
     ]);
 
@@ -843,6 +848,38 @@ describe('serve fast path argument parsing', () => {
     expect(parsed).toMatchObject({
       kind: 'serve',
       options: { experimentalLsp: true },
+    });
+  });
+
+  it('keeps --restore-ask-user-question on the fast path', () => {
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--restore-ask-user-question',
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: { restoreAskUserQuestion: true },
+    });
+  });
+
+  it('keeps authenticated open on the fast path', () => {
+    const parsed = parseServeFastPathArgs(['serve', '--open-with-auth']);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      open: true,
+      openWithAuth: true,
+    });
+  });
+
+  it('lets authenticated open imply --open regardless of --no-open', () => {
+    expect(
+      parseServeFastPathArgs(['serve', '--open-with-auth', '--no-open']),
+    ).toMatchObject({
+      kind: 'serve',
+      open: true,
+      openWithAuth: true,
     });
   });
 

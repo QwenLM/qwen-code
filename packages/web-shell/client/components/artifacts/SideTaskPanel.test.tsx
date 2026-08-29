@@ -12,10 +12,12 @@ const {
   renameSession,
   sendPrompt,
   transcript,
+  catalogController,
 } = vi.hoisted(() => ({
   connection: {
     status: 'idle',
     sessionId: undefined as string | undefined,
+    workspaceCwd: undefined as string | undefined,
     displayName: undefined as string | undefined,
     loadingTranscript: false,
     catchingUp: false,
@@ -48,9 +50,16 @@ const {
     capacityReached: false,
     paginationError: undefined as string | undefined,
   },
+  catalogController: {
+    invalidateWorkspace: vi.fn(),
+    sessionCreated: vi.fn(),
+    promptAdmitted: vi.fn(),
+    renamed: vi.fn(),
+    turnCompleted: vi.fn(),
+  },
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: (props: {
     children: ReactNode;
     [key: string]: unknown;
@@ -60,8 +69,13 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   },
   useConnection: () => connection,
   useActions: () => ({ renameSession, sendPrompt }),
+  useWorkspace: () => ({ client: {}, workspaceCwd: '/work/project' }),
   useTranscriptBlocks: () => transcript.blocks,
   useTranscriptHistory: () => transcript,
+}));
+
+vi.mock('../../session-catalog/session-catalog-hooks', () => ({
+  useSessionCatalogController: () => catalogController,
 }));
 
 vi.mock('../ChatPane', () => ({
@@ -105,6 +119,7 @@ afterEach(() => {
   root = null;
   connection.status = 'idle';
   connection.sessionId = undefined;
+  connection.workspaceCwd = undefined;
   connection.displayName = undefined;
   connection.loadingTranscript = false;
   connection.catchingUp = false;
@@ -118,6 +133,9 @@ afterEach(() => {
   renameSession.mockClear();
   renameSession.mockResolvedValue(undefined);
   sendPrompt.mockClear();
+  catalogController.invalidateWorkspace.mockClear();
+  catalogController.promptAdmitted.mockClear();
+  catalogController.renamed.mockClear();
 });
 
 it('creates a side task and reports the new session id', async () => {
@@ -307,6 +325,11 @@ it('names a restored empty side task from its first prompt', async () => {
   });
 
   expect(renameSession).toHaveBeenCalledWith('Investigate restored task');
+  expect(catalogController.renamed).toHaveBeenCalledWith(
+    '/work/project',
+    'side-session-1',
+    'Investigate restored task',
+  );
   expect(onTitleChange).toHaveBeenCalledWith(
     'side-task:side-session-1',
     'Investigate restored task',
@@ -393,11 +416,33 @@ it('sends the /btw question as the first side-task prompt', async () => {
   expect(renameSession).toHaveBeenCalledWith(
     'Explain the current implementation',
   );
+  expect(catalogController.promptAdmitted).toHaveBeenCalledWith(
+    '/work/project',
+    'side-session-1',
+  );
   expect(onTitleChange).toHaveBeenCalledWith(
     'side-task:side-session-1',
     'Explain the current implementation',
     true,
   );
+});
+
+it('does not patch a different workspace after side-task admission', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.workspaceCwd = '/work/other';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    renderSideTask({ initialPrompt: 'Explain the current implementation' });
+    await Promise.resolve();
+  });
+
+  expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
+  expect(catalogController.renamed).not.toHaveBeenCalled();
 });
 
 it('does not rename a restored side task when older history exists', () => {

@@ -37,7 +37,6 @@ const PREVIEW_CONFIG_STUB = {
   getIdeMode: () => false,
   isTrustedFolder: () => false,
   getToolRegistry: () => ({ getTool: () => undefined }),
-  getContentGenerator: () => ({ useSummarizedThinking: () => false }),
 } as unknown as Config;
 
 const PREVIEW_SETTINGS_STUB = {

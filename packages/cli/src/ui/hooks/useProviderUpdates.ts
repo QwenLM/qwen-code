@@ -37,7 +37,6 @@ export interface ModelUpdateDiff {
   added: string[];
   removed: string[];
   currentModelAffected: boolean;
-  fallbackModel?: string;
 }
 
 export type UpdateChoice = 'update' | 'later' | 'skip';
@@ -148,9 +147,8 @@ function computeModelDiff(
   const added = newModelIds.filter((id) => !existingSet.has(id));
   const removed = existingModelIds.filter((id) => !newSet.has(id));
   const currentModelAffected = removed.includes(currentModel);
-  const fallbackModel = currentModelAffected ? newModelIds[0] : undefined;
 
-  return { added, removed, currentModelAffected, fallbackModel };
+  return { added, removed, currentModelAffected };
 }
 
 interface PendingUpdate {
@@ -205,8 +203,9 @@ function findAllPendingUpdates(
     if (!metadata.version) continue;
 
     const baseUrl = metadata.baseUrl || resolveBaseUrl(provider);
-    const currentTemplate = buildProviderTemplate(provider, baseUrl);
-    const currentVersion = computeModelListVersion(currentTemplate);
+    const currentVersion = computeModelListVersion(
+      buildProviderTemplate(provider, baseUrl),
+    );
 
     if (metadata.version === currentVersion) continue;
     if (metadata.ignoredVersion === currentVersion) continue;
@@ -255,9 +254,10 @@ export function useProviderUpdates(
   const migrated = useRef(false);
 
   const executeUpdate = useCallback(
-    async (providerCfg: ProviderConfig, baseUrl?: string) => {
+    async (pending: PendingUpdate) => {
       try {
-        const resolved = resolveBaseUrl(providerCfg, baseUrl);
+        const providerCfg = pending.provider;
+        const resolved = resolveBaseUrl(providerCfg, pending.baseUrl);
         // An update only refreshes built-in models — user-added custom IDs
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
@@ -270,8 +270,12 @@ export function useProviderUpdates(
           apiKey: '',
           modelIds: [...defaultIds, ...customIds],
         });
+        installPlan.providerState![
+          `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
+        ]!['version'] = pending.currentVersion;
         delete installPlan.env;
-        const previousModel = config.getModel();
+        // Template updates never change the selected model.
+        delete installPlan.modelSelection;
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
           activeConfig?.authType === providerCfg.protocol &&
@@ -280,14 +284,6 @@ export function useProviderUpdates(
             activeConfig.baseUrl,
             activeConfig.apiKeyEnvKey,
           );
-        const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
-        const previousModelStillAvailable = newConfigs.some(
-          (cfg) => cfg.id === previousModel,
-        );
-        // Only the active provider may migrate model selection.
-        if (!updatesActiveProvider || previousModelStillAvailable) {
-          delete installPlan.modelSelection;
-        }
         const settingsAdapter = createLoadedSettingsAdapter(settings);
 
         await applyProviderInstallPlan(installPlan, {
@@ -301,40 +297,21 @@ export function useProviderUpdates(
             },
           },
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
-          syncAuthState: (authType, modelId, baseUrl) =>
-            config
-              .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId, baseUrl),
           ...(updatesActiveProvider && {
             refreshAuth: (authType) => config.refreshAuth(authType),
           }),
         });
 
-        const activeModel = config.getModel();
         const displayName = t(providerCfg.label);
-
-        if (activeModel === previousModel) {
-          addItem(
-            {
-              type: 'info',
-              text: t('{{plan}} configuration updated successfully.', {
-                plan: displayName,
-              }),
-            },
-            Date.now(),
-          );
-        } else {
-          addItem(
-            {
-              type: 'info',
-              text: t(
-                '{{plan}} configuration updated successfully. Model switched to "{{model}}".',
-                { plan: displayName, model: activeModel },
-              ),
-            },
-            Date.now(),
-          );
-        }
+        addItem(
+          {
+            type: 'info',
+            text: t('{{plan}} configuration updated successfully.', {
+              plan: displayName,
+            }),
+          },
+          Date.now(),
+        );
 
         addItem(
           {
@@ -386,7 +363,7 @@ export function useProviderUpdates(
         setUpdateRequest(undefined);
         if (choice === 'update') {
           for (const p of pendingList) {
-            await executeUpdate(p.provider, p.baseUrl);
+            await executeUpdate(p);
           }
         } else if (choice === 'skip') {
           const persistScope = getPersistScopeForModelSelection(settings);

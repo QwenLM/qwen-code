@@ -57,6 +57,8 @@ Under `sessionScope: 'thread'`, each thread can mint a distinct session. The cal
 
 `X-Qwen-Client-Id` is **optional** but **strongly recommended**. The daemon does not generate one on the caller's behalf — clients pick their own and reuse it across requests so the daemon can attribute votes, audit events, and detect reconnects.
 
+Each independent controller should use a distinct, stable ID. The WebUI generates IDs with a `webui_` prefix by default. A host and an embedded WebShell should share an ID only when they intentionally act as one logical controller; once shared, daemon logs cannot distinguish which one originated a request.
+
 Validation rules:
 
 - Charset: `[A-Za-z0-9._:-]`.
@@ -241,6 +243,26 @@ only a storage-state transition; clients must call `session/load` or
 `session/resume` afterward. Archived sessions return `409 session_archived` for
 load/resume, and mutations racing an archive transition return
 `409 session_archiving`.
+
+Empty, damaged, and orphaned regular transcript files remain eligible for these
+lifecycle operations even when they cannot be loaded as conversations.
+Ownership-safety checks can intentionally fail closed and require operator
+intervention. A file changed after a writer sealed its certified handoff proof
+fails with `SessionTranscriptChangedError` until the operator resolves the
+sealed lock and changed bytes. A JSON-shaped first physical record that exceeds
+the bounded ownership-read window fails with
+`SessionTranscriptIdentityUnavailableError` until the record is repaired or
+reduced; oversized damaged records with a non-object prefix remain eligible. A
+parseable recovered record must contain string `sessionId` and `cwd` ownership
+fields, and mixed local/foreign archive states also fail closed. When
+`session_storage_conflict_repair` is advertised, archive and unarchive accept
+`resolveConflicts: true`: archive keeps the archived copy, while unarchive keeps
+the active copy. Without that option, active/archive conflicts do not move,
+remove, or overwrite either persisted copy and are returned in the batch
+`errors` array. Archive still strictly closes a live session before classifying
+the conflict, which may flush queued records to the active transcript.
+Workspace-qualified lifecycle routes now use that HTTP `200` batch envelope
+instead of their earlier HTTP `409 session_conflict` response.
 
 ### Context Usage (`session_context_usage` capability tag)
 

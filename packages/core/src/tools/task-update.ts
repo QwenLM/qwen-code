@@ -23,6 +23,7 @@ import {
   isTeammate,
   resolveActiveTeamName,
 } from '../agents/team/identity.js';
+import { sanitizeName } from '../agents/team/teamHelpers.js';
 import {
   getPlanRequiredTeammatePreApprovalMessage,
   isPlanRequiredTeammatePreApprovalAllowedTool,
@@ -37,7 +38,7 @@ import {
   TaskOwnershipError,
   RECIPROCAL_CALLER,
 } from '../agents/team/tasks.js';
-import type { SwarmTask } from '../agents/team/types.js';
+import { LEADER_NAME, type SwarmTask } from '../agents/team/types.js';
 import { truncateForConfirmation } from './task-create.js';
 
 export interface TaskUpdateParams {
@@ -375,6 +376,24 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       this.params.status === 'in_progress' && this.params.owner === undefined
         ? getAgentName()
         : undefined;
+    const explicitOwner =
+      this.params.owner === undefined
+        ? undefined
+        : sanitizeName(this.params.owner);
+    if (
+      this.params.owner !== undefined &&
+      this.params.owner !== '' &&
+      !explicitOwner
+    ) {
+      const msg =
+        `Cannot assign task #${taskId}: owner must include at least one ` +
+        `letter, number, or hyphen.`;
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
 
     if (
       this.params.status === 'in_progress' &&
@@ -391,6 +410,72 @@ class TaskUpdateInvocation extends BaseToolInvocation<
       };
     }
 
+    // The pre-update snapshot feeds the assignment checks below (#9282):
+    // what matters is whether THIS call changed the owner or moved the
+    // task into in_progress, not the post-update state alone.
+    const existing = await getTask(teamName, taskId);
+    if (!existing) {
+      // Answer existence BEFORE the assignment gates below, so a call on
+      // a missing task reports "not found" instead of a wrong reason
+      // derived from the empty snapshot (e.g. a phantom blocked-by
+      // refusal built from this same call's addBlockedBy).
+      const msg = `Task #${taskId} not found.`;
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+
+    // A manual owner assignment can only be delivered to an existing,
+    // non-shutting-down teammate (#9282): auto-claim consumes pending,
+    // UNOWNED tasks only, so an owned in_progress task has no delivery
+    // path other than the direct dispatch. Validate before the write —
+    // persisting any other assignment would report success for a task
+    // that can never arrive.
+    const teamManager = this.config.getTeamManager?.() ?? null;
+    const existingOwner = existing?.owner
+      ? sanitizeName(existing.owner)
+      : undefined;
+    const nextOwner = explicitOwner ?? autoOwner ?? existing?.owner;
+    const nextStatus = this.params.status ?? existing?.status;
+    const statusBecameInProgress =
+      this.params.status === 'in_progress' &&
+      existing?.status !== 'in_progress';
+    const ownerChanged =
+      explicitOwner !== undefined && explicitOwner !== existingOwner;
+    const nextBlockedBy = new Set(existing?.blockedBy ?? []);
+    for (const blockedBy of this.params.addBlockedBy ?? []) {
+      nextBlockedBy.add(blockedBy);
+    }
+    const shouldDispatchAssignment =
+      nextStatus === 'in_progress' &&
+      !!nextOwner &&
+      nextOwner !== teammateCallerName &&
+      (ownerChanged || statusBecameInProgress);
+    if (shouldDispatchAssignment && nextBlockedBy.size > 0) {
+      const msg =
+        `Cannot assign task #${taskId} to "${nextOwner}" while it is ` +
+        `blocked by ${Array.from(nextBlockedBy)
+          .map((id) => `#${id}`)
+          .join(', ')}. Complete or remove the blocker first.`;
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+    if (explicitOwner && teamManager && shouldDispatchAssignment) {
+      const refusal = teamManager.validateTaskOwner(explicitOwner);
+      if (refusal) {
+        return {
+          llmContent: refusal,
+          returnDisplay: refusal,
+          error: { message: refusal },
+        };
+      }
+    }
+
     let task;
     try {
       task = await updateTask(
@@ -398,7 +483,7 @@ class TaskUpdateInvocation extends BaseToolInvocation<
         taskId,
         {
           status: this.params.status,
-          owner: this.params.owner ?? autoOwner,
+          owner: explicitOwner ?? autoOwner,
           subject: this.params.subject,
           description: this.params.description,
           activeForm: this.params.activeForm,
@@ -428,6 +513,55 @@ class TaskUpdateInvocation extends BaseToolInvocation<
         returnDisplay: msg,
         error: { message: msg },
       };
+    }
+
+    // Dispatch the manual assignment (#9282). Auto-claim only consumes
+    // pending, unowned tasks, so an owned in_progress task has exactly
+    // one delivery path: this prompt. Fire it when THIS call assigned
+    // the work — the owner changed, or the task moved into in_progress
+    // under its owner — and never for a self-claim (the caller already
+    // knows; it just made the call). Re-asserting an unchanged
+    // owner+status dispatches nothing, so a retried task_update cannot
+    // double-deliver the same assignment.
+    let dispatchFailure:
+      | {
+          llmContent: string;
+          returnDisplay: string;
+          error: { message: string };
+        }
+      | undefined;
+    // Compare on the sanitized owner: tasks persisted before the
+    // canonicalization above landed keep their raw spelling, and a
+    // raw-vs-sanitized comparison would fire a fresh assignment prompt
+    // on every innocent touch of such a task.
+    const persistedOwner = task.owner ? sanitizeName(task.owner) : undefined;
+    if (
+      teamManager &&
+      task.status === 'in_progress' &&
+      persistedOwner &&
+      // Leader-owned tasks need no delivery: the leader has no backend
+      // agent handle to receive a dispatch prompt, so nothing can be
+      // delivered; the exclusion keeps a leader's self-assignment from
+      // surfacing a dispatch failure. When a teammate assigns to the
+      // leader the update persists with a plain success and the leader
+      // sees the task on its next task_list (no notification path).
+      persistedOwner !== LEADER_NAME &&
+      persistedOwner !== teammateCallerName &&
+      (persistedOwner !== existingOwner || statusBecameInProgress)
+    ) {
+      const dispatched = await teamManager.dispatchAssignedTask(task);
+      if (!dispatched) {
+        const msg =
+          `Task #${taskId} was updated (status: ${task.status}, ` +
+          `owner: ${task.owner}), but the assignment prompt could not ` +
+          `be delivered. Reassign the task to a different active ` +
+          `teammate to retry delivery.`;
+        dispatchFailure = {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
     }
 
     // Mirror dependency edges so auto-claim and completion-unblock
@@ -479,6 +613,7 @@ class TaskUpdateInvocation extends BaseToolInvocation<
     if (reciprocalUpdates.length > 0) {
       await Promise.all(reciprocalUpdates);
     }
+    if (dispatchFailure) return dispatchFailure;
 
     const llmContent =
       `Task #${taskId} updated (status: ${task.status}` +

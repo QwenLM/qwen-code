@@ -34,6 +34,18 @@ export default defineConfig({
         maxForks: 4,
       },
     },
+    // The worker->main `onTaskUpdate` RPC runs on a 60s budget; under
+    // resource pressure a stall longer than that surfaces as an unhandled
+    // error and exits an all-green run red (the same failure class the
+    // core, cli, and scripts suites hit on the macOS lane). Since #10085
+    // the Linux shards run on the shared self-hosted pool instead of
+    // ubuntu-hosted VMs and hit the same pressure class there (#10325), so
+    // self-hosted runners are exempted as well. Test failures still fail
+    // the run; only unhandled errors stop being fatal — github-hosted Linux
+    // (the nightly isolated legs) and local Linux runs keep the signal.
+    dangerouslyIgnoreUnhandledErrors:
+      process.platform !== 'linux' ||
+      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
   },
   resolve: {
     alias: {
@@ -41,6 +53,10 @@ export default defineConfig({
       '@qwen-code/sdk/daemon/transports': resolve(
         __dirname,
         '../packages/sdk-typescript/dist/daemon/transports.js',
+      ),
+      '@qwen-code/sdk/daemon/transcript': resolve(
+        __dirname,
+        '../packages/sdk-typescript/dist/daemon/transcript.js',
       ),
       '@qwen-code/sdk/daemon': resolve(
         __dirname,

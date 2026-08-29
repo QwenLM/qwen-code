@@ -207,6 +207,112 @@ describe('SDK MCP Server Integration (E2E)', () => {
         await q.close();
       }
     });
+
+    it('keeps previously used MCP tools available when resuming a session', async () => {
+      // Resume needs a persisted transcript; the rest of this suite keeps
+      // recording disabled so enable it only for this case.
+      testDir = await helper.setup('sdk-mcp-server-integration', {
+        chatRecording: true,
+      });
+
+      const calculatorTool = tool(
+        'calculate_sum',
+        'Calculate the sum of two numbers',
+        z.object({
+          a: z.number().describe('First number'),
+          b: z.number().describe('Second number'),
+        }).shape,
+        async (args) => ({
+          content: [{ type: 'text', text: String(args.a + args.b) }],
+        }),
+      );
+      const serverConfig = createSdkMcpServer({
+        name: 'sdk-calculator',
+        version: '1.0.0',
+        tools: [calculatorTool],
+      });
+      let streamingRequestIndex = 0;
+      fakeResponse = ({ body }) => {
+        if (body['stream'] !== true) {
+          return { content: '{"selected_memories":[]}' };
+        }
+        const requestIndex = streamingRequestIndex++;
+        if (requestIndex === 0) {
+          return {
+            toolCalls: [
+              fakeToolCall('tool_search', {
+                query: `select:${MCP_CALCULATE_SUM}`,
+              }),
+            ],
+          };
+        }
+        if (requestIndex === 1) {
+          return {
+            toolCalls: [fakeToolCall(MCP_CALCULATE_SUM, { a: 25, b: 17 })],
+          };
+        }
+        if (requestIndex === 3) {
+          // The resumed model calls the historical tool directly, without a
+          // second tool_search request.
+          return {
+            toolCalls: [fakeToolCall(MCP_CALCULATE_SUM, { a: 8, b: 5 })],
+          };
+        }
+        return { content: 'Done.' };
+      };
+
+      const firstQuery = query({
+        prompt: 'Calculate 25 + 17.',
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
+          cwd: testDir,
+          mcpServers: { 'sdk-calculator': serverConfig },
+        },
+      });
+      const firstMessages: SDKMessage[] = [];
+      const sessionId = firstQuery.getSessionId();
+      try {
+        for await (const message of firstQuery) {
+          firstMessages.push(message);
+        }
+        expect(
+          findToolResults(firstMessages, MCP_CALCULATE_SUM)[0]?.content,
+        ).toContain('42');
+        assertSuccessfulCompletion(firstMessages);
+      } finally {
+        await firstQuery.close();
+      }
+
+      const resumedQuery = query({
+        prompt: 'Now calculate 8 + 5 with the same tool.',
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
+          cwd: testDir,
+          resume: sessionId,
+          mcpServers: { 'sdk-calculator': serverConfig },
+        },
+      });
+      const resumedMessages: SDKMessage[] = [];
+      try {
+        for await (const message of resumedQuery) {
+          resumedMessages.push(message);
+        }
+
+        expect(advertisedToolNames(fakeServer, 3)).toContain(MCP_CALCULATE_SUM);
+        const resumedResults = findToolResults(
+          resumedMessages,
+          MCP_CALCULATE_SUM,
+        );
+        expect(resumedResults).toHaveLength(1);
+        expect(resumedResults[0]?.isError).toBe(false);
+        expect(resumedResults[0]?.content).toContain('13');
+        assertSuccessfulCompletion(resumedMessages);
+      } finally {
+        await resumedQuery.close();
+      }
+    });
   });
 
   describe('SDK MCP Tool Error Handling', () => {

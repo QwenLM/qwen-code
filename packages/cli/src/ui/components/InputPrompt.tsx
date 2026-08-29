@@ -7,7 +7,11 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
-import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
+import {
+  SuggestionsDisplay,
+  MAX_WIDTH,
+  type SuggestionCategory,
+} from './SuggestionsDisplay.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { theme } from '../semantic-colors.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
@@ -73,6 +77,7 @@ import type { RenderLineOptions } from './BaseTextInput.js';
 import { getApprovalModePromptStyle } from './approvalModeVisuals.js';
 import {
   useVoiceInput,
+  type MicrophonePermission,
   type VoiceTranscriber,
 } from '../hooks/use-voice-input.js';
 import { createVoiceRecorder } from '../voice/voice-recorder.js';
@@ -215,6 +220,8 @@ export interface InputPromptProps {
   /** Called when prompt suggestion is dismissed (user typed) */
   onPromptSuggestionDismiss?: () => void;
   clipboardUnavailableShownRef?: React.MutableRefObject<boolean>;
+  /** Session-scoped so the microphone notice survives InputPrompt remounts. */
+  voiceMicWarnedStatusRef?: React.MutableRefObject<MicrophonePermission | null>;
 }
 
 // Re-export from shared utils for backwards compatibility
@@ -249,6 +256,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   promptSuggestion,
   onPromptSuggestionDismiss,
   clipboardUnavailableShownRef: sessionClipboardUnavailableShownRef,
+  voiceMicWarnedStatusRef: sessionVoiceMicWarnedStatusRef,
 }) => {
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
@@ -300,12 +308,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const hasActiveToolConfirmation = useMemo(
     () =>
       Boolean(uiState.confirmationRequest) ||
-      (uiState.pendingGeminiHistoryItems ?? []).some(
+      (uiState.pendingLlmHistoryItems ?? []).some(
         (item) =>
           item.type === 'tool_group' &&
           item.tools.some((tool) => tool.confirmationDetails),
       ),
-    [uiState.confirmationRequest, uiState.pendingGeminiHistoryItems],
+    [uiState.confirmationRequest, uiState.pendingLlmHistoryItems],
   );
   const [historyRestoredText, setHistoryRestoredText] = useState<string | null>(
     null,
@@ -451,7 +459,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       refineVoiceTranscript(config, raw, signal),
     [config],
   );
-  const voiceMicWarnedStatusRef = useRef<string | null>(null);
+  const localVoiceMicWarnedStatusRef = useRef<MicrophonePermission | null>(
+    null,
+  );
+  // Falls back to a local ref only when no session-scoped ref is supplied; the
+  // session ref keeps the notice to once per run across InputPrompt remounts.
+  const voiceMicWarnedStatusRef =
+    sessionVoiceMicWarnedStatusRef ?? localVoiceMicWarnedStatusRef;
   const voiceRecorderRef = useRef<ReturnType<
     typeof createVoiceRecorder
   > | null>(null);
@@ -462,6 +476,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const warmupVoice = useCallback(() => {
     const recorder = getVoiceRecorder();
     void Promise.resolve(recorder.warmup?.()).catch(() => {});
+  }, [getVoiceRecorder]);
+  // Runs when a recording starts, not on warmup: users who never dictate
+  // should not be told about microphone access on every startup.
+  const checkVoiceMicPermission = useCallback(() => {
+    const recorder = getVoiceRecorder();
     void Promise.resolve(recorder.microphoneStatus?.())
       .then((status) => {
         if (voiceMicWarnedStatusRef.current === status) {
@@ -495,7 +514,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
       })
       .catch(() => {});
-  }, [getVoiceRecorder, uiState.historyManager]);
+  }, [getVoiceRecorder, uiState.historyManager, voiceMicWarnedStatusRef]);
   const voiceStreaming = voiceModel ? isStreamingVoiceModel(voiceModel) : false;
   const openVoiceStreamSession = useCallback(
     (callbacks: {
@@ -541,6 +560,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     refine: voiceRefineEnabled ? refineVoice : undefined,
     onSubmit: (text) => voiceSubmitRef.current(text),
     warmup: warmupVoice,
+    checkMicrophonePermission: checkVoiceMicPermission,
     streaming: voiceStreaming,
     openStream: voiceStreaming ? openVoiceStreamSession : undefined,
   });
@@ -2136,6 +2156,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       uiActions,
     ],
   );
+  const handleCategorySelect = useCallback(
+    (category: SuggestionCategory | 'all') => {
+      completion.selectCategory(category);
+      setExpandedSuggestionIndex(-1);
+    },
+    [completion],
+  );
 
   // Whether any input-side handler would consume a Tab keystroke. AppContainer
   // feeds this into useAutoAcceptIndicator's `shouldBlockTab` so the
@@ -2320,6 +2347,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             }
             onSelectIndex={
               suggestionsFromExport ? undefined : handleSuggestionSelect
+            }
+            onSelectCategory={
+              suggestionsFromExport ||
+              commandSearchActive ||
+              reverseSearchActive
+                ? undefined
+                : handleCategorySelect
             }
           />
         </Box>
