@@ -199,6 +199,61 @@ describe('runCleanup', () => {
     mocks.rmSync.mockReset();
   });
 
+  it('spares THIS run\u2019s stop sidecar, sweeps a foreign one', () => {
+    // The PR stop path writes the sidecar and runs cleanup in the same
+    // breath, and the parent's first poll is up to 250 ms away — swept
+    // here, no reader could ever observe the decision and a decided round
+    // exited 1 (human review on #9659). Kept only under a matching runId;
+    // foreign or unstamped residue sweeps as before.
+    const prev = process.env['QWEN_REVIEW_RUN_ID'];
+    process.env['QWEN_REVIEW_RUN_ID'] = 'run-A';
+    try {
+      mocks.existsSync.mockReturnValue(true);
+      mocks.readdirSync.mockImplementation((p: string): string[] =>
+        String(p).endsWith('tmp') ? ['qwen-review-pr-9-stop.json'] : [],
+      );
+      mocks.readFileSync.mockImplementation((p: string) => {
+        if (String(p).endsWith('qwen-review-pr-9-stop.json')) {
+          return JSON.stringify({ reason: 'up-to-date', runId: 'run-A' });
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      runCleanup('pr-9');
+      expect(mocks.rmSync).not.toHaveBeenCalledWith(
+        expect.stringContaining('qwen-review-pr-9-stop.json'),
+        expect.anything(),
+      );
+
+      mocks.rmSync.mockClear();
+      process.env['QWEN_REVIEW_RUN_ID'] = 'run-B';
+      runCleanup('pr-9');
+      expect(mocks.rmSync).toHaveBeenCalledWith(
+        expect.stringContaining('qwen-review-pr-9-stop.json'),
+        expect.anything(),
+      );
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_REVIEW_RUN_ID'];
+      else process.env['QWEN_REVIEW_RUN_ID'] = prev;
+    }
+  });
+
+  it('refuses the bare `pr` target — its prefix engulfs every PR family', () => {
+    // R20-4 follow-up: `tmpPrefix('pr')` is `qwen-review-pr-`, a strict
+    // prefix of EVERY PR round's family, and the lease guard lives inside
+    // the `pr-<n>` branch a bare `pr` never enters — one `cleanup pr` swept
+    // every PR's artifacts at once, unguarded. A repo-root file literally
+    // named `pr` derives exactly this token.
+    runCleanup('pr');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = 0;
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Refusing to clean target "pr"'),
+    );
+    expect(mocks.rmSync).not.toHaveBeenCalled();
+    // The numbered form is untouched.
+    expect(() => runCleanup('pr-123')).not.toThrow();
+  });
+
   it('keeps the lease when branch deletion fails', () => {
     mocks.execFileSync.mockImplementation(() => {
       throw new Error('branch is locked');

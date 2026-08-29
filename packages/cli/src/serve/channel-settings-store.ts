@@ -11,6 +11,7 @@ import {
   getPlugin,
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
+import { multiSessionCompatibilityError } from '../commands/channel/config-utils.js';
 import { loadSettings, saveSettings } from '../config/settings.js';
 
 export type ChannelSecretUpdate =
@@ -144,6 +145,12 @@ function assertSharedField(
   value: unknown,
   previous?: unknown,
 ): boolean {
+  if (key === 'multiSession') {
+    if (typeof value !== 'boolean') {
+      throw invalidConfig(`Channel field "${key}" must be a boolean.`);
+    }
+    return true;
+  }
   const enumValues: Record<string, ReadonlySet<string>> = {
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
@@ -535,6 +542,22 @@ export class WorkspaceChannelSettingsStore {
       if (value !== undefined) nextConfig[key] = value;
     }
     assertManagedConfig(nextConfig, previous, plugin.management.fields);
+    const multiSessionError = multiSessionCompatibilityError(name, {
+      multiSession: nextConfig['multiSession'] === true,
+      sessionScope:
+        (nextConfig['sessionScope'] as
+          | 'user'
+          | 'thread'
+          | 'chat_thread'
+          | 'single'
+          | undefined) ??
+        plugin.defaultSessionScope ??
+        'user',
+      groupHistoryLimit: nextConfig['groupHistoryLimit'],
+      groups: isRecord(nextConfig['groups']) ? nextConfig['groups'] : {},
+      webhooks: nextConfig['webhooks'],
+    });
+    if (multiSessionError) throw invalidConfig(multiSessionError);
     let crossFieldError: unknown;
     try {
       crossFieldError = plugin.management.validateConfig?.(nextConfig);

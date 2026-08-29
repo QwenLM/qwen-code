@@ -24,7 +24,7 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
   };
 });
 
-import type { GeminiClient } from '@qwen-code/qwen-code-core';
+import type { LlmClient } from '@qwen-code/qwen-code-core';
 
 describe('clearCommand', () => {
   let mockContext: CommandContext;
@@ -60,10 +60,10 @@ describe('clearCommand', () => {
     mockContext = createMockCommandContext({
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               resetChat: mockResetChat,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
           getBackgroundTaskRegistry: vi.fn().mockReturnValue({
             hasRunningTasks: vi.fn().mockReturnValue(false),
             reset: mockResetBackgroundTasks,
@@ -335,9 +335,9 @@ describe('clearCommand', () => {
               abortAll: mockAbortBackgroundShells,
             }),
             startNewSession: mockStartNewSession,
-            getGeminiClient: vi.fn().mockReturnValue({
+            getLlmClient: vi.fn().mockReturnValue({
               resetChat: mockResetChat,
-            } as unknown as GeminiClient),
+            } as unknown as LlmClient),
             getModel: vi.fn().mockReturnValue('test-model'),
             getApprovalMode: vi.fn().mockReturnValue('default'),
             getToolRegistry: vi.fn().mockReturnValue({
@@ -433,9 +433,9 @@ describe('clearCommand', () => {
             }),
             getHookSystem: mockGetHookSystem,
             startNewSession: mockStartNewSession,
-            getGeminiClient: vi.fn().mockReturnValue({
+            getLlmClient: vi.fn().mockReturnValue({
               resetChat: mockResetChat,
-            } as unknown as GeminiClient),
+            } as unknown as LlmClient),
             getModel: vi.fn().mockReturnValue('test-model'),
             getApprovalMode: vi.fn().mockReturnValue('default'),
             getToolRegistry: vi.fn().mockReturnValue({
@@ -506,9 +506,9 @@ describe('clearCommand', () => {
             }),
             getHookSystem: mockGetHookSystem,
             startNewSession: mockStartNewSession,
-            getGeminiClient: vi.fn().mockReturnValue({
+            getLlmClient: vi.fn().mockReturnValue({
               resetChat: mockResetChat,
-            } as unknown as GeminiClient),
+            } as unknown as LlmClient),
             getModel: vi.fn().mockReturnValue('test-model'),
             getApprovalMode: vi.fn().mockReturnValue('default'),
             getToolRegistry: vi.fn().mockReturnValue({
@@ -575,9 +575,9 @@ describe('clearCommand', () => {
             }),
             getHookSystem: mockGetHookSystem,
             startNewSession: mockStartNewSession,
-            getGeminiClient: vi.fn().mockReturnValue({
+            getLlmClient: vi.fn().mockReturnValue({
               resetChat: mockResetChat,
-            } as unknown as GeminiClient),
+            } as unknown as LlmClient),
             getModel: vi.fn().mockReturnValue('test-model'),
             getApprovalMode: vi.fn().mockReturnValue('default'),
             getToolRegistry: vi.fn().mockReturnValue({
@@ -645,9 +645,9 @@ describe('clearCommand', () => {
             }),
             getHookSystem: mockGetHookSystem,
             startNewSession: mockStartNewSession,
-            getGeminiClient: vi.fn().mockReturnValue({
+            getLlmClient: vi.fn().mockReturnValue({
               resetChat: mockResetChat,
-            } as unknown as GeminiClient),
+            } as unknown as LlmClient),
             getModel: vi.fn().mockReturnValue('test-model'),
             getApprovalMode: vi.fn().mockReturnValue('default'),
             getToolRegistry: vi.fn().mockReturnValue({

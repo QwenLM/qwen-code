@@ -144,6 +144,9 @@ jobs:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ github.event.issue.number || github.event.pull_request.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          # Empty for a pull_request_review trigger: review bodies have no
+          # reactions endpoint, so only the two comment shapes get the 👀.
+          COMMENT_ID: '${{ github.event.comment.id }}'
         run: |-
           set -euo pipefail
           PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')"
@@ -151,32 +154,55 @@ jobs:
             echo "PR #${PR_NUMBER} is ${PR_STATE}; skipping acknowledgement." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # The 👀 on the command itself is the one signal GitHub renders in
+          # place, next to what the requester typed. Best effort: a failed
+          # reaction must not cost the ack comment below.
+          case "$GITHUB_EVENT_NAME" in
+            issue_comment)
+              REACTION_PATH="repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" ;;
+            pull_request_review_comment)
+              REACTION_PATH="repos/${GITHUB_REPOSITORY}/pulls/comments/${COMMENT_ID}/reactions" ;;
+            *)
+              REACTION_PATH="" ;;
+          esac
+          if [ -n "$REACTION_PATH" ] && [ -n "$COMMENT_ID" ]; then
+            gh api --method POST "$REACTION_PATH" -f content=eyes > /dev/null \
+              || echo "Could not react to comment ${COMMENT_ID}." >> "$GITHUB_STEP_SUMMARY"
+          fi
           # Blank line after the marker, or none of the prose below renders. A
           # line opening with `<!--` starts an HTML block that runs to the line
           # containing the closing delimiter, and the REST of that line stays
           # inside it — so gluing the text on shipped it as raw source with a
           # dead link. Verified against GitHub's own renderer.
-          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is queued in [workflow run](%s)._' "$RUN_URL")"
-          EXISTING_ACK_ID="$(
-            # -F would otherwise make gh api default to POST.
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-              --method GET \
-              --paginate \
-              -F per_page=100 \
-              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
-          )" || EXISTING_ACK_ID=""
-          if [ -n "$EXISTING_ACK_ID" ]; then
-            gh api \
-              --method PATCH \
-              "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ACK_ID}" \
-              -f body="$ACK_BODY" > /dev/null
-            echo "Queued acknowledgement updated on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
-          else
-            gh pr comment "$PR_NUMBER" \
-              --repo "$GITHUB_REPOSITORY" \
-              --body "$ACK_BODY"
-            echo "Queued acknowledgement posted on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          #
+          # A command-triggered run executes against the base branch, so its
+          # `review-pr` check attaches to main's commit and never shows under
+          # this PR's checks — the link here is the only way to watch it.
+          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is running in [workflow run](%s). A command-triggered review is not listed under the checks of this PR; the result is posted here as a review when it finishes._' "$RUN_URL")"
+          # One ack per PR, and it must sit right under the command that asked
+          # for it. Editing the previous ack in place kept the count at one but
+          # left the notice wherever the FIRST request landed — on a 15-comment
+          # thread that was comment #2, above the previous day's triage, and
+          # the requester reading from the bottom concluded nothing had
+          # started. Delete-then-post keeps the count and moves the notice to
+          # the bottom. Nothing keys on the comment id: every consumer
+          # (qwen-autofix's bot-comment filters, the review's bypass audit)
+          # matches the marker.
+          # -F would otherwise make gh api default to POST.
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --method GET \
+            --paginate \
+            -F per_page=100 \
+            | jq -r '.[] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]") | .id' \
+            | while read -r STALE_ACK_ID; do
+                [ -n "$STALE_ACK_ID" ] || continue
+                gh api --method DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${STALE_ACK_ID}" \
+                  || echo "Could not delete stale acknowledgement ${STALE_ACK_ID}." >> "$GITHUB_STEP_SUMMARY"
+              done
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$ACK_BODY"
+          echo "Queued acknowledgement posted on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
 
   review-config:
     # Bot-requested review_requested only: a CODEOWNERS-covered PR open
@@ -529,6 +555,53 @@ jobs:
               done || true
           "${GIT_SAFE[@]}" worktree prune -v || true
           echo "stale agent state cleaned"
+
+      # A cancelled verify can leave either the active project state or its
+      # protected recovery backup unreadable to the runner user. Remove only
+      # those two known names before checkout reuses the workspace.
+      # `.qwen.root-orig` is emitted by recovery tooling OUTSIDE this repo —
+      # nothing here produces it (git grep matches only these sweep copies
+      # and their pins in scripts/tests/review-worktree-cleanup-workflow.
+      # test.js). It is the backup name a cancelled verify's recovery leaves
+      # after renaming an unreadable, root-owned `.qwen` aside (observed on
+      # the shared pool; first recorded around review run 33146730771). If
+      # that producer's naming changes or a third residue name appears,
+      # update the for-loop list in every sweep copy or the checkout
+      # poisoning this sweep exists for silently recurs.
+      - name: 'Clean stale .qwen before checkout'
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # If a foreign-owned directory cannot move to a different parent,
+            # quarantine the runner-owned workspace and recreate the checkout
+            # root. Warm contents are lost only on this unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
 
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
       # Self-heals on the reused self-hosted pool in two observed shapes: a
@@ -898,17 +971,12 @@ jobs:
           QWEN_CODE_API_TIMEOUT_MS: '600000'
           QWEN_STREAM_IDLE_TIMEOUT_MS: '600000'
           QWEN_STREAM_MAX_LIFETIME_MS: '1800000'
-          # Evidence-image destination for `qwen review publish-assets` —
-          # OPT-IN by design: the command refuses to push images anywhere the
-          # user did not designate, so with the repository variable unset the
-          # review simply keeps its evidence as prose and local paths. Set the
-          # variable (e.g. to this repository) to let reviews embed capture
-          # PNGs; images land on commit-pinned pr-assets/<pr>-review branches,
-          # pushed with the same CI_BOT_PAT this step already uses for gh.
-          # Retention: the visuals cleanup workflow deletes those branches
-          # only when the variable points at THIS repository — a fork or
-          # scratch destination manages its own retention.
-          QWEN_REVIEW_ASSETS_REPO: '${{ vars.QWEN_REVIEW_ASSETS_REPO }}'
+          # Evidence-image destination for `qwen review publish-assets`.
+          # It must be a dedicated external host repository: project-local
+          # image branches are fetched by ordinary clones and permanently
+          # inflate this repository. Unset or self-targeting configurations
+          # deliberately degrade to prose and local artifact paths.
+          QWEN_REVIEW_ASSETS_REPO: "${{ vars.QWEN_REVIEW_ASSETS_REPO != github.repository && vars.QWEN_REVIEW_ASSETS_REPO || '' }}"
           # Per-run agent home so this review's session/memory cannot leak into
           # the next on the reused self-hosted workspace (reset in "Clean stale
           # agent state"). Must match the QWEN_HOME computed there.
@@ -939,6 +1007,22 @@ jobs:
           }
 
           REPO="${GITHUB_REPOSITORY}"
+
+          # Normalize the assets-repo designation before the CLI reads it.
+          # The env-level guard compares the RAW variable, so whitespace
+          # variants (" QwenLM/qwen-code ") and case variants slip past it;
+          # trim both ends and re-check self-targeting case-insensitively
+          # (repository names are case-insensitive). A padded or case-shifted
+          # self-reference must degrade to prose exactly like an unset one.
+          QWEN_REVIEW_ASSETS_REPO="${QWEN_REVIEW_ASSETS_REPO#"${QWEN_REVIEW_ASSETS_REPO%%[![:space:]]*}"}"
+          QWEN_REVIEW_ASSETS_REPO="${QWEN_REVIEW_ASSETS_REPO%"${QWEN_REVIEW_ASSETS_REPO##*[![:space:]]}"}"
+          if [ -n "${QWEN_REVIEW_ASSETS_REPO}" ] &&
+             [ "$(printf '%s' "${QWEN_REVIEW_ASSETS_REPO}" | tr '[:upper:]' '[:lower:]')" = \
+               "$(printf '%s' "${REPO}" | tr '[:upper:]' '[:lower:]')" ]; then
+            QWEN_REVIEW_ASSETS_REPO=''
+          fi
+          export QWEN_REVIEW_ASSETS_REPO
+
           REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
           # Set by configure_qwen_network once the wrapper dir exists.
@@ -1360,6 +1444,16 @@ jobs:
             stop_token="qwen-review-stop-$(date +%s%N)-${RANDOM}${RANDOM}"
             echo "::stop-commands::${stop_token}"
             # GNU timeout times out command children unless --foreground is used.
+            # The agent runs no-sandbox with the full job environment, and
+            # the runner applies whatever it appends to $GITHUB_PATH /
+            # $GITHUB_ENV to every LATER step (prepending the path file,
+            # shell lookup included). Point both at invocation-scoped decoys
+            # so appends die with PROXY_BIN no matter how the step exits —
+            # SIGKILL, set -e abort, chmod 444 on the real files, or an
+            # EXIT-trap bypass all become irrelevant because the real
+            # command files are never in the agent's environment.
+            GITHUB_PATH="$PROXY_BIN/decoy.github-path" \
+            GITHUB_ENV="$PROXY_BIN/decoy.github-env" \
             timeout --kill-after=10s "${attempt_timeout}s" qwen \
               --auth-type openai \
               --approval-mode yolo \
@@ -1837,6 +1931,110 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --body "$body"
 
+      # Preserve the review's machine record for later consumers — an agent
+      # collecting deferred Suggestions, a maintainer auditing the run.
+      # GUARANTEE BOUNDARY, stated so the artifact is read correctly:
+      #  - CLOSED — anything contributor-COMMITTED: the upload never reads
+      #    the review worktree (.qwen/tmp/review-pr-<N>/ is a checkout of
+      #    the PR head), so a force-committed file or symlink in the PR
+      #    tree cannot reach the artifact without the review agent's
+      #    cooperation, and `-type f` (no -L) keeps even agent-planted
+      #    symlinks in the trusted trees out.
+      #  - CLOSED — runner command files and PATH shims: the agent's
+      #    $GITHUB_PATH/$GITHUB_ENV point at invocation-scoped decoys
+      #    ('Run review'), and this step runs an absolute shell with a
+      #    pinned PATH, so prepended shims — including any dropped into
+      #    the agent-writable capture-tools dir — resolve nothing here.
+      #  - CLOSED — foreign-uid and cross-job residue at a fixed path:
+      #    staging is a fresh mktemp dir per run (unpredictable name,
+      #    minted 0700 for the runner user), and the upload reads only the
+      #    path this step outputs — residue an earlier job leaves in
+      #    RUNNER_TEMP (including root-owned residue this job cannot
+      #    remove, documented at the network-proxy wiring in 'Run review')
+      #    cannot squat the staging path and is never read.
+      #  - ACCEPTED, not a hole to keep patching: a prompt-injected agent
+      #    with arbitrary code execution already holds the job's PAT,
+      #    network and unsandboxed shell. REGULAR files it plants in
+      #    .qwen/reviews/ or .qwen/tmp/ during the review match these
+      #    patterns and ride the upload with no provenance distinction,
+      #    and a same-uid survivor of the review step that discovers the
+      #    fresh staging dir can still plant files into it before the
+      #    upload reads it (the fixed-path relink variant is gone — there
+      #    is no fixed path to relink). Read the artifact as the run's
+      #    BEST-EFFORT record, never an integrity-attested one: the
+      #    authoritative channel is the posted review body, and the
+      #    reliable re-check of any finding is a fresh review run, not
+      #    this file set.
+      - name: 'Stage review artifacts'
+        id: 'stage'
+        if: 'always()'
+        continue-on-error: true
+        shell: '/bin/bash --noprofile --norc -eo pipefail {0}'
+        env:
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+        run: |-
+          set -uo pipefail
+          # Resolve nothing through the job PATH: shims prepended by
+          # earlier steps or dropped into agent-writable dirs stay inert
+          # (the interpreter itself is pinned absolutely on the step).
+          PATH=/usr/bin:/bin
+          # The value rides find's -name patterns — pin it to digits so a
+          # dispatch-supplied string can never widen the glob.
+          case "${PR_NUMBER}" in
+            ''|*[!0-9]*)
+              echo "no valid PR number resolved; nothing to stage"
+              exit 0
+              ;;
+          esac
+          # Stage into a FRESH per-run dir, never a fixed path: RUNNER_TEMP
+          # survives across jobs on this pool, and the triage workflow's
+          # containerised jobs write it as root through the bind mount
+          # (measured hazard, see the network-proxy wiring in 'Run review')
+          # — a fixed staging path could arrive pre-occupied by foreign-uid
+          # residue this job cannot remove, and the unconditional upload
+          # would then publish that residue as this run's record. A mktemp
+          # name is unpredictable and minted 0700 for the runner user, so
+          # no earlier job can have planted it; the path rides to the
+          # upload step via GITHUB_OUTPUT, never a constant residue can
+          # squat. This step's exit-0 paths that skip the publish below
+          # simply leave the output unset, and the upload reads an empty
+          # path and uploads nothing (continue-on-error).
+          STAGE="$(mktemp -d "${{ runner.temp }}/qwen-review-upload.XXXXXX")"
+          echo "dir=${STAGE}" >> "${GITHUB_OUTPUT}"
+          find .qwen/reviews -maxdepth 1 -type f \
+            \( -name "*-pr-${PR_NUMBER}.*" -o -name "*-pr-${PR_NUMBER}-cost-ledger.json" \) \
+            -exec cp -p {} "$STAGE/" \; 2>/dev/null || true
+          find .qwen/tmp -maxdepth 1 -type f \
+            -name "qwen-review-pr-${PR_NUMBER}-*" \
+            -exec cp -p {} "$STAGE/" \; 2>/dev/null || true
+          # NO listing of the staged files: filenames are agent-writable
+          # (a prompt-injected agent can plant one containing newlines and
+          # `::error::`-shaped text), step stdout is parsed for workflow
+          # commands, and the agent's own output is stop-commands-wrapped
+          # upstream precisely so this channel stays closed ('Run review').
+          # The artifact itself is the record of what staged.
+
+      # The upload reads only the staged directory the stage step minted
+      # and output — never a fixed or contributor-writable path. An unset
+      # dir (guard exit, stage step crashed) interpolates empty, the
+      # action errors, and continue-on-error uploads nothing: the correct
+      # failure direction. The name carries run_attempt: a re-run keeps the
+      # run_id, and without the suffix the second attempt 409s on the
+      # first attempt's artifact while continue-on-error leaves the STALE
+      # one as the only record (qwen-triage.yml names its re-runnable
+      # uploads the same way). Runs BEFORE 'Clean review worktrees'; never
+      # fails the job — a run that wrote nothing uploads nothing, and an
+      # upload error must not flip an already-posted review red.
+      - name: 'Upload review artifacts'
+        if: 'always()'
+        continue-on-error: true
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'qwen-review-pr-${{ steps.context.outputs.pr_number }}-attempt-${{ github.run_attempt }}'
+          path: '${{ steps.stage.outputs.dir }}'
+          retention-days: 90
+          if-no-files-found: 'ignore'
+
       # A cancelled or timed-out review may not reach the CLI's process cleanup.
       # Remove both the worktree directories and Git's worktree registrations so
       # the next job on this reused runner can delete qwen-review/* branches.
@@ -1861,6 +2059,16 @@ jobs:
         timeout-minutes: 5
         run: |-
           set -uo pipefail
+          # Sweep the per-run staging dirs 'Stage review artifacts' mints
+          # under RUNNER_TEMP, which survives across jobs on this pool: the
+          # upload has already run, and a runner executes one job at a time,
+          # so nothing else owns a live staging dir. Runs BEFORE the .git
+          # check so a job that dies before checkout still sweeps. The
+          # legacy fixed path rides along; foreign-uid residue that refuses
+          # removal stays — it can never be published, because the upload
+          # reads only the per-run mktemp path this job output.
+          rm -rf "${RUNNER_TEMP:-/tmp}"/qwen-review-upload.* \
+            "${RUNNER_TEMP:-/tmp}"/qwen-review-upload 2>/dev/null || true
           if [ ! -e .git ]; then
             echo "no Git checkout; nothing to clean"
             exit 0
@@ -2016,9 +2224,18 @@ jobs:
   # cannot land that late — its cancel fires at run creation, seconds in.
   # A manual run-cancel during the delay window goes
   # silent under this rule (the person who cancelled does not need retry
-  # guidance); a manual cancel of review-pr alone mid-review still posts,
-  # benign as before. The PR number comes from the event payload, not the
-  # dead job's outputs, which do not survive a crash.
+  # guidance); a cancel landing mid-review still posts, but with the
+  # cancellation body, not the failure one — the step branches on
+  # REVIEW_PR_RESULT. For a cancel nothing failed and nothing retries
+  # automatically, so the failure body's claims are false and read as a
+  # pipeline outage to the PR author (issue #10109: run 32875478404 was
+  # run-cancelled two minutes into the review, no successor run existed,
+  # and the full "pipeline failed" comment posted anyway). The cancelled
+  # case cannot simply go silent: the job-level-timeout flavor — the very
+  # reason 'cancelled' is admitted here — reaches this job as the same
+  # result, so one accurate body covers both flavors. The PR number comes
+  # from the event payload, not the dead job's outputs, which do not
+  # survive a crash.
   fallback-comment:
     needs:
       [
@@ -2053,6 +2270,7 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}'
+          REVIEW_PR_RESULT: '${{ needs.review-pr.result }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -uo pipefail
@@ -2176,7 +2394,20 @@ jobs:
             echo "Skipping fallback comment: a bot review of this PR was submitted after this run was created." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          body="**Qwen Code review did not complete successfully.** The review pipeline failed before a review could be posted. A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
+          # A cancelled review-pr reaches this job through the gate's
+          # compound clause with two indistinguishable-in-`needs` flavors:
+          # its own job-level timeout (auto-CANCELLED by GitHub), and a
+          # run/job cancel landing after the upstream chain finished. For
+          # neither is the failure body true — nothing failed, nothing is
+          # retried automatically (issue #10109) — so the cancelled case
+          # gets one body accurate for both flavors. It keeps the
+          # `[workflow logs](RUN_URL)` markdown link the cross-job dedup
+          # anchors on, and the retry instruction the timeout flavor needs.
+          if [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
+            body="**Qwen Code review was cancelled before a review could be posted.** Nothing failed and nothing is retried automatically: the run was cancelled — by an operator, an upstream event, or the job exceeding its execution time limit. If you still want a review of this PR, request one with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
+          else
+            body="**Qwen Code review did not complete successfully.** The review pipeline failed before a review could be posted. A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
+          fi
           body="$(printf '%s\n\n%s' "$FALLBACK_MARKER" "$body")"
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \

@@ -45,6 +45,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/acp-bridge/src/process-registry.ts',
+    {
+      reason:
+        'Windows process-tree cleanup resolves the trusted System32 taskkill path from the process-scoped OS root.',
+      accesses: { 'key:SystemRoot': 1 },
+    },
+  ],
+  [
     'packages/acp-bridge/src/spawnChannel.ts',
     {
       reason:
@@ -143,6 +151,16 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/native-directory-picker.ts',
+    {
+      reason:
+        'Picker availability probes process-scoped host session state ' +
+        '(SSH markers, display server, Windows session name), so embedded ' +
+        'callers may omit the environment argument.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/pem-certificate-blocks.ts',
     {
       reason:
@@ -224,6 +242,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:PYTHONPATH': 2,
         'key:QWEN_CODE_INTEGRATION_TEST': 1,
         'key:QWEN_CODE_MCP_APPROVALS_PATH': 2,
+        'key:QWEN_CODE_WARNINGS_FILE': 2,
         'key:QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE': 1,
         'key:QWEN_CODE_TEST_VAR': 2,
         'key:QWEN_SANDBOX_PROXY_COMMAND': 2,
@@ -264,6 +283,16 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     {
       reason:
         'Embedded feature detection defaults to the daemon process environment.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/server/session-pr-refresh.ts',
+    {
+      reason:
+        'The PR-state refresh interval (QWEN_SESSION_PR_REFRESH_MINUTES) is a ' +
+        'process-scoped operator switch; embedded callers may omit the ' +
+        'environment argument.',
       accesses: { whole: 1 },
     },
   ],
