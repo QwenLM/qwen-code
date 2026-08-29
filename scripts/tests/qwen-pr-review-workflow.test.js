@@ -39,6 +39,20 @@ const botLogin =
     .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
     ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
 
+// Capability probe, not a platform check: the FIFO wedge tests need
+// mkfifo(1), which macOS does not ship — the merge_group-gated test_macos
+// lane still runs this suite (vitest.config excludes win32 only), where
+// the plants would throw ENOENT or vacuously pass (R11-7). A BSD host
+// with mkfifo fronting PATH keeps the coverage.
+const hasMkfifo = (() => {
+  try {
+    execFileSync('mkfifo', ['--help'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
 function runReviewStep() {
   const doc = parse(workflow);
   const step = doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review');
@@ -4493,36 +4507,39 @@ describe('review supersede salvage (#10110)', () => {
     expect(r.marker).toBeNull();
   });
 
-  it('never blocks a signal write or read on a planted FIFO (replayed watcher)', () => {
-    // Every signal name is agent-derivable (SALVAGE_DIR derives from the
-    // exported marker path), so the reviewed agent can mkfifo one and
-    // block a direct open: write-side the CEDE/KEEP decision, read-side
-    // the attempt-start poll. Writes go aside-then-rename and every read
-    // is one timeout-bounded open, so all three plants still reach the
-    // one-shot decision inside the bounded timeout — a direct `>` or an
-    // unbounded cat hangs and this test dies on the timeout instead.
-    const cede = runWatcher({ plant: { superseded: 'fifo' } });
-    expect(cede.superseded).toBe('head-b');
-    expect(cede.pkilled).toBe(true);
-    const keep = runWatcher({
-      runElapsed: 12000,
-      attemptElapsed: 12000,
-      plant: { 'moved-to': 'fifo' },
-    });
-    expect(keep.marker).toBe('head-a');
-    expect(keep.superseded).toBeNull();
-    const fresh = runWatcher({ plant: { 'attempt-start': 'fifo' } });
-    expect(fresh.superseded).toBe('head-b');
-    // The latch write itself: a compose-seen FIFO plus a real artifact
-    // must still latch (KEEP) — the write renames over the plant.
-    const latch = runWatcher({
-      composedArtifact: '{"downgraded":false}',
-      attemptElapsed: 30,
-      plant: { 'compose-seen': 'fifo' },
-    });
-    expect(latch.marker).toBe('head-a');
-    expect(latch.superseded).toBeNull();
-  });
+  it.skipIf(!hasMkfifo)(
+    'never blocks a signal write or read on a planted FIFO (replayed watcher)',
+    () => {
+      // Every signal name is agent-derivable (SALVAGE_DIR derives from the
+      // exported marker path), so the reviewed agent can mkfifo one and
+      // block a direct open: write-side the CEDE/KEEP decision, read-side
+      // the attempt-start poll. Writes go aside-then-rename and every read
+      // is one timeout-bounded open, so all three plants still reach the
+      // one-shot decision inside the bounded timeout — a direct `>` or an
+      // unbounded cat hangs and this test dies on the timeout instead.
+      const cede = runWatcher({ plant: { superseded: 'fifo' } });
+      expect(cede.superseded).toBe('head-b');
+      expect(cede.pkilled).toBe(true);
+      const keep = runWatcher({
+        runElapsed: 12000,
+        attemptElapsed: 12000,
+        plant: { 'moved-to': 'fifo' },
+      });
+      expect(keep.marker).toBe('head-a');
+      expect(keep.superseded).toBeNull();
+      const fresh = runWatcher({ plant: { 'attempt-start': 'fifo' } });
+      expect(fresh.superseded).toBe('head-b');
+      // The latch write itself: a compose-seen FIFO plus a real artifact
+      // must still latch (KEEP) — the write renames over the plant.
+      const latch = runWatcher({
+        composedArtifact: '{"downgraded":false}',
+        attemptElapsed: 30,
+        plant: { 'compose-seen': 'fifo' },
+      });
+      expect(latch.marker).toBe('head-a');
+      expect(latch.superseded).toBeNull();
+    },
+  );
 
   it('latches the compose signal only from a real composed artifact (replayed watcher)', () => {
     // A genuinely composed verdict below the elapsed threshold: KEEP —
@@ -4541,48 +4558,83 @@ describe('review supersede salvage (#10110)', () => {
       expect(r.marker, JSON.stringify(forged)).toBeNull();
       expect(r.superseded, JSON.stringify(forged)).toBe('head-b');
     }
-    // A FIFO at the artifact path must not wedge the poll — [ -f ] refuses
-    // it and the watcher still cedes (bounded by the harness timeout).
-    const fifo = runWatcher({
-      composedArtifact: '{"downgraded":false}',
-      attemptElapsed: 30,
-      plant: { 'composed.json': 'fifo' },
-    });
-    expect(fifo.marker).toBeNull();
-    expect(fifo.superseded).toBe('head-b');
   });
 
-  it('bounds the compose-artifact reopen against a rename-swapped FIFO (replayed watcher)', () => {
-    // R6-3: [ -f ] refuses a statically planted FIFO, but the artifact
-    // path is agent-derivable — one rename-swapped in during the
-    // check-then-open window blocks readFileSync forever (no writer, no
-    // timeout) and kills the supersede watcher permanently: every later
-    // head move goes unwatched. The node stub performs the swap at open
-    // time; the timeout bound keeps the poll bounded and the one-shot
-    // decision alive (removing the bound turns this test into a harness
-    // timeout). Takes the ~5s of the production bound.
-    const r = runWatcher({
-      composedArtifact: '{"downgraded":false}',
-      attemptElapsed: 30,
-      swapArtifactOnRead: true,
-    });
+  it.skipIf(!hasMkfifo)(
+    'refuses a statically planted FIFO composed artifact (replayed watcher)',
+    () => {
+      // A FIFO at the artifact path must not wedge the poll — [ -f ]
+      // refuses it and the watcher still cedes (bounded by the harness
+      // timeout).
+      const fifo = runWatcher({
+        composedArtifact: '{"downgraded":false}',
+        attemptElapsed: 30,
+        plant: { 'composed.json': 'fifo' },
+      });
+      expect(fifo.marker).toBeNull();
+      expect(fifo.superseded).toBe('head-b');
+    },
+  );
+
+  it('caps the compose-latch read on the agent-writable artifact (replayed watcher)', () => {
+    // R10-9/R10-1: the latch was the one salvage read with no size bound —
+    // readFileSync slurped the whole agent-writable artifact into node's
+    // heap on every poll, so a planted multi-GB file churned the shared
+    // runner for the whole run. A genuine verdict is bounded by the
+    // compose budget, far under the cap; an over-cap plant must decide
+    // inside the harness bound with the latch un-fired (removing the cap
+    // turns this red: the padded JSON parses and latches KEEP).
+    const overCap = `{"downgraded":false}${' '.repeat(3 * 1024 * 1024)}`;
+    const r = runWatcher({ composedArtifact: overCap, attemptElapsed: 30 });
     expect(r.marker).toBeNull();
     expect(r.superseded).toBe('head-b');
-    expect(r.pkilled).toBe(true);
+    // A verdict UNDER the cap still latches — the cap is not a wedge.
+    const underCap = `{"downgraded":false}${' '.repeat(64 * 1024)}`;
+    const kept = runWatcher({
+      composedArtifact: underCap,
+      attemptElapsed: 30,
+    });
+    expect(kept.marker).toBe('head-a');
+    expect(kept.superseded).toBeNull();
   });
 
-  it('bounds the attempt-start read against a rename-swapped FIFO (replayed watcher)', () => {
-    // R8-10 (1/3): a FIFO rename-swapped into the attempt-start
-    // check-then-open window (no writer) wedges an unbounded cat forever
-    // and the one-shot watcher never decides — a real head move then
-    // burns the budget re-reviewing the dead head. The head stub swaps at
-    // open time; the timeout bound keeps the decision inside the harness
-    // bound (removing it turns this test into a harness timeout). Takes
-    // the ~5s of the production bound.
-    const r = runWatcher({ swapAttemptStartOnRead: true });
-    expect(r.superseded).toBe('head-b');
-    expect(r.pkilled).toBe(true);
-  });
+  it.skipIf(!hasMkfifo)(
+    'bounds the compose-artifact reopen against a rename-swapped FIFO (replayed watcher)',
+    () => {
+      // R6-3: [ -f ] refuses a statically planted FIFO, but the artifact
+      // path is agent-derivable — one rename-swapped in during the
+      // check-then-open window blocks readFileSync forever (no writer, no
+      // timeout) and kills the supersede watcher permanently: every later
+      // head move goes unwatched. The node stub performs the swap at open
+      // time; the timeout bound keeps the poll bounded and the one-shot
+      // decision alive (removing the bound turns this test into a harness
+      // timeout). Takes the ~5s of the production bound.
+      const r = runWatcher({
+        composedArtifact: '{"downgraded":false}',
+        attemptElapsed: 30,
+        swapArtifactOnRead: true,
+      });
+      expect(r.marker).toBeNull();
+      expect(r.superseded).toBe('head-b');
+      expect(r.pkilled).toBe(true);
+    },
+  );
+
+  it.skipIf(!hasMkfifo)(
+    'bounds the attempt-start read against a rename-swapped FIFO (replayed watcher)',
+    () => {
+      // R8-10 (1/3): a FIFO rename-swapped into the attempt-start
+      // check-then-open window (no writer) wedges an unbounded cat forever
+      // and the one-shot watcher never decides — a real head move then
+      // burns the budget re-reviewing the dead head. The head stub swaps at
+      // open time; the timeout bound keeps the decision inside the harness
+      // bound (removing it turns this test into a harness timeout). Takes
+      // the ~5s of the production bound.
+      const r = runWatcher({ swapAttemptStartOnRead: true });
+      expect(r.superseded).toBe('head-b');
+      expect(r.pkilled).toBe(true);
+    },
+  );
 
   it('still decides when SALVAGE_DIR vanished before the head move (replayed watcher)', () => {
     // The deletion dual of the planted-FIFO hardening: SALVAGE_DIR is
@@ -5161,8 +5213,12 @@ describe('review supersede salvage (#10110)', () => {
       // above pins that refusal for a watcher-less run). Here the watcher
       // saw the move itself: its kill record, written into the unexported
       // minted dir, is the primary witness, and the killed attempt cedes
-      // clean instead of going red on a genuine supersede.
-      const now = new Date().toISOString();
+      // clean instead of going red on a genuine supersede. The corrective
+      // back-push lands AFTER the run started — the kill-record branch
+      // admits no skew tolerance (a lone back-push at or before run start
+      // is the triggering push's shape) — so the event postdates START_TS
+      // with margin for the harness setup between now and the loop start.
+      const now = new Date(Date.now() + 5000).toISOString();
       const r = runScenario('cede_revert_ff_kill', {
         armWatcher: true,
         extraEnv: {
@@ -5229,6 +5285,26 @@ describe('review supersede salvage (#10110)', () => {
       expect(unrelated.status).toBe(1);
       expect(unrelated.raw).toContain('FAIL ');
       expect(unrelated.raw).not.toContain('Superseded early:');
+      // The run's OWN triggering force-push has the corroboration's exact
+      // shape — a back-push onto the expected head — and with the old skew
+      // tolerance any such event inside [START_TS - 15, ...) corroborated a
+      // planted record whenever dispatch was fast or the runner clock
+      // lagged GitHub: silent suppression with the head never moved. The
+      // kill-record branch must require the event at or after run start —
+      // 5s before it sits inside the old window, so this arm shipped green
+      // pre-fix. The triggering push predates START_TS by the full
+      // dispatch-plus-setup latency; a genuine mid-run revert postdates it.
+      const triggering = runScenario('supersede_forged_kill_record', {
+        armWatcher: true,
+        extraEnv: {
+          ...base,
+          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() - 5000).toISOString()}`,
+        },
+      });
+      expect(triggering.attempts).toBe(1);
+      expect(triggering.status).toBe(1);
+      expect(triggering.raw).toContain('FAIL ');
+      expect(triggering.raw).not.toContain('Superseded early:');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -5373,15 +5449,24 @@ describe('review supersede salvage (#10110)', () => {
     // the step's errexit, nor skip the SALVAGE_DIR cleanup.
     const trapLine = run.split('\n').find((l) => l.startsWith("trap '"));
     expect(trapLine).toContain("' EXIT");
-    const runTrap = (plantLogDir) => {
+    const runTrap = (plant) => {
       const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
       try {
         const harness = [
           'set -euo pipefail',
           `LOG_PATH="${join(dir, 'log')}"`,
-          plantLogDir ? 'mkdir -p "$LOG_PATH"' : ': > "$LOG_PATH"',
-          'PROXY_BIN=""',
+          // R10-2: every cleanup path is agent-derivable — the poisoned
+          // arm plants LOG_PATH as a directory holding a mode-000 child,
+          // which makes rm -rf exit 1 (EACCES) and under errexit aborts
+          // the rest of the trap; the sibling cleanups must still run.
+          plant === 'dir'
+            ? 'mkdir -p "$LOG_PATH"'
+            : plant === 'poisoned'
+              ? 'mkdir -p "$LOG_PATH/locked"; touch "$LOG_PATH/locked/inner"; chmod 000 "$LOG_PATH/locked"'
+              : ': > "$LOG_PATH"',
+          `PROXY_BIN="${join(dir, 'proxy')}"; mkdir -p "$PROXY_BIN"`,
           `SALVAGE_DIR="${join(dir, 'salvage')}"; mkdir -p "$SALVAGE_DIR"`,
+          `SUPERSEDE_KILL_DIR="${join(dir, 'killdir')}"; mkdir -p "$SUPERSEDE_KILL_DIR"`,
           '( : ) &',
           'WATCHER_PID=$!',
           'wait "$WATCHER_PID"',
@@ -5391,15 +5476,29 @@ describe('review supersede salvage (#10110)', () => {
         const r = spawnSync('bash', ['-c', harness], { encoding: 'utf8' });
         expect(r.status).toBe(0);
         expect(existsSync(join(dir, 'salvage'))).toBe(false);
+        expect(existsSync(join(dir, 'proxy'))).toBe(false);
+        expect(existsSync(join(dir, 'killdir'))).toBe(false);
       } finally {
+        try {
+          chmodSync(join(dir, 'log', 'locked'), 0o755);
+        } catch {
+          // Not planted in the file/dir arms.
+        }
         rmSync(dir, { recursive: true, force: true });
       }
     };
-    runTrap(false);
+    runTrap('file');
     // LOG_PATH is agent-derivable (RUNNER_TEMP + PR number): a planted
     // DIRECTORY there must not abort the trap's first clause and leak the
     // watcher reap / SALVAGE_DIR cleanup (rm -f exits 1 on a directory).
-    runTrap(true);
+    runTrap('dir');
+    // R10-2: the same plant hardened against removal — a child chmod 000
+    // makes rm -rf fail EACCES (-f does not suppress that on existing
+    // operands). Without the || true guards the failing clause aborts the
+    // trap and silently skips the PROXY_BIN/SALVAGE_DIR/SUPERSEDE_KILL_DIR
+    // cleanups this PR added, leaking every later run's temp dirs into the
+    // persistent self-hosted runner.
+    runTrap('poisoned');
   });
 
   it('wires the salvage outputs into the historical-head note step', () => {
@@ -5581,13 +5680,19 @@ describe('review supersede salvage (#10110)', () => {
     // time (empty output) falls the same way.
     expect(runSalvageOutputs({ liveHead: 'head-a' })).toEqual([]);
     expect(runSalvageOutputs({ liveHead: '' })).toEqual([]);
-    // A FIFO planted at moved-to must not hang the finished step; the
-    // bounded read degrades it to unknown inside the timeout bound.
-    expect(runSalvageOutputs({ movedToFifo: true })).toEqual([
-      'salvaged=true',
-      'salvage_moved_to=unknown',
-    ]);
   });
+
+  it.skipIf(!hasMkfifo)(
+    'never hangs the finished step on a planted moved-to FIFO (replayed block)',
+    () => {
+      // A FIFO planted at moved-to must not hang the finished step; the
+      // bounded read degrades it to unknown inside the timeout bound.
+      expect(runSalvageOutputs({ movedToFifo: true })).toEqual([
+        'salvaged=true',
+        'salvage_moved_to=unknown',
+      ]);
+    },
+  );
 
   it('degrades a forged moved-to instead of injecting outputs (replayed block)', () => {
     // moved-to is agent-writable; embedded newlines would land as forged
@@ -5604,30 +5709,46 @@ describe('review supersede salvage (#10110)', () => {
     ]);
   });
 
-  it('bounds the moved-to read against a wedge or a huge plant (replayed block)', () => {
-    // R8-10 (3/3): read_head_signal is one timeout-bounded, size-capped
-    // open. A FIFO rename-swapped in at open time must degrade to
-    // `unknown` inside the bound instead of hanging the finished step; a
-    // huge regular plant must not be slurped into the command
+  it.skipIf(!hasMkfifo)(
+    'bounds the moved-to read against a rename-swapped FIFO (replayed block)',
+    () => {
+      // R8-10 (3/3): read_head_signal is one timeout-bounded, size-capped
+      // open. A FIFO rename-swapped in at open time must degrade to
+      // `unknown` inside the bound instead of hanging the finished step.
+      expect(
+        runSalvageOutputs({
+          movedTo: 'b'.repeat(40),
+          movedToSwapOnRead: true,
+        }),
+      ).toEqual(['salvaged=true', 'salvage_moved_to=unknown']);
+    },
+  );
+
+  it('bounds the moved-to read against a huge plant (replayed block)', () => {
+    // A huge regular plant must not be slurped into the command
     // substitution (unbounded, the ~1.5GB plant out-runs the harness
     // bound).
-    expect(
-      runSalvageOutputs({ movedTo: 'b'.repeat(40), movedToSwapOnRead: true }),
-    ).toEqual(['salvaged=true', 'salvage_moved_to=unknown']);
     expect(runSalvageOutputs({ movedToHuge: true })).toEqual([
       'salvaged=true',
       'salvage_moved_to=unknown',
     ]);
   });
 
-  it('bounds the superseded read against a wedge or a huge plant (replayed cede)', () => {
-    // R8-10 (3/3): cede_superseded reads SUPERSEDE_FILE through
-    // read_head_signal. The control cedes with the recorded head; a FIFO
-    // swapped in at open time must cede with `unknown` inside the bound
-    // (an unbounded open wedges the exit and this test dies on the
-    // harness timeout); a huge plant must not be slurped.
+  it.skipIf(!hasMkfifo)(
+    'bounds the superseded read against a rename-swapped FIFO (replayed cede)',
+    () => {
+      // R8-10 (3/3): cede_superseded reads SUPERSEDE_FILE through
+      // read_head_signal; a FIFO swapped in at open time must cede with
+      // `unknown` inside the bound (an unbounded open wedges the exit and
+      // this test dies on the harness timeout).
+      expect(runCedeRead({ swapOnRead: true })).toContain('to unknown before');
+    },
+  );
+
+  it('bounds the superseded read against a huge plant (replayed cede)', () => {
+    // The control cedes with the recorded head; a huge plant must not be
+    // slurped into the command substitution.
     expect(runCedeRead()).toContain(`to ${'b'.repeat(40)} before`);
-    expect(runCedeRead({ swapOnRead: true })).toContain('to unknown before');
     expect(runCedeRead({ huge: true })).toContain('to unknown before');
   });
 
@@ -5729,6 +5850,19 @@ describe('review supersede salvage (#10110)', () => {
       // below rejects any unknown flag exactly like real gh.
       expect(delay.run).toContain(`== "${botLogin}"`);
       expect(delay.run).not.toContain('--arg');
+      // R5-4: the marker+commit_id pair is caller-supplied on POST
+      // reviews, so a match dedups only corroborated by a successful run
+      // of THIS workflow server-recorded at the candidate head — and that
+      // lookup needs the actions:read permission the job declares.
+      expect(delay.run).toContain(
+        'actions/runs?head_sha=${current_head}&status=success',
+      );
+      expect(delay.run).toContain(
+        'select(.path == ".github/workflows/qwen-code-pr-review.yml")',
+      );
+      expect(doc.jobs['delay-automatic-review'].permissions.actions).toBe(
+        'read',
+      );
       const H = 'a'.repeat(40);
       const OTHER = 'b'.repeat(40);
       const ledgerFor = (sha) =>
@@ -5739,6 +5873,8 @@ describe('review supersede salvage (#10110)', () => {
         reviews = [],
         apiStatus = 0,
         prState = 'OPEN',
+        runPaths = [],
+        runsStatus = 0,
       }) => {
         const dir = mkdtempSync(join(tmpdir(), 'review-delay-'));
         try {
@@ -5760,6 +5896,7 @@ describe('review supersede salvage (#10110)', () => {
               'fi',
               'if [ "${1:-}" = "api" ]; then',
               '  shift',
+              '  endpoint="$1"',
               '  filter=""',
               '  while [ $# -gt 0 ]; do',
               '    case "$1" in',
@@ -5769,8 +5906,25 @@ describe('review supersede salvage (#10110)', () => {
               '      *) shift ;;',
               '    esac',
               '  done',
-              `  printf '%s' "$STUB_REVIEWS" | jq -r "$filter"`,
-              '  exit "${STUB_API_STATUS}"',
+              // Two read-only lookups, each run through the step's OWN
+              // --jq program with real jq: the reviews anchor and the
+              // R5-4 run-history corroboration. Faithful to real gh on
+              // failure: nonzero exit with EMPTY stdout (the step's
+              // fail-open keys on the empty capture).
+              '  case "$endpoint" in',
+              '    *actions/runs*)',
+              '      if [ "${STUB_RUNS_STATUS:-0}" != "0" ]; then',
+              '        echo "gh api failed" >&2',
+              '        exit "$STUB_RUNS_STATUS"',
+              '      fi',
+              `      printf '%s' "$STUB_RUNS" | jq -r "$filter"`,
+              '      exit 0',
+              '      ;;',
+              '    *)',
+              `      printf '%s' "$STUB_REVIEWS" | jq -r "$filter"`,
+              '      exit "$STUB_API_STATUS"',
+              '      ;;',
+              '  esac',
               'fi',
               'exit 1',
             ].join('\n') + '\n',
@@ -5795,6 +5949,10 @@ describe('review supersede salvage (#10110)', () => {
               STUB_CURRENT_HEAD: currentHead,
               STUB_REVIEWS: JSON.stringify(reviews),
               STUB_API_STATUS: String(apiStatus),
+              STUB_RUNS: JSON.stringify({
+                workflow_runs: runPaths.map((path) => ({ path })),
+              }),
+              STUB_RUNS_STATUS: String(runsStatus),
             },
           });
           return {
@@ -5805,13 +5963,16 @@ describe('review supersede salvage (#10110)', () => {
           rmSync(dir, { recursive: true, force: true });
         }
       };
-      // A posted bot review anchored on the live head: nothing to do. The
-      // marker sha must also match the review's server-recorded commit_id —
-      // the body is model-authored text and never dedups alone.
+      // A posted bot review anchored on the live head, corroborated by a
+      // successful run of this workflow at that head: nothing to do. The
+      // marker sha must match the review's commit_id AND a server-recorded
+      // run must back the pair — the body is model-authored text and both
+      // compared values are caller-supplied, so neither dedups alone.
       const deduped = runDelayStep({
         reviews: [
           { user: { login: botLogin }, body: ledgerFor(H), commit_id: H },
         ],
+        runPaths: ['.github/workflows/qwen-code-pr-review.yml'],
       });
       expect(deduped.outputs).toContain('should_review=false');
       expect(deduped.summary).toContain(
@@ -5869,6 +6030,7 @@ describe('review supersede salvage (#10110)', () => {
             commit_id: H,
           },
         ],
+        runPaths: ['.github/workflows/qwen-code-pr-review.yml'],
       });
       expect(genuineLast.outputs).toContain('should_review=false');
       // A ledger whose sha did not survive (truncation, fail-closed round):
@@ -5886,6 +6048,36 @@ describe('review supersede salvage (#10110)', () => {
       // Lookup failure fails OPEN — the review runs.
       const apiDown = runDelayStep({ apiStatus: 1 });
       expect(apiDown.outputs).toContain('should_review=true');
+      // R5-4 strengthened: the reviewed agent holds the run's bot token
+      // and both compared values are caller-supplied on POST reviews, so
+      // an agent-forged bot review can pair marker sha and commit_id on
+      // the live head. The pair alone must never skip: without a
+      // corroborating successful run at that head the review runs
+      // (removing the corroboration turns this arm red).
+      const uncorroborated = runDelayStep({
+        reviews: [
+          { user: { login: botLogin }, body: ledgerFor(H), commit_id: H },
+        ],
+      });
+      expect(uncorroborated.outputs).toContain('should_review=true');
+      // A successful run of some OTHER workflow at the head proves
+      // nothing about this workflow's review.
+      const wrongWorkflow = runDelayStep({
+        reviews: [
+          { user: { login: botLogin }, body: ledgerFor(H), commit_id: H },
+        ],
+        runPaths: ['.github/workflows/ci.yml'],
+      });
+      expect(wrongWorkflow.outputs).toContain('should_review=true');
+      // A failed corroboration lookup fails OPEN like the reviews lookup.
+      const runsDown = runDelayStep({
+        reviews: [
+          { user: { login: botLogin }, body: ledgerFor(H), commit_id: H },
+        ],
+        runPaths: ['.github/workflows/qwen-code-pr-review.yml'],
+        runsStatus: 1,
+      });
+      expect(runsDown.outputs).toContain('should_review=true');
       // Controls: the pre-existing guards keep their shape.
       expect(
         runDelayStep({ currentHead: OTHER, eventHead: H }).outputs,

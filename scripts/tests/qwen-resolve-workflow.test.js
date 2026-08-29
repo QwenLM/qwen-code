@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -23,6 +23,21 @@ const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../..',
 );
+
+// Capability probe, not a platform check: the FIFO wedge tests need
+// mkfifo(1), which macOS does not ship — the merge_group-gated test_macos
+// lane still runs this suite (vitest.config excludes win32 only), where
+// spawnSync('mkfifo', ...) returns ENOENT without throwing, no FIFO is
+// ever created, and the wedge assertions would pass for the wrong reason
+// (R11-7).
+const hasMkfifo = (() => {
+  try {
+    execFileSync('mkfifo', ['--help'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -762,42 +777,45 @@ describe('qwen resolve workflow', () => {
     expect(closedSalvage.ghLog).toBe('');
   });
 
-  it('bounds the salvage marker read on the posting path (#10110)', () => {
-    const runStep = step(reviewJob, 'Run review');
-    // R8-10: the escape's marker read is one timeout-bounded, size-capped
-    // open. A FIFO rename-swapped in at open time — or planted statically —
-    // must fail CLOSED to the block inside the bound: an unbounded open
-    // wedges the posting path forever, the attempt budget bleeds out, and
-    // the salvage-armed cede then discards a finished review with no
-    // failure signal at all.
-    const wedged = runReviewGhWrapper(
-      runStep,
-      ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
-      'OPEN',
-      'head-b',
-      'head-a',
-      { salvageContent: 'head-a', swapSalvageOnRead: true },
-    );
-    expect(wedged.status).toBe(90);
-    expect(wedged.stderr).toContain(
-      'Blocked PR write: PR #123 moved from head-a to head-b',
-    );
-    expect(wedged.ghLog).toBe('');
+  it.skipIf(!hasMkfifo)(
+    'bounds the salvage marker read on the posting path (#10110)',
+    () => {
+      const runStep = step(reviewJob, 'Run review');
+      // R8-10: the escape's marker read is one timeout-bounded, size-capped
+      // open. A FIFO rename-swapped in at open time — or planted statically —
+      // must fail CLOSED to the block inside the bound: an unbounded open
+      // wedges the posting path forever, the attempt budget bleeds out, and
+      // the salvage-armed cede then discards a finished review with no
+      // failure signal at all.
+      const wedged = runReviewGhWrapper(
+        runStep,
+        ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+        'OPEN',
+        'head-b',
+        'head-a',
+        { salvageContent: 'head-a', swapSalvageOnRead: true },
+      );
+      expect(wedged.status).toBe(90);
+      expect(wedged.stderr).toContain(
+        'Blocked PR write: PR #123 moved from head-a to head-b',
+      );
+      expect(wedged.ghLog).toBe('');
 
-    const fifo = runReviewGhWrapper(
-      runStep,
-      ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
-      'OPEN',
-      'head-b',
-      'head-a',
-      { salvageFifo: true },
-    );
-    expect(fifo.status).toBe(90);
-    expect(fifo.stderr).toContain(
-      'Blocked PR write: PR #123 moved from head-a to head-b',
-    );
-    expect(fifo.ghLog).toBe('');
-  });
+      const fifo = runReviewGhWrapper(
+        runStep,
+        ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+        'OPEN',
+        'head-b',
+        'head-a',
+        { salvageFifo: true },
+      );
+      expect(fifo.status).toBe(90);
+      expect(fifo.stderr).toContain(
+        'Blocked PR write: PR #123 moved from head-a to head-b',
+      );
+      expect(fifo.ghLog).toBe('');
+    },
+  );
 
   it('allows wrapped gh review writes when the PR is still current', () => {
     const runStep = step(reviewJob, 'Run review');

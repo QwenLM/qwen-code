@@ -261,6 +261,7 @@ jobs:
       name: 'qwen-pr-review-delay'
       deployment: false
     permissions:
+      actions: 'read'
       contents: 'read'
       pull-requests: 'read'
     outputs:
@@ -312,18 +313,29 @@ jobs:
           # never dedups alone: only the LAST ledger marker per body
           # counts (compose appends the genuine one last — the CLI's
           # parseLedger reads the last marker for the same reason), and it
-          # must equal the review's server-recorded commit_id. A salvaged
-          # historical-head review posts under a NEWER commit_id, so it
-          # never dedups the live head here. gh's --jq accepts a single
-          # expression only (no jq argument flags — fleet-shepherd
-          # documents the same limit), so the constant bot login is
-          # interpolated.
+          # must equal the review's commit_id. Both are CALLER-SUPPLIED on
+          # POST reviews, and the reviewed agent holds the run's bot token,
+          # so a matching pair dedups only corroborated by a state the
+          # agent cannot author — a successful run of THIS workflow,
+          # server-recorded with the candidate as its event head (workflow
+          # runs have no create API). A salvaged historical-head review
+          # posts under a NEWER commit_id, so it never dedups the live head
+          # here. Fail-open like the lookup above: a lost corroboration
+          # costs one duplicate review, a false skip loses one. gh's --jq
+          # accepts a single expression only (no jq argument flags —
+          # fleet-shepherd documents the same limit), so the constant bot
+          # login is interpolated.
           reviewed_shas="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate \
             --jq '.[] | select((.user.login // "") == "qwen-code-ci-bot") | ((.body // "") | [match("<!-- qwen-review-ledger [^\n]*"; "g")] | .[-1].string // "") as $marker | (($marker | capture("\"sha\":\"(?<sha>[0-9a-f]{7,64})\"").sha)? // "") as $sha | select(($sha | length) > 0 and $sha == (.commit_id // "")) | $sha' 2>/dev/null)" || reviewed_shas=""
           if [ -n "$current_head" ] && printf '%s\n' "$reviewed_shas" | grep -qx "$current_head"; then
-            echo "Skipping delayed review: PR #${PR_NUMBER} head ${current_head} already carries a posted automatic review." >> "$GITHUB_STEP_SUMMARY"
-            echo "should_review=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            corroborating_runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${current_head}&status=success" \
+              --jq '[.workflow_runs[]? | select(.path == ".github/workflows/qwen-code-pr-review.yml")] | length' 2>/dev/null || true)"
+            case "$corroborating_runs" in ''|*[!0-9]*) corroborating_runs=0 ;; esac
+            if [ "$corroborating_runs" -gt 0 ]; then
+              echo "Skipping delayed review: PR #${PR_NUMBER} head ${current_head} already carries a posted automatic review." >> "$GITHUB_STEP_SUMMARY"
+              echo "should_review=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
           echo "should_review=true" >> "$GITHUB_OUTPUT"
 
@@ -1037,12 +1049,14 @@ jobs:
           # The trap must reap the watcher on EVERY exit path (fail() included):
           # a background watcher outliving this step on the reused self-hosted
           # runner could later kill a NEXT job's review of the same PR. The
-          # kill runs FIRST: under errexit a failing clause aborts the rest of
-          # the trap, and LOG_PATH is agent-derivable (RUNNER_TEMP + PR
-          # number), so a planted directory there must not skip the reap and
-          # leak the watcher — rm -rf absorbs it. The kill itself tolerates an
+          # kill runs FIRST and every clause is || true-guarded: under
+          # errexit a failing clause aborts the rest of the trap, and every
+          # cleanup path is agent-derivable (RUNNER_TEMP + PR number) — a
+          # planted directory holding a permission-resistant child makes
+          # rm -rf exit 1 (-f does not suppress EACCES) and would silently
+          # skip the cleanups after it. The kill itself tolerates an
           # already-reaped watcher (salvage arming exits it on the spot).
-          trap '[ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}" 2>/dev/null || true; rm -rf "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"; [ -z "${SALVAGE_DIR:-}" ] || rm -rf "${SALVAGE_DIR}"; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || rm -rf "${SUPERSEDE_KILL_DIR}"' EXIT
+          trap '[ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}" 2>/dev/null || true; rm -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || rm -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || rm -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "CI_BOT_PAT secret is required for Qwen PR review."
@@ -1738,9 +1752,14 @@ jobs:
               # timeout-bounded: [ -f ] refuses a statically planted FIFO,
               # but one rename-swapped in during the check-then-open window
               # would otherwise block readFileSync forever (no writer) and
-              # kill the watcher permanently.
+              # kill the watcher permanently. The read is the one salvage
+              # open not bounded by head -c, so it caps via fstat on the
+              # ALREADY-OPEN fd (a reopen would race the swap window): the
+              # agent-writable artifact would otherwise be slurped whole
+              # into node's heap on every poll — a legit verdict is bounded
+              # by the compose budget, far under the cap.
               if [ ! -f "${SALVAGE_DIR}/compose-seen" ] && [ -f "$COMPOSED_ARTIFACT" ] \
-                && timeout 5 node -e 'const v=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(typeof v!=="object"||v===null||Array.isArray(v))process.exit(1);' "$COMPOSED_ARTIFACT" 2>/dev/null; then
+                && timeout 5 node -e 'const fs=require("fs");const fd=fs.openSync(process.argv[1],"r");if(fs.fstatSync(fd).size>2097152)process.exit(1);const v=JSON.parse(fs.readFileSync(fd,"utf8"));if(typeof v!=="object"||v===null||Array.isArray(v))process.exit(1);' "$COMPOSED_ARTIFACT" 2>/dev/null; then
                 write_signal "${SALVAGE_DIR}/compose-seen" '' || true
               fi
               live_head="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null)" || continue
@@ -1866,9 +1885,15 @@ jobs:
             # present when a real move reverted (the return is
             # non-fast-forward), absent in the pure forgery.
             if [ -n "${SUPERSEDE_KILL_DIR:-}" ] && [ -f "${SUPERSEDE_KILL_DIR}/killed" ]; then
+              # No skew tolerance here, unlike the pair branch below: this
+              # branch accepts a LONE back-push — the exact shape of the
+              # run's OWN triggering force-push, which predates START_TS by
+              # only the dispatch latency. A genuine mid-run revert
+              # postdates run start; a skew-shifted one degrades to the
+              # visible red failure the lost-record branch documents.
               while read -r before after at; do
                 at="$(date -d "$at" +%s 2>/dev/null || echo 0)"
-                [ "$at" -ge "$(( START_TS - 15 ))" ] || continue
+                [ "$at" -ge "$START_TS" ] || continue
                 if [ "$after" = "${EXPECTED_HEAD_SHA:-}" ]; then
                   return 0
                 fi
