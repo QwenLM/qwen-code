@@ -27,6 +27,23 @@
   align-items: center;
 }
 
+.sidebar.mobileOpen {
+  width: clamp(
+    var(--web-shell-sidebar-min-width, 220px),
+    70%,
+    var(--web-shell-sidebar-max-width, 420px)
+  );
+  min-width: clamp(
+    var(--web-shell-sidebar-min-width, 220px),
+    70%,
+    var(--web-shell-sidebar-max-width, 420px)
+  );
+}
+
+.sidebar.mobileOpen .resizeHandle {
+  display: none;
+}
+
 .newChatButton,
 .pluginButton,
 .footerButton,
@@ -83,7 +100,23 @@
   flex: 0 0 auto;
   flex-direction: column;
   gap: 2px;
-  padding: 12px 0;
+  padding-bottom: 4px;
+}
+
+.newTaskNav {
+  display: flex;
+  width: 100%;
+  flex: 0 0 auto;
+  padding: 12px 0 2px;
+  border-bottom: 1px solid transparent;
+}
+
+.newTaskNavScrolled {
+  border-bottom-color: color-mix(
+    in srgb,
+    var(--sidebar-border) 55%,
+    transparent
+  );
 }
 
 .newChatButton:disabled {
@@ -127,6 +160,7 @@
 }
 
 .navIcon {
+  position: relative;
   width: 24px;
   height: 24px;
   flex: 0 0 24px;
@@ -386,7 +420,17 @@
   flex-direction: column;
   gap: 8px;
   margin-right: -12px;
-  overflow: hidden;
+  padding-right: 12px;
+  /* End the scroll port above the footer overlay so rows can never sit
+     under it (padding inside the scroll port would not: the port itself
+     still reaches the footer and rows parked at its bottom edge stay
+     unhoverable). */
+  margin-bottom: 40px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  touch-action: pan-y;
 }
 
 .sectionTitle {
@@ -435,6 +479,7 @@
   flex: 0 0 auto;
   align-items: center;
   gap: 2px;
+  margin-left: auto;
   margin-right: 8px;
 }
 
@@ -477,20 +522,12 @@
 .sessionText {
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.sessionBadgeIcon {
-  display: inline;
-  vertical-align: -1px;
-  margin-right: 3px;
-  color: var(--color-accent-fg, #8b5cf6);
-  flex-shrink: 0;
 }
 
 .projectName {
   flex: 0 1 auto;
+  text-overflow: ellipsis;
 }
 
 .projectIconButton:last-child {
@@ -507,18 +544,11 @@
 }
 
 .sessionList {
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding-right: 12px;
-  padding-bottom: 44px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
-  touch-action: pan-y;
+  overflow: visible;
 }
 
 .sessionGroupSection {
@@ -643,16 +673,54 @@
   gap: 2px;
 }
 
+.showAllSessions {
+  align-self: flex-start;
+  margin-left: 26px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.showAllSessions:hover {
+  color: var(--sidebar-foreground);
+}
+
+.showAllSessions:focus-visible {
+  color: var(--sidebar-foreground);
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 2px;
+}
+
 .sessionRow {
   position: relative;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
   padding: 2px 0 2px 26px;
   border-radius: 8px;
   color: color-mix(in srgb, var(--sidebar-foreground) 68%, transparent);
   cursor: pointer;
+}
+
+.collapsedSessionPopover {
+  overscroll-behavior: contain;
+  width: min(
+    var(--collapsed-session-popover-width, 260px),
+    var(--radix-popover-content-available-width, 420px)
+  );
+  max-width: var(--radix-popover-content-available-width, 420px);
+  max-height: min(70vh, var(--radix-popover-content-available-height, 70vh));
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 8px;
+  overflow-y: auto;
+  touch-action: pan-y;
 }
 
 .currentSession {
@@ -665,121 +733,108 @@
   pointer-events: none;
 }
 
-.floatingTooltip {
-  position: fixed;
-  z-index: 1000;
-  max-width: 320px;
-  min-width: 220px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--popover);
-  color: var(--popover-foreground);
-  box-shadow:
-    0 2px 4px -2px rgb(0 0 0 / 10%),
-    0 4px 6px -1px rgb(0 0 0 / 10%);
-  font-size: 12px;
-  font-weight: 400;
-  line-height: 18px;
-  overflow-wrap: anywhere;
-  pointer-events: auto;
-  transform: translateY(-50%);
-}
-
-.floatingTooltip::before {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: -12px;
-  width: 12px;
-  content: '';
-}
-
-.tooltipContent {
+.sessionDetailsTooltip {
+  width: min(360px, var(--radix-popover-content-available-width, 360px));
+  min-width: min(280px, var(--radix-popover-content-available-width, 280px));
+  max-width: var(--radix-popover-content-available-width, 360px);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  align-items: stretch;
+  gap: 10px;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 20px;
 }
 
-.tooltipTitle {
-  display: -webkit-box;
+.sessionDetailsHeader,
+.sessionDetailsRow {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sessionDetailsHeader {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.sessionDetailsTitle {
+  min-width: 0;
   overflow: hidden;
   color: var(--popover-foreground);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 20px;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
+  font-size: 14px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.tooltipTags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+.sessionDetailsTime {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
 }
 
-.tooltipTag {
+.sessionDetailsRow {
+  color: var(--popover-foreground);
+}
+
+.sessionDetailsRow svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  color: var(--muted-foreground);
+  stroke-width: 1.6;
+}
+
+.sessionDetailsRow span {
   min-width: 0;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--secondary);
-  color: var(--secondary-foreground);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.tooltipTagRunning {
-  background: color-mix(in srgb, var(--agent-blue-500) 16%, transparent);
-  color: var(--agent-blue-500);
+/* Match the session-row badge text: neutral muted tone, not the global link
+   blue — a blue/purple link would clash with the merged state icon's purple. */
+.sessionDetailsRow a {
+  color: color-mix(
+    in srgb,
+    var(--muted-foreground, #6b7280) 75%,
+    var(--foreground)
+  );
 }
 
-.tooltipTagNew {
-  background: color-mix(in srgb, var(--agent-blue-500) 12%, transparent);
-  color: var(--agent-blue-500);
-}
-
-.sessionDetailsContent {
-  width: min(16rem, var(--radix-dropdown-menu-content-available-width, 16rem));
-  max-width: var(--radix-dropdown-menu-content-available-width, 16rem);
-  max-height: var(--radix-dropdown-menu-content-available-height);
-  overflow: hidden auto;
+.sessionDetailsRow a:hover {
+  color: var(--foreground);
 }
 
 .sessionDetailsIdRow {
-  display: flex;
   min-width: 0;
+  display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.sessionDetailsId {
+.sessionDetailsIdRow > span:first-child {
   min-width: 0;
   overflow: hidden;
   color: var(--muted-foreground);
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
-  font-weight: 400;
-  line-height: 18px;
 }
 
 .sessionDetailsCopyButton {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
   display: inline-flex;
-  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  padding: 0;
   border: 0;
   border-radius: 4px;
   background: transparent;
   color: var(--muted-foreground);
+  cursor: pointer;
 }
 
 .sessionDetailsCopyButton:hover,
@@ -790,22 +845,51 @@
 }
 
 .sessionDetailsCopyButton svg {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
 }
 
 .sessionDetailsCopied {
+  flex: 0 0 auto;
   color: var(--muted-foreground);
   font-size: 12px;
-  line-height: 18px;
 }
 
 .sessionText {
+  position: relative;
+  min-width: 0;
   flex: 1 1 auto;
-  margin-right: 18px;
+  margin-right: 4px;
+  overflow: hidden;
   color: currentColor;
   font-size: 14px;
   line-height: 22px;
+}
+
+/* The fade hints at a clipped tail; only overflowing titles clip, and the
+   hover measurement marks them via the overflow attribute. */
+.sessionText[data-web-shell-title-overflow] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 10px), transparent);
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - 10px),
+    transparent
+  );
+}
+
+.sessionTextInner {
+  display: inline-block;
+  min-width: max-content;
+}
+
+.sessionRow:hover .sessionTextInner {
+  animation: sessionTitleScroll var(--session-title-scroll-duration, 0s) 1s
+    linear forwards;
+}
+
+.sessionRow:focus-within .sessionTextInner {
+  animation: sessionTitleScroll var(--session-title-scroll-duration, 0s) 0.3s
+    linear forwards;
 }
 
 .sessionStatusSlot {
@@ -821,13 +905,59 @@
 }
 
 .sessionStatusDot {
+  color: var(--agent-blue-500);
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: var(--agent-blue-500);
-  box-shadow: 0 0 0 3px
-    color-mix(in srgb, var(--agent-blue-500) 14%, transparent);
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent);
   animation: sidebarPulse 1.6s ease-in-out infinite;
+}
+
+.sessionStatusDotOverlay {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 5px;
+  height: 5px;
+  box-shadow: 0 0 0 1.5px var(--sidebar-background);
+}
+
+.sessionSourceIcon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+}
+
+.sessionSourceIcon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+}
+
+.collapsedSessionStatusDot {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  color: var(--agent-blue-500);
+  animation: sidebarPulse 1.6s ease-in-out infinite;
+}
+
+.collapsedSessionStatusApproval {
+  color: color-mix(in srgb, var(--success-color) 95%, var(--foreground));
+}
+
+.collapsedSessionStatusQuestion {
+  color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
 }
 
 .sessionTitlePin {
@@ -872,6 +1002,12 @@
   justify-content: flex-end;
 }
 
+.sessionMetaSlot:not(
+  :has(.sessionLoading, .sessionAttention, .sessionGitIcon)
+) {
+  padding-right: 10px;
+}
+
 .sessionAttention {
   height: 22px;
   display: inline-flex;
@@ -891,44 +1027,49 @@
   color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
 }
 
-.sessionAttention + .sessionLoading {
-  margin-left: 10px;
-}
-
 .sessionRow:hover .sessionMetaSlot,
+.sessionRow:focus-within .sessionMetaSlot,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible),
 .sessionMetaSlot:has([data-state='open']) {
-  min-width: 86px;
+  min-width: var(--session-actions-width, 78px);
 }
 
-.sessionTime {
-  color: var(--muted-foreground);
-  font-size: 12px;
-  line-height: 18px;
-  white-space: nowrap;
-  padding-right: 10px;
+.sessionGitIcon {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-accent-fg, #8b5cf6);
+}
+
+.sessionGitIcon svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.6;
 }
 
 .sessionLoading {
-  margin-right: 10px;
-  width: 14px;
-  height: 14px;
+  margin: 0 10px;
+  width: 12px;
+  height: 12px;
   display: inline-flex;
-  border: 2px solid color-mix(in srgb, var(--agent-blue-300) 24%, transparent);
-  border-top-color: var(--agent-blue-300);
+  border: 1.5px solid
+    color-mix(in srgb, var(--muted-foreground) 28%, transparent);
+  border-top-color: var(--muted-foreground);
   border-radius: 999px;
   animation: sidebarSpin 0.8s linear infinite;
 }
 
-.sessionRow:hover:not(.runningSession) .sessionTime,
-.sessionRow:focus-within:not(.runningSession) .sessionTime,
+.sessionRow:hover:not(.runningSession) .sessionGitIcon,
+.sessionRow:focus-within:not(.runningSession) .sessionGitIcon,
 .sessionRow:hover:not(.runningSession) .sessionAttention,
 .sessionRow:focus-within:not(.runningSession) .sessionAttention,
-.sessionMetaSlot:hover .sessionTime,
+.sessionMetaSlot:hover .sessionGitIcon,
 .sessionMetaSlot:hover .sessionLoading,
 .sessionMetaSlot:hover .sessionAttention,
-.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionTime,
-.sessionMetaSlot:has([data-state='open']) .sessionTime,
+.sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionGitIcon,
+.sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionLoading,
 .sessionMetaSlot:has([data-state='open']) .sessionLoading,
 .sessionMetaSlot:has(.sessionActionButton:focus-visible) .sessionAttention,
@@ -942,7 +1083,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 2px;
+  gap: 0;
   opacity: 0;
 }
 
@@ -960,18 +1101,29 @@
   }
 }
 
+@keyframes sessionTitleScroll {
+  to {
+    transform: translateX(calc(var(--session-title-scroll-distance, 0px) * -1));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessionRow:hover .sessionTextInner,
+  .sessionRow:focus-within .sessionTextInner {
+    animation: none;
+  }
+}
+
 @keyframes sidebarPulse {
   0%,
   100% {
-    box-shadow: 0 0 0 2px
-      color-mix(in srgb, var(--agent-blue-500) 16%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 16%, transparent);
     opacity: 0.72;
     transform: scale(0.9);
   }
 
   50% {
-    box-shadow: 0 0 0 6px
-      color-mix(in srgb, var(--agent-blue-500) 0%, transparent);
+    box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 0%, transparent);
     opacity: 1;
     transform: scale(1);
   }
@@ -993,6 +1145,7 @@
 .sessionActionButton {
   width: 26px;
   height: 26px;
+  flex: 0 0 26px;
   border-radius: 7px;
 }
 
@@ -1207,6 +1360,10 @@
   font-size: 12px;
   line-height: 18px;
   text-align: left;
+}
+
+.notice {
+  padding: 4px 8px 4px 26px;
 }
 
 .retry {
@@ -1447,7 +1604,19 @@
 .collapsed .body {
   align-items: center;
   width: 100%;
+  gap: 2px;
   margin-right: 0;
+  padding-right: 0;
+  margin-bottom: 220px;
+}
+
+.collapsed .newTaskNav {
+  justify-content: center;
+}
+
+.collapsed .primaryNav {
+  align-items: center;
+  padding-bottom: 0;
 }
 
 .collapsed .sessionList {
@@ -1455,7 +1624,6 @@
   width: 100%;
   margin-right: 0;
   padding-right: 0;
-  padding-bottom: 220px;
 }
 
 .collapsed .footer {
@@ -1686,9 +1854,6 @@
   .sidebar.mobileOpen {
     display: flex;
     z-index: 50;
-    /* The width var is shared with the desktop resize handle and can be wider
-       than a phone viewport; cap it so the drawer never overflows the screen. */
-    max-width: 100vw;
   }
 
   .resizeHandle {

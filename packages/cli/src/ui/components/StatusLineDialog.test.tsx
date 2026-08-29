@@ -118,11 +118,16 @@ describe('StatusLineDialog', () => {
     const addItem = vi.fn();
     const onClose = vi.fn();
     const onSaved = vi.fn();
+    const recordSlashCommand = vi.fn();
+    const recordingConfig = {
+      ...config,
+      getChatRecordingService: () => ({ recordSlashCommand }),
+    } as unknown as Config;
     const { stdin } = render(
       <KeypressProvider kittyProtocolEnabled={false}>
         <StatusLineDialog
           settings={settings}
-          config={config}
+          config={recordingConfig}
           uiState={uiState}
           addItem={addItem}
           onSaved={onSaved}
@@ -157,6 +162,16 @@ describe('StatusLineDialog', () => {
       },
       expect.any(Number),
     );
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/statusline',
+      outputHistoryItems: [
+        {
+          type: MessageType.INFO,
+          text: 'Status line preset saved to user settings.',
+        },
+      ],
+    });
     expect(onSaved).toHaveBeenCalledWith(settings.merged.ui?.statusLine);
     expect(onClose).toHaveBeenCalled();
   });

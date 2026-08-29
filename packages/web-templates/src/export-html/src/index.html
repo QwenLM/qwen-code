@@ -31,11 +31,12 @@
       window['react/jsx-runtime'] = jsxRuntime;
       window['react/jsx-dev-runtime'] = jsxRuntime;
     </script>
-    <script src="https://unpkg.com/@qwen-code/webui@__WEBUI_VERSION__/dist/index.umd.js"></script>
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/@qwen-code/webui@__WEBUI_VERSION__/dist/styles.css"
-    />
+    <script>
+      __WEBUI_UMD_JS__;
+    </script>
+    <style>
+      __WEBUI_CSS__
+    </style>
     <title>Qwen Code Chat Export</title>
     <script>
       // Pre-hydrate FOUC guard: must run before <style> below applies layout.

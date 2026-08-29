@@ -40,9 +40,20 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     );
   });
 
+  it('excludes QWEN_CODE_WARNINGS_FILE so a project .env cannot redirect temp warnings', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_WARNINGS_FILE',
+    );
+  });
   it('keeps ACP repeated-tool-failure rollout policy operator-owned', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
+    );
+  });
+
+  it('keeps daemon memory scope operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_MEMORY_PROJECT_SCOPE',
     );
   });
 
@@ -78,6 +89,17 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   // session children, reopening the #8653 vector.
   it('excludes DEV so a project .env cannot spoof the dev harness', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('DEV');
+  });
+
+  // QWEN_SERVE_NEW_FILE_MODE sets the daemon-wide creation mode for
+  // agent-written NEW files. A project `.env` flipping it to `system` would
+  // silently widen file visibility (0600 -> umask-derived) for every
+  // workspace with no warning, so the fail-closed posture stays an operator
+  // decision made in the daemon's launch env or a home `.env`.
+  it('excludes QWEN_SERVE_NEW_FILE_MODE so a project .env cannot widen new-file mode', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_SERVE_NEW_FILE_MODE',
+    );
   });
 
   // The non-Node TLS trust-anchor vars reach the same MITM outcome as

@@ -16,7 +16,7 @@ import {
 import { ToolCallStatus } from '../../types.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
 
-// ToolStatusIndicator pulls in GeminiRespondingSpinner which requires
+// ToolStatusIndicator pulls in RespondingSpinner which requires
 // StreamingContext; stub the component but keep the real constant so
 // height-estimation tests stay in sync with production.
 vi.mock('../shared/ToolStatusIndicator.js', async (importOriginal) => ({

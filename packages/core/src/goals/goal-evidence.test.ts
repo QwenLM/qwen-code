@@ -89,6 +89,7 @@ function goal(cursor: string | null = 'cursor'): GoalRecord {
     evidenceCursor: { recordId: cursor },
     turnCount: 2,
     activeTimeMs: 100,
+    tokensUsed: 0,
     createdAt: 1,
     updatedAt: 2,
   };
@@ -107,7 +108,7 @@ function complete(evidenceRefs: string[]): GoalTerminalProposal {
 }
 
 function blocked(
-  blockerKind: 'authority' | 'external' | 'repeated',
+  blockerKind: NonNullable<GoalTerminalProposal['blockerKind']>,
   evidenceRefs: string[],
 ): GoalTerminalProposal {
   return {
@@ -547,10 +548,50 @@ describe('Goal evidence catalog', () => {
     expect(small?.content).toBe('output 1');
   });
 
+  it('does not start truncated under a full checkpoint of multi-byte claims', () => {
+    // The failure this guards: catalog previews were cut to 240 *characters*
+    // while the catalog budget counts *bytes*. A legal 32-claim checkpoint of
+    // Chinese claims serialized to ~29kB against the 24kB cap, so the window
+    // was truncated before a single new record was scanned — and `truncated`
+    // switches `shouldCheckpoint` off, so compaction could never run again and
+    // the Goal was stopped as `usage_limited` with nothing to salvage.
+    const checkpointGoal: GoalRecord = {
+      ...goal('checkpoint-1'),
+      evidenceCheckpoint: {
+        checkpointId: 'checkpoint-1',
+        createdAt: 1,
+        claims: Array.from({ length: 32 }, (_, index) => ({
+          id: `checkpoint-1:${index + 1}`,
+          proofKind: 'external_fact' as const,
+          claim: '\u4e2d'.repeat(2_000),
+          sourceRefs: ['cursor'],
+        })),
+      },
+    };
+
+    const window = buildGoalEvidenceCheckpointWindow({
+      records: [
+        record('checkpoint-1', 'system'),
+        record('evidence-0', 'assistant', {
+          provenance: 'assistant_output',
+          turnId: 'turn-3',
+          text: '\u4e2d'.repeat(50),
+        }),
+      ],
+      goal: checkpointGoal,
+      permit: permit(),
+    });
+
+    expect(window.truncated).toBe(false);
+  });
+
   it('caps window content on a code point boundary for multi-byte text', () => {
     const records = [
       record('cursor', 'system'),
-      ...Array.from({ length: 26 }, (_, index) =>
+      // Sized against the byte-capped catalog entry (~364 bytes each), not the
+      // ~910 a 240-character CJK preview used to cost: 53 entries reach the
+      // 19,200-byte checkpoint threshold, 66 would reach the 24,000 cap.
+      ...Array.from({ length: 55 }, (_, index) =>
         record(`evidence-${index}`, 'assistant', {
           provenance: 'assistant_output',
           turnId: 'turn-3',
@@ -1000,6 +1041,59 @@ describe('Goal evidence lineage and blockers', () => {
       );
     },
   );
+
+  it('holds an infeasible blocker to external facts, not user input or prose', () => {
+    // Infeasibility is a claim about the world. A user can authorise a stop
+    // (that is `authority`), but cannot make an objective impossible, and
+    // the assistant saying it is impossible is exactly the exit this kind
+    // must not become -- so only a tool result can carry it.
+    const records = [
+      record('cursor', 'system'),
+      record('user', 'user', {
+        provenance: 'real_user',
+        turnId: 'turn-2',
+        text: 'Please target the v9 branch',
+      }),
+      record('probe', 'tool_result', {
+        provenance: 'tool_result',
+        turnId: 'turn-3',
+        toolResponse: { output: "fatal: branch 'v9' not found" },
+      }),
+      record('assistant', 'assistant', {
+        provenance: 'assistant_output',
+        turnId: 'turn-3',
+        text: 'The v9 branch does not exist, so this objective cannot be met.',
+      }),
+    ];
+
+    expect(() =>
+      validate(records, blocked('infeasible', ['assistant'])),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'infeasible_blocker_external_fact_required',
+      }),
+    );
+    expect(() =>
+      validate(records, blocked('infeasible', ['user', 'assistant'])),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'infeasible_blocker_external_fact_required',
+      }),
+    );
+    expect(
+      validate(records, blocked('infeasible', ['probe', 'assistant']))
+        .citedRecords[0],
+    ).toMatchObject({ uuid: 'probe', proofKind: 'external_fact' });
+    // Like the other immediate blockers, it cannot leave newer evidence
+    // uncited: a later record could contradict the impossibility.
+    expect(() =>
+      validate(records, blocked('infeasible', ['probe'])),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'immediate_blocker_newer_evidence_required',
+      }),
+    );
+  });
 
   it.each(['authority', 'external'] as const)(
     'gates an immediate %s blocker on checkpoint claims like raw evidence',

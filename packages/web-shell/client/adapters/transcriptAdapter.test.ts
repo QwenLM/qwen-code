@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type {
   DaemonTranscriptBlock,
   DaemonTranscriptState,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { extractPendingPermission } from './transcriptAdapter';
 
 function state(blocks: DaemonTranscriptBlock[]): DaemonTranscriptState {

@@ -161,12 +161,16 @@ function legacyStatusKind(
     case 'replace':
     case 'edit':
     case 'resume':
-    case 'migrated':
       return 'set';
     case 'complete':
       return 'achieved';
     case 'clear':
       return 'cleared';
+    // A migrated goal is always persisted `paused` (`createMigratedGoalState`),
+    // and nothing drives a paused goal. Projecting it as `set` would re-assert
+    // "active" to every client that derives the live goal from the newest card,
+    // leaving a phantom running goal behind a resumed pre-v2 transcript.
+    case 'migrated':
     case 'pause':
       return 'paused';
     case 'blocked':

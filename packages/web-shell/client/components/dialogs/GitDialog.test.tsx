@@ -26,6 +26,8 @@ const {
   workspaceGitHubDefaultBranch,
   workspaceGit,
   workspaceGitHubCreatePullRequest,
+  updateSessionMetadata,
+  btwSession,
   workspaceClient,
   mockState,
 } = vi.hoisted(() => {
@@ -38,7 +40,10 @@ const {
   const workspaceGitHubDefaultBranch = vi.fn();
   const workspaceGit = vi.fn();
   const workspaceGitHubCreatePullRequest = vi.fn();
+  const updateSessionMetadata = vi.fn();
+  const btwSession = vi.fn();
   const workspaceClient = {
+    btwSession,
     workspaceByCwd: () => ({
       workspaceGitDiff,
       workspaceGitDiffFile: vi.fn(),
@@ -51,6 +56,7 @@ const {
       workspaceGitHubDefaultBranch,
       workspaceGit,
       workspaceGitHubCreatePullRequest,
+      updateSessionMetadata,
     }),
   };
   const mockState = { capabilities: undefined as unknown };
@@ -64,14 +70,18 @@ const {
     workspaceGitHubDefaultBranch,
     workspaceGit,
     workspaceGitHubCreatePullRequest,
+    updateSessionMetadata,
+    btwSession,
     workspaceClient,
     mockState,
   };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
   return {
     ...actual,
     useWorkspace: () => ({
@@ -1237,5 +1247,275 @@ describe('GitDialog', () => {
       undefined,
     );
     expect(document.body.textContent).toContain('#99');
+  });
+
+  it('binds the created PR to the current session', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      files: [],
+      linesAdded: 0,
+      linesRemoved: 0,
+      hiddenCount: 0,
+    });
+    workspaceGit.mockResolvedValue({ branch: 'feat/x', detached: false });
+    workspaceGitHubDefaultBranch.mockResolvedValue({ branch: 'origin/main' });
+    workspaceGitBranches.mockResolvedValue({
+      local: [{ name: 'main' }],
+      remote: [{ name: 'origin/main' }],
+    });
+    workspaceGitHubCreatePullRequest.mockResolvedValue({
+      number: 99,
+      url: 'https://github.com/o/r/pull/99',
+    });
+    updateSessionMetadata.mockResolvedValue({});
+    mockState.capabilities = { features: ['workspace_github_prs'] };
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            sessionId="sess-1"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const createPrBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find((b) => b.textContent?.includes('Create Pull Request'));
+    expect(createPrBtn).toBeTruthy();
+    await act(async () => {
+      createPrBtn!.click();
+    });
+    await flush();
+
+    const titleInput = document.body.querySelector(
+      '[data-web-shell-dialog] input',
+    );
+    expect(titleInput).toBeTruthy();
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(titleInput, 'feat: add new feature');
+      titleInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const submitBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find(
+      (b) =>
+        b.textContent?.includes('Create') &&
+        !b.textContent?.includes('Pull Request'),
+    );
+    expect(submitBtn).toBeTruthy();
+    await act(async () => {
+      submitBtn!.click();
+    });
+    await flush();
+
+    expect(updateSessionMetadata).toHaveBeenCalledWith('sess-1', {
+      pr: {
+        number: 99,
+        url: 'https://github.com/o/r/pull/99',
+        state: 'open',
+      },
+    });
+  });
+
+  it('keeps the PR-creation success when the session binding fails', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      files: [],
+      linesAdded: 0,
+      linesRemoved: 0,
+      hiddenCount: 0,
+    });
+    workspaceGit.mockResolvedValue({ branch: 'feat/x', detached: false });
+    workspaceGitHubDefaultBranch.mockResolvedValue({ branch: 'origin/main' });
+    workspaceGitBranches.mockResolvedValue({
+      local: [{ name: 'main' }],
+      remote: [{ name: 'origin/main' }],
+    });
+    workspaceGitHubCreatePullRequest.mockResolvedValue({
+      number: 99,
+      url: 'https://github.com/o/r/pull/99',
+    });
+    updateSessionMetadata.mockRejectedValue(new Error('daemon gone'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockState.capabilities = { features: ['workspace_github_prs'] };
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            sessionId="sess-1"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const createPrBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find((b) => b.textContent?.includes('Create Pull Request'));
+    await act(async () => {
+      createPrBtn!.click();
+    });
+    await flush();
+
+    const titleInput = document.body.querySelector(
+      '[data-web-shell-dialog] input',
+    );
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(titleInput, 'feat: add new feature');
+      titleInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const submitBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find(
+      (b) =>
+        b.textContent?.includes('Create') &&
+        !b.textContent?.includes('Pull Request'),
+    );
+    await act(async () => {
+      submitBtn!.click();
+    });
+    await flush();
+    // Let the rejected binding promise settle.
+    await flush();
+
+    expect(updateSessionMetadata).toHaveBeenCalledWith('sess-1', {
+      pr: {
+        number: 99,
+        url: 'https://github.com/o/r/pull/99',
+        state: 'open',
+      },
+    });
+    // The binding failure is a warning only — the created PR status stays.
+    expect(document.body.textContent).toContain('#99');
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('binds the PR to the freshly resolved session after a stale-id retry', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      files: [{ path: 'a.ts', added: 3, removed: 1, isBinary: false }],
+      linesAdded: 3,
+      linesRemoved: 1,
+      hiddenCount: 0,
+    });
+    workspaceGit.mockResolvedValue({ branch: 'feat/x', detached: false });
+    workspaceGitHubDefaultBranch.mockResolvedValue({ branch: 'origin/main' });
+    workspaceGitBranches.mockResolvedValue({
+      local: [{ name: 'main' }],
+      remote: [{ name: 'origin/main' }],
+    });
+    workspaceGitHubCreatePullRequest.mockResolvedValue({
+      number: 99,
+      url: 'https://github.com/o/r/pull/99',
+    });
+    updateSessionMetadata.mockResolvedValue({});
+    // The prop session is dead (daemon restarted); the dialog's side query
+    // force-creates a fresh one and the ref must keep it across re-renders
+    // until doCreatePr binds the PR.
+    btwSession
+      .mockRejectedValueOnce(new Error('no session'))
+      .mockResolvedValue({ answer: 'feat: change a' });
+    // The resolver's list path returns the dead id (generation's first
+    // btwSession fails on it); the force-create path returns the fresh id.
+    const resolveSessionForWorkspace = vi
+      .fn()
+      .mockImplementation((_cwd: string, force?: boolean) =>
+        Promise.resolve(force ? 'sess-fresh' : 'sess-stale'),
+      );
+    mockState.capabilities = { features: ['workspace_github_prs'] };
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            sessionId="sess-stale"
+            resolveSessionForWorkspace={resolveSessionForWorkspace}
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+    await flush();
+
+    // Commit-message generation ran through the retry: first call on the
+    // stale id failed, the retry hit the fresh id.
+    expect(btwSession).toHaveBeenCalledTimes(2);
+    expect(btwSession.mock.calls[0]?.[0]).toBe('sess-stale');
+    expect(btwSession.mock.calls[1]?.[0]).toBe('sess-fresh');
+
+    const createPrBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find((b) => b.textContent?.includes('Create Pull Request'));
+    expect(createPrBtn).toBeTruthy();
+    await act(async () => {
+      createPrBtn!.click();
+    });
+    await flush();
+
+    const titleInput = document.body.querySelector(
+      '[data-web-shell-dialog] input',
+    );
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(titleInput, 'feat: change a');
+      titleInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const submitBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find(
+      (b) =>
+        b.textContent?.includes('Create') &&
+        !b.textContent?.includes('Pull Request'),
+    );
+    expect(submitBtn).toBeTruthy();
+    await act(async () => {
+      submitBtn!.click();
+    });
+    await flush();
+
+    expect(updateSessionMetadata).toHaveBeenCalledWith('sess-fresh', {
+      pr: {
+        number: 99,
+        url: 'https://github.com/o/r/pull/99',
+        state: 'open',
+      },
+    });
   });
 });

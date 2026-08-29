@@ -32,7 +32,7 @@ flowchart LR
   C -->|authenticated loopback URL| D[Existing Web Shell]
   A -->|retry / choose workspace / logs| B
   B -->|exit event| A
-  E[GitHub latest.json + installers] -->|signed updater| B
+  E[OSS / GitHub update feeds + installers] -->|signed updater| B
 ```
 
 ### 组件职责
@@ -122,13 +122,13 @@ flowchart LR
 
 ## 更新模型
 
-Tauri updater 使用签名更新产物和固定公开 key。应用启动后后台检查一次更新：
+Tauri updater 使用签名更新产物和固定公开 key。稳定发布的安装包和 updater 产物同时保存在 GitHub Releases 与 Aliyun OSS；应用优先检查 OSS 的小型更新清单，并在请求失败或超时时回退 GitHub。两个清单分别指向同一版本在各自源中的签名产物。应用启动后后台检查一次更新：
 
 - 无更新：不打扰用户。
 - 检查失败：写日志，不阻塞启动。
 - 有更新：bootstrap/Web Shell 上方显示原生确认对话框；用户确认后下载并安装，然后重启。
 
-发布 CI 使用 `TAURI_SIGNING_PRIVATE_KEY` 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 生成 updater signatures。`latest.json` 指向同一 GitHub Release 的平台更新包。只有非 draft、非 prerelease 发布会更新固定的 `desktop-latest` feed release。
+发布 CI 使用 `TAURI_SIGNING_PRIVATE_KEY` 与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 生成 updater signatures。只有非 draft、非 prerelease 发布会更新 GitHub 的 `desktop-latest` feed，并在校验版本化 OSS 产物后更新 OSS feed。GitHub 始终保留为权威发布源和回退源。
 
 ## 平台发布矩阵
 
@@ -149,7 +149,7 @@ Windows WebView2 使用 download bootstrapper；系统离线且缺失 WebView2 �
 5. 构建安装包和 updater artifacts。
 6. 平台 runner 安装并启动 packaged app，等待 daemon/Web Shell ready 证据。
 7. 上传产物；发布 job 生成 `latest.json` 和 `SHA256SUMS.txt`。
-8. 非 draft stable release 更新 `desktop-latest` feed。
+8. 非 draft stable release 更新 GitHub `desktop-latest` feed，将同一批产物同步并校验到 OSS，再更新 OSS feed。
 
 缺失签名密钥时只允许 `dry_run=true`，公开发布必须 fail closed。
 

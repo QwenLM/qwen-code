@@ -5,7 +5,8 @@ import {
   useConnection,
   useTranscriptBlocks,
   useTranscriptHistory,
-} from '@qwen-code/webui/daemon-react-sdk';
+  useWorkspace,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   WEB_SHELL_HISTORY_PAGE_SIZE,
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
@@ -16,6 +17,7 @@ import { useI18n } from '../../i18n';
 import { ChatPane } from '../ChatPane';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
+import { useSessionCatalogController } from '../../session-catalog/session-catalog-hooks';
 
 interface SideTaskPanelProps {
   tabId: string;
@@ -202,8 +204,18 @@ function SideTaskSession({
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
+  const workspace = useWorkspace();
+  const sessionCatalogController = useSessionCatalogController(
+    workspace.client,
+  );
   const blocks = useTranscriptBlocks();
   const transcriptHistory = useTranscriptHistory();
+  const catalogOwnerCwd =
+    connection.workspaceCwd &&
+    workspaceCwd &&
+    connection.workspaceCwd !== workspaceCwd
+      ? undefined
+      : (connection.workspaceCwd ?? workspaceCwd);
   const hasTextualUserPrompt = blocks.some(
     (block) =>
       block.kind === 'user' &&
@@ -241,16 +253,35 @@ function SideTaskSession({
         ) {
           try {
             await actions.renameSession(nextTitle);
+            if (connection.sessionId && catalogOwnerCwd) {
+              sessionCatalogController.renamed(
+                catalogOwnerCwd,
+                connection.sessionId,
+                nextTitle,
+              );
+            }
             onTitleChange(tabId, nextTitle, true);
             return;
           } catch (error) {
             lastError = error;
           }
         }
+        if (catalogOwnerCwd) {
+          sessionCatalogController.invalidateWorkspace(catalogOwnerCwd);
+        }
         onError?.(lastError, t('sideTask.renameFailed'));
       })();
     },
-    [actions, onError, onTitleChange, t, tabId],
+    [
+      actions,
+      catalogOwnerCwd,
+      connection.sessionId,
+      onError,
+      onTitleChange,
+      sessionCatalogController,
+      t,
+      tabId,
+    ],
   );
   const initialPromptSentRef = useRef(false);
   useEffect(() => {
@@ -260,7 +291,15 @@ function SideTaskSession({
     initialPromptSentRef.current = true;
     actions
       .sendPrompt(prompt, {
-        onAdmitted: () => nameFromFirstPrompt(prompt),
+        onAdmitted: () => {
+          if (connection.sessionId && catalogOwnerCwd) {
+            sessionCatalogController.promptAdmitted(
+              catalogOwnerCwd,
+              connection.sessionId,
+            );
+          }
+          nameFromFirstPrompt(prompt);
+        },
       })
       .catch((error: unknown) => {
         initialPromptSentRef.current = false;
@@ -268,10 +307,13 @@ function SideTaskSession({
       });
   }, [
     actions,
+    catalogOwnerCwd,
+    connection.sessionId,
     initialPrompt,
     nameFromFirstPrompt,
     onError,
     restoredEmptySession,
+    sessionCatalogController,
     t,
   ]);
 

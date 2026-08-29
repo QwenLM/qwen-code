@@ -1,0 +1,526 @@
+{
+  "docs": [
+    {
+      "id": "en-release",
+      "type": "project",
+      "title": "Release process",
+      "description": "Production deployment checklist",
+      "body": "Verify monitoring and rollback switches before shipping."
+    },
+    {
+      "id": "en-style",
+      "type": "user",
+      "title": "Response preferences",
+      "description": "Concise answer style",
+      "body": "Keep explanations direct and skip trailing summaries."
+    },
+    {
+      "id": "en-oncall",
+      "type": "reference",
+      "title": "Oncall latency board",
+      "description": "Grafana service dashboard",
+      "body": "Service response times and alert entry points."
+    },
+    {
+      "id": "en-rollback",
+      "type": "feedback",
+      "title": "Operational notes",
+      "description": "Miscellaneous guidance",
+      "body": "Emergency rollback procedures require owner approval."
+    },
+    {
+      "id": "en-testing",
+      "type": "feedback",
+      "title": "Testing rules",
+      "description": "Run focused vitest suites",
+      "body": "Avoid full builds on constrained machines."
+    },
+    {
+      "id": "en-migration",
+      "type": "project",
+      "title": "Database migration",
+      "description": "Postgres schema rollout",
+      "body": "Run migrations behind a feature flag."
+    },
+    {
+      "id": "en-owner",
+      "type": "user",
+      "title": "Team ownership",
+      "description": "Platform team contacts",
+      "body": "Escalate storage issues to the platform team."
+    },
+    {
+      "id": "en-secrets",
+      "type": "reference",
+      "title": "Credential locations",
+      "description": "Vault paths for staging",
+      "body": "Staging credentials live in the vault under platform."
+    },
+    {
+      "id": "en-empty",
+      "type": "project",
+      "title": "Sprint placeholder",
+      "description": "Upcoming milestone",
+      "body": "_No entries yet._"
+    },
+    {
+      "id": "zh-deploy",
+      "type": "project",
+      "title": "生产部署流程",
+      "description": "发布检查清单",
+      "body": "上线前确认监控和回滚开关。"
+    },
+    {
+      "id": "zh-api",
+      "type": "reference",
+      "title": "接口延迟排查",
+      "description": "API 性能看板",
+      "body": "记录服务响应时间和告警入口。"
+    },
+    {
+      "id": "zh-auth",
+      "type": "project",
+      "title": "认证配置",
+      "description": "登录问题排查",
+      "body": "会话过期和权限配置检查。"
+    },
+    {
+      "id": "zh-perf",
+      "type": "project",
+      "title": "性能优化目标",
+      "description": "季度性能指标",
+      "body": "降低冷启动时间。"
+    },
+    {
+      "id": "ja-auth",
+      "type": "project",
+      "title": "認証設定ガイド",
+      "description": "ユーザーログイン構成",
+      "body": "セッション設定の確認手順。"
+    },
+    {
+      "id": "ja-deploy",
+      "type": "reference",
+      "title": "デプロイ手順",
+      "description": "リリース運用",
+      "body": "本番反映前の確認事項。"
+    },
+    {
+      "id": "ja-hiragana",
+      "type": "user",
+      "title": "よくあるしつもん",
+      "description": "ひらがなだけでかいたあんない",
+      "body": "ひらがなのとうこうにそなえたきろく。"
+    },
+    {
+      "id": "ja-review",
+      "type": "feedback",
+      "title": "レビュー方針",
+      "description": "コードレビューの基準",
+      "body": "小さな変更に分割する。"
+    },
+    {
+      "id": "ko-deploy",
+      "type": "project",
+      "title": "배포 절차",
+      "description": "릴리스 체크리스트",
+      "body": "운영 반영 전에 모니터링을 확인한다."
+    },
+    {
+      "id": "ko-auth",
+      "type": "reference",
+      "title": "인증 설정",
+      "description": "로그인 문제 해결",
+      "body": "세션 만료와 권한 구성을 확인한다."
+    },
+    {
+      "id": "ko-perf",
+      "type": "project",
+      "title": "성능 목표",
+      "description": "분기 성능 지표",
+      "body": "콜드 스타트 시간을 줄인다."
+    },
+    {
+      "id": "mixed-api",
+      "type": "reference",
+      "title": "Qwen API 限流",
+      "description": "Rate limit dashboard",
+      "body": "检查 quota 和请求速率。"
+    },
+    {
+      "id": "mixed-deploy",
+      "type": "project",
+      "title": "Deployment 发布说明",
+      "description": "Release 流程",
+      "body": "Mixed-language deployment notes."
+    },
+    {
+      "id": "ru-deploy",
+      "type": "project",
+      "title": "Процесс развёртывания",
+      "description": "Контрольный список релиза",
+      "body": "Перед выкатом проверить мониторинг и переключатели отката."
+    },
+    {
+      "id": "el-auth",
+      "type": "reference",
+      "title": "Ρύθμιση ταυτοποίησης",
+      "description": "Επίλυση προβλημάτων σύνδεσης",
+      "body": "Έλεγχος λήξης συνεδρίας και δικαιωμάτων."
+    },
+    {
+      "id": "fr-perf",
+      "type": "project",
+      "title": "Réduction du démarrage à froid",
+      "description": "Objectifs de performance trimestriels",
+      "body": "Mesurer la latence côté serveur avant toute optimisation."
+    }
+  ],
+  "cases": [
+    {
+      "id": "en-release-process",
+      "category": "english",
+      "query": "release process",
+      "relevantIds": ["en-release"],
+      "expectedTopId": "en-release"
+    },
+    {
+      "id": "en-production-deployment",
+      "category": "english",
+      "query": "production deployment checklist",
+      "relevantIds": ["en-release"],
+      "expectedTopId": "en-release"
+    },
+    {
+      "id": "en-concise-style",
+      "category": "english",
+      "query": "concise answer style",
+      "relevantIds": ["en-style"],
+      "expectedTopId": "en-style"
+    },
+    {
+      "id": "en-response-preferences",
+      "category": "english",
+      "query": "response preferences",
+      "relevantIds": ["en-style"],
+      "expectedTopId": "en-style"
+    },
+    {
+      "id": "en-latency-board",
+      "category": "english",
+      "query": "oncall latency board",
+      "relevantIds": ["en-oncall"],
+      "expectedTopId": "en-oncall"
+    },
+    {
+      "id": "en-grafana-dashboard",
+      "category": "english",
+      "query": "grafana service dashboard",
+      "relevantIds": ["en-oncall"],
+      "expectedTopId": "en-oncall"
+    },
+    {
+      "id": "en-vitest-suites",
+      "category": "english",
+      "query": "focused vitest suites",
+      "relevantIds": ["en-testing"],
+      "expectedTopId": "en-testing"
+    },
+    {
+      "id": "en-database-migration",
+      "category": "english",
+      "query": "database migration",
+      "relevantIds": ["en-migration"],
+      "expectedTopId": "en-migration"
+    },
+    {
+      "id": "en-postgres-schema",
+      "category": "english",
+      "query": "postgres schema rollout",
+      "relevantIds": ["en-migration"],
+      "expectedTopId": "en-migration"
+    },
+    {
+      "id": "en-credential-locations",
+      "category": "english",
+      "query": "credential locations",
+      "relevantIds": ["en-secrets"],
+      "expectedTopId": "en-secrets"
+    },
+    {
+      "id": "en-team-ownership",
+      "category": "english",
+      "query": "team ownership",
+      "relevantIds": ["en-owner"],
+      "expectedTopId": "en-owner"
+    },
+    {
+      "id": "zh-deploy-title",
+      "category": "chinese",
+      "query": "生产部署",
+      "relevantIds": ["zh-deploy"],
+      "expectedTopId": "zh-deploy"
+    },
+    {
+      "id": "zh-deploy-description",
+      "category": "chinese",
+      "query": "发布检查",
+      "relevantIds": ["zh-deploy"],
+      "expectedTopId": "zh-deploy"
+    },
+    {
+      "id": "zh-api-title",
+      "category": "chinese",
+      "query": "接口延迟",
+      "relevantIds": ["zh-api"],
+      "expectedTopId": "zh-api"
+    },
+    {
+      "id": "zh-api-troubleshooting",
+      "category": "chinese",
+      "query": "延迟排查",
+      "relevantIds": ["zh-api"],
+      "expectedTopId": "zh-api"
+    },
+    {
+      "id": "zh-auth-config",
+      "category": "chinese",
+      "query": "认证配置",
+      "relevantIds": ["zh-auth"],
+      "expectedTopId": "zh-auth"
+    },
+    {
+      "id": "zh-performance-goal",
+      "category": "chinese",
+      "query": "性能优化目标",
+      "relevantIds": ["zh-perf"],
+      "expectedTopId": "zh-perf"
+    },
+    {
+      "id": "ja-auth-title",
+      "category": "japanese",
+      "query": "認証設定",
+      "relevantIds": ["ja-auth"],
+      "expectedTopId": "ja-auth"
+    },
+    {
+      "id": "ja-login-description",
+      "category": "japanese",
+      "query": "ログイン構成",
+      "relevantIds": ["ja-auth"],
+      "expectedTopId": "ja-auth"
+    },
+    {
+      "id": "ja-deploy-title",
+      "category": "japanese",
+      "query": "デプロイ手順",
+      "relevantIds": ["ja-deploy"],
+      "expectedTopId": "ja-deploy"
+    },
+    {
+      "id": "ja-release-description",
+      "category": "japanese",
+      "query": "リリース運用",
+      "relevantIds": ["ja-deploy"],
+      "expectedTopId": "ja-deploy"
+    },
+    {
+      "id": "ja-hiragana-only",
+      "category": "japanese",
+      "query": "よくあるしつもん",
+      "relevantIds": ["ja-hiragana"],
+      "expectedTopId": "ja-hiragana"
+    },
+    {
+      "id": "ja-review-standard",
+      "category": "japanese",
+      "query": "コードレビューの基準",
+      "relevantIds": ["ja-review"],
+      "expectedTopId": "ja-review"
+    },
+    {
+      "id": "ko-deploy-title",
+      "category": "korean",
+      "query": "배포 절차",
+      "relevantIds": ["ko-deploy"],
+      "expectedTopId": "ko-deploy"
+    },
+    {
+      "id": "ko-release-checklist",
+      "category": "korean",
+      "query": "릴리스 체크",
+      "relevantIds": ["ko-deploy"],
+      "expectedTopId": "ko-deploy"
+    },
+    {
+      "id": "ko-auth-title",
+      "category": "korean",
+      "query": "인증 설정",
+      "relevantIds": ["ko-auth"],
+      "expectedTopId": "ko-auth"
+    },
+    {
+      "id": "ko-login-description",
+      "category": "korean",
+      "query": "로그인 문제",
+      "relevantIds": ["ko-auth"],
+      "expectedTopId": "ko-auth"
+    },
+    {
+      "id": "ko-performance-goal",
+      "category": "korean",
+      "query": "성능 목표",
+      "relevantIds": ["ko-perf"],
+      "expectedTopId": "ko-perf"
+    },
+    {
+      "id": "mixed-rate-limit-han",
+      "category": "mixed",
+      "query": "qwen api 限流",
+      "relevantIds": ["mixed-api"],
+      "expectedTopId": "mixed-api"
+    },
+    {
+      "id": "mixed-rate-limit-ascii",
+      "category": "mixed",
+      "query": "rate limit dashboard",
+      "relevantIds": ["mixed-api"],
+      "expectedTopId": "mixed-api"
+    },
+    {
+      "id": "mixed-deployment-han",
+      "category": "mixed",
+      "query": "deployment 发布说明",
+      "relevantIds": ["mixed-deploy"],
+      "expectedTopId": "mixed-deploy"
+    },
+    {
+      "id": "nfkc-fullwidth-qwen-api",
+      "category": "nfkc",
+      "query": "ＱＷＥＮ ＡＰＩ",
+      "relevantIds": ["mixed-api"],
+      "expectedTopId": "mixed-api"
+    },
+    {
+      "id": "nfkc-fullwidth-production",
+      "category": "nfkc",
+      "query": "ＰＲＯＤＵＣＴＩＯＮ deployment",
+      "relevantIds": ["en-release"],
+      "expectedTopId": "en-release"
+    },
+    {
+      "id": "body-only-owner-approval",
+      "category": "body-only",
+      "query": "owner approval",
+      "relevantIds": ["en-rollback"],
+      "expectedTopId": "en-rollback"
+    },
+    {
+      "id": "body-only-feature-flag",
+      "category": "body-only",
+      "query": "feature flag",
+      "relevantIds": ["en-migration"],
+      "expectedTopId": "en-migration"
+    },
+    {
+      "id": "body-only-alert-entry",
+      "category": "body-only",
+      "query": "alert entry points",
+      "relevantIds": ["en-oncall"],
+      "expectedTopId": "en-oncall"
+    },
+    {
+      "id": "no-result-kubernetes-ingress",
+      "category": "no-result",
+      "query": "kubernetes ingress certificate",
+      "relevantIds": []
+    },
+    {
+      "id": "no-result-quantum",
+      "category": "no-result",
+      "query": "quantum entanglement",
+      "relevantIds": []
+    },
+    {
+      "id": "no-result-knowledge-graph",
+      "category": "no-result",
+      "query": "knowledge graph embeddings",
+      "relevantIds": []
+    },
+    {
+      "id": "no-result-weather",
+      "category": "no-result",
+      "query": "weather forecast tomorrow",
+      "relevantIds": []
+    },
+    {
+      "id": "no-result-marketing",
+      "category": "no-result",
+      "query": "marketing budget spreadsheet",
+      "relevantIds": []
+    },
+    {
+      "id": "no-result-single-han",
+      "category": "no-result",
+      "query": "部",
+      "relevantIds": []
+    },
+    {
+      "id": "no-result-single-kanji",
+      "category": "no-result",
+      "query": "認",
+      "relevantIds": []
+    },
+    {
+      "id": "no-result-single-hangul",
+      "category": "no-result",
+      "query": "배",
+      "relevantIds": []
+    },
+    {
+      "id": "no-result-short-ascii",
+      "category": "no-result",
+      "query": "go",
+      "relevantIds": []
+    },
+    {
+      "id": "semantic-terse-replies",
+      "category": "semantic-no-lexical",
+      "query": "stop padding your replies with recaps",
+      "relevantIds": ["en-style"]
+    },
+    {
+      "id": "semantic-latency-chart",
+      "category": "semantic-no-lexical",
+      "query": "which chart shows p99 spikes",
+      "relevantIds": ["en-oncall"]
+    },
+    {
+      "id": "semantic-slow-first-paint",
+      "category": "semantic-no-lexical",
+      "query": "首屏加载太久了",
+      "relevantIds": ["zh-perf"]
+    },
+    {
+      "id": "other-script-ru-deploy",
+      "category": "other-script",
+      "query": "процесс развёртывания",
+      "relevantIds": ["ru-deploy"],
+      "expectedTopId": "ru-deploy"
+    },
+    {
+      "id": "other-script-el-auth",
+      "category": "other-script",
+      "query": "ρύθμιση ταυτοποίησης",
+      "relevantIds": ["el-auth"],
+      "expectedTopId": "el-auth"
+    },
+    {
+      "id": "other-script-fr-perf",
+      "category": "other-script",
+      "query": "démarrage à froid",
+      "relevantIds": ["fr-perf"],
+      "expectedTopId": "fr-perf"
+    }
+  ]
+}

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -13,6 +13,7 @@ import {
   getAgentJsonlPath,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
+  buildAgentTranscriptAttach,
   normalizeResumedAgentDepth,
   readAgentMeta,
   readLastTranscriptRecordUuidSync,
@@ -21,7 +22,24 @@ import {
 } from './agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import type { Config } from '../config/config.js';
 import type { Content } from '@google/genai';
+
+// Pin the git-branch annotation without spawning git: buildAgentTranscriptAttach
+// is the only consumer of getCachedGitBranch in this file's import graph.
+// vi.hoisted so the attach tests can also pin WHICH directory the builder
+// hands to the lookup (project root, not the storage dir).
+const { getCachedGitBranchMock } = vi.hoisted(() => ({
+  getCachedGitBranchMock: vi.fn(() => 'test-branch'),
+}));
+
+vi.mock('../utils/gitUtils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/gitUtils.js')>();
+  return {
+    ...actual,
+    getCachedGitBranch: getCachedGitBranchMock,
+  };
+});
 
 describe('agent-transcript', () => {
   describe('path helpers', () => {
@@ -67,6 +85,61 @@ describe('agent-transcript', () => {
     it('preserves alphanumerics, underscores, and hyphens in agentId', () => {
       expect(getAgentJsonlPath('/proj', 'sess', 'agent_1-abc')).toBe(
         path.join('/proj', 'subagents', 'sess', 'agent-agent_1-abc.jsonl'),
+      );
+    });
+  });
+
+  describe('buildAgentTranscriptAttach', () => {
+    beforeEach(() => {
+      getCachedGitBranchMock.mockClear();
+    });
+
+    function makeConfig(cliVersion: string): Config {
+      return {
+        getSessionId: () => 'sess-9',
+        getProjectRoot: () => '/proj/root',
+        getCliVersion: () => cliVersion,
+        storage: { getProjectDir: () => '/proj/dir' },
+      } as unknown as Config;
+    }
+
+    it('assembles the path and launch metadata every attach site shares', () => {
+      const { jsonlPath, options } = buildAgentTranscriptAttach(
+        makeConfig('1.2.3'),
+        'agent-1',
+      );
+
+      expect(jsonlPath).toBe(
+        getAgentJsonlPath('/proj/dir', 'sess-9', 'agent-1'),
+      );
+      expect(options).toEqual({
+        agentId: 'agent-1',
+        sessionId: 'sess-9',
+        cwd: '/proj/root',
+        version: '1.2.3',
+        gitBranch: 'test-branch',
+      });
+      // The branch lookup is anchored at the project root — the storage dir
+      // is never inside a git repo, so a swap would silently drop gitBranch
+      // from every transcript.
+      expect(getCachedGitBranchMock).toHaveBeenCalledWith('/proj/root');
+    });
+
+    it('falls back to an unknown version when the CLI reports none', () => {
+      const { options } = buildAgentTranscriptAttach(makeConfig(''), 'agent-1');
+      expect(options.version).toBe('unknown');
+    });
+
+    it('routes the path through an overridden sessionId for resume', () => {
+      const { jsonlPath, options } = buildAgentTranscriptAttach(
+        makeConfig('1.2.3'),
+        'agent-1',
+        { sessionId: 'launch-session' },
+      );
+
+      expect(options.sessionId).toBe('launch-session');
+      expect(jsonlPath).toBe(
+        getAgentJsonlPath('/proj/dir', 'launch-session', 'agent-1'),
       );
     });
   });
@@ -278,6 +351,48 @@ describe('agent-transcript', () => {
       expect(records[0]?.systemPayload).not.toHaveProperty(
         'executionAllowedTools',
       );
+    });
+
+    it('seeds an agent_retry system marker at the retry seam', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const first = makeWriter(jsonlPath, { initialUserPrompt: 'task' });
+      first.emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'attempt one',
+        thoughtText: '',
+        timestamp: Date.now(),
+      });
+      first.cleanup();
+
+      const emitter = new AgentEventEmitter();
+      const { cleanup } = attachJsonlTranscriptWriter(emitter, jsonlPath, {
+        agentId: 'agent-x',
+        sessionId: 'session-1',
+        cwd: '/proj',
+        version: '1.2.3',
+        appendToExisting: true,
+        retryAttempt: 2,
+      });
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'attempt two',
+        thoughtText: '',
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records.map((record) => [record.type, record.subtype])).toEqual([
+        ['user', undefined],
+        ['assistant', undefined],
+        ['system', 'agent_retry'],
+        ['assistant', undefined],
+      ]);
+      expect(records[2]?.systemPayload).toEqual({ attempt: 2 });
+      expect(records[2]?.parentUuid).toBe(records[1]?.uuid);
+      expect(records[3]?.parentUuid).toBe(records[2]?.uuid);
     });
 
     it('writes a ROUND_TEXT event as an assistant record with text part', () => {
