@@ -20,19 +20,33 @@ set -u
 
 MIN_FREE_KB="${DISK_FLOOR_MIN_FREE_KB:-2097152}"
 MIN_FREE_INODES="${DISK_FLOOR_MIN_FREE_INODES:-100000}"
+MAX_BASH_INT=9223372036854775807
 
-case "$MIN_FREE_KB" in
-  '' | *[!0-9]*)
-    echo "::error::DISK_FLOOR_MIN_FREE_KB must be a non-negative integer"
+validate_floor_override() {
+  local name="$1"
+  local value="$2"
+  local normalized
+
+  case "$value" in
+    '' | *[!0-9]*)
+      echo "::error::${name} must be a non-negative integer"
+      exit 1
+      ;;
+  esac
+
+  normalized="$(sed 's/^0*//' <<< "$value")"
+  if [ -z "$normalized" ]; then
+    normalized=0
+  fi
+  if [ "${#normalized}" -gt 19 ] ||
+    { [ "${#normalized}" -eq 19 ] && [[ "$normalized" > "$MAX_BASH_INT" ]]; }; then
+    echo "::error::${name} must fit in a signed 64-bit integer"
     exit 1
-    ;;
-esac
-case "$MIN_FREE_INODES" in
-  '' | *[!0-9]*)
-    echo "::error::DISK_FLOOR_MIN_FREE_INODES must be a non-negative integer"
-    exit 1
-    ;;
-esac
+  fi
+}
+
+validate_floor_override DISK_FLOOR_MIN_FREE_KB "$MIN_FREE_KB"
+validate_floor_override DISK_FLOOR_MIN_FREE_INODES "$MIN_FREE_INODES"
 
 TAG="runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-check-disk-floor}]"
 

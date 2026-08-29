@@ -91,6 +91,10 @@ describe('check-disk-floor', () => {
 
       assert.equal(result.status, 1);
       assert.ok(result.stdout.includes(`::error::${name} must be`));
+
+      const huge = runGate({ env: { [name]: '9223372036854775808' } });
+      assert.equal(huge.status, 1);
+      assert.ok(huge.stdout.includes(`${name} must fit`));
     }
   });
 
