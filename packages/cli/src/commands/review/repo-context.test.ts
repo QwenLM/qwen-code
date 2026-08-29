@@ -7,13 +7,17 @@
 import {
   chmodSync,
   linkSync,
+  readdirSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
+  renameSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -23,8 +27,18 @@ import {
   MAX_IDENTITY_BYTES,
   type RepositoryContextProvider,
 } from './lib/repository-context.js';
-import { repoContextCommand, runRepoContext } from './repo-context.js';
+import {
+  commitPlanPreservingEpoch,
+  repoContextCommand,
+  runRepoContext,
+} from './repo-context.js';
+import { stringifyPlanReport } from './lib/report.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+import {
+  appendRunSession,
+  priorSessionIds,
+  recordResume,
+} from './lib/run-ledger.js';
 
 const tempRoots: string[] = [];
 
@@ -167,6 +181,73 @@ describe('repo-context providers and trust boundary', () => {
     expect(readJson(outPath)).toBeNull();
     expect(readJson(planPath)).not.toHaveProperty('repositoryContext');
   });
+
+  it('fails actionably when the worktree vanished mid-review (#9205)', () => {
+    // A concurrent same-PR cleanup (or any delete) removes the worktree a
+    // review is running on; the bare `ENOENT … lstat` realpathSync produced
+    // named neither the cause nor the remedy.
+    const root = temp();
+    const planPath = planAt(root, { files: [] });
+    expect(() =>
+      runRepoContext(
+        {
+          plan: planPath,
+          worktree: join(root, 'missing-worktree'),
+          out: join(root, 'context.json'),
+        },
+        [],
+      ),
+    ).toThrow(
+      'is missing — recreate the review worktree ' +
+        '(for PR targets: re-run `qwen review fetch-pr`)',
+    );
+  });
+
+  it('keeps the precise error for a worktree path that is not a directory', () => {
+    // A regular file at --worktree is NOT a missing worktree: converting it
+    // to the "missing" remedy would point at a fix that cannot help.
+    const root = temp();
+    const planPath = planAt(root, { files: [] });
+    const notADirectory = join(root, 'worktree-file');
+    write(notADirectory, 'not a directory\n');
+    expect(() =>
+      runRepoContext(
+        {
+          plan: planPath,
+          worktree: notADirectory,
+          out: join(root, 'context.json'),
+        },
+        [],
+      ),
+    ).toThrow('worktree is not a directory');
+  });
+
+  // Windows/libuv maps a regular file as an intermediate path component
+  // to ENOENT, never ENOTDIR — see the measured record in
+  // serve/fs/paths.ts — so the kernel shape this pins is POSIX-only.
+  it.skipIf(process.platform === 'win32')(
+    'rethrows ENOTDIR when a regular file is an intermediate path component',
+    () => {
+      // `--worktree <file>/subdir` is a malformed argument, not a missing
+      // worktree: the "re-run fetch-pr" remedy cannot fix it, and absorbing
+      // ENOTDIR into the missing-worktree message would lose the diagnosis
+      // that names the real cause.
+      const root = temp();
+      const planPath = planAt(root, { files: [] });
+      const blocker = join(root, 'blocker');
+      write(blocker, 'not a directory\n');
+      expect(() =>
+        runRepoContext(
+          {
+            plan: planPath,
+            worktree: join(blocker, 'wt'),
+            out: join(root, 'context.json'),
+          },
+          [],
+        ),
+      ).toThrow('ENOTDIR');
+    },
+  );
 
   it('passes sorted unique changed paths and local identity to a provider', () => {
     const root = temp();
@@ -815,6 +896,30 @@ describe('repo-context providers and trust boundary', () => {
     expect(readFileSync(planPath, 'utf8')).toBe(before);
   });
 
+  it('rejects an --out whose canonical identity equals an absent --plan', () => {
+    // The hardened absent-side semantics, untested by the alias cases above
+    // (which all compare two EXISTING paths): neither file is on disk yet,
+    // but --out is spelled through a symlinked directory component, so its
+    // canonical identity is the plan's. A revert to the old local sameFile —
+    // false whenever a side is absent — passes green and re-opens the
+    // overwrite this guard closes.
+    const root = temp();
+    const worktree = join(root, 'worktree');
+    mkdirSync(worktree);
+    mkdirSync(join(root, 'real'));
+    symlinkSync(join(root, 'real'), join(root, 'link'));
+    expect(() =>
+      runRepoContext(
+        {
+          plan: join(root, 'real/plan.json'),
+          worktree,
+          out: join(root, 'link/plan.json'),
+        },
+        [{ provide: () => context() }],
+      ),
+    ).toThrow('--out must differ');
+  });
+
   it('rejects invalid provider output', () => {
     const root = temp();
     const worktree = join(root, 'worktree');
@@ -1017,4 +1122,272 @@ describe('repo-context providers and trust boundary', () => {
       expect(readJson(local.outPath)).toBeNull();
     },
   );
+});
+
+describe('the plan mtime is the run epoch — enrichment must not advance it', () => {
+  // The run-session ledger, deadline stamps, prompt records and transcripts
+  // are all fenced on the plan's mtime, and fetch-pr's session entry lands an
+  // orchestrator turn BEFORE this command runs. A rewrite that advanced the
+  // mtime re-keyed the epoch mid-run and orphaned everything recorded before
+  // it — a resumed run then saw no prior evidence at all.
+  it('preserves the plan mtime across the enrichment rewrite', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-context-epoch-'));
+    try {
+      const worktree = join(root, 'wt');
+      mkdirSync(worktree, { recursive: true });
+      const planPath = planAt(root, { files: [{ path: 'src/a.ts' }] });
+      const before = new Date(Date.now() - 3600_000);
+      utimesSync(planPath, before, before);
+      const mtimeBefore = statSync(planPath).mtimeMs;
+
+      runRepoContext({ plan: planPath, worktree, out: join(root, 'ctx.json') });
+
+      // Within a millisecond, not exactly: `mtimeMs` is a double over a
+      // nanosecond clock and `utimesSync` takes seconds as a double, so a
+      // restore costs a unit in the last place on ext4 (…911.999 goes back as
+      // …911.998). That is the same tolerance the ledger's own plan fence
+      // uses, and the assertion that matters — the entries stay visible — is
+      // the one below.
+      expect(Math.abs(statSync(planPath).mtimeMs - mtimeBefore)).toBeLessThan(
+        1,
+      );
+      // The rewrite itself still happened — asserted on CONTENT, not just
+      // parseability: a regression that skips the write when content changed
+      // passes both mtime assertions.
+      expect(
+        (JSON.parse(readFileSync(planPath, 'utf8')) as Record<string, unknown>)[
+          'repositoryContext'
+        ],
+      ).toBeUndefined();
+      expect(readFileSync(planPath, 'utf8')).toContain('files');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('skips the write entirely when the enrichment changes nothing', () => {
+    // The resumed-run common case the code comments on, unreachable from
+    // `planAt` fixtures: those write compact JSON while production plans are
+    // written by `stringifyPlanReport`, so `planUnchanged` was always false
+    // in this suite and the skip branch ran nowhere. Write the plan the way
+    // production does, with its context already attached, and assert no
+    // write happened at all — the strongest form of "the epoch cannot move"
+    // is that the commit-then-restore window never opens.
+    const root = mkdtempSync(join(tmpdir(), 'repo-context-skip-'));
+    try {
+      const worktree = join(root, 'wt');
+      mkdirSync(worktree, { recursive: true });
+      const planPath = join(root, 'plan.json');
+      const context0 = context();
+      const planObj = {
+        files: [{ path: 'src/a.ts' }],
+        repositoryContext: context0,
+      };
+      writeFileSync(planPath, stringifyPlanReport(planObj as never));
+      const before = new Date(Date.now() - 3600_000);
+      utimesSync(planPath, before, before);
+      const inoBefore = statSync(planPath).ino;
+      const mtimeBefore = statSync(planPath).mtimeMs;
+
+      const same: RepositoryContextProvider = {
+        provide: () => context0,
+      };
+      runRepoContext(
+        { plan: planPath, worktree, out: join(root, 'ctx.json') },
+        [same],
+      );
+
+      // Same inode, same mtime: not restored — never rewritten.
+      expect(statSync(planPath).ino).toBe(inoBefore);
+      expect(statSync(planPath).mtimeMs).toBe(mtimeBefore);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('aborts on a rename-replacement even with the mtime restored', () => {
+    // The inode disjunct: an in-place rewrite fires the mtime clause, so a
+    // swap that RESTORES the mtime — the checkpoint-faking shape — is the
+    // only thing this half catches, and no test exercised it.
+    const root = mkdtempSync(join(tmpdir(), 'repo-context-ino-'));
+    try {
+      const worktree = join(root, 'wt');
+      mkdirSync(worktree, { recursive: true });
+      const planPath = planAt(root, { files: [{ path: 'src/a.ts' }] });
+      const before = statSync(planPath);
+      const racer: RepositoryContextProvider = {
+        provide() {
+          // Replace the FILE (new inode), then put the old mtime back.
+          const tmp = join(root, 'swap.json');
+          writeFileSync(tmp, readFileSync(planPath, 'utf8'));
+          rmSync(planPath);
+          renameSync(tmp, planPath);
+          utimesSync(planPath, before.atime, before.mtime);
+          return null;
+        },
+      };
+      expect(() =>
+        runRepoContext(
+          { plan: planPath, worktree, out: join(root, 'ctx.json') },
+          [racer],
+        ),
+      ).toThrow(/changed while repository context was being computed/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('aborts when the plan changed while providers were running', () => {
+    // The plan path is shared per PR and providers take real time: a
+    // concurrent capture can replace the file mid-computation, and this run
+    // would then write contents derived from the OLD plan and restore the
+    // NEW run's epoch over them — the other run's ledger and transcripts
+    // pass an exact mtime fence against a plan they never described.
+    const root = mkdtempSync(join(tmpdir(), 'repo-context-cas-'));
+    try {
+      const worktree = join(root, 'wt');
+      mkdirSync(worktree, { recursive: true });
+      const planPath = planAt(root, { files: [{ path: 'src/a.ts' }] });
+      const racer: RepositoryContextProvider = {
+        provide() {
+          // The concurrent run captures the plan mid-computation.
+          writeFileSync(planPath, JSON.stringify({ files: [] }));
+          const later = new Date(Date.now() + 60_000);
+          utimesSync(planPath, later, later);
+          return null;
+        },
+      };
+      expect(() =>
+        runRepoContext(
+          { plan: planPath, worktree, out: join(root, 'ctx.json') },
+          [racer],
+        ),
+      ).toThrow(/changed while repository context was being computed/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves a SUB-MILLISECOND plan mtime, and stays silent about it', () => {
+    // The case a `Date`-backdated fixture cannot reach. `Date` carries whole
+    // milliseconds; APFS and ext4 keep nanoseconds. Restoring from
+    // `planStat.mtime` truncates the remainder, so the plan comes back with a
+    // mtime that is CLOSE to the original and not equal to it — and the run
+    // ledger's exact `planMtimeMs === planMtime` fence reads that as a
+    // different plan and drops every session entry, silently emptying the
+    // resume ledger. The test that shipped alongside the restore used an
+    // integer-millisecond fixture, which round-trips exactly and sees none of
+    // this.
+    const root = mkdtempSync(join(tmpdir(), 'repo-context-epoch-sub-ms-'));
+    const err = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const worktree = join(root, 'wt');
+      mkdirSync(worktree, { recursive: true });
+      const planPath = planAt(root, { files: [{ path: 'src/a.ts' }] });
+      // Seconds as a float: 0.1234567 s past the epoch second, which no
+      // `Date` can hold.
+      const seconds = Math.floor(Date.now() / 1000) - 3600 + 0.1234567;
+      utimesSync(planPath, seconds, seconds);
+      const mtimeBefore = statSync(planPath).mtimeMs;
+      // The ledger `fetch-pr` writes an orchestrator turn before this command
+      // runs: S0 is the interrupted attempt, S1 the continuation reading it.
+      appendRunSession(planPath, { QWEN_CODE_SESSION_ID: 'S0' });
+      recordResume(planPath, { QWEN_CODE_SESSION_ID: 'S1' });
+      // The fixture is only meaningful if this filesystem actually keeps the
+      // fraction; on one that does not, the integer case above already covers
+      // it.
+      const hasSubMs = mtimeBefore !== Math.floor(mtimeBefore);
+
+      runRepoContext({ plan: planPath, worktree, out: join(root, 'ctx.json') });
+
+      if (hasSubMs) {
+        expect(Math.abs(statSync(planPath).mtimeMs - mtimeBefore)).toBeLessThan(
+          1,
+        );
+      }
+      // The consequence that actually matters, asserted end to end rather
+      // than inferred from a timestamp: the session entry `fetch-pr` wrote
+      // before this command ran is still THIS run's. Honest scope note: with
+      // the ledger fence tolerating 1ms, a `Date`-based restore (which loses
+      // strictly less than 1ms) would ALSO pass this assertion — the fence's
+      // tolerance is what makes that regression benign, and this test pins
+      // the end-to-end visibility, not the float restore itself.
+      expect(priorSessionIds(planPath, { QWEN_CODE_SESSION_ID: 'S1' })).toEqual(
+        ['S0'],
+      );
+      // And no WARNING: the verification compares floats that survived a
+      // filesystem round trip, so an exact-equality check reports failure on
+      // every enrichment that changed anything.
+      const printed = err.mock.calls.map((c) => String(c[0])).join('');
+      expect(printed).not.toContain("could not restore the plan's timestamp");
+    } finally {
+      err.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('commitPlanPreservingEpoch — the epoch never advances, even torn', () => {
+  let root: string;
+  let plan: string;
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'commit-epoch-')));
+    plan = join(root, 'plan.json');
+    writeFileSync(plan, '{"old":true}');
+    const past = new Date(Date.now() - 300_000);
+    utimesSync(plan, past, past);
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it('the committed file carries the anchor epoch, atomically', () => {
+    // The temp file is stamped BEFORE the rename: there is no instant at
+    // which the plan path exists with an advanced mtime, so a kill at any
+    // point leaves either the old plan under the old epoch or the new plan
+    // under the old epoch — never the new plan under a new one. The
+    // separate write-then-restore pair had exactly that instant, and the
+    // skip-when-identical retry guard made it permanent.
+    const anchor = statSync(plan);
+    commitPlanPreservingEpoch(plan, '{"new":true}', anchor);
+    expect(readFileSync(plan, 'utf8')).toBe('{"new":true}');
+    expect(
+      Math.abs(statSync(plan).mtimeMs - anchor.mtimeMs),
+    ).toBeLessThanOrEqual(1);
+    expect(readdirSync(root).filter((n) => n.includes('enrich-tmp'))).toEqual(
+      [],
+    );
+  });
+
+  it('refuses to overwrite a capture that landed after the anchor', () => {
+    // The compare-and-refuse upstream leaves a read+compare+write window; a
+    // concurrent capture landing inside it was silently overwritten with
+    // stale derived contents under the OTHER run's epoch. Identity is
+    // re-checked against the anchor immediately before the rename.
+    const anchor = statSync(plan);
+    writeFileSync(plan, '{"captured":"by-another-run"}');
+    expect(() =>
+      commitPlanPreservingEpoch(plan, '{"stale":true}', anchor),
+    ).toThrow(/changed while repository context was being committed/);
+    expect(readFileSync(plan, 'utf8')).toBe('{"captured":"by-another-run"}');
+    expect(readdirSync(root).filter((n) => n.includes('enrich-tmp'))).toEqual(
+      [],
+    );
+  });
+
+  it('refuses when the inode moved even if the mtime was forged back', () => {
+    const anchor = statSync(plan);
+    // The imposter is created WHILE the original still exists, then renamed
+    // over it — so its inode is guaranteed distinct. A delete-then-create
+    // fixture is not: ext4 recycles a just-freed inode number immediately,
+    // and the imposter came back as the same (ino, mtime) identity, which
+    // no check can (or should) tell apart.
+    const imposter = join(root, 'imposter.json');
+    writeFileSync(imposter, '{"captured":"by-another-run"}');
+    renameSync(imposter, plan);
+    // Forge the anchor's mtime onto the imposter: the inode still differs.
+    utimesSync(plan, anchor.atimeMs / 1000, anchor.mtimeMs / 1000);
+    expect(() =>
+      commitPlanPreservingEpoch(plan, '{"stale":true}', anchor),
+    ).toThrow(/changed while repository context was being committed/);
+  });
 });

@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { Config, ApprovalMode } from '../../config/config.js';
+import {
+  Config,
+  ApprovalMode,
+  deriveWorktreeConfig,
+} from '../../config/config.js';
 import { isPlanModeBlocked } from '../../core/permissionFlow.js';
 import type { ToolCallConfirmationDetails } from '../tools.js';
 import {
@@ -218,6 +222,22 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(parent.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
   });
 
+  it('lets an approval override above a worktree Config change mode', async () => {
+    const parent = await createParentWithRegistry();
+    const worktree = deriveWorktreeConfig(parent, '/tmp/worktree');
+    const { config: child } = await createApprovalModeOverride(
+      worktree,
+      ApprovalMode.PLAN,
+    );
+
+    expect(() => worktree.setApprovalMode(ApprovalMode.DEFAULT)).toThrow(
+      'Derived Configs cannot change approval mode',
+    );
+    expect(() => child.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
+    expect(child.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    expect(parent.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+  });
+
   it('stops plan-mode blocking exec tools after a child override exits plan mode', async () => {
     const parent = await createParentWithRegistry();
 
@@ -309,6 +329,22 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
 
     cleanup();
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores AUTO rules when registry setup fails', async () => {
+    const parent = await createParentWithRegistry();
+    const { stripDangerousRulesForAutoMode, restoreDangerousRules } =
+      attachFakePermissionManager(parent);
+    vi.spyOn(parent, 'createToolRegistry').mockRejectedValue(
+      new Error('registry boom'),
+    );
+
+    await expect(
+      createApprovalModeOverride(parent, ApprovalMode.AUTO),
+    ).rejects.toThrow('registry boom');
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
     expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
   });
 

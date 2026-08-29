@@ -25,8 +25,12 @@
  * cap and its own starting baseline on each request, so there is no grant
  * ledger to reconcile when sessions are reaped. Growth beyond the baseline
  * is the accounted resource; baseline caps are not charged against the
- * pool. Baselines are per-session, so bridges sharing one pool may run
- * different baselines without mischarging each other's untouched sessions.
+ * pool. One journal's growth is charged per session, but a session retains
+ * TWO journals (full plus summary projection) under the granted cap, so its
+ * retained heap can reach ~2x the charged growth — an accepted over-commit
+ * documented at JOURNAL_GROWTH_HARD_CAP_BYTES. Baselines are per-session,
+ * so bridges sharing one pool may run different baselines without
+ * mischarging each other's untouched sessions.
  */
 
 import type { JournalGrowthSessionLimit } from './replayWindowLimits.js';

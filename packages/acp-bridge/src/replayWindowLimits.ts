@@ -15,6 +15,13 @@ export const DEFAULT_MAX_JOURNAL_BYTES = 8 * 1024 * 1024;
  * regardless of the daemon-wide growth pool. Aligned with
  * `MAX_COMPACTED_REPLAY_MAX_BYTES` — both bound daemon heap retained for
  * one session's replay state.
+ *
+ * Memory-ceiling note: one in-flight turn retains TWO journals that share
+ * these caps — the `full` journal plus the `summary` projection for
+ * summary-mode loads — so a session's live-journal heap is bounded by
+ * twice the effective cap (2x the baseline, or 2x the grown cap under
+ * adaptive growth), not one. Operators sizing daemon memory from
+ * `maxJournalBytes x live sessions` must double the journal term.
  */
 export const JOURNAL_GROWTH_HARD_CAP_BYTES = 256 * 1024 * 1024;
 

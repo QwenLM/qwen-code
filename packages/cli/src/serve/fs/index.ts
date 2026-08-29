@@ -43,10 +43,13 @@ export {
   type FsDeniedAuditPayload,
 } from './audit.js';
 export {
+  OWNER_ONLY_NEW_FILE_MODE,
   createWorkspaceFileSystemFactory,
   isContentHash,
+  resolveNewFileModeBits,
   type ContentHash,
   type CreateWorkspaceFileSystemFactoryDeps,
+  type NewFileModePolicy,
   type FsEntry,
   type FsStat,
   type GlobOptions,

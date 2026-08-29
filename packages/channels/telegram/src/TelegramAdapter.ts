@@ -128,21 +128,21 @@ export class TelegramChannel extends ChannelBase {
       const photo = msg.photo[msg.photo.length - 1];
       if (!photo) return;
 
-      try {
-        const file = await ctx.api.getFile(photo.file_id);
-        const fileUrl = this.getFileUrl(file.file_path!);
-        const resp = await fetch(fileUrl);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const buf = Buffer.from(await resp.arrayBuffer());
-        envelope.imageBase64 = buf.toString('base64');
-        envelope.imageMimeType = 'image/jpeg'; // Telegram always converts photos to JPEG
-      } catch (err) {
-        process.stderr.write(
-          `[Telegram:${this.name}] Failed to download photo: ${err instanceof Error ? err.message : err}\n`,
-        );
-      }
-
-      this.handleInbound(envelope).catch((err) => {
+      this.prepareThenHandleInbound(envelope, async () => {
+        try {
+          const file = await ctx.api.getFile(photo.file_id);
+          const fileUrl = this.getFileUrl(file.file_path!);
+          const resp = await fetch(fileUrl);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const buf = Buffer.from(await resp.arrayBuffer());
+          envelope.imageBase64 = buf.toString('base64');
+          envelope.imageMimeType = 'image/jpeg'; // Telegram always converts photos to JPEG
+        } catch (err) {
+          process.stderr.write(
+            `[Telegram:${this.name}] Failed to download photo: ${err instanceof Error ? err.message : err}\n`,
+          );
+        }
+      }).catch((err) => {
         process.stderr.write(
           `[Telegram:${this.name}] Error handling message: ${err}\n`,
         );
@@ -164,38 +164,41 @@ export class TelegramChannel extends ChannelBase {
         msg.caption_entities,
       );
 
-      try {
-        const file = await ctx.api.getFile(doc.file_id);
-        const fileUrl = this.getFileUrl(file.file_path!);
-        const resp = await fetch(fileUrl);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const buf = Buffer.from(await resp.arrayBuffer());
+      this.prepareThenHandleInbound(envelope, async () => {
+        try {
+          const file = await ctx.api.getFile(doc.file_id);
+          const fileUrl = this.getFileUrl(file.file_path!);
+          const resp = await fetch(fileUrl);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const buf = Buffer.from(await resp.arrayBuffer());
 
-        // Save to temp dir so the agent can read it via read-file tool
-        const dir = join(tmpdir(), 'channel-files', randomUUID());
-        mkdirSync(dir, { recursive: true });
-        const filePath = join(dir, basename(fileName) || `file_${Date.now()}`);
-        writeFileSync(filePath, buf);
+          // Save to temp dir so the agent can read it via read-file tool
+          const dir = join(tmpdir(), 'channel-files', randomUUID());
+          mkdirSync(dir, { recursive: true });
+          const filePath = join(
+            dir,
+            basename(fileName) || `file_${Date.now()}`,
+          );
+          writeFileSync(filePath, buf);
 
-        envelope.text = msg.caption || '';
-        envelope.attachments = [
-          {
-            type: 'file',
-            filePath,
-            mimeType: doc.mime_type || 'application/octet-stream',
-            fileName,
-          },
-        ];
-      } catch (err) {
-        process.stderr.write(
-          `[Telegram:${this.name}] Failed to download document: ${err instanceof Error ? err.message : err}\n`,
-        );
-        envelope.text =
-          (msg.caption || '') +
-          `\n\n(User sent a file "${fileName}" but download failed)`;
-      }
-
-      this.handleInbound(envelope).catch((err) => {
+          envelope.text = msg.caption || '';
+          envelope.attachments = [
+            {
+              type: 'file',
+              filePath,
+              mimeType: doc.mime_type || 'application/octet-stream',
+              fileName,
+            },
+          ];
+        } catch (err) {
+          process.stderr.write(
+            `[Telegram:${this.name}] Failed to download document: ${err instanceof Error ? err.message : err}\n`,
+          );
+          envelope.text =
+            (msg.caption || '') +
+            `\n\n(User sent a file "${fileName}" but download failed)`;
+        }
+      }).catch((err) => {
         process.stderr.write(
           `[Telegram:${this.name}] Error handling message: ${err}\n`,
         );
@@ -217,38 +220,38 @@ export class TelegramChannel extends ChannelBase {
         msg.caption_entities,
       );
 
-      try {
-        const file = await ctx.api.getFile(voice.file_id);
-        const fileUrl = this.getFileUrl(file.file_path!);
-        const resp = await fetch(fileUrl);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const buf = Buffer.from(await resp.arrayBuffer());
+      this.prepareThenHandleInbound(envelope, async () => {
+        try {
+          const file = await ctx.api.getFile(voice.file_id);
+          const fileUrl = this.getFileUrl(file.file_path!);
+          const resp = await fetch(fileUrl);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const buf = Buffer.from(await resp.arrayBuffer());
 
-        // Save to temp dir so the agent can read it via read-file tool
-        const dir = join(tmpdir(), 'channel-files', randomUUID());
-        mkdirSync(dir, { recursive: true });
-        const filePath = join(dir, fileName);
-        writeFileSync(filePath, buf);
+          // Save to temp dir so the agent can read it via read-file tool
+          const dir = join(tmpdir(), 'channel-files', randomUUID());
+          mkdirSync(dir, { recursive: true });
+          const filePath = join(dir, fileName);
+          writeFileSync(filePath, buf);
 
-        envelope.text = msg.caption || '';
-        envelope.attachments = [
-          {
-            type: 'audio',
-            filePath,
-            mimeType: voice.mime_type || 'audio/ogg',
-            fileName,
-          },
-        ];
-      } catch (err) {
-        process.stderr.write(
-          `[Telegram:${this.name}] Failed to download voice message: ${err instanceof Error ? err.message : err}\n`,
-        );
-        envelope.text =
-          (msg.caption || '') +
-          `\n\n(User sent a voice message but download failed)`;
-      }
-
-      this.handleInbound(envelope).catch((err) => {
+          envelope.text = msg.caption || '';
+          envelope.attachments = [
+            {
+              type: 'audio',
+              filePath,
+              mimeType: voice.mime_type || 'audio/ogg',
+              fileName,
+            },
+          ];
+        } catch (err) {
+          process.stderr.write(
+            `[Telegram:${this.name}] Failed to download voice message: ${err instanceof Error ? err.message : err}\n`,
+          );
+          envelope.text =
+            (msg.caption || '') +
+            `\n\n(User sent a voice message but download failed)`;
+        }
+      }).catch((err) => {
         process.stderr.write(
           `[Telegram:${this.name}] Error handling message: ${err}\n`,
         );
@@ -349,6 +352,17 @@ export class TelegramChannel extends ChannelBase {
     const route =
       envelope.threadId === undefined ? {} : { threadId: envelope.threadId };
     await this.inboundRoute.run(route, () => super.handleInbound(envelope));
+  }
+
+  protected override async prepareThenHandleInbound(
+    envelope: Envelope,
+    prepare: () => Promise<boolean | void>,
+  ): Promise<void> {
+    const route =
+      envelope.threadId === undefined ? {} : { threadId: envelope.threadId };
+    await this.inboundRoute.run(route, () =>
+      super.prepareThenHandleInbound(envelope, prepare),
+    );
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {

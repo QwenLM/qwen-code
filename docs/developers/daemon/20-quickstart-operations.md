@@ -137,7 +137,7 @@ Boot calls `loadSettings(boundWorkspace)` once:
 | --------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `policy.permissionStrategy` | `'first-responder' \| 'designated' \| 'consensus' \| 'local-only'` | Sets `BridgeOptions.permissionPolicy`. **Boot validates with `validatePolicyConfig`**; unknown values throw `InvalidPolicyConfigError` instead of falling back silently. |
 | `policy.consensusQuorum`    | positive integer                                                   | N for the `consensus` policy. Default is `floor(M/2)+1`. If set under a non-consensus policy, it is ignored and boot logs a stderr warning.                              |
-| `context.fileName`          | string                                                             | Overrides `getCurrentGeminiMdFilename()` and controls which file `POST /workspace/init` writes.                                                                          |
+| `context.fileName`          | string                                                             | Controls which file `POST /workspace/init` writes through the workspace-service `contextFilename`.                                                                       |
 | `tools.disabled`            | string[]                                                           | Normalized through `normalizeDisabledToolList()` (trim, drop empty entries, dedupe) before affecting the next ACP child spawn.                                           |
 | `tools.approvalMode`        | string                                                             | Default session approval mode.                                                                                                                                           |
 | `telemetry`                 | object                                                             | OTel configuration: `enabled`, `otlpEndpoint`, `otlpProtocol`, per-signal endpoints, and more. See [`17-configuration.md`](./17-configuration.md).                       |
@@ -225,7 +225,7 @@ qwen serve
 packages/cli/index.ts              main()
    |
    v
-gemini.tsx                         main() - parseArguments()
+llm.tsx                         main() - parseArguments()
    |
    v (yargs assembly)
 config/config.ts                   import { serveCommand } ...
@@ -259,7 +259,9 @@ serve/server.ts                    createServeApp() - builds Express app (**does
    |  `- return app
    |
    v
-serve/run-qwen-serve.ts              server = app.listen(port, hostname, cb)
+serve/run-qwen-serve.ts              server = createServer(app) / https.createServer(..., app)
+   |  |- lifecycle.bindServer(server, { startupReady, drainHost })
+   |  |- server.listen(port, hostname)
    |  |- server.maxConnections = cap
    |  |- actualPort = server.address().port
    |  |- write "qwen serve listening on ..."
@@ -272,9 +274,9 @@ commands/serve.ts                  await blockForever()    // block forever unti
 
 Key facts:
 
-- **`createServeApp` only builds; it does not listen.** It returns an `express()` instance with middleware and routes mounted. The caller owns `app.listen()`. `server.test.ts` uses the factory this way across roughly 25 cases, so the factory intentionally avoids owning lifecycle.
-- **`() => actualPort` is a lazy closure.** `actualPort` is assigned in the `app.listen` callback. The `hostAllowlist` middleware reads it on demand, so ephemeral ports (`--port 0`) still gate the `Host` header correctly.
-- **`await blockForever()` is intentional.** If `yargs.parse()` resolves, the CLI top level falls through into the interactive TUI entrypoint (`gemini.tsx`). SIGINT / SIGTERM exit through `runQwenServe`'s `onSignal` path.
+- **`createServeApp` only builds; it does not listen.** It returns an `express()` instance with middleware and routes mounted. Ordinary-only embedders may continue to own `app.listen()`. Embedders that use Live/Conversations must bind the actual Node server to the exported app lifecycle before listening and await that lifecycle during shutdown.
+- **`() => actualPort` is a lazy closure.** `actualPort` is assigned in the `server.listen` callback. The `hostAllowlist` middleware reads it on demand, so ephemeral ports (`--port 0`) still gate the `Host` header correctly.
+- **`await blockForever()` is intentional.** If `yargs.parse()` resolves, the CLI top level falls through into the interactive TUI entrypoint (`llm.tsx`). SIGINT / SIGTERM exit through `runQwenServe`'s `onSignal` path.
 
 ## 10. HTTP route file split
 
@@ -325,11 +327,17 @@ console.log(`Daemon at ${handle.url}`);
 await handle.close(); // programmatic shutdown
 ```
 
-Or get the Express app directly and listen yourself:
+Or get the Express app directly and bind the listener lifecycle yourself. This form is required when the embed uses Live/Conversations:
 
 ```ts
-import { createServeApp } from '@qwen-code/qwen-code/serve';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import {
+  createServeApp,
+  getServeAppLifecycle,
+} from '@qwen-code/qwen-code/serve';
 
+let actualPort = 0;
 const app = createServeApp(
   {
     port: 0,
@@ -337,16 +345,27 @@ const app = createServeApp(
     mode: 'http-bridge',
     maxSessions: 20,
   },
-  () => 0,
+  () => actualPort,
   {
     /* deps: bridge, fsFactory, ... */
   },
 );
 
-const server = app.listen(0, '127.0.0.1', () => {
-  console.log('listening on', server.address());
+const lifecycle = getServeAppLifecycle(app);
+const server = createServer(app);
+lifecycle.bindServer(server);
+await new Promise<void>((resolve, reject) => {
+  server.once('error', reject);
+  server.listen(0, '127.0.0.1', () => resolve());
 });
+actualPort = (server.address() as AddressInfo).port;
+console.log('listening on', server.address());
+
+// Stop admission, drain app work, close the listener, and release ownership.
+await lifecycle.close();
 ```
+
+Calling raw `server.close()` also starts the same event-driven cleanup, but it is only best effort unless the process remains alive; always await `lifecycle.close()` to receive shutdown errors. If no server is bound, Live/Conversations requests fail closed while ordinary-only app behavior is unchanged.
 
 Note: when calling `createServeApp` directly, the default `fsFactory.trusted = false`. Agent-side ACP `writeTextFile` is rejected as `untrusted_workspace`, and a stderr warning is printed once. Either inject `deps.fsFactory` with explicit trust, inject `deps.bridge`, or accept the trust-gated default behavior.
 

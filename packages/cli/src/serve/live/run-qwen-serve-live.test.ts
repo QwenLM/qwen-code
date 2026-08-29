@@ -90,7 +90,11 @@ describe('qwen serve Live Host discovery', () => {
         pid: process.pid,
       });
       expect(record['instanceNonce']).toMatch(/^[A-Za-z0-9_-]{16,256}$/);
-      expect((await fs.stat(discoveryPath)).mode & 0o777).toBe(0o600);
+      // Windows has no POSIX permission bits; the discovery read side
+      // already skips the mode check there.
+      if (process.platform !== 'win32') {
+        expect((await fs.stat(discoveryPath)).mode & 0o777).toBe(0o600);
+      }
 
       const statusResponse = await fetch(`${handle.url}/live/status`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -162,6 +166,21 @@ describe('qwen serve Live Host discovery', () => {
     process.env['QWEN_HOME'] = qwenHome;
     process.env['QWEN_RUNTIME_DIR'] = runtime;
     resetHomeEnvBootstrapForTesting();
+    const runtimeDiscoveryPath = getLiveDiscoveryPath(runtime);
+    await fs.mkdir(path.dirname(runtimeDiscoveryPath), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await fs.writeFile(
+      runtimeDiscoveryPath,
+      `${JSON.stringify({
+        url: 'http://127.0.0.1:1',
+        protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+        pid: 999_999,
+        instanceNonce: 'stale_runtime_owner_nonce_0001',
+      })}\n`,
+      { mode: 0o600 },
+    );
     let handle: Awaited<ReturnType<typeof runQwenServe>> | undefined;
     try {
       handle = await runQwenServe(

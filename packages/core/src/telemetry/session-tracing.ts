@@ -37,8 +37,19 @@ import {
   setSessionIdOnContext,
 } from './session-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getErrorType } from '../utils/errors.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { redactUrlCredentials } from '../extension/redaction.js';
 import type { ToolExecutionStatus } from '../core/turn.js';
 import { sessionIdContext } from '../utils/sessionIdContext.js';
+import {
+  cloneContextUsage,
+  CONTEXT_USAGE_ATTRIBUTE,
+  normalizeContextUsage,
+  serializeContextUsage,
+  serializeContextUsageForSpanStart,
+  type ContextUsageV1,
+} from './context-usage.js';
 
 const debugLogger = createDebugLogger('SESSION_TRACING');
 
@@ -51,7 +62,9 @@ export interface StartInteractionOptions {
 }
 
 export interface EndInteractionOptions {
+  promptId?: string;
   errorMessage?: string;
+  errorType?: string;
 }
 
 export type InteractionSpanResultStatus = 'ok' | 'error' | 'cancelled';
@@ -62,6 +75,7 @@ export interface StartLLMRequestSpanOptions {
   outputType?: 'text' | 'json' | 'image' | 'speech';
   sessionId?: string;
   userId?: string;
+  contextUsage?: ContextUsageV1;
 }
 
 export interface LLMRequestMetadata {
@@ -77,6 +91,7 @@ export interface LLMRequestMetadata {
   cacheCreationInputTokens?: number;
   cachedInputTokensReported?: boolean;
   success: boolean;
+  cancelled?: boolean;
   durationMs?: number;
   error?: string;
   /**
@@ -150,6 +165,9 @@ export interface ToolSpanMetadata {
 interface SpanContext {
   span: Span;
   startTime: number;
+  lastActivityTime?: number;
+  interactionOwner?: SpanContext;
+  contextUsage?: ContextUsageV1;
   attributes: Record<string, string | number | boolean>;
   ended?: boolean;
   type:
@@ -205,12 +223,15 @@ const toolContext = new AsyncLocalStorage<SpanContext | undefined>();
  * Review wenshao @ #4410.
  */
 const subagentContext = new AsyncLocalStorage<SpanContext | undefined>();
-// The interaction span ends before a ToolResult continuation starts. Retain
-// only its identity attributes so later spans can inherit the user without
-// re-parenting to an ended span or keeping the Span object alive.
+const activeInteractionsByPromptId = new Map<string, SpanContext>();
+// Retain only identity attributes after an interaction ends so a late
+// standalone span can still be attributed without parenting to an ended span.
 const interactionIdentityByPromptId = new Map<
   string,
-  Pick<SpanContext, 'startTime' | 'attributes'>
+  {
+    lastActivityTime: number;
+    attributes: Record<string, string | number | boolean>;
+  }
 >();
 
 export function isInNativeSubagentSpan(): boolean {
@@ -262,7 +283,6 @@ const activeSpans = new Map<string, WeakRef<SpanContext>>();
 const strongSpans = new Map<string, SpanContext>();
 
 let interactionSequence = 0;
-let lastInteractionCtx: SpanContext | undefined;
 let cleanupIntervalStarted = false;
 const SPAN_TTL_MS_DEFAULT = 30 * 60 * 1000; //   30 min — user walk-away
 const SPAN_TTL_MS_LONG = 4 * 60 * 60 * 1000; //   4 h  — long fire-and-forget subagent
@@ -309,7 +329,7 @@ function ttlFor(ctx: SpanContext): number {
 
 function sweepStaleSpans(now: number): void {
   for (const [promptId, ctx] of interactionIdentityByPromptId) {
-    if (now - ctx.startTime >= SPAN_TTL_MS_DEFAULT) {
+    if (now - ctx.lastActivityTime >= SPAN_TTL_MS_DEFAULT) {
       interactionIdentityByPromptId.delete(promptId);
     }
   }
@@ -321,10 +341,23 @@ function sweepStaleSpans(now: number): void {
       strongSpans.delete(spanId);
       continue;
     }
-    if (now - ctx.startTime < ttlFor(ctx)) continue;
+    const ttlReferenceTime =
+      ctx.type === 'interaction'
+        ? (ctx.lastActivityTime ?? ctx.startTime)
+        : ctx.startTime;
+    if (now - ttlReferenceTime < ttlFor(ctx)) continue;
 
     if (!ctx.ended) {
       ctx.ended = true;
+      if (ctx.type === 'interaction') {
+        const promptId = ctx.attributes['qwen-code.prompt_id'];
+        if (
+          typeof promptId === 'string' &&
+          activeInteractionsByPromptId.get(promptId) === ctx
+        ) {
+          activeInteractionsByPromptId.delete(promptId);
+        }
+      }
       // Mark the span so backends can distinguish "abandoned and
       // garbage-collected by the TTL safety net" from "deliberately
       // ended without setting status / attrs" (#4321 review).
@@ -437,7 +470,7 @@ function truncateSpanText(s: string, maxChars = SPAN_TEXT_MAX_CHARS): string {
 }
 
 export function truncateSpanError(s: string): string {
-  return truncateSpanText(s);
+  return truncateSpanText(redactUrlCredentials(stripAnsiAndControl(s)));
 }
 
 function getTracer() {
@@ -445,6 +478,146 @@ function getTracer() {
 }
 
 // --- Interaction Spans ---
+
+function buildInteractionAttributes(
+  config: Config,
+  options: StartInteractionOptions,
+): Attributes {
+  const sessionId = config.getSessionId();
+  const userId = config.getTelemetryUserId();
+  const ownsStructuredOutputContract =
+    options.messageType === 'userQuery' ||
+    options.messageType === 'retry' ||
+    options.messageType === 'acp_prompt';
+  return {
+    'session.id': sessionId,
+    ...(userId ? { 'gen_ai.user.id': userId } : {}),
+    'gen_ai.operation.name': 'invoke_agent',
+    'gen_ai.agent.name': 'qwen-code',
+    'gen_ai.conversation.id': sessionId,
+    ...(ownsStructuredOutputContract && config.getJsonSchema?.()
+      ? { 'gen_ai.output.type': 'json' }
+      : {}),
+    'qwen-code.prompt_id': options.promptId,
+    'qwen-code.message_type': options.messageType,
+    'qwen-code.model': options.model,
+    'qwen-code.approval_mode': config.getApprovalMode(),
+    'interaction.sequence': interactionSequence,
+  };
+}
+
+function finalizeInteractionContext(
+  spanCtx: SpanContext,
+  status: InteractionStatus,
+  metadata?: EndInteractionOptions,
+): void {
+  if (spanCtx.ended) return;
+  spanCtx.ended = true;
+
+  const promptId = spanCtx.attributes['qwen-code.prompt_id'];
+  if (
+    typeof promptId === 'string' &&
+    activeInteractionsByPromptId.get(promptId) === spanCtx
+  ) {
+    activeInteractionsByPromptId.delete(promptId);
+    const identity = interactionIdentityByPromptId.get(promptId);
+    if (identity) identity.lastActivityTime = Date.now();
+  }
+
+  try {
+    const duration = Date.now() - spanCtx.startTime;
+    const attributes: Attributes = {
+      'interaction.duration_ms': duration,
+      'qwen-code.turn_status': status,
+    };
+    if (status === 'error') {
+      attributes['error.type'] = metadata?.errorType || 'interaction_error';
+    }
+    spanCtx.span.setAttributes(attributes);
+
+    if (status === 'error') {
+      spanCtx.span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: truncateSpanError(metadata?.errorMessage ?? 'unknown error'),
+      });
+    }
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to update interaction span attributes/status: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  try {
+    spanCtx.span.end();
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to end interaction span: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const spanId = getSpanId(spanCtx.span);
+  activeSpans.delete(spanId);
+  strongSpans.delete(spanId);
+}
+
+function registerInteractionContext(
+  promptId: string,
+  spanContextObj: SpanContext,
+): void {
+  const existing = activeInteractionsByPromptId.get(promptId);
+  if (existing && !existing.ended) {
+    debugLogger.warn(
+      `Replacing unfinished interaction for promptId=${promptId}; ending the previous span as cancelled`,
+    );
+    finalizeInteractionContext(existing, 'cancelled', { promptId });
+  }
+
+  const spanId = getSpanId(spanContextObj.span);
+  activeSpans.set(spanId, new WeakRef(spanContextObj));
+  strongSpans.set(spanId, spanContextObj);
+  activeInteractionsByPromptId.set(promptId, spanContextObj);
+
+  const userId = spanContextObj.attributes['gen_ai.user.id'];
+  if (typeof userId === 'string' && userId) {
+    interactionIdentityByPromptId.set(promptId, {
+      lastActivityTime:
+        spanContextObj.lastActivityTime ?? spanContextObj.startTime,
+      attributes: { 'gen_ai.user.id': userId },
+    });
+  } else {
+    interactionIdentityByPromptId.delete(promptId);
+  }
+}
+
+function getInteractionContext(promptId?: string): SpanContext | undefined {
+  if (promptId !== undefined) {
+    const exact = activeInteractionsByPromptId.get(promptId);
+    return exact && !exact.ended ? exact : undefined;
+  }
+  const current = interactionContext.getStore();
+  return current && !current.ended ? current : undefined;
+}
+
+function touchInteractionContext(spanCtx: SpanContext | undefined): boolean {
+  if (!spanCtx || spanCtx.type !== 'interaction' || spanCtx.ended) return false;
+  const promptId = spanCtx.attributes['qwen-code.prompt_id'];
+  if (
+    typeof promptId !== 'string' ||
+    activeInteractionsByPromptId.get(promptId) !== spanCtx
+  ) {
+    return false;
+  }
+
+  const now = Date.now();
+  spanCtx.lastActivityTime = now;
+  const identity = interactionIdentityByPromptId.get(promptId);
+  if (identity) identity.lastActivityTime = now;
+  return true;
+}
+
+function resolveGenAiParentContext(parent: SpanContext | undefined): Context {
+  if (!parent && interactionContext.getStore()) return ROOT_CONTEXT;
+  return resolveParentContext(parent);
+}
 
 export function startInteractionSpan(
   config: Config,
@@ -454,17 +627,7 @@ export function startInteractionSpan(
 
   ensureCleanupInterval();
   interactionSequence++;
-
-  const userId = config.getTelemetryUserId();
-  const attributes: Attributes = {
-    'session.id': config.getSessionId(),
-    ...(userId ? { 'gen_ai.user.id': userId } : {}),
-    'qwen-code.prompt_id': options.promptId,
-    'qwen-code.message_type': options.messageType,
-    'qwen-code.model': options.model,
-    'qwen-code.approval_mode': config.getApprovalMode(),
-    'interaction.sequence': interactionSequence,
-  };
+  const attributes = buildInteractionAttributes(config, options);
 
   // Each interaction is a trace root with its own traceId so that traces
   // stay bounded and renderable in trace viewers (ARMS / Jaeger).
@@ -475,24 +638,14 @@ export function startInteractionSpan(
     ROOT_CONTEXT,
   );
 
-  const spanId = getSpanId(span);
   const spanContextObj: SpanContext = {
     span,
     startTime: Date.now(),
+    lastActivityTime: Date.now(),
     attributes: attributes as Record<string, string | number | boolean>,
     type: 'interaction',
   };
-  activeSpans.set(spanId, new WeakRef(spanContextObj));
-  strongSpans.set(spanId, spanContextObj);
-  if (userId) {
-    interactionIdentityByPromptId.set(options.promptId, {
-      startTime: spanContextObj.startTime,
-      attributes: { 'gen_ai.user.id': userId },
-    });
-  } else {
-    interactionIdentityByPromptId.delete(options.promptId);
-  }
-  lastInteractionCtx = spanContextObj;
+  registerInteractionContext(options.promptId, spanContextObj);
   interactionContext.enterWith(spanContextObj);
 }
 
@@ -500,7 +653,7 @@ export function endInteractionSpan(
   status: InteractionStatus,
   metadata?: EndInteractionOptions,
 ): void {
-  const spanCtx = interactionContext.getStore() ?? lastInteractionCtx;
+  const spanCtx = getInteractionContext(metadata?.promptId);
   if (!spanCtx) return;
   if (spanCtx.ended) {
     debugLogger.debug(
@@ -509,28 +662,17 @@ export function endInteractionSpan(
     return;
   }
 
-  spanCtx.ended = true;
-  lastInteractionCtx = undefined;
+  const current = interactionContext.getStore();
+  finalizeInteractionContext(spanCtx, status, metadata);
+  if (current === spanCtx) interactionContext.enterWith(undefined);
+}
 
-  const duration = Date.now() - spanCtx.startTime;
-  spanCtx.span.setAttributes({
-    'interaction.duration_ms': duration,
-    'qwen-code.turn_status': status,
-  });
-
-  if (status === 'error') {
-    spanCtx.span.setStatus({
-      code: SpanStatusCode.ERROR,
-      message: metadata?.errorMessage ?? 'unknown error',
-    });
-  } else {
-    spanCtx.span.setStatus({ code: SpanStatusCode.OK });
+export function endAllInteractionSpans(
+  status: InteractionStatus = 'cancelled',
+): void {
+  for (const spanCtx of [...activeInteractionsByPromptId.values()]) {
+    finalizeInteractionContext(spanCtx, status);
   }
-
-  spanCtx.span.end();
-  const spanId = getSpanId(spanCtx.span);
-  activeSpans.delete(spanId);
-  strongSpans.delete(spanId);
   interactionContext.enterWith(undefined);
 }
 
@@ -544,18 +686,8 @@ export async function withInteractionSpan<T>(
 
   ensureCleanupInterval();
   interactionSequence++;
-
   const sessionId = config.getSessionId();
-  const userId = config.getTelemetryUserId();
-  const attributes: Attributes = {
-    'session.id': sessionId,
-    ...(userId ? { 'gen_ai.user.id': userId } : {}),
-    'qwen-code.prompt_id': options.promptId,
-    'qwen-code.message_type': options.messageType,
-    'qwen-code.model': options.model,
-    'qwen-code.approval_mode': config.getApprovalMode(),
-    'interaction.sequence': interactionSequence,
-  };
+  const attributes = buildInteractionAttributes(config, options);
 
   const parentContext = options.parentContext ?? ROOT_CONTEXT;
   const span = getTracer().startSpan(
@@ -566,23 +698,14 @@ export async function withInteractionSpan<T>(
     },
     parentContext,
   );
-  const spanId = getSpanId(span);
   const spanContextObj: SpanContext = {
     span,
     startTime: Date.now(),
+    lastActivityTime: Date.now(),
     attributes: attributes as Record<string, string | number | boolean>,
     type: 'interaction',
   };
-  activeSpans.set(spanId, new WeakRef(spanContextObj));
-  strongSpans.set(spanId, spanContextObj);
-  if (userId) {
-    interactionIdentityByPromptId.set(options.promptId, {
-      startTime: spanContextObj.startTime,
-      attributes: { 'gen_ai.user.id': userId },
-    });
-  } else {
-    interactionIdentityByPromptId.delete(options.promptId);
-  }
+  registerInteractionContext(options.promptId, spanContextObj);
 
   const activeContext = trace.setSpan(
     setSessionIdOnContext(parentContext, sessionId),
@@ -591,45 +714,29 @@ export async function withInteractionSpan<T>(
   return await otelContext.with(activeContext, async () =>
     interactionContext.run(spanContextObj, async () => {
       let terminalStatus: InteractionStatus = 'ok';
-      let errorStatusSet = false;
+      let errorMetadata: EndInteractionOptions | undefined;
       try {
         const result = await fn();
         terminalStatus = getResultStatus?.(result) ?? 'ok';
         return result;
       } catch (error) {
         terminalStatus = 'error';
-        span.setStatus({
-          code: SpanStatusCode.ERROR,
-          message: truncateSpanError(
-            error instanceof Error ? error.message : String(error),
-          ),
-        });
-        errorStatusSet = true;
+        errorMetadata = {
+          promptId: options.promptId,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          errorType: getErrorType(error),
+        };
         throw error;
       } finally {
-        if (!spanContextObj.ended) {
-          spanContextObj.ended = true;
-          const duration = Date.now() - spanContextObj.startTime;
-          span.setAttributes({
-            'interaction.duration_ms': duration,
-            'qwen-code.turn_status': terminalStatus,
-          });
-          if (terminalStatus === 'ok') {
-            span.setStatus({ code: SpanStatusCode.OK });
-          } else if (terminalStatus === 'error' && !errorStatusSet) {
-            // getResultStatus reported 'error' on a non-throwing path (e.g. the
-            // cron path swallows API errors and surfaces them via status), so
-            // the catch above didn't run. Mark the span ERROR here, guarded so
-            // a thrown error's specific message is never overwritten.
-            span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: 'interaction error',
-            });
-          }
-          span.end();
-          activeSpans.delete(spanId);
-          strongSpans.delete(spanId);
-        }
+        finalizeInteractionContext(spanContextObj, terminalStatus, {
+          promptId: options.promptId,
+          ...(terminalStatus === 'error' && !errorMetadata
+            ? {
+                errorMessage: 'interaction error',
+                errorType: 'interaction_error',
+              }
+            : errorMetadata),
+        });
       }
     }),
   );
@@ -660,36 +767,32 @@ export function startLLMRequestSpanWithContext(
   // Prefer subagentContext over interactionContext so LLM spans inside a
   // foreground subagent nest under the subagent span instead of escaping
   // back to the outer interaction. wenshao @ #4410.
-  const parentCtx = subagentContext.getStore() ?? interactionContext.getStore();
-  const identityParentCtx =
+  const interactionParentCtx = getInteractionContext(promptId);
+  touchInteractionContext(interactionParentCtx);
+  const parentCtx =
     subagentContext.getStore() ??
     toolContext.getStore() ??
-    interactionContext.getStore();
-  // resolveParentContext() also re-parents to the active OTel span when
-  // present, so a side-query LLM call nested inside a tool span still
-  // attaches to the tool span instead of becoming a separate trace root.
-  const ctx = resolveParentContext(parentCtx);
+    interactionParentCtx;
+  // Active-OTel fallback preserves nested side queries only when no
+  // interaction ALS owner exists. A mismatched prompt must stay standalone.
+  const ctx = resolveGenAiParentContext(parentCtx);
 
-  const sessionId = resolveSessionId(
-    identityParentCtx,
-    options?.sessionId,
-    ctx,
-  );
-  const userId = resolveGenAiUserId(
-    identityParentCtx,
-    promptId,
-    options?.userId,
-  );
+  const sessionId = resolveSessionId(parentCtx, options?.sessionId, ctx);
+  const userId = resolveGenAiUserId(parentCtx, promptId, options?.userId);
+  const contextUsage = cloneContextUsage(options?.contextUsage);
+  const serializedContextUsage =
+    serializeContextUsageForSpanStart(contextUsage);
   const attributes: Attributes = {
     ...(sessionId ? { 'session.id': sessionId } : {}),
     ...(sessionId ? { 'gen_ai.conversation.id': sessionId } : {}),
     ...(userId ? { 'gen_ai.user.id': userId } : {}),
     'qwen-code.prompt_id': promptId,
-    'llm_request.context': subagentContext.getStore()
-      ? 'subagent'
-      : interactionContext.getStore()
-        ? 'interaction'
-        : 'standalone',
+    'llm_request.context':
+      parentCtx?.type === 'subagent'
+        ? 'subagent'
+        : interactionParentCtx
+          ? 'interaction'
+          : 'standalone',
     // Emit the version-pinned OTel GenAI semantic convention.
     'gen_ai.request.model': model,
     ...(options?.operationName
@@ -700,6 +803,9 @@ export function startLLMRequestSpanWithContext(
       : {}),
     ...(options?.outputType
       ? { 'gen_ai.output.type': options.outputType }
+      : {}),
+    ...(serializedContextUsage
+      ? { [CONTEXT_USAGE_ATTRIBUTE]: serializedContextUsage }
       : {}),
   };
 
@@ -714,6 +820,8 @@ export function startLLMRequestSpanWithContext(
   const spanContextObj: SpanContext = {
     span,
     startTime: Date.now(),
+    ...(interactionParentCtx ? { interactionOwner: interactionParentCtx } : {}),
+    ...(serializedContextUsage && contextUsage ? { contextUsage } : {}),
     attributes: attributes as Record<string, string | number | boolean>,
     type: 'llm_request',
   };
@@ -752,12 +860,21 @@ export function endLLMRequestSpan(
     const endAttributes: Attributes = { duration_ms: duration };
 
     if (metadata) {
-      if (
-        metadata.inputTokens !== undefined &&
-        Number.isSafeInteger(metadata.inputTokens) &&
-        metadata.inputTokens >= 0
-      ) {
-        endAttributes['gen_ai.usage.input_tokens'] = metadata.inputTokens;
+      const inputTokens = metadata.inputTokens;
+      const hasValidInputTokens =
+        inputTokens !== undefined &&
+        Number.isSafeInteger(inputTokens) &&
+        inputTokens >= 0;
+      if (hasValidInputTokens) {
+        endAttributes['gen_ai.usage.input_tokens'] = inputTokens;
+        if (spanCtx.contextUsage) {
+          const normalized = serializeContextUsage(
+            normalizeContextUsage(spanCtx.contextUsage, inputTokens),
+          );
+          if (normalized) {
+            endAttributes[CONTEXT_USAGE_ATTRIBUTE] = normalized;
+          }
+        }
       }
       if (
         metadata.outputTokens !== undefined &&
@@ -844,9 +961,16 @@ export function endLLMRequestSpan(
       if (metadata.subagentName !== undefined) {
         endAttributes['subagent_name'] = metadata.subagentName;
       }
-      if (metadata.errorType !== undefined) {
+      if (metadata.errorType && !metadata.cancelled) {
         endAttributes['error_type'] = metadata.errorType;
         endAttributes['error.type'] = metadata.errorType;
+      }
+      if (
+        !metadata.success &&
+        !metadata.cancelled &&
+        endAttributes['error.type'] === undefined
+      ) {
+        endAttributes['error.type'] = 'llm_error';
       }
       if (metadata.errorStatusCode !== undefined) {
         endAttributes['error_status_code'] = metadata.errorStatusCode;
@@ -889,9 +1013,7 @@ export function endLLMRequestSpan(
       );
     }
 
-    if (metadata === undefined || metadata.success) {
-      spanCtx.span.setStatus({ code: SpanStatusCode.OK });
-    } else {
+    if (metadata !== undefined && !metadata.success && !metadata.cancelled) {
       spanCtx.span.setStatus({
         code: SpanStatusCode.ERROR,
         message: metadata.error
@@ -915,6 +1037,7 @@ export function endLLMRequestSpan(
   }
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
+  touchInteractionContext(spanCtx.interactionOwner);
 }
 
 // --- Tool Spans ---
@@ -933,18 +1056,19 @@ export function startToolSpan(
   try {
     // Prefer subagentContext over interactionContext (see startLLMRequestSpan
     // for rationale; wenshao @ #4410).
+    const interactionParentCtx = getInteractionContext(promptId);
+    touchInteractionContext(interactionParentCtx);
     const parentCtx =
-      subagentContext.getStore() ?? interactionContext.getStore();
-    const identityParentCtx =
       subagentContext.getStore() ??
       toolContext.getStore() ??
-      interactionContext.getStore();
-    // Same fallback as startLLMRequestSpan: prefer active OTel span for
-    // tools-inside-tools cases before becoming a trace root.
-    const ctx = resolveParentContext(parentCtx);
+      interactionParentCtx;
+    // Same guarded active-OTel fallback as startLLMRequestSpan.
+    const ctx = resolveGenAiParentContext(parentCtx);
 
-    const sessionId = resolveSessionId(identityParentCtx);
-    const userId = resolveGenAiUserId(identityParentCtx, promptId);
+    const sessionId = resolveSessionId(parentCtx, undefined, ctx);
+    const userId = resolveGenAiUserId(parentCtx, promptId);
+    const agentName = (subagentContext.getStore() ?? interactionParentCtx)
+      ?.attributes['gen_ai.agent.name'];
     const attributes: Attributes = {
       ...(sessionId ? { 'session.id': sessionId } : {}),
       ...attrs,
@@ -952,6 +1076,9 @@ export function startToolSpan(
       'gen_ai.operation.name': 'execute_tool',
       'gen_ai.tool.name': toolName,
       'gen_ai.tool.type': 'function',
+      ...(typeof agentName === 'string'
+        ? { 'gen_ai.agent.name': agentName }
+        : {}),
       ...(description
         ? {
             'gen_ai.tool.description': truncateSpanText(
@@ -961,6 +1088,9 @@ export function startToolSpan(
           }
         : {}),
     };
+    if (typeof agentName !== 'string') {
+      delete attributes['gen_ai.agent.name'];
+    }
 
     span = getTracer().startSpan(
       SPAN_TOOL,
@@ -972,6 +1102,9 @@ export function startToolSpan(
     const spanContextObj: SpanContext = {
       span,
       startTime: Date.now(),
+      ...(interactionParentCtx
+        ? { interactionOwner: interactionParentCtx }
+        : {}),
       attributes: attributes as Record<string, string | number | boolean>,
       type: 'tool',
     };
@@ -1016,8 +1149,8 @@ export function runInToolSpanContext<T>(span: Span, fn: () => T): T {
 /**
  * When metadata is omitted, span status is NOT set — callers on failure paths
  * must pre-set status via setToolSpanFailure/setToolSpanCancelled before calling
- * this. This asymmetry with endLLMRequestSpan (which defaults to OK) is intentional:
- * tool spans have multiple failure modes that set status before endToolSpan runs.
+ * this. Tool spans have multiple failure modes that set status before
+ * endToolSpan runs.
  */
 export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
   const spanId = getSpanId(span);
@@ -1044,6 +1177,9 @@ export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
       }
       if (metadata.error !== undefined)
         endAttributes['error'] = truncateSpanError(metadata.error);
+      if (metadata.success === false && !metadata.cancelled) {
+        endAttributes['error.type'] = 'tool_error';
+      }
       if (metadata.cancelled) {
         endAttributes[TOOL_FAILURE_KIND_ATTRIBUTE] =
           TOOL_FAILURE_KIND_CANCELLED;
@@ -1053,11 +1189,7 @@ export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
     spanCtx.span.setAttributes(endAttributes);
 
     if (metadata) {
-      if (metadata.cancelled) {
-        spanCtx.span.setStatus({ code: SpanStatusCode.UNSET });
-      } else if (metadata.success !== false) {
-        spanCtx.span.setStatus({ code: SpanStatusCode.OK });
-      } else {
+      if (!metadata.cancelled && metadata.success === false) {
         spanCtx.span.setStatus({
           code: SpanStatusCode.ERROR,
           message: metadata.error
@@ -1081,6 +1213,7 @@ export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
   }
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
+  touchInteractionContext(spanCtx.interactionOwner);
 }
 
 // --- Tool Execution Sub-Spans ---
@@ -1184,6 +1317,9 @@ export function endToolExecutionSpan(
 
   try {
     const duration = Date.now() - spanCtx.startTime;
+    const executionStatus = metadata?.executionStatus;
+    const cancelled =
+      metadata?.cancelled === true || executionStatus === 'cancelled';
     // Apply caller-supplied attributes FIRST so the canonical keys written
     // below (duration_ms, success, error) always win a key collision — a
     // passthrough attribute must never mask the span's own outcome fields.
@@ -1201,9 +1337,20 @@ export function endToolExecutionSpan(
       if (metadata.executionStatus !== undefined) {
         endAttributes['execution_status'] = metadata.executionStatus;
       }
-      if (metadata.errorType !== undefined) {
+      if (metadata.errorType) {
         endAttributes['error_type'] = metadata.errorType;
-        endAttributes['error.type'] = metadata.errorType;
+        if (!cancelled) {
+          endAttributes['error.type'] = metadata.errorType;
+        }
+      }
+      const failed =
+        !cancelled &&
+        executionStatus !== 'not_started' &&
+        (executionStatus === undefined
+          ? metadata.success === false
+          : executionStatus !== 'success');
+      if (failed && endAttributes['error.type'] === undefined) {
+        endAttributes['error.type'] = 'tool_execution_error';
       }
     }
 
@@ -1213,9 +1360,6 @@ export function endToolExecutionSpan(
     // status (e.g. via setToolSpanCancelled) and then call this without
     // metadata get their pre-set status preserved. Cancellation also
     // preserves UNSET so the child agrees with the cancelled parent.
-    const executionStatus = metadata?.executionStatus;
-    const cancelled =
-      metadata?.cancelled === true || executionStatus === 'cancelled';
     // The not_started guard is unreachable by construction (the span only
     // exists once execution is attempted); kept as defence-in-depth.
     if (metadata && !cancelled && executionStatus !== 'not_started') {
@@ -1223,9 +1367,7 @@ export function endToolExecutionSpan(
         executionStatus === undefined
           ? metadata.success !== false
           : executionStatus === 'success';
-      if (succeeded) {
-        spanCtx.span.setStatus({ code: SpanStatusCode.OK });
-      } else {
+      if (!succeeded) {
         spanCtx.span.setStatus({
           code: SpanStatusCode.ERROR,
           message: metadata.error
@@ -1430,6 +1572,7 @@ export function startHookSpan(opts: StartHookSpanOptions): Span {
     subagentContext.getStore() ??
     interactionContext.getStore() ??
     undefined;
+  touchInteractionContext(interactionContext.getStore());
   const ctx = resolveParentContext(parentCtx);
   const sessionId = resolveSessionId(parentCtx);
 
@@ -1452,6 +1595,9 @@ export function startHookSpan(opts: StartHookSpanOptions): Span {
   const spanContextObj: SpanContext = {
     span,
     startTime: Date.now(),
+    ...(interactionContext.getStore()
+      ? { interactionOwner: interactionContext.getStore() }
+      : {}),
     attributes: attributes as Record<string, string | number | boolean>,
     type: 'hook',
   };
@@ -1503,6 +1649,8 @@ export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
         );
       if (metadata.error !== undefined)
         endAttributes['error'] = truncateSpanError(metadata.error);
+      if (metadata.error !== undefined)
+        endAttributes['error.type'] = 'hook_error';
     }
 
     spanCtx.span.setAttributes(endAttributes);
@@ -1527,6 +1675,7 @@ export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
   }
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
+  touchInteractionContext(spanCtx.interactionOwner);
 }
 
 // --- Subagent Spans (#3731 Phase 3) ---
@@ -1739,7 +1888,7 @@ export function runInSubagentSpanContext<T>(
 
 /**
  * Finalize a subagent span. Status mapping:
- *  - `completed` → SpanStatus OK
+ *  - `completed` → SpanStatus UNSET
  *  - `failed`    → SpanStatus ERROR, sets `exception.message` + `error.type`
  *  - `cancelled` / `aborted` → SpanStatus UNSET (matches Phase 2 cancellation)
  *
@@ -1795,19 +1944,17 @@ export function endSubagentSpan(
       endAttributes['qwen-code.subagent.result_summary_present'] =
         metadata.resultSummaryPresent;
     }
-    if (metadata.error !== undefined) {
+    if (metadata.status === 'failed' && metadata.error !== undefined) {
       const truncated = truncateSpanError(metadata.error);
       endAttributes['exception.message'] = truncated;
     }
-    if (metadata.errorType !== undefined) {
-      endAttributes['error.type'] = metadata.errorType;
+    if (metadata.status === 'failed') {
+      endAttributes['error.type'] = metadata.errorType || 'subagent_error';
     }
 
     spanCtx.span.setAttributes(endAttributes);
 
-    if (metadata.status === 'completed') {
-      spanCtx.span.setStatus({ code: SpanStatusCode.OK });
-    } else if (metadata.status === 'failed') {
+    if (metadata.status === 'failed') {
       spanCtx.span.setStatus({
         code: SpanStatusCode.ERROR,
         message: metadata.error
@@ -1836,10 +1983,17 @@ export function endSubagentSpan(
 
 // --- Interaction Span Attribute Access ---
 
-export function getActiveInteractionSpan(): Span | undefined {
-  const ctx = interactionContext.getStore() ?? lastInteractionCtx;
-  if (!ctx || ctx.ended) return undefined;
-  return ctx.span;
+export function getActiveInteractionSpan(promptId?: string): Span | undefined {
+  return getInteractionContext(promptId)?.span;
+}
+
+export function recordInteractionActivity(
+  promptId: string,
+  expectedOwner: Span,
+): boolean {
+  const spanCtx = getInteractionContext(promptId);
+  if (!spanCtx || spanCtx.span !== expectedOwner) return false;
+  return touchInteractionContext(spanCtx);
 }
 
 // --- Testing Utilities ---
@@ -1847,6 +2001,7 @@ export function getActiveInteractionSpan(): Span | undefined {
 export function clearSessionTracingForTesting(): void {
   activeSpans.clear();
   strongSpans.clear();
+  activeInteractionsByPromptId.clear();
   interactionIdentityByPromptId.clear();
   interactionContext.enterWith(undefined);
   toolContext.enterWith(undefined);
@@ -1855,7 +2010,6 @@ export function clearSessionTracingForTesting(): void {
   // test's spans. wenshao @ #4410.
   subagentContext.enterWith(undefined);
   interactionSequence = 0;
-  lastInteractionCtx = undefined;
   // Reach into session-context module to prevent cross-test leakage.
   setSessionContext(undefined);
 }

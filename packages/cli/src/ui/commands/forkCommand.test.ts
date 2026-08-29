@@ -41,7 +41,7 @@ describe('forkCommand', () => {
   ];
 
   const createConfig = (overrides: Record<string, unknown> = {}) => ({
-    getGeminiClient: () => ({
+    getLlmClient: () => ({
       addHistory: mockAddHistory,
       getHistoryShallow: () => historyWithTurn,
     }),
@@ -121,7 +121,7 @@ describe('forkCommand', () => {
     const fresh = createMockCommandContext({
       services: {
         config: createConfig({
-          getGeminiClient: () => ({ getHistoryShallow: () => [] }),
+          getLlmClient: () => ({ getHistoryShallow: () => [] }),
         }),
       },
     });
@@ -137,7 +137,7 @@ describe('forkCommand', () => {
     const unreadableHistory = createMockCommandContext({
       services: {
         config: createConfig({
-          getGeminiClient: () => ({
+          getLlmClient: () => ({
             getHistoryShallow: () => {
               throw new Error('history unavailable');
             },
