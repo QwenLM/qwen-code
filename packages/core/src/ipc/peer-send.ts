@@ -169,6 +169,23 @@ export function lookupSentPeerMessageForTest(
   return sentMessages.get(canonicalizeMsgId(msgId));
 }
 
+/**
+ * Test-only: remember a send the way `sendToPeer` does.
+ *
+ * The ledger is process-private, and the only production writer is a real
+ * delivery over a real socket to a peer in the registry. A test that needs
+ * a *settleable* id — one `settleSentPeerMessage` will answer for — would
+ * otherwise have to stage a whole peer session to get one. This calls the
+ * same `trackSent` the send path calls, so what lands in the map is what a
+ * send leaves there; only the trigger is the test.
+ */
+export function trackSentPeerMessageForTest(
+  msgId: string,
+  address: string,
+): void {
+  trackSent(msgId, { address, state: 'pending' });
+}
+
 /** Test-only: forget every tracked send. */
 export function resetSentPeerMessagesForTest(): void {
   sentMessages.clear();

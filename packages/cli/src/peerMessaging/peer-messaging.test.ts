@@ -20,8 +20,10 @@ import {
   buildUserFrame,
   MAX_HELD_MESSAGES,
   MAX_SETTLED_IDS,
+  resetSentPeerMessagesForTest,
   sendPeerFrame,
   startPeerInbox,
+  trackSentPeerMessageForTest,
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
@@ -67,6 +69,8 @@ beforeEach(async () => {
   chmodControl.holdSocketChmod = false;
   chmodControl.calls = 0;
   chmodControl.release = null;
+  // The ledger is a module singleton shared by every test in this file.
+  resetSentPeerMessagesForTest();
 });
 
 afterEach(async () => {
@@ -220,6 +224,39 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     await settle();
 
     expect(seen).toEqual([]);
+  });
+
+  it('surfaces a real-ledger receipt with the address the send recorded', async () => {
+    // The case above only proves the default drops what it should. A
+    // default swapped for a no-op returning undefined passes it just as
+    // happily — and in production that silently loses every receipt, since
+    // `startInteractiveUI` injects no `settleSentMessage`. This drives the
+    // other direction through the same unstubbed default: an id the real
+    // ledger holds must come back out of `onReceipt` carrying the ledger's
+    // own `address` and `previous`, neither of which the frame supplies.
+    trackSentPeerMessageForTest('sent-real-0001', 'docs-cd [ab12cd]');
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const seen: unknown[] = [];
+    m.onReceipt((receipt) => seen.push(receipt));
+
+    await sendPeerFrame(
+      m.socketPath!,
+      buildDeliveryStatusFrame({
+        status: 'held',
+        origMsgId: 'sent-real-0001',
+        from: '/tmp/peer.sock',
+      }),
+    );
+    await settle();
+
+    expect(seen).toEqual([
+      {
+        status: 'held',
+        address: 'docs-cd [ab12cd]',
+        origMsgId: 'sent-real-0001',
+        previous: 'pending',
+      },
+    ]);
   });
 
   it('keeps delivering receipts when one listener throws', async () => {

@@ -7294,6 +7294,31 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('hands the drain the peer handle at the one production call site', () => {
+      // The drop behaviour itself is covered by the `renderHook` test in
+      // 'Queued submission drain', which injects `peerMessaging` directly —
+      // so it proves the logic and nothing about the container passing the
+      // handle in. Delete that single prop and the drain sees
+      // `peerMessaging === undefined`, the optional call short-circuits, and
+      // an envelope addressed to the session `/clear` replaced is submitted
+      // into its successor: the exact regression the pin check exists to
+      // prevent, with every hook-level test still green.
+      //
+      // Structural rather than behavioural for the reason recorded on the
+      // Ctrl+O guard in 'Thinking expansion': under this harness the mount
+      // effect's
+      // `setConfigInitialized(true)` never re-renders the tree, and the
+      // drain is gated on it, so a rendered AppContainer can never reach a
+      // drain at all here. Reading the call site out of the component's own
+      // source is what is left, and it is a real witness: removing
+      // `peerMessaging` from this call makes the assertion fail.
+      const drainCall = /useQueuedSubmissionDrain\(\{([^}]*)\}/.exec(
+        AppContainer.toString(),
+      );
+      expect(drainCall).not.toBeNull();
+      expect(drainCall![1]).toMatch(/\bpeerMessaging\b/);
+    });
+
     it('refuses peer frames once the pending backlog reaches the cap', () => {
       // Frames arrive at socket speed but drain at one per turn; without
       // the guard a busy session's queue grows without bound.
