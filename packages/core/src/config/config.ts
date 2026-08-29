@@ -4422,13 +4422,54 @@ export class Config {
         // just read out of `qwen sessions ps`, and re-deriving it here
         // would rename a live session on every /clear for no gain — the
         // directory it names has not changed.
-        this.queueSessionRegistryWrite(async () => {
-          await patchSessionRecord({ sessionId: newSessionId, cwd: workDir });
-        });
+        this.queueRetriedSessionRegistryPatch(
+          { sessionId: newSessionId, cwd: workDir },
+          'session registry record still names the previous session id; peers addressing this session by its new id will be refused until it is re-asserted',
+        );
       }
     }
 
     return this.sessionId;
+  }
+
+  /**
+   * Re-write this session's current id and directory into its registry
+   * record. Called when a peer message arrives pinned to a session id this
+   * process does not hold: either the sender's directory is stale, or the
+   * record is — a /clear patch that was skipped in the fd-pressure window
+   * leaves the record naming the previous id for the rest of the process
+   * lifetime, and every send to this session would then be refused. Both
+   * cases are answered by asserting the record again.
+   */
+  async reassertSessionRegistryRecord(): Promise<void> {
+    if (!this.sessionRegistryActive) return;
+    this.queueRetriedSessionRegistryPatch(
+      { sessionId: this.sessionId, cwd: this.targetDir },
+      'session registry record could not be re-asserted; peers may keep addressing a stale session id',
+    );
+    await this.sessionRegistryWrite;
+  }
+
+  /**
+   * Queue a registry patch that retries the transient skips
+   * `patchSessionRecord` reports (this process's own start-token read
+   * failing under fd pressure, a momentary read error) — the same window
+   * registration retries the same reads for.
+   */
+  private queueRetriedSessionRegistryPatch(
+    patch: Parameters<typeof patchSessionRecord>[0],
+    failureWarning: string,
+  ): void {
+    this.queueSessionRegistryWrite(async () => {
+      let applied = await patchSessionRecord(patch);
+      for (let attempt = 0; attempt < 2 && !applied; attempt += 1) {
+        await delay(250);
+        applied = await patchSessionRecord(patch);
+      }
+      if (!applied) {
+        this.debugLogger.warn(failureWarning);
+      }
+    });
   }
 
   /**

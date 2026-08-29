@@ -70,10 +70,15 @@ import {
   SendMessageType,
   type LlmClient,
   type GoalTurnHost,
+  describeDeliveryStatus,
   type HeldMessage,
   type SubagentManager,
 } from '@qwen-code/qwen-code-core';
-import type { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import type {
+  PeerMessaging,
+  PeerQueuedDelivery,
+  PeerReceipt,
+} from '../peerMessaging/peer-messaging.js';
 import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -1894,16 +1899,63 @@ describe('AppContainer State Management', () => {
       view.unmount();
     });
 
+    it('drops a peer envelope whose session-id pin the drain outgrew', async () => {
+      const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return {
+          kind: 'peer' as const,
+          modelText: '<cross_session_message>stale</cross_session_message>',
+          displayText: 'Message from another session: stale',
+          delivery,
+        };
+      });
+      const drainQueuedFrame = vi.fn().mockReturnValue(false);
+      const submitQuery = vi.fn();
+      const addHistoryItem = vi.fn();
+
+      renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => (popped ? 0 : 1),
+          popNextSubmission,
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages: vi.fn(),
+          restorePeerMessage: vi.fn(),
+          addHistoryItem,
+          submitQuery,
+          submissionInFlightRef: { current: false },
+          submissionSettledRevision: 0,
+          peerMessaging: { drainQueuedFrame } as unknown as PeerMessaging,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(drainQueuedFrame).toHaveBeenCalledWith(delivery);
+      });
+      expect(submitQuery).not.toHaveBeenCalled();
+      expect(addHistoryItem).not.toHaveBeenCalled();
+    });
+
     it('restores a failed peer admission as a peer entry, not user text', async () => {
       // Restoring as plain user text would drain the envelope through the
       // UserQuery preprocessing on retry — the exact hazard the peer
       // send type exists to prevent.
       const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
       const displayText = 'Message from another session (a): x';
+      const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
       const popNextSubmission = vi.fn(() => ({
         kind: 'peer' as const,
         modelText,
         displayText,
+        delivery,
       }));
       const restorePeerMessage = vi.fn(() => {});
       const submitQuery = vi.fn(async (...args: unknown[]) => {
@@ -1938,6 +1990,7 @@ describe('AppContainer State Management', () => {
           modelText,
           displayText,
           true,
+          delivery,
         );
       });
     });
@@ -1951,10 +2004,12 @@ describe('AppContainer State Management', () => {
       // while the sender keeps a live `delivered` receipt.
       const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
       const displayText = 'Message from another session (a): x';
+      const delivery = { msgId: 'frame-1', toSessionId: 'session-a' };
       const popNextSubmission = vi.fn(() => ({
         kind: 'peer' as const,
         modelText,
         displayText,
+        delivery,
       }));
       const restorePeerMessage = vi.fn(() => {});
       const submitQuery = vi.fn(async (...args: unknown[]) => {
@@ -1996,6 +2051,7 @@ describe('AppContainer State Management', () => {
           modelText,
           displayText,
           true,
+          delivery,
         );
       });
       expect(submitQuery).toHaveBeenCalledTimes(1);
@@ -7107,8 +7163,13 @@ describe('AppContainer State Management', () => {
 
     interface FakePeerMessaging {
       value: PeerMessaging;
-      submit: (modelText: string, displayText: string) => void;
+      submit: (
+        modelText: string,
+        displayText: string,
+        delivery?: PeerQueuedDelivery,
+      ) => void;
       emitHeld: (held: readonly HeldMessage[]) => void;
+      emitReceipt: (receipt: PeerReceipt) => void;
     }
 
     const heldMessage = (msgId: string): HeldMessage =>
@@ -7125,16 +7186,32 @@ describe('AppContainer State Management', () => {
       }) as unknown as HeldMessage;
 
     const makePeerMessaging = (): FakePeerMessaging => {
-      let submitFn: ((modelText: string, displayText: string) => void) | null =
-        null;
+      let submitFn:
+        | ((
+            modelText: string,
+            displayText: string,
+            delivery?: PeerQueuedDelivery,
+          ) => void)
+        | null = null;
       let heldListener: ((held: readonly HeldMessage[]) => void) | null = null;
+      let receiptListener: ((receipt: PeerReceipt) => void) | null = null;
       const value = {
-        setSubmitFn: (fn: (modelText: string, displayText: string) => void) => {
+        setSubmitFn: (
+          fn: (
+            modelText: string,
+            displayText: string,
+            delivery?: PeerQueuedDelivery,
+          ) => void,
+        ) => {
           submitFn = fn;
         },
         setQueuedPeerCount: vi.fn(),
         onHeldChange: (fn: (held: readonly HeldMessage[]) => void) => {
           heldListener = fn;
+          return () => {};
+        },
+        onReceipt: (fn: (receipt: PeerReceipt) => void) => {
+          receiptListener = fn;
           return () => {};
         },
         getHeld: () => [],
@@ -7143,10 +7220,15 @@ describe('AppContainer State Management', () => {
       } as unknown as PeerMessaging;
       return {
         value,
-        submit: (modelText, displayText) => submitFn?.(modelText, displayText),
+        submit: (modelText, displayText, delivery) =>
+          submitFn?.(modelText, displayText, delivery),
         emitHeld: (held) => {
           if (!heldListener) throw new Error('no held-change listener wired');
           heldListener(held);
+        },
+        emitReceipt: (receipt) => {
+          if (!receiptListener) throw new Error('no receipt listener wired');
+          receiptListener(receipt);
         },
       };
     };
@@ -7185,21 +7267,56 @@ describe('AppContainer State Management', () => {
         getQueuedPeerCount: vi.fn().mockReturnValue(0),
       });
       const peer = makePeerMessaging();
+      const delivery = {
+        msgId: 'frame-1',
+        from: '/tmp/peer.sock',
+        toSessionId: 'session-a',
+      };
 
       renderWithPeer(peer);
       act(() => {
-        peer.submit('<cross_session_message …>envelope</…>', 'one-liner');
+        peer.submit(
+          '<cross_session_message …>envelope</…>',
+          'one-liner',
+          delivery,
+        );
       });
 
       expect(addPeerMessage).toHaveBeenCalledWith(
         '<cross_session_message …>envelope</…>',
         'one-liner',
+        delivery,
       );
       expect(addMessage).not.toHaveBeenCalled();
       // close() settles still-queued entries; it needs the live depth.
       expect(peer.value.setQueuedPeerCount).toHaveBeenCalledWith(
         expect.any(Function),
       );
+    });
+
+    it('hands the drain the peer handle at the one production call site', () => {
+      // The drop behaviour itself is covered by the `renderHook` test in
+      // 'Queued submission drain', which injects `peerMessaging` directly —
+      // so it proves the logic and nothing about the container passing the
+      // handle in. Delete that single prop and the drain sees
+      // `peerMessaging === undefined`, the optional call short-circuits, and
+      // an envelope addressed to the session `/clear` replaced is submitted
+      // into its successor: the exact regression the pin check exists to
+      // prevent, with every hook-level test still green.
+      //
+      // Structural rather than behavioural for the reason recorded on the
+      // Ctrl+O guard in 'Thinking expansion': under this harness the mount
+      // effect's
+      // `setConfigInitialized(true)` never re-renders the tree, and the
+      // drain is gated on it, so a rendered AppContainer can never reach a
+      // drain at all here. Reading the call site out of the component's own
+      // source is what is left, and it is a real witness: removing
+      // `peerMessaging` from this call makes the assertion fail.
+      const drainCall = /useQueuedSubmissionDrain\(\{([^}]*)\}/.exec(
+        AppContainer.toString(),
+      );
+      expect(drainCall).not.toBeNull();
+      expect(drainCall![1]).toMatch(/\bpeerMessaging\b/);
     });
 
     it('refuses peer frames once the pending backlog reaches the cap', () => {
@@ -7229,6 +7346,117 @@ describe('AppContainer State Management', () => {
       });
 
       expect(addPeerMessage).not.toHaveBeenCalled();
+    });
+
+    it('announces held and denied receipts, and delivery only after a hold', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+      renderWithPeer(peer);
+      const notices = () =>
+        addItem.mock.calls
+          .map((call) => String((call[0] as { text?: string })?.text ?? ''))
+          .filter((text) => text.startsWith('Message to '));
+
+      // The common case: delivered straight away. Nothing to say.
+      act(() => {
+        peer.emitReceipt({
+          status: 'delivered',
+          address: 'docs-cd',
+          origMsgId: 'm1',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toEqual([]);
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'held',
+          address: 'docs-cd',
+          origMsgId: 'm2',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(1);
+      expect(notices()[0]).toBe(
+        `Message to docs-cd: ${describeDeliveryStatus('held')}`,
+      );
+
+      // The user over there released it: that ends a hold they saw.
+      act(() => {
+        peer.emitReceipt({
+          status: 'delivered',
+          address: 'docs-cd',
+          origMsgId: 'm2',
+          previous: 'held',
+        });
+      });
+      expect(notices()).toHaveLength(2);
+      expect(notices()[1]).toContain(describeDeliveryStatus('delivered'));
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'denied',
+          address: 'app-ab [ab12cd]',
+          origMsgId: 'm3',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(3);
+      expect(notices()[2]).toBe(
+        `Message to app-ab [ab12cd]: ${describeDeliveryStatus('denied')}`,
+      );
+
+      // A stale address is named as such, never as a human's decision.
+      act(() => {
+        peer.emitReceipt({
+          status: 'misaddressed',
+          address: 'docs-cd',
+          origMsgId: 'm4',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(4);
+      expect(notices()[3]).toContain('different session');
+      expect(notices()[3]).not.toContain('declined');
+
+      // An accepted message that expired was never held: the wire text
+      // for 'expired' speaks of a held message and must not be reused.
+      act(() => {
+        peer.emitReceipt({
+          status: 'expired',
+          address: 'docs-cd',
+          origMsgId: 'm5',
+          previous: 'delivered',
+        });
+      });
+      expect(notices()).toHaveLength(5);
+      expect(notices()[4]).toContain('exited before it read');
+      expect(notices()[4]).not.toContain('held');
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'expired',
+          address: 'docs-cd',
+          origMsgId: 'm6',
+          previous: 'held',
+        });
+      });
+      expect(notices()).toHaveLength(6);
+      expect(notices()[5]).toContain(describeDeliveryStatus('expired'));
+
+      // Expired with no delivery at all: the gate could not queue it
+      // (accept backlog full) — the peer may be alive, so no exit claim.
+      act(() => {
+        peer.emitReceipt({
+          status: 'expired',
+          address: 'docs-cd',
+          origMsgId: 'm7',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(7);
+      expect(notices()[6]).not.toContain('exited before');
+      expect(notices()[6]).toContain('too busy');
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {
