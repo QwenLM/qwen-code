@@ -101,6 +101,153 @@ class FakeStdout extends EventEmitter {
   }
 }
 
+/**
+ * Minimal alternate-screen grid emulator: replays raw byte streams the way a
+ * non-reflowing terminal grid applies them (xterm.js alternate-buffer
+ * semantics). Width shrinks truncate rows in place instead of re-wrapping
+ * them — the physical condition an incremental diff's keep-ops cannot
+ * survive once the viewport was cleared or resized under them.
+ */
+class MiniTerminal {
+  private rows: string[];
+  private row = 0;
+  private col = 0;
+
+  constructor(
+    private width: number,
+    private readonly height: number,
+  ) {
+    this.rows = Array.from({ length: height }, () => '');
+  }
+
+  resize(width: number): void {
+    this.width = width;
+    this.rows = this.rows.map((r) => r.slice(0, width));
+    this.col = Math.min(this.col, width);
+  }
+
+  screenText(): string {
+    return this.rows.map((r) => r.trimEnd()).join('\n');
+  }
+
+  private writeChar(char: string): void {
+    if (this.col >= this.width) return;
+    const current = this.rows[this.row] ?? '';
+    this.rows[this.row] =
+      current.slice(0, this.col) + char + current.slice(this.col + 1);
+    this.col += 1;
+  }
+
+  feed(chunk: string): void {
+    let i = 0;
+    while (i < chunk.length) {
+      const char = chunk[i]!;
+      if (char === '\u001B') {
+        if (chunk[i + 1] === '[') {
+          // eslint-disable-next-line no-control-regex
+          const m = /^\u001B\[([?]?)([\d;]*)([@-~])/.exec(chunk.slice(i));
+          if (!m) break;
+          const n = parseInt(m[2]!, 10) || 1;
+          if (m[1] !== '?') {
+            switch (m[3]) {
+              case 'A':
+                this.row = Math.max(0, this.row - n);
+                break;
+              case 'B':
+                this.row = Math.min(this.height - 1, this.row + n);
+                break;
+              case 'C':
+                this.col = Math.min(this.width, this.col + n);
+                break;
+              case 'D':
+                this.col = Math.max(0, this.col - n);
+                break;
+              case 'E':
+                this.row = Math.min(this.height - 1, this.row + n);
+                this.col = 0;
+                break;
+              case 'F':
+                this.row = Math.max(0, this.row - n);
+                this.col = 0;
+                break;
+              case 'G':
+                this.col = Math.min(this.width, n - 1);
+                break;
+              case 'H':
+                this.row = 0;
+                this.col = 0;
+                break;
+              case 'J':
+                if (m[2] === '' || m[2] === '0') {
+                  this.rows[this.row] = (this.rows[this.row] ?? '').slice(
+                    0,
+                    this.col,
+                  );
+                  for (let r = this.row + 1; r < this.height; r++) {
+                    this.rows[r] = '';
+                  }
+                } else {
+                  this.rows = Array.from({ length: this.height }, () => '');
+                }
+                break;
+              case 'K':
+                if (m[2] === '' || m[2] === '0') {
+                  this.rows[this.row] = (this.rows[this.row] ?? '').slice(
+                    0,
+                    this.col,
+                  );
+                } else {
+                  this.rows[this.row] = '';
+                }
+                break;
+              default:
+                break;
+            }
+          }
+          i += m[0].length;
+          continue;
+        }
+        if (chunk[i + 1] === ']') {
+          const bel = chunk.indexOf('\u0007', i);
+          const st = chunk.indexOf('\u001B\\', i);
+          const end =
+            bel !== -1 && (st === -1 || bel < st)
+              ? bel + 1
+              : st !== -1
+                ? st + 2
+                : chunk.length;
+          i = end;
+          continue;
+        }
+        i += 2;
+        continue;
+      }
+      if (char === '\n') {
+        if (this.row >= this.height - 1) {
+          this.rows.shift();
+          this.rows.push('');
+        } else {
+          this.row += 1;
+        }
+        this.col = 0;
+        i++;
+        continue;
+      }
+      if (char === '\r') {
+        this.col = 0;
+        i++;
+        continue;
+      }
+      if (char === '\x07') {
+        i++;
+        continue;
+      }
+      this.writeChar(char);
+      i++;
+    }
+  }
+}
+
 // Mirrors the patched Ink: renderInteractiveFrame publishes its fullscreen
 // decision on the stream immediately before writing a clearTerminal reset.
 const publishResetFullscreen = (stdout: FakeStdout, isFullscreen: boolean) => {
@@ -195,7 +342,7 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
     }
   });
 
-  it('passes a shrink diff through an armed clear window unmodified', () => {
+  it('rewrites an erase-prefixed shrink diff inside the clear window to a full repaint', () => {
     const stdout = new FakeStdout();
     const { restore, repaint } = installTerminalResizeReflow(
       stdout as unknown as NodeJS.WriteStream,
@@ -206,8 +353,9 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
       // A width shrink arms the clear window: ordinary erase-prefixed writes
       // get their erase prefix swapped for CLEAR_VIEWPORT while it is armed.
-      // An incremental shrink diff must bypass that rewrite — the swap would
-      // blank its kept tail (no op is emitted for a kept last line).
+      // An incremental shrink diff inside the window cannot paint its kept
+      // lines onto the resized viewport either — it must become a full
+      // repaint of the transformed frame, not a raw pass-through.
       stdout.columns = 12;
       stdout.emit('resize');
       const next = prev.slice(0, 6);
@@ -218,13 +366,100 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       });
       stdout.written.length = 0;
       stdout.write(diff);
-      expect(stdout.written).toEqual([diff]);
+      expect(stdout.written).toEqual([
+        RETURN_PREFIX + ansiEscapes.clearViewport + next.join('\n'),
+      ]);
       stdout.written.length = 0;
       repaint!();
       const replay = stdout.written[0]!;
       expect(replay).toContain('CHANGED-LINE');
       expect(replay).toContain('line-5-');
       expect(replay).not.toContain('line-6-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('repaints a bare diff armed in the clear window instead of corrupting the resized grid', () => {
+    // Production capture from the #9970 review: after a width shrink, Ink's
+    // resized() clear-only erase is rewritten to a viewport clear, and the
+    // post-shrink redraw can arrive as a bare incremental diff computed
+    // against the PRE-shrink frame. Passing that diff through left the
+    // cleared grid with only the rewritten lines — the composer row
+    // vanished. The armed diff must become a full repaint.
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    const term = new MiniTerminal(100, 32);
+    const feedWritten = () => {
+      for (const w of stdout.written) term.feed(w);
+      stdout.written.length = 0;
+    };
+    try {
+      const prev = [
+        ...frameLines(20, 10),
+        '> and now a follow-up line that fits',
+      ];
+      stdout.write(ansiEscapes.eraseLines(11) + prev.join('\n'));
+      feedWritten();
+      expect(term.screenText()).toContain('and now a follow-up');
+
+      // Shrink to 70: the grid truncates without reflow and the interceptor
+      // arms the clear window.
+      term.resize(70);
+      stdout.columns = 70;
+      stdout.emit('resize');
+      stdout.write(RETURN_PREFIX + ansiEscapes.eraseLines(11));
+      feedWritten();
+
+      // The redraw arrives as a bare diff against the pre-shrink frame: it
+      // rewrites one line and keeps the rest, composer included.
+      const next = prev.slice();
+      next[3] = 'reflowed-line-three';
+      stdout.write(
+        incrementalDiffFrame(prev, next, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      feedWritten();
+
+      const screen = term.screenText();
+      expect(screen).toContain('reflowed-line-three');
+      expect(screen).toContain('and now a follow-up');
+      expect(screen).toContain('line-0-');
+      expect(screen).toContain('line-9-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('repaints an unarmed bare diff inside the clear window instead of passing it through', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      // Width shrink arms the clear window; a bare diff can land inside it
+      // without any clear-only write arming the handoff.
+      stdout.columns = 12;
+      stdout.emit('resize');
+      const next = prev.slice();
+      next[2] = 'WINDOW-UPDATE';
+      const diff = incrementalDiffFrame(prev, next, {
+        trailingNewline: false,
+        returnPrefix: RETURN_PREFIX,
+      });
+      stdout.written.length = 0;
+      stdout.write(diff);
+      expect(stdout.written).toEqual([
+        ansiEscapes.clearViewport + next.join('\n'),
+      ]);
     } finally {
       restore();
     }
@@ -1782,5 +2017,83 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
         restore();
       }
     });
+  });
+});
+
+describe('width shrink with a real Ink instance (issue #9970 review)', () => {
+  it('repaints the post-shrink update in full instead of passing a raw diff', async () => {
+    const stdout = new FakeStdout();
+    stdout.columns = 100;
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    let setValue!: (v: string) => void;
+    const App = () => {
+      const [value, set] = useState('original-value');
+      setValue = set;
+      return createElement(Box, { flexDirection: 'column' }, [
+        ...Array.from({ length: 12 }, (_, i) =>
+          createElement(Text, { key: i }, `line-${i} content`),
+        ),
+        createElement(Text, { key: 'composer' }, `> ${value}`),
+      ]);
+    };
+    let app: Instance | undefined;
+    try {
+      await act(async () => {
+        app = render(createElement(App), {
+          stdout: stdout as unknown as NodeJS.WriteStream,
+          interactive: true,
+          incrementalRendering: true,
+          alternateScreen: true,
+          maxFps: 1000,
+          patchConsole: false,
+        });
+      });
+      await app!.waitUntilRenderFlush();
+
+      const resizeAt = stdout.written.length;
+      stdout.columns = 70;
+      stdout.emit('resize');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      await act(async () => {
+        setValue('updated-value');
+      });
+      await app!.waitUntilRenderFlush();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // Inside the post-shrink clear window the update frame must reach the
+      // terminal as a full viewport repaint — a raw incremental diff there
+      // assumes the pre-shrink grid, which the resize invalidated (the
+      // width-shrink corruption reported on the #9970 review).
+      const updateWrite = stdout.written
+        .slice(resizeAt)
+        .find((w) => w.includes('updated-value'));
+      expect(updateWrite).toBeDefined();
+      expect(updateWrite!.startsWith(ansiEscapes.clearViewport)).toBe(true);
+
+      // End to end: replaying every write on a non-reflowing grid that
+      // resizes at the same point leaves the full frame visible at the new
+      // width, composer included.
+      const term = new MiniTerminal(100, 32);
+      for (let i = 0; i < resizeAt; i++) term.feed(stdout.written[i]!);
+      term.resize(70);
+      for (let i = resizeAt; i < stdout.written.length; i++) {
+        term.feed(stdout.written[i]!);
+      }
+      const screen = term.screenText();
+      expect(screen).toContain('line-0 content');
+      expect(screen).toContain('line-11 content');
+      expect(screen).toContain('> updated-value');
+    } finally {
+      if (app) {
+        await act(async () => {
+          app!.unmount();
+        });
+      }
+      restore();
+    }
   });
 });

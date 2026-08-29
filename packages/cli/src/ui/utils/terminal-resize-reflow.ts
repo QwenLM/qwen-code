@@ -615,8 +615,6 @@ export function installTerminalResizeReflow(
         // VP incremental shrink-diff frames carry the erase prefix in front
         // of a cursorUp to the frame top plus line ops; apply them as a
         // transform instead of mistaking the fragment for a full frame.
-        // Such a frame is self-consistent against the post-shrink screen,
-        // so it also skips the clear-window rewrite below.
         const head = isVP ? parseDiffHead(content) : null;
         let incrementalShrinkDiff = false;
         if (head !== null) {
@@ -642,6 +640,15 @@ export function installTerminalResizeReflow(
           expectFirstFrame = false;
           barePrintableCount = 0;
           burstCaptured = false;
+          if (Date.now() < clearUntil) {
+            // Inside the post-shrink window the resized viewport no longer
+            // holds the frame the diff's keep-ops assume (and the rewrite
+            // below blanks it for every other redraw), so replay the
+            // transformed frame over a clean viewport instead of passing
+            // the diff through.
+            chunk =
+              chunk.slice(0, match.index) + CLEAR_VIEWPORT + model.content;
+          }
         } else {
           const printable = stripAnsi(content).trim() !== '';
           if (printable && head === null) {
@@ -794,6 +801,12 @@ export function installTerminalResizeReflow(
             expectFirstFrame = false;
             barePrintableCount = 0;
             burstCaptured = false;
+            if (Date.now() < clearUntil) {
+              // Same clear-window rule as erase-prefixed shrink diffs: the
+              // diff was computed against the pre-shrink frame, which the
+              // resized (and clear-window-blanked) viewport no longer shows.
+              chunk = CLEAR_VIEWPORT + model.content;
+            }
           } else if (diffHead === null) {
             if (modelFrame(chunk, barePrintableCount > 1 && !late)) {
               burstCaptured = true;
@@ -841,6 +854,12 @@ export function installTerminalResizeReflow(
         if (model.content !== '') {
           const applied = applyIncrementalDiff(model, chunk, currentWidth);
           debugLogger.debug('diff', { applied });
+          if (applied && Date.now() < clearUntil) {
+            // Clear-window rule: a diff inside the window cannot paint its
+            // kept lines onto the resized/blanked viewport; replay the
+            // transformed frame in full instead.
+            chunk = CLEAR_VIEWPORT + model.content;
+          }
         }
       }
     }
