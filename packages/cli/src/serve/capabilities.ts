@@ -190,8 +190,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // unregistered — the toggle takes effect on the next ACP child spawn
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
-  workspace_skill_toggle: { since: 'v1' },
-  workspace_skill_batch_toggle: { since: 'v1' },
+  workspace_skill_settings_toggle: { since: 'v1' },
+  workspace_skill_settings_batch_toggle: { since: 'v1' },
   extension_batch_activation_v2: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
   workspace_settings: { since: 'v1' },
@@ -357,6 +357,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_display_name: { since: 'v1' },
   scratch_workspace_registration: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
+  // A native OS directory picker can be opened on the daemon host
+  // (osascript on macOS, PowerShell on Windows, zenity on a Linux host
+  // with a display). Headless hosts omit the tag so clients hide the
+  // Browse affordance instead of surfacing a guaranteed picker failure.
+  native_directory_picker: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
   // memory, workspace agent CRUD, and persisted session organization surfaces.
@@ -448,6 +453,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. `/live/status` remains the dynamic readiness surface for the Host,
   // permissions, self-checks, and provider reachability.
   realtime_voice: { since: 'v1' },
+  web_terminal: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -501,6 +507,7 @@ export interface AdvertiseFeatureToggles {
   persistentWorkspaceRegistrationAvailable?: boolean;
   scratchWorkspaceRegistrationAvailable?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  nativeDirectoryPickerAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
@@ -640,6 +647,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.workspaceRuntimeRemovalAvailable === true,
   ],
   [
+    'native_directory_picker',
+    (toggles) => toggles.nativeDirectoryPickerAvailable === true,
+  ],
+  [
     'workspace_qualified_acp',
     // The plural routes are pre-mounted for workspaces registered after app
     // creation, but the capability becomes meaningful only once a secondary
@@ -683,6 +694,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) =>
       toggles.acpHttpEnabled === true && toggles.realtimeVoiceEnabled === true,
   ],
+  ['web_terminal', (toggles) => toggles.acpHttpEnabled === true],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

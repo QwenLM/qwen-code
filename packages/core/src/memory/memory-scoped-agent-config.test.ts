@@ -581,30 +581,98 @@ describe('createMemoryScopedAgentConfig', () => {
     ).resolves.toBe('deny');
   });
 
-  it('delegates isPermissionsAllowListActive to the base PM so the scheduler message branch never throws (#9827)', () => {
-    // The scheduler's permission-denied message branch calls
-    // `isPermissionsAllowListActive()` on whatever
-    // `getPermissionManager()` returns. Before this shim exposed the
-    // method, a shim-rejected call under an active allowlist threw
-    // `TypeError: pm.isPermissionsAllowListActive is not a function`
-    // instead of producing the designed permission error.
-    const basePm: Pick<PermissionManager, 'isPermissionsAllowListActive'> = {
-      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
-    };
-    const active = permissionManager(
-      createMemoryScopedAgentConfig(
-        {
-          getPermissionManager: () => basePm as PermissionManager,
-        } as Config,
-        projectRoot,
-      ),
-    );
-    expect(active.isPermissionsAllowListActive()).toBe(true);
+  describe('registration-gate shim delegation (#10075)', () => {
+    it('isToolDisabledByCoreToolsAllowList delegates when present, defaults to false otherwise', () => {
+      const gate = vi.fn().mockReturnValue(true);
+      const withGate: Pick<
+        PermissionManager,
+        'isToolDisabledByCoreToolsAllowList'
+      > = {
+        isToolDisabledByCoreToolsAllowList: gate,
+      };
+      const delegated = permissionManager(
+        createMemoryScopedAgentConfig(
+          {
+            getPermissionManager: () => withGate as PermissionManager,
+          } as Config,
+          projectRoot,
+        ),
+      );
+      expect(delegated.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+        true,
+      );
+      expect(gate).toHaveBeenCalledWith(ToolNames.EDIT);
 
-    const withoutBase = permissionManager(
-      createMemoryScopedAgentConfig({} as Config, projectRoot),
-    );
-    expect(withoutBase.isPermissionsAllowListActive()).toBe(false);
+      const noBase = permissionManager(
+        createMemoryScopedAgentConfig({} as Config, projectRoot),
+      );
+      expect(noBase.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+        false,
+      );
+
+      // A base PM without the method (older shape) must not throw — the
+      // scheduler's own `typeof` guard relies on this returning false.
+      const legacyBase: Pick<PermissionManager, 'isToolEnabled'> = {
+        isToolEnabled: vi.fn().mockResolvedValue(true),
+      };
+      const legacy = permissionManager(
+        createMemoryScopedAgentConfig(
+          {
+            getPermissionManager: () => legacyBase as PermissionManager,
+          } as Config,
+          projectRoot,
+        ),
+      );
+      expect(legacy.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+        false,
+      );
+    });
+
+    it('getToolRegistrationStatus delegates when present, defaults to registered', async () => {
+      // Use a non-scoped tool: edit/write_file/shell short-circuit as
+      // scoped tools before the base delegation.
+      const status = vi.fn().mockResolvedValue('disabled');
+      const withStatus: Pick<PermissionManager, 'getToolRegistrationStatus'> = {
+        getToolRegistrationStatus: status,
+      };
+      const delegated = permissionManager(
+        createMemoryScopedAgentConfig(
+          {
+            getPermissionManager: () => withStatus as PermissionManager,
+          } as Config,
+          projectRoot,
+        ),
+      );
+      await expect(
+        delegated.getToolRegistrationStatus(ToolNames.WEB_FETCH),
+      ).resolves.toBe('disabled');
+      expect(status).toHaveBeenCalledWith(ToolNames.WEB_FETCH);
+
+      const noBase = permissionManager(
+        createMemoryScopedAgentConfig({} as Config, projectRoot),
+      );
+      await expect(
+        noBase.getToolRegistrationStatus(ToolNames.WEB_FETCH),
+      ).resolves.toBe('registered');
+    });
+
+    it('gates the shell registration status on allowShell', async () => {
+      const disabled = permissionManager(
+        createMemoryScopedAgentConfig({} as Config, projectRoot),
+      );
+      await expect(
+        disabled.getToolRegistrationStatus(ToolNames.SHELL),
+      ).resolves.toBe('disabled');
+
+      const enabled = permissionManager(
+        createMemoryScopedAgentConfig({} as Config, projectRoot, {
+          allowShell: true,
+        }),
+      );
+      await expect(
+        enabled.getToolRegistrationStatus(ToolNames.SHELL),
+      ).resolves.toBe('registered');
+    });
   });
 });
 

@@ -49,7 +49,7 @@ describe('NotebookEditTool', () => {
       getFileReadCache: () => fileReadCache,
       getFileHistoryService: () => mockFileHistoryService,
       getFileReadCacheDisabled: () => false,
-      getGeminiClient: vi.fn(),
+      getLlmClient: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getIdeMode: () => false,
       getApiKey: () => 'test-api-key',
