@@ -177,7 +177,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
               items: ['title', 'environment', 'rightPanel', 'tokenUsage'],
             },
             rightPanel: {
-              items: ['review', 'sideTask'],
+              items: ['review', 'sideTask', 'terminal'],
             },
             environmentPanel: {
               items: ['environment', 'subagents', 'backgroundTasks'],
@@ -197,7 +197,15 @@ async function main() {
   const daemonToken = getDaemonToken() ?? (await waitForDaemonTokenMessage());
   removeDaemonTokenFromUrl();
 
-  ReactDOM.createRoot(document.getElementById('root')!).render(
+  const container = document.getElementById('root');
+  // Boot can outlast the watchdog's grace period (a slow daemon, a token
+  // handshake that only completes after a restart settles), in which case
+  // index.html's fallback panel is already in #root. React appends to the
+  // container rather than replacing it, so drop the panel here — otherwise
+  // the recovered app renders below a full-viewport "failed to load" screen.
+  container?.querySelector('[data-boot-fallback]')?.remove();
+
+  ReactDOM.createRoot(container!).render(
     <React.StrictMode>
       <StandaloneApp daemonToken={daemonToken} />
     </React.StrictMode>,

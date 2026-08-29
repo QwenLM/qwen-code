@@ -34,10 +34,12 @@ validate_floor_override() {
       ;;
   esac
 
-  normalized="$(sed 's/^0*//' <<< "$value")"
+  normalized="${value#"${value%%[!0]*}"}"
   if [ -z "$normalized" ]; then
     normalized=0
   fi
+  # Same-length decimal strings sort numerically; arithmetic can overflow.
+  # shellcheck disable=SC2071
   if [ "${#normalized}" -gt 19 ] ||
     { [ "${#normalized}" -eq 19 ] && [[ "$normalized" > "$MAX_BASH_INT" ]]; }; then
     echo "::error::${name} must fit in a signed 64-bit integer"
