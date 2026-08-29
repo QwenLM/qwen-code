@@ -1023,6 +1023,9 @@ describe('WorkspaceSection git chip', () => {
       chipButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flush();
+    // Opening the picker fetches a fresh status for its action hints and
+    // hands it back to the chip.
+    expect(workspaceGit).toHaveBeenCalledTimes(2);
 
     // The picker content is portaled outside the section container.
     const mainItem = Array.from(document.body.querySelectorAll('button')).find(
@@ -1035,7 +1038,7 @@ describe('WorkspaceSection git chip', () => {
     await flush();
 
     expect(workspaceGitCheckout).toHaveBeenCalledWith('main', undefined);
-    expect(workspaceGit).toHaveBeenCalledTimes(2);
+    expect(workspaceGit).toHaveBeenCalledTimes(3);
   });
 
   it('hides the chip for an untrusted workspace and never queries git', async () => {
