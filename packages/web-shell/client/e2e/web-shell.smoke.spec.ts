@@ -1646,7 +1646,9 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
     await expect(surface).toBeVisible();
 
     await page.keyboard.press('Control+r');
-    const historySearch = surface.locator('input');
+    const historySearch = surface.locator(
+      '[data-web-shell-composer-history-search]',
+    );
     await expect(historySearch).toBeVisible();
     const searchPanel = historySearch.locator('..').locator('..');
     await expect
