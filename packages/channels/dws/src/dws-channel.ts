@@ -1044,12 +1044,19 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       await this.sendMessage(chatId, text);
       return;
     }
+    const idempotencyKey = stableUuid(
+      `${this.name}\0${chatId}\0${messageId}\0${text}`,
+    );
+    if (this.findImTarget(chatId)?.kind === 'direct') {
+      await this.sendImText(chatId, text, idempotencyKey);
+      return;
+    }
     await this.client.replyToImMessage(
       chatId,
       messageId,
       senderId,
       text,
-      stableUuid(`${this.name}\0${chatId}\0${messageId}\0${text}`),
+      idempotencyKey,
     );
   }
 
@@ -1121,20 +1128,29 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       );
       for (const message of page.messages) {
         if (signal.aborted || !this.connected) return;
-        if (this.isSelfMessage(message)) {
-          this.markProcessedMessage(messageKey(message));
-          continue;
-        }
         const key = messageKey(message);
         if (this.cursor.processedMessages.includes(key)) {
           continue;
         }
-        const notification = parseDocumentMentionNotification(message.content);
-        if (!notification) continue;
-        await this.processDocumentNotification(message, key, notification);
+        // A parked message is already re-driven every poll by
+        // `replayPendingMessages`; dispatching it here too would spend the
+        // shared retry budget twice per poll.
+        if (this.hasPendingMessage(key)) continue;
+        try {
+          await this.handleImMessage({ kind: 'direct' }, message, true);
+        } catch (error) {
+          // A failed plain direct message was just parked for replay, so the
+          // page can keep moving. An unparked failure — a document
+          // notification's turn — must still abort the window: the pinned
+          // watermark is what re-fetches it until its budget is spent.
+          if (!this.hasPendingMessage(key)) throw error;
+          process.stderr.write(
+            `[Channel:${this.name}] direct-message dispatch failed mid-window; the message is parked for retry: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+          );
+        }
       }
       if (this.notificationWatermarkPulledBack) {
-        // R4-4: a stale document notification replayed while this window's
+        // R4-4: a stale direct message replayed while this window's
         // fetch was in flight, and `handleImMessage` pulled the watermark back
         // to cover it. That replay was left UNMARKED on purpose for history
         // polling, so finishing this window normally would undo the rescue:
@@ -1458,13 +1474,13 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       message.eventTime !== undefined &&
       message.eventTime < this.connectionStartedAt - 5_000
     ) {
-      if (!parseDocumentMentionNotification(message.content)) {
+      if (source.kind !== 'direct') {
         this.markProcessedMessage(messageKey(message));
         this.saveCursor();
         return;
       }
-      // A replayed document notification is left UNMARKED on purpose, for
-      // history polling to pick up. That only works if polling will ever look
+      // A replayed direct message is left UNMARKED on purpose, for history
+      // polling to pick up. That only works if polling will ever look
       // that far back: on a fresh cursor `notificationWatermark` starts at
       // `connectionStartedAt` and the query window opens at `watermark − 5s`
       // — exactly this branch's drop boundary — so every message this branch
@@ -1485,6 +1501,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       // a replay no window will ever cover. Drop the checkpoint here too, so
       // the pullback survives regardless of when it arrived.
       this.cursor.notificationCheckpoint = undefined;
+      process.stderr.write(
+        `[Channel:${this.name}] parked a stale direct message for history polling and pulled the watermark back to ${message.eventTime}: ${sanitizeLogText(message.messageId, 120)}\n`,
+      );
       this.saveCursor();
       return;
     }
@@ -1504,12 +1523,24 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return;
     }
     const key = messageKey(message);
+    let waitedOnInFlight = false;
+    let inFlightError: unknown;
     while (true) {
       const existing = this.processingMessages.get(key);
       if (!existing) break;
-      await existing.catch(() => undefined);
+      waitedOnInFlight = true;
+      inFlightError = await existing.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
     }
     if (this.cursor.processedMessages.includes(key)) return;
+    // The in-flight turn failed and parked the message while this caller
+    // waited; replay already re-drives parked entries every poll, so a new
+    // turn here would spend the retry budget twice in one poll. Rethrow
+    // instead of returning so `replayPendingMessages` keeps the entry — a
+    // normal return there deletes it.
+    if (waitedOnInFlight && this.hasPendingMessage(key)) throw inFlightError;
     const task = this.processImMessage(source, message, key);
     this.processingMessages.set(key, task);
     try {
@@ -1582,10 +1613,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     } catch (error) {
       if (source.kind !== 'at') {
         // R12-1: park failed direct messages next to ambient group ones.
-        // The DM history loop dispatches document-mention notifications
-        // only, so nothing else ever re-drove a plain DM whose turn threw
-        // once. `at` messages need no parking: the pinned mention
-        // checkpoint re-fetches them.
+        // Direct-message history may be unavailable, and ambient group
+        // messages have no history fallback. `at` messages need no parking:
+        // the pinned mention checkpoint re-fetches them.
         this.rememberPendingMessage(source, message);
       }
       // Under budget the throw propagates exactly as before, so redelivery
@@ -1678,8 +1708,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     message: DwsImMessage,
   ): void {
     const key = messageKey(message);
+    if (this.hasPendingMessage(key)) return;
     const pending = this.cursor.pendingMessages ?? [];
-    if (pending.some((item) => messageKey(item.message) === key)) return;
     while (pending.length >= MAX_PROCESSED_ITEMS) {
       const dropped = pending.shift();
       if (!dropped) break;
@@ -1888,6 +1918,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         );
       }
     }
+  }
+
+  private hasPendingMessage(key: string): boolean {
+    return (this.cursor.pendingMessages ?? []).some(
+      (pending) => messageKey(pending.message) === key,
+    );
   }
 
   private hasPendingDocumentNotification(notificationKey: string): boolean {

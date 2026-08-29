@@ -37,6 +37,7 @@ import {
   updateCronTasks,
   generateCronTaskId,
   appendCronRun,
+  annotateCronRunSession,
   taskHasLegacyCondition,
   parseCron,
   nextFireTime,
@@ -45,6 +46,7 @@ import {
   Storage,
   stripTerminalControlSequences,
   MAX_JOBS,
+  type CronRunSessionOutcome,
   type CronTaskDelivery,
   type DurableCronTask,
   type CronTaskRun,
@@ -67,9 +69,14 @@ import {
   resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
   sendConversationRuntimeUnavailable,
   sendGenerationClosedError,
-  sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
+import {
+  buildScheduledTaskRunPrompt,
+  scheduledTaskRunSessionName,
+  scheduledTaskRunSourceId,
+  SCHEDULED_TASK_RUN_SOURCE_TYPE,
+} from '../../runtime/scheduled-task-run.js';
 
 // The per-file create cap, shared with the scheduler's MAX_JOBS. The scheduler
 // caps DURABLE loads against a durable-only budget of MAX_JOBS (independent of
@@ -88,10 +95,22 @@ export interface ScheduledTasksSessionBridge {
   spawnOrAttach(req: {
     workspaceCwd: string;
     sessionScope?: 'single' | 'thread';
+    parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
   }): Promise<{ sessionId: string }>;
+  sendPrompt?(
+    sessionId: string,
+    req: {
+      sessionId: string;
+      prompt: Array<{ type: 'text'; text: string }>;
+    },
+    signal?: AbortSignal,
+    context?: { onPromptAdmitted?: () => void },
+  ): Promise<unknown>;
   closeSession(sessionId: string): Promise<unknown>;
+  /** Persist a restorable transcript anchor for an eligible default session. */
+  ensureDefaultSessionPersisted?(sessionId: string): Promise<void>;
   /** Advance the in-memory session-catalog revision after a successful
    * persisted removal driven by task cleanup. Optional so existing
    * structural test fakes stay source-compatible; the production bridge
@@ -106,7 +125,10 @@ export interface ScheduledTasksSessionBridge {
   getSessionSummary(sessionId: string): {
     workspaceCwd: string;
     hasActivePrompt: boolean;
+    pendingInteractionCount?: number;
+    parentSessionId?: string;
     sourceType?: string;
+    sourceId?: string;
   };
 }
 
@@ -114,9 +136,8 @@ export interface ScheduledTasksSessionBridge {
 // prompt (which can be up to MAX_PROMPT_LENGTH).
 const MAX_SESSION_NAME_LENGTH = 60;
 
-/** Builds a readable session name for a task from its name (or prompt), marked
- * with a clock so scheduled-task sessions are recognizable in the list. Strips
- * terminal control sequences (C0/C1/DEL/ANSI) — the bridge's title guard REJECTS
+/** Builds a readable session name for a task — or one of its per-run child
+ * sessions — from its name (or prompt). Strips terminal control sequences (C0/C1/DEL/ANSI) — the bridge's title guard REJECTS
  * them, so an unsanitized control char would silently drop the whole rename and
  * leave a bare-id session — plus Unicode Bidi_Control marks (ALM/LRM/RLM,
  * embedding/override, isolates) as a Trojan-Source-style reordering defense for
@@ -140,7 +161,7 @@ export function scheduledTaskSessionName(label: string): string {
     if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
     short = `${cleaned.slice(0, cut)}…`;
   }
-  return `⏰ ${short}`;
+  return short;
 }
 
 /**
@@ -149,7 +170,7 @@ export function scheduledTaskSessionName(label: string): string {
  * missing bridge means tasks are created unbound (shared per-project
  * durable-owner firing) — the same fallback a bridge-less embedding gets.
  */
-interface ScheduledTaskTarget {
+export interface ScheduledTaskTarget {
   workspaceCwd: string;
   runtimeBaseDir?: string;
   bridge?: ScheduledTasksSessionBridge;
@@ -157,6 +178,269 @@ interface ScheduledTaskTarget {
   assertGenerationOpen?: () => void;
   activity?: ConversationRuntimeActivityGate;
   resolveLiveSessionOwner?: WorkspaceRegistry['resolveLiveSessionOwner'];
+}
+
+export interface ExistingSessionScheduledTaskCreateInput {
+  sessionId: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  enabled?: boolean;
+  sessionMode?: 'persistent' | 'per_run';
+  name?: string;
+  delivery?: CronTaskDelivery;
+}
+
+export class ExistingSessionScheduledTaskCreateError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ExistingSessionScheduledTaskCreateError';
+  }
+}
+
+function assertReusableScheduledTaskSession(
+  target: ScheduledTaskTarget,
+  sessionId: string,
+  allowActivePrompt: boolean,
+  assertCallerPromptActive?: () => void,
+): void {
+  const { bridge, workspaceCwd } = target;
+  if (!bridge) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      409,
+      'session_binding_unavailable',
+      'Session management is not available for this workspace',
+    );
+  }
+  assertCallerPromptActive?.();
+  let owner:
+    | ReturnType<NonNullable<ScheduledTaskTarget['resolveLiveSessionOwner']>>
+    | undefined;
+  try {
+    owner = target.resolveLiveSessionOwner?.(sessionId);
+  } catch (error) {
+    writeStderrLine(
+      `qwen serve: failed to resolve scheduled-task session owner '${sessionId}': ${error instanceof Error ? error.message : String(error)}`,
+    );
+    throw new ExistingSessionScheduledTaskCreateError(
+      500,
+      'scheduled_tasks_session_failed',
+      'Failed to look up the requested session',
+    );
+  }
+  if (owner?.kind === 'unavailable') {
+    throw new ExistingSessionScheduledTaskCreateError(
+      503,
+      'workspace_runtime_unavailable',
+      'The workspace runtime is unavailable',
+    );
+  }
+  if (owner?.kind === 'ambiguous') {
+    throw new ExistingSessionScheduledTaskCreateError(
+      500,
+      'ambiguous_session_owner',
+      `Session owner is ambiguous for "${sessionId}"`,
+    );
+  }
+  if (owner?.kind === 'found' && owner.runtime.workspaceCwd !== workspaceCwd) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      400,
+      'session_workspace_mismatch',
+      "The requested session belongs to a different workspace; use that workspace's scheduled-task endpoint",
+    );
+  }
+
+  let summary: ReturnType<ScheduledTasksSessionBridge['getSessionSummary']>;
+  try {
+    summary = bridge.getSessionSummary(sessionId);
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      throw new ExistingSessionScheduledTaskCreateError(
+        404,
+        'session_not_found',
+        `Session '${sessionId}' was not found`,
+      );
+    }
+    writeStderrLine(
+      `qwen serve: failed to look up scheduled-task session '${sessionId}': ${error instanceof Error ? error.message : String(error)}`,
+    );
+    throw new ExistingSessionScheduledTaskCreateError(
+      500,
+      'scheduled_tasks_session_failed',
+      'Failed to look up the requested session',
+    );
+  }
+  if (summary.workspaceCwd !== workspaceCwd) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      400,
+      'session_workspace_mismatch',
+      "The requested session belongs to a different workspace; use that workspace's scheduled-task endpoint",
+    );
+  }
+  if (
+    (!allowActivePrompt && summary.hasActivePrompt) ||
+    (summary.pendingInteractionCount ?? 0) > 0
+  ) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      409,
+      'session_busy',
+      allowActivePrompt
+        ? 'The caller session has a pending interaction; resolve it before binding the session to a task'
+        : 'The requested session is busy; wait for its active prompt or pending interaction to finish before binding it to a task',
+    );
+  }
+  if (summary.sourceType === 'scheduled_task') {
+    throw new ExistingSessionScheduledTaskCreateError(
+      409,
+      'session_already_bound',
+      'The requested session is already reserved for a scheduled task',
+    );
+  }
+  if (
+    summary.parentSessionId !== undefined ||
+    summary.sourceId !== undefined ||
+    (summary.sourceType !== undefined && summary.sourceType !== 'default')
+  ) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      409,
+      'session_source_ineligible',
+      'The requested session source cannot own a scheduled task',
+    );
+  }
+}
+
+export async function createScheduledTaskWithExistingSession(
+  target: ScheduledTaskTarget,
+  input: ExistingSessionScheduledTaskCreateInput,
+  options:
+    | { source: 'rest' }
+    | { source: 'cron-tool'; assertCallerPromptActive: () => void },
+): Promise<DurableCronTask> {
+  if (
+    input.cron.length === 0 ||
+    input.cron.length > MAX_CRON_LENGTH ||
+    validateCron(input.cron) !== null
+  ) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      400,
+      'invalid_cron',
+      'The scheduled-task cron expression is invalid',
+    );
+  }
+  const prompt = input.prompt.trim();
+  if (prompt.length === 0 || prompt.length > MAX_PROMPT_LENGTH) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      400,
+      'invalid_prompt',
+      'The scheduled-task prompt is invalid',
+    );
+  }
+  const allowActivePrompt = options.source === 'cron-tool';
+  const assertCallerPromptActive =
+    options.source === 'cron-tool'
+      ? options.assertCallerPromptActive
+      : undefined;
+  assertReusableScheduledTaskSession(
+    target,
+    input.sessionId,
+    allowActivePrompt,
+    assertCallerPromptActive,
+  );
+  target.assertGenerationOpen?.();
+
+  if (options.source === 'rest') {
+    const ensurePersisted = target.bridge?.ensureDefaultSessionPersisted;
+    if (!ensurePersisted) {
+      throw new ExistingSessionScheduledTaskCreateError(
+        409,
+        'session_binding_unavailable',
+        'Session persistence is not available for this workspace',
+      );
+    }
+    try {
+      await ensurePersisted.call(target.bridge, input.sessionId);
+    } catch (error) {
+      target.assertGenerationOpen?.();
+      if (error instanceof SessionNotFoundError) {
+        throw new ExistingSessionScheduledTaskCreateError(
+          404,
+          'session_not_found',
+          `Session '${input.sessionId}' was not found`,
+        );
+      }
+      writeStderrLine(
+        `qwen serve: failed to persist scheduled-task session '${input.sessionId}': ${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw new ExistingSessionScheduledTaskCreateError(
+        500,
+        'session_persistence_failed',
+        'Failed to persist the requested session',
+      );
+    }
+    target.assertGenerationOpen?.();
+  }
+
+  const now = Date.now();
+  const task: DurableCronTask = {
+    id: generateCronTaskId(),
+    cron: input.cron,
+    prompt,
+    recurring: input.recurring,
+    createdAt: now,
+    lastFiredAt: now - (now % 60_000),
+    enabled: input.enabled !== false,
+    sessionId: input.sessionId,
+    sessionOwnedByTask: false,
+    sessionMode: input.sessionMode === 'per_run' ? 'per_run' : 'persistent',
+    ...(input.delivery !== undefined ? { delivery: input.delivery } : {}),
+    ...(input.name !== undefined ? { name: input.name } : {}),
+  };
+  let before: DurableCronTask[] | undefined;
+  let after: DurableCronTask[] | undefined;
+  await runWithScheduledTaskTarget(target, () =>
+    updateCronTasks(
+      target.workspaceCwd,
+      (tasks) => {
+        assertReusableScheduledTaskSession(
+          target,
+          input.sessionId,
+          allowActivePrompt,
+          assertCallerPromptActive,
+        );
+        if (
+          tasks.some((candidate) => candidate.sessionId === input.sessionId)
+        ) {
+          throw new ExistingSessionScheduledTaskCreateError(
+            409,
+            'session_already_bound',
+            'The requested session is already bound to another scheduled task',
+          );
+        }
+        if (tasks.length >= MAX_SCHEDULED_TASKS) {
+          throw new ExistingSessionScheduledTaskCreateError(
+            409,
+            'max_tasks_reached',
+            `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
+          );
+        }
+        before = tasks;
+        after = [...tasks, task];
+        return after;
+      },
+      { assertCanCommit: target.assertGenerationOpen },
+    ),
+  );
+  try {
+    target.assertGenerationOpen?.();
+  } catch (error) {
+    await rollbackCronMutation(target, before, after, 'scheduled-task create');
+    throw error;
+  }
+  return task;
 }
 
 function requireOpenGeneration(
@@ -190,6 +474,40 @@ async function rollbackCronMutation(
   });
 }
 
+/**
+ * Puts a one-shot task back after its manual run failed to dispatch.
+ *
+ * Unlike {@link rollbackCronMutation} this is keyed by task id, not by
+ * whole-file equality: the dispatch window is wide enough for an unrelated
+ * write to land on the same workspace file (a recurring task's tick persist, a
+ * keepalive binding a task, another client's PATCH), and an equality-gated
+ * undo would silently decline — permanently destroying a schedule that never
+ * executed. Restores at the task's original position and no-ops when the task
+ * is somehow still present.
+ */
+async function restoreConsumedOneShot(
+  target: ScheduledTaskTarget,
+  before: DurableCronTask[] | undefined,
+  id: string,
+  route: string,
+): Promise<void> {
+  const index = before?.findIndex((t) => t.id === id) ?? -1;
+  const original = index === -1 ? undefined : before![index];
+  if (!original) return;
+  await runWithScheduledTaskTarget(target, () =>
+    updateCronTasks(target.workspaceCwd, (tasks) => {
+      if (tasks.some((t) => t.id === id)) return tasks; // never consumed → no write
+      const restored = [...tasks];
+      restored.splice(Math.min(index, restored.length), 0, original);
+      return restored;
+    }),
+  ).catch((error) => {
+    writeStderrLine(
+      `qwen serve: ${route} failed to restore the consumed one-shot task: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
+}
+
 async function teardownBoundSession(
   target: ScheduledTaskTarget,
   sessionId: string,
@@ -205,6 +523,82 @@ async function teardownBoundSession(
       .catch(() => false);
     if (removed) target.bridge.markSessionCatalogChanged?.();
   }
+}
+
+async function dispatchTaskToFreshSession(
+  target: ScheduledTaskTarget,
+  task: DurableCronTask,
+): Promise<string> {
+  const { bridge } = target;
+  const sendPrompt = bridge?.sendPrompt?.bind(bridge);
+  if (!bridge || !sendPrompt || !task.sessionId) {
+    throw new Error('Fresh-session dispatch is unavailable for this task');
+  }
+  const triggeredAt = task.lastFiredAt ?? Date.now();
+  const child = await runWithScheduledTaskTarget(target, () =>
+    bridge.spawnOrAttach({
+      workspaceCwd: target.workspaceCwd,
+      sessionScope: 'thread',
+      parentSessionId: task.sessionId,
+      sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,
+      sourceId: scheduledTaskRunSourceId(task.id),
+    }),
+  );
+  try {
+    bridge.updateSessionMetadata(child.sessionId, {
+      displayName: scheduledTaskRunSessionName(
+        task.name ?? task.prompt,
+        triggeredAt,
+      ),
+    });
+  } catch {
+    // The prompt can still run with the generated session id as its label.
+  }
+  try {
+    let markPromptAdmitted!: () => void;
+    const promptAdmitted = new Promise<void>((resolve) => {
+      markPromptAdmitted = resolve;
+    });
+    const turn = sendPrompt(
+      child.sessionId,
+      {
+        sessionId: child.sessionId,
+        prompt: [
+          {
+            type: 'text',
+            text: buildScheduledTaskRunPrompt({
+              id: task.id,
+              name: task.name,
+              cron: task.cron,
+              prompt: task.prompt,
+              triggeredAt,
+              trigger: 'manual',
+            }),
+          },
+        ],
+      },
+      undefined,
+      {
+        onPromptAdmitted: markPromptAdmitted,
+      },
+    );
+    await Promise.race([
+      promptAdmitted,
+      turn.then(
+        () => undefined,
+        (error) => Promise.reject(error),
+      ),
+    ]);
+    void turn.catch((error) => {
+      writeStderrLine(
+        `qwen serve: scheduled-task session ${child.sessionId} prompt failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  } catch (error) {
+    await teardownBoundSession(target, child.sessionId);
+    throw error;
+  }
+  return child.sessionId;
 }
 
 /**
@@ -305,6 +699,7 @@ interface ScheduledTaskView {
   lastFiredAt: number | null;
   nextRunAt: number | null;
   sessionId: string | null;
+  sessionMode: 'persistent' | 'per_run';
   runs: CronTaskRun[];
   delivery?: CronTaskDelivery;
 }
@@ -346,6 +741,7 @@ function toView(task: DurableCronTask): ScheduledTaskView {
       typeof task.sessionId === 'string' && task.sessionId.length > 0
         ? task.sessionId
         : null,
+    sessionMode: task.sessionMode === 'per_run' ? 'per_run' : 'persistent',
     // Absent runs (tool-created / never-fired) normalizes to [] so the client
     // never special-cases undefined.
     runs: Array.isArray(task.runs) ? task.runs : [],
@@ -533,6 +929,15 @@ function registerScheduledTaskCrudRoutes(
         });
         return;
       }
+      const sessionMode =
+        body['sessionMode'] === undefined ? 'persistent' : body['sessionMode'];
+      if (sessionMode !== 'persistent' && sessionMode !== 'per_run') {
+        res.status(400).json({
+          error: '`sessionMode` must be "persistent" or "per_run"',
+          code: 'invalid_session_mode',
+        });
+        return;
+      }
       const parsedSessionId = parseCallerSuppliedSessionId(body['sessionId']);
       if (parsedSessionId.kind === 'invalid') {
         res.status(400).json({
@@ -556,6 +961,13 @@ function registerScheduledTaskCrudRoutes(
           return;
         }
       }
+      if (sessionMode === 'per_run' && delivery !== undefined) {
+        res.status(400).json({
+          error: 'Per-run sessions do not support channel delivery',
+          code: 'session_mode_delivery_unsupported',
+        });
+        return;
+      }
       const removedField = findRemovedTaskField(body);
       if (removedField) {
         res.status(400).json(removedFieldError(removedField));
@@ -565,85 +977,68 @@ function registerScheduledTaskCrudRoutes(
       const enabled = body['enabled'] !== false;
       const taskId = generateCronTaskId();
 
-      let boundSessionId: string | undefined;
-      let sessionMintedHere = false;
-      if (providedSessionId !== undefined && !bridge) {
+      if (sessionMode === 'per_run' && (!bridge || !bridge.sendPrompt)) {
         res.status(409).json({
-          error: 'Session management is not available for this workspace',
-          code: 'session_binding_unavailable',
+          error: 'Fresh-session dispatch is not available for this workspace',
+          code: 'session_mode_unavailable',
         });
         return;
       }
-      if (bridge) {
-        if (providedSessionId !== undefined) {
-          try {
-            const owner = target.resolveLiveSessionOwner?.(providedSessionId);
-            if (owner?.kind === 'unavailable') {
-              sendWorkspaceRuntimeUnavailable(res);
-              return;
-            }
-            if (owner?.kind === 'ambiguous') {
-              res.status(500).json({
-                error: `Session owner is ambiguous for "${providedSessionId}"`,
-                code: 'ambiguous_session_owner',
-              });
-              return;
-            }
-            if (
-              owner?.kind === 'found' &&
-              owner.runtime.workspaceCwd !== workspaceCwd
-            ) {
-              res.status(400).json({
-                error:
-                  "The requested session belongs to a different workspace; use that workspace's scheduled-task endpoint",
-                code: 'session_workspace_mismatch',
-              });
-              return;
-            }
-            const summary = bridge.getSessionSummary(providedSessionId);
-            if (summary.workspaceCwd !== workspaceCwd) {
-              res.status(400).json({
-                error:
-                  "The requested session belongs to a different workspace; use that workspace's scheduled-task endpoint",
-                code: 'session_workspace_mismatch',
-              });
-              return;
-            }
-            if (summary.hasActivePrompt) {
-              res.status(409).json({
-                error:
-                  'The requested session is busy; wait for its active prompt to finish before binding it to a task',
-                code: 'session_busy',
-              });
-              return;
-            }
-            if (summary.sourceType === 'scheduled_task') {
-              res.status(409).json({
-                error:
-                  'The requested session is already reserved for a scheduled task',
-                code: 'session_already_bound',
-              });
-              return;
-            }
-          } catch (err) {
-            if (err instanceof SessionNotFoundError) {
-              res.status(404).json({
-                error: `Session '${providedSessionId}' was not found`,
-                code: 'session_not_found',
-              });
-              return;
-            }
-            writeStderrLine(
-              `qwen serve: POST ${base} failed to look up session '${providedSessionId}': ${err instanceof Error ? err.message : String(err)}`,
-            );
-            res.status(500).json({
-              error: 'Failed to look up the requested session',
-              code: 'scheduled_tasks_session_failed',
+
+      if (providedSessionId !== undefined) {
+        try {
+          const task = await createScheduledTaskWithExistingSession(
+            target,
+            {
+              sessionId: providedSessionId,
+              cron,
+              prompt,
+              recurring,
+              enabled,
+              sessionMode,
+              ...(delivery !== undefined ? { delivery } : {}),
+              ...(nameResult.value !== undefined
+                ? { name: nameResult.value }
+                : {}),
+            },
+            { source: 'rest' },
+          );
+          if (task.delivery && task.sessionId) {
+            channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
+              sessionId: task.sessionId,
+              taskId: task.id,
+              target: task.delivery.target,
+              recurring: task.recurring,
+              lastFiredAt: task.lastFiredAt ?? undefined,
             });
+          }
+          res.status(201).json(toView(task));
+        } catch (error) {
+          if (error instanceof ExistingSessionScheduledTaskCreateError) {
+            if (error.code === 'workspace_runtime_unavailable') {
+              res.set('Retry-After', '1');
+            }
+            res
+              .status(error.status)
+              .json({ error: error.message, code: error.code });
             return;
           }
+          if (sendActivityGateError(res, error)) return;
+          if (sendGenerationClosedError(res, error)) return;
+          writeStderrLine(
+            `qwen serve: POST ${base} failed to create a task for session '${providedSessionId}': ${error instanceof Error ? error.message : String(error)}`,
+          );
+          res.status(500).json({
+            error: 'Failed to create scheduled task',
+            code: 'scheduled_tasks_write_failed',
+          });
         }
+        return;
+      }
 
+      let boundSessionId: string | undefined;
+      let sessionMintedHere = false;
+      if (bridge) {
         // Best-effort pre-check; the write-lock checks below are authoritative.
         try {
           const tasks = await runWithScheduledTaskTarget(target, () =>
@@ -660,47 +1055,43 @@ function registerScheduledTaskCrudRoutes(
           // Read failure → skip the pre-check; the write below is authoritative.
         }
         if (!requireOpenGeneration(target, res)) return;
-        if (providedSessionId !== undefined) {
-          boundSessionId = providedSessionId;
-        } else {
-          try {
-            const session = await runWithScheduledTaskTarget(target, () =>
-              bridge.spawnOrAttach({
-                workspaceCwd,
-                sessionScope: 'thread',
-                sourceType: 'scheduled_task',
-                sourceId: taskId,
-              }),
-            );
-            boundSessionId = session.sessionId;
-            sessionMintedHere = true;
-            if (!requireOpenGeneration(target, res)) {
-              await teardownBoundSession(target, boundSessionId);
-              return;
-            }
-            try {
-              await runWithScheduledTaskTarget(target, async () =>
-                bridge.updateSessionMetadata(boundSessionId!, {
-                  displayName: scheduledTaskSessionName(
-                    nameResult.value ?? prompt,
-                  ),
-                }),
-              );
-            } catch {
-              // metadata update is non-critical
-            }
-          } catch (err) {
-            if (sendActivityGateError(res, err)) return;
-            if (sendGenerationClosedError(res, err)) return;
-            writeStderrLine(
-              `qwen serve: POST ${base} failed to create the task's session: ${err instanceof Error ? err.message : String(err)}`,
-            );
-            res.status(500).json({
-              error: "Failed to create the task's session",
-              code: 'scheduled_tasks_session_failed',
-            });
+        try {
+          const session = await runWithScheduledTaskTarget(target, () =>
+            bridge.spawnOrAttach({
+              workspaceCwd,
+              sessionScope: 'thread',
+              sourceType: 'scheduled_task',
+              sourceId: taskId,
+            }),
+          );
+          boundSessionId = session.sessionId;
+          sessionMintedHere = true;
+          if (!requireOpenGeneration(target, res)) {
+            await teardownBoundSession(target, boundSessionId);
             return;
           }
+          try {
+            await runWithScheduledTaskTarget(target, async () =>
+              bridge.updateSessionMetadata(boundSessionId!, {
+                displayName: scheduledTaskSessionName(
+                  nameResult.value ?? prompt,
+                ),
+              }),
+            );
+          } catch {
+            // metadata update is non-critical
+          }
+        } catch (err) {
+          if (sendActivityGateError(res, err)) return;
+          if (sendGenerationClosedError(res, err)) return;
+          writeStderrLine(
+            `qwen serve: POST ${base} failed to create the task's session: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          res.status(500).json({
+            error: "Failed to create the task's session",
+            code: 'scheduled_tasks_session_failed',
+          });
+          return;
         }
       }
 
@@ -715,13 +1106,11 @@ function registerScheduledTaskCrudRoutes(
         // minute the task was created — same guard cronScheduler.create uses.
         lastFiredAt: now - (now % 60_000),
         enabled,
+        sessionMode,
         ...(delivery !== undefined ? { delivery } : {}),
         ...(boundSessionId !== undefined
           ? {
               sessionId: boundSessionId,
-              ...(providedSessionId !== undefined
-                ? { sessionOwnedByTask: false }
-                : {}),
             }
           : {}),
         ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
@@ -732,7 +1121,7 @@ function registerScheduledTaskCrudRoutes(
       // deletes the persisted transcript/title record — both are needed, or a
       // rejected create (the loser of a concurrent create at the cap boundary,
       // which passes the pre-check but loses the authoritative write) would leave
-      // a named "⏰ …" session in the list with no owning task.
+      // a named session in the list with no owning task.
       const rollbackSession = async () => {
         if (boundSessionId !== undefined && sessionMintedHere) {
           await teardownBoundSession(target, boundSessionId);
@@ -740,8 +1129,6 @@ function registerScheduledTaskCrudRoutes(
       };
 
       let overCap = false;
-      let alreadyBound = false;
-      let sessionNoLongerLive = false;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
       try {
@@ -749,30 +1136,6 @@ function registerScheduledTaskCrudRoutes(
           updateCronTasks(
             workspaceCwd,
             (tasks) => {
-              if (
-                providedSessionId !== undefined &&
-                tasks.some((task) => task.sessionId === providedSessionId)
-              ) {
-                alreadyBound = true;
-                return tasks;
-              }
-              if (providedSessionId !== undefined && bridge) {
-                try {
-                  if (
-                    bridge.getSessionSummary(providedSessionId).sourceType ===
-                    'scheduled_task'
-                  ) {
-                    alreadyBound = true;
-                    return tasks;
-                  }
-                } catch (err) {
-                  if (err instanceof SessionNotFoundError) {
-                    sessionNoLongerLive = true;
-                    return tasks;
-                  }
-                  throw err;
-                }
-              }
               // Cap check under the write lock so two concurrent creates can't both
               // slip past a stale count. Returning the input unchanged is a no-op
               // (no write), which the flag below turns into a 409.
@@ -820,21 +1183,6 @@ function registerScheduledTaskCrudRoutes(
         res.status(409).json({
           error: `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
           code: 'max_tasks_reached',
-        });
-        return;
-      }
-      if (alreadyBound) {
-        res.status(409).json({
-          error:
-            'The requested session is already bound to another scheduled task',
-          code: 'session_already_bound',
-        });
-        return;
-      }
-      if (sessionNoLongerLive) {
-        res.status(404).json({
-          error: `Session '${providedSessionId}' was not found`,
-          code: 'session_not_found',
         });
         return;
       }
@@ -943,6 +1291,24 @@ function registerScheduledTaskCrudRoutes(
         }
         patch.enabled = body['enabled'];
       }
+      if ('sessionMode' in body) {
+        if (
+          body['sessionMode'] !== 'persistent' &&
+          body['sessionMode'] !== 'per_run'
+        ) {
+          res.status(400).json({
+            error: '`sessionMode` must be "persistent" or "per_run"',
+            code: 'invalid_session_mode',
+          });
+          return;
+        }
+        // The per-run admission checks live inside the mutation below, where the
+        // task's CURRENT mode is known: the edit dialog re-sends the task's own
+        // sessionMode on every PATCH, so gating on the raw value here would make
+        // a prompt-only edit of an existing per_run task unsavable wherever
+        // fresh-session dispatch is unavailable.
+        patch.sessionMode = body['sessionMode'];
+      }
       if ('delivery' in body) {
         if (body['delivery'] === null) {
           clearDelivery = true;
@@ -968,6 +1334,9 @@ function registerScheduledTaskCrudRoutes(
       let updated: DurableCronTask | undefined;
       let blockedByArchive = false;
       let blockedLegacy = false;
+      let blockedSessionModeDelivery = false;
+      let blockedSessionModeUnavailable = false;
+      let blockedSessionModeUnbound = false;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
       try {
@@ -979,6 +1348,25 @@ function registerScheduledTaskCrudRoutes(
               if (idx === -1) return tasks; // not found → no write
               found = true;
               const current = tasks[idx]!;
+              // Both per-run admission checks apply to an actual CONVERSION.
+              // Re-sending the mode the task already has changes nothing, so it
+              // must not be refused (see the note on `patch.sessionMode` above).
+              const convertingToPerRun =
+                patch.sessionMode === 'per_run' &&
+                current.sessionMode !== 'per_run';
+              if (convertingToPerRun && (!bridge || !bridge.sendPrompt)) {
+                blockedSessionModeUnavailable = true;
+                return tasks; // no write
+              }
+              // `dispatchTaskToFreshSession` needs a bound session to attribute
+              // the child to and throws without one. Tool-created durable tasks
+              // start unbound (`cron_create` omits sessionId), so accepting the
+              // conversion here would leave a task whose every manual run 500s
+              // with a phantom failed-run record until keepalive binds it.
+              if (convertingToPerRun && !current.sessionId) {
+                blockedSessionModeUnbound = true;
+                return tasks; // no write
+              }
               // A legacy guarded task (isolated + precondition, both removed) can't be
               // enabled: `toView` reports it disabled, so the only PATCH the Web Shell
               // sends for it is the Enable toggle — which would 200 here and then read
@@ -1008,6 +1396,10 @@ function registerScheduledTaskCrudRoutes(
               // so toView reports it as unnamed and isValidTask never sees a "".
               if (clearName) delete next.name;
               if (clearDelivery) delete next.delivery;
+              if (next.sessionMode === 'per_run' && next.delivery) {
+                blockedSessionModeDelivery = true;
+                return tasks;
+              }
               // Re-seat the task's schedule anchor to "now" whenever an edit would
               // otherwise let the scheduler retroactively fire an already-past slot.
               const justReEnabled =
@@ -1100,6 +1492,28 @@ function registerScheduledTaskCrudRoutes(
           error:
             'This task was disabled by archiving its session; unarchive the session to re-enable it.',
           code: 'task_session_archived',
+        });
+        return;
+      }
+      if (blockedSessionModeUnavailable) {
+        res.status(409).json({
+          error: 'Fresh-session dispatch is not available for this workspace',
+          code: 'session_mode_unavailable',
+        });
+        return;
+      }
+      if (blockedSessionModeUnbound) {
+        res.status(409).json({
+          error:
+            'This task is not bound to a session yet, so it cannot run in a new session every run. Try again once it has run or been opened at least once.',
+          code: 'session_mode_requires_bound_session',
+        });
+        return;
+      }
+      if (blockedSessionModeDelivery) {
+        res.status(409).json({
+          error: 'Per-run sessions do not support channel delivery',
+          code: 'session_mode_delivery_unsupported',
         });
         return;
       }
@@ -1250,12 +1664,10 @@ function registerScheduledTaskCrudRoutes(
     }),
   );
 
-  // ── Record a manual run ───────────────────────────────────────────
-  // Marks the task as run *now* (updates lastFiredAt + appends a 'manual' run
-  // record) so the management UI's "last run" reflects a manual trigger. The
-  // prompt itself is executed by the client in the task's bound session; this
-  // route only records that a run happened, keeping manual and scheduled runs
-  // consistent in the history.
+  // ── Manual run ────────────────────────────────────────────────────
+  // Persistent tasks are recorded here and executed by the client in their
+  // bound session. Per-run tasks are dispatched here because only the daemon
+  // can create the fresh child session and attribute it to this run.
   app.post(
     `${base}/:id/run`,
     mutate(),
@@ -1314,7 +1726,7 @@ function registerScheduledTaskCrudRoutes(
                 runs: appendCronRun(current.runs, {
                   at: now,
                   kind: 'manual',
-                  ...(current.sessionId
+                  ...(current.sessionMode !== 'per_run' && current.sessionId
                     ? { sessionId: current.sessionId }
                     : {}),
                 }),
@@ -1381,6 +1793,71 @@ function registerScheduledTaskCrudRoutes(
           .status(404)
           .json({ error: 'Task not found', code: 'task_not_found' });
         return;
+      }
+      if (updated.sessionMode === 'per_run') {
+        const persistOutcome = async (outcome: CronRunSessionOutcome) => {
+          if (!updated!.recurring) return;
+          await runWithScheduledTaskTarget(target, () =>
+            updateCronTasks(
+              workspaceCwd,
+              (tasks) =>
+                tasks.map((task) =>
+                  task.id === id
+                    ? annotateCronRunSession(task, now, outcome)
+                    : task,
+                ),
+              { assertCanCommit: target.assertGenerationOpen },
+            ),
+          );
+        };
+        let childSessionId: string;
+        try {
+          childSessionId = await dispatchTaskToFreshSession(target, updated);
+        } catch (error) {
+          updated = annotateCronRunSession(updated, now, {
+            dispatchFailed: true,
+          });
+          if (updated.recurring) {
+            await persistOutcome({ dispatchFailed: true }).catch(
+              (persistError) => {
+                // Matches the success path and rollbackCronMutation: a lost
+                // marker leaves a run record indistinguishable from an
+                // un-attributed run, so say so rather than swallowing it.
+                writeStderrLine(
+                  `qwen serve: POST ${base}/${id}/run could not record the failed dispatch: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
+                );
+              },
+            );
+          } else {
+            // The mutation above consumed this one-shot before dispatch so it
+            // could not race its scheduled slot. A synchronous admission
+            // failure means nothing ran, so put it back unconditionally — the
+            // 500 below invites a retry, and a declined undo would answer that
+            // retry with 404 for a schedule that never executed.
+            await restoreConsumedOneShot(
+              target,
+              rollbackBefore,
+              id,
+              `POST ${base}/${id}/run fresh-session dispatch`,
+            );
+          }
+          writeStderrLine(
+            `qwen serve: POST ${base}/${id}/run could not create a fresh session: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          res.status(500).json({
+            error: 'Failed to create a fresh session for the scheduled task',
+            code: 'scheduled_task_session_dispatch_failed',
+          });
+          return;
+        }
+        updated = annotateCronRunSession(updated, now, {
+          sessionId: childSessionId,
+        });
+        await persistOutcome({ sessionId: childSessionId }).catch((error) => {
+          writeStderrLine(
+            `qwen serve: POST ${base}/${id}/run could not attribute fresh session ${childSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
       }
       if (!updated.recurring && updated.sessionId) {
         channelDeliveryAuthorizations?.revokeScheduledTask(
