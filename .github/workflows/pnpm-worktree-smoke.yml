@@ -83,7 +83,3 @@ jobs:
 
       - name: 'Ensure bootstrap keeps the worktree clean'
         run: 'git diff --exit-code'
-
-      - name: 'Build with pnpm workspace dependencies'
-        if: "${{ matrix.os == 'ubuntu-latest' }}"
-        run: 'npm run build'

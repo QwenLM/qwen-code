@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync, execSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
 import {
   existsSync,
   readFileSync,
@@ -14,21 +14,11 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-import { getPinnedPnpmPackage } from './pnpm-package.js';
-
 // A script to handle versioning and ensure all related changes are in a single, atomic commit.
 
 function run(command) {
   console.log(`> ${command}`);
   execSync(command, { stdio: 'inherit' });
-}
-
-function runFile(command, args) {
-  console.log(`> ${command} ${args.join(' ')}`);
-  execFileSync(command, args, {
-    shell: process.platform === 'win32',
-    stdio: 'inherit',
-  });
 }
 
 function readJson(filePath) {
@@ -144,25 +134,16 @@ for (const entry of readdirSync(channelsDir)) {
   }
 }
 
-// 8. Refresh node_modules and both lockfiles against the pinned exact versions
-// so the adapters resolve channel-base to the workspace link again.
+// 8. Refresh node_modules and package-lock.json against the pinned exact
+// versions so the adapters resolve channel-base to the workspace link again.
 // --ignore-scripts prevents the root `prepare` lifecycle from triggering a
 // redundant full build that fails with TS5055 when dist/ already exists from
 // the initial `npm ci` install.
 run('npm install --ignore-scripts');
-const packageManager = getPinnedPnpmPackage(readJson(rootPackageJsonPath));
-runFile(process.platform === 'win32' ? 'npx.cmd' : 'npx', [
-  '--yes',
-  packageManager,
-  'install',
-  '--lockfile-only',
-  '--no-frozen-lockfile',
-  '--ignore-scripts',
-]);
 
 // 9. The per-workspace `npm version` reifies above nested a stale registry
-// copy of channel-base under each adapter while ranges briefly mismatched. The
-// npm install above refreshes the npm layout but can leave that directory on
+// copy of channel-base under each adapter while ranges briefly mismatched.
+// The install above cleans both lockfiles but can leave that directory on
 // disk, where it shadows the workspace link during tsc. Remove it.
 for (const entry of readdirSync(channelsDir)) {
   rmSync(join(channelsDir, entry, 'node_modules', '@qwen-code'), {

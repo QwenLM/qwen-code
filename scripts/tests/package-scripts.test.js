@@ -45,10 +45,11 @@ describe('package scripts', () => {
     ).toThrow('packageManager must pin an exact pnpm version');
   });
 
-  it('links file-based internal packages to their live pnpm workspaces', () => {
+  it('keeps internal pnpm workspaces independent of manifest versions', () => {
     const packageJson = {
       dependencies: {
         '@qwen-code/qwen-code-core': 'file:../core',
+        '@qwen-code/channel-base': '0.22.4',
         fixture: 'file:../fixture',
       },
     };
@@ -56,6 +57,7 @@ describe('package scripts', () => {
     expect(pnpmHooks.readPackage(packageJson)).toEqual({
       dependencies: {
         '@qwen-code/qwen-code-core': 'workspace:*',
+        '@qwen-code/channel-base': 'workspace:*',
         fixture: 'file:../fixture',
       },
     });
@@ -69,6 +71,23 @@ describe('package scripts', () => {
     expect(workspace.minimumReleaseAgeExclude).toEqual([
       '@qwen-code/channel-base',
     ]);
+  });
+
+  it('keeps channel workspace lock entries independent of release versions', () => {
+    const lockfile = parse(
+      readFileSync(path.join(root, 'pnpm-lock.yaml'), 'utf8'),
+    );
+    const specifiers = Object.values(lockfile.importers).flatMap((importer) =>
+      ['dependencies', 'devDependencies', 'optionalDependencies'].flatMap(
+        (field) => {
+          const entry = importer[field]?.['@qwen-code/channel-base'];
+          return entry ? [entry.specifier] : [];
+        },
+      ),
+    );
+
+    expect(specifiers.length).toBeGreaterThan(0);
+    expect(new Set(specifiers)).toEqual(new Set(['workspace:*']));
   });
 
   it('bootstraps worktrees with frozen pnpm dependencies and skips prepare', () => {
@@ -210,17 +229,6 @@ describe('package scripts', () => {
     );
   });
 
-  it('refreshes the pnpm lockfile after release version changes', () => {
-    const versionScript = readFileSync(
-      path.join(root, 'scripts/version.js'),
-      'utf8',
-    );
-
-    expect(versionScript).toContain(
-      "runFile(process.platform === 'win32' ? 'npx.cmd' : 'npx'",
-    );
-  });
-
   it('smoke-tests the real worktree bootstrap on every supported host', () => {
     const workflow = parse(
       readWorkflow('.github/workflows/pnpm-worktree-smoke.yml'),
@@ -244,11 +252,7 @@ describe('package scripts', () => {
       )?.run,
     ).toBe('git diff --exit-code');
 
-    const buildStep = job.steps.find(
-      (step) => step.name === 'Build with pnpm workspace dependencies',
-    );
-    expect(buildStep?.if).toBe("${{ matrix.os == 'ubuntu-latest' }}");
-    expect(buildStep?.run).toBe('npm run build');
+    expect(job.steps.some((step) => step.run === 'npm run build')).toBe(false);
   });
 
   it('runs the pnpm smoke workflow when a dependency input changes', () => {

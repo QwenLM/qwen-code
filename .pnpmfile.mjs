@@ -35,8 +35,8 @@ export const hooks = {
       const dependencies = packageJson[field];
       if (!dependencies) continue;
 
-      for (const [name, specifier] of Object.entries(dependencies)) {
-        if (workspacePackages.has(name) && specifier.startsWith('file:')) {
+      for (const name of Object.keys(dependencies)) {
+        if (workspacePackages.has(name)) {
           dependencies[name] = 'workspace:*';
         }
       }

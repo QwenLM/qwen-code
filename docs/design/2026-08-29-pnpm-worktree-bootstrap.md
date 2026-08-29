@@ -19,21 +19,20 @@ npm workspace boundaries in `pnpm-workspace.yaml`. A hoisted linker is used
 for the initial migration because current build and packaging scripts still
 contain assumptions inherited from npm's layout.
 
-The committed lockfile remains the source of dependency resolution. Root
-TypeScript and Node type versions are pinned to the versions currently hoisted
-by npm so switching package managers does not silently change the compiler or
-ambient Node declarations. Dependency install scripts are denied unless they
-are explicitly listed in `allowBuilds`; the allowlist contains only packages
-whose scripts run in the current npm installation.
+The committed pnpm lockfile is the source of dependency resolution for this
+bootstrap only. pnpm-specific overrides preserve the dependency versions used
+by the current npm installation without changing npm's manifest or lockfile.
+Dependency install scripts are denied unless they are explicitly listed in
+`allowBuilds`; the allowlist contains only packages whose scripts run in the
+current npm installation.
 
-The existing manifests use `file:` for local package dependencies. npm links
-those packages to their workspace sources, while pnpm snapshots them; a build
-of an upstream package therefore did not reach downstream consumers. During
-the dual-lock transition, `.pnpmfile.mjs` rewrites only known internal `file:`
-dependencies to pnpm's `workspace:*` protocol in memory. The checked-in
-manifests stay npm-compatible until CI is cut over, while pnpm gets live
-workspace links. The compatibility hook can be removed when the manifests
-adopt `workspace:` during the final cutover.
+During the dual-lock transition, `.pnpmfile.mjs` rewrites known internal
+dependencies to pnpm's `workspace:*` protocol in memory. This covers both the
+existing `file:` dependencies and the exact channel dependency versions that
+the release script updates. As a result, release version bumps do not stale the
+pnpm lockfile, while the checked-in manifests and npm lockfile remain untouched.
+The compatibility hook can be removed when the manifests adopt `workspace:`
+during the final cutover.
 
 New worktrees use `node scripts/setup-worktree.js`. The script prefers Corepack
 so an existing pnpm cache can stay fully offline, and falls back to npm's
@@ -46,35 +45,29 @@ on the common warm-store path. The script sets `QWEN_SKIP_PREPARE=1`, keeping
 dependency install scripts enabled while skipping repository build, bundle,
 Husky setup, and npm-layout notice generation. Script execution does not
 implicitly install stale dependencies; the bootstrap command is the explicit
-installation boundary. Builds remain available on demand.
+installation boundary. Building from this pnpm layout is deferred to Stage 2.
 
 ## Migration boundary
 
-The package-manager migration applies to repository dependency installation,
-workspace orchestration, and CI caches. It does not replace npm where npm is
-the product boundary, including registry publication, extension installation,
-self-update, and fixtures that intentionally exercise npm behavior.
+Stage 1 applies only to dependency installation in additional Git worktrees.
+It does not change repository build commands, CI build orchestration, release
+versioning, packaging, or publishing. `package-lock.json` remains authoritative
+for every existing npm path. A path-filtered workflow exercises the real frozen
+bootstrap on Linux, macOS, and Windows whenever a pnpm installation input
+changes. The generated pnpm lockfile is excluded from the repository's
+human-authored YAML style rules.
 
-The first stage keeps `package-lock.json` and npm-based build and release paths
-operational. Release versioning refreshes and commits both lockfiles, and a
-path-filtered workflow exercises the real frozen worktree bootstrap on Linux,
-macOS, and Windows whenever a dependency input changes. The generated pnpm
-lockfile is excluded from the repository's human-authored YAML style rules. The
-release-age exception for the internal channel base package is package-scoped,
-so a version bump does not require a configuration edit.
-
-Later stages will switch development and CI orchestration to pnpm, followed by
-release dependency installation and builds. npm remains the product boundary
-for package creation, registry publication, and clean artifact installation
-until the scripts that intentionally read `package-lock.json` are migrated.
+Stage 2 can separately make the pnpm layout a supported build and development
+path, then migrate CI installation and caches. Stage 3 can address release
+installation and build orchestration. npm remains the product boundary for
+package creation, registry publication, and clean artifact installation until
+the scripts that intentionally read `package-lock.json` are migrated.
 
 ## Verification
 
-The pnpm path must complete a frozen install and pass the full repository build
-with the same effective compiler and Node type versions as npm. Script tests
-cover the bootstrap command, its prepare-skip environment, and the transitional
-workspace rewrite. The cross-platform workflow provides the real install gate;
-release versioning performs a second frozen lockfile check before it commits or
-publishes. A dependency-only worktree still cannot launch the CLI before the
-packages it imports through `dist` are built; removing that existing build
-prerequisite is outside this migration.
+The Stage 1 pnpm path must complete a frozen install without modifying tracked
+files. Script tests cover the bootstrap command, its prepare-skip environment,
+the version-independent workspace rewrite, and process failure behavior. The
+cross-platform workflow provides the real install gate. Building from the pnpm
+layout is intentionally deferred to Stage 2; existing npm build and release
+validation remain unchanged.

@@ -628,7 +628,8 @@ function readRequestBody(raw: string | null): unknown {
 
 // Mirror production query modes: `group=pinned` is the pinned bucket;
 // `group=all` (and missing group) returns the full active list. The UI
-// excludes pinned rows from organized sections via `excludePinned`.
+// renders pinned rows in the Pinned section and keeps them inside their
+// named groups; unassigned pinned rows stay out of Ungrouped.
 function filterScenarioSessions(
   scenario: WebShellDaemonScenario,
   searchParams: URLSearchParams,
