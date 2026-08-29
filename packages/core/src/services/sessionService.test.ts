@@ -25,6 +25,7 @@ import { getProjectHash } from '../utils/paths.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   SessionService,
+  SessionTranscriptDurabilityError,
   buildApiHistoryFromConversation,
   computeUniqueBranchTitle,
   normalizeDerivedBranchTitle,
@@ -41,6 +42,7 @@ import {
   stableSessionArtifactId,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
+import { SessionTranscriptChangedError } from './session-writer-lease.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -1761,6 +1763,12 @@ describe('SessionService', () => {
   });
 
   describe('removeSession', () => {
+    const lifecycleParent = {
+      device: 7,
+      inode: 9,
+      inodeVerifiable: true,
+    };
+
     it('should remove session file', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
 
@@ -2053,6 +2061,383 @@ describe('SessionService', () => {
       expect(unlinkSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.ledger.jsonl`),
       );
+    });
+
+    it('can commit only the active transcript for lifecycle deletion', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+      existsSyncSpy.mockReturnValue(true);
+      const removeOrganizationSpy = vi.spyOn(
+        SessionOrganizationService.prototype,
+        'removeSession',
+      );
+      const sync = vi.fn(async () => undefined);
+      const close = vi.fn(async () => undefined);
+      const directoryStats = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy.mockResolvedValue(directoryStats);
+      const open = vi.spyOn(fs.promises, 'open').mockResolvedValue({
+        stat: vi.fn(async () => directoryStats),
+        sync,
+        close,
+      } as unknown as fs.promises.FileHandle);
+
+      const removed = await sessionService.removeSessionTranscriptForLifecycle(
+        sessionIdA,
+        'active',
+        lifecycleParent,
+      );
+
+      expect(removed).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledTimes(1);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+      expect(commitUsageBeforeTranscriptDeletion).toHaveBeenCalledOnce();
+      expect(rmSyncSpy).not.toHaveBeenCalled();
+      expect(removeOrganizationSpy).not.toHaveBeenCalled();
+      expect(open).toHaveBeenCalledWith(
+        expect.stringContaining('/chats'),
+        expect.any(Number),
+      );
+      expect(sync).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledOnce();
+    });
+
+    it('surfaces transcript parent sync failure after lifecycle unlink', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+      existsSyncSpy.mockReturnValue(true);
+      const syncError = Object.assign(new Error('sync failed'), {
+        code: 'EIO',
+      });
+      const directoryStats = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy.mockResolvedValue(directoryStats);
+      vi.spyOn(fs.promises, 'open').mockResolvedValue({
+        stat: vi.fn(async () => directoryStats),
+        sync: vi.fn(async () => Promise.reject(syncError)),
+        close: vi.fn(async () => undefined),
+      } as unknown as fs.promises.FileHandle);
+
+      await expect(
+        sessionService.removeSessionTranscriptForLifecycle(
+          sessionIdA,
+          'active',
+          lifecycleParent,
+        ),
+      ).rejects.toMatchObject({
+        name: 'SessionTranscriptDurabilityError',
+        cause: syncError,
+      } satisfies Partial<SessionTranscriptDurabilityError>);
+
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('rejects lifecycle durability when the transcript parent is replaced after unlink', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+      existsSyncSpy.mockReturnValue(true);
+      const original = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      const replacement = {
+        dev: 7,
+        ino: 10,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(replacement);
+      vi.spyOn(fs.promises, 'open').mockResolvedValue({
+        stat: vi.fn(async () => original),
+        sync: vi.fn(async () => undefined),
+        close: vi.fn(async () => undefined),
+      } as unknown as fs.promises.FileHandle);
+
+      await expect(
+        sessionService.removeSessionTranscriptForLifecycle(
+          sessionIdA,
+          'active',
+          lifecycleParent,
+        ),
+      ).rejects.toBeInstanceOf(SessionTranscriptDurabilityError);
+
+      expect(unlinkSyncSpy).toHaveBeenCalledOnce();
+    });
+
+    it('rejects recovery confirmation for a replacement transcript parent', async () => {
+      const replacement = {
+        dev: 7,
+        ino: 10,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy.mockResolvedValue(replacement);
+      const sync = vi.fn(async () => undefined);
+      vi.spyOn(fs.promises, 'open').mockResolvedValue({
+        stat: vi.fn(async () => replacement),
+        sync,
+        close: vi.fn(async () => undefined),
+      } as unknown as fs.promises.FileHandle);
+
+      await expect(
+        sessionService.confirmSessionTranscriptDeletionForLifecycle(
+          'active',
+          lifecycleParent,
+        ),
+      ).rejects.toBeInstanceOf(SessionTranscriptDurabilityError);
+
+      expect(sync).not.toHaveBeenCalled();
+    });
+
+    it('does not hide lifecycle directory I/O failures on Windows', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+      existsSyncSpy.mockReturnValue(true);
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const directoryStats = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy.mockResolvedValue(directoryStats);
+      const syncError = Object.assign(new Error('sync failed'), {
+        code: 'EIO',
+      });
+      vi.spyOn(fs.promises, 'open').mockResolvedValue({
+        stat: vi.fn(async () => directoryStats),
+        sync: vi.fn(async () => Promise.reject(syncError)),
+        close: vi.fn(async () => undefined),
+      } as unknown as fs.promises.FileHandle);
+
+      await expect(
+        sessionService.removeSessionTranscriptForLifecycle(
+          sessionIdA,
+          'active',
+          lifecycleParent,
+        ),
+      ).rejects.toMatchObject({ cause: syncError });
+    });
+
+    it('rejects lifecycle deletion when active and archived transcripts conflict', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      await expect(
+        sessionService.removeSessionTranscriptForLifecycle(
+          sessionIdA,
+          'active',
+          lifecycleParent,
+        ),
+      ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+
+      expect(prepareUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects lifecycle deletion when the transcript moved states', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (!filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+
+      await expect(
+        sessionService.removeSessionTranscriptForLifecycle(
+          sessionIdA,
+          'active',
+          lifecycleParent,
+        ),
+      ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('cleans sidecars after the transcript is already absent', async () => {
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) => {
+        const value = filePath.toString();
+        return (
+          value.endsWith(`${sessionIdA}.worktree.json`) ||
+          value.endsWith(`${sessionIdA}.pr.json`) ||
+          value.endsWith(`${sessionIdA}.ledger.jsonl`)
+        );
+      });
+      const removeOrganizationSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'removeSession')
+        .mockResolvedValue();
+
+      await sessionService.cleanupRemovedSessionState(sessionIdA);
+
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.worktree.json`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.pr.json`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.ledger.jsonl`),
+      );
+      expect(rmSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`file-history/${sessionIdA}`),
+        { recursive: true, force: true },
+      );
+      expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA);
+    });
+
+    it('durably confirms lifecycle sidecar cleanup before returning', async () => {
+      const directoryStats = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy.mockResolvedValue(directoryStats);
+      const sync = vi.fn(async () => undefined);
+      const close = vi.fn(async () => undefined);
+      const open = vi.spyOn(fs.promises, 'open').mockImplementation(
+        async () =>
+          ({
+            stat: vi.fn(async () => directoryStats),
+            sync,
+            close,
+          }) as unknown as fs.promises.FileHandle,
+      );
+      vi.spyOn(
+        SessionOrganizationService.prototype,
+        'removeSession',
+      ).mockResolvedValue();
+
+      await sessionService.cleanupRemovedSessionStateForLifecycle(sessionIdA);
+
+      expect(open).toHaveBeenCalledTimes(4);
+      expect(sync).toHaveBeenCalledTimes(4);
+      expect(close).toHaveBeenCalledTimes(4);
+    });
+
+    it('rejects a replacement sidecar parent before lifecycle cleanup', async () => {
+      const original = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      const replacement = {
+        dev: 7,
+        ino: 10,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(replacement);
+      vi.spyOn(fs.promises, 'open').mockImplementation(
+        async () =>
+          ({
+            stat: vi.fn(async () => original),
+            sync: vi.fn(async () => undefined),
+            close: vi.fn(async () => undefined),
+          }) as unknown as fs.promises.FileHandle,
+      );
+      const removeOrganization = vi.spyOn(
+        SessionOrganizationService.prototype,
+        'removeSession',
+      );
+
+      await expect(
+        sessionService.cleanupRemovedSessionStateForLifecycle(sessionIdA),
+      ).rejects.toThrow('Session transcript parent directory changed.');
+
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+      expect(rmSyncSpy).not.toHaveBeenCalled();
+      expect(removeOrganization).not.toHaveBeenCalled();
+    });
+
+    it('rejects a vanished sidecar parent after opening it', async () => {
+      const original = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      const vanished = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      statPromiseSpy.mockRejectedValueOnce(vanished);
+      const close = vi.fn(async () => undefined);
+      vi.spyOn(fs.promises, 'open').mockResolvedValue({
+        stat: vi.fn(async () => original),
+        sync: vi.fn(async () => undefined),
+        close,
+      } as unknown as fs.promises.FileHandle);
+      const removeOrganization = vi.spyOn(
+        SessionOrganizationService.prototype,
+        'removeSession',
+      );
+
+      await expect(
+        sessionService.cleanupRemovedSessionStateForLifecycle(sessionIdA),
+      ).rejects.toBe(vanished);
+
+      expect(close).toHaveBeenCalledOnce();
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+      expect(rmSyncSpy).not.toHaveBeenCalled();
+      expect(removeOrganization).not.toHaveBeenCalled();
+    });
+
+    it('surfaces lifecycle sidecar cleanup failures for retry', async () => {
+      const cleanupError = new Error('organization cleanup failed');
+      vi.spyOn(
+        SessionOrganizationService.prototype,
+        'removeSession',
+      ).mockRejectedValue(cleanupError);
+
+      await expect(
+        sessionService.cleanupRemovedSessionState(sessionIdA),
+      ).rejects.toBe(cleanupError);
     });
   });
 
@@ -4518,6 +4903,48 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('remaps persisted telemetry prompt ids into the fork', async () => {
+      const oldId = '51515151-5151-5151-5151-515151515151';
+      const newId = '61616161-6161-6161-6161-616161616161';
+      const { file, lines } = seedSession(oldId);
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          {
+            uuid: 'telemetry-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'ui_telemetry',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              uiEvent: {
+                'event.name': 'api_response',
+                prompt_id: `${oldId}#Explore#0`,
+              },
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const telemetry = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+        .find((record) => record.subtype === 'ui_telemetry');
+
+      expect(telemetry.systemPayload.uiEvent.prompt_id).toBe(
+        `${newId}#Explore#0`,
+      );
+    });
+
     it('does not copy source turn_result identities into a fork', async () => {
       const oldId = '31313131-3131-3131-3131-313131313131';
       const newId = '41414141-4141-4141-4141-414141414141';
@@ -6197,10 +6624,12 @@ describe('SessionService', () => {
       sessionId: string,
       title: string,
       sessionCwd: string = cwd,
+      state: 'active' | 'archived' = 'active',
     ) => {
       const chatsDir = realPath.join(
         service['storage'].getProjectDir(),
         'chats',
+        ...(state === 'archived' ? ['archive'] : []),
       );
       fs.mkdirSync(chatsDir, { recursive: true });
       const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
@@ -6256,6 +6685,78 @@ describe('SessionService', () => {
       await expect(
         service.getSessionDisplayName('11111111-1111-1111-1111-111111111111'),
       ).resolves.toBe('my-branch(1)');
+    });
+
+    it('also returns titles from archived sessions, so unarchiving cannot surface a duplicate', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+      );
+      seedSessionWithTitle(
+        '22222222-2222-2222-2222-222222222222',
+        'my-branch(2)',
+        cwd,
+        'archived',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('my-branch(');
+
+      expect(new Set(titles)).toEqual(
+        new Set(['my-branch(1)', 'my-branch(2)']),
+      );
+    });
+
+    it('deduplicates a title held by the same session in both active and archived state', async () => {
+      // getSessionLocation's 'conflict' state (reachable via an interrupted
+      // move) leaves one session file in both chats/ and chats/archive/;
+      // both scans read it and must not report its title twice.
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+        cwd,
+        'active',
+      );
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+        cwd,
+        'archived',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('my-branch(');
+
+      expect(titles).toEqual(['my-branch(1)']);
+    });
+
+    it('skips archived sessions from other projects (collisions stay project-scoped)', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'shared(1)',
+        cwd,
+        'archived',
+      );
+      seedSessionWithTitle(
+        '22222222-2222-2222-2222-222222222222',
+        'shared(2)',
+        '/some/other/project',
+        'archived',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('shared(');
+      expect(titles).toEqual(['shared(1)']);
+    });
+
+    it('computeUniqueBranchTitle skips a suffix already taken by an archived session', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+        cwd,
+        'archived',
+      );
+
+      const title = await computeUniqueBranchTitle('my-branch', service);
+
+      expect(title).toBe('my-branch(2)');
     });
 
     it('returns empty when chats directory does not exist', async () => {
@@ -6343,6 +6844,192 @@ describe('SessionService', () => {
       await expect(service.getSessionDisplayName(sessionId)).resolves.toBe(
         '创建 MR 描述生成 Skill(1)',
       );
+    });
+
+    it('uses the picker prompt for an archived session with no custom title', async () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const archiveDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        'archive',
+      );
+      fs.mkdirSync(archiveDir, { recursive: true });
+      const file = realPath.join(archiveDir, `${sessionId}.jsonl`);
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'archived-prompt(1)' }] },
+        }) + '\n',
+      );
+
+      const titles =
+        await service.findSessionTitlesByPrefix('archived-prompt(');
+      expect(titles).toEqual(['archived-prompt(1)']);
+    });
+  });
+
+  describe('unarchiveSessions title collision', () => {
+    // Real disk again (see the findSessionTitlesByPrefix describe above):
+    // exercising the actual retitle-then-move needs a real renameSync and a
+    // real writeLineSync, neither of which that describe's setup restores
+    // (it only needed read paths).
+    let realTmpDir: string;
+    let realPath: typeof import('node:path');
+    let service: SessionService;
+    let cwd: string;
+
+    beforeEach(async () => {
+      const realOs = await import('node:os');
+      realPath = await vi.importActual<typeof import('node:path')>('node:path');
+      const actualPaths =
+        await vi.importActual<typeof import('../utils/paths.js')>(
+          '../utils/paths.js',
+        );
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+
+      vi.mocked(path.join).mockImplementation(
+        realPath.join as unknown as typeof path.join,
+      );
+      vi.mocked(path.dirname).mockImplementation(
+        realPath.dirname as unknown as typeof path.dirname,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation(
+        realPath.isAbsolute as unknown as typeof path.isAbsolute,
+      );
+      vi.mocked(path.resolve).mockImplementation(
+        realPath.resolve as unknown as typeof path.resolve,
+      );
+      vi.mocked(getProjectHash).mockImplementation(actualPaths.getProjectHash);
+      const mockedPaths = (await import('../utils/paths.js')) as unknown as {
+        sanitizeCwd: (cwd: string) => string;
+      };
+      mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
+      vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
+      vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
+      vi.mocked(jsonl.writeLineSync).mockImplementation(
+        actualJsonl.writeLineSync,
+      );
+
+      vi.mocked(readdirSyncSpy).mockRestore?.();
+      vi.mocked(statSyncSpy).mockRestore?.();
+      vi.mocked(statPromiseSpy).mockRestore?.();
+      vi.mocked(unlinkSyncSpy).mockRestore?.();
+      vi.mocked(rmSyncSpy).mockRestore?.();
+      vi.mocked(renameSyncSpy).mockRestore?.();
+
+      realTmpDir = fs.mkdtempSync(
+        realPath.join(realOs.tmpdir(), 'unarchive-title-collision-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = realTmpDir;
+      cwd = process.cwd();
+      service = new SessionService(cwd);
+    });
+
+    afterEach(() => {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      try {
+        fs.rmSync(realTmpDir, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    });
+
+    const seedSessionWithTitle = (
+      sessionId: string,
+      title: string,
+      state: 'active' | 'archived' = 'active',
+    ) => {
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        ...(state === 'archived' ? ['archive'] : []),
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
+      const lines = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        },
+        {
+          uuid: 'u2',
+          parentUuid: 'u1',
+          sessionId,
+          type: 'system',
+          subtype: 'custom_title',
+          timestamp: '2026-04-22T00:00:01.000Z',
+          cwd,
+          version: 'test',
+          systemPayload: { customTitle: title, titleSource: 'manual' },
+        },
+      ];
+      fs.writeFileSync(
+        file,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+      return file;
+    };
+
+    it('retitles an archived session before unarchiving it into a title an active session already holds', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+        'active',
+      );
+      seedSessionWithTitle(
+        '22222222-2222-2222-2222-222222222222',
+        'my-branch(1)',
+        'archived',
+      );
+
+      const result = await service.unarchiveSessions([
+        '22222222-2222-2222-2222-222222222222',
+      ]);
+
+      expect(result.unarchived).toEqual([
+        '22222222-2222-2222-2222-222222222222',
+      ]);
+      expect(result.errors).toEqual([]);
+      await expect(
+        service.getSessionDisplayName('11111111-1111-1111-1111-111111111111'),
+      ).resolves.toBe('my-branch(1)');
+      await expect(
+        service.getSessionDisplayName('22222222-2222-2222-2222-222222222222'),
+      ).resolves.toBe('my-branch(2)');
+    });
+
+    it('leaves the title untouched when unarchiving does not collide', async () => {
+      seedSessionWithTitle(
+        '33333333-3333-3333-3333-333333333333',
+        'unrelated-branch',
+        'archived',
+      );
+
+      const result = await service.unarchiveSessions([
+        '33333333-3333-3333-3333-333333333333',
+      ]);
+
+      expect(result.unarchived).toEqual([
+        '33333333-3333-3333-3333-333333333333',
+      ]);
+      await expect(
+        service.getSessionDisplayName('33333333-3333-3333-3333-333333333333'),
+      ).resolves.toBe('unrelated-branch');
     });
   });
 
@@ -6594,6 +7281,26 @@ describe('SessionService', () => {
         parentSessionId: 'parent-abc',
         sourceType: 'scheduled_task',
         sourceId: 'task-123',
+      });
+    });
+
+    it('reads one exact persisted summary without paging the catalog', async () => {
+      const sessionId = '79777777-7777-4777-8777-777777777777';
+      writeSession(sessionId, [
+        userLine(sessionId, 'exact prompt'),
+        sessionSourceLine(sessionId),
+      ]);
+
+      await expect(
+        service.getSessionListItem(sessionId),
+      ).resolves.toMatchObject({
+        sessionId,
+        cwd,
+        startTime: '2026-04-22T00:00:00.000Z',
+        prompt: 'exact prompt',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+        isArchived: false,
       });
     });
 

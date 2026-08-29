@@ -145,6 +145,7 @@ describe('GetGoalTool', () => {
           turnCount: 27,
           activeTimeMs: 1_763_705,
           tokensUsed: 4_500,
+          tokenBudget: 30_000_000,
           createdAt: 1,
           updatedAt: 2,
           lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
@@ -176,6 +177,7 @@ describe('GetGoalTool', () => {
         turnCount: 27,
         activeTimeMs: 1_763_705,
         tokensUsed: 4_500,
+        tokenBudget: 30_000_000,
         lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
       },
     });
@@ -615,6 +617,16 @@ describe('UpdateGoalTool', () => {
     );
     expect(schema.properties.blockerKind.description).toContain(
       'exact same reason text',
+    );
+    expect(
+      (schema.properties.blockerKind as { enum?: string[] }).enum,
+    ).toContain('infeasible');
+    expect(schema.properties.blockerKind.description).toContain(
+      'cannot be satisfied as written',
+    );
+    expect(tool.description).toContain('a tool result, not your own text');
+    expect(tool.description).toContain(
+      'not for difficulty, uncertainty, information you could still obtain',
     );
   });
 

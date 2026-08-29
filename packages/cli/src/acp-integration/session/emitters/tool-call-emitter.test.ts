@@ -601,6 +601,33 @@ describe('ToolCallEmitter', () => {
       expect(sendUpdateSpy.mock.calls[0][0].rawOutput).toBeUndefined();
     });
 
+    it('should replay an intact saved patch without truncated file bodies', async () => {
+      const fileDiff = '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new';
+
+      await emitter.emitResult({
+        toolName: 'edit_file',
+        callId: 'call-edit',
+        success: true,
+        message: [],
+        resultDisplay: {
+          fileName: '/test/file.ts',
+          originalContent: 'old preview',
+          newContent: 'new preview',
+          fileDiff,
+          truncatedForSession: true,
+          fileDiffTruncated: false,
+        },
+      });
+
+      expect(sendUpdateSpy.mock.calls[0][0].rawOutput).toEqual({
+        fileName: '/test/file.ts',
+        fileDiff,
+      });
+      expect(sendUpdateSpy.mock.calls[0][0].content).not.toContainEqual(
+        expect.objectContaining({ type: 'diff' }),
+      );
+    });
+
     it('should transform message parts to content', async () => {
       await emitter.emitResult({
         toolName: 'test_tool',

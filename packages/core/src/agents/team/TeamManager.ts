@@ -19,6 +19,7 @@ import { randomBytes } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { escapeJsonTagCharacters } from '../../utils/formatters.js';
 import { escapeXml } from '../../utils/xml.js';
 import { ApprovalMode } from '../../config/config.js';
 import type {
@@ -27,7 +28,11 @@ import type {
   TeamAgentHandle,
 } from '../backends/types.js';
 import { PermissionMode } from '../../hooks/types.js';
-import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
+import {
+  AgentStatus,
+  isTerminalStatus,
+  lastVisibleAnswer,
+} from '../runtime/agent-types.js';
 import { AgentEventType } from '../runtime/agent-events.js';
 import type {
   AgentRoundTextEvent,
@@ -75,6 +80,7 @@ import {
 import { buildTeammatePromptAddendum } from './promptAddendum.js';
 import { runWithTeammateIdentity } from './identity.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
+import type { SubagentModelRoute } from '../../subagents/types.js';
 import type { ToolConfig } from '../runtime/agent-types.js';
 import { runOutsideAgentContext } from '../runtime/agent-context.js';
 import { READ_ONLY_INSPECTION_TOOLS } from '../runtime/subagent-plan-tool-policy.js';
@@ -87,6 +93,14 @@ const debug = createDebugLogger('AGENTS_TEAM_MANAGER');
 // `TeamAgentHandle` is re-exported below so existing callers that
 // imported it from this module keep compiling.
 export type { TeamAgentHandle };
+
+/** Delivery outcome of a {@link TeamManager.broadcast} call. */
+export interface BroadcastResult {
+  /** Number of recipients the broadcast attempted (sender excluded). */
+  total: number;
+  /** Names of recipients whose delivery was rejected. */
+  failedRecipients: string[];
+}
 
 /** Configuration for spawning a teammate. */
 export interface TeammateSpawnConfig {
@@ -306,6 +320,13 @@ export class TeamManager {
       );
     }
 
+    // Normalize the spawn-time model override once: an empty string
+    // means "no override", same as undefined. The guards below used to
+    // mix `??` (nullish) and `!` (falsy), so `model: ''` kept the
+    // empty override for the model while the route guard saw it as
+    // absent — the two halves of the spawn disagreed.
+    const effectiveModel = config.model || undefined;
+
     const name = generateUniqueTeammateName(config.name, this.teamFile.members);
     const agentId = formatAgentId(name, this.teamFile.name);
     const color = assignTeammateColor(this.teamFile.members);
@@ -315,7 +336,7 @@ export class TeamManager {
       agentId,
       name,
       agentType: config.agentType,
-      model: config.model,
+      model: effectiveModel,
       prompt: config.prompt,
       color,
       joinedAt: Date.now(),
@@ -382,6 +403,7 @@ export class TeamManager {
       // definition so the teammate behaves like that agent type.
       let subagentPrompt: string | undefined;
       let subagentModel: string | undefined;
+      let subagentModelRoute: SubagentModelRoute | undefined;
       let subagentRunConfig: Record<string, unknown> | undefined;
       let toolConfig: ToolConfig | undefined;
       if (config.agentType && this.subagentManager) {
@@ -397,6 +419,18 @@ export class TeamManager {
         subagentModel = runtimeCfg.modelConfig.model;
         subagentRunConfig = runtimeCfg.runConfig as Record<string, unknown>;
         toolConfig = runtimeCfg.toolConfig;
+        // Resolve the definition's model selector with the runtime context,
+        // the same way the ordinary-subagent path does (#10071).
+        // convertToRuntimeConfig is called without a context, so it keeps
+        // only a bare model ID and cannot resolve `fast`; both the
+        // selector's authType and the resolved model ID are needed below
+        // to give the teammate the definition's provider route instead of
+        // the leader's.
+        subagentModelRoute =
+          this.subagentManager.resolveSubagentModelRoute(subagentConfig);
+        if (subagentModelRoute) {
+          subagentModel = subagentModelRoute.modelId;
+        }
         // Ensure team coordination tools are always available,
         // even when the subagent defines a restricted tool set.
         if (toolConfig) {
@@ -457,6 +491,17 @@ export class TeamManager {
         ? `${basePrompt}\n\n${addendum}`
         : addendum;
 
+      // Reflect the model the teammate will actually run on — including a
+      // model selected by the definition's frontmatter (#10071), not just
+      // an explicit spawn-time override — in the team file and join event.
+      member.model = effectiveModel ?? subagentModel;
+
+      // The definition's resolved route is applied only when the leader
+      // did not override the model at spawn time. Computed once so the
+      // authOverrides build below and the post-spawn route verification
+      // cannot drift apart (#10071).
+      const dedicatedRoute = !effectiveModel ? subagentModelRoute : undefined;
+
       // Build spawn config for the backend.
       const spawnConfig: AgentSpawnConfig = {
         agentId,
@@ -477,12 +522,22 @@ export class TeamManager {
                 '(status: "in_progress"), do the work, report ' +
                 'via send_message(to: "leader"), then mark ' +
                 'completed with task_update.'),
+          // The definition's resolved provider route (#10071). InProcess
+          // backends build a dedicated per-agent ContentGenerator only
+          // when authOverrides.authType is present; without this the
+          // teammate falls back to the leader's generator and streams the
+          // definition's model ID over the leader's route. Skipped when
+          // the leader overrode the model at spawn time — the definition
+          // does not vouch for the route of a model it did not select.
+          authOverrides: dedicatedRoute
+            ? { authType: dedicatedRoute.authType }
+            : undefined,
           runtimeConfig: {
             promptConfig: {
               systemPrompt,
             },
             modelConfig: {
-              model: config.model ?? subagentModel,
+              model: effectiveModel ?? subagentModel,
             },
             runConfig: {
               ...subagentRunConfig,
@@ -515,6 +570,43 @@ export class TeamManager {
             ? `agent terminated during start (${spawnedStatus})`
             : 'backend returned no agent handle');
         throw new Error(`Teammate "${name}" failed to start: ${reason}`);
+      }
+
+      // A healthy spawn is not proof the requested route materialized:
+      // InProcessBackend swallows per-agent ContentGenerator creation
+      // failures into a debug log and falls back to the leader's
+      // generator (#10071). Without this check the teammate would join
+      // while streaming the definition's model ID over the leader's
+      // route — the exact misrouting this PR fixes. Verify the
+      // dedicated generator exists and fail loudly so `rollback` tears
+      // the teammate down, matching the ordinary-subagent path, which
+      // surfaces the same failure as a spawn error.
+      if (dedicatedRoute) {
+        // A backend that omits the accessor cannot prove the route
+        // materialized. Fail loudly with the real cause instead of
+        // treating a missing method like a generator-creation failure
+        // (which would send maintainers hunting for a missing API key)
+        // or, worse, letting the teammate join on the leader's
+        // generator — the silent misrouting this PR fixes (#10071).
+        if (typeof this.backend.getAgentContentGenerator !== 'function') {
+          throw new Error(
+            `Teammate "${name}" failed to start: the active backend ` +
+              `does not support dedicated per-agent ContentGenerators ` +
+              `required by model "${dedicatedRoute.modelId}" ` +
+              `(${dedicatedRoute.authType})`,
+          );
+        }
+        const routeGenerator = this.backend.getAgentContentGenerator(agentId);
+        if (!routeGenerator) {
+          const cause = this.backend.getAgentContentGeneratorError?.(agentId);
+          throw new Error(
+            `Teammate "${name}" failed to start: could not create a ` +
+              `dedicated ContentGenerator for model ` +
+              `"${dedicatedRoute.modelId}" ` +
+              `(${dedicatedRoute.authType})` +
+              (cause ? `: ${cause}` : ''),
+          );
+        }
       }
 
       this.setupEventBridge(agentId, name);
@@ -670,31 +762,38 @@ export class TeamManager {
   /**
    * Broadcast a message to all teammates and the leader
    * (except the sender).
+   *
+   * Returns the delivery outcome so the caller can distinguish complete
+   * success from partial/total failure instead of assuming every
+   * delivery landed.
    */
-  async broadcast(message: string, fromName: string): Promise<void> {
-    const promises = this.teamFile.members
+  async broadcast(message: string, fromName: string): Promise<BroadcastResult> {
+    const recipients = this.teamFile.members
       .filter((m) => m.name.toLowerCase() !== fromName.toLowerCase())
-      .map((m) => this.sendMessage(m.name, message, fromName));
+      .map((m) => m.name);
 
     // Also deliver to leader inbox if sender is not the leader.
     if (fromName.toLowerCase() !== LEADER_NAME) {
-      promises.push(this.sendMessage(LEADER_NAME, message, fromName));
+      recipients.push(LEADER_NAME);
     }
 
     // allSettled, not all: a single recipient that terminated between
     // the member snapshot and the send throws (its queue is gone), and
     // Promise.all would reject the whole broadcast — making the leader
     // think every recipient failed when the rest were delivered fine.
-    const results = await Promise.allSettled(promises);
-    const failures = results.filter(
-      (r): r is PromiseRejectedResult => r.status === 'rejected',
+    const results = await Promise.allSettled(
+      recipients.map((name) => this.sendMessage(name, message, fromName)),
     );
-    if (failures.length > 0) {
+    const failedRecipients = recipients.filter(
+      (_, i) => results[i]?.status === 'rejected',
+    );
+    if (failedRecipients.length > 0) {
       debug.warn(
-        `Broadcast: ${failures.length}/${results.length} send(s) failed ` +
+        `Broadcast: ${failedRecipients.length}/${results.length} send(s) failed ` +
           `(recipient likely terminated).`,
       );
     }
+    return { total: recipients.length, failedRecipients };
   }
 
   /**
@@ -1053,9 +1152,8 @@ export class TeamManager {
       originalRequest: request.originalRequest,
       researchSummary: request.researchSummary,
     };
-    const escapedJson = JSON.stringify(payload, null, 2).replace(
-      /</g,
-      '\\u003c',
+    const escapedJson = escapeJsonTagCharacters(
+      JSON.stringify(payload, null, 2),
     );
     return [
       `<team_plan_approval_request request_id="${escapeXml(requestId)}" from="${escapeXml(request.teammateName)}">`,
@@ -1716,10 +1814,54 @@ export class TeamManager {
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
     });
 
-    // Reconcile: if agent already reached IDLE before we
-    // attached, flush now.
+    // Reconcile state reached before we attached. The emitter does
+    // not buffer for late subscribers, and the in-process run loop
+    // can settle the initial round while spawnAgent() is still
+    // resolving — those events never reach the bridge.
     const currentStatus = agent.getStatus();
-    if (currentStatus === AgentStatus.IDLE) {
+
+    // Round text emitted before attach survives only in the agent's
+    // message history (AgentCore appends an assistant message per
+    // ROUND_TEXT). Recover the last model-visible answer — mirroring
+    // onRoundText's last-non-empty-text-wins semantics — so the
+    // settlement below reports it instead of the no-visible-answer
+    // fallback. Live ROUND_TEXT events after attach overwrite this
+    // seed as usual; RUNNING/terminal handlers clear it like any
+    // pending report.
+    const preAttachReport = this.lastVisibleAnswer(agent);
+    if (preAttachReport !== undefined) {
+      this.pendingFinalReports.set(agentId, preAttachReport);
+      // Mirror onRoundText: visible round text supersedes any
+      // explicit send_message(to: leader) flag set earlier in this
+      // round. sendMessage sets that flag synchronously — no event
+      // bridge needed — so a pre-attach explicit progress note would
+      // otherwise survive until the replayed IDLE settlement below,
+      // which would then skip this recovered answer and leave the
+      // leader with zero automatic reports. Erring toward one extra
+      // delivery (when the last visible text preceded the explicit
+      // send) matches the "exactly once, not zero" intent.
+      this.explicitLeaderReports.delete(agentId);
+      debug.info(
+        `setupEventBridge: recovered pre-attach round text for "${agentName}" (${agentId}); seeding pending report (${preAttachReport.length} chars) from message history.`,
+      );
+    }
+
+    if (currentStatus === AgentStatus.IDLE && preAttachReport !== undefined) {
+      // The initial round already settled to IDLE before attach.
+      // Replay the STATUS_CHANGE through the same handler the live
+      // path uses so its final report and message flush happen
+      // exactly once. Without pre-attach round text there is no
+      // completed round to report — keep the flush-only behavior.
+      debug.info(
+        `setupEventBridge: replaying missed IDLE settlement for "${agentName}" (${agentId}); the initial round settled before the event bridge attached.`,
+      );
+      onStatusChange({
+        agentId,
+        previousStatus: AgentStatus.RUNNING,
+        newStatus: AgentStatus.IDLE,
+        timestamp: Date.now(),
+      } as AgentStatusChangeEvent);
+    } else if (currentStatus === AgentStatus.IDLE) {
       this.fireAndForget(
         `flushNextMessage(${agentId})`,
         this.flushNextMessage(agentId, agentName),
@@ -1737,6 +1879,18 @@ export class TeamManager {
         timestamp: Date.now(),
       } as AgentStatusChangeEvent);
     }
+  }
+
+  /**
+   * The last model-visible answer in an agent handle's message
+   * history, or undefined when there is none. Mirrors the live
+   * ROUND_TEXT → pendingFinalReports semantics: the most recent
+   * non-empty, non-thought assistant text wins.
+   */
+  private lastVisibleAnswer(agent: TeamAgentHandle): string | undefined {
+    const messages = agent.getMessages?.();
+    if (!messages) return undefined;
+    return lastVisibleAnswer(messages);
   }
 
   // ─── Private: Permission fallback ───────────────────────

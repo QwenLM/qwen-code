@@ -22,7 +22,7 @@ import {
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
   DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
 } from './workflow-orchestrator.js';
-import type { Config } from '../../config/config.js';
+import type { ApprovalMode, Config } from '../../config/config.js';
 import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import { WorkflowRunRegistry } from '../workflow-run-registry.js';
@@ -34,7 +34,7 @@ import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 // reset between cases. Without this, the module-level `created` array
 // accumulated across tests, so a later test could pass by coincidence.
 //
-// FIX-C8 (TST-2-I2): record the full 9-arg signature of AgentHeadless.create
+// FIX-C8 (TST-2-I2): record the full signature of AgentHeadless.create
 // and the (ctx, signal?) shape of execute so any drift between the production
 // call site and the real AgentHeadless surface becomes a test failure.
 const {
@@ -54,6 +54,8 @@ const {
     runConfig?: { max_turns?: number; max_time_minutes?: number };
     toolConfig?: { tools?: string[]; disallowedTools?: string[] };
     agentId?: string | null;
+    taskName?: string;
+    subagentId?: string;
   }>,
   nextFinalText: { value: undefined as string | undefined },
   // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
@@ -177,6 +179,8 @@ vi.mock('./agent-headless.js', () => ({
       _eventEmitter?: unknown,
       _hooks?: unknown,
       _runtimeView?: unknown,
+      taskName?: string,
+      subagentId?: string,
     ) => ({
       execute: async (
         ctx: { get: (k: string) => unknown },
@@ -192,6 +196,8 @@ vi.mock('./agent-headless.js', () => ({
           runConfig,
           toolConfig,
           agentId: getCurrentAgentId(),
+          taskName,
+          subagentId,
         });
         if (
           !promptConfig.systemPrompt?.includes('subagent spawned by a workflow')
@@ -2017,6 +2023,8 @@ describe('createProductionDispatch', () => {
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
     expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    expect(created[0]!.taskName).toBe('hello');
+    expect(created[0]!.subagentId).toBe(created[0]!.agentId);
   });
 
   it('does not suppress env bootstrap with an empty initial history', async () => {
@@ -2460,7 +2468,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         args: undefined,
       });
       // 50 thunks >> window, so the window fully fills: peak === cap.
-      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
   });
@@ -2533,7 +2541,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         );`,
         args: undefined,
       });
-      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
 
@@ -2828,16 +2836,31 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       }
     });
 
-    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [1,16]', () => {
+    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [2,16]', () => {
       expect(
         resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '4' }),
       ).toBe(4);
-      // invalid → cpu-derived default, always within [1, 16]
+      // invalid → cpu-derived default, always within [2, 16]
       const fallback = resolveConcurrencyLimit({
         QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '-1',
       });
-      expect(fallback).toBeGreaterThanOrEqual(1);
+      expect(fallback).toBeGreaterThanOrEqual(2);
       expect(fallback).toBeLessThanOrEqual(16);
+    });
+
+    // The default reads `availableParallelism()`, which honours the CPU
+    // affinity mask and container limits, where `os.cpus()` reports the
+    // host and can return an empty array. The floor is 2, not 1: a window
+    // of 1 turns every `parallel()` into a sequence on a small machine.
+    it('resolveConcurrencyLimit derives the default from availableParallelism, floored at 2', () => {
+      const at = (parallelism: number) =>
+        resolveConcurrencyLimit({}, () => parallelism);
+      expect(at(0)).toBe(2);
+      expect(at(1)).toBe(2);
+      expect(at(3)).toBe(2);
+      expect(at(6)).toBe(4);
+      expect(at(18)).toBe(16);
+      expect(at(64)).toBe(16);
     });
 
     // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must
@@ -2911,7 +2934,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     /** What the subagent's Config answers for "where am I?". */
     runtimeTargetDir?: string;
     runtimeIgnoreFiles?: string;
-    options?: { runConfigOverrides?: unknown };
+    runtimeContext: Config;
+    options?: {
+      runConfigOverrides?: unknown;
+      taskName?: string;
+      subagentId?: string;
+    };
     eventEmitterAttached: boolean;
     executeAgentId?: string | null;
   };
@@ -2964,6 +2992,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
       getToolRegistry: () => fakeRegistry,
+      // Derived dispatch contexts layer an approval profile over the
+      // worktree profile; the derivation snapshots the base mode through
+      // these methods.
+      getApprovalMode: () => 'default' as ApprovalMode,
+      isTrustedFolder: () => true,
       // P3 R2 self-review: isolation:'worktree' provisioning reads
       // these methods. Provide deterministic returns so the tests can
       // drive GitWorktreeService stubs without re-deriving cwd.
@@ -2989,7 +3022,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             disallowedTools?: string[];
           },
           runtimeContext: Config,
-          options?: { eventEmitter?: unknown; runConfigOverrides?: unknown },
+          options?: {
+            eventEmitter?: unknown;
+            runConfigOverrides?: unknown;
+            taskName?: string;
+            subagentId?: string;
+          },
         ) => {
           const call: StubSubagentCall = {
             config: subagentConfig,
@@ -2998,7 +3036,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             runtimeIgnoreFiles: runtimeContext
               .getFileService?.()
               .getQwenIgnoreFileNamesDisplay(),
-            options: { runConfigOverrides: options?.runConfigOverrides },
+            runtimeContext,
+            options: {
+              runConfigOverrides: options?.runConfigOverrides,
+              taskName: options?.taskName,
+              subagentId: options?.subagentId,
+            },
             eventEmitterAttached: options?.eventEmitter !== undefined,
           };
           calls.push(call);
@@ -3097,6 +3140,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
     expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    expect(calls[0].options?.taskName).toBe('find foo');
+    expect(calls[0].options?.subagentId).toBe(calls[0].executeAgentId);
     // Workflow floor [AskUserQuestion, SendMessage, Monitor, EnterPlanMode,
     // ExitPlanMode, Agent] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
@@ -4427,6 +4472,28 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls[0].config.model).toBe('qwen3-max');
     // Default-clean stub auto-removes; no suffix expected.
     expect(String(result)).not.toMatch(/worktree preserved/);
+    expect(calls[0].runtimeContextSame).toBe(false);
+    expect(calls[0].runtimeContext.getTargetDir()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getCwd()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getWorkingDir()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getProjectRoot()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    // The approval profile layered over the worktree context inherits the
+    // worktree rebinding through the prototype chain. The fake worktree
+    // path does not exist on disk, so assert the rebinding's presence
+    // rather than its resolved directories.
+    expect(calls[0].runtimeContext.getWorkspaceContext()).toBeDefined();
+    expect(
+      calls[0].runtimeContext.getFileService().getQwenIgnoreFileNamesDisplay(),
+    ).toBe('.qwenignore, .cursorignore');
+    expect(config.getTargetDir()).toBe('/fake/repo');
   });
 
   it("schema + isolation:'worktree': structured payload returned, worktree info logged", async () => {
