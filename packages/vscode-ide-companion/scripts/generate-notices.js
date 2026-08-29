@@ -507,13 +507,13 @@ async function main() {
 }
 
 export async function runNoticeGeneration(env = process.env) {
-  const skipPrepare =
-    env.npm_lifecycle_event === 'prepare' &&
-    ['1', 'true'].includes((env.QWEN_SKIP_PREPARE ?? '').toLowerCase());
+  const skipGeneration = ['1', 'true'].includes(
+    (env.QWEN_SKIP_NOTICE_GENERATION ?? '').toLowerCase(),
+  );
 
-  if (skipPrepare) {
+  if (skipGeneration) {
     console.log(
-      'Skipping VS Code notice generation because QWEN_SKIP_PREPARE is set.',
+      'Skipping VS Code notice generation during worktree bootstrap.',
     );
     return;
   }

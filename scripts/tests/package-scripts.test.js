@@ -100,12 +100,12 @@ describe('package scripts', () => {
       if (process.platform === 'win32') {
         writeFileSync(
           path.join(commandDir, 'corepack.cmd'),
-          '@echo %QWEN_SKIP_PREPARE% %*>>"%WORKTREE_SETUP_LOG%"\r\n',
+          '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n',
         );
       } else {
         writeFileSync(
           path.join(commandDir, 'corepack'),
-          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $*" >> "$WORKTREE_SETUP_LOG"\n',
+          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $QWEN_SKIP_NOTICE_GENERATION $*" >> "$WORKTREE_SETUP_LOG"\n',
         );
         chmodSync(path.join(commandDir, 'corepack'), 0o755);
       }
@@ -126,7 +126,7 @@ describe('package scripts', () => {
 
       expect(result.status).toBe(0);
       expect(readFileSync(logFile, 'utf8').trim()).toBe(
-        '1 pnpm install --frozen-lockfile --offline',
+        '1 1 pnpm install --frozen-lockfile --offline',
       );
     } finally {
       rmSync(binDir, { recursive: true, force: true });
@@ -141,12 +141,12 @@ describe('package scripts', () => {
       if (process.platform === 'win32') {
         writeFileSync(
           path.join(binDir, 'npx.cmd'),
-          '@echo %QWEN_SKIP_PREPARE% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if "%5"=="--offline" exit /b 1\r\n',
+          '@echo %QWEN_SKIP_PREPARE% %QWEN_SKIP_NOTICE_GENERATION% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if "%5"=="--offline" exit /b 1\r\n',
         );
       } else {
         writeFileSync(
           path.join(binDir, 'npx'),
-          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $*" >> "$WORKTREE_SETUP_LOG"\n[ "$5" != "--offline" ]\n',
+          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $QWEN_SKIP_NOTICE_GENERATION $*" >> "$WORKTREE_SETUP_LOG"\n[ "$5" != "--offline" ]\n',
         );
         chmodSync(path.join(binDir, 'npx'), 0o755);
       }
@@ -167,8 +167,8 @@ describe('package scripts', () => {
 
       expect(result.status).toBe(0);
       expect(readFileSync(logFile, 'utf8').trim().split('\n')).toEqual([
-        '1 --yes pnpm@11.24.0 install --frozen-lockfile --offline',
-        '1 --yes pnpm@11.24.0 install --frozen-lockfile --prefer-offline',
+        '1 1 --yes pnpm@11.24.0 install --frozen-lockfile --offline',
+        '1 1 --yes pnpm@11.24.0 install --frozen-lockfile --prefer-offline',
       ]);
     } finally {
       rmSync(binDir, { recursive: true, force: true });

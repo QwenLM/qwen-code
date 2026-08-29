@@ -19,6 +19,7 @@ const packageManager = getPinnedPnpmPackage(
 const env = {
   ...process.env,
   QWEN_SKIP_PREPARE: '1',
+  QWEN_SKIP_NOTICE_GENERATION: '1',
 };
 
 function findOnPath(command) {

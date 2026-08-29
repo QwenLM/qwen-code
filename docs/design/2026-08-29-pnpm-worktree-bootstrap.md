@@ -41,9 +41,10 @@ the exact pnpm package declared by `packageManager`. The script freezes the
 lockfile and first attempts an offline install from the shared local store. It
 retries with registry access only when that cache-only attempt is incomplete.
 This avoids waiting for pnpm to prefetch optional binaries for other platforms
-on the common warm-store path. The script sets `QWEN_SKIP_PREPARE=1`, keeping
-dependency install scripts enabled while skipping repository build, bundle,
-Husky setup, and npm-layout notice generation. Script execution does not
+on the common warm-store path. The script sets `QWEN_SKIP_PREPARE=1` plus a
+bootstrap-private notice-generation guard, keeping dependency install scripts
+enabled while skipping repository build, bundle, Husky setup, and npm-layout
+notice generation. Script execution does not
 implicitly install stale dependencies; the bootstrap command is the explicit
 installation boundary. Building from this pnpm layout is deferred to Stage 2.
 

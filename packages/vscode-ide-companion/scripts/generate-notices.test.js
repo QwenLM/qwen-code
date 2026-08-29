@@ -19,17 +19,17 @@ import {
 } from './generate-notices.js';
 
 describe('runNoticeGeneration', () => {
-  it('skips prepare-time generation for dependency-only worktree setup', async () => {
+  it('skips generation during dependency-only worktree setup', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     try {
       await runNoticeGeneration({
-        npm_lifecycle_event: 'prepare',
-        QWEN_SKIP_PREPARE: '1',
+        npm_lifecycle_event: 'generate:notices',
+        QWEN_SKIP_NOTICE_GENERATION: '1',
       });
 
       expect(log).toHaveBeenCalledWith(
-        'Skipping VS Code notice generation because QWEN_SKIP_PREPARE is set.',
+        'Skipping VS Code notice generation during worktree bootstrap.',
       );
     } finally {
       log.mockRestore();
