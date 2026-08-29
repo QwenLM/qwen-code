@@ -73,6 +73,7 @@ import {
 import { repositoryContextOf } from './lib/repository-context.js';
 import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
+import { ledgerDedupFacts } from './dedup-candidates.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
   LEDGER_BODY_FILE,
@@ -2138,6 +2139,7 @@ export function composeReview(
     closuresThisRound,
     churnRounds,
     flatRounds,
+    result.recommendations,
   );
   // `postedInline` came out of the body composer on the same input, so only
   // the predecessor's volume — which only this scope read — is added here.
@@ -2776,6 +2778,7 @@ function ledgerMarkerFor(
   closed: LedgerClosure[],
   churnRounds: number,
   flatRounds: number,
+  recommendations: readonly Recommendation[] | undefined,
 ): string | null {
   try {
     if (!input.planPath) return null;
@@ -2937,6 +2940,14 @@ function ledgerMarkerFor(
       // The floor trigger's streak rides beside the churn streak — same
       // rung, same zero-omission; see the field's own note in `Ledger`.
       ...(flatRounds > 0 ? { flatRounds } : {}),
+      // The diagnosis's matched codes, off the SAME derivation the posted
+      // paragraph and `result.recommendations` render from — one origin, so
+      // the codes an outside consumer wires (#10107) and the sentences a
+      // human reads cannot describe different rounds. Absent when the round
+      // produced no diagnosis, exactly as the result field is.
+      ...(recommendations !== undefined && recommendations.length > 0
+        ? { rec: recommendations.map((r) => r.code) }
+        : {}),
     });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
@@ -4295,6 +4306,18 @@ function composeReviewBody(
     downgradedFrom = 'Request changes';
   }
 
+  // Candidates the pre-verify carried-ledger dedup set aside (issue #10105) —
+  // read from the report the Step 4 command wrote, the same
+  // model-out-of-the-loop shape as `scriptLintGate` but non-capping: nothing
+  // is owed, so an absent or stale report renders nothing. Only validated ids
+  // are quoted (the titles are model-written and stay in the report), so this
+  // block needs none of the sanitation the model-written lists above get.
+  // Read ABOVE the low-signal gate: its carve-out turns on the set-aside
+  // count, and the rendering below only formats what this reads.
+  const ledgerDedup: ReturnType<typeof ledgerDedupFacts> = input.planPath
+    ? ledgerDedupFacts(input.planPath)
+    : { droppedCount: 0, ids: [] };
+
   // A zero-finding Approve over a non-trivial source diff is disclosed, not
   // capped. Every gate above proves the agents READ the diff; none proves the
   // review could tell good code from bad, and a dogfooded weak-model run
@@ -4308,11 +4331,15 @@ function composeReviewBody(
   let lowSignal: ComposeReviewResult['lowSignal'] = null;
   // A deferrals-only APPROVE is not low signal: the agents DID report
   // findings — this run recorded them as deferred — and the low-signal
-  // sentence's whole claim is that none reported any.
+  // sentence's whole claim is that none reported any. A dedup-only APPROVE
+  // is the same shape one step earlier: the agents reported findings the
+  // round set aside as already carried, so "none reported a finding" would
+  // contradict the disclosure two lines below it.
   if (
     event === 'APPROVE' &&
     input.planPath &&
-    deferredSuggestions.length === 0
+    deferredSuggestions.length === 0 &&
+    ledgerDedup.droppedCount === 0
   ) {
     let plan: RosterPlan | undefined;
     try {
@@ -4427,6 +4454,10 @@ function composeReviewBody(
       zh: 'persistently-critical 收敛建议',
     },
     1: { en: 'the deferred-findings list', zh: '延后发现清单' },
+    1.5: {
+      en: 'the carried-ledger dedup disclosure',
+      zh: 'carried-ledger 去重披露',
+    },
     2: {
       en: 'the not-reviewed and non-blocking disclosures',
       zh: '未审查范围与非阻断披露',
@@ -4489,8 +4520,9 @@ function composeReviewBody(
    * fold yields FIRST (it is a translation of the English above it, so it
    * costs the author nothing the body does not still say), then parts by
    * ascending `trim` rank (the mechanism-health note, then the residual-risk
-   * advisory, then the deferral display, then the not-reviewed disclosures,
-   * then the convergence observation), the blockers and the caps never, and
+   * advisory, then the deferral display, then the carried-ledger dedup
+   * disclosure, then the not-reviewed disclosures, then the convergence
+   * observation), the blockers and the caps never, and
    * every drop is
    * disclosed with its count and its kind — a list silently shortened reads
    * as a list that was complete.
@@ -4511,14 +4543,15 @@ function composeReviewBody(
    * Every exit of `render` that dropped a rank owes this line — the
    * last-resort path drops ranks AND cuts, and a stderr record naming only
    * the cut leaves the kinds it dropped disclosed nowhere but the body.
-   * Four of the five TRIM ranks keep a second durable copy, and the
+   * Five of the six TRIM ranks keep a second durable copy, and the
    * ladder's order now follows that fact almost exactly: trim rank -1's
    * health note and trim rank 0's residual-risk advisory both ride the
    * composed result and print as `HEALTH:` and `RESIDUAL-RISK:`, trim rank
    * 1's deferrals are each a `D<round>-<n>` entry in the findings artifact,
-   * and trim rank 3's observation rides the composed result too (and
-   * prints as `CONVERGENCE:`) — it is last for the arithmetic its own block
-   * explains, not for want of a copy. Trim rank 2 is the exception — a
+   * trim rank 1.5's dedup disclosure keeps its whole content in the dedup
+   * report on disk, and trim rank 3's observation rides the composed result
+   * too (and prints as `CONVERGENCE:`) — it is last for the arithmetic its
+   * own block explains, not for want of a copy. Trim rank 2 is the exception — a
    * trimmed disclosure section survives nowhere but the terminal summary,
    * so ask for it there rather than pointing at an artifact that does not
    * carry it.
@@ -5071,6 +5104,43 @@ function composeReviewBody(
           },
         ];
 
+  const MAX_DEDUP_IDS_SHOWN = 12;
+  const dedupIdsShown = ledgerDedup.ids
+    .slice(0, MAX_DEDUP_IDS_SHOWN)
+    .map(({ id, n }) => (n > 1 ? `${id} ×${n}` : id));
+  const dedupIdsMore = ledgerDedup.ids.length - dedupIdsShown.length;
+  const dedupIdList =
+    dedupIdsShown.length === 0
+      ? ''
+      : dedupIdsShown.join(', ') +
+        (dedupIdsMore > 0 ? `, +${dedupIdsMore} more` : '');
+  const ledgerDedupBlock: Bi[] =
+    ledgerDedup.droppedCount === 0
+      ? []
+      : [
+          {
+            // Its OWN rank, between the deferral list and the disclosures —
+            // see the ladder comment where the ranks are named. Sharing rank
+            // 1 keyed every notice surface (the rank's name, the artifact
+            // pointer, `bodyTrim.deferralList`) on the deferral list over a
+            // round whose only trim was this block.
+            trim: 1.5,
+            en:
+              `${ledgerDedup.droppedCount} candidate finding(s) this round's ` +
+              `reviewers re-derived matched entries already carried on this PR ` +
+              `and were set aside before verification` +
+              (dedupIdList ? ` (${dedupIdList})` : '') +
+              ` — a matched posted finding is ruled in the previous-round ` +
+              `status as always, and a matched deferral stays on the standing ` +
+              `deferral record.`,
+            zh:
+              `本轮评审重新推导出的 ${ledgerDedup.droppedCount} 条候选发现与本 PR ` +
+              `已携带的条目匹配，已在验证前搁置` +
+              (dedupIdList ? `（${dedupIdList}）` : '') +
+              `——被匹配的已发布条目照常在上一轮状态区裁定，被匹配的延后条目仍保留在延后清单记录中。`,
+          },
+        ];
+
   const contextUnavailableClause: Bi = {
     keep: 1,
     en: 'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
@@ -5331,7 +5401,8 @@ function composeReviewBody(
   // maintainer it is written for receives it whole on the terminal
   // `RESIDUAL-RISK:` line AND in the composed JSON, which the persisted
   // artifact carries. The deferral list below it keeps one copy (the
-  // findings artifact), the disclosures below that keep none but the
+  // findings artifact), the dedup disclosure below that keeps the dedup
+  // report on disk, the disclosures below that keep none but the
   // terminal report, and the observation last is the author's only sentence
   // about the shape of the loop. Sharing a rank with any of them is what
   // the trim notice cannot survive: it names what a rank drops, and rank
@@ -5382,7 +5453,8 @@ function composeReviewBody(
   // makes the trim notice name it when it does. It is ranked LAST because
   // it is the cheapest block to keep and the only one whose reader is the
   // author of the pull request alone — the deferral list has a second
-  // durable copy in the findings artifact, the disclosures are restated in
+  // durable copy in the findings artifact, the dedup disclosure in the
+  // dedup report on disk, the disclosures are restated in
   // the terminal report, and the mechanism-health note above it is written
   // for the operator, who has the `HEALTH:` line. This paragraph is the
   // whole of what this pipeline tells a PR author about a loop that is not
@@ -5510,6 +5582,7 @@ function composeReviewBody(
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...approachBlock,
       ...duplicatesBlock,
+      ...ledgerDedupBlock,
       ...cannotTellBlock,
       ...notReviewedForBody,
       ...unverifiedTagsBlock,
@@ -5565,9 +5638,12 @@ function composeReviewBody(
     // With posture-deferred Suggestions on record, "No issues found" would be
     // a lie the deferral list two lines down contradicts: the review DID find
     // them — it recorded them and chose, per the posture, not to request them.
+    // The carried-ledger dedup disclosure contradicts it the same way: the
+    // reviewers derived those candidates; the round set them aside because
+    // the PR already carries them.
     const body = render(
       [
-        deferredSuggestionsBlock.length
+        deferredSuggestionsBlock.length || ledgerDedupBlock.length
           ? {
               keep: 1,
               en: 'No blocking issues. LGTM! ✅',
@@ -5578,6 +5654,7 @@ function composeReviewBody(
               en: 'No issues found. LGTM! ✅',
               zh: '未发现问题。LGTM！✅',
             },
+        ...ledgerDedupBlock,
         ...notReviewedForBody,
         ...deferredBlock,
         ...testPlanBlock,
@@ -5599,6 +5676,7 @@ function composeReviewBody(
         ...continuityBlock,
       ],
       notReviewedParts.length ||
+        ledgerDedupBlock.length ||
         deferredBlock.length ||
         testPlanBlock.length ||
         repositoryContextBlock.length ||
@@ -5783,6 +5861,10 @@ function composeReviewBody(
   // 4a. Duplicate-dropped Suggestions — built above with the other body
   //     blocks; it renders on every event, RC included.
   clauses.push(...duplicatesBlock);
+
+  // 4b. Pre-verify carried-ledger dedup disclosure — same render-on-every-
+  //     event rule as 4a, whose posting-layer drop it front-runs.
+  clauses.push(...ledgerDedupBlock);
 
   // 5. Unresolved existing Criticals.
   clauses.push(...cannotTellBlock);
@@ -6013,7 +6095,9 @@ interface Bi {
    * persistently-critical advisory (trim rank 0 — the maintainer has it
    * whole on the terminal line and in the composed JSON), then the display
    * of findings the review deliberately did NOT request (the deferral list,
-   * trim rank 1, kept whole in the findings artifact), then the disclosures
+   * trim rank 1, kept whole in the findings artifact), then the
+   * carried-ledger dedup disclosure (trim rank 1.5, kept whole in the dedup
+   * report on disk), then the disclosures
    * of what went unreviewed (trim rank 2, which have no other durable
    * copy), and the convergence observation last (trim rank 3 — see its own
    * block for why the cheapest paragraph is shed last). The blockers, the
