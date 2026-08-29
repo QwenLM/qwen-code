@@ -55,6 +55,23 @@ describe('markdown document policy', () => {
     }
   });
 
+  it.each([
+    ['pseudo fence', ['```a`', `${'a*'.repeat(3_000)}]`, '```'].join('\n')],
+    ['strikethrough delimiters', `${'a~'.repeat(3_000)}]`],
+    ['math delimiters', `${'a$'.repeat(3_000)}]`],
+    [
+      'comment-wrapped fence',
+      ['<!--', '```', '-->', `${'a*'.repeat(3_000)}]`].join('\n'),
+    ],
+  ])('fails closed for parser/scanner divergence: %s', (_name, input) => {
+    const activePolicy = policy();
+
+    expect(sanitizeMarkdownDocument(input, activePolicy)).toBe(
+      '[markdown omitted: complexity limit exceeded]',
+    );
+    expect(activePolicy.onComplexityLimit).toHaveBeenCalledOnce();
+  });
+
   it('keeps flat bracketed logs above the old raw-marker limit', () => {
     const input = Array.from(
       { length: 342 },

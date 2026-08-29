@@ -40,7 +40,7 @@ export interface MarkdownDocumentPolicy {
 const MARKDOWN_COMPLEXITY_FALLBACK =
   '[markdown omitted: complexity limit exceeded]';
 const MAX_MARKDOWN_SOURCE_CHARACTERS = 400 * 1024;
-const MAX_MARKDOWN_EMPHASIS_DELIMITERS = 2_048;
+const MAX_MARKDOWN_INLINE_DELIMITERS = 2_048;
 const MAX_MARKDOWN_BRACKET_DEPTH = 512;
 const MAX_MARKDOWN_BLOCKQUOTE_DEPTH = 512;
 const MAX_MARKDOWN_AST_NODES = 20_000;
@@ -77,10 +77,12 @@ function parseMarkdown(value: string): MarkdownNode | undefined {
 
 function isMarkdownSourceWithinBudget(value: string): boolean {
   if (value.length > MAX_MARKDOWN_SOURCE_CHARACTERS) return false;
-  let emphasisDelimiters = 0;
+  const source = sourceOutsideHtmlComments(value);
+  if (source === undefined) return false;
+  let inlineDelimiters = 0;
   let bracketDepth = 0;
   let fence: { character: string; length: number } | undefined;
-  for (const line of value.split('\n')) {
+  for (const line of source.split('\n')) {
     const fenceText = line.replace(/^ {0,3}/, '');
     const fenceRun = /^(`+|~+)/.exec(fenceText)?.[1];
     if (fence) {
@@ -94,8 +96,12 @@ function isMarkdownSourceWithinBudget(value: string): boolean {
       continue;
     }
     if (fenceRun && fenceRun.length >= 3) {
-      fence = { character: fenceRun[0], length: fenceRun.length };
-      continue;
+      const character = fenceRun[0];
+      const info = fenceText.slice(fenceRun.length);
+      if (character !== '`' || !info.includes('`')) {
+        fence = { character, length: fenceRun.length };
+        continue;
+      }
     }
 
     let leadingIndent = 0;
@@ -129,15 +135,37 @@ function isMarkdownSourceWithinBudget(value: string): boolean {
         if (bracketDepth > MAX_MARKDOWN_BRACKET_DEPTH) return false;
       } else if (character === ']') {
         bracketDepth = Math.max(0, bracketDepth - 1);
-      } else if (character === '*' || character === '_') {
-        emphasisDelimiters += 1;
-        if (emphasisDelimiters > MAX_MARKDOWN_EMPHASIS_DELIMITERS) {
+      } else if (
+        character === '*' ||
+        character === '_' ||
+        character === '~' ||
+        character === '$'
+      ) {
+        inlineDelimiters += 1;
+        if (inlineDelimiters > MAX_MARKDOWN_INLINE_DELIMITERS) {
           return false;
         }
       }
     }
   }
   return true;
+}
+
+function sourceOutsideHtmlComments(value: string): string | undefined {
+  let result = '';
+  let cursor = 0;
+  while (cursor < value.length) {
+    const start = value.indexOf('<!--', cursor);
+    if (start === -1) return result + value.slice(cursor);
+    result += value.slice(cursor, start);
+    const end = value.indexOf('-->', start + 4);
+    const commentEnd = end === -1 ? value.length : end;
+    const comment = value.slice(start + 4, commentEnd);
+    if (/^ {0,3}(?:`{3,}|~{3,})/m.test(comment)) return undefined;
+    result += comment.replace(/[^\n]/g, '');
+    cursor = end === -1 ? value.length : end + 3;
+  }
+  return result;
 }
 
 function walkMarkdown(

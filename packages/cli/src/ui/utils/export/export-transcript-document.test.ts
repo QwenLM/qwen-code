@@ -169,6 +169,8 @@ describe('ExportTranscriptDocumentV1', () => {
                   'nested=/home/alice/home/notes.txt',
                   'forged=[home]/home/alice/private.txt',
                   'redundant=//home/alice/private.txt /./home/bob/private.txt',
+                  'mixed=C:\\Users/alice/private.txt /home\\bob/private.txt',
+                  'windows dotted=C:\\Users\\.\\alice\\private.txt',
                   '![safe](data:image/png;base64,/home/AA)',
                 ].join('\n'),
               },
@@ -204,7 +206,26 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).not.toContain('forged=[home]/home/');
     expect(text).not.toContain('//home/alice');
     expect(text).not.toContain('/./home/bob');
+    expect(text).not.toContain('C:\\Users/alice');
+    expect(text).not.toContain('/home\\bob');
+    expect(text).not.toContain('Users\\.\\alice');
   });
+
+  it.each(['/Users/./bob', '/home/../home/alice', 'C:\\Users\\.\\alice'])(
+    'redacts a structured home root with dot segments: %s',
+    (cwd) => {
+      const document = createExportTranscriptDocumentV1(
+        [record('structured-dot-path', null)],
+        {
+          ...sessionData,
+          metadata: { ...sessionData.metadata, cwd },
+        },
+        EXPORT_OPTIONS,
+      );
+
+      expect(document.metadata.projectName).toBe('[home]');
+    },
+  );
 
   it('marks excluded file attachments as incomplete', () => {
     const document = createExportTranscriptDocumentV1(

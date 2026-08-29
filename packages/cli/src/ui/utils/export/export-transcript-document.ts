@@ -1863,7 +1863,20 @@ function safePath(value: string): string {
     .replace(/^file:\/\/\//i, '/')
     .replace(/^file:\//i, '/')
     .replace(/\/+$/, '');
-  const components = normalized.split('/').filter(Boolean);
+  const components: string[] = [];
+  for (const component of normalized.split('/').filter(Boolean)) {
+    if (component === '.') continue;
+    if (component === '..') {
+      if (
+        components.length > 0 &&
+        !(components.length === 1 && /^[A-Za-z]:$/.test(components[0]))
+      ) {
+        components.pop();
+      }
+      continue;
+    }
+    components.push(component);
+  }
   const rootIndex = /^[A-Za-z]:$/.test(components[0] ?? '') ? 1 : 0;
   if (
     /^(?:Users|home)$/i.test(components[rootIndex] ?? '') &&
@@ -1943,11 +1956,7 @@ function redactRawHomePathStructures(value: string): string {
       'file://[home]',
     )
     .replace(
-      /(?:\/(?:\.\/|\/)*)+(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/gi,
-      '[home]',
-    )
-    .replace(
-      /(?:[A-Za-z]:)?\\(?:Users|home)\\[^/\\\s<>"'\x60,;:|()]+/gi,
+      /(?:[A-Za-z]:)?(?:[\\/](?:\.[\\/]|[\\/])*)+(?:home|Users)[\\/](?:\.[\\/]|[\\/])*[^/\\\s<>"'\x60,;:|()]+/gi,
       '[home]',
     );
 }
@@ -1996,14 +2005,14 @@ function containsNonHttpHomePath(
 }
 
 function containsRawHomePath(value: string): boolean {
+  const normalized = value.replaceAll('\\', '/');
   return (
     /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/i.test(
       value,
     ) ||
-    /(?:\/(?:\.\/|\/)*)+(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/i.test(
-      value,
-    ) ||
-    /(?:[A-Za-z]:)?\\(?:Users|home)\\[^/\\\s<>"'\x60,;:|()]+/i.test(value)
+    /(?:[A-Za-z]:)?(?:\/(?:\.\/|\/)*)+(?:home|Users)\/(?:\.\/|\/)*[^/\\\s<>"'\x60,;:|()]+/i.test(
+      normalized,
+    )
   );
 }
 
