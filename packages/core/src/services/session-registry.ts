@@ -447,6 +447,35 @@ export async function unregisterSession(): Promise<void> {
 }
 
 /**
+ * This process's own record, as the registry currently holds it.
+ *
+ * Null when this session never registered, when its record is not
+ * readable, or when the record at this PID's path was written by another
+ * incarnation of the PID (another namespace, another boot, or a dead
+ * predecessor whose token no longer matches) — the same tests
+ * `patchSessionRecord` applies before it will merge into a record, so a
+ * caller never reads back a record that a patch would have refused to
+ * touch. Never throws.
+ */
+export async function readOwnSessionRecord(): Promise<SessionRegistryRecord | null> {
+  try {
+    const existing = await readRecord(thisProcessRecordPath());
+    if (existing.status !== 'ok' || !matchesLocalIdentity(existing.record)) {
+      return null;
+    }
+    const record = existing.record;
+    const currentToken = readProcStartToken(process.pid);
+    if (record.procStart !== null && record.procStart !== currentToken) {
+      return null;
+    }
+    return record;
+  } catch (error) {
+    debugLogger.debug(`readOwnSessionRecord failed: ${describe(error)}`);
+    return null;
+  }
+}
+
+/**
  * Enumerate live sessions, newest first, sweeping records whose process
  * is provably gone.
  *
