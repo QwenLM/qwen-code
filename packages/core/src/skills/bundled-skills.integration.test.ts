@@ -63,4 +63,15 @@ describe('bundled SKILL.md files', () => {
       fs.existsSync(path.join(datavizDir, 'references', 'anti-patterns.md')),
     ).toBe(true);
   });
+
+  it('ships the review verdict-gated reference files with the bundled skill', () => {
+    const reviewDir = path.join(bundledDir, 'review');
+
+    expect(fs.existsSync(path.join(reviewDir, 'SKILL.md'))).toBe(true);
+    for (const name of ['posting.md', 'persistence.md', 'aone.md']) {
+      expect(fs.existsSync(path.join(reviewDir, 'references', name))).toBe(
+        true,
+      );
+    }
+  });
 });

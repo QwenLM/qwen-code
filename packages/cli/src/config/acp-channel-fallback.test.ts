@@ -35,11 +35,11 @@ describe('resolveAcpChannelFallback', () => {
     ).toBe('desktop');
   });
 
-  it('ignores empty marker values', () => {
+  it.each(['', '0', 'false'])('ignores marker value %j', (value) => {
     expect(
       resolveAcpChannelFallback({
-        [QWEN_CODE_SERVE_ENV]: '',
-        [QWEN_CODE_DESKTOP_ENV]: '',
+        [QWEN_CODE_SERVE_ENV]: value,
+        [QWEN_CODE_DESKTOP_ENV]: value,
       }),
     ).toBe('ACP');
   });

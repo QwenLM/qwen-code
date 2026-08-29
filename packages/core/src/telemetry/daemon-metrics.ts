@@ -41,6 +41,8 @@ const KNOWN_ERROR_TYPES = new Set([
   'SubscriberLimitExceededError',
   'BridgeChannelClosedError',
   'BridgeTimeoutError',
+  'SessionRestoreTimeoutError',
+  'BridgeChannelQuarantinedError',
   'PermissionForbiddenError',
 ]);
 

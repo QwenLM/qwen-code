@@ -10,6 +10,7 @@ import {
 } from '@qwen-code/acp-bridge/workspacePaths';
 import type { Request, Response } from 'express';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { WorkspaceRequestContext } from '../workspace-service/index.js';
 
@@ -165,7 +166,7 @@ export function requireSessionId(req: Request, res: Response): string | null {
     res.status(400).json({ error: '`sessionId` route parameter is required' });
     return null;
   }
-  return sessionId;
+  return normalizeSessionIdForLookup(sessionId);
 }
 
 export function parseClientIdHeader(

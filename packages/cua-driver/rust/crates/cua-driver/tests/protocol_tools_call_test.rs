@@ -12,6 +12,8 @@
 #![cfg(any(target_os = "macos", target_os = "windows"))]
 
 use cua_driver_testkit::RawDriver;
+#[cfg(target_os = "windows")]
+use cua_driver_testkit::{Driver, McpDriver};
 
 fn spawn_unrestricted() -> Option<RawDriver> {
     RawDriver::spawn_with_env(&[
@@ -38,7 +40,13 @@ fn tools_call_list_apps() {
         "method": "tools/call",
         "params": { "name": "list_apps", "arguments": {} }
     }));
+    let started = std::time::Instant::now();
     let resp = d.recv();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(8),
+        "list_apps exceeded its optional installed-app discovery budget: {:?}",
+        started.elapsed()
+    );
     assert_eq!(resp["id"], 2);
     assert!(resp["result"]["content"].is_array());
     if cfg!(target_os = "windows") {
@@ -65,6 +73,89 @@ fn tools_call_list_apps() {
             text
         );
     }
+}
+
+#[test]
+#[cfg(target_os = "windows")]
+fn launch_unknown_app_is_bounded_and_keeps_mcp_session_responsive() {
+    let Some(mut driver) = McpDriver::spawn_with_env(&[
+        ("CUA_DRIVER_PERMISSION_MODE", "unrestricted"),
+        ("CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS", "1"),
+    ]) else {
+        return;
+    };
+    let missing_name = format!("CuaMissingAppIssue2856_{}.exe", std::process::id());
+
+    let launch_started = std::time::Instant::now();
+    let launch = driver.call("launch_app", serde_json::json!({ "name": missing_name }));
+    let launch_elapsed = launch_started.elapsed();
+    assert!(
+        launch_elapsed < std::time::Duration::from_secs(10),
+        "unknown-app launch exceeded its hard response budget: {launch_elapsed:?}; response={:?}",
+        launch.raw
+    );
+    assert!(
+        launch.is_error(),
+        "unknown app should fail: {:?}",
+        launch.raw
+    );
+    let error = launch.text().to_ascii_lowercase();
+    assert!(
+        error.contains("not found") || error.contains("lookup") && error.contains("unavailable"),
+        "expected an explicit not-found or lookup-unavailable error, got: {}",
+        launch.text()
+    );
+
+    let follow_up_started = std::time::Instant::now();
+    let windows = driver.call("list_windows", serde_json::json!({}));
+    let follow_up_elapsed = follow_up_started.elapsed();
+    assert!(
+        follow_up_elapsed < std::time::Duration::from_secs(5),
+        "follow-up list_windows call was not responsive: {follow_up_elapsed:?}; response={:?}",
+        windows.raw
+    );
+    assert!(
+        !windows.is_error(),
+        "follow-up list_windows failed after unknown launch: {:?}",
+        windows.raw
+    );
+    assert!(
+        windows.structured()["windows"].is_array(),
+        "follow-up list_windows returned no windows array: {:?}",
+        windows.raw
+    );
+}
+
+#[test]
+#[cfg(target_os = "windows")]
+#[ignore = "requires an interactive Windows desktop with Microsoft Edge installed"]
+fn launch_edge_from_apps_folder_registration() {
+    let Some(mut driver) = McpDriver::spawn_with_env(&[
+        ("CUA_DRIVER_PERMISSION_MODE", "unrestricted"),
+        ("CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS", "1"),
+    ]) else {
+        return;
+    };
+
+    let launch = driver.call(
+        "launch_app",
+        serde_json::json!({
+            "name": "Microsoft Edge",
+            "urls": ["https://example.com"]
+        }),
+    );
+    assert!(
+        !launch.is_error(),
+        "Edge AppsFolder launch failed: {:?}",
+        launch.raw
+    );
+    assert!(
+        launch.structured()["pid"]
+            .as_u64()
+            .is_some_and(|pid| pid > 0),
+        "Edge AppsFolder launch returned no process id: {:?}",
+        launch.raw
+    );
 }
 
 #[test]
@@ -611,14 +702,41 @@ fn type_text_chars_tool() {
         return;
     };
 
-    // type_text_chars with delay_ms=5 — just verify the tool invocation is accepted.
+    // Resolve an exact on-screen window. PID-only targeting is deliberately
+    // refused when an app owns multiple eligible windows.
     d.send(&serde_json::json!({
         "jsonrpc":"2.0","id":3,"method":"tools/call",
+        "params":{"name":"list_windows","arguments":{"pid":pid,"on_screen_only":true}}
+    }));
+    let resp = d.recv();
+    let windows = resp["result"]["structuredContent"]["windows"].as_array();
+    let Some(window_id) = windows
+        .and_then(|windows| windows.first())
+        .and_then(|window| window["window_id"].as_u64())
+    else {
+        eprintln!("TextEdit has no on-screen windows — skipping type_text_chars test");
+        return;
+    };
+
+    // type_text_chars with delay_ms=5 — just verify the tool invocation is accepted.
+    d.send(&serde_json::json!({
+        "jsonrpc":"2.0","id":4,"method":"tools/call",
         "params":{"name":"type_text_chars","arguments":{
-            "pid": pid, "text": "hi", "delay_ms": 5
+            "pid": pid, "window_id": window_id, "text": "hi", "delay_ms": 5
         }}
     }));
     let resp = d.recv();
+    if resp["result"]["isError"].as_bool().unwrap_or(false)
+        && matches!(
+            resp["result"]["structuredContent"]["code"].as_str(),
+            Some("off_space_or_ax_unresolved" | "window_target_not_found")
+        )
+    {
+        eprintln!(
+            "TextEdit has no safe AX-resolved input target in this desktop session — skipping type_text_chars test"
+        );
+        return;
+    }
     assert!(
         !resp["result"]["isError"].as_bool().unwrap_or(false),
         "type_text_chars returned error: {resp:?}"
@@ -943,14 +1061,14 @@ fn set_value_via_element_index() {
     let element_count = resp["result"]["structuredContent"]["element_count"]
         .as_u64()
         .unwrap_or(0);
-    let snapshot_id = resp["result"]["structuredContent"]["snapshot_id"]
-        .as_str()
-        .expect("get_window_state snapshot_id")
-        .to_owned();
     if element_count == 0 {
         eprintln!("No AX elements — skipping set_value test");
         return;
     }
+    let snapshot_id = resp["result"]["structuredContent"]["snapshot_id"]
+        .as_str()
+        .expect("get_window_state snapshot_id")
+        .to_owned();
 
     // set_value on element 0 — this is the document / text area in a new TextEdit document.
     d.send(&serde_json::json!({

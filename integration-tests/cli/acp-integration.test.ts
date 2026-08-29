@@ -310,6 +310,7 @@ function setupAcpTest(
     stderr,
     sessionUpdates,
     permissionRequests,
+    agent,
   };
 }
 
@@ -486,7 +487,7 @@ function setupAcpTest(
     }
   });
 
-  it('supports session/set_config_option for mode and model', async () => {
+  it('supports session/set_config_option for mode, model, and reasoning effort', async () => {
     const rig = new TestRig();
     // Inject a deterministic openai provider model so `availableModels` always
     // contains a settable openai entry. The previous version relied on the
@@ -533,8 +534,25 @@ function setupAcpTest(
         models: {
           availableModels: Array<{ modelId: string }>;
         };
+        configOptions: Array<{
+          id: string;
+          category?: string;
+          currentValue: string;
+          options: Array<{ value: string; name: string }>;
+        }>;
       };
       expect(newSession.sessionId).toBeTruthy();
+
+      const initialReasoningOption = newSession.configOptions.find(
+        (opt) => opt.id === 'reasoning_effort',
+      );
+      expect(initialReasoningOption).toMatchObject({
+        category: 'thought_level',
+        currentValue: 'default',
+      });
+      expect(
+        initialReasoningOption?.options.map((option) => option.value),
+      ).toEqual(['default', 'low', 'medium', 'high', 'xhigh', 'max']);
 
       // Test: Set mode using set_config_option
       const setModeResult = (await sendRequest('session/set_config_option', {
@@ -598,6 +616,57 @@ function setupAcpTest(
       );
       expect(updatedModelOption).toBeDefined();
       expect(updatedModelOption!.currentValue).toBe(openaiModel!.modelId);
+      expect(
+        setModelResult.configOptions.find(
+          (opt) => opt.id === 'reasoning_effort',
+        )?.currentValue,
+      ).toBe('default');
+
+      const setReasoningResult = (await sendRequest(
+        'session/set_config_option',
+        {
+          sessionId: newSession.sessionId,
+          configId: 'reasoning_effort',
+          value: 'xhigh',
+        },
+      )) as {
+        configOptions: Array<{ id: string; currentValue: string }>;
+      };
+      expect(
+        setReasoningResult.configOptions.find(
+          (opt) => opt.id === 'reasoning_effort',
+        )?.currentValue,
+      ).toBe('xhigh');
+
+      const resetReasoningResult = (await sendRequest(
+        'session/set_config_option',
+        {
+          sessionId: newSession.sessionId,
+          configId: 'reasoning_effort',
+          value: 'default',
+        },
+      )) as {
+        configOptions: Array<{ id: string; currentValue: string }>;
+      };
+      expect(
+        resetReasoningResult.configOptions.find(
+          (opt) => opt.id === 'reasoning_effort',
+        )?.currentValue,
+      ).toBe('default');
+
+      await expect(
+        sendRequest('session/set_config_option', {
+          sessionId: newSession.sessionId,
+          configId: 'reasoning_effort',
+          value: 'ultra',
+        }),
+      ).rejects.toMatchObject({
+        response: {
+          code: -32602,
+          message:
+            'Invalid params: Unknown reasoning effort: ultra. Choose one of: default, low, medium, high, xhigh, max',
+        },
+      });
     } catch (e) {
       if (stderr.length) {
         console.error('Agent stderr:', stderr.join(''));
@@ -722,20 +791,26 @@ function setupAcpTest(
     // Track which permission requests we've seen
     const planModeRequests: PermissionRequest[] = [];
 
-    const { sendRequest, cleanup, stderr, sessionUpdates, permissionRequests } =
-      setupAcpTest(rig, {
-        permissionHandler: (request) => {
-          // Track all permission requests for later verification
-          // Auto-approve exit plan mode requests with "proceed_always" to trigger auto-edit mode
-          if (request.toolCall?.kind === 'switch_mode') {
-            planModeRequests.push(request);
-            // Return proceed_always to switch to auto-edit mode
-            return { optionId: 'proceed_always' };
-          }
-          // Auto-approve all other requests
-          return { optionId: 'proceed_once' };
-        },
-      });
+    const {
+      sendRequest,
+      cleanup,
+      stderr,
+      sessionUpdates,
+      permissionRequests,
+      agent,
+    } = setupAcpTest(rig, {
+      permissionHandler: (request) => {
+        // Track all permission requests for later verification
+        // Auto-approve exit plan mode requests with "proceed_always" to trigger auto-edit mode
+        if (request.toolCall?.kind === 'switch_mode') {
+          planModeRequests.push(request);
+          // Return proceed_always to switch to auto-edit mode
+          return { optionId: 'proceed_always' };
+        }
+        // Auto-approve all other requests
+        return { optionId: 'proceed_once' };
+      },
+    });
 
     try {
       // Initialize
@@ -762,21 +837,60 @@ function setupAcpTest(
       })) as unknown;
       expect(setModeResult).toEqual({});
 
-      // Send a prompt that should trigger the LLM to call exit_plan_mode
-      // The prompt is designed to trigger planning behavior
-      const promptResult = await sendRequest('session/prompt', {
-        sessionId: newSession.sessionId,
-        prompt: [
-          {
-            type: 'text',
-            text: 'Create a simple hello world function in Python. Make a brief plan and when ready, use the exit_plan_mode tool to present it for approval.',
-          },
-        ],
-      });
-      expect(promptResult).toBeDefined();
+      // Send a prompt that should trigger the LLM to call exit_plan_mode.
+      // The prompt is designed to trigger planning behavior, but LLM
+      // behavior is non-deterministic — it may take too long or never call
+      // exit_plan_mode. Catch timeouts so the test can still verify any
+      // notifications that were received.
+      try {
+        const promptResult = await sendRequest('session/prompt', {
+          sessionId: newSession.sessionId,
+          prompt: [
+            {
+              type: 'text',
+              text: 'Create a simple hello world function in Python. Make a brief plan and when ready, use the exit_plan_mode tool to present it for approval.',
+            },
+          ],
+        });
+        expect(promptResult).toBeDefined();
+      } catch (e) {
+        // Only the harness's own 60s request timeout is acceptable — LLM
+        // behavior is non-deterministic. JSON-RPC errors (errors with a
+        // `response` property) indicate a real problem and must be surfaced.
+        if (
+          !(e instanceof Error) ||
+          'response' in e ||
+          !/^Request \d+ \(session\/prompt\) timed out$/.test(e.message)
+        ) {
+          throw e;
+        }
+        // A dead agent also manifests as a timeout. Surface the crash instead
+        // of swallowing it as an acceptable slow-LLM path.
+        if (agent.exitCode !== null || agent.signalCode !== null) {
+          throw e;
+        }
+        console.error(
+          'session/prompt did not complete (continuing with partial verification):',
+          e,
+        );
+      }
 
-      // Give time for all notifications to be processed
-      await delay(1000);
+      // Poll for mode_update notification after switch_mode, bounded at 5 s.
+      // A fixed delay races the slow-LLM path: switch_mode can arrive just
+      // after the timeout, and mode_update may land after the wait window.
+      await rig.poll(
+        () => {
+          const hasSwitchMode = permissionRequests.some(
+            (req) => req.toolCall?.kind === 'switch_mode',
+          );
+          if (!hasSwitchMode) return false;
+          return sessionUpdates.some(
+            (update) => update.update?.sessionUpdate === 'current_mode_update',
+          );
+        },
+        5000,
+        250,
+      );
 
       // Verify: If exit_plan_mode was called, we should have received:
       // 1. A permission request with kind: "switch_mode"
@@ -1012,6 +1126,84 @@ function setupAcpTest(
     } catch (e) {
       if (stderr.length) console.error('Agent stderr:', stderr.join(''));
       throw e;
+    } finally {
+      await cleanup();
+      await fakeServer.close();
+    }
+  });
+
+  it('injects managed auto-memory into the first ACP model request', async () => {
+    const marker = 'ACP-MEMORY-ZEPHYR-4207';
+    const prompt = 'What is the ACP zephyr codeword?';
+    const fakeServer = await startFakeOpenAIServer(async ({ body }) => {
+      // Keep the model selector outside the initial Recall budget. The
+      // deterministic match must still reach the main streamed request.
+      if (body['stream'] !== true) await delay(250);
+      return { content: 'done' };
+    });
+    const rig = new TestRig();
+    await rig.setup('acp managed auto-memory recall', {
+      settings: {
+        memory: {
+          enableManagedAutoMemory: true,
+          enableManagedAutoDream: false,
+        },
+      },
+    });
+    const memoryDir = join(rig.testDir!, '.qwen', 'memory', 'project');
+    mkdirSync(memoryDir, { recursive: true });
+    writeFileSync(
+      join(memoryDir, 'acp-zephyr.md'),
+      [
+        '---',
+        'type: project',
+        'name: ACP Zephyr Codeword',
+        `description: The ACP zephyr codeword is ${marker}.`,
+        '---',
+        '',
+        `The ACP zephyr codeword is ${marker}.`,
+      ].join('\n'),
+      'utf8',
+    );
+
+    const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
+      env: {
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        QWEN_CODE_MEMORY_LOCAL: '1',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+      },
+    });
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
+      });
+      await sendRequest('authenticate', { methodId: 'openai' });
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: prompt }],
+      });
+
+      const mainRequest = fakeServer.requests.find(
+        ({ body }) =>
+          body['stream'] === true &&
+          JSON.stringify(body['messages']).includes(prompt),
+      );
+      expect(mainRequest).toBeDefined();
+      expect(JSON.stringify(mainRequest?.body['messages'])).toContain(marker);
+    } catch (error) {
+      if (stderr.length) console.error('Agent stderr:', stderr.join(''));
+      throw error;
     } finally {
       await cleanup();
       await fakeServer.close();

@@ -24,8 +24,10 @@
 // diff is a concatenation of per-file sections; the result parses exactly like
 // any other.
 
-import { lstatSync, statSync, type Stats, realpathSync } from 'node:fs';
-import { join, relative, resolve, isAbsolute, sep } from 'node:path';
+import { lstatSync, statSync, type Stats } from 'node:fs';
+import { join, sep } from 'node:path';
+import { repoRelativeOf } from './paths.js';
+import { parseDiff, sliceDiffByLines } from './diff-plan.js';
 import {
   LITERAL_PATHSPECS,
   NULL_DEVICE,
@@ -91,6 +93,8 @@ export interface LocalDiffCapture {
   skipped: SkippedFile[];
   /** True when HEAD does not exist yet (a repo with no commits). */
   unbornHead: boolean;
+  /** The repo root every path in the capture is relative to. */
+  repoRoot: string;
 }
 
 /**
@@ -190,21 +194,11 @@ function toRepoPathspec(repoRoot: string, file: string): string {
   // throws on a path that does not exist yet, which a `--file` may legitimately
   // be (a brand-new untracked file is exactly this feature's subject), so fall
   // back to the non-canonical form rather than failing the review.
-  let abs = resolve(process.cwd(), file);
-  try {
-    abs = realpathSync(abs);
-  } catch {
-    // Not on disk yet — resolve() is the best we have, and the check below still
-    // holds for it.
-  }
-  const rel = relative(repoRoot, abs);
-  // `rel.startsWith('..')` is not the containment check it looks like: a file
-  // called `..foo.ts` at the repository root relativises to `..foo.ts`, and the
-  // scoped review would refuse to look at a perfectly ordinary file on the
-  // grounds that it had escaped. What escapes is `..` itself, or a path whose
-  // FIRST SEGMENT is `..`.
-  const escapes =
-    rel === '' || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
+  // Canonicalisation and the segment-aware escape check live in
+  // `repoRelativeOf` because `qwen review run` pins the artifact name it polls
+  // for from the same answer; a second derivation here is how the two spellings
+  // drifted before.
+  const { rel, abs, escapes } = repoRelativeOf(repoRoot, file);
   if (escapes) {
     throw new Error(
       `--file ${file} resolves to ${abs}, which is outside the repository ` +
@@ -242,14 +236,23 @@ export function isBinarySection(section: Buffer): boolean {
 }
 
 /** Repo-root-relative paths of untracked, non-ignored files. */
-function listUntracked(repoRoot: string, pathspec?: string): string[] {
+function listUntracked(
+  repoRoot: string,
+  pathspec?: string,
+  excludeStandard = true,
+): string[] {
   const args = [
     '-C',
     repoRoot,
     LITERAL_PATHSPECS,
     'ls-files',
     '--others',
-    '--exclude-standard',
+    // Deliberately named plumbing wins over ignore rules — repos ordinarily
+    // ignore `.qwen/` (this repo's own `.gitignore` does), and exclusion
+    // applies to an explicitly pathspec-NAMED file too, so with the flag the
+    // named file never reached the filter at all and the round reported
+    // clean over the one file it was asked about.
+    ...(excludeStandard ? ['--exclude-standard'] : []),
     '--full-name',
     '-z',
   ];
@@ -293,6 +296,73 @@ function diffUntracked(repoRoot: string, path: string): Buffer {
  * `file` scopes the capture to a single path (a `/review <file-path>` target).
  * Nothing here writes to the index, the worktree, or any ref.
  */
+/**
+ * Is this repo-relative path the review's own plumbing?
+ *
+ * Segment-exact at ANY depth, not anchored to the cwd. The three constants in
+ * `paths.ts` are cwd-relative for every invocation, so a round started from
+ * `sub/` writes `sub/.qwen/…` — which a filter built from THIS invocation's
+ * cwd does not match. A repo that does not ignore `.qwen` then lets the next
+ * root-invoked round capture the previous round's cache, reports, and args
+ * record as the user's untracked work, and the cache changes every round by
+ * construction, so an incremental round could never again report "no
+ * changes". Matching the segment wherever it sits closes both directions with
+ * no dependence on where either round ran.
+ *
+ * Segment-exact matters for the same reason `toRepoPathspec` records: a
+ * directory named `.qwen-notes` or `tmpfiles` is the user's, not ours.
+ */
+export function isReviewPlumbing(repoRelPath: string): boolean {
+  return /(?:^|\/)\.qwen\/(?:tmp|review-cache|reviews)(?:\/|$)/.test(
+    repoRelPath,
+  );
+}
+
+/**
+ * The tracked diff with the review's own plumbing sections removed.
+ *
+ * Ignore rules never apply to TRACKED files, so a repo that once committed
+ * its `.qwen` plumbing gets the cache back in `git diff HEAD` every round —
+ * and Step 8 rewrites that cache after every clean round, so the section is
+ * there by construction. The round then reviews its own ledger JSON, and
+ * `changedSince` can never empty: the incremental loop can never report "no
+ * changes". Exactly the pathology the untracked filter beside this exists to
+ * prevent, on the half it could not reach.
+ *
+ * The exemption is a NAMED plumbing pathspec, file- or directory-shaped:
+ * `/review .qwen/reviews/saved.md` is a deliberate request for exactly the
+ * section this drop exists to remove, so whatever came back stays. A
+ * NON-plumbing pathspec still drops: a directory target carries every
+ * tracked section beneath it, and "whatever came back is what the user
+ * asked for" is only true of file-shaped names — a repo that committed its
+ * own plumbing would otherwise review its ledger JSON as user content under
+ * a `sub/` target, and its every-round churn would keep `changedSince` from
+ * ever emptying. This matches the untracked filter beside this, which drops
+ * plumbing descendants of a directory target the same way.
+ */
+function dropPlumbingSections(diff: Buffer, pathspec?: string): Buffer {
+  if (diff.length === 0) return diff;
+  if (pathspec !== undefined && isReviewPlumbing(pathspec)) return diff;
+  // The cap gate runs BEFORE any decode: an over-cap tracked diff is
+  // rejected by the caller whole, never inlined, so parsing it first made
+  // the pathological case this gate exists for pay the cost it avoids —
+  // and near `gitRaw`'s 512 MiB ceiling an all-ASCII diff decodes past
+  // Node's maximum string length, so the decode throws instead of
+  // producing the caller's graceful skip record. The one semantic delta,
+  // accepted: a diff whose plumbing DROP would have shrunk it under the
+  // cap is rejected whole rather than rescued — an 11 MB diff is the cap's
+  // pathology whatever it is made of, and the skip record says so.
+  if (diff.length > MAX_UNTRACKED_TOTAL_BYTES) return diff;
+  const files = parseDiff(diff.toString('utf8')).files;
+  if (!files.some((f) => isReviewPlumbing(f.path))) return diff;
+  return sliceDiffByLines(
+    diff,
+    files
+      .filter((f) => !isReviewPlumbing(f.path))
+      .map((f) => ({ startLine: f.diffStart, endLine: f.diffEnd })),
+  );
+}
+
 export function captureLocalDiff(opts: {
   file?: string;
   includeUntracked?: boolean;
@@ -315,6 +385,12 @@ export function captureLocalDiff(opts: {
   // The user typed `--file` relative to *their* directory; every git call here
   // runs with `-C <repoRoot>`. Re-base it, and strip it of pathspec magic.
   const pathspec = file ? toRepoPathspec(repoRoot, file) : undefined;
+  // The user NAMED a plumbing path — a file or a directory under
+  // `.qwen/tmp|review-cache|reviews` — when reviewing it is the point. Both
+  // halves of the capture key on this one predicate so they cannot disagree:
+  // the tracked drop keeps its sections, and the untracked filter lists its
+  // files even when ignore rules cover them.
+  const namedPlumbing = pathspec !== undefined && isReviewPlumbing(pathspec);
 
   // `git diff HEAD` is what covers the whole tracked scope: a bare `git diff`
   // omits staged changes.
@@ -328,7 +404,7 @@ export function captureLocalDiff(opts: {
     base,
   ];
   if (pathspec) trackedArgs.push('--', pathspec);
-  const trackedDiff = gitRaw(...trackedArgs);
+  const trackedDiff = dropPlumbingSections(gitRaw(...trackedArgs), pathspec);
 
   const untracked: string[] = [];
   const skipped: SkippedFile[] = [];
@@ -353,13 +429,28 @@ export function captureLocalDiff(opts: {
   }
 
   if (includeUntracked) {
-    // The review writes its own scratch files under `.qwen/tmp` — the args
-    // record, the parsed-args verdict, the diff, the plan — *before* this
-    // capture runs. In a repo that does not ignore `.qwen`, `ls-files --others`
-    // lists them as the user's untracked work, and the review would report on
-    // its own plumbing. They are never the change under review; drop them.
-    const candidates = listUntracked(repoRoot, pathspec).filter(
-      (p) => !p.startsWith('.qwen/tmp/') && p !== '.qwen/tmp',
+    // The review writes its own plumbing before and after this capture runs:
+    // scratch files under `.qwen/tmp` (the args record, the diff, the plan),
+    // the persistent incremental cache under `.qwen/review-cache` (rewritten
+    // by Step 8 after every clean round), and per-round artifacts under
+    // `.qwen/reviews`. In a repo that does not ignore `.qwen`, `ls-files
+    // --others` lists all of them as the user's untracked work — and the
+    // cache is worse than noise: hashed into its own next-round candidate it
+    // changes every round by construction, so an incremental round could
+    // never again report "no changes". None of it is ever the change under
+    // review; drop it.
+    //
+    // …unless the user NAMED plumbing. An explicit `--file` under
+    // `.qwen/reviews` is a deliberate request to review it — round notes, a
+    // saved report — and dropping it here left the round claiming "the
+    // working tree is clean, 0 chunks" over the one file it was asked about,
+    // with no `Not reviewed` record: mute, which this module's `SkippedFile`
+    // contract forbids. A NAMED plumbing path exempts itself and — for a
+    // directory-shaped target — its children; everything else under the
+    // plumbing directories is still dropped, exactly as the tracked half
+    // drops plumbing sections under a non-plumbing directory target.
+    const candidates = listUntracked(repoRoot, pathspec, !namedPlumbing).filter(
+      (p) => namedPlumbing || !isReviewPlumbing(p),
     );
 
     if (candidates.length > MAX_UNTRACKED_FILES) {
@@ -506,5 +597,11 @@ export function captureLocalDiff(opts: {
     }
   }
 
-  return { diff: Buffer.concat(parts), untracked, skipped, unbornHead };
+  return {
+    diff: Buffer.concat(parts),
+    untracked,
+    skipped,
+    unbornHead,
+    repoRoot,
+  };
 }

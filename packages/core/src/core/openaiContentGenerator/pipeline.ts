@@ -20,6 +20,7 @@ import {
   isOfficialOpenAIEndpoint,
 } from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
+import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
@@ -33,12 +34,12 @@ import {
   isTieredEffortWireModel,
 } from '../modalityDefaults.js';
 import {
-  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
-  DEFAULT_STREAM_MAX_LIFETIME_MS,
-  MAX_STREAM_GUARD_TIMEOUT_MS,
-  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
-  QWEN_STREAM_MAX_LIFETIME_MS_ENV,
-} from './constants.js';
+  resolveStreamIdleTimeoutMs,
+  resolveStreamMaxLifetimeMs,
+  StreamInactivityTimeoutError,
+  StreamLifetimeExceededError,
+  withStreamGuards,
+} from '../stream-guards.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
@@ -56,6 +57,101 @@ import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
 import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
+const OPENAI_STRICT_SCHEMA_KEYS = new Set([
+  'type',
+  'properties',
+  'required',
+  'additionalProperties',
+  'items',
+  'description',
+  'enum',
+]);
+const OPENAI_STRICT_UNSUPPORTED_SCHEMA_KEYS = new Set([
+  'minLength',
+  'maxLength',
+  'minItems',
+  'maxItems',
+  'uniqueItems',
+]);
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizeSchemaType(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.toLowerCase();
+  return [
+    'object',
+    'array',
+    'string',
+    'number',
+    'integer',
+    'boolean',
+    'null',
+  ].includes(normalized)
+    ? normalized
+    : undefined;
+}
+
+function normalizeOpenAIStrictSchema(
+  schema: unknown,
+): Record<string, unknown> | undefined {
+  const source = asObject(schema);
+  if (!source) return undefined;
+
+  const type = normalizeSchemaType(source['type']);
+  if (!type) return undefined;
+
+  const normalized: Record<string, unknown> = { type };
+  for (const [key, value] of Object.entries(source)) {
+    if (
+      key === 'type' ||
+      OPENAI_STRICT_UNSUPPORTED_SCHEMA_KEYS.has(key) ||
+      !OPENAI_STRICT_SCHEMA_KEYS.has(key)
+    ) {
+      continue;
+    }
+    normalized[key] = value;
+  }
+
+  if (type === 'object') {
+    const properties = asObject(source['properties']);
+    if (!properties) return undefined;
+
+    const normalizedProperties: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(properties)) {
+      const property = normalizeOpenAIStrictSchema(value);
+      if (!property) return undefined;
+      normalizedProperties[key] = property;
+    }
+
+    const propertyKeys = Object.keys(normalizedProperties);
+    const required = source['required'];
+    if (
+      !Array.isArray(required) ||
+      !propertyKeys.every((key) => required.includes(key)) ||
+      required.length !== propertyKeys.length
+    ) {
+      return undefined;
+    }
+
+    normalized['properties'] = normalizedProperties;
+    normalized['required'] = required;
+    normalized['additionalProperties'] = false;
+  }
+
+  if (type === 'array') {
+    const items = normalizeOpenAIStrictSchema(source['items']);
+    if (!items) return undefined;
+    normalized['items'] = items;
+  }
+
+  return normalized;
+}
 
 function isRequiredThinkingError(error: unknown): boolean {
   if (getErrorStatus(error) !== 400) return false;
@@ -80,59 +176,13 @@ export class StreamContentError extends Error {
   }
 }
 
-/**
- * Thrown when a streaming response goes silent past the inactivity timeout.
- * `code: 'ETIMEDOUT'` makes `classifyRetryError` treat it as a retryable
- * transport error, identical to a real socket read timeout.
- */
-export class StreamInactivityTimeoutError extends Error {
-  readonly code = 'ETIMEDOUT' as const;
-
-  constructor(
-    readonly idleMs: number,
-    readonly chunksReceived: number,
-    readonly streamLifetimeMs: number,
-  ) {
-    super(
-      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks ` +
-        `(stream lifetime: ${streamLifetimeMs}ms). Set ` +
-        `${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV} to increase this window ` +
-        `(or 0 to disable it).`,
-    );
-    this.name = 'StreamInactivityTimeoutError';
-  }
-}
-
-/**
- * Thrown when a streaming response exceeds its upstream-wait budget without
- * completing. The cap charges accumulated time blocked in `await it.next()`
- * (upstream latency), never the consumer's processing, so a buffered,
- * already-complete stream never trips it — the shape it catches is a
- * never-completing stream the inactivity watchdog cannot see: a drip-fed
- * gateway or a model crawling through an oversized response resets that
- * watchdog forever (issue #8597). Same retryable `ETIMEDOUT` code, so a
- * text-only generation resumes via the transport-continuation recovery; a
- * turn that already streamed a functionCall surfaces as a visible,
- * classified error instead.
- */
-export class StreamLifetimeExceededError extends Error {
-  readonly code = 'ETIMEDOUT' as const;
-
-  constructor(
-    readonly maxLifetimeMs: number,
-    readonly chunksReceived: number,
-    readonly streamLifetimeMs: number,
-  ) {
-    super(
-      `Stream exceeded its ${maxLifetimeMs}ms upstream-wait cap after ` +
-        `${chunksReceived} chunks without completing (wall clock: ` +
-        `${streamLifetimeMs}ms). Set ` +
-        `${QWEN_STREAM_MAX_LIFETIME_MS_ENV} to increase this cap ` +
-        `(or 0 to disable it).`,
-    );
-    this.name = 'StreamLifetimeExceededError';
-  }
-}
+// Stream watchdog errors are shared with the Anthropic wire — see
+// ../stream-guards.ts (issue #9005 finding 4). Re-exported so existing
+// imports from this module keep working.
+export {
+  StreamInactivityTimeoutError,
+  StreamLifetimeExceededError,
+} from '../stream-guards.js';
 
 /**
  * Maximum bytes of response body to include in NonSSEResponseError diagnostics.
@@ -223,214 +273,8 @@ function clampProviderOutputBudgetKeys(
   return samplingParams;
 }
 
-/**
- * Resolve a stream-guard timeout (ms). Precedence, for both guards: explicit
- * `ContentGeneratorConfig` field (programmatic, wins — including `0` to
- * disable) > the env deployment knob > the built-in default. A malformed env
- * value is ignored (with a `console.warn`) rather than failing the request.
- */
-function resolveStreamGuardMs(
-  fromConfig: number | undefined,
-  configLabel: string,
-  envName: string,
-  defaultMs: number,
-): number {
-  // 1. Explicit config field (programmatic) wins:
-  //    - `<= 0` disables the watchdog (downstream `> 0` guards skip it).
-  //    - Values above the JS timer ceiling are rejected: setTimeout silently
-  //      compresses them to 1ms, which would fire near-immediately.
-  //    - NaN/Infinity/non-integer are invalid.
-  if (typeof fromConfig === 'number') {
-    if (
-      Number.isInteger(fromConfig) &&
-      fromConfig <= MAX_STREAM_GUARD_TIMEOUT_MS
-    ) {
-      return fromConfig;
-    }
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[qwen-code] Ignoring out-of-range ${configLabel}=${fromConfig} ` +
-        `(expected an integer in (-∞, ${MAX_STREAM_GUARD_TIMEOUT_MS}]); ` +
-        `falling back to ${envName}/default.`,
-    );
-  }
-  // 2. Env deployment knob. Strict decimal integer only — reject hex/scientific
-  //    notation/floats/signs so a typo can't silently become a surprising
-  //    timeout. `0` disables; values above the timer ceiling are rejected.
-  const raw = process.env[envName];
-  const trimmed = raw?.trim();
-  if (trimmed) {
-    if (/^\d+$/.test(trimmed)) {
-      const parsed = Number(trimmed);
-      if (parsed <= MAX_STREAM_GUARD_TIMEOUT_MS) {
-        return parsed;
-      }
-    }
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[qwen-code] Ignoring invalid ${envName}="${raw}" ` +
-        `(expected an integer of milliseconds in [0, ${MAX_STREAM_GUARD_TIMEOUT_MS}]); ` +
-        `using default ${defaultMs}ms.`,
-    );
-  }
-  return defaultMs;
-}
-
-function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
-  return resolveStreamGuardMs(
-    config.streamIdleTimeoutMs,
-    'streamIdleTimeoutMs',
-    QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
-    DEFAULT_STREAM_IDLE_TIMEOUT_MS,
-  );
-}
-
-function resolveStreamMaxLifetimeMs(config: ContentGeneratorConfig): number {
-  return resolveStreamGuardMs(
-    config.streamMaxLifetimeMs,
-    'streamMaxLifetimeMs',
-    QWEN_STREAM_MAX_LIFETIME_MS_ENV,
-    DEFAULT_STREAM_MAX_LIFETIME_MS,
-  );
-}
-
-/**
- * Wraps a streaming chunk source with two guards. The inactivity watchdog: if
- * no chunk arrives for `idleMs`, `abortRequest()` is invoked (to abort the
- * underlying request and free the socket) and the iterator throws — a user
- * `AbortError` when the parent signal was cancelled, otherwise a retryable
- * ETIMEDOUT. The idle timer resets on every chunk (including
- * thinking/reasoning deltas), so an actively streaming model is never
- * interrupted by it. The lifetime cap does NOT reset: once the stream has
- * accumulated `maxLifetimeMs` of upstream-wait time (the time spent blocked
- * on the source, never the consumer's time after a yield) without
- * completing, the iterator throws the same way — the bound a drip-fed
- * stream cannot reset (issue #8597). `<= 0` disables each guard
- * independently.
- */
-async function* withStreamGuards(
-  source: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
-  idleMs: number,
-  maxLifetimeMs: number,
-  abortRequest: () => void,
-  parentSignal: AbortSignal | undefined,
-): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
-  // Both guards off: pass the source through untouched. The caller's
-  // `idleMs > 0 || maxLifetimeMs > 0` already prevents this, but the invariant
-  // must live here too — with both `<= 0`, `wait` computes to `Infinity` and
-  // Node clamps `setTimeout(Infinity)` to ~1ms, so every stream would die
-  // instantly with a bogus lifetime error.
-  if (idleMs <= 0 && maxLifetimeMs <= 0) {
-    yield* source;
-    return;
-  }
-  const it = source[Symbol.asyncIterator]();
-  // Monotonic, never `Date.now()`: an NTP step must not kill a healthy
-  // generation on the next iteration (a forward jump) nor silently disable
-  // the cap until the clock catches up (a backward jump) — the hang this
-  // guard exists to bound. The setTimeout this races is a monotonic clock
-  // too, so the two agree.
-  const streamStartedAt = performance.now();
-  // The lifetime cap is on ACCUMULATED UPSTREAM-WAIT — the wall-clock time
-  // this loop spends blocked in `await it.next()`. It is deliberately NOT
-  // end-to-end delivery time: an upstream that finished and buffered its
-  // chunks owes nothing, however slowly the consumer drains (a paused IDE
-  // client, a big TUI render), and a stream whose terminal `done` resolves
-  // at the boundary completes rather than becoming a retry. The cap only
-  // bites while the consumer is actually waiting on the model — which is
-  // exactly where #8597's drip-fed, never-completing stream spends its time.
-  let upstreamMs = 0;
-  let chunksReceived = 0;
-  try {
-    while (true) {
-      const remainingMs =
-        maxLifetimeMs > 0
-          ? maxLifetimeMs - upstreamMs
-          : Number.POSITIVE_INFINITY;
-      // The upstream-wait budget is already spent; a further wait can only
-      // lose, so fail it here (the lifetime timer below normally wins first).
-      if (remainingMs <= 0) {
-        // Same precedence as the timer below: a user cancellation wins over
-        // the cap's retryable ETIMEDOUT.
-        if (parentSignal?.aborted) {
-          const abortErr = new Error('Aborted');
-          abortErr.name = 'AbortError';
-          throw abortErr;
-        }
-        abortRequest();
-        throw new StreamLifetimeExceededError(
-          maxLifetimeMs,
-          chunksReceived,
-          performance.now() - streamStartedAt,
-        );
-      }
-      const nextPromise = it.next();
-      const awaitedAt = performance.now();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<never>((_resolve, reject) => {
-        // The caller wraps only when at least one guard is positive, so at
-        // least one of these is finite.
-        const idleIn = idleMs > 0 ? idleMs : Number.POSITIVE_INFINITY;
-        const wait = Math.min(idleIn, remainingMs);
-        timer = setTimeout(
-          () => {
-            if (parentSignal?.aborted) {
-              // Plain Error (not DOMException) so error redaction's prototype
-              // clone cannot corrupt it; name 'AbortError' satisfies isAbortError.
-              const abortErr = new Error('Aborted');
-              abortErr.name = 'AbortError';
-              reject(abortErr);
-            } else if (remainingMs <= idleIn) {
-              abortRequest();
-              reject(
-                new StreamLifetimeExceededError(
-                  maxLifetimeMs,
-                  chunksReceived,
-                  performance.now() - streamStartedAt,
-                ),
-              );
-            } else {
-              abortRequest();
-              reject(
-                new StreamInactivityTimeoutError(
-                  idleMs,
-                  chunksReceived,
-                  performance.now() - streamStartedAt,
-                ),
-              );
-            }
-          },
-          Math.max(wait, 0),
-        );
-        timer.unref?.();
-      });
-      let result: IteratorResult<OpenAI.Chat.ChatCompletionChunk>;
-      try {
-        result = await Promise.race([nextPromise, timeout]);
-      } catch (err) {
-        // Once abortRequest() aborts the request, the orphaned next() rejects
-        // with an AbortError; swallow it so it is not an unhandled rejection.
-        void Promise.resolve(nextPromise).catch(() => {});
-        throw err;
-      } finally {
-        if (timer !== undefined) clearTimeout(timer);
-      }
-      if (result.done) return;
-      // Charge only the time this chunk took to arrive — the upstream
-      // latency — never the time the consumer spent after the previous yield.
-      upstreamMs += performance.now() - awaitedAt;
-      chunksReceived += 1;
-      yield result.value;
-    }
-  } finally {
-    abortRequest();
-    try {
-      await it.return?.();
-    } catch {
-      // The abort above is the cleanup that matters; ignore return failures.
-    }
-  }
-}
+// The stream-guard timeout resolvers and `withStreamGuards` are shared with
+// the Anthropic wire — see ../stream-guards.ts (issue #9005 finding 4).
 
 export type { PipelineConfig } from './types.js';
 
@@ -480,13 +324,12 @@ export class ContentGenerationPipeline {
           )) as OpenAI.Chat.ChatCompletion;
           reportOpenAiResponse(telemetryAttempt, openaiResponse);
 
-          const geminiResponse =
-            OpenAIContentConverter.convertOpenAIResponseToGemini(
-              openaiResponse,
-              context,
-            );
+          const llmResponse = OpenAIContentConverter.convertOpenAIResponseToLlm(
+            openaiResponse,
+            context,
+          );
 
-          return geminiResponse;
+          return llmResponse;
         } finally {
           perRequestAc?.abort();
         }
@@ -692,7 +535,7 @@ export class ContentGenerationPipeline {
           throw new StreamContentError(errorContent);
         }
 
-        const response = OpenAIContentConverter.convertOpenAIChunkToGemini(
+        const response = OpenAIContentConverter.convertOpenAIChunkToLlm(
           chunk,
           context,
         );
@@ -953,7 +796,7 @@ export class ContentGenerationPipeline {
     context: RequestContext,
     isStreaming: boolean,
   ): Promise<OpenAI.Chat.ChatCompletionCreateParams> {
-    const messages = OpenAIContentConverter.convertGeminiRequestToOpenAI(
+    const messages = OpenAIContentConverter.convertLlmRequestToOpenAI(
       request,
       context,
     );
@@ -963,6 +806,7 @@ export class ContentGenerationPipeline {
       model: context.model,
       messages,
       ...this.buildGenerateContentConfig(request),
+      ...this.buildResponseFormat(request),
     };
 
     if (isStreaming) {
@@ -980,11 +824,10 @@ export class ContentGenerationPipeline {
     // Add tools if present and non-empty.
     // Some providers reject tools: [] (empty array), so skip when there are no tools.
     if (request.config?.tools && request.config.tools.length > 0) {
-      baseRequest.tools =
-        await OpenAIContentConverter.convertGeminiToolsToOpenAI(
-          request.config.tools,
-          this.contentGeneratorConfig.schemaCompliance ?? 'auto',
-        );
+      baseRequest.tools = await OpenAIContentConverter.convertLlmToolsToOpenAI(
+        request.config.tools,
+        this.contentGeneratorConfig.schemaCompliance ?? 'auto',
+      );
 
       // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
       // tool_choice so structured side queries (e.g. the AUTO-mode
@@ -1119,12 +962,42 @@ export class ContentGenerationPipeline {
       if (isDeepSeekHostname(this.contentGeneratorConfig)) {
         typed['thinking'] = { type: 'disabled' };
       }
+      // OpenRouter's thinking switch is the provider-level `reasoning`
+      // parameter (`reasoning: { enabled: false }`, see
+      // https://openrouter.ai/docs/features/reasoning-tokens). The shapes
+      // emitted above are ignored by the gateway, and the strip just above
+      // removes any `reasoning` object a provider hook injected — so
+      // thinking-capable models routed through OpenRouter keep thinking on.
+      // That breaks the AUTO-mode classifier's stage-1 side query (#9757):
+      // the 256-token budget is spent on reasoning, the forced
+      // respond_in_schema tool call never ships, and the classifier
+      // fail-closes. Must be emitted after the strip, which runs later
+      // than the provider buildRequest hook.
+      //
+      // Provider-level, not model-family-gated: unlike `enable_thinking`
+      // (a qwen-family wire field that leaks upstream on non-qwen
+      // routings), `reasoning` is an OpenRouter API parameter the gateway
+      // applies to whatever model supports it. `thinkingMandatory` models
+      // stay exempt: a disable shape they reject would be a guaranteed
+      // request failure.
+      if (
+        !thinkingMandatory &&
+        isOpenRouterHostname(this.contentGeneratorConfig)
+      ) {
+        typed['reasoning'] = { enabled: false };
+      }
     }
 
     if (thinkingMandatory) {
       const typed = providerRequest as unknown as Record<string, unknown>;
       if (typed['enable_thinking'] === false) {
         delete typed['enable_thinking'];
+      }
+      // `reasoning_effort: 'none'` is the tiered family's canonical disable
+      // shape (the provider canonicalizes the extra_body escape hatch into
+      // it); a thinking-mandatory model rejects it like the boolean shapes.
+      if (typed['reasoning_effort'] === 'none') {
+        delete typed['reasoning_effort'];
       }
       const chatTemplateKwargs = typed['chat_template_kwargs'] as
         | Record<string, unknown>
@@ -1142,6 +1015,7 @@ export class ContentGenerationPipeline {
 
     const typed = providerRequest as unknown as Record<string, unknown>;
     const reasoningEffort = typed['reasoning_effort'];
+    const thinkingBudget = typed['thinking_budget'];
     // DashScope rejects forced tool selection while thinking is enabled
     // ("The tool_choice parameter does not support being set to required or
     // object in thinking mode"). Both field clauses are family-gated like
@@ -1158,17 +1032,47 @@ export class ContentGenerationPipeline {
       (thinkingMandatory ||
         (isQwenFamilyWireModel(model) &&
           (typed['enable_thinking'] === true ||
+            (thinkingBudget != null && typed['enable_thinking'] !== false) ||
             (typeof reasoningEffort === 'string' &&
               reasoningEffort !== 'none'))))
     ) {
       debugLogger.debug(
         'DashScope: dropping tool_choice=required while thinking is enabled',
-        { model, reasoningEffort, thinkingMandatory },
+        { model, reasoningEffort, thinkingBudget, thinkingMandatory },
       );
       delete typed['tool_choice'];
     }
 
     return providerRequest;
+  }
+
+  private buildResponseFormat(
+    request: PromptCacheSharingParameters,
+  ): Pick<OpenAI.Chat.ChatCompletionCreateParams, 'response_format'> {
+    // `response_format` (both `json_object` and the strict `json_schema`
+    // variant) is official-OpenAI-specific wire shape. Third-party
+    // OpenAI-compatible endpoints reject it (DeepSeek accepts only
+    // text/json_object; older vLLM builds and validating gateways refuse
+    // unknown fields), and this pipeline never sent the field before this
+    // feature. Gate on the official endpoint, same precedent as the
+    // prompt-caching feature above.
+    if (!isOfficialOpenAIEndpoint(this.contentGeneratorConfig)) return {};
+    if (request.config?.responseMimeType !== 'application/json') return {};
+    const schema =
+      request.config.responseJsonSchema ?? request.config.responseSchema;
+    if (!schema) return { response_format: { type: 'json_object' } };
+    const strictSchema = normalizeOpenAIStrictSchema(schema);
+    if (!strictSchema) return { response_format: { type: 'json_object' } };
+    return {
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'response',
+          schema: strictSchema,
+          strict: true,
+        },
+      },
+    };
   }
 
   private requiresThinking(model: string): boolean {

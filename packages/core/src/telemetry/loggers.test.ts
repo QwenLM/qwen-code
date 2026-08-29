@@ -16,7 +16,7 @@ import type {
 } from '../index.js';
 import {
   AuthType,
-  GeminiClient,
+  LlmClient,
   ToolConfirmationOutcome,
   ToolErrorType,
   ToolRegistry,
@@ -29,11 +29,14 @@ import {
   EVENT_CLI_CONFIG,
   EVENT_FLASH_FALLBACK,
   EVENT_TOOL_CALL,
+  EVENT_REPEATED_TOOL_FAILURE_GUARD,
   EVENT_USER_PROMPT,
   EVENT_MALFORMED_JSON_RESPONSE,
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
   EVENT_RIPGREP_RUNTIME_RECOVERY,
+  EVENT_SESSION_END,
+  EVENT_SESSION_START,
   EVENT_SKILL_LAUNCH,
   EVENT_EXTENSION_ENABLE,
   EVENT_EXTENSION_DISABLE,
@@ -47,8 +50,11 @@ import {
   logApiRequest,
   logApiResponse,
   logStartSession,
+  logSessionEnd,
   logUserPrompt,
   logToolCall,
+  logLoopDetected,
+  logRepeatedToolFailureGuard,
   logFlashFallback,
   logChatCompression,
   logMalformedJsonResponse,
@@ -97,6 +103,9 @@ import {
   ApiRetryEvent,
   ProtocolTagSanitizedEvent,
   MemoryRecallDeliveryEvent,
+  LoopDetectedEvent,
+  LoopType,
+  RepeatedToolFailureGuardEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
 import type {
@@ -111,6 +120,7 @@ import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppress
 describe('loggers', () => {
   const mockLogger = {
     emit: vi.fn(),
+    enabled: vi.fn().mockReturnValue(true),
   };
   const mockUiEvent = {
     addEvent: vi.fn(),
@@ -347,6 +357,210 @@ describe('loggers', () => {
     });
   });
 
+  describe('session lifecycle wiring', () => {
+    // Distinct session ids per case: emitSessionStart is idempotent per id,
+    // and the module-level guard persists across tests in this file.
+    it('logStartSession emits the standard session.start record with lineage', () => {
+      const mockConfig = makeFakeConfig({
+        sessionId: 'lifecycle-start-session',
+      });
+
+      logStartSession(
+        mockConfig,
+        new StartSessionEvent(mockConfig),
+        'previous-session-id',
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Session started.',
+        attributes: {
+          'event.name': EVENT_SESSION_START,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          'session.id': 'lifecycle-start-session',
+          'session.previous_id': 'previous-session-id',
+        },
+      });
+    });
+
+    it('logSessionEnd emits the standard session.end record', () => {
+      const mockConfig = makeFakeConfig({
+        sessionId: 'lifecycle-end-session',
+      });
+
+      logSessionEnd(mockConfig);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Session ended.',
+        attributes: {
+          'event.name': EVENT_SESSION_END,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          'session.id': 'lifecycle-end-session',
+        },
+      });
+    });
+
+    it('does not emit or consume the session.start idempotency token while the SDK is uninitialized', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      const mockConfig = makeFakeConfig({
+        sessionId: 'suppressed-session',
+      });
+
+      logStartSession(mockConfig, new StartSessionEvent(mockConfig));
+      logSessionEnd(mockConfig);
+
+      expect(mockLogger.emit).not.toHaveBeenCalled();
+
+      // The suppressed start must not consume the one-shot token: once the
+      // SDK settles, the settle-time catch-up still emits the record.
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(true);
+      logStartSession(mockConfig, new StartSessionEvent(mockConfig));
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Session started.',
+        attributes: {
+          'event.name': EVENT_SESSION_START,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          'session.id': 'suppressed-session',
+        },
+      });
+    });
+  });
+
+  describe('logRepeatedToolFailureGuard', () => {
+    it('emits a data-minimized transition log and low-cardinality metric', () => {
+      vi.spyOn(
+        metrics,
+        'recordRepeatedToolFailureGuardMetrics',
+      ).mockImplementation(() => undefined);
+      const event = new RepeatedToolFailureGuardEvent({
+        prompt_id: 'prompt-id',
+        route: 'acp_foreground',
+        mode: 'shadow',
+        phase_before: 'tracking',
+        phase_after: 'warned',
+        decision: 'would_warn',
+        failure_count_bucket: '8+',
+        batch_count_bucket: '2',
+        candidate_ordinal: 1,
+        terminal_status: 'error',
+        execution_status: 'error',
+        execution_error_type: ToolErrorType.EXECUTION_TIMEOUT,
+        tool_type: 'mcp',
+      });
+
+      logRepeatedToolFailureGuard(event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Repeated tool failure guard decision: would_warn.',
+        attributes: {
+          ...event,
+          'event.name': EVENT_REPEATED_TOOL_FAILURE_GUARD,
+        },
+      });
+      expect(
+        metrics.recordRepeatedToolFailureGuardMetrics,
+      ).toHaveBeenCalledWith({
+        route: 'acp_foreground',
+        mode: 'shadow',
+        phase_before: 'tracking',
+        phase_after: 'warned',
+        decision: 'would_warn',
+        failure_count_bucket: '8+',
+        batch_count_bucket: '2',
+        terminal_status: 'error',
+        execution_status: 'error',
+        tool_type: 'mcp',
+      });
+      const serialized = JSON.stringify(mockLogger.emit.mock.calls.at(-1));
+      expect(serialized).not.toMatch(
+        /session.id|user.id|policyToolName|function_args|result|error_message|server_name/,
+      );
+    });
+
+    it('isolates transition log and metric sink failures', () => {
+      const event = new RepeatedToolFailureGuardEvent({
+        prompt_id: 'prompt-id',
+        route: 'acp_foreground',
+        mode: 'enforce',
+        phase_before: 'warned',
+        phase_after: 'latched',
+        decision: 'stopped',
+        failure_count_bucket: '8+',
+        batch_count_bucket: '3+',
+        candidate_ordinal: 1,
+      });
+      vi.spyOn(
+        metrics,
+        'recordRepeatedToolFailureGuardMetrics',
+      ).mockImplementationOnce(() => {
+        throw new Error('metric unavailable');
+      });
+      mockLogger.emit.mockImplementationOnce(() => {
+        throw new Error('log unavailable');
+      });
+
+      expect(() => logRepeatedToolFailureGuard(event)).not.toThrow();
+      expect(event).not.toHaveProperty('reset_reason');
+      expect(event).not.toHaveProperty('terminal_status');
+      expect(event).not.toHaveProperty('execution_status');
+      expect(event).not.toHaveProperty('execution_error_type');
+      expect(event).not.toHaveProperty('tool_type');
+    });
+  });
+
+  describe('logLoopDetected', () => {
+    it('does not infer telemetry destinations from the loop type', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const logLoopDetectedEvent = vi.fn();
+      const getInstanceSpy = vi
+        .spyOn(QwenLogger, 'getInstance')
+        .mockReturnValue({
+          logLoopDetectedEvent,
+        } as unknown as QwenLogger);
+      const event = new LoopDetectedEvent(
+        LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+        'prompt-id',
+      );
+
+      try {
+        logLoopDetected(config, event);
+
+        expect(logLoopDetectedEvent).toHaveBeenCalledWith(event);
+      } finally {
+        getInstanceSpy.mockRestore();
+      }
+    });
+
+    it('supports explicitly keeping a loop event out of QwenLogger', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const logLoopDetectedEvent = vi.fn();
+      const getInstanceSpy = vi
+        .spyOn(QwenLogger, 'getInstance')
+        .mockReturnValue({
+          logLoopDetectedEvent,
+        } as unknown as QwenLogger);
+      const event = new LoopDetectedEvent(
+        LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+        'prompt-id',
+      );
+
+      try {
+        logLoopDetected(config, event, { recordToQwenLogger: false });
+
+        expect(logLoopDetectedEvent).not.toHaveBeenCalled();
+        expect(mockLogger.emit).toHaveBeenCalledWith({
+          body: `Loop detected. Type: ${LoopType.REPEATED_TOOL_EXECUTION_FAILURE}.`,
+          attributes: {
+            'session.id': 'test-session-id',
+            ...event,
+          },
+        });
+      } finally {
+        getInstanceSpy.mockRestore();
+      }
+    });
+  });
+
   describe('logUserPrompt', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
@@ -530,6 +744,57 @@ describe('loggers', () => {
       ).toHaveBeenCalledWith(mockConfig, event);
     });
 
+    it('uses the request session snapshot when provided', () => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        'prompt-id',
+      );
+
+      logApiResponse(mockConfig, event, 'request-session-id');
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            'session.id': 'request-session-id',
+          }),
+        }),
+      );
+    });
+
+    it('keeps task identity local to UI telemetry', () => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        'prompt-id',
+        undefined,
+        undefined,
+        undefined,
+        'general-purpose',
+      );
+
+      logApiResponse(mockConfig, event, undefined, {
+        id: 'general-purpose-12345678',
+        type: 'general-purpose',
+        taskName: 'inspect customer records',
+      });
+
+      expect(mockUiEvent.addEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subagent_name: 'general-purpose',
+          subagent_id: 'general-purpose-12345678',
+          subagent_task_name: 'inspect customer records',
+        }),
+        'test-session-id',
+      );
+      const attributes = mockLogger.emit.mock.calls[0]![0].attributes;
+      expect(attributes.subagent_name).toBe('general-purpose');
+      expect(attributes).not.toHaveProperty('subagent_id');
+      expect(attributes).not.toHaveProperty('subagent_task_name');
+    });
+
     it.each([
       'prompt_suggestion',
       'forked_query',
@@ -630,6 +895,29 @@ describe('loggers', () => {
       logApiResponse(configWithRecording, event);
 
       expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
+    });
+
+    it('uses the request session snapshot when provided', () => {
+      const event = new ApiErrorEvent({
+        model: 'test-model',
+        durationMs: 100,
+        promptId: 'user_query',
+        errorMessage: 'test error',
+      });
+
+      logApiError(
+        makeFakeConfig({ sessionId: 'current-session-id' }),
+        event,
+        'request-session-id',
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            'session.id': 'request-session-id',
+          }),
+        }),
+      );
     });
 
     it('suppresses chatRecordingService writes inside hidden runs', () => {
@@ -777,6 +1065,20 @@ describe('loggers', () => {
           prompt_id: 'prompt-id-6',
         },
       });
+    });
+
+    it('uses the request session snapshot when provided', () => {
+      const event = new ApiRequestEvent('test-model', 'prompt-id');
+
+      logApiRequest(mockConfig, event, 'request-session-id');
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            'session.id': 'request-session-id',
+          }),
+        }),
+      );
     });
   });
 
@@ -946,7 +1248,7 @@ describe('loggers', () => {
     const cfg1 = {
       getSessionId: () => 'test-session-id',
       getTargetDir: () => 'target-dir',
-      getGeminiClient: () => mockGeminiClient,
+      getLlmClient: () => mockLlmClient,
     } as Config;
     const cfg2 = {
       getSessionId: () => 'test-session-id',
@@ -976,11 +1278,11 @@ describe('loggers', () => {
       getUserMemory: () => 'user-memory',
     } as unknown as Config;
 
-    const mockGeminiClient = new GeminiClient(cfg2);
+    const mockLlmClient = new LlmClient(cfg2);
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getTargetDir: () => 'target-dir',
-      getGeminiClient: () => mockGeminiClient,
+      getLlmClient: () => mockLlmClient,
       getUsageStatisticsEnabled: () => true,
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,

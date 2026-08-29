@@ -73,19 +73,47 @@ jobs:
           HAS_LABEL="$(gh pr view "${PR}" --repo "${REPO}" --json labels \
             --jq "[.labels[].name] | index(\"${LABEL}\") != null" 2> /dev/null || echo 'false')"
 
+          # Label mutations go through REST, NOT `gh pr edit`: that command's
+          # GraphQL lookup requests repository.pullRequest.projectCards, and
+          # GitHub answers the Projects (classic) deprecation as an ERROR on
+          # the gh builds that still send that query — this job's runner
+          # image does, so `gh pr edit` exits 1 before mutating anything.
+          # Every add/remove path of this job failed that way from
+          # 2026-08-04 on (43 runs); the green runs were all the no-change
+          # arm. REST never touches that query.
           if [[ "${SELF}" == 'true' && "${HAS_LABEL}" != 'true' ]]; then
             # Create the label on first use (idempotent), then apply it.
             gh label create "${LABEL}" --repo "${REPO}" --color 'BFD4F2' \
               --description 'The linked issue was opened by the PR author (self-reported)' \
               2> /dev/null || true
-            gh pr edit "${PR}" --repo "${REPO}" --add-label "${LABEL}"
+            gh api -X POST "repos/${REPO}/issues/${PR}/labels" -f "labels[]=${LABEL}" > /dev/null
             echo "🏷️ #${PR}: added ${LABEL} — a closed issue was opened by ${PR_AUTHOR}"
           elif [[ "${SELF}" != 'true' && "${HAS_LABEL}" == 'true' && "${API_OK}" == 'true' ]]; then
             # The link was removed or re-pointed to someone else's issue — clear
             # the now-stale label so it never lies. Only when the query itself
             # succeeded: an API failure must not look like "no self-reported link".
-            gh pr edit "${PR}" --repo "${REPO}" --remove-label "${LABEL}"
-            echo "🏷️ #${PR}: removed ${LABEL} — no self-reported linked issue"
+            # The label name is a PATH SEGMENT here, and it contains a slash —
+            # unencoded, the request hits …/labels/review/self-reported (404).
+            # The presence check above is not atomic with this DELETE: if the
+            # label was removed in the gap, the 404 only says the desired end
+            # state already holds and must not fail the step. Any other
+            # failure (403 rate limit, 5xx, network) also keeps the step
+            # green — the job only re-runs on the next PR event — but must
+            # not disappear: without the warning, the log claims "removed"
+            # while the label stays on the PR. LBL_DEL_FAILED is keyed on the
+            # exit status, with the exact "HTTP 404" token as the only
+            # text-derived exception (a bare 404 substring also rides
+            # transport failures' embedded URLs), and mirrors the identical
+            # idiom in qwen-autofix.yml (a contract test pins them in sync).
+            LBL_DEL_FAILED=false
+            if ! REMOVE_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${LABEL}" '$l|@uri')" 2>&1)"; then
+              [[ "${REMOVE_ERR}" == *"HTTP 404"* ]] || { LBL_DEL_FAILED=true; echo "::warning::#${PR}: ${LABEL} removal failed — ${REMOVE_ERR}"; }
+            fi
+            if [[ "${LBL_DEL_FAILED}" == "true" ]]; then
+              echo "#${PR}: ${LABEL} removal did not land — will retry on the next PR event"
+            else
+              echo "🏷️ #${PR}: removed ${LABEL} — no self-reported linked issue"
+            fi
           else
             echo "#${PR}: no change (self=${SELF}, labeled=${HAS_LABEL}, api=${API_OK})"
           fi

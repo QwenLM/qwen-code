@@ -47,17 +47,38 @@ describe('goals workspace actions', () => {
 
   describe('listGoals', () => {
     it('GETs /goals and returns the goals with the dropped count', async () => {
-      fetchMock.mockResolvedValue(
-        ok({ v: 1, goals: [{ sessionId: 's1' }], droppedCount: 2 }),
-      );
+      const goal = {
+        sessionId: 's1',
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      };
+      fetchMock.mockResolvedValue(ok({ v: 1, goals: [goal], droppedCount: 2 }));
 
       const list = await makeActions('tok').listGoals();
 
-      expect(list).toEqual({ goals: [{ sessionId: 's1' }], droppedCount: 2 });
+      expect(list).toEqual({ goals: [goal], droppedCount: 2 });
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe('/goals');
       expect(initOf(fetchMock.mock.calls[0]).method ?? 'GET').toBe('GET');
       expect(headersOf(init)['Authorization']).toBe('Bearer tok');
+    });
+
+    it('drops legacy rows without snapshots and counts them', async () => {
+      const current = {
+        sessionId: 'current',
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      };
+      fetchMock.mockResolvedValue(
+        ok({
+          v: 1,
+          goals: [{ sessionId: 'legacy' }, current],
+          droppedCount: 2,
+        }),
+      );
+
+      await expect(makeActions().listGoals()).resolves.toEqual({
+        goals: [current],
+        droppedCount: 3,
+      });
     });
 
     it('normalizes a missing goals array to empty', async () => {
@@ -112,6 +133,44 @@ describe('goals workspace actions', () => {
     it('throws on a non-ok response', async () => {
       fetchMock.mockResolvedValue(fail(404, { error: 'no session' }));
       await expect(makeActions().clearGoal('gone')).rejects.toThrow();
+    });
+  });
+
+  describe('controlGoal', () => {
+    it('POSTs an optimistic-concurrency request to the session goal route', async () => {
+      const response = {
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      };
+      fetchMock.mockResolvedValue(ok(response));
+      const request = {
+        action: 'pause' as const,
+        expectedGoalId: 'goal-1',
+        expectedRevision: 3,
+      };
+
+      await expect(
+        makeActions('tok').controlGoal('a/b c', request),
+      ).resolves.toEqual(response);
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe('/session/a%2Fb%20c/goal');
+      expect(initOf(fetchMock.mock.calls[0]).method).toBe('POST');
+      expect(headersOf(init)['Authorization']).toBe('Bearer tok');
+      expect(headersOf(init)['Content-Type']).toBe('application/json');
+      expect(initOf(fetchMock.mock.calls[0]).body).toBe(
+        JSON.stringify(request),
+      );
+    });
+
+    it('throws on a non-ok response', async () => {
+      fetchMock.mockResolvedValue(fail(409, { error: 'stale revision' }));
+      await expect(
+        makeActions().controlGoal('s1', {
+          action: 'resume',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 2,
+        }),
+      ).rejects.toThrow();
     });
   });
 });

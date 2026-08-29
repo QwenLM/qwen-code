@@ -996,7 +996,13 @@ None captured`;
           try {
             // Get all chat files in the chats directory
             const files = await fs.readdir(chatsDir);
-            const chatFiles = files.filter((file) => file.endsWith('.jsonl'));
+            // The prompt terminal ledger sidecar (<id>.ledger.jsonl) is not
+            // a transcript — only real session JSONL files carry chat
+            // records.
+            const chatFiles = files.filter(
+              (file) =>
+                file.endsWith('.jsonl') && !file.endsWith('.ledger.jsonl'),
+            );
 
             for (const file of chatFiles) {
               const filePath = path.join(chatsDir, file);

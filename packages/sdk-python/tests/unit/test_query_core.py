@@ -576,6 +576,10 @@ async def test_set_effort_sends_control_request() -> None:
                     "subtype": "set_effort",
                     "effort": "high",
                     "applied": True,
+                    "override": {
+                        "source": "extra_body",
+                        "field": "thinking_budget",
+                    },
                 },
             },
         }
@@ -583,6 +587,42 @@ async def test_set_effort_sends_control_request() -> None:
 
     result = await task
     assert result is True
+    await query.close()
+
+
+@pytest.mark.asyncio
+async def test_set_effort_status_returns_override() -> None:
+    transport = FakeTransport()
+    query = await _start_query(transport)
+
+    task = asyncio.create_task(query.set_effort_status("max"))
+    request = await _wait_for_request(transport, "set_effort")
+    transport.push(
+        {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request["request_id"],
+                "response": {
+                    "subtype": "set_effort",
+                    "effort": "max",
+                    "applied": False,
+                    "override": {
+                        "source": "extra_body",
+                        "field": "thinking_budget",
+                    },
+                },
+            },
+        }
+    )
+
+    assert await task == {
+        "applied": False,
+        "override": {
+            "source": "extra_body",
+            "field": "thinking_budget",
+        },
+    }
     await query.close()
 
 
@@ -694,10 +734,29 @@ async def test_initialize_sends_effort() -> None:
             "response": {
                 "subtype": "success",
                 "request_id": init_request["request_id"],
-                "response": {},
+                "response": {
+                    "effort_status": {
+                        "effort": "high",
+                        "applied": False,
+                        "override": {
+                            "source": "samplingParams",
+                            "field": "enable_thinking",
+                        },
+                        "reason": "samplingParams.enable_thinking takes precedence",
+                    }
+                },
             },
         }
     )
+    await query._initialize_task
+    assert query.initial_effort_status == {
+        "applied": False,
+        "override": {
+            "source": "samplingParams",
+            "field": "enable_thinking",
+        },
+        "reason": "samplingParams.enable_thinking takes precedence",
+    }
     await query.close()
 
 

@@ -20,8 +20,14 @@ import {
   DaemonClient,
   DaemonHttpError,
   DaemonSessionClient,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
   createDaemonTranscriptStore,
+  estimateDaemonTranscriptBlockBytes,
   extractServerTimestamp,
+  isTaskExecutionMode,
+  isTrimmedPermissionBlockId,
+  isTrimmedToolBlockId,
+  isUnrecognizedDiagnosticReason,
   matchTurnEvent,
   normalizeDaemonEvent,
   type CreateSessionRequest,
@@ -30,10 +36,18 @@ import {
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
+  type DaemonTranscriptTruncationDetail,
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
+  type DaemonUnrecognizedDiagnostic,
 } from '@qwen-code/sdk/daemon';
-import { createDaemonSessionActions, getPromptSettledKey } from './actions.js';
+import {
+  createDaemonSessionActions,
+  getWorkspaceModelsAfterSessionClear,
+  getPromptSettledKey,
+  normalizeWorkspaceIdentity,
+  resolveSessionRestoreTimeouts,
+} from './actions.js';
 import {
   eventPromptId,
   findLiveJournalRepairSuffix,
@@ -55,8 +69,10 @@ import {
   getTokenCountFromUsage,
   mapProviderStatus,
   mapSessionContextModels,
+  mapSessionContextReasoning,
   mapSupportedCommands,
   mapWorkspaceSkills,
+  selectGoalStateFromRead,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import {
@@ -96,6 +112,7 @@ import type {
   DaemonSessionActions,
   DaemonSessionContextValue,
   DaemonSessionNotice,
+  DaemonSessionOwnerGuard,
   DaemonSessionProviderProps,
   DaemonWorkspaceEventSignals,
   PendingSessionLoad,
@@ -148,24 +165,72 @@ interface LiveJournalRepairEpisode {
 interface TranscriptHistoryMaterialization {
   blocks: readonly DaemonTranscriptBlock[];
   nextOrdinal: number;
+  retainedBytes: number;
   toolBlockByCallId: Record<string, string>;
   permissionBlockByRequestId: Record<string, string>;
+  unrecognizedDiagnostics: readonly DaemonUnrecognizedDiagnostic[];
 }
 
+type TranscriptHistoryAdmission =
+  | { admitted: true; materialization: TranscriptHistoryMaterialization }
+  | {
+      admitted: false;
+      reason: 'count' | 'bytes';
+      pageBlocks: number;
+      pageBytes: number;
+      /** True when the page can never be admitted, even into an empty window. */
+      impossible: boolean;
+    };
+
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
+const CLIENT_IDENTITY_FEATURE = 'client_identity';
 const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
 const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
+// Cap the daemon-advertised restore retry delay: an unbounded value overflows
+// setTimeout's 2^31-1 ms limit (firing instantly, retry storm) or leaves the
+// UI stuck connecting for hours.
+const RESTORE_IN_PROGRESS_RETRY_MAX_MS = 60_000;
+
+const RECORD_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function assistantDoneFromTurnEvent(
   event: DaemonEvent,
   reason: string,
 ): DaemonUiEvent {
   const serverTimestamp = extractServerTimestamp(event);
+  const data = isRecord(event.data) ? event.data : undefined;
+  const rawBranchPoint =
+    event.type === 'turn_complete' &&
+    reason === 'end_turn' &&
+    isRecord(data?.['branchPoint'])
+      ? data['branchPoint']
+      : undefined;
+  const assistantRecordUuid =
+    typeof rawBranchPoint?.['assistantRecordUuid'] === 'string'
+      ? rawBranchPoint['assistantRecordUuid']
+      : undefined;
+  const checkpointUuid =
+    typeof rawBranchPoint?.['checkpointUuid'] === 'string'
+      ? rawBranchPoint['checkpointUuid']
+      : undefined;
+  const branchPointValid =
+    assistantRecordUuid !== undefined &&
+    RECORD_UUID_PATTERN.test(assistantRecordUuid) &&
+    checkpointUuid !== undefined &&
+    RECORD_UUID_PATTERN.test(checkpointUuid);
   return {
     type: 'assistant.done',
     reason,
     eventId: event.id,
+    ...(event.promptId ? { promptId: event.promptId } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
+    ...(branchPointValid
+      ? {
+          sourceRecordIds: [assistantRecordUuid],
+          branchRecordId: checkpointUuid,
+        }
+      : {}),
   };
 }
 
@@ -219,7 +284,7 @@ function materializeTranscriptHistory(
   current: DaemonTranscriptState,
   events: DaemonUiEvent[],
   maxBlocks: number,
-): TranscriptHistoryMaterialization | undefined {
+): TranscriptHistoryAdmission {
   // Drop fetched events whose source records are already displayed.
   // `beforeRecordId` pagination is exclusive of the anchor but the anchor
   // can sit inside the retained window (e.g. the daemon's transcript
@@ -232,6 +297,40 @@ function materializeTranscriptHistory(
       displayedRecordIds.add(recordId);
     }
   }
+  for (const diagnostic of current.unrecognizedDiagnostics) {
+    for (const recordId of diagnostic.sourceRecordIds ?? []) {
+      displayedRecordIds.add(recordId);
+    }
+  }
+  // Secondary content-aware dedup for blocks that carry no recordId — the
+  // locally echoed user prompt, which `suppressOwnUserEcho` keeps from ever
+  // unioning the daemon's recordId-stamped echo. RecordId dedup is blind to
+  // it, so once a trim leaves it as the oldest retained block, a load-older
+  // page returning that same prompt's persisted record would materialize a
+  // second user block and double-count it. The collision is strictly a
+  // boundary pair — the window's oldest block (the echo) against the page's
+  // newest user block (that same prompt's persisted record, adjacent to the
+  // window) — so only that pair is compared below. Keying on text window-wide
+  // would instead drop DISTINCT older prompts the user happened to send twice
+  // ("yes", a retry), permanently orphaning their assistant replies.
+  // The key must key on echo PRESENCE, not non-empty text: image/file-only
+  // prompts submit with empty text, so a `text !== ''` gate would skip their
+  // dedup and double-render the prompt. Fold media into the key (image/file
+  // counts) so two distinct media-only prompts at the boundary don't collapse.
+  const userBlockBoundaryKey = (
+    block: DaemonTranscriptBlock | undefined,
+  ): string | undefined => {
+    if (block?.kind !== 'user') return undefined;
+    const text = (block as { text?: string }).text ?? '';
+    const images = (block as { images?: unknown[] }).images?.length ?? 0;
+    const files = (block as { files?: unknown[] }).files?.length ?? 0;
+    return `${text} img:${images} file:${files}`;
+  };
+  const oldestRetainedBlock = current.blocks[0];
+  const boundaryEchoKey =
+    (oldestRetainedBlock?.sourceRecordIds?.length ?? 0) === 0
+      ? userBlockBoundaryKey(oldestRetainedBlock)
+      : undefined;
   const freshEvents =
     displayedRecordIds.size === 0
       ? events
@@ -243,19 +342,83 @@ function materializeTranscriptHistory(
         );
   const historyStore = createDaemonTranscriptStore({
     maxBlocks: Number.MAX_SAFE_INTEGER,
+    // Trim-free by intent: a media-heavy page would otherwise cross the
+    // default byte budget mid-build and evict the page's oldest records,
+    // which the exclusive pagination anchor can never re-fetch.
+    maxRetainedBytes: Number.POSITIVE_INFINITY,
     nextOrdinal: current.nextOrdinal,
     retainSubagentBlocks: current.retainSubagentBlocks,
   });
   historyStore.dispatch(freshEvents);
   const history = historyStore.getSnapshot();
-  if (history.blocks.length + current.blocks.length > maxBlocks) {
-    return undefined;
+  // Drop the page's newest user block only when it duplicates the window's
+  // oldest recordId-less echo (the boundary pair). A same-text user block
+  // deeper in older history is a distinct prompt and must survive.
+  let pageBlockList = history.blocks;
+  if (boundaryEchoKey !== undefined) {
+    for (let i = history.blocks.length - 1; i >= 0; i -= 1) {
+      const block = history.blocks[i];
+      if (block?.kind !== 'user') continue;
+      if (userBlockBoundaryKey(block) === boundaryEchoKey) {
+        pageBlockList = [
+          ...history.blocks.slice(0, i),
+          ...history.blocks.slice(i + 1),
+        ];
+      }
+      break;
+    }
+  }
+  let pageBytes = 0;
+  for (const block of pageBlockList) {
+    pageBytes += estimateDaemonTranscriptBlockBytes(block);
+  }
+  const pageBlocks = pageBlockList.length;
+  // `impossible` must be evaluated across BOTH dimensions, regardless of
+  // which branch rejects: a page that alone fills the whole block window can
+  // never be admitted (an anchored window always retains at least one block),
+  // and likewise for the byte budget. Equality is already impossible, hence
+  // `>=`. A page rejected by one dimension but impossible in the other would
+  // route to the re-openable latch whose re-open gate is then unsatisfiable —
+  // terminal either way.
+  const impossible =
+    pageBlocks >= maxBlocks || pageBytes >= current.maxRetainedBytes;
+  // Count admission: an over-count merge stays untrimmed while the session
+  // is idle, and the next live trim evicts the freshly prepended oldest
+  // records, which the exclusive pagination anchor can never re-fetch — a
+  // permanent silent gap. Reject atomically.
+  if (pageBlocks + current.blocks.length > maxBlocks) {
+    return {
+      admitted: false,
+      reason: 'count',
+      pageBlocks,
+      pageBytes,
+      impossible,
+    };
+  }
+  // Byte-budget admission: same silent-gap hazard as the count cap — an
+  // over-budget merge is evicted oldest-first by the next live trim.
+  if (current.retainedBytes + pageBytes > current.maxRetainedBytes) {
+    return {
+      admitted: false,
+      reason: 'bytes',
+      pageBlocks,
+      pageBytes,
+      impossible,
+    };
   }
   return {
-    blocks: history.blocks,
-    nextOrdinal: history.nextOrdinal,
-    toolBlockByCallId: history.toolBlockByCallId,
-    permissionBlockByRequestId: history.permissionBlockByRequestId,
+    admitted: true,
+    materialization: {
+      blocks: pageBlockList,
+      nextOrdinal: history.nextOrdinal,
+      retainedBytes: pageBytes,
+      toolBlockByCallId: history.toolBlockByCallId,
+      permissionBlockByRequestId: history.permissionBlockByRequestId,
+      // History pages can carry frames recorded by newer daemon versions, exactly
+      // forward-compat case the sidechannel exists for (#8823); keep them
+      // instead of dropping the throwaway store's diagnostics.
+      unrecognizedDiagnostics: history.unrecognizedDiagnostics,
+    },
   };
 }
 
@@ -263,18 +426,64 @@ function applyTranscriptHistory(
   current: DaemonTranscriptState,
   history: TranscriptHistoryMaterialization,
 ): DaemonTranscriptState {
+  // A page-resurrected real block mapping must win over the current window's
+  // TRIMMED sentinel for the same callId — otherwise the resurrected block is
+  // orphaned and every later live update for that tool hits the sentinel
+  // branch (a false "output trimmed" error block plus dropped updates).
+  // Real-vs-real collisions cannot occur (the recordId dedup filter drops
+  // already-displayed records before materialization).
+  const toolBlockByCallId: Record<string, string> = {
+    ...history.toolBlockByCallId,
+  };
+  for (const [callId, blockId] of Object.entries(current.toolBlockByCallId)) {
+    if (
+      isTrimmedToolBlockId(blockId) &&
+      toolBlockByCallId[callId] !== undefined
+    ) {
+      continue;
+    }
+    toolBlockByCallId[callId] = blockId;
+  }
+  // A resurrected tool is live content again; clear its trimmed-notification
+  // flag so a future re-trim reports it once instead of staying silent.
+  const trimmedToolNotificationByCallId: Record<string, true> = {
+    ...current.trimmedToolNotificationByCallId,
+  };
+  for (const callId of Object.keys(history.toolBlockByCallId)) {
+    delete trimmedToolNotificationByCallId[callId];
+  }
+  // Same sentinel-aware merge for permission blocks: a page-resurrected real
+  // mapping must win over the current window's TRIMMED_PERMISSION sentinel, or
+  // a resurrected pending permission never flips to resolved (the permission
+  // upsert/resolve paths early-return on the sentinel).
+  const permissionBlockByRequestId: Record<string, string> = {
+    ...history.permissionBlockByRequestId,
+  };
+  for (const [requestId, blockId] of Object.entries(
+    current.permissionBlockByRequestId,
+  )) {
+    if (
+      isTrimmedPermissionBlockId(blockId) &&
+      permissionBlockByRequestId[requestId] !== undefined
+    ) {
+      continue;
+    }
+    permissionBlockByRequestId[requestId] = blockId;
+  }
   return {
     ...current,
     blocks: [...history.blocks, ...current.blocks],
+    retainedBytes: current.retainedBytes + history.retainedBytes,
     nextOrdinal: history.nextOrdinal,
-    toolBlockByCallId: {
-      ...history.toolBlockByCallId,
-      ...current.toolBlockByCallId,
-    },
-    permissionBlockByRequestId: {
-      ...history.permissionBlockByRequestId,
-      ...current.permissionBlockByRequestId,
-    },
+    toolBlockByCallId,
+    trimmedToolNotificationByCallId,
+    permissionBlockByRequestId,
+    // History entries are older than anything received live, so they go
+    // first; the slice keeps the newest entries within the sidechannel cap.
+    unrecognizedDiagnostics: [
+      ...history.unrecognizedDiagnostics,
+      ...current.unrecognizedDiagnostics,
+    ].slice(-UNRECOGNIZED_DIAGNOSTICS_LIMIT),
   };
 }
 
@@ -302,12 +511,15 @@ function projectSubagentToolUpdate(
   const subagentType = boundedString(rawInput?.['subagent_type'], 120);
   const prompt = boundedString(rawInput?.['prompt'], 240);
   const description = boundedString(rawInput?.['description'], 240);
+  const workingDir = boundedString(rawInput?.['working_dir'], 240);
+  const agentName = boundedString(rawInput?.['name'], 120);
   const todoId =
     typeof rawInput?.['todo_id'] === 'string' ? rawInput['todo_id'] : undefined;
   const subagentName = boundedString(rawOutput?.['subagentName'], 120);
   const subagentColor = boundedString(rawOutput?.['subagentColor'], 80);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
   const status = boundedString(rawOutput?.['status'], 80);
+  const executionMode = rawOutput?.['executionMode'];
   const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
   const projectedInput = rawInput
     ? {
@@ -315,9 +527,11 @@ function projectSubagentToolUpdate(
         ...(prompt ? { prompt } : {}),
         ...(description ? { description } : {}),
         ...(todoId ? { todo_id: todoId } : {}),
-        ...(rawInput['run_in_background'] === true
-          ? { run_in_background: true }
+        ...(typeof rawInput['run_in_background'] === 'boolean'
+          ? { run_in_background: rawInput['run_in_background'] }
           : {}),
+        ...(workingDir ? { working_dir: workingDir } : {}),
+        ...(agentName ? { name: agentName } : {}),
       }
     : undefined;
   const projectedOutput = rawOutput
@@ -329,6 +543,7 @@ function projectSubagentToolUpdate(
         ...(subagentColor ? { subagentColor } : {}),
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
+        ...(isTaskExecutionMode(executionMode) ? { executionMode } : {}),
         ...(terminateReason ? { terminateReason } : {}),
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }
@@ -422,6 +637,9 @@ const DaemonSessionNoticesContext = createContext<
 const DaemonWorkspaceEventSignalsContext = createContext<
   DaemonWorkspaceEventSignals | undefined
 >(undefined);
+const DaemonSessionOwnerGuardContext = createContext<
+  DaemonSessionOwnerGuard | undefined
+>(undefined);
 /**
  * Subset of TERMINAL_SESSION_HTTP_STATUSES that represent **credential
  * failures** (vs session-not-found 404/410). Auth failures should NOT enter
@@ -440,23 +658,29 @@ const TERMINAL_SESSION_HTTP_STATUSES = new Set([
 ]);
 
 interface HeartbeatFailureState {
-  sessionId?: string;
+  session?: DaemonSessionClient;
   consecutiveFailures: number;
   lastHttpError?: { status: number; message: string };
 }
 
 // Keep enough transcript history for large daemon replay streams so event order
 // and subagent grouping survive replay. Rendering is virtualized, but message
-// normalization still rebuilds from retained blocks today, so this high default
-// is a history-preservation tradeoff rather than a claim that large transcripts
-// are CPU-free. Callers can pass a smaller maxBlocks in constrained contexts.
-const DEFAULT_MAX_BLOCKS = 200_000;
+// normalization still rebuilds from retained blocks today, so this default is a
+// history-preservation tradeoff rather than a claim that large transcripts are
+// CPU-free. This is a block-COUNT ceiling; the memory ceiling is enforced
+// separately by the transcript store's retention byte budget, because blocks
+// can carry large raw tool payloads (an implicit 200k window let a single busy
+// session exhaust renderer memory). Callers can pass a smaller maxBlocks in
+// constrained contexts.
+export const DEFAULT_MAX_BLOCKS = 50_000;
+const TRANSCRIPT_DISPATCH_BATCH_MS = 16;
 
 const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   memoryVersion: 0,
   agentsVersion: 0,
   toolsVersion: 0,
   settingsVersion: 0,
+  skillsVersion: 0,
   mcpVersion: 0,
   extensionsVersion: 0,
   artifactsVersion: 0,
@@ -476,6 +700,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     createSessionRequest,
     maxQueued = 1024,
     maxBlocks = DEFAULT_MAX_BLOCKS,
+    maxRetainedBytes,
     historyPageSize,
     subagentTranscriptMode = 'full',
     suppressOwnUserEcho = true,
@@ -494,6 +719,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const resolvedBaseUrl = baseUrl ?? workspace?.baseUrl;
   const resolvedToken = token ?? workspace?.token;
   const resolvedWorkspaceCwd = workspaceCwd ?? workspace?.workspaceCwd;
+  const sessionCapabilitiesRef = useRef<DaemonConnectionState['capabilities']>(
+    workspace?.capabilities,
+  );
   const workspaceClientRef = useRef(workspace?.client);
   workspaceClientRef.current = workspace?.client;
   const workspaceCapabilitiesRef = useRef(workspace?.capabilities);
@@ -515,15 +743,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     activeWorkspaceCwdRef.current = resolvedWorkspaceCwd;
   }
 
-  const store = useMemo(
-    () =>
-      createDaemonTranscriptStore({
-        maxBlocks,
-        retainSubagentBlocks: subagentTranscriptMode === 'full',
-      }),
-    [maxBlocks, subagentTranscriptMode],
-  );
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
+  const sessionConfigGenerationRef = useRef(
+    new WeakMap<DaemonSessionClient, number>(),
+  );
   const transcriptHistoryRef = useRef<{
     sessionId?: string;
     beforeRecordId?: string;
@@ -532,6 +755,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     loading: boolean;
     capacityReached: boolean;
     paginationError: boolean;
+    /**
+     * Footprint of the last page rejected by admission. The eviction
+     * re-open of the capacity latch consults it so the affordance only
+     * reappears once enough capacity has been freed for that page to be
+     * admitted; undefined when the latch came from replay saturation.
+     */
+    rejectedPage?: { blocks: number; bytes: number };
   }>({
     hasMore: false,
     loading: false,
@@ -544,6 +774,169 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     capacityReached: false,
     paginationError: false,
   });
+  // Monotonic counter bumped whenever a block trim invalidates the
+  // pagination position (the anchor record may have been evicted). A
+  // load-older fetch captures it before the await and drops the page if it
+  // moved mid-fetch, so a stale page can never advance the anchor below the
+  // evicted band.
+  const paginationGenerationRef = useRef(0);
+  const store = useMemo(
+    () =>
+      createDaemonTranscriptStore({
+        maxBlocks,
+        ...(maxRetainedBytes !== undefined ? { maxRetainedBytes } : {}),
+        retainSubagentBlocks: subagentTranscriptMode === 'full',
+        onTruncation: (detail) => {
+          if (detail.kind !== 'blocks') return;
+          const history = transcriptHistoryRef.current;
+          const activeSession = sessionRef.current;
+          if (!activeSession || history.sessionId !== activeSession.sessionId) {
+            return;
+          }
+          // Trimming evicts oldest-first, so it can remove the very record
+          // the exclusive `beforeRecordId` anchor points at; the daemon
+          // never returns the anchor itself, so the evicted stretch would
+          // become unreachable. Re-anchor to the oldest retained record and
+          // atomically drop a stale cursor (loadMore prefers cursor over
+          // beforeRecordId, and a cursor-addressed position can never be
+          // re-based after the blocks it points past are evicted). A rewind
+          // (`evictedOldest === false`) drops the newest blocks and leaves
+          // the oldest anchor intact, so it must not trigger re-anchoring.
+          if (detail.evictedOldest !== false) {
+            if (detail.oldestRetainedRecordId !== undefined) {
+              history.beforeRecordId = detail.oldestRetainedRecordId;
+              history.cursor = undefined;
+              // A re-anchoring trim invalidates a latched rejectedPage
+              // footprint: the daemon (exclusive-before, served from disk)
+              // re-serves the evicted band on the next fetch, so the page will
+              // be larger than latched. Grow the latched footprint by the
+              // evicted band so the re-open gate measures the page the
+              // re-anchored fetch actually gets — a stale (too-small) footprint
+              // would churn fetch/reject, or misclassify a now-larger page as
+              // terminal. `store.getSnapshot()` is still pre-trim here: the
+              // store swaps its state only after the reduce completes.
+              if (history.rejectedPage) {
+                const preTrim = store.getSnapshot();
+                const postTrimBlockCount =
+                  detail.blockCount ?? preTrim.blocks.length;
+                const postTrimRetainedBytes =
+                  detail.retainedBytes ?? preTrim.retainedBytes;
+                history.rejectedPage = {
+                  blocks:
+                    history.rejectedPage.blocks +
+                    Math.max(0, preTrim.blocks.length - postTrimBlockCount),
+                  bytes:
+                    history.rejectedPage.bytes +
+                    Math.max(0, preTrim.retainedBytes - postTrimRetainedBytes),
+                };
+              }
+              // A live trim evicts oldest blocks that stay persisted
+              // daemon-side, so there is now fetchable content older than the
+              // re-set anchor. A session that loaded unlatched (hasMore=false,
+              // capacityReached=false) must surface that affordance, or the
+              // evicted band is unreachable until a reload. Mirror the replay
+              // path's olderHistoryReachable gates.
+              if (!history.capacityReached && !history.hasMore) {
+                const features = sessionCapabilitiesRef.current?.features;
+                const windowCaps = store.getSnapshot();
+                const postTrimRetainedBytes =
+                  detail.retainedBytes ?? windowCaps.retainedBytes;
+                const byteCap =
+                  detail.maxRetainedBytes ?? windowCaps.maxRetainedBytes;
+                const olderHistoryReachable =
+                  Array.isArray(features) &&
+                  features.includes(SESSION_TRANSCRIPT_PAGINATION_FEATURE) &&
+                  postTrimRetainedBytes < byteCap;
+                if (olderHistoryReachable) {
+                  history.hasMore = true;
+                  setTranscriptHistoryState({
+                    hasMore: true,
+                    loading: false,
+                    capacityReached: false,
+                    paginationError: history.paginationError,
+                  });
+                }
+              }
+            } else {
+              // Re-anchor uncomputable — no retained block carries a
+              // recordId. The current anchor points at an evicted record the
+              // exclusive pagination contract can never return again; fail
+              // closed instead of offering an affordance that skips the
+              // evicted band.
+              history.beforeRecordId = undefined;
+              history.cursor = undefined;
+              if (history.hasMore) {
+                history.hasMore = false;
+                setTranscriptHistoryState({
+                  hasMore: false,
+                  loading: history.loading,
+                  capacityReached: history.capacityReached,
+                  paginationError: history.paginationError,
+                });
+              }
+            }
+          }
+          // Oldest-first eviction can invalidate an in-flight page's anchor;
+          // bump the generation so the stale page is dropped on resolve. A
+          // rewind leaves the anchor band untouched, so in-flight pages stay
+          // valid and must not be dropped.
+          if (detail.evictedOldest !== false) {
+            paginationGenerationRef.current += 1;
+          }
+          if (history.capacityReached) {
+            // Eviction freed retention capacity, so the page rejected at the
+            // latch may fit now — re-open the load-older affordance, but
+            // only where the sibling paths would have offered it: the daemon
+            // must support pagination and a positional anchor must exist.
+            const features = sessionCapabilitiesRef.current?.features;
+            const paginationSupported =
+              Array.isArray(features) &&
+              features.includes(SESSION_TRANSCRIPT_PAGINATION_FEATURE);
+            const anchored =
+              history.beforeRecordId !== undefined ||
+              history.cursor !== undefined;
+            if (!paginationSupported || !anchored) {
+              return;
+            }
+            // Admission-headroom gate: only re-open when the rejected page
+            // would actually be admitted now. A count trim restores the
+            // window to exactly maxBlocks (zero headroom), so without this
+            // check every live block during streaming would re-open the
+            // latch into an immediate fetch/reject cycle. Caps are stable
+            // across a trim; the snapshot only backs detail-field fallbacks.
+            const windowCaps = store.getSnapshot();
+            const postTrimBlockCount =
+              detail.blockCount ?? windowCaps.blocks.length;
+            const postTrimRetainedBytes =
+              detail.retainedBytes ?? windowCaps.retainedBytes;
+            const blockCap = detail.maxBlocks ?? windowCaps.maxBlocks;
+            const byteCap =
+              detail.maxRetainedBytes ?? windowCaps.maxRetainedBytes;
+            const rejected = history.rejectedPage;
+            // A footprint-less latch (replay saturation) re-opens only on
+            // real count headroom: while the count window is saturated,
+            // count admission rejects every page regardless of bytes.
+            const admissionHeadroom = rejected
+              ? rejected.blocks + postTrimBlockCount <= blockCap &&
+                rejected.bytes + postTrimRetainedBytes <= byteCap
+              : postTrimBlockCount < blockCap;
+            if (!admissionHeadroom) {
+              return;
+            }
+            history.rejectedPage = undefined;
+            history.hasMore = true;
+            history.capacityReached = false;
+            setTranscriptHistoryState({
+              hasMore: true,
+              loading: false,
+              capacityReached: false,
+              paginationError: history.paginationError,
+            });
+          }
+        },
+      }),
+    [maxBlocks, maxRetainedBytes, subagentTranscriptMode],
+  );
   const eventStreamRef = useRef<
     | {
         sessionId: string;
@@ -574,21 +967,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     consecutiveFailures: 0,
   });
   const manualSessionClearRef = useRef(false);
-  const skipNextCleanupDetachSessionIdRef = useRef<string | undefined>(
-    undefined,
-  );
+  const skipNextCleanupDetachSessionRef = useRef<
+    DaemonSessionClient | undefined
+  >(undefined);
   const settledRestoredActivePromptSessionsRef = useRef<
     WeakSet<DaemonSessionClient>
   >(new WeakSet());
   const eventOptionsRef = useRef({ suppressOwnUserEcho, includeRawEvent });
   const reconnectConfigRef = useRef({ reconnectDelayMs, maxReconnectDelayMs });
+  // Aborts the reconnect backoff wait so a caller can force an immediate SSE
+  // rebuild (e.g. a prompt submitted while the stream is down).
+  const reconnectAbortRef = useRef<AbortController | undefined>(undefined);
   const loadWarningsRef = useRef(loadWarnings);
   const historyPageSizeRef = useRef(historyPageSize);
   const subagentTranscriptModeRef = useRef(subagentTranscriptMode);
-  const clientIdRef = useRef<string | undefined>(undefined);
-  if (!clientIdRef.current || clientId) {
-    clientIdRef.current = getStableClientId(clientId);
-  }
+  const clientIdRef = useRef<string | undefined>(getStableClientId(clientId));
   eventOptionsRef.current = { suppressOwnUserEcho, includeRawEvent };
   reconnectConfigRef.current = { reconnectDelayMs, maxReconnectDelayMs };
   loadWarningsRef.current = loadWarnings;
@@ -612,9 +1005,36 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const [connection, setConnection] = useState<DaemonConnectionState>({
     status: autoConnect ? 'connecting' : 'idle',
     ...(initialRestoreSessionId ? { sessionId: initialRestoreSessionId } : {}),
+    ...(resolvedWorkspaceCwd ? { workspaceCwd: resolvedWorkspaceCwd } : {}),
   });
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  const initialClientIdDependencyRef = useRef(clientId);
+  const knownCapabilities =
+    workspace?.capabilities ??
+    sessionCapabilitiesRef.current ??
+    connection.capabilities;
+  const legacyClientIdDependency =
+    knownCapabilities &&
+    !knownCapabilities.features.includes(CLIENT_IDENTITY_FEATURE)
+      ? clientId
+      : initialClientIdDependencyRef.current;
+  if (
+    knownCapabilities &&
+    !knownCapabilities.features.includes(CLIENT_IDENTITY_FEATURE) &&
+    legacyClientIdDependency
+  ) {
+    clientIdRef.current = getStableClientId(legacyClientIdDependency);
+  }
+  const setConnectionSynchronous = useCallback(
+    (update: SetStateAction<DaemonConnectionState>) => {
+      const next =
+        typeof update === 'function' ? update(connectionRef.current) : update;
+      connectionRef.current = next;
+      setConnection(update);
+    },
+    [],
+  );
   useEffect(() => {
     if (!workspace?.capabilities) return;
     setConnection((current) =>
@@ -667,6 +1087,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     };
   }, []);
 
+  const sessionEffectWorkspaceCwd = restoreWorkspaceCwd ?? workspaceCwd;
+
   useEffect(() => {
     if (!autoConnect) return undefined;
     if (!workspaceClientRef.current && !resolvedBaseUrl) {
@@ -683,7 +1105,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       restoreMode === 'load' &&
       restoreSessionId !== undefined &&
       restoreSessionId === sessionRef.current?.sessionId &&
-      restoreSessionId === skipNextCleanupDetachSessionIdRef.current;
+      sessionRef.current === skipNextCleanupDetachSessionRef.current;
+    const effectPendingSessionLoad = pendingSessionLoadRef.current;
+    let runnerSession = sessionRef.current;
 
     // ── Batched transcript dispatch ────────────────────────────────
     // The live SSE loop dispatches transcript events through this batcher
@@ -698,13 +1122,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     // drains already-buffered events back-to-back via microtasks, so a
     // microtask flush would run between every event and never coalesce. A
     // macrotask only runs once the generator blocks on a genuinely new network
-    // event, so a whole burst collapses into a single dispatch while steady
-    // streaming stays at ~one dispatch per network chunk.
+    // event. Holding the batch for one frame also coalesces steady streaming:
+    // copying a 50k-block immutable snapshot once per token otherwise consumes
+    // the main thread before the render throttle can help. Control and terminal
+    // paths call flushTranscriptSync below, so ordering and completion are not
+    // delayed by the window.
     let pendingTranscriptEvents: DaemonUiEvent[] = [];
     let transcriptFlushTimer: ReturnType<typeof setTimeout> | undefined;
-    const runTranscriptFlush = () => {
+    const runTranscriptFlush = (force = false) => {
       transcriptFlushTimer = undefined;
       if (pendingTranscriptEvents.length === 0) return;
+      if (
+        !force &&
+        runnerSession !== undefined &&
+        sessionRef.current !== runnerSession
+      ) {
+        pendingTranscriptEvents = [];
+        return;
+      }
       const batch = pendingTranscriptEvents;
       pendingTranscriptEvents = [];
       // Swallow a reducer throw (log it) so it cannot escape as an uncaught
@@ -728,7 +1163,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       if (events.length === 0) return;
       for (const event of events) pendingTranscriptEvents.push(event);
       if (transcriptFlushTimer === undefined) {
-        transcriptFlushTimer = setTimeout(runTranscriptFlush, 0);
+        transcriptFlushTimer = setTimeout(
+          runTranscriptFlush,
+          TRANSCRIPT_DISPATCH_BATCH_MS,
+        );
       }
     };
     // Apply buffered transcript events immediately. Called before any control
@@ -736,7 +1174,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     // buffered content stays correctly ordered ahead of it.
     const flushTranscriptSync = () => {
       cancelTranscriptFlush();
-      runTranscriptFlush();
+      runTranscriptFlush(true);
     };
     const dispatchTranscriptNow = (events: DaemonUiEvent | DaemonUiEvent[]) => {
       flushTranscriptSync();
@@ -797,7 +1235,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         | Awaited<ReturnType<DaemonClient['capabilities']>>
         | undefined;
       let reconnectSessionId = restoreSessionId;
-      let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
+      let shouldCreateFreshSession =
+        !manualSessionClearRef.current &&
+        !restoreSessionId &&
+        newSessionNonce > 0;
       let reconnectAttempt = 0;
       let nextSseConnectReason: DaemonSseConnectReason | undefined;
       let skipMetadataRefresh = false;
@@ -898,6 +1339,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : await client.capabilities());
             if (disposed || abort.signal.aborted) return;
             capabilities = caps;
+            sessionCapabilitiesRef.current = caps;
             const historyPaginationSupported =
               Array.isArray(caps.features) &&
               caps.features.includes(SESSION_TRANSCRIPT_PAGINATION_FEATURE);
@@ -1047,14 +1489,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }
               return;
             }
-            const restoreMethod =
-              restoreSessionId && restoreMode === 'resume'
-                ? DaemonSessionClient.resume
-                : DaemonSessionClient.load;
             const targetSessionId = restoreSessionId ?? reconnectSessionId;
-            const requestClientId = clientId
+            const requestClientId = legacyClientIdDependency
               ? clientIdRef.current
               : getStableClientId(undefined, targetSessionId);
+            const legacyClientRebind =
+              targetSessionId !== undefined &&
+              targetSessionId === connectionRef.current.sessionId &&
+              connectionRef.current.clientId !== undefined &&
+              requestClientId !== connectionRef.current.clientId;
+            const restoreMethod =
+              restoreSessionId &&
+              restoreMode === 'resume' &&
+              !legacyClientRebind
+                ? DaemonSessionClient.resume
+                : DaemonSessionClient.load;
             loadingRequestedSession = Boolean(restoreSessionId);
             if (targetSessionId && !preservingTranscriptDuringLoad) {
               setConnection((current) => ({
@@ -1070,12 +1519,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               pendingSessionLoadRef.current?.sessionId === targetSessionId
                 ? pendingSessionLoadRef.current
                 : undefined;
+            const restoreRequestTimeoutMs =
+              attemptedLoad?.requestTimeoutMs ??
+              resolveSessionRestoreTimeouts(capabilities).requestTimeoutMs;
             const nextSession = restoreSessionId
               ? await restoreMethod(
                   client,
                   restoreSessionId,
                   {
                     workspaceCwd: effectWorkspaceCwd,
+                    timeoutMs: restoreRequestTimeoutMs,
+                    ...(restoreMethod === DaemonSessionClient.load &&
+                    subagentTranscriptModeRef.current === 'summary'
+                      ? { liveReplayMode: 'summary' as const }
+                      : {}),
                     ...(historyPaginationSupported &&
                     restoreMode === 'load' &&
                     attemptedLoad?.replaySource !== 'memory' &&
@@ -1091,6 +1548,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     reconnectSessionId,
                     {
                       workspaceCwd: effectWorkspaceCwd,
+                      timeoutMs: restoreRequestTimeoutMs,
+                      ...(subagentTranscriptModeRef.current === 'summary'
+                        ? { liveReplayMode: 'summary' as const }
+                        : {}),
                       ...(historyPaginationSupported &&
                       historyPageSizeRef.current !== undefined
                         ? { historyPageSize: historyPageSizeRef.current }
@@ -1114,7 +1575,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     requestClientId,
                   );
             loadingRequestedSession = false;
-            if (!clientId && nextSession.clientId) {
+            if (!legacyClientIdDependency && nextSession.clientId) {
               clientIdRef.current = nextSession.clientId;
               persistStableClientId(
                 nextSession.clientId,
@@ -1152,16 +1613,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }
               if (pendingSessionLoadRef.current === attemptedLoad) {
                 pendingSessionLoadRef.current = undefined;
-                clearTimeout(attemptedLoad.timeout);
+                if (attemptedLoad.timeout !== undefined) {
+                  clearTimeout(attemptedLoad.timeout);
+                }
                 attemptedLoad.reject(
                   new DOMException('Session load cancelled', 'AbortError'),
                 );
               }
-              if (
-                skipNextCleanupDetachSessionIdRef.current ===
-                nextSession.sessionId
-              ) {
-                skipNextCleanupDetachSessionIdRef.current = undefined;
+              if (skipNextCleanupDetachSessionRef.current === previousSession) {
+                skipNextCleanupDetachSessionRef.current = undefined;
               }
               loadingRequestedSession = false;
               if (previousSession?.sessionId === nextSession.sessionId) {
@@ -1202,7 +1662,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 }
                 if (pendingSessionLoadRef.current === attemptedLoad) {
                   pendingSessionLoadRef.current = undefined;
-                  clearTimeout(attemptedLoad.timeout);
+                  if (attemptedLoad.timeout !== undefined) {
+                    clearTimeout(attemptedLoad.timeout);
+                  }
                   attemptedLoad.reject(
                     new Error(
                       nextSession.replayDegraded === true
@@ -1212,10 +1674,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   );
                 }
                 if (
-                  skipNextCleanupDetachSessionIdRef.current ===
-                  nextSession.sessionId
+                  skipNextCleanupDetachSessionRef.current === previousSession
                 ) {
-                  skipNextCleanupDetachSessionIdRef.current = undefined;
+                  skipNextCleanupDetachSessionRef.current = undefined;
                 }
                 if (previousSession?.sessionId === nextSession.sessionId) {
                   session = previousSession;
@@ -1284,6 +1745,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
 
           const activeSession = session;
+          runnerSession = activeSession;
           // Prompt activity is session state returned by /load. Surface it
           // immediately so a refreshed page shows the running state without
           // waiting for auxiliary data such as providers, commands, or context.
@@ -1309,7 +1771,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           };
           const hasSessionActivePrompt = () =>
             restoredActivePrompt ||
-            activePromptsRef.current.has(activeSession.sessionId);
+            activePromptsRef.current.has(activeSession.sessionId) ||
+            activePromptsRef.current.has(`${activeSession.sessionId}:shell`);
           hasCurrentSessionActivePrompt = hasSessionActivePrompt;
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
           setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
@@ -1372,7 +1835,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ) &&
               (activeSession.historyHasMore || replayHistoryWasTruncated) &&
               firstPersistedRecordId !== undefined;
-          if (!repairingEpisode) {
+          const replayInjected =
+            shouldInjectReplaySnapshot && replayEvents.length > 0;
+          // After the snapshot is consumed the replay-derived inputs above
+          // (firstPersistedRecordId, replayHistoryWasTruncated) recompute
+          // empty on delta-resume reconnects; keep the history state that
+          // the original injection initialized instead of clobbering it.
+          if (
+            !repairingEpisode &&
+            (replayInjected ||
+              transcriptHistoryRef.current.sessionId !==
+                activeSession.sessionId)
+          ) {
             transcriptHistoryRef.current = {
               sessionId: activeSession.sessionId,
               ...(firstPersistedRecordId !== undefined
@@ -1390,6 +1864,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               paginationError: false,
             });
           } else if (
+            repairingEpisode &&
             !markerStillVisible &&
             firstPersistedRecordId !== undefined
           ) {
@@ -1397,8 +1872,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               firstPersistedRecordId;
             transcriptHistoryRef.current.cursor = undefined;
           }
-          const replayInjected =
-            shouldInjectReplaySnapshot && replayEvents.length > 0;
           if (needsStoreReset && !replayInjected) {
             // Reset needed but no replay data (e.g. fresh session) — reset
             // immediately since there is no dispatch to batch with.
@@ -1527,43 +2000,95 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               (group) => group.transcript,
             );
             let replayExceededCapacity = false;
+            let replayTrimmed = false;
+            let replayTrimmedAnchor: string | undefined;
             const rebuildReplay =
               repairingEpisode !== undefined ||
               replayTarget !== undefined ||
               needsStoreReset ||
               store.getSnapshot().blocks.length === 0;
             if (rebuildReplay) {
-              const replayMaxBlocks = repairingEpisode
-                ? markerStillVisible
+              // Ordinary replay rebuilds under the same cap as live growth:
+              // a session loaded mid-turn can carry a live journal with tens
+              // of thousands of events, and retaining it all (the previous
+              // uncapped rebuild) exhausted renderer memory. Trimming keeps
+              // the most recent blocks; older history stays reachable via
+              // pagination.
+              const replayMaxBlocks =
+                repairingEpisode && markerStillVisible
                   ? repairingEpisode.checkpoint.maxBlocks
-                  : maxBlocks
-                : Number.MAX_SAFE_INTEGER;
+                  : maxBlocks;
+              const observeReplayTrim = (
+                detail: DaemonTranscriptTruncationDetail,
+              ) => {
+                // A rewind also fires `kind: 'blocks'` but with
+                // `evictedOldest: false` — it drops the NEWEST blocks and
+                // leaves the oldest pagination anchor valid, so it must not
+                // latch the capacity/re-anchor path (same gate as the live
+                // store's onTruncation handler above).
+                if (detail.kind === 'blocks' && detail.evictedOldest !== false)
+                  replayTrimmed = true;
+              };
+              // Both rebuild branches can trim (count cap or byte budget), so
+              // both observe it — a marker-visible repair seeded from the
+              // checkpoint is just as able to evict the pagination anchor as
+              // an ordinary rebuild.
               const replayStore = createDaemonTranscriptStore(
                 repairingEpisode && markerStillVisible
                   ? {
                       ...repairingEpisode.checkpoint,
                       maxBlocks: replayMaxBlocks,
+                      onTruncation: observeReplayTrim,
                     }
                   : {
                       maxBlocks: replayMaxBlocks,
                       retainSubagentBlocks:
                         subagentTranscriptModeRef.current === 'full',
+                      // Rebuild under the same byte budget as the live store
+                      // so an oversized replay is trimmed to the same ceiling.
+                      ...(maxRetainedBytes !== undefined
+                        ? { maxRetainedBytes }
+                        : {}),
+                      // The count cap and the default byte budget can both
+                      // evict mid-rebuild; observe either so the pagination
+                      // anchor and capacity indicator reconcile below.
+                      onTruncation: observeReplayTrim,
                     },
               );
               let nextCheckpoint: DaemonTranscriptState | undefined;
-              for (const [index, group] of eventGroups.entries()) {
-                if (index === markerIndex) {
-                  nextCheckpoint = replayStore.getSnapshot();
+              if (markerIndex < 0 && repairingEpisode === undefined) {
+                // Ordinary replay needs no intermediate checkpoint. Dispatch
+                // once so rebuilding a long transcript stays O(B), not O(E×B).
+                replayStore.dispatch(allUiEvents);
+              } else {
+                for (const [index, group] of eventGroups.entries()) {
+                  if (index === markerIndex) {
+                    nextCheckpoint = replayStore.getSnapshot();
+                  }
+                  replayStore.dispatch(group.transcript);
                 }
-                replayStore.dispatch(group.transcript);
               }
               const replayState = replayStore.getSnapshot();
+              // A rebuild trim (count cap or byte budget) evicted older
+              // blocks; a merely saturated window leaves no in-store room
+              // for pagination either way — surface capacityReached for both.
+              // Repair rebuilds reconcile too: they evict the anchor just as
+              // an ordinary rebuild does.
               replayExceededCapacity =
-                repairingEpisode === undefined &&
-                replayState.blocks.length > maxBlocks;
-              const committedMaxBlocks = repairingEpisode
-                ? replayMaxBlocks
-                : Math.max(maxBlocks, replayState.blocks.length);
+                replayTrimmed || replayState.blocks.length >= replayMaxBlocks;
+              if (replayExceededCapacity) {
+                // The pre-trim anchor can sit inside the trimmed stretch;
+                // re-anchor below to the oldest RETAINED record so
+                // pagination fetches exactly the dropped records.
+                replayTrimmedAnchor = replayState.blocks.find(
+                  (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+                )?.sourceRecordIds?.[0];
+              }
+              // Replay must never ratchet the retention window above the
+              // configured cap: the committed cap is what bounds every
+              // later dispatch, and an escalation here turned one large
+              // replay into permanent unbounded retention.
+              const committedMaxBlocks = replayMaxBlocks;
               store.reset({
                 ...replayState,
                 maxBlocks: committedMaxBlocks,
@@ -1616,13 +2141,52 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               bumpWorkspaceEventSignals(
                 sideEffectEvents,
                 setWorkspaceEventSignals,
+                activeSession.workspaceCwd,
               );
             }
-            if (replayExceededCapacity && historyHasMore) {
-              transcriptHistoryRef.current.hasMore = false;
+            if (replayExceededCapacity) {
+              if (replayTrimmed) {
+                if (replayTrimmedAnchor !== undefined) {
+                  transcriptHistoryRef.current.beforeRecordId =
+                    replayTrimmedAnchor;
+                } else {
+                  // The rebuild trimmed but no retained block carries a
+                  // recordId, so a re-anchor to a retained record is
+                  // uncomputable. Any pre-trim anchor points at an evicted
+                  // record the exclusive pagination contract can never return
+                  // again — drop it unconditionally, mirroring the live store's
+                  // fail-closed branch. Scanning only the fresh replayEvents
+                  // would miss recordIds trimmed from the repair checkpoint in
+                  // a marker-visible live-journal repair, leaving a stale anchor
+                  // with the affordance still on; when no recordId ever existed
+                  // the anchor is already undefined, so the drop is a no-op.
+                  transcriptHistoryRef.current.beforeRecordId = undefined;
+                }
+                // A rebuild trim can evict the records a cursor points past;
+                // drop it so the beforeRecordId (re-anchored or pre-trim) is
+                // authoritative.
+                transcriptHistoryRef.current.cursor = undefined;
+              }
+              // Trimmed/saturated replay content stays persisted daemon-side
+              // and is fetchable through pagination, so keep the load-older
+              // affordance — but only while admission has real headroom: a
+              // positional anchor and byte-budget room. Without byte-budget
+              // headroom (e.g. a single oversized block whose estimate alone
+              // exceeds the budget) no page can ever be admitted, so offering
+              // the affordance would burn it on the first click with no
+              // terminal signal.
+              const postRebuild = store.getSnapshot();
+              const olderHistoryReachable =
+                Array.isArray(capabilities?.features) &&
+                capabilities.features.includes(
+                  SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+                ) &&
+                transcriptHistoryRef.current.beforeRecordId !== undefined &&
+                postRebuild.retainedBytes < postRebuild.maxRetainedBytes;
+              transcriptHistoryRef.current.hasMore = olderHistoryReachable;
               transcriptHistoryRef.current.capacityReached = true;
               setTranscriptHistoryState({
-                hasMore: false,
+                hasMore: olderHistoryReachable,
                 loading: false,
                 capacityReached: true,
                 paginationError: false,
@@ -1641,6 +2205,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
+            // Release the raw snapshot only after the injection above
+            // completed: if normalization/dispatch threw, the recovery path
+            // reloads the session, and the still-retained snapshot keeps the
+            // window consistent until then. On success it is never read again
+            // (SSE continues from lastEventId; older history via pagination),
+            // so dropping it unpins busy-session snapshots that can reach
+            // tens of MiB after adaptive journal growth.
+            activeSession.consumeReplaySnapshot();
           }
           setConnection((current) => ({
             ...current,
@@ -1667,6 +2239,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : current.sessionId === activeSession.sessionId
                   ? (current.tokenCount ?? 0)
                   : 0,
+            goalState:
+              current.sessionId === activeSession.sessionId
+                ? current.goalState
+                : undefined,
             loadingTranscript: undefined,
             catchingUp: replayInjected
               ? current.catchingUp
@@ -1675,13 +2251,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 undefined,
           }));
           if (pendingLoadToResolve) {
+            lastHandledSessionIdRef.current = activeSession.sessionId;
+            lastHandledWorkspaceRef.current = activeSession.workspaceCwd;
+            lastHandledClientIdRef.current = undefined;
             pendingSessionLoadRef.current = undefined;
-            clearTimeout(pendingLoadToResolve.timeout);
-            if (
-              skipNextCleanupDetachSessionIdRef.current ===
-              activeSession.sessionId
-            ) {
-              skipNextCleanupDetachSessionIdRef.current = undefined;
+            if (pendingLoadToResolve.timeout !== undefined) {
+              clearTimeout(pendingLoadToResolve.timeout);
+            }
+            if (skipNextCleanupDetachSessionRef.current === activeSession) {
+              skipNextCleanupDetachSessionRef.current = undefined;
             }
             pendingLoadToResolve.resolve();
           }
@@ -1693,24 +2271,84 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               connectionRef.current.skills !== undefined &&
               connectionRef.current.supportedCommands !== undefined &&
               connectionRef.current.context !== undefined);
+          const configGeneration =
+            sessionConfigGenerationRef.current.get(activeSession) ?? 0;
+          const goalStateAtLoadStart =
+            connectionRef.current.sessionId === activeSession.sessionId
+              ? connectionRef.current.goalState
+              : undefined;
           const gitPromise = skipMetadataRefreshThisIteration
             ? Promise.resolve({ branch: connectionRef.current.gitBranch })
             : activeSession.workspaceCwd
               ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
               : client.workspaceGit();
-          const [providerResult, commandResult, contextResult, gitResult] =
-            await Promise.allSettled([
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : client.workspaceProviders(),
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : activeSession.supportedCommands(),
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : activeSession.context(),
-              gitPromise,
-            ]);
+          const metadataPromise = Promise.allSettled([
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : client.workspaceProviders(),
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : activeSession.supportedCommands(),
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : activeSession.context(),
+            gitPromise,
+          ]);
+          // Hydrate Goal ownership independently so unrelated metadata cannot
+          // leave Slash commands blocked. Reconcile against any Goal frame
+          // that landed while the read was in flight.
+          const goalPromise = activeSession
+            .goal()
+            .then(
+              (response) => response.snapshot,
+              () => undefined,
+            )
+            .then((goalState) => {
+              if (
+                disposed ||
+                abort.signal.aborted ||
+                sessionRef.current !== activeSession
+              ) {
+                return goalState;
+              }
+              setConnection((current) => {
+                if (
+                  sessionRef.current !== activeSession ||
+                  current.sessionId !== activeSession.sessionId
+                ) {
+                  return current;
+                }
+                if (!goalState && goalStateAtLoadStart !== undefined) {
+                  return current;
+                }
+                return {
+                  ...current,
+                  goalState: goalState
+                    ? selectGoalStateFromRead(
+                        current.goalState,
+                        goalState,
+                        goalStateAtLoadStart?.goal?.goalId,
+                      )
+                    : (current.goalState ?? {
+                        v: 2,
+                        goal: null,
+                        activity: 'idle',
+                      }),
+                };
+              });
+              return goalState;
+            });
+          const [
+            [providerResult, commandResult, contextResult, gitResult],
+            goalState,
+          ] = await Promise.all([metadataPromise, goalPromise]);
+          if (
+            disposed ||
+            abort.signal.aborted ||
+            sessionRef.current !== activeSession
+          ) {
+            return;
+          }
           const providers =
             providerResult?.status === 'fulfilled'
               ? providerResult.value
@@ -1726,6 +2364,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const gitBranch =
             gitResult?.status === 'fulfilled'
               ? (gitResult.value.branch ?? undefined)
+              : undefined;
+          const goalStateFallback =
+            goalState === undefined && goalStateAtLoadStart === undefined
+              ? ({ v: 2, goal: null, activity: 'idle' } as const)
               : undefined;
           const loadWarningTexts = [
             providerResult?.status === 'rejected'
@@ -1763,13 +2405,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             getCurrentMode(context) ?? providerModelStatus.currentMode;
 
           setConnection((current) => {
-            if (current.sessionId !== activeSession.sessionId) return current;
+            if (
+              abort.signal.aborted ||
+              (sessionRef.current !== undefined &&
+                sessionRef.current !== activeSession) ||
+              current.sessionId !== activeSession.sessionId
+            ) {
+              return current;
+            }
+            const configSnapshotCurrent =
+              configGeneration % 2 === 0 &&
+              (sessionConfigGenerationRef.current.get(activeSession) ?? 0) ===
+                configGeneration;
             return {
               ...current,
               status: 'connected',
               sessionId: activeSession.sessionId,
-              // Surface the bound client id so consumers can recognize their own
-              // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
+              // Surface the bound client id for consumers of legacy
+              // originator-stamped frames.
               ...(activeSession.clientId
                 ? { clientId: activeSession.clientId }
                 : {}),
@@ -1785,15 +2438,43 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 supportedCommands !== undefined ? commands : current.commands,
               skills: supportedCommands !== undefined ? skills : current.skills,
               models: sessionModels.length > 0 ? sessionModels : current.models,
-              currentModel: sessionCurrentModel ?? current.currentModel,
+              currentModel: configSnapshotCurrent
+                ? (sessionCurrentModel ?? current.currentModel)
+                : current.currentModel,
               currentMode: currentMode ?? current.currentMode,
+              reasoning:
+                configSnapshotCurrent && context !== undefined
+                  ? mapSessionContextReasoning(
+                      context,
+                      current.reasoning?.effort,
+                    )
+                  : current.reasoning,
               displayName:
                 getSessionDisplayName(activeSession.state) ??
                 current.displayName,
-              contextWindow: sessionContextWindow ?? current.contextWindow,
+              contextWindow: configSnapshotCurrent
+                ? (sessionContextWindow ?? current.contextWindow)
+                : current.contextWindow,
               providers: providers ?? current.providers,
               supportedCommands: supportedCommands ?? current.supportedCommands,
-              context: context ?? current.context,
+              context: configSnapshotCurrent
+                ? (context ?? current.context)
+                : current.context,
+              // Reconcile rather than reference-compare: the load response and
+              // any frame that arrived during the load window share a revision
+              // domain, and routing through `selectGoalState` is what registers
+              // the cleared-goal tombstone that keeps a later stale frame from
+              // resurrecting a cleared goal. The read is stamped with the goal
+              // observed when it was issued (`goalStateAtLoadStart`) — a create
+              // that lands inside the load window must not be wiped, and
+              // tombstoned, by a bare-null answer that predates it.
+              goalState: goalState
+                ? selectGoalStateFromRead(
+                    current.goalState,
+                    goalState,
+                    goalStateAtLoadStart?.goal?.goalId,
+                  )
+                : (current.goalState ?? goalStateFallback),
               gitBranch:
                 gitResult.status === 'fulfilled'
                   ? gitBranch
@@ -1899,7 +2580,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             maxQueued,
             ...(sseConnectReason ? { sseConnectReason } : {}),
           })) {
-            if (sessionRef.current?.sessionId !== activeSession.sessionId) {
+            if (sessionRef.current !== activeSession) {
               break;
             }
             if (!sawEvent) {
@@ -1928,9 +2609,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // Keep the sidechannel for queue dedupe, but still normalize the
                 // event below so chat UIs can render the inserted-message status.
                 publishSidechannelMidTurnInjected(midTurnInjected);
+                if (sessionRef.current !== activeSession) break;
               }
               if (isPendingPromptEvent(event)) {
                 publishPendingPromptEvent(event);
+                if (sessionRef.current !== activeSession) break;
                 if (event.type === 'pending_prompt_started') {
                   clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                   setPromptStatus('waiting');
@@ -1940,7 +2623,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 event,
                 activeSession.clientId,
                 eventOptionsRef.current,
-                setConnection,
+                (update) => {
+                  if (sessionRef.current !== activeSession) return;
+                  setConnectionSynchronous(update);
+                },
               );
               const uiEvents = filterDaemonUiEventsForTranscript(
                 event,
@@ -1962,7 +2648,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   break;
                 }
               }
-              bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
+              bumpWorkspaceEventSignals(
+                uiEvents,
+                setWorkspaceEventSignals,
+                activeSession.workspaceCwd,
+              );
               if (uiEvents.length > 0) {
                 const hasGenerationSignal = hasActiveGenerationSignal(uiEvents);
                 setPromptStatus((current) =>
@@ -2017,25 +2707,35 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   setPromptStatus('idle');
                 }
               }
+              const hasBlockPathDebugEvent = uiEvents.some(
+                (e) =>
+                  e.type === 'debug' &&
+                  !isUnrecognizedDiagnosticReason(e.debugReason),
+              );
               // The debug guard below reads the committed store's active
               // assistant block, but batching leaves earlier chunks from this
               // same burst in the pending buffer until the macrotask flush. An
               // observer burst that interleaves a debug event between assistant
               // chunks would otherwise miss the still-pending assistant block
               // and let the debug event split it. Commit the buffer first so the
-              // guard sees the effective state. Scoped to observer-mode debug
-              // events (rare) so steady streaming keeps batching.
-              if (
-                !hasSessionActivePrompt() &&
-                uiEvents.some((e) => e.type === 'debug')
-              ) {
+              // guard sees the effective state. Scoped to block-path debug events
+              // because unrecognized diagnostics route to the sidechannel.
+              if (!hasSessionActivePrompt() && hasBlockPathDebugEvent) {
                 flushTranscriptSync();
               }
               const shouldGuardAssistant =
                 !hasSessionActivePrompt() &&
                 store.getSnapshot().activeAssistantBlockId != null;
+              // `unrecognized_*` debug events route to the sidechannel
+              // instead of `blocks[]` (#8823), so they cannot split the
+              // streaming assistant block and must not be dropped here;
+              // only block-path debug events still need the guard.
               const eventsToDispatch = shouldGuardAssistant
-                ? transcriptUiEvents.filter((e) => e.type !== 'debug')
+                ? transcriptUiEvents.filter(
+                    (e) =>
+                      e.type !== 'debug' ||
+                      isUnrecognizedDiagnosticReason(e.debugReason),
+                  )
                 : transcriptUiEvents;
               enqueueTranscriptEvents(eventsToDispatch);
               for (const uiEvent of uiEvents) {
@@ -2204,6 +2904,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 break;
               }
             } catch (error) {
+              if (sessionRef.current !== activeSession) break;
               const message =
                 error instanceof Error ? error.message : String(error);
               addNotice({
@@ -2220,6 +2921,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 error,
               );
             }
+          }
+          if (
+            sessionRef.current !== activeSession &&
+            !resyncRequested &&
+            !userDeletedSession
+          ) {
+            clearPendingTranscriptEvents();
+            clearEventStream();
+            return;
           }
           // The stream ended or broke: apply any buffered transcript events now
           // so post-loop handling (and consumers reading the snapshot) see a
@@ -2250,6 +2960,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               sessionId: undefined,
+              context: undefined,
+              reasoning: undefined,
+              models: getWorkspaceModelsAfterSessionClear(current),
+              goalState: undefined,
               error: undefined,
               errorStatus: undefined,
               missingSession: false,
@@ -2266,7 +2980,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             nextSseConnectReason = 'stream_end';
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
-            if (sessionRef.current?.sessionId === activeSession.sessionId) {
+            if (sessionRef.current === activeSession) {
               console.debug('[DaemonSessionProvider] SSE stream ended');
               if (!hasSessionActivePrompt()) {
                 // A transport close is only a safe "done" signal for passive
@@ -2295,6 +3009,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         } catch (error) {
           const restartRequested = eventStream?.restartRequested === true;
           clearEventStream();
+          if (session && sessionRef.current !== session) {
+            clearPendingTranscriptEvents();
+            return;
+          }
           if (restartRequested && !disposed && !abort.signal.aborted) {
             flushTranscriptSync();
             nextSseConnectReason = 'prompt_restart';
@@ -2314,6 +3032,40 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const message =
             error instanceof Error ? error.message : String(error);
           const errorStatus = extractHttpStatus(error);
+          const pendingLoad = pendingSessionLoadRef.current;
+          const restoreRetryDelayMs = getRestoreInProgressRetryDelayMs(error);
+          const pendingLoadMatches =
+            pendingLoad === undefined ||
+            pendingLoad.sessionId === restoreSessionId;
+          if (
+            autoReconnect &&
+            loadingRequestedSession &&
+            ((restoreRetryDelayMs !== undefined && pendingLoadMatches) ||
+              (pendingLoad?.sessionId === restoreSessionId &&
+                isClosingSessionLoadError(
+                  error,
+                  !capabilities?.features.includes(CLIENT_IDENTITY_FEATURE),
+                )))
+          ) {
+            reconnectAttempt += 1;
+            const reconnectConfig = reconnectConfigRef.current;
+            await delay(
+              restoreRetryDelayMs ??
+                getReconnectDelayMs(
+                  reconnectAttempt,
+                  reconnectConfig.reconnectDelayMs,
+                  reconnectConfig.maxReconnectDelayMs,
+                ),
+              abort.signal,
+            );
+            if (
+              pendingLoad !== undefined &&
+              pendingSessionLoadRef.current !== pendingLoad
+            ) {
+              return;
+            }
+            continue;
+          }
           const failedSessionId = session?.sessionId;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
@@ -2329,20 +3081,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
           }
-          const pendingLoad = pendingSessionLoadRef.current;
           if (
             pendingLoad &&
             (pendingLoad.sessionId === restoreSessionId ||
               pendingLoad.sessionId === reconnectSessionId)
           ) {
             if (
-              skipNextCleanupDetachSessionIdRef.current ===
+              skipNextCleanupDetachSessionRef.current?.sessionId ===
               pendingLoad.sessionId
             ) {
-              skipNextCleanupDetachSessionIdRef.current = undefined;
+              skipNextCleanupDetachSessionRef.current = undefined;
             }
             pendingSessionLoadRef.current = undefined;
-            clearTimeout(pendingLoad.timeout);
+            if (pendingLoad.timeout !== undefined) {
+              clearTimeout(pendingLoad.timeout);
+            }
             pendingLoad.reject(error);
           }
           if (isAuthFailure || isTerminal) {
@@ -2356,6 +3109,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...current,
                 status: 'error',
                 sessionId: undefined,
+                context: undefined,
+                reasoning: undefined,
+                models: getWorkspaceModelsAfterSessionClear(current),
+                goalState: undefined,
                 error: message,
                 errorStatus: resolveConnectionErrorStatus(
                   errorStatus,
@@ -2381,6 +3138,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               sessionId: undefined,
+              context: undefined,
+              reasoning: undefined,
+              models: getWorkspaceModelsAfterSessionClear(current),
+              goalState: undefined,
               error: message,
               errorStatus: resolveConnectionErrorStatus(
                 errorStatus,
@@ -2409,6 +3170,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             reconnectAttempt = 0;
             skipMetadataRefresh = true;
             continue;
+          } else if (isRestoreInProgressLoadError(error)) {
+            setConnection((current) => ({
+              ...current,
+              status: 'error',
+              error: message,
+              errorStatus: resolveConnectionErrorStatus(
+                errorStatus,
+                current.errorStatus,
+              ),
+              missingSession: false,
+              loadingTranscript: undefined,
+              catchingUp: undefined,
+            }));
+            return;
           } else {
             // Retriable error (network failure, timeout, etc.) — preserve
             // the session so the next iteration skips the full load() and
@@ -2443,7 +3218,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
-            error: message,
             errorStatus: resolveConnectionErrorStatus(
               errorStatus,
               current.errorStatus,
@@ -2474,43 +3248,64 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         setConnection((current) => ({
           ...current,
           status: 'disconnected',
-          error: `Reconnecting in ${delayMs}ms`,
+          error: undefined,
         }));
-        await delay(delayMs, abort.signal);
+        reconnectAbortRef.current?.abort();
+        const reconnectAbort = new AbortController();
+        reconnectAbortRef.current = reconnectAbort;
+        const onEffectAbort = () => reconnectAbort.abort();
+        abort.signal.addEventListener('abort', onEffectAbort, { once: true });
+        await delay(delayMs, reconnectAbort.signal);
+        abort.signal.removeEventListener('abort', onEffectAbort);
       }
     };
 
     void run();
     return () => {
-      const session = sessionRef.current;
+      const session = runnerSession;
       disposed = true;
       abort.abort();
-      // Apply buffered transcript events before tearing down (do NOT drop them).
-      // The SSE client advances lastSeenEventId as each event is *yielded* —
-      // before our batched dispatch runs — so dropping here would make a
-      // same-session incremental resume (the keepSessionForNextEffect path)
-      // skip them permanently. Flushing is free and safe: the store notifies
-      // via queueMicrotask, so there is no synchronous setState; on unmount it
-      // is an orphaned dispatch and on a session switch the next run resets the
-      // store anyway.
-      flushTranscriptSync();
-      hasCurrentSessionActivePromptRef.current = () => false;
-      setPromptStatus('idle');
-      clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      const ownsCurrentSession =
+        session !== undefined && sessionRef.current === session;
+      const ownsEmptyState =
+        session === undefined && sessionRef.current === undefined;
       const keepSessionForNextEffect =
-        session?.sessionId === skipNextCleanupDetachSessionIdRef.current;
+        ownsCurrentSession &&
+        session === skipNextCleanupDetachSessionRef.current;
       const isUnmounting = !mountedRef.current;
+      if (ownsCurrentSession || ownsEmptyState) {
+        // A same-attachment effect restart must flush events already yielded by
+        // the SSE client, because its resume cursor has advanced past them.
+        flushTranscriptSync();
+      } else {
+        // A replacement attachment owns the store now. Never let the old
+        // runner's pending macrotask append its buffered events to that owner.
+        clearPendingTranscriptEvents();
+      }
+      if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
+        hasCurrentSessionActivePromptRef.current = () => false;
+        setPromptStatus('idle');
+        clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      }
       if (
-        pendingSessionLoadRef.current &&
+        effectPendingSessionLoad !== undefined &&
+        pendingSessionLoadRef.current === effectPendingSessionLoad &&
+        (ownsCurrentSession || ownsEmptyState) &&
         (!keepSessionForNextEffect || isUnmounting)
       ) {
-        clearTimeout(pendingSessionLoadRef.current.timeout);
+        if (pendingSessionLoadRef.current.timeout !== undefined) {
+          clearTimeout(pendingSessionLoadRef.current.timeout);
+        }
         pendingSessionLoadRef.current.reject(
           new DOMException('Session load interrupted by cleanup', 'AbortError'),
         );
         pendingSessionLoadRef.current = undefined;
       }
-      if ((!keepSessionForNextEffect || isUnmounting) && session?.clientId) {
+      if (
+        ownsCurrentSession &&
+        (!keepSessionForNextEffect || isUnmounting) &&
+        session.clientId
+      ) {
         void detachDaemonClient({
           baseUrl: resolvedBaseUrl!,
           token: resolvedToken,
@@ -2520,7 +3315,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           console.warn('[DaemonSessionProvider] detach failed:', err),
         );
       }
-      if (!keepSessionForNextEffect || isUnmounting) {
+      if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
         sessionRef.current = undefined;
       }
     };
@@ -2529,11 +3324,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     autoReconnect,
     resolvedBaseUrl,
     resolvedToken,
-    workspaceCwd,
+    sessionEffectWorkspaceCwd,
     modelServiceId,
     sessionScope,
     maxQueued,
     maxBlocks,
+    maxRetainedBytes,
     store,
     restoreSessionId,
     restoreWorkspaceCwd,
@@ -2541,11 +3337,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     restoreSessionNonce,
     attachSessionNonce,
     newSessionNonce,
-    clientId,
+    legacyClientIdDependency,
     shouldDeferInitialSessionCreation,
     clearNotices,
     addNotice,
     dismissNotice,
+    setConnectionSynchronous,
   ]);
 
   useEffect(() => {
@@ -2558,21 +3355,27 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ) {
       return undefined;
     }
-    if (heartbeatFailureStateRef.current.sessionId !== connection.sessionId) {
-      heartbeatFailureStateRef.current = {
-        sessionId: connection.sessionId,
-        consecutiveFailures: 0,
-      };
-    }
-    const heartbeatFailureState = heartbeatFailureStateRef.current;
     let disposed = false;
     const timer = setInterval(() => {
       const session = sessionRef.current;
       if (!session) return;
+      if (heartbeatFailureStateRef.current.session !== session) {
+        heartbeatFailureStateRef.current = {
+          session,
+          consecutiveFailures: 0,
+        };
+      }
+      const heartbeatFailureState = heartbeatFailureStateRef.current;
       session
         .heartbeat()
         .then(() => {
-          if (disposed) return;
+          if (
+            disposed ||
+            sessionRef.current !== session ||
+            heartbeatFailureStateRef.current !== heartbeatFailureState
+          ) {
+            return;
+          }
           if (
             heartbeatFailureState.consecutiveFailures >=
             heartbeatFailureThreshold
@@ -2592,7 +3395,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           heartbeatFailureState.lastHttpError = undefined;
         })
         .catch((error: unknown) => {
-          if (disposed) return;
+          if (
+            disposed ||
+            sessionRef.current !== session ||
+            heartbeatFailureStateRef.current !== heartbeatFailureState
+          ) {
+            return;
+          }
           heartbeatFailureState.consecutiveFailures += 1;
           const message =
             error instanceof Error ? error.message : 'Session heartbeat failed';
@@ -2641,7 +3450,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             activePromptsRef.current.delete(deadSessionId);
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
-            if (sessionRef.current?.sessionId === deadSessionId) {
+            if (sessionRef.current === session) {
               if (missingSession) {
                 manualSessionClearRef.current = true;
               }
@@ -2662,6 +3471,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ...(authFailure || missingSession
                     ? {
                         sessionId: undefined,
+                        context: undefined,
+                        reasoning: undefined,
+                        models: getWorkspaceModelsAfterSessionClear(current),
+                        goalState: undefined,
                         loadingTranscript: undefined,
                         catchingUp: undefined,
                       }
@@ -2691,9 +3504,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         settledPromptsRef,
         pendingSessionLoadRef,
         pendingSessionLoadIdRef,
+        sessionConfigGeneration: sessionConfigGenerationRef.current,
         heartbeatSupportedRef,
         manualSessionClearRef,
-        skipNextCleanupDetachSessionIdRef,
+        skipNextCleanupDetachSessionRef,
         passiveAssistantDoneTimerRef,
         hasSessionActivePrompt: () =>
           hasCurrentSessionActivePromptRef.current(),
@@ -2701,11 +3515,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           hasCurrentSessionActivePromptRef.current = () => false;
         },
         restartEventStream: (sessionId: string) => {
-          if (!restartEventStreamOnPrompt) return;
           const eventStream = eventStreamRef.current;
-          if (eventStream?.sessionId !== sessionId) return;
-          eventStream.restartRequested = true;
-          eventStream.controller.abort();
+          if (eventStream?.sessionId === sessionId) {
+            // Live stream: restart it only in the opt-in prompt-restart mode.
+            if (!restartEventStreamOnPrompt) return;
+            eventStream.restartRequested = true;
+            eventStream.controller.abort();
+            return;
+          }
+          // The stream is already down (reconnecting with backoff): a prompt
+          // was submitted, so skip the remaining wait and rebuild the SSE
+          // immediately so the response events land without the backoff delay.
+          if (sessionRef.current?.sessionId === sessionId) {
+            reconnectAbortRef.current?.abort();
+          }
         },
         getCreateSessionRequest: () => ({
           ...createSessionRequestRef.current,
@@ -2758,7 +3581,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         getConnection: () => connectionRef.current,
         addNotice,
         setConnection,
-        setPromptStatus,
+        setPromptStatus: (update) => {
+          setPromptStatus(update);
+        },
         setRestoreSessionId,
         setRestoreWorkspaceCwd,
         setRestoreMode,
@@ -2799,6 +3624,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         if (options?.force !== true) {
           return;
         }
+        // A fail-closed trim can drop both anchors. With neither cursor nor
+        // beforeRecordId, the daemon defaults the request to the journal's
+        // oldest page, which would be prepended below the window and re-stamp
+        // a bogus anchor. Refuse to re-arm anchor-less; the affordance stays
+        // closed until a later trim re-establishes an anchor.
+        if (
+          history.beforeRecordId === undefined &&
+          history.cursor === undefined
+        ) {
+          return;
+        }
         // The failed page's cursor was never advanced, so clearing the
         // latched error retries that exact page.
         history.paginationError = false;
@@ -2814,24 +3650,38 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         capacityReached: false,
         paginationError: false,
       });
+      const fetchPaginationGeneration = paginationGenerationRef.current;
       let terminalFailure = false;
       try {
-        const page = await activeSession.client.getSessionTranscriptPage(
-          activeSession.sessionId,
-          {
-            ...(history.cursor !== undefined
-              ? { cursor: history.cursor }
-              : history.beforeRecordId !== undefined
-                ? { beforeRecordId: history.beforeRecordId }
-                : {}),
-            limit: historyPageSizeRef.current ?? 100,
-            clientId: activeSession.clientId,
-          },
-        );
+        const page = await activeSession.getTranscriptPage({
+          ...(history.cursor !== undefined
+            ? { cursor: history.cursor }
+            : history.beforeRecordId !== undefined
+              ? { beforeRecordId: history.beforeRecordId }
+              : {}),
+          limit: historyPageSizeRef.current ?? 100,
+          clientId: activeSession.clientId,
+        });
         if (
           sessionRef.current !== activeSession ||
           transcriptHistoryRef.current !== history
         ) {
+          return;
+        }
+        if (paginationGenerationRef.current !== fetchPaginationGeneration) {
+          // A retention trim re-anchored pagination while this page was in
+          // flight. The page was fetched against the stale anchor; merging it
+          // would advance the anchor below the evicted band and make the
+          // evicted-but-persisted records unreachable. Drop it without
+          // mutating pagination state — every record it carries is older
+          // than the new anchor and will be re-served by the next fetch.
+          history.loading = false;
+          setTranscriptHistoryState({
+            hasMore: history.hasMore,
+            loading: false,
+            capacityReached: history.capacityReached,
+            paginationError: history.paginationError,
+          });
           return;
         }
         if (page.partial || page.replayError) {
@@ -2887,7 +3737,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             );
           }
         }
-        const historyMaterialization =
+        const admission =
           uiEvents.length > 0
             ? materializeTranscriptHistory(
                 store.getSnapshot(),
@@ -2895,10 +3745,30 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 maxBlocks,
               )
             : undefined;
-        if (uiEvents.length > 0 && !historyMaterialization) {
+        if (admission && !admission.admitted) {
+          if (admission.impossible) {
+            // A page that alone exceeds the whole window (block count or
+            // byte budget) can never be admitted in any occupancy state.
+            // Surface a terminal pagination failure instead of a re-openable
+            // capacity latch — otherwise every later trim would re-offer the
+            // same doomed page, and everything older than it would stay
+            // unreachable with no terminal signal.
+            history.rejectedPage = undefined;
+            terminalFailure = true;
+            throw new Error(
+              'Earlier history page exceeds the transcript retention window',
+            );
+          }
           history.hasMore = false;
           history.loading = false;
           history.capacityReached = true;
+          // Remember the rejected page's footprint: the eviction re-open
+          // must only fire once enough capacity has been freed for THIS page
+          // to be admitted, or streaming trims churn fetch/reject/re-render.
+          history.rejectedPage = {
+            blocks: admission.pageBlocks,
+            bytes: admission.pageBytes,
+          };
           setTranscriptHistoryState({
             hasMore: false,
             loading: false,
@@ -2907,7 +3777,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           });
           return;
         }
+        const historyMaterialization = admission?.admitted
+          ? admission.materialization
+          : undefined;
         if (historyMaterialization) {
+          history.rejectedPage = undefined;
           store.reset(
             applyTranscriptHistory(store.getSnapshot(), historyMaterialization),
           );
@@ -2937,6 +3811,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           sessionRef.current !== activeSession ||
           transcriptHistoryRef.current !== history
         ) {
+          return;
+        }
+        if (paginationGenerationRef.current !== fetchPaginationGeneration) {
+          // A retention trim re-anchored — or the fail-closed branch dropped —
+          // the pagination anchor while this fetch was in flight. Restoring
+          // `hasMore` here would revive the load-older affordance in the
+          // anchor-less state the fail-closed branch just closed, and the next
+          // fetch (no cursor, no beforeRecordId) would default to the oldest
+          // page and corrupt the anchor. Leave the fail-closed state intact.
+          history.loading = false;
+          setTranscriptHistoryState({
+            hasMore: history.hasMore,
+            loading: false,
+            capacityReached: history.capacityReached,
+            paginationError: history.paginationError,
+          });
           return;
         }
         const retryable =
@@ -2989,16 +3879,46 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const lastHandledSessionIdRef = useRef<
     string | undefined | typeof UNHANDLED_SESSION
   >(UNHANDLED_SESSION);
+  const lastHandledWorkspaceRef = useRef<string | undefined>(undefined);
+  const lastHandledClientIdRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
-    if (lastHandledSessionIdRef.current === sessionId) return;
+    const targetWorkspaceCwd =
+      resolvedWorkspaceCwd ??
+      // A failed controlled load leaves the target's workspace on the
+      // connection for error rendering; never feed it back into the next
+      // workspace-less switch.
+      (connectionRef.current.error
+        ? undefined
+        : connectionRef.current.workspaceCwd);
+    if (
+      lastHandledSessionIdRef.current === sessionId &&
+      normalizeWorkspaceIdentity(lastHandledWorkspaceRef.current) ===
+        normalizeWorkspaceIdentity(targetWorkspaceCwd) &&
+      lastHandledClientIdRef.current === clientId
+    ) {
+      return;
+    }
     lastHandledSessionIdRef.current = sessionId;
+    lastHandledWorkspaceRef.current = targetWorkspaceCwd;
+    lastHandledClientIdRef.current = clientId;
 
     const currentSessionId = connectionRef.current.sessionId;
-    if (sessionId === currentSessionId) return;
+    const currentWorkspaceCwd = connectionRef.current.workspaceCwd;
+    if (
+      sessionId === currentSessionId &&
+      normalizeWorkspaceIdentity(targetWorkspaceCwd) ===
+        normalizeWorkspaceIdentity(currentWorkspaceCwd)
+    ) {
+      return;
+    }
 
     const request = sessionId
-      ? actions.loadSession(sessionId)
+      ? actions.loadSession(sessionId, {
+          ...(targetWorkspaceCwd !== undefined
+            ? { workspaceCwd: targetWorkspaceCwd }
+            : {}),
+        })
       : currentSessionId
         ? actions.clearSession()
         : undefined;
@@ -3011,7 +3931,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         error,
       );
     });
-  }, [actions, sessionId]);
+  }, [actions, clientId, resolvedWorkspaceCwd, sessionId]);
+
+  const ownerGuardValue = useMemo<DaemonSessionOwnerGuard>(
+    () => ({
+      capture: () => {
+        const session = sessionRef.current;
+        return { isCurrent: () => sessionRef.current === session };
+      },
+    }),
+    [],
+  );
 
   return (
     <DaemonStoreContext.Provider value={store}>
@@ -3022,11 +3952,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               value={workspaceEventSignals}
             >
               <DaemonActionsContext.Provider value={actions}>
-                <DaemonTranscriptHistoryContext.Provider
-                  value={transcriptHistoryValue}
+                <DaemonSessionOwnerGuardContext.Provider
+                  value={ownerGuardValue}
                 >
-                  {children}
-                </DaemonTranscriptHistoryContext.Provider>
+                  <DaemonTranscriptHistoryContext.Provider
+                    value={transcriptHistoryValue}
+                  >
+                    {children}
+                  </DaemonTranscriptHistoryContext.Provider>
+                </DaemonSessionOwnerGuardContext.Provider>
               </DaemonActionsContext.Provider>
             </DaemonWorkspaceEventSignalsContext.Provider>
           </DaemonSessionNoticesContext.Provider>
@@ -3381,6 +4315,16 @@ export function useOptionalDaemonActions(): DaemonSessionActions | undefined {
   return useContext(DaemonActionsContext);
 }
 
+export function useDaemonSessionOwnerGuard(): DaemonSessionOwnerGuard {
+  const guard = useContext(DaemonSessionOwnerGuardContext);
+  if (!guard) {
+    throw new Error(
+      'useDaemonSessionOwnerGuard must be used within DaemonSessionProvider',
+    );
+  }
+  return guard;
+}
+
 export function useDaemonWorkspaceEventSignals():
   | DaemonWorkspaceEventSignals
   | undefined {
@@ -3493,7 +4437,11 @@ function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
     kind !== 'cleared' &&
     kind !== 'achieved' &&
     kind !== 'failed' &&
-    kind !== 'aborted'
+    kind !== 'aborted' &&
+    // Rejecting 'paused' made every surface keep showing a paused goal as
+    // actively running: the card never rendered and the active-goal
+    // derivation fell back to the previous 'set' card.
+    kind !== 'paused'
   ) {
     return null;
   }
@@ -3552,11 +4500,16 @@ function getNumber(
 function bumpWorkspaceEventSignals(
   events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
+  workspaceCwd: string,
 ): void {
   let memory = 0;
   let agents = 0;
   let tools = 0;
   let settings = 0;
+  const skillMutations: Array<
+    NonNullable<DaemonWorkspaceEventSignals['lastSkillMutation']>
+  > = [];
+  const seenSkillMutationIds = new Set<string>();
   let mcp = 0;
   let extensions = 0;
   let artifacts = 0;
@@ -3578,7 +4531,14 @@ function bumpWorkspaceEventSignals(
         tools += 1;
         break;
       case 'workspace.settings.changed':
-        settings += 1;
+        if (event.mutation?.kind === 'skill_toggle') {
+          if (!seenSkillMutationIds.has(event.mutation.id)) {
+            seenSkillMutationIds.add(event.mutation.id);
+            skillMutations.push(event.mutation);
+          }
+        } else {
+          settings += 1;
+        }
         break;
       case 'workspace.mcp.budget_warning':
       case 'workspace.mcp.child_refused':
@@ -3627,22 +4587,61 @@ function bumpWorkspaceEventSignals(
       artifacts +
       init +
       auth ===
-    0
+      0 &&
+    skillMutations.length === 0
   )
     return;
 
-  setSignals((current) => ({
-    memoryVersion: current.memoryVersion + memory,
-    agentsVersion: current.agentsVersion + agents,
-    toolsVersion: current.toolsVersion + tools,
-    settingsVersion: current.settingsVersion + settings,
-    mcpVersion: current.mcpVersion + mcp,
-    extensionsVersion: current.extensionsVersion + extensions,
-    artifactsVersion: current.artifactsVersion + artifacts,
-    ...(lastExtensionChange ? { lastExtensionChange } : {}),
-    initVersion: current.initVersion + init,
-    authVersion: current.authVersion + auth,
-  }));
+  setSignals((current) => {
+    const existing = current.skillMutationsByCwd?.[workspaceCwd] ?? [];
+    const existingIds = new Set(existing.map((mutation) => mutation.id));
+    const newSkillMutations = skillMutations.filter(
+      (mutation) => !existingIds.has(mutation.id),
+    );
+    if (
+      memory +
+        agents +
+        tools +
+        settings +
+        mcp +
+        extensions +
+        artifacts +
+        init +
+        auth ===
+        0 &&
+      newSkillMutations.length === 0
+    ) {
+      return current;
+    }
+    return {
+      memoryVersion: current.memoryVersion + memory,
+      agentsVersion: current.agentsVersion + agents,
+      toolsVersion: current.toolsVersion + tools,
+      settingsVersion: current.settingsVersion + settings,
+      skillsVersion: current.skillsVersion + newSkillMutations.length,
+      mcpVersion: current.mcpVersion + mcp,
+      extensionsVersion: current.extensionsVersion + extensions,
+      artifactsVersion: current.artifactsVersion + artifacts,
+      ...(newSkillMutations.length > 0
+        ? { lastSkillMutation: newSkillMutations.at(-1) }
+        : current.lastSkillMutation
+          ? { lastSkillMutation: current.lastSkillMutation }
+          : {}),
+      ...(newSkillMutations.length > 0
+        ? {
+            skillMutationsByCwd: {
+              ...current.skillMutationsByCwd,
+              [workspaceCwd]: [...existing, ...newSkillMutations],
+            },
+          }
+        : current.skillMutationsByCwd
+          ? { skillMutationsByCwd: current.skillMutationsByCwd }
+          : {}),
+      ...(lastExtensionChange ? { lastExtensionChange } : {}),
+      initVersion: current.initVersion + init,
+      authVersion: current.authVersion + auth,
+    };
+  });
 }
 
 function isTerminalSessionHttpError(error: unknown): boolean {
@@ -3653,4 +4652,48 @@ function isTerminalSessionHttpError(error: unknown): boolean {
 function isAuthFailureHttpError(error: unknown): boolean {
   const status = extractHttpStatus(error);
   return status !== undefined && AUTH_FAILURE_HTTP_STATUSES.has(status);
+}
+
+function isClosingSessionLoadError(
+  error: unknown,
+  allowLegacyMessage = false,
+): boolean {
+  if (!(error instanceof DaemonHttpError) || error.status !== 404) return false;
+  const body = isRecord(error.body) ? error.body : undefined;
+  return (
+    body?.['code'] === 'session_closing' ||
+    (allowLegacyMessage &&
+      typeof body?.['error'] === 'string' &&
+      body['error'].endsWith(
+        'The session is closing; retry after close completes',
+      ))
+  );
+}
+
+function isRestoreInProgressLoadError(
+  error: unknown,
+): error is DaemonHttpError {
+  if (!(error instanceof DaemonHttpError) || error.status !== 409) return false;
+  const body = isRecord(error.body) ? error.body : undefined;
+  return body?.['code'] === 'restore_in_progress';
+}
+
+function getRestoreInProgressRetryDelayMs(error: unknown): number | undefined {
+  if (!isRestoreInProgressLoadError(error)) return undefined;
+  const body = isRecord(error.body) ? error.body : undefined;
+  if (
+    body?.['retryable'] !== true ||
+    body['reason'] === 'awaiting_abandoned_cleanup'
+  ) {
+    return undefined;
+  }
+  const retryAfterSeconds = body['retryAfterSeconds'];
+  return typeof retryAfterSeconds === 'number' &&
+    Number.isFinite(retryAfterSeconds) &&
+    retryAfterSeconds > 0
+    ? Math.min(
+        Math.ceil(retryAfterSeconds * 1000),
+        RESTORE_IN_PROGRESS_RETRY_MAX_MS,
+      )
+    : 5000;
 }

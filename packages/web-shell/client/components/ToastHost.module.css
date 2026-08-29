@@ -10,6 +10,25 @@
   pointer-events: none;
 }
 
+/* Applied by App while the fullscreen artifact surface is up: the docked
+   surface covers the viewport at dialog-backdrop z - 10 and the drawer-mode
+   one at dialog-backdrop z, so an un-elevated toast from a panel action
+   would paint under the opaque surface. DialogShell modals resolve the same
+   dialog-backdrop variable, and no ladder slot exists above the fullscreen
+   surface but below modals — so while the surface is up, toasts paint above
+   modals too until auto-dismiss. */
+.hostElevated {
+  /* The elevated host is portaled out of the .app positioning context, so
+     .host's absolute layout would resolve off-screen: against the 0x0
+     shadow-DOM portal host in shadow mode, and against the initial
+     containing block (wrong once the host page scrolls or the shell is
+     embedded below the document top) in light-DOM mode. Neither portal path
+     has a transform/filter/contain ancestor, so fixed anchors to the
+     viewport in both. */
+  position: fixed;
+  z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 10);
+}
+
 .toast {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 28px;

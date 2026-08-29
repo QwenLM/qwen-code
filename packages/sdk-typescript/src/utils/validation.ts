@@ -2,7 +2,7 @@
  * UUID validation utilities
  */
 
-// UUID v4 regex pattern
+// RFC-variant UUID v1-v5 regex pattern
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 

@@ -5,10 +5,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { dirname, isAbsolute } from 'node:path';
+import { tmpdir } from 'node:os';
 
-const { spawnMock, execSyncMock } = vi.hoisted(() => ({
+const { spawnMock, execSyncMock, rmSyncMock } = vi.hoisted(() => ({
   spawnMock: vi.fn(() => ({ on: vi.fn() })),
   execSyncMock: vi.fn(() => ''),
+  rmSyncMock: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({
@@ -18,6 +21,7 @@ vi.mock('node:child_process', () => ({
 
 vi.mock('node:fs', () => ({
   readFileSync: vi.fn(() => JSON.stringify({ version: '0.0.0-test' })),
+  rmSync: rmSyncMock,
 }));
 
 const normalizePath = (path) => String(path).replaceAll('\\', '/');
@@ -74,6 +78,54 @@ describe('scripts/start.js launcher', () => {
     } finally {
       if (inherited === undefined) delete process.env.QWEN_CODE_CLI;
       else process.env.QWEN_CODE_CLI = inherited;
+    }
+  });
+
+  it('passes one scoped warnings file to the checker and child process', async () => {
+    await import('../start.js?scopes-startup-warnings');
+
+    const [, checkerOptions] = execSyncMock.mock.calls[0];
+    const [, , childOptions] = spawnMock.mock.calls[0];
+    const checkerPath = checkerOptions.env.QWEN_CODE_WARNINGS_FILE;
+
+    expect(checkerPath).toBe(childOptions.env.QWEN_CODE_WARNINGS_FILE);
+    expect(isAbsolute(checkerPath)).toBe(true);
+    expect(dirname(checkerPath)).toBe(tmpdir());
+    expect(normalizePath(checkerPath)).toMatch(
+      /qwen-code-warnings-\d+-[0-9a-f-]+\.txt$/,
+    );
+
+    await import('../start.js?scopes-startup-warnings-second');
+    const checkerCalls = execSyncMock.mock.calls.filter(
+      ([command]) => command === 'node ./scripts/check-build-status.js',
+    );
+    expect(checkerCalls).toHaveLength(2);
+    expect(checkerCalls[1][1].env.QWEN_CODE_WARNINGS_FILE).not.toBe(
+      checkerPath,
+    );
+  });
+
+  it('cleans up the scoped warnings file when the child closes', async () => {
+    await import('../start.js?cleans-startup-warnings');
+
+    const child = spawnMock.mock.results[0].value;
+    const close = child.on.mock.calls.find(([ev]) => ev === 'close')[1];
+    const [, checkerOptions] = execSyncMock.mock.calls[0];
+    const warningsPath = checkerOptions.env.QWEN_CODE_WARNINGS_FILE;
+
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined);
+    try {
+      rmSyncMock.mockImplementationOnce(() => {
+        throw new Error('EBUSY');
+      });
+      expect(rmSyncMock).not.toHaveBeenCalled();
+      close(0, null);
+      expect(rmSyncMock).toHaveBeenCalledWith(warningsPath, { force: true });
+      expect(exitSpy).toHaveBeenCalledWith(0);
+    } finally {
+      exitSpy.mockRestore();
     }
   });
 });
