@@ -301,7 +301,7 @@ export function extractJsonStringFieldFromLastMatchingLine(
     let markerOffset = line.lastIndexOf(lineContains);
     while (markerOffset >= 0) {
       const recordStart = line.lastIndexOf('{', markerOffset);
-      if (recordStart >= 0) {
+      if (recordStart >= 0 && line[recordStart - 1] !== ':') {
         try {
           const parsed = JSON.parse(line.slice(recordStart));
           const record = JSON.stringify(parsed);

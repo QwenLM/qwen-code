@@ -7255,10 +7255,9 @@ describe('SessionService', () => {
         systemPayload: { text: 'x'.repeat(350) },
       }));
 
-    // These cases drive the real tail-window scan over a real transcript, so
-    // they pin the production marker (`"subtype":"goal_state"`) and field
-    // name. Mocked-fs tests cannot: the scan fails open into the records
-    // fallback and every assertion still passes.
+    // Short complete fixtures answer from parsed records before the scan runs.
+    // The long and truncated fixtures below drive the real tail-window scan
+    // and pin the production marker (`"subtype":"goal_state"`) and field name.
     it('labels a prompt-less session with its Goal objective', async () => {
       const sessionId = '21111111-1111-4111-8111-111111111111';
       writeSession(sessionId, [
@@ -7273,7 +7272,7 @@ describe('SessionService', () => {
       });
     });
 
-    it('recovers a legacy Goal after an absent real-file scan', async () => {
+    it('recovers a legacy Goal from a complete record prefix', async () => {
       const sessionId = '28888888-8888-4888-8888-888888888888';
       const objective = '😀'.repeat(250);
       writeSession(sessionId, [legacyGoalLine(sessionId, objective)]);
@@ -7286,10 +7285,9 @@ describe('SessionService', () => {
     });
 
     it('reads the Goal record through the file scan, not the parsed records', async () => {
-      // The goal_state record sits past the ten lines the records fallback
-      // reads, so the tail-window scan is the only thing that can answer —
-      // this is what pins the production marker and field name. Every other
-      // case is masked by the fallback finding the record anyway.
+      // The goal_state record sits past the ten-line parsed prefix, so the
+      // tail-window scan is the only thing that can answer. This pins the
+      // production marker and field name independently of parsed records.
       const sessionId = '27777777-7777-4777-8777-777777777777';
       const objective = '😀'.repeat(250);
       writeSession(sessionId, [
@@ -7436,9 +7434,9 @@ describe('SessionService', () => {
     });
 
     it('labels nothing when the Goal records fell out of the tail window', async () => {
-      // The clear record sits past the ten lines the records fallback reads
-      // AND past the tail window, so the only reachable evidence is the stale
-      // create record at the head of the file.
+      // The clear record sits past the ten-line parsed prefix AND past the
+      // tail window, so the only reachable evidence is the stale create record
+      // at the head of the file.
       const sessionId = '24444444-4444-4444-8444-444444444444';
       writeSession(sessionId, [
         goalStateLine(sessionId, 'Write the migration guide'),
