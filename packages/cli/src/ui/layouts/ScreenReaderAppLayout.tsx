@@ -54,6 +54,8 @@ export const ScreenReaderAppLayout: React.FC = () => {
           marginX={2}
           flexDirection="column"
           width={uiState.mainAreaWidth}
+          // Max height, not fixed height: a padded full-height frame triggers
+          // Ink's full-clear repaint and wipes the startup banner.
           maxHeight={dialogHeight}
           overflow={uiState.constrainHeight ? 'hidden' : undefined}
         >
