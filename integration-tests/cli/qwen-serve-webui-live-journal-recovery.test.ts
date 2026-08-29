@@ -28,8 +28,8 @@ let activeDaemon: SpawnedDaemon | undefined;
 let root: Root | undefined;
 let dom: JSDOM;
 let createRoot: typeof import('react-dom/client').createRoot;
-let DaemonSessionProvider: typeof import('@qwen-code/webui/daemon-react-sdk').DaemonSessionProvider;
-let useTranscriptBlocks: typeof import('@qwen-code/webui/daemon-react-sdk').useTranscriptBlocks;
+let DaemonSessionProvider: typeof import('@qwen-code/web-shell/daemon-react-sdk').DaemonSessionProvider;
+let useTranscriptBlocks: typeof import('@qwen-code/web-shell/daemon-react-sdk').useTranscriptBlocks;
 const originalGlobalDescriptors = new Map(
   ['window', 'document', 'navigator', 'IS_REACT_ACT_ENVIRONMENT'].map(
     (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
@@ -58,7 +58,7 @@ beforeAll(async () => {
   });
   ({ createRoot } = await import('react-dom/client'));
   ({ DaemonSessionProvider, useTranscriptBlocks } = await import(
-    '@qwen-code/webui/daemon-react-sdk'
+    '@qwen-code/web-shell/daemon-react-sdk'
   ));
 });
 
@@ -121,7 +121,7 @@ describe('qwen serve WebUI live journal recovery', () => {
       };
       activeDaemon = await spawnDaemon({
         workspaceCwd: workspace,
-        extraArgs: ['--max-journal-events', '3'],
+        extraArgs: ['--max-journal-events', '3', '--max-journal-bytes', '300'],
         env: {
           QWEN_CLI_ENTRY: MOCK_AGENT_PATH,
           MOCK_ACP_MODE: 'echo',

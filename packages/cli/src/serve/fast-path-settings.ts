@@ -151,8 +151,6 @@ function findEnvFilesFastPath(
   } catch {
     // Match loadSettings(): use the resolved path when realpath is unavailable.
   }
-  const isTrusted = isWorkspaceTrustedFastPath(settings, realStartDir);
-
   const globalQwenDir = getGlobalQwenDirLite();
   const legacyQwenDir = path.normalize(
     path.join(homeDir, SETTINGS_DIRECTORY_NAME),
@@ -161,8 +159,16 @@ function findEnvFilesFastPath(
   const found: string[] = [];
   const seen = new Set<string>();
 
-  const canUseEnvFile = (filePath: string): boolean =>
-    isTrusted !== false || userLevelPaths.has(path.normalize(filePath));
+  const canUseEnvFile = (filePath: string): boolean => {
+    const normalized = path.normalize(filePath);
+    if (userLevelPaths.has(normalized)) return true;
+    const dirPath = path.dirname(normalized);
+    const workspaceDir =
+      path.basename(dirPath) === SETTINGS_DIRECTORY_NAME
+        ? path.dirname(dirPath)
+        : dirPath;
+    return isWorkspaceTrustedFastPath(settings, workspaceDir) !== false;
+  };
 
   const pushCandidate = (filePath: string): boolean => {
     const normalized = path.normalize(filePath);

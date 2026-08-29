@@ -8,7 +8,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 export function getCurrentQwenCliEntrypoint(): string {
-  return process.argv[1] ?? 'qwen';
+  const entry = process.argv[1];
+  if (!entry) return 'qwen';
+  // Absolute-ize so the persisted argv and the PTY spawn resolve the same
+  // binary regardless of the supervisor daemon's cwd.
+  return path.isAbsolute(entry) ? entry : path.resolve(entry);
 }
 
 export function buildCurrentQwenCliArgv(args: readonly string[]): string[] {

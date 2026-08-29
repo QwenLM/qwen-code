@@ -71,7 +71,7 @@ import {
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { sanitizeHookName } from '../sanitize.js';
-import { InstallationManager } from '../../utils/installationManager.js';
+import { InstallationManager } from '../../config/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
 
@@ -1005,7 +1005,7 @@ export class QwenLogger {
   }
 
   // Phase 4b — HTTP-status retry from retryWithBackoff (429/5xx). Distinct from
-  // logContentRetryEvent which is fired by geminiChat's content-recovery loop.
+  // logContentRetryEvent which is fired by llmChat's content-recovery loop.
   logApiRetryEvent(event: ApiRetryEvent): void {
     const rumEvent = this.createActionEvent('misc', 'api_retry', {
       properties: {

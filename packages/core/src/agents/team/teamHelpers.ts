@@ -18,6 +18,7 @@ import * as path from 'node:path';
 import { Storage } from '../../config/storage.js';
 import { isNodeError } from '../../utils/errors.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
+import { isPidAlive } from '../../utils/process-liveness.js';
 import type { TeamFile, TeamMember } from './types.js';
 import {
   TEAMS_DIR,
@@ -295,20 +296,6 @@ export async function createTeamFile(
 }
 
 /**
- * Returns true when the given PID belongs to a live process.
- * EPERM means the process exists but is owned by another user —
- * treat as alive.
- */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return isNodeError(err) && err.code === 'EPERM';
-  }
-}
-
-/**
  * Reclaim a stale team so its name can be reused.
  *
  * Nothing deletes team dirs on normal session exit (only an explicit
@@ -321,26 +308,64 @@ function isPidAlive(pid: number): boolean {
  *
  * Conservative on ambiguity: an unreadable/corrupt team file or a
  * pre-`leadPid` file can't prove its owner is gone, so it is left
- * for manual recovery.
+ * for manual recovery. Likewise when the config changes between the
+ * staleness check and the delete — that change means another creator
+ * already reclaimed the name and created a new live generation, which
+ * a by-name delete would destroy (#10209).
  */
 export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
-  let existing: TeamFile | undefined;
+  const configPath = getTeamFilePath(teamName);
+  let inspectedRaw: string;
   try {
-    existing = await readTeamFile(teamName);
-  } catch {
+    inspectedRaw = await fs.readFile(configPath, 'utf-8');
+  } catch (err) {
+    if (isNodeError(err) && err.code === 'ENOENT') {
+      // config.json vanished between the caller's EEXIST and this read —
+      // a concurrent team_delete finished the job. The dirs may still
+      // hold leftovers; clear them so the retried create starts clean.
+      await deleteTeamDirs(teamName);
+      return true;
+    }
     return false;
   }
-  if (!existing) {
-    // config.json vanished between the caller's EEXIST and this read —
-    // a concurrent team_delete finished the job. The dirs may still
-    // hold leftovers; clear them so the retried create starts clean.
-    await deleteTeamDirs(teamName);
-    return true;
+  let existing: TeamFile;
+  try {
+    const parsed: unknown = JSON.parse(inspectedRaw);
+    // A config containing the literal `null` (or any other non-object
+    // JSON value) parses successfully but proves nothing about the
+    // owner — treat it like a corrupt file and leave the dirs for
+    // manual recovery.
+    if (parsed === null || typeof parsed !== 'object') {
+      return false;
+    }
+    existing = parsed as TeamFile;
+  } catch {
+    return false;
   }
   if (typeof existing.leadPid !== 'number' || existing.leadPid <= 0) {
     return false;
   }
   if (existing.leadPid !== process.pid && isPidAlive(existing.leadPid)) {
+    return false;
+  }
+  // Generation safety (#10209): the delete below targets the team NAME,
+  // not the generation inspected above. Two concurrent creators can
+  // read the same stale config and both pass the liveness check; if
+  // one of them reclaims the name and creates a new team before this
+  // delete runs, a by-name delete would destroy that newer live
+  // generation. Only proceed when the on-disk config is still
+  // byte-identical to the stale generation this reclaim inspected —
+  // otherwise the name now belongs to a newer generation, and the
+  // caller's retried create will fail with EEXIST against it.
+  try {
+    const currentRaw = await fs.readFile(configPath, 'utf-8');
+    if (currentRaw !== inspectedRaw) {
+      return false;
+    }
+  } catch {
+    // The config vanished or became unreadable after the inspection —
+    // ambiguous, and a by-name delete could hit a generation this
+    // reclaim never inspected.
     return false;
   }
   await deleteTeamDirs(teamName);
@@ -349,16 +374,38 @@ export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
 
 /**
  * Delete an entire team directory and its associated task
- * directory. Silently ignores missing directories.
+ * directory. Missing directories are silently ignored because
+ * fs.rm is called with { force: true }.
+ * Throws on real filesystem failures (EACCES, EIO, etc.).
+ * When both removals fail, throws an AggregateError covering both.
  */
 export async function deleteTeamDirs(teamName: string): Promise<void> {
   const teamDir = getTeamDir(teamName);
   const tasksDir = getTasksDir(teamName);
 
-  await Promise.allSettled([
+  const results = await Promise.allSettled([
     fs.rm(teamDir, { recursive: true, force: true }),
     fs.rm(tasksDir, { recursive: true, force: true }),
   ]);
+
+  const errors = results
+    .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    .map((r) => r.reason);
+
+  if (errors.length === 1) {
+    throw errors[0];
+  }
+  if (errors.length > 1) {
+    // Fold member messages into the wrapper message: serializers that
+    // only read `.stack`/`.message` (e.g. debugLogger) would otherwise
+    // drop the per-directory errno/path detail of `.errors`.
+    throw new AggregateError(
+      errors,
+      `Failed to delete team directories for "${teamName}": ${errors
+        .map((e) => (e instanceof Error ? e.message : String(e)))
+        .join('; ')}`,
+    );
+  }
 }
 
 /**

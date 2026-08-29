@@ -33,6 +33,13 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
   },
   { id: 'qwen3.7-max', contextWindowSize: 1000000, enableThinking: true },
   {
+    id: 'qwen3.8-max',
+    contextWindowSize: 1000000,
+    enableThinking: true,
+    thinkingMandatory: true,
+    modalities: { image: true, video: true },
+  },
+  {
     id: 'qwen3.8-max-preview',
     contextWindowSize: 1000000,
     enableThinking: true,
@@ -99,6 +106,7 @@ export const tokenPlanProvider: ProviderConfig = {
   envKey: TOKEN_PLAN_ENV_KEY,
   models: TOKEN_PLAN_MODELS,
   modelsEditable: true,
+  supportsModelDiscovery: true,
   modelNamePrefix: (baseUrl) =>
     baseUrl === TOKEN_PLAN_GLOBAL_BASE_URL
       ? 'ModelStudio Token Plan for Global/Intl'

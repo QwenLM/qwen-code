@@ -2,15 +2,6 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "composite": true,
-    // Override the root's `vitest/globals` entry: vitest's types import the
-    // optional `jsdom` peer types, and once `@types/jsdom` is installed that
-    // drags `/// <reference lib="dom" />` into this program. The DOM lib
-    // flips @types/node's conditional fetch globals to their DOM variants,
-    // whose ReadableStream is not async-iterable (needs lib.dom.asynciterable),
-    // breaking the `for await` over `response.body` in http-client.ts. The
-    // sources compiled here use no vitest globals (tests are excluded), so
-    // `node` alone is enough.
-    "types": ["node"],
     "outDir": "dist",
     "rootDir": "src"
   },

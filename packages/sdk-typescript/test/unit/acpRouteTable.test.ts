@@ -57,6 +57,25 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ model: 'gpt-4' });
   });
 
+  it('POST /session maps sessionId into ACP metadata', () => {
+    const result = matchRoute('/session', 'POST')!;
+    const params = result.mapping.extractParams(
+      result.segments,
+      {
+        sessionId: '550E8400-E29B-41D4-A716-446655440000',
+        sessionScope: 'single',
+        _meta: { existing: true },
+      },
+      'POST',
+    );
+    expect(params).toEqual({
+      _meta: {
+        existing: true,
+        'qwen-code/sessionId': '550E8400-E29B-41D4-A716-446655440000',
+      },
+    });
+  });
+
   it('POST /session with non-record body returns empty params', () => {
     const result = matchRoute('/session', 'POST')!;
     const params = result.mapping.extractParams(

@@ -49,7 +49,7 @@ describe('NotebookEditTool', () => {
       getFileReadCache: () => fileReadCache,
       getFileHistoryService: () => mockFileHistoryService,
       getFileReadCacheDisabled: () => false,
-      getGeminiClient: vi.fn(),
+      getLlmClient: vi.fn(),
       getBaseLlmClient: vi.fn(),
       getIdeMode: () => false,
       getApiKey: () => 'test-api-key',
@@ -65,14 +65,15 @@ describe('NotebookEditTool', () => {
       getUserAgent: () => 'test-agent',
       getUserMemory: () => '',
       setUserMemory: vi.fn(),
-      getGeminiMdFileCount: () => 0,
-      setGeminiMdFileCount: vi.fn(),
+      getMemoryFileCount: () => 0,
+      setMemoryFileCount: vi.fn(),
       getToolRegistry: () => ({}) as never,
     } as unknown as Config;
     tool = new NotebookEditTool(config);
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     CommitAttributionService.resetInstance();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -114,6 +115,10 @@ describe('NotebookEditTool', () => {
       metadata: { language_info: { name: 'python' } },
     });
     seedNotebookRead(filePath);
+    const writeSpy = vi.spyOn(
+      StandardFileSystemService.prototype,
+      'writeTextFile',
+    );
 
     const result = await buildInvocation({
       notebook_path: filePath,
@@ -127,6 +132,10 @@ describe('NotebookEditTool', () => {
     expect(updated.cells[0].execution_count).toBeNull();
     expect(updated.cells[0].outputs).toEqual([]);
     expect(result.llmContent).toContain('replace cell load-data');
+    expect(writeSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ toolWriteOrigin: 'notebook_edit' }),
+    );
+    writeSpy.mockRestore();
 
     const cacheState = fileReadCache.check(fs.statSync(filePath));
     expect(cacheState.state).toBe('fresh');

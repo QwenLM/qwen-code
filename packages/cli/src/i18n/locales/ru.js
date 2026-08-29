@@ -463,6 +463,7 @@ export default {
   'Tool Output Truncation Lines': 'Лимит строк вывода инструментов',
   'Folder Trust': 'Доверие к папке',
   'Tool Schema Compliance': 'Соответствие Tool Schema',
+  Unset: 'Не задано',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
   'Auto (follow user input)': 'Авто (следовать вводу пользователя)',
@@ -1065,6 +1066,12 @@ export default {
     'Сжатие истории чата не уменьшило размер. Это может указывать на проблемы с промптом сжатия.',
   'Could not compress chat history due to a token counting error.':
     'Не удалось сжать историю чата из-за ошибки подсчета токенов.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была пустой.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была усечена.',
+  'Could not compress chat history due to an API error.':
+    'Не удалось сжать историю чата из-за ошибки API.',
   // ============================================================================
   // Команды - Директория
   // ============================================================================
@@ -1479,6 +1486,7 @@ export default {
     'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
   'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
+  'from nested agent': 'от вложенного агента',
   Running: 'Выполняется',
   Pausing: 'Приостанавливается',
   Paused: 'Приостановлено',
@@ -1988,6 +1996,18 @@ export default {
   'not updatable': 'обновление недоступно',
   'Ask a quick side question without affecting the main conversation':
     'Задать быстрый побочный вопрос, не затрагивая основной разговор',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Получить второе мнение о текущем разговоре от модели-рецензента',
+  'Consulting advisor...': 'Консультация с советником...',
+  'Advisor review failed: {{error}}': 'Ошибка обзора советника: {{error}}',
+  'No conversation context available for /advisor':
+    'Нет контекста разговора, доступного для /advisor',
+  'Focus too long (max {{max}} chars)':
+    'Фокус слишком длинный (макс. {{max}} символов)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Выполняется другая операция, дождитесь её завершения перед запуском /advisor',
+  'No response received.': 'Ответ не получен.',
+  'No model configured.': 'Модель не настроена.',
   'Manage Arena sessions': 'Управлять сессиями Arena',
   'Start an Arena session with multiple models competing on the same task':
     'Запустить сессию Arena, где несколько моделей соревнуются на одной и той же задаче',
@@ -2291,4 +2311,5 @@ export default {
     'Изменения куратора автоматических навыков отключены в безопасном режиме.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
+  'Kept model as {{model}}': 'Оставлена модель {{model}}',
 };

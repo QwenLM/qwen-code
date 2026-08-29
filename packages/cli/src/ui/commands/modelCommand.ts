@@ -19,6 +19,7 @@ import {
   type AvailableModel,
   type Config,
   isImageCapable,
+  isImageGenerationCapable,
   parseVisionModelSetting,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
@@ -27,6 +28,7 @@ import {
   isInlineModelOverrideAllowed,
   parseAcpModelOption,
 } from '../../utils/acpModelUtils.js';
+import { recordDaemonSessionModelFromConfig } from '../../acp-integration/session-model-persistence.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -45,7 +47,25 @@ const COMPACTION_MODEL_CONFIGURATION_HINT =
   'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.';
 
 const IMAGE_MODEL_CONFIGURATION_HINT =
-  'Configure a model with imageOnly: true, baseUrl, and envKey in settings.modelProviders. Run /model --image <model-id> to select it.';
+  'Configure a model with supportsImageGeneration: true (or legacy imageOnly: true), baseUrl, and envKey in settings.modelProviders. Run /model --image <model-id> to select it.';
+
+const MODEL_PICKER_FLAGS = [
+  'fast',
+  'voice',
+  'vision',
+  'compaction',
+  'image',
+  'project',
+  'global',
+] as const;
+const MODEL_PICKER_FLAG_PATTERN = `(?:${MODEL_PICKER_FLAGS.join('|')})`;
+const MODEL_PICKER_ONLY_PATTERN = new RegExp(
+  `^(?:\\s*--${MODEL_PICKER_FLAG_PATTERN})*\\s*$`,
+);
+
+export function isPickerOnlyModelInvocation(args: string): boolean {
+  return MODEL_PICKER_ONLY_PATTERN.test(args);
+}
 
 /**
  * Parse --project / --global scope flags from the argument string.
@@ -114,6 +134,7 @@ async function switchMainModel(
   currentAuthType: AuthType,
   modelArg: string,
   scopeOverride?: SettingScope,
+  persistSelection = true,
 ): Promise<string> {
   const parsed = parseAcpModelOption(modelArg);
 
@@ -126,25 +147,29 @@ async function switchMainModel(
         ? { requireCachedCredentials: true }
         : undefined,
     );
-    persistSetting(
-      settings,
-      'security.auth.selectedType',
-      parsed.authType,
-      scopeOverride,
-    );
-    persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
-    // `/model <id>` selects by id only, so clear any baseUrl disambiguator left
-    // by a previous model-picker selection — otherwise next launch would
-    // resolve to a different provider than this switch just chose. Use an
-    // empty-string tombstone so the clear overrides a lower-scope value (an
-    // undefined write is dropped from JSON and would not override on merge).
-    persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+    if (persistSelection) {
+      persistSetting(
+        settings,
+        'security.auth.selectedType',
+        parsed.authType,
+        scopeOverride,
+      );
+      persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
+      // `/model <id>` selects by id only, so clear any baseUrl disambiguator left
+      // by a previous model-picker selection — otherwise next launch would
+      // resolve to a different provider than this switch just chose. Use an
+      // empty-string tombstone so the clear overrides a lower-scope value (an
+      // undefined write is dropped from JSON and would not override on merge).
+      persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+    }
     return parsed.modelId;
   }
 
   await config.switchModel(currentAuthType, modelArg, undefined);
-  persistSetting(settings, 'model.name', modelArg, scopeOverride);
-  persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+  if (persistSelection) {
+    persistSetting(settings, 'model.name', modelArg, scopeOverride);
+    persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+  }
   return modelArg;
 }
 
@@ -346,7 +371,7 @@ function getAvailableModelIds(
       : config.getAvailableModels();
   const availableModels = models.filter((m) => {
     if (mode === 'image')
-      return m.imageOnly === true && !m.fastOnly && !m.voiceOnly;
+      return isImageGenerationCapable(m) && !m.fastOnly && !m.voiceOnly;
     if (mode === 'vision') return !m.fastOnly && !m.voiceOnly && !m.imageOnly;
     if (mode === 'fast') return !m.voiceOnly && !m.imageOnly && !m.visionOnly;
     if (mode === 'voice') return !m.fastOnly && !m.imageOnly && !m.visionOnly;
@@ -480,6 +505,20 @@ export const modelCommand: SlashCommand = {
         content: t(
           'Cannot use both --project and --global. Choose one scope flag.',
         ),
+      };
+    }
+    const auxiliarySelection =
+      /(?:^|\s)--(?:fast|voice|vision|compaction|image)(?:\s|$)/.test(rawArgs);
+    if (
+      (hasProject &&
+        context.executionPolicy?.allowWorkspaceSettingsWrite === false) ||
+      (context.executionPolicy?.persistModelSelection === false &&
+        (hasProject || hasGlobal || auxiliarySelection))
+    ) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('This model selection is not available in this session.'),
       };
     }
     // Reject --project when workspace is untrusted — workspace settings are
@@ -932,7 +971,9 @@ export const modelCommand: SlashCommand = {
           : config.getAllConfiguredModels()
       ).filter(
         (model) =>
-          model.imageOnly === true && !model.fastOnly && !model.voiceOnly,
+          isImageGenerationCapable(model) &&
+          !model.fastOnly &&
+          !model.voiceOnly,
       );
       const matchingModels = availableModels.filter(
         (model) => model.id === selector.modelId,
@@ -1114,7 +1155,11 @@ export const modelCommand: SlashCommand = {
         authType,
         modelName,
         scopeOverride,
+        context.executionPolicy?.persistModelSelection !== false,
       );
+      if (context.executionMode === 'acp') {
+        await recordDaemonSessionModelFromConfig(config);
+      }
       return {
         type: 'message',
         messageType: 'info',

@@ -12,6 +12,7 @@ import {
   type ResumedSessionData,
   SessionStartSource,
   computeUniqueBranchTitle,
+  normalizeDerivedBranchTitle,
 } from '@qwen-code/qwen-code-core';
 import {
   buildResumedHistoryItems,
@@ -22,6 +23,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import {
   hasBlockingBackgroundWork,
+  buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
@@ -111,23 +113,60 @@ export function useBranchCommand(
         historyManager.addItem(
           {
             type: 'error',
-            text: t(BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE),
+            text: buildBackgroundWorkBlockedMessage(
+              config,
+              t(BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE),
+            ),
           },
           Date.now(),
         );
         return;
       }
 
-      const oldSessionId = config.getSessionId();
       const newSessionId = randomUUID();
       const sessionService = config.getSessionService();
 
+      // Recaptured under the swap latch below (step 0) — the value read
+      // before the latch could name a session a concurrent swap's rollback
+      // is about to change (#9844).
+      let oldSessionId = config.getSessionId();
       let coreSwapped = false;
       let uiSwapped = false;
       let forkCreated = false;
+      // Whether THIS attempt opened the swap transaction: the catch block
+      // may only settle a transaction it opened itself. A latch-rejected
+      // attempt owns none — it throws in step 0 BEFORE `swapOpened = true`,
+      // so this stays false — and the shared slot may hold a different
+      // in-flight swap (#9844).
+      let swapOpened = false;
       let prevSessionData: ResumedSessionData | undefined;
 
       try {
+        // 0. Open the telemetry swap transaction BEFORE touching the
+        //    outgoing session. Opening takes the session-switch latch and
+        //    fixes the outgoing session for this attempt; see the lifetime
+        //    contract in beginTelemetrySwap's JSDoc in core client.ts
+        //    (#9833, #9844).
+        //
+        //    A false return means another /resume or /branch already holds
+        //    the single swap slot. Throw (rather than early-return) so the
+        //    catch block still reports the failure; throwing BEFORE
+        //    `swapOpened = true` keeps the catch from settling the slot,
+        //    which belongs to the in-flight swap.
+        const telemetrySwapOpened =
+          config.getLlmClient()?.beginTelemetrySwap?.() ?? true;
+        if (!telemetrySwapOpened) {
+          throw new Error(
+            'A session switch is already in progress. Try again in a moment.',
+          );
+        }
+        swapOpened = true;
+        // Capture the outgoing session under the latch: before this point a
+        // concurrent picker swap could still roll back and change the
+        // session the user is on, and forking/rolling back against that
+        // stale id would land on a session the UI never shows (#9844).
+        oldSessionId = config.getSessionId();
+
         // 1. Flush outgoing recorder. A degraded source must not fork because
         //    the visible, unpersisted tail would be silently missing.
         //    It must happen BEFORE the parent snapshot
@@ -136,8 +175,13 @@ export function useBranchCommand(
         //    a stale `lastCompletedUuid` and the next user message attaches
         //    its parentUuid to a record that's no longer the JSONL tail.
         const outgoingRecording = config.getChatRecordingService();
+        const sourceCustomTitle = outgoingRecording?.getCurrentCustomTitle();
         outgoingRecording?.finalize();
         await outgoingRecording?.flush();
+        const sourceDisplayName =
+          name === undefined && sourceCustomTitle === undefined
+            ? await sessionService.getSessionDisplayName(oldSessionId)
+            : undefined;
 
         // 2. Snapshot the parent JSONL state for rollback. `/branch` is
         //    guarded on `isIdleRef`, so the file isn't being mutated
@@ -163,8 +207,17 @@ export function useBranchCommand(
         // 5. Persist the branch title before switching core or UI. A failed
         //    title write leaves the parent active and the catch path removes
         //    the incomplete fork.
+        // A base that is empty, whitespace-only, or exactly a legacy
+        // `(Branch)`/`(Branch N)` token falls back to the first prompt here,
+        // while the daemon route falls back to the session-id prefix; no
+        // picker name survives either way, so each client keeps its own
+        // degradation.
         const baseName =
-          name ?? deriveFirstPrompt(provisional.conversation.messages);
+          name ??
+          (sourceCustomTitle
+            ? normalizeDerivedBranchTitle(sourceCustomTitle)
+            : sourceDisplayName?.trim() || undefined) ??
+          deriveFirstPrompt(provisional.conversation.messages);
         const effectiveTitle = await computeUniqueBranchTitle(
           baseName,
           sessionService,
@@ -193,17 +246,23 @@ export function useBranchCommand(
         //    block below — without it, a failure between swap and UI
         //    update would leave core on the fork while UI still shows
         //    the parent, silently recording user input into an orphan.
+        //    The transaction opened in step 0 covers the initialize()
+        //    replay (#9833; see beginTelemetrySwap's JSDoc in core
+        //    client.ts).
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
-        await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
+        await config.getLlmClient()?.initialize?.(SessionStartSource.Branch);
 
         // 8. Swap UI. Once this commits, rolling core back is unsafe —
         //    it would leave UI on the branch but recorder writing into
-        //    the parent JSONL (the inverse split-brain). `uiSwapped` is
-        //    set immediately after the UI commits so any subsequent
-        //    failure (hook, remount, announce) skips the catch
-        //    block's core rollback.
+        //    the parent JSONL (the inverse split-brain). The commit point
+        //    is the stats-provider re-key itself: from here on a failure
+        //    must not roll core back OR undo the telemetry replay — the
+        //    re-keyed display would read the fork's dropped bucket as
+        //    zeros. `uiSwapped` gates the catch block's core rollback;
+        //    post-commit failures (history items, remount, announce) are
+        //    non-fatal and surfaced as an error item.
         const rawItems = buildResumedHistoryItems(resumed, config);
         const collapseOnResume =
           options.settings.merged.ui?.history?.collapseOnResume ?? false;
@@ -215,10 +274,11 @@ export function useBranchCommand(
           collapsePreviewCount,
         );
         startNewSession(newSessionId);
+        uiSwapped = true;
+        config.getLlmClient()?.commitTelemetrySwap?.();
         clearPendingState?.();
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
-        uiSwapped = true;
         resetBackgroundStateForSessionSwitch(config);
 
         // 9. Apply the already-persisted title to the prompt bar.
@@ -229,7 +289,7 @@ export function useBranchCommand(
 
         // 11. Announce. Two history items mirror Claude's success message
         //    (branched line + resume hint). The quoted name is the raw
-        //    user-provided `name`; no `(Branch)` suffix — that decoration
+        //    user-provided `name`; no generated numeric suffix — that decoration
         //    belongs in the picker/prompt bar, not in the user-facing
         //    announcement.
         const titleInfo = name ? ` "${name}"` : '';
@@ -269,7 +329,7 @@ export function useBranchCommand(
             // Re-hydrate chat history against the restored session. Best-
             // effort: if this throws too, sessionId + recorder are still
             // back on the parent, which is the load-bearing invariant.
-            await config.getGeminiClient()?.initialize?.();
+            await config.getLlmClient()?.initialize?.();
           } catch (rollbackErr) {
             config
               .getDebugLogger()
@@ -277,6 +337,23 @@ export function useBranchCommand(
                 `Rollback after failed /branch init failed: ${rollbackErr}`,
               );
           }
+          // Core is back on the parent: put the usage aggregate (and the
+          // two affected session buckets) back to pre-swap state. Must run
+          // AFTER the rollback's re-initialize above — that re-initialize
+          // replays the parent's history on top of the fork's already-
+          // committed replay, and restore overwrites rather than subtracts,
+          // so the final state is exactly pre-swap (#9833).
+          config.getLlmClient()?.abortTelemetrySwap?.();
+        } else if (swapOpened) {
+          // Either the core swap never happened (nothing was replayed — the
+          // transaction is unarmed) or the UI already committed (the replay
+          // belongs to the session the user is on): close THIS attempt's
+          // transaction without restoring. `swapOpened` alone is the settle
+          // guard: a latch-rejected attempt throws in step 0 before
+          // `swapOpened = true`, so it owns no transaction here, and the
+          // shared slot may hold a different in-flight swap (#9844). See
+          // beginTelemetrySwap's JSDoc in core client.ts.
+          config.getLlmClient()?.commitTelemetrySwap?.();
         }
         if (forkCreated && !uiSwapped) {
           try {

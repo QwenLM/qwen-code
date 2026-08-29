@@ -45,6 +45,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/acp-bridge/src/process-registry.ts',
+    {
+      reason:
+        'Windows process-tree cleanup resolves the trusted System32 taskkill path from the process-scoped OS root.',
+      accesses: { 'key:SystemRoot': 1 },
+    },
+  ],
+  [
     'packages/acp-bridge/src/spawnChannel.ts',
     {
       reason:
@@ -143,25 +151,113 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/native-directory-picker.ts',
+    {
+      reason:
+        'Picker availability probes process-scoped host session state ' +
+        '(SSH markers, display server, Windows session name), so embedded ' +
+        'callers may omit the environment argument.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/pem-certificate-blocks.ts',
+    {
+      reason:
+        'The certificate-loader oracle child inherits the daemon process environment so it uses the same OpenSSL configuration as channel workers, while stripping NODE_OPTIONS that can alter eval input or corrupt its protocol.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/run-qwen-serve.ts',
     {
       reason:
-        'The serve entry point owns daemon bootstrap, feature flags, child-process defaults, and the launch-env loader scrub.',
+        'The serve entry point owns daemon bootstrap, feature flags, child-process defaults, and the launch-env loader scrub. ' +
+        'NODE_EXTRA_CA_CERTS is read from the daemon process environment on purpose: it is the trust store Node itself ' +
+        'already loaded for this process, so the worker TLS trust-gap check has to consult the same value to know whether ' +
+        "an operator has already supplied the issuing CA. Read once into a local: the check now needs the file's " +
+        'contents, not just the path, and a second read could see a different value. The whole-object read copies the ' +
+        'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
+        'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
+        'via fetch, which honors it, so the strict probe would flag an outage that never happens.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
-        'computed:QWEN_SERVER_TOKEN_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
         'computed:QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV': 1,
         'computed:RUNTIME_STARTUP_TIMEOUT_ENV': 1,
-        'computed:key': 1,
         'key:DEV': 1,
+        'key:NODE_EXTRA_CA_CERTS': 1,
+        'key:NODE_TLS_REJECT_UNAUTHORIZED': 1,
         'key:QWEN_CODE_IDE_WORKSPACE_PATH': 1,
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
         'key:VITEST_WORKER_ID': 1,
-        whole: 7,
+        whole: 6,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/serve-token.ts',
+    {
+      reason:
+        'Daemon token selection defaults to the process-scoped QWEN_SERVER_TOKEN.',
+      accesses: { 'computed:QWEN_SERVER_TOKEN_ENV': 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/sandbox.ts',
+    {
+      reason:
+        'The sandbox launcher assembles the sandboxed child environment: ' +
+        'it passes through the process environment, forwards provider keys, ' +
+        'proxy settings, and debug switches, and reads the SANDBOX_* control ' +
+        'variables. It entered the scanned serve/ layer via the #9146 ' +
+        'leaf-layer move; its access surface is unchanged.',
+      accesses: {
+        'computed:envVar': 2,
+        'key:BUILD_SANDBOX': 2,
+        'key:COLORTERM': 2,
+        'key:DEBUG': 5,
+        'key:DEBUG_MODE': 1,
+        'key:DEBUG_PORT': 2,
+        'key:GEMINI_API_KEY': 2,
+        'key:GEMINI_MODEL': 2,
+        'key:GOOGLE_API_KEY': 2,
+        'key:GOOGLE_APPLICATION_CREDENTIALS': 2,
+        'key:GOOGLE_CLOUD_LOCATION': 2,
+        'key:GOOGLE_CLOUD_PROJECT': 2,
+        'key:GOOGLE_GENAI_USE_GCA': 2,
+        'key:GOOGLE_GENAI_USE_VERTEXAI': 2,
+        'key:HTTP_PROXY': 2,
+        'key:HTTPS_PROXY': 2,
+        'key:NO_PROXY': 2,
+        'key:NODE_ENV': 1,
+        'key:NODE_OPTIONS': 1,
+        'key:OPENAI_API_KEY': 2,
+        'key:OPENAI_BASE_URL': 2,
+        'key:OPENAI_MODEL': 2,
+        'key:PATH': 2,
+        'key:PYTHONPATH': 2,
+        'key:QWEN_CODE_INTEGRATION_TEST': 1,
+        'key:QWEN_CODE_MCP_APPROVALS_PATH': 2,
+        'key:QWEN_CODE_WARNINGS_FILE': 2,
+        'key:QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE': 1,
+        'key:QWEN_CODE_TEST_VAR': 2,
+        'key:QWEN_SANDBOX_PROXY_COMMAND': 2,
+        'key:SANDBOX_ENV': 2,
+        'key:SANDBOX_FLAGS': 2,
+        'key:SANDBOX_MOUNTS': 2,
+        'key:SANDBOX_PORTS': 1,
+        'key:SANDBOX_SET_UID_GID': 1,
+        'key:SEATBELT_PROFILE': 1,
+        'key:TERM': 2,
+        'key:VIRTUAL_ENV': 1,
+        'key:http_proxy': 2,
+        'key:https_proxy': 2,
+        'key:no_proxy': 2,
+        whole: 6,
       },
     },
   ],
@@ -169,8 +265,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/server/fs-factory.ts',
     {
       reason:
-        'Embedded server construction keeps a process-environment compatibility fallback.',
-      accesses: { 'computed:IDE_WORKSPACE_PATH_ENV_VAR': 1 },
+        'Embedded server construction keeps a process-environment compatibility fallback, ' +
+        'and the new-file-mode policy parser defaults to the daemon process environment.',
+      accesses: { 'computed:IDE_WORKSPACE_PATH_ENV_VAR': 1, whole: 1 },
     },
   ],
   [
@@ -186,6 +283,16 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     {
       reason:
         'Embedded feature detection defaults to the daemon process environment.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/server/session-pr-refresh.ts',
+    {
+      reason:
+        'The PR-state refresh interval (QWEN_SESSION_PR_REFRESH_MINUTES) is a ' +
+        'process-scoped operator switch; embedded callers may omit the ' +
+        'environment argument.',
       accesses: { whole: 1 },
     },
   ],

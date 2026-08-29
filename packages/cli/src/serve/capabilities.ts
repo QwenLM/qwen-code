@@ -34,6 +34,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   daemon_status: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
+  session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
   session_load: { since: 'v1' },
   session_resume: { since: 'v1' },
@@ -51,7 +52,18 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_source_metadata: { since: 'v1' },
   session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
+  session_turn_status: { since: 'v1' },
+  // Prompts and mid-turn messages reference session-scoped image and file
+  // attachments by their stored filename.
+  session_attachments: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
+  // Daemon-owned reconciliation surface for mid-turn messages:
+  // `GET /session/:id/mid-turn-messages` returns the messages still waiting
+  // in the queue plus bounded settled/promoted id rings. Clients pre-flight
+  // this tag before calling the route; an
+  // older daemon without it leaves them on the legacy client-fallback
+  // behavior. Client-generated message ids make retries idempotent.
+  session_mid_turn_message_query: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
@@ -85,7 +97,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
     since: 'v1',
     modes: ['workspace', 'clean'],
   },
+  // Explicit remember targets and scoped forget (`scope` parameter). Old
+  // daemons silently ignore an unknown `scope`, so the SDK pre-flights the
+  // matching tag before sending one. The sibling no-op behavior change — a
+  // zero-write remember now fails `remember_no_update` instead of completing
+  // with 'No memory files updated.' — is deliberately untagged: it changes a
+  // task's terminal outcome, not the surface shape, and every client sees it
+  // as a typed `failed` task status that cannot be mistaken for success.
+  workspace_memory_remember_project_scope: { since: 'v1' },
+  workspace_memory_remember_user_scope: { since: 'v1' },
   workspace_memory_forget: { since: 'v1' },
+  workspace_memory_forget_scope: { since: 'v1' },
   workspace_memory_dream: { since: 'v1' },
   // Workspace agents CRUD (`GET/POST /workspace/agents` +
   // `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
@@ -100,15 +122,18 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
+  scheduled_task_session_reuse: { since: 'v1' },
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
   session_status: { since: 'v1' },
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
+  session_storage_conflict_repair: { since: 'v1' },
   session_metadata: { since: 'v1' },
   session_organization: { since: 'v1' },
   session_export: { since: 'v1' },
+  standalone_sessions_v1: { since: 'v1' },
   session_transcript: { since: 'v1' },
   session_transcript_pagination: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
@@ -154,6 +179,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. Clients should still pre-flight `require_auth` separately for
   // deployment posture; this tag only means the route contract exists.
   workspace_file_write: { since: 'v1' },
+  // Daemon hosts binary file upload (`POST /file/upload`) behind the strict
+  // mutation gate. Uploads never overwrite; occupied names auto-number. New
+  // route contract = new tag (same split as `workspace_file_bytes` from
+  // `workspace_file_read`). The advertised upload byte cap is surfaced via
+  // `limits.maxWorkspaceFileUploadBytes`.
+  workspace_file_upload: { since: 'v1' },
   // Daemon hosts the session-level approval-mode
   // control route `POST /session/:id/approval-mode` (gated by the
   // mutation gate, strict). The route accepts `{mode, persist?}` —
@@ -169,8 +200,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // unregistered — the toggle takes effect on the next ACP child spawn
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
-  workspace_skill_toggle: { since: 'v1' },
-  workspace_skill_batch_toggle: { since: 'v1' },
+  workspace_skill_settings_toggle: { since: 'v1' },
+  workspace_skill_settings_batch_toggle: { since: 'v1' },
+  extension_batch_activation_v2: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
@@ -187,13 +219,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Workspace trust policy changes rebuild the affected runtime generation
   // without restarting the daemon. V2 trust status exposes convergence.
   workspace_trust_hot_reload: { since: 'v1' },
-  // `POST /workspace/init` scaffolds an empty
-  // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
-  // the bound workspace root. Body: `{force?: boolean}`. Default
+  // `POST /workspace/init` scaffolds an empty `QWEN.md` (or the
+  // workspace `context.fileName` value injected as `contextFilename`)
+  // at the bound workspace root. Body: `{force?: boolean}`. Default
   // refuses with 409 when the file already exists; `force: true`
-  // overwrites. Mechanical only — does NOT call the LLM. To AI-fill
-  // the file, the caller should follow up with
-  // `POST /session/:id/prompt`.
+  // overwrites. Mechanical only — does NOT call the LLM. To AI-fill the
+  // file, the caller should follow up with `POST /session/:id/prompt`.
   workspace_init: { since: 'v1' },
   // `POST /workspace/setup-github` installs the fixed
   // qwen-code-action workflow set into the bound workspace after
@@ -336,9 +367,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_display_name: { since: 'v1' },
   scratch_workspace_registration: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
+  // A native OS directory picker can be opened on the daemon host
+  // (osascript on macOS, PowerShell on Windows, zenity on a Linux host
+  // with a display). Headless hosts omit the tag so clients hide the
+  // Browse affordance instead of surfacing a guaranteed picker failure.
+  native_directory_picker: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
-  // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,
-  // workspace agent CRUD, and persisted session organization surfaces.
+  // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
+  // memory, workspace agent CRUD, and persisted session organization surfaces.
   // Workspace-qualified settings also require the existing
   // `workspace_settings` tag because that surface depends on settings
   // persistence. ACP/WebSocket and auth stay outside this core tag;
@@ -359,6 +395,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // projections. This is additive to the legacy primary-workspace
   // `workspace_extensions` contract.
   extension_management_v2: { since: 'v1' },
+  extension_git_credentials: { since: 'v1' },
+  extension_local_path_install: { since: 'v1' },
   // Workspace-qualified, daemon-local persisted transcript paging. The tag is
   // unconditional because the route also serves a trusted single-workspace
   // primary; authorization is evaluated for the selected runtime per request.
@@ -371,6 +409,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // This remains independent from active export so older daemons cannot ignore
   // archive intent and return an active transcript with the same session id.
   workspace_archived_session_export: { since: 'v1' },
+  // Workspace-qualified, memory-only session live-state snapshot plus the
+  // in-memory catalog version token
+  // (`GET /workspaces/:workspace/sessions/live-state`). Independent from
+  // `workspace_qualified_rest_core`: released daemons can advertise that tag
+  // without implementing this route, so clients must pre-flight it directly.
+  // The route stays subject to the per-workspace trust check even when the
+  // tag is advertised.
+  workspace_session_live_state: { since: 'v1' },
+  // Workspace-qualified metadata updates for active, inactive, and archived
+  // persisted sessions.
+  workspace_session_metadata: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and
@@ -414,6 +463,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. `/live/status` remains the dynamic readiness surface for the Host,
   // permissions, self-checks, and provider reachability.
   realtime_voice: { since: 'v1' },
+  web_terminal: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -435,6 +485,7 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   sessionArtifactsPersistenceAvailable?: boolean;
   sessionGenerationAvailable?: boolean;
+  currentSessionSchedulingAvailable?: boolean;
   workspaceGenerationAvailable?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
@@ -466,6 +517,7 @@ export interface AdvertiseFeatureToggles {
   persistentWorkspaceRegistrationAvailable?: boolean;
   scratchWorkspaceRegistrationAvailable?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  nativeDirectoryPickerAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
@@ -473,6 +525,7 @@ export interface AdvertiseFeatureToggles {
   acpHttpEnabled?: boolean;
   realtimeVoiceEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
+  standaloneSessionsAvailable?: boolean;
 }
 
 /**
@@ -512,6 +565,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  [
+    'standalone_sessions_v1',
+    (toggles) => toggles.standaloneSessionsAvailable === true,
+  ],
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
   ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
   [
@@ -548,6 +605,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'session_generation',
     (toggles) => toggles.sessionGenerationAvailable === true,
+  ],
+  [
+    'scheduled_task_session_reuse',
+    (toggles) => toggles.currentSessionSchedulingAvailable === true,
   ],
   [
     'workspace_generation',
@@ -596,6 +657,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.workspaceRuntimeRemovalAvailable === true,
   ],
   [
+    'native_directory_picker',
+    (toggles) => toggles.nativeDirectoryPickerAvailable === true,
+  ],
+  [
     'workspace_qualified_acp',
     // The plural routes are pre-mounted for workspaces registered after app
     // creation, but the capability becomes meaningful only once a secondary
@@ -639,6 +704,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) =>
       toggles.acpHttpEnabled === true && toggles.realtimeVoiceEnabled === true,
   ],
+  ['web_terminal', (toggles) => toggles.acpHttpEnabled === true],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

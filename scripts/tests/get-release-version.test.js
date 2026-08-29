@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { getVersion } from '../get-release-version.js';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import {
+  assertVersionUnreleased,
+  getVersion,
+  PUBLISHED_PACKAGES,
+  runCli,
+} from '../get-release-version.js';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
@@ -46,6 +51,7 @@ describe('getVersion', () => {
     if (command.includes('deprecated')) return '';
 
     // Git Tag Mocks
+    if (command.includes("git tag -l 'v*'")) return 'v0.6.0\nv0.6.1';
     if (command.includes("git tag -l 'v[0-9].[0-9].[0-9]'")) return 'v0.6.1';
     if (command.includes("git tag -l 'v*-preview*'")) return 'v0.7.0-preview.1';
     if (command.includes("git tag -l 'v*-nightly*'"))
@@ -220,6 +226,8 @@ describe('getVersion', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         if (command.includes('npm view') && command.includes('--tag=latest'))
           return '0.8.0';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v0.6.0\nv0.6.1\nv0.8.0';
         return mockExecSync(command);
       });
 
@@ -233,6 +241,8 @@ describe('getVersion', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         if (command.includes('npm view') && command.includes('--tag=latest'))
           return '0.9.0';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v0.6.0\nv0.6.1\nv0.9.0';
         return mockExecSync(command);
       });
 
@@ -246,6 +256,8 @@ describe('getVersion', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         if (command.includes('npm view') && command.includes('--tag=latest'))
           return '0.7.9';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v0.6.0\nv0.6.1\nv0.7.9';
         return mockExecSync(command);
       });
 
@@ -253,6 +265,68 @@ describe('getVersion', () => {
       expect(result.releaseVersion).toBe('0.8.0-preview.0');
       expect(result.npmTag).toBe('preview');
       expect(result.previousReleaseTag).toBe('v0.7.9');
+    });
+
+    it('should fall back to the latest existing git tag when the npm baseline has no tag (half-shipped release)', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          // Published to npm, but its release run failed before the git
+          // tag was created, so the base mock's tag list lacks v0.6.2.
+          return '0.6.2';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should skip unparseable tags (e.g. leading zeros) when resolving the previous release tag', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.6.2';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v01.2.3\nv0.6.0\nv0.6.1';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should sort tags by semver order, not lexicographic order', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes("git tag -l 'v*'")) return 'v0.9.0\nv0.10.0';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      // semver descending: v0.10.0 > v0.9.0 (lexicographic would pick v0.9.0)
+      expect(result.previousReleaseTag).toBe('v0.10.0');
+    });
+
+    it('should keep the npm-derived previous tag when git tag listing fails', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes("git tag -l 'v*'")) {
+          throw new Error('git not available');
+        }
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should return an empty previous tag when no stable git tags exist', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes("git tag -l 'v*'")) {
+          // Only prerelease tags exist; the stable filter drops them all.
+          return 'v0.7.0-preview.1\nv0.8.0-nightly.20250916.abcdef';
+        }
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('');
     });
 
     it('should fall back to package.json when no nightly dist-tag exists (preview)', () => {
@@ -607,5 +681,278 @@ describe('getVersion', () => {
         'Derived stable version 0.7.0 is lower than published latest 0.9.0',
       );
     });
+  });
+
+  it('runCli default dispatch prints the version JSON and exits 0', () => {
+    // The prepare job consumes this path (VERSION_JSON=$(node
+    // scripts/get-release-version.js ...)); pin it through runCli, the
+    // wrapper prepare actually invokes, so a dropped args pass-through or
+    // a flipped exit code fails here instead of at the next release. The
+    // override makes the printed version depend on args reaching
+    // getVersion.
+    vi.mocked(execSync).mockImplementation(mockExecSync);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli({ type: 'stable', stable_version_override: '9.9.9' })).toBe(
+      0,
+    );
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(logSpy.mock.calls[0][0])).toEqual({
+      releaseTag: 'v9.9.9',
+      releaseVersion: '9.9.9',
+      npmTag: 'latest',
+      previousReleaseTag: 'v0.6.1',
+    });
+  });
+});
+
+describe('assertVersionUnreleased', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const notFoundAnywhere = (command) => {
+    if (command.includes('npm view')) throw new Error('npm error code E404');
+    if (command.includes('git ls-remote')) {
+      // --exit-code exits 2 when no ref matches.
+      throw Object.assign(new Error('no match'), { status: 2 });
+    }
+    if (command.includes('gh release view')) {
+      throw new Error('release not found');
+    }
+    return '';
+  };
+
+  // The push-time refusal must tell the operator where the version was
+  // found and that re-running cannot fix a partial publish.
+  const refusalMessage = (foundOn) =>
+    `Version 1.2.3 has already shipped; refusing to force-push the release branch over it. Found on: ${foundOn}. If a previous attempt published only part of the release, complete the remaining artifacts manually — re-running this job will keep failing here while the version stays published.`;
+
+  it('pins the full published-package set', () => {
+    // The push-time guard derives from this list; the workflow's publish
+    // steps hardcode the same set separately, so adding or removing a
+    // package must update both this pin and the publish steps in
+    // release.yml so every consumer is reviewed together.
+    expect(PUBLISHED_PACKAGES).toEqual([
+      '@qwen-code/qwen-code',
+      '@qwen-code/audio-capture',
+      '@qwen-code/channel-base',
+      '@qwen-code/channel-dingtalk',
+      '@qwen-code/channel-dws',
+      '@qwen-code/channel-feishu',
+      '@qwen-code/channel-github',
+      '@qwen-code/channel-qqbot',
+      '@qwen-code/channel-telegram',
+      '@qwen-code/channel-wecom',
+      '@qwen-code/channel-weixin',
+    ]);
+  });
+
+  it('passes when no package, tag, or release has shipped the version', () => {
+    vi.mocked(execSync).mockImplementation(notFoundAnywhere);
+    expect(() => assertVersionUnreleased('1.2.3')).not.toThrow();
+  });
+
+  it('checks origin for tags, not the stale local checkout', () => {
+    const commands = [];
+    vi.mocked(execSync).mockImplementation((command) => {
+      commands.push(command);
+      return notFoundAnywhere(command);
+    });
+    assertVersionUnreleased('1.2.3');
+    expect(commands).toContain(
+      'git ls-remote --exit-code origin "refs/tags/v1.2.3"',
+    );
+    expect(commands.some((c) => c.includes('git tag -l'))).toBe(false);
+  });
+
+  it('refuses when ANY published package has shipped the version', () => {
+    // Ship the version on one package at a time, middle-list packages
+    // included: dropping any of them from PUBLISHED_PACKAGES must fail.
+    for (const pkg of PUBLISHED_PACKAGES) {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command === `npm view ${pkg}@1.2.3 version`) {
+          return '1.2.3';
+        }
+        return notFoundAnywhere(command);
+      });
+      expect(() => assertVersionUnreleased('1.2.3')).toThrow(/already shipped/);
+    }
+  });
+
+  it('refuses when the tag already exists on origin', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('git ls-remote')) {
+        return '0123456789abcdef\trefs/tags/v1.2.3';
+      }
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(
+      refusalMessage('origin tag v1.2.3'),
+    );
+  });
+
+  it('refuses when the GitHub release already exists', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('gh release view')) return 'v1.2.3';
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(
+      refusalMessage('GitHub release v1.2.3'),
+    );
+  });
+
+  it('names every shipped package after a partial publish', () => {
+    // A retry of a partially published release is refused forever; the
+    // refusal must name exactly which packages to complete, which needs
+    // the strict scan of every package, not a stop at the first hit.
+    const shipped = [PUBLISHED_PACKAGES[1], PUBLISHED_PACKAGES[7]];
+    const commands = [];
+    vi.mocked(execSync).mockImplementation((command) => {
+      commands.push(command);
+      if (shipped.some((pkg) => command === `npm view ${pkg}@1.2.3 version`)) {
+        return '1.2.3';
+      }
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(
+      refusalMessage(shipped.join(', ')),
+    );
+    expect(commands.filter((c) => c.startsWith('npm view '))).toHaveLength(
+      PUBLISHED_PACKAGES.length,
+    );
+  });
+
+  it('stops probing once the refusal is decided', () => {
+    // A shipped version already decides the refusal; running the remaining
+    // probes would let a flaky one replace the refusal's recovery
+    // guidance with a probe-failure error.
+    const commands = [];
+    vi.mocked(execSync).mockImplementation((command) => {
+      commands.push(command);
+      if (command === `npm view ${PUBLISHED_PACKAGES[0]}@1.2.3 version`) {
+        return '1.2.3';
+      }
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(/already shipped/);
+    expect(commands.some((c) => c.includes('ls-remote'))).toBe(false);
+    expect(commands.some((c) => c.includes('gh release view'))).toBe(false);
+  });
+
+  it('rejects a missing or non-string version instead of failing open', () => {
+    for (const bad of [undefined, '', true]) {
+      expect(() => assertVersionUnreleased(bad)).toThrow(/requires a version/);
+    }
+  });
+
+  it('fails closed when an npm probe errors with anything other than E404', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('npm view')) {
+        throw new Error('npm error code ETIMEDOUT');
+      }
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(
+      /Failed to verify .* on npm/,
+    );
+  });
+
+  it('keeps the refusal decisive when a probe fails after a shipped hit', () => {
+    // A partial publish retried during a registry disruption: the scan
+    // hits on a shipped package, then a later probe errors transiently.
+    // The refusal is already decided; throwing there would demote the
+    // exit-3 refusal to a probe-failure exit and lose the version_refusal
+    // marker the workflow keys on to skip the release-failed notification.
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command === `npm view ${PUBLISHED_PACKAGES[0]}@1.2.3 version`) {
+        return '1.2.3';
+      }
+      if (command.includes('npm view')) {
+        throw new Error('npm error code ETIMEDOUT');
+      }
+      return notFoundAnywhere(command);
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // The runner parses workflow commands from stdout only; ::error:: on
+    // stderr would never surface as an annotation in the Actions UI.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(3);
+    expect(logSpy).toHaveBeenCalledWith(
+      `::error::${refusalMessage(PUBLISHED_PACKAGES[0])}`,
+    );
+  });
+
+  it('fails closed when ls-remote errors with anything other than no-match', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('git ls-remote')) {
+        throw Object.assign(new Error('fatal: authentication failed'), {
+          status: 128,
+        });
+      }
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(
+      /Failed to verify tag v1\.2\.3 on origin/,
+    );
+  });
+
+  it('fails closed when gh release view errors with anything other than not-found', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('gh release view')) {
+        throw new Error('gh: To use GitHub CLI in automation, set GH_TOKEN.');
+      }
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(
+      /Failed to verify release v1\.2\.3 on GitHub/,
+    );
+  });
+
+  it('CLI dispatch: exits 3 (benign refusal) when the version has shipped', () => {
+    // Exit 3 is the marker the release workflow uses to keep this
+    // decisive, benign refusal out of the release-failed notification.
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('npm view')) return '1.2.3';
+      return notFoundAnywhere(command);
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(3);
+    expect(logSpy).toHaveBeenCalledWith(
+      `::error::${refusalMessage(PUBLISHED_PACKAGES.join(', '))}`,
+    );
+  });
+
+  it('CLI dispatch: exits 2 (not the refusal marker) when a probe fails', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('npm view')) {
+        throw new Error('npm error code ETIMEDOUT');
+      }
+      return notFoundAnywhere(command);
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(2);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('::error::Failed to verify'),
+    );
+  });
+
+  it('CLI dispatch: exits 2 (not the refusal marker) on a missing version', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli({ 'assert-unreleased': '' })).toBe(2);
+    expect(logSpy).toHaveBeenCalledWith(
+      '::error::assert-unreleased requires a version, e.g. --assert-unreleased=1.2.3',
+    );
+  });
+
+  it('CLI dispatch: exits 0 when the version has not shipped', () => {
+    vi.mocked(execSync).mockImplementation(notFoundAnywhere);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(0);
+    expect(logSpy).not.toHaveBeenCalled();
   });
 });

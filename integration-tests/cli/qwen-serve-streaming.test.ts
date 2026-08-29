@@ -27,6 +27,9 @@
  *   5. A same-host ACP child reads text outside the workspace only after the
  *      daemon permission request is approved, and never returns the content
  *      after rejection.
+ *   6. Built-in text writes approved by the tool permission layer can commit
+ *      outside the workspace without falling back to shell, while rejection
+ *      still prevents the final ACP write and YOLO needs no second prompt.
  *
  */
 import { spawn, execSync, type ChildProcess } from 'node:child_process';
@@ -35,6 +38,8 @@ import {
   constants,
   mkdirSync,
   mkdtempSync,
+  existsSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -43,7 +48,10 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { isPathWithinRoot } from '@qwen-code/qwen-code-core';
+import {
+  isPathWithinRoot,
+  TURN_RESULT_TEXT_MAX_CHARS,
+} from '@qwen-code/qwen-code-core';
 import { DaemonClient, parseSseStream } from '@qwen-code/sdk';
 import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
 import {
@@ -157,6 +165,9 @@ let pendingWritePath = '';
 let pendingReadPath = '';
 let pendingReadMarker = '';
 let pendingReadSentinel = '';
+let pendingExternalWritePath = '';
+let pendingExternalWriteMarker = '';
+let pendingExternalWriteSentinel = '';
 
 beforeAll(async () => {
   if (SKIP) return;
@@ -186,6 +197,32 @@ beforeAll(async () => {
       return { content: 'The test Todo remains unfinished.' };
     }
 
+    if (messages.includes('turn-final-answer-boundary-e2e')) {
+      const toolCallId = 'call_turn_final_answer_boundary';
+      if (!messages.includes(toolCallId)) {
+        return {
+          content: 'I will inspect the fixture first. ',
+          toolCalls: [
+            fakeToolCall(
+              'read_file',
+              {
+                file_path: path.join(
+                  workspaceDir,
+                  'turn-final-answer-boundary.txt',
+                ),
+              },
+              toolCallId,
+            ),
+          ],
+        };
+      }
+      return { content: 'The strict final answer is 42.' };
+    }
+
+    if (messages.includes('turn-result-truncation-e2e')) {
+      return { content: 'z'.repeat(TURN_RESULT_TEXT_MAX_CHARS + 100) };
+    }
+
     if (pendingWritePath && messages.includes('fan-out') && !hasToolResult) {
       return {
         toolCalls: [
@@ -195,6 +232,24 @@ beforeAll(async () => {
           }),
         ],
       };
+    }
+
+    if (
+      pendingExternalWritePath &&
+      pendingExternalWriteMarker &&
+      messages.includes(pendingExternalWriteMarker)
+    ) {
+      if (!hasToolResult) {
+        return {
+          toolCalls: [
+            fakeToolCall('write_file', {
+              file_path: pendingExternalWritePath,
+              content: pendingExternalWriteSentinel,
+            }),
+          ],
+        };
+      }
+      return { content: 'external write completed' };
     }
 
     if (
@@ -246,6 +301,10 @@ beforeAll(async () => {
     }),
   );
   workspaceDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-ws-'));
+  writeFileSync(
+    path.join(workspaceDir, 'turn-final-answer-boundary.txt'),
+    '42',
+  );
   daemon = spawn(
     process.execPath,
     [
@@ -362,6 +421,121 @@ async function* sseFrames(
   // wants to abort mid-stream.
   yield* parseSseStream(res.body!, opts.signal);
 }
+
+async function turnStatus(
+  sessionId: string,
+  promptId: string,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(
+    `${base}/session/${sessionId}/turns/${promptId}`,
+    { headers: { Authorization: `Bearer ${TOKEN}` } },
+  );
+  if (!response.ok) return { status: response.status };
+  return (await response.json()) as Record<string, unknown>;
+}
+
+describePOSIX('qwen serve — pollable turn results', () => {
+  it('returns only the final parent answer after a tool boundary', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    await client.setSessionApprovalMode(session.sessionId, 'yolo');
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: 'turn-final-answer-boundary-e2e' }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          state: 'completed',
+          stopReason: 'end_turn',
+          resultText: 'The strict final answer is 42.',
+        });
+    } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 60_000);
+
+  it('reports truncation through the stable result code', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: 'turn-result-truncation-e2e' }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          state: 'completed',
+          resultTruncated: true,
+          resultCode: 'RESULT_TEXT_TRUNCATED',
+        });
+      const status = await turnStatus(session.sessionId, accepted.promptId);
+      expect(status['resultText']).toHaveLength(TURN_RESULT_TEXT_MAX_CHARS);
+    } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 60_000);
+
+  it('reads a settled result after a normal Session reload', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: 'turn-result-reload-e2e' }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          state: 'completed',
+          stopReason: 'end_turn',
+          resultText: 'fake response complete',
+        });
+
+      await client.closeSession(session.sessionId);
+      await client.loadSession(session.sessionId, {
+        workspaceCwd: workspaceDir,
+      });
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          state: 'completed',
+          stopReason: 'end_turn',
+          resultText: 'fake response complete',
+        });
+    } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 60_000);
+});
 
 describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
   it('publishes session_died after the qwen --acp child is SIGKILL-ed', async () => {
@@ -725,6 +899,164 @@ describePOSIX('qwen serve — same-host external text reads', () => {
   }, 150_000);
 });
 
+describePOSIX('qwen serve — same-host external built-in text writes', () => {
+  async function runExternalWrite(
+    mode: 'allow_once' | 'reject_once' | 'yolo',
+  ): Promise<void> {
+    const suffix = `${mode}-${Date.now()}`;
+    const marker = `external-write-${suffix}`;
+    const sentinel = `external-write-sentinel-${suffix}`;
+    const externalPath = path.join(externalReadDir, `${suffix}.txt`);
+    pendingExternalWritePath = externalPath;
+    pendingExternalWriteMarker = marker;
+    pendingExternalWriteSentinel = sentinel;
+
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    await client.setSessionApprovalMode(
+      session.sessionId,
+      mode === 'yolo' ? 'yolo' : 'default',
+    );
+
+    const events: DaemonEvent[] = [];
+    const ac = new AbortController();
+    let promptId: string | undefined;
+    const subscriber = (async () => {
+      try {
+        for await (const event of sseFrames(session.sessionId, {
+          signal: ac.signal,
+        })) {
+          events.push(event);
+          const data = event.data as { promptId?: string } | undefined;
+          if (event.type === 'turn_complete' && data?.promptId === promptId) {
+            break;
+          }
+        }
+      } catch {
+        /* aborted */
+      }
+    })();
+    const findWritePermission = () =>
+      events.find((event) => {
+        if (event.type !== 'permission_request') return false;
+        const data = event.data as {
+          toolCall?: {
+            rawInput?: { file_path?: string };
+            _meta?: { toolName?: string };
+          };
+        };
+        return (
+          data.toolCall?._meta?.toolName === 'write_file' &&
+          data.toolCall.rawInput?.file_path === externalPath
+        );
+      });
+    const hasToolStatus = (status: 'completed' | 'failed') =>
+      events.some((event) => {
+        if (event.type !== 'session_update') return false;
+        const data = event.data as {
+          update?: {
+            sessionUpdate?: string;
+            status?: string;
+            _meta?: { toolName?: string };
+          };
+        };
+        return (
+          data.update?.sessionUpdate === 'tool_call_update' &&
+          data.update._meta?.toolName === 'write_file' &&
+          data.update.status === status
+        );
+      });
+
+    const requestStart = fakeServer.requests.length;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: marker }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+      promptId = accepted.promptId;
+
+      if (mode !== 'yolo') {
+        await expect
+          .poll(findWritePermission, { timeout: 30_000 })
+          .toBeDefined();
+        const permission = findWritePermission();
+        const permissionData = permission!.data as {
+          requestId: string;
+          options: Array<{ optionId: string; kind: string }>;
+        };
+        const optionId = permissionData.options.find(
+          (option) => option.kind === mode,
+        )?.optionId;
+        expect(optionId).toBeDefined();
+        expect(
+          await client.respondToPermission(permissionData.requestId, {
+            outcome: { outcome: 'selected', optionId: optionId! },
+          }),
+        ).toBe(true);
+      }
+
+      await expect
+        .poll(
+          () =>
+            events.some((event) => {
+              const data = event.data as { promptId?: string } | undefined;
+              return (
+                event.type === 'turn_complete' && data?.promptId === promptId
+              );
+            }),
+          { timeout: 30_000 },
+        )
+        .toBe(true);
+
+      const modelRequests = fakeServer.requests
+        .slice(requestStart)
+        .map((request) => JSON.stringify(request.body['messages'] ?? []))
+        .filter((messages) => messages.includes(marker));
+      const serializedEvents = JSON.stringify(events);
+
+      if (mode === 'reject_once') {
+        expect(modelRequests).toHaveLength(1);
+        expect(existsSync(externalPath)).toBe(false);
+        expect(hasToolStatus('failed')).toBe(true);
+      } else {
+        expect(modelRequests.length).toBeGreaterThanOrEqual(2);
+        expect(readFileSync(externalPath, 'utf8')).toBe(sentinel);
+        expect(hasToolStatus('completed')).toBe(true);
+      }
+      if (mode === 'yolo') {
+        expect(
+          events.some((event) => event.type === 'permission_request'),
+        ).toBe(false);
+      }
+      expect(serializedEvents).not.toContain('"toolName":"shell"');
+    } finally {
+      await client.cancel(session.sessionId).catch(() => undefined);
+      ac.abort();
+      await subscriber;
+      await client.closeSession(session.sessionId).catch(() => undefined);
+      pendingExternalWritePath = '';
+      pendingExternalWriteMarker = '';
+      pendingExternalWriteSentinel = '';
+      rmSync(externalPath, { force: true });
+    }
+  }
+
+  it('closes approve/reject/YOLO write authorization without shell fallback', async (ctx) => {
+    if (!externalReadDir) {
+      ctx.skip('no writable fixture root outside the workspace and /tmp');
+    }
+    await runExternalWrite('allow_once');
+    await runExternalWrite('reject_once');
+    await runExternalWrite('yolo');
+  }, 180_000);
+});
+
 describePOSIX('qwen serve — Last-Event-ID resume', () => {
   it('reconnect with Last-Event-ID:N yields events with id > N', async () => {
     const session = await client.createOrAttachSession({
@@ -769,6 +1101,78 @@ describePOSIX('qwen serve — Last-Event-ID resume', () => {
     expect(resumedFirst!.id).toBeDefined();
     expect(resumedFirst!.id!).toBeGreaterThan(lastId);
   }, 60_000);
+});
+
+describePOSIX('qwen serve — historical Assistant response branch', () => {
+  it('creates, opens, and continues a branch through the real daemon', async () => {
+    const source = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    const first = await client.prompt(source.sessionId, {
+      prompt: [{ type: 'text', text: 'historical branch turn one' }],
+    });
+    expect(first.branchPoint).toBeDefined();
+    if (!first.branchPoint) return;
+
+    await client.prompt(source.sessionId, {
+      prompt: [{ type: 'text', text: 'historical branch turn two' }],
+    });
+    await client.prompt(source.sessionId, {
+      prompt: [{ type: 'text', text: 'historical branch turn three' }],
+    });
+
+    const branched = await client.branchSession(source.sessionId, {
+      atRecordId: first.branchPoint.checkpointUuid,
+    });
+    const branchBeforeContinue = await client.getSessionTranscriptPage(
+      branched.sessionId,
+      { limit: 500 },
+    );
+    const branchBeforeText = JSON.stringify(branchBeforeContinue.events);
+    expect(branchBeforeText).toContain('historical branch turn one');
+    expect(branchBeforeText).not.toContain('historical branch turn two');
+    expect(branchBeforeText).not.toContain('historical branch turn three');
+
+    const sourceAfterBranch = await client.getSessionTranscriptPage(
+      source.sessionId,
+      { limit: 500 },
+    );
+    const sourceText = JSON.stringify(sourceAfterBranch.events);
+    expect(sourceText).toContain('historical branch turn one');
+    expect(sourceText).toContain('historical branch turn two');
+    expect(sourceText).toContain('historical branch turn three');
+
+    const loadedBranch = await client.loadSession(branched.sessionId);
+    await client.prompt(
+      branched.sessionId,
+      {
+        prompt: [{ type: 'text', text: 'continue the historical branch' }],
+      },
+      undefined,
+      loadedBranch.clientId,
+    );
+    const branchAfterContinue = await client.getSessionTranscriptPage(
+      branched.sessionId,
+      { limit: 500 },
+    );
+    expect(JSON.stringify(branchAfterContinue.events)).toContain(
+      'continue the historical branch',
+    );
+
+    // The source session must stay untouched by the fork's continuation.
+    const sourceAfterContinue = await client.getSessionTranscriptPage(
+      source.sessionId,
+      { limit: 500 },
+    );
+    const sourceAfterContinueText = JSON.stringify(sourceAfterContinue.events);
+    expect(sourceAfterContinueText).not.toContain(
+      'continue the historical branch',
+    );
+    expect(sourceAfterContinueText).toContain('historical branch turn one');
+    expect(sourceAfterContinueText).toContain('historical branch turn two');
+    expect(sourceAfterContinueText).toContain('historical branch turn three');
+  }, 90_000);
 });
 
 describePOSIX('qwen serve — daemon Todo Stop Guard replay', () => {

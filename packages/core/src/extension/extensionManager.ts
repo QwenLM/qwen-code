@@ -7,19 +7,19 @@
 import type {
   MCPServerConfig,
   ExtensionInstallMetadata,
-  SkillConfig,
-  SubagentConfig,
-  ClaudeMarketplaceConfig,
-} from '../index.js';
+} from '../config/config.js';
+import { Config } from '../config/config.js';
+import type { SkillConfig } from '../skills/types.js';
+import type { SubagentConfig } from '../subagents/types.js';
+import type { ClaudeMarketplaceConfig } from './claude-converter.js';
 import type { HookEventName, HookDefinition } from '../hooks/types.js';
+import { Storage } from '../config/storage.js';
 import {
-  Storage,
-  Config,
   logExtensionEnable,
   logExtensionInstallEvent,
   logExtensionUninstall,
   logExtensionDisable,
-} from '../index.js';
+} from '../telemetry/loggers.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -40,10 +40,13 @@ import {
   cloneFromGit,
   downloadFromArchiveUrl,
   downloadFromGitHubRelease,
+  downloadPublicGitHubArchiveFallback,
   extractArchiveFile,
   isSupportedArchivePath,
   parseGitHubRepoForReleases,
+  shouldUsePublicGitHubArchiveFallback,
 } from './github.js';
+import { assertDirectorySymlinksAreSafe } from './archive-safety.js';
 import { downloadFromNpmRegistry } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
 import type { LoadExtensionContext } from './variableSchema.js';
@@ -65,7 +68,7 @@ import {
 } from './marketplace.js';
 import { convertCompatibleExtension } from './extension-converter.js';
 import { glob } from 'glob';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { ExtensionStorage } from './storage.js';
 import {
   resolveExtensionConfigLocale,
@@ -103,11 +106,39 @@ import {
   ExtensionStore,
   type ExtensionActivation,
   type ExtensionActivationResult,
+  type ExtensionIdentity,
   type ExtensionStoreSnapshot,
   type InitialExtensionActivation,
+  type WorkspaceActivation,
 } from './extension-store.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  getAgentPluginSchemaStatus,
+  loadAgentPluginManifest,
+  loadAgentPluginMcpServers,
+  loadAgentPluginSkills,
+} from './agent-plugins-v1/index.js';
+import { resolveContainedExistingPath } from './agent-plugins-v1/paths.js';
+import {
+  prepareStoredGitCredential,
+  prepareStoredGitCredentialDeletion,
+  removeGitCredentialSelector,
+  resolveStoredGitCredential,
+  writeGitCredentialSelector,
+  type ExtensionGitCredential,
+  type ExtensionGitCredentialSelector,
+  type PreparedStoredGitCredential,
+} from './extension-git-credentials.js';
+import type { TokenStorageType } from '../mcp/token-storage/types.js';
 
 const debugLogger = createDebugLogger('EXTENSIONS');
+
+export type ExtensionPackageFormat = 'qwen' | 'agent-plugins-v1';
+
+interface LoadedExtensionManifest {
+  format: ExtensionPackageFormat;
+  config: ExtensionConfig;
+}
 
 // ============================================================================
 // Types and Interfaces
@@ -137,6 +168,7 @@ export interface Extension {
   isActive: boolean;
   path: string;
   config: ExtensionConfig;
+  format?: ExtensionPackageFormat;
   installMetadata?: ExtensionInstallMetadata;
 
   mcpServers?: Record<string, MCPServerConfig>;
@@ -251,6 +283,7 @@ export interface ExtensionManagerOptions {
 export interface PrepareExtensionInstallOptions {
   installMetadata: ExtensionInstallMetadata;
   initialActivation: InitialExtensionActivation;
+  gitCredential?: ExtensionGitCredential;
   localSourcePath?: string;
   requestConsent?: (options?: ExtensionRequestOptions) => Promise<void>;
   requestSetting?: (setting: ExtensionSetting) => Promise<string>;
@@ -289,7 +322,15 @@ export interface PreparedExtensionMutation {
   /** @internal */
   readonly discardSettings?: () => Promise<void>;
   /** @internal */
+  readonly credentialStorage?: TokenStorageType;
+  /** @internal */
+  readonly commitGitCredential?: () => void;
+  /** @internal */
+  readonly discardGitCredential?: () => Promise<void>;
+  /** @internal */
   settingsActivated: boolean;
+  /** @internal */
+  gitCredentialActivated: boolean;
   /** @internal */
   consumed: boolean;
   /** @internal */
@@ -306,6 +347,7 @@ export interface CommittedExtensionMutation {
 
 export interface ExtensionStoreMutationResult extends ExtensionStoreSnapshot {
   warnings?: Array<{ code: string; error: string }>;
+  updated?: boolean;
 }
 
 export type ExtensionCommitCallback = (generation: number) => void;
@@ -326,6 +368,19 @@ export class InvalidPreparedExtensionError extends Error {
     super('Prepared extension mutation does not belong to this manager.');
     this.name = 'InvalidPreparedExtensionError';
   }
+}
+
+export class ExtensionNotUpdatableError extends Error {
+  readonly code = 'extension_not_updatable';
+
+  constructor(name: string) {
+    super(`Extension "${name}" is not remotely updatable.`);
+    this.name = 'ExtensionNotUpdatableError';
+  }
+}
+
+interface RuntimeGitCredential extends ExtensionGitCredential {
+  selector?: ExtensionGitCredentialSelector;
 }
 
 export interface ExtensionMutationEvent {
@@ -732,10 +787,22 @@ export class ExtensionManager {
     workspacePath: string = this.workspaceDir,
   ): ExtensionActivationResult {
     const extension = this.findExtensionById(extensionId);
+    return this.getExtensionActivationForIdentityFromSnapshot(
+      { id: extension.id, name: extension.name },
+      snapshot,
+      workspacePath,
+    );
+  }
+
+  getExtensionActivationForIdentityFromSnapshot(
+    identity: ExtensionIdentity,
+    snapshot: ExtensionStoreSnapshot,
+    workspacePath: string = this.workspaceDir,
+  ): ExtensionActivationResult {
     const activation = this.extensionStore.getActivation(
       snapshot,
-      extension.id,
-      extension.name,
+      identity.id,
+      identity.name,
       workspacePath,
     );
     if (this.enabledExtensionNamesOverride.length === 0) {
@@ -743,9 +810,35 @@ export class ExtensionManager {
     }
     return {
       ...activation,
-      effective: this.isEnabled(extension.name) ? 'enabled' : 'disabled',
+      effective: this.isEnabled(identity.name) ? 'enabled' : 'disabled',
       source: 'cli_override',
     };
+  }
+
+  getExtensionActivationForNameFromSnapshot(
+    name: string,
+    snapshot: ExtensionStoreSnapshot,
+    workspacePath: string = this.workspaceDir,
+  ): ExtensionActivationResult {
+    const entry = Object.entries(snapshot.extensions).find(
+      ([, policy]) => policy.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (!entry) {
+      const cliOverride = this.enabledExtensionNamesOverride.length > 0;
+      return {
+        default: 'enabled',
+        workspace: 'inherit',
+        effective:
+          cliOverride && !this.isEnabled(name) ? 'disabled' : 'enabled',
+        source: cliOverride ? 'cli_override' : 'default',
+      };
+    }
+    const [id, policy] = entry;
+    return this.getExtensionActivationForIdentityFromSnapshot(
+      { id, name: policy.name },
+      snapshot,
+      workspacePath,
+    );
   }
 
   async setExtensionDefaultActivation(
@@ -763,6 +856,29 @@ export class ExtensionManager {
       onCommitted?.(snapshot.generation);
       this.applyStoreActivation(snapshot);
       const warning = await this.refreshToolsAfterActivation(extension.name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
+    } finally {
+      endMutation();
+    }
+  }
+
+  async setExtensionDefaultActivations(
+    names: readonly string[],
+    activation: ExtensionActivation,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const endMutation = this.beginMutation('setExtensionDefaultActivations');
+    try {
+      const identities = this.resolveBatchExtensionIdentities(names);
+      const snapshot = await this.extensionStore.setDefaultActivations(
+        identities,
+        activation,
+      );
+      onCommitted?.(snapshot.generation);
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(
+        `${identities.length} extensions`,
+      );
       return warning ? { ...snapshot, warnings: [warning] } : snapshot;
     } finally {
       endMutation();
@@ -811,6 +927,65 @@ export class ExtensionManager {
     } finally {
       endMutation();
     }
+  }
+
+  async setExtensionWorkspaceActivations(
+    names: readonly string[],
+    workspacePath: string,
+    activation: WorkspaceActivation,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const endMutation = this.beginMutation('setExtensionWorkspaceActivations');
+    try {
+      const identities = this.resolveBatchExtensionIdentities(names);
+      let snapshot: ExtensionStoreSnapshot;
+      let updated = true;
+      if (activation === 'inherit') {
+        const outcome = await this.extensionStore.clearWorkspaceActivations(
+          identities,
+          workspacePath,
+        );
+        snapshot = outcome.snapshot;
+        updated = outcome.updated;
+      } else {
+        snapshot = await this.extensionStore.setWorkspaceActivations(
+          identities,
+          workspacePath,
+          activation,
+        );
+      }
+      if (!updated) {
+        this.applyStoreActivation(snapshot);
+        return { ...snapshot, updated: false };
+      }
+      onCommitted?.(snapshot.generation);
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(
+        `${identities.length} extensions`,
+      );
+      return warning
+        ? { ...snapshot, updated: true, warnings: [warning] }
+        : { ...snapshot, updated: true };
+    } finally {
+      endMutation();
+    }
+  }
+
+  private resolveBatchExtensionIdentities(
+    names: readonly string[],
+  ): ExtensionIdentity[] {
+    const loadedByName = new Map(
+      this.getLoadedExtensions().map((extension) => [
+        extension.name.toLowerCase(),
+        extension,
+      ]),
+    );
+    return names.map((name) => {
+      const loaded = loadedByName.get(name.toLowerCase());
+      return loaded
+        ? { id: loaded.id, name: loaded.name }
+        : { id: hashValue(name.toLowerCase()), name };
+    });
   }
 
   async clearExtensionWorkspaceActivation(
@@ -1135,9 +1310,9 @@ export class ExtensionManager {
     return snapshot;
   }
 
-  private static stampPath(target: string): string {
+  private static stampPath(target: string, followSymlinks = true): string {
     try {
-      const stats = fs.statSync(target);
+      const stats = followSymlinks ? fs.statSync(target) : fs.lstatSync(target);
       return `${stats.mtimeMs}:${stats.size}`;
     } catch {
       // Absent is a real state and must not collide with any present one —
@@ -1155,10 +1330,11 @@ export class ExtensionManager {
    * A refresh never writes these paths, which is what makes it safe to commit
    * the pre-load value — see `refreshCacheWithSnapshot`.
    *
-   * Deliberately cheap: one `readdir` plus one `stat` per entry, where
-   * `refreshCache()` parses every manifest and re-lists every extension skill
-   * directory. That difference is what lets a status read stay self-healing
-   * without becoming a directory scan.
+   * Deliberately cheap: one `readdir`, one manifest `stat` per entry, and a
+   * sidecar read for linked entries, where `refreshCache()` parses every
+   * manifest and re-lists every extension skill directory. That difference is
+   * what lets a status read stay self-healing without becoming a directory
+   * scan.
    *
    * mtime-and-size is the usual stat-based approximation, so an edit that
    * preserves both is not detected. That is acceptable here: this is only the
@@ -1174,8 +1350,33 @@ export class ExtensionManager {
     }
     const parts: string[] = [];
     for (const entry of entries) {
+      const extensionRoot = path.join(this.configDir, entry);
+      const installMetadata = this.loadInstallMetadata(extensionRoot);
+      const effectiveRoot =
+        installMetadata?.type === 'link' &&
+        typeof installMetadata.source === 'string' &&
+        installMetadata.source.length > 0
+          ? installMetadata.source
+          : extensionRoot;
+      const manifestName =
+        getAgentPluginSchemaStatus(effectiveRoot) === 'unrelated'
+          ? EXTENSIONS_CONFIG_FILENAME
+          : AGENT_PLUGIN_MANIFEST;
+      let manifestPath = path.join(effectiveRoot, manifestName);
+      let followManifestSymlink = true;
+      if (manifestName === AGENT_PLUGIN_MANIFEST) {
+        try {
+          manifestPath = resolveContainedExistingPath(
+            effectiveRoot,
+            manifestPath,
+          );
+        } catch {
+          followManifestSymlink = false;
+        }
+      }
       const stamp = ExtensionManager.stampPath(
-        path.join(this.configDir, entry, EXTENSIONS_CONFIG_FILENAME),
+        manifestPath,
+        followManifestSymlink,
       );
       // Entries with no manifest are not extensions — notably the enablement
       // file, which lives in this directory and is created lazily by the store.
@@ -1336,20 +1537,37 @@ export class ExtensionManager {
     const installMetadata = this.loadInstallMetadata(extensionDir);
     let effectiveExtensionPath = extensionDir;
 
-    if (installMetadata?.type === 'link') {
+    if (
+      installMetadata?.type === 'link' &&
+      typeof installMetadata.source === 'string' &&
+      installMetadata.source.length > 0
+    ) {
       effectiveExtensionPath = installMetadata.source;
     }
 
     try {
-      let config = this.loadExtensionConfig({
+      const loadedManifest = this.loadExtensionManifest({
         extensionDir: effectiveExtensionPath,
         workspaceDir,
       });
-
-      config = resolveEnvVarsInObject(config);
+      let config = loadedManifest.config;
+      if (loadedManifest.format === 'qwen') {
+        config = resolveEnvVarsInObject(config);
+      }
+      const extensionId = getExtensionId(config, installMetadata);
+      if (loadedManifest.format === 'agent-plugins-v1') {
+        config = {
+          ...config,
+          mcpServers: await loadAgentPluginMcpServers(
+            effectiveExtensionPath,
+            this.extensionStore.agentPluginDataRoot(extensionId),
+            { createDataDir: true },
+          ),
+        };
+      }
 
       const extension: Extension = {
-        id: getExtensionId(config, installMetadata),
+        id: extensionId,
         name: config.name,
         displayName: config.displayName,
         version:
@@ -1357,6 +1575,7 @@ export class ExtensionManager {
           installMetadata?.marketplaceConfig?.metadata?.version ||
           '1.0.0',
         path: effectiveExtensionPath,
+        format: loadedManifest.format,
         installMetadata,
         isActive: this.isEnabled(config.name, this.workspaceDir),
         config,
@@ -1373,28 +1592,36 @@ export class ExtensionManager {
         );
       }
 
-      if (config.channels) {
+      if (loadedManifest.format === 'qwen' && config.channels) {
         extension.channels = config.channels;
       }
 
-      extension.commands = await loadCommandsFromDir(
-        `${effectiveExtensionPath}/commands`,
-      );
+      if (loadedManifest.format === 'agent-plugins-v1') {
+        extension.commands = [];
+        extension.skills = await loadAgentPluginSkills(effectiveExtensionPath);
+        extension.agents = [];
+      } else {
+        extension.commands = await loadCommandsFromDir(
+          `${effectiveExtensionPath}/commands`,
+        );
+        extension.contextFiles = getContextFileNames(config)
+          .map((contextFileName) =>
+            path.join(effectiveExtensionPath, contextFileName),
+          )
+          .filter((contextFilePath) => fs.existsSync(contextFilePath));
+        extension.skills = await loadSkillsFromDir(
+          `${effectiveExtensionPath}/skills`,
+        );
+        extension.agents = await loadSubagentFromDir(
+          `${effectiveExtensionPath}/agents`,
+        );
+      }
 
-      extension.contextFiles = getContextFileNames(config)
-        .map((contextFileName) =>
-          path.join(effectiveExtensionPath, contextFileName),
-        )
-        .filter((contextFilePath) => fs.existsSync(contextFilePath));
-
-      extension.skills = await loadSkillsFromDir(
-        `${effectiveExtensionPath}/skills`,
-      );
-      extension.agents = await loadSubagentFromDir(
-        `${effectiveExtensionPath}/agents`,
-      );
-
-      if (config.hooks && typeof config.hooks !== 'string') {
+      if (
+        loadedManifest.format === 'qwen' &&
+        config.hooks &&
+        typeof config.hooks !== 'string'
+      ) {
         // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
         extension.hooks = this.substituteHookVariables(
           config.hooks,
@@ -1403,7 +1630,7 @@ export class ExtensionManager {
       }
 
       // Also load hooks from hooks directory or from config.hooks string path if available and not already set
-      if (!extension.hooks) {
+      if (loadedManifest.format === 'qwen' && !extension.hooks) {
         const hooksDir = path.join(effectiveExtensionPath, 'hooks');
         const hooksJsonPath = path.join(hooksDir, 'hooks.json');
 
@@ -1488,7 +1715,27 @@ export class ExtensionManager {
   }
 
   loadExtensionConfig(context: LoadExtensionContext): ExtensionConfig {
+    return this.loadExtensionManifest(context).config;
+  }
+
+  private loadExtensionManifest(
+    context: LoadExtensionContext,
+  ): LoadedExtensionManifest {
     const { extensionDir, workspaceDir = this.workspaceDir } = context;
+    const agentPluginStatus = getAgentPluginSchemaStatus(extensionDir);
+    if (agentPluginStatus !== 'unrelated') {
+      try {
+        return {
+          format: 'agent-plugins-v1',
+          config: loadAgentPluginManifest(extensionDir),
+        };
+      } catch (error) {
+        throw new Error(
+          `Failed to load Agent Plugins manifest from ${path.join(extensionDir, 'plugin.json')}: ${getErrorMessage(error)}`,
+        );
+      }
+    }
+
     const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
     if (!fs.existsSync(configFilePath)) {
       throw new Error(`Configuration file not found at ${configFilePath}`);
@@ -1512,7 +1759,7 @@ export class ExtensionManager {
       }
       validateName(config.name);
       validateExtensionSettingEnvVars(config.settings);
-      return config;
+      return { format: 'qwen', config };
     } catch (e) {
       throw new Error(
         `Failed to load extension config from ${configFilePath}: ${getErrorMessage(
@@ -1607,6 +1854,7 @@ export class ExtensionManager {
       true,
       false,
       options.localSourcePath,
+      options.gitCredential,
     )) as PreparedExtensionMutation;
   }
 
@@ -1618,9 +1866,21 @@ export class ExtensionManager {
     if (!installMetadata?.type || installMetadata.type === 'link') {
       throw new Error(`Extension ${extension.name} cannot be updated.`);
     }
+    if (installMetadata.type === 'snapshot') {
+      throw new ExtensionNotUpdatableError(extension.name);
+    }
     const previousConfig = this.loadExtensionConfig({
       extensionDir: extension.path,
     });
+    let gitCredential: RuntimeGitCredential | undefined;
+    if (installMetadata.credentialPersistence === 'stored') {
+      const stored = await resolveStoredGitCredential(extension.path);
+      gitCredential = {
+        ...stored.credential,
+        persistence: 'stored',
+        selector: stored.selector,
+      };
+    }
     return (await this.installExtensionInternal(
       { ...installMetadata },
       undefined,
@@ -1631,6 +1891,8 @@ export class ExtensionManager {
       signal,
       true,
       false,
+      undefined,
+      gitCredential,
     )) as PreparedExtensionMutation;
   }
 
@@ -1654,6 +1916,9 @@ export class ExtensionManager {
     );
     if (state === ExtensionUpdateState.UP_TO_DATE) {
       return { upToDate: true, extension: options.extension };
+    }
+    if (state === ExtensionUpdateState.NOT_UPDATABLE) {
+      throw new ExtensionNotUpdatableError(options.extension.name);
     }
     if (state !== ExtensionUpdateState.UPDATE_AVAILABLE) {
       throw new Error(
@@ -1684,18 +1949,34 @@ export class ExtensionManager {
     prepareOnly: boolean,
     emitMutation: boolean,
     localSourcePathOverride?: string,
+    gitCredential?: RuntimeGitCredential,
   ): Promise<Extension | PreparedExtensionMutation> {
     if (localSourcePathOverride && installMetadata.type !== 'local') {
       throw new Error('A local source path requires a local install.');
     }
     installMetadata = this.withNetworkPolicy(installMetadata)!;
+    const remoteGitInstall =
+      installMetadata.type === 'git' ||
+      installMetadata.type === 'github-release';
+    if (gitCredential && !remoteGitInstall) {
+      throw new Error('Git credentials require an HTTPS Git install source.');
+    }
+    if (gitCredential?.persistence === 'one_time' && previousExtensionConfig) {
+      throw new ExtensionNotUpdatableError(previousExtensionConfig.name);
+    }
+    if (gitCredential && !installMetadata.installId) {
+      installMetadata.installId = randomBytes(32).toString('hex');
+    }
     const currentDir = cwd ?? this.workspaceDir;
     const telemetryConfig = getTelemetryConfig(
       currentDir,
       this.telemetrySettings,
     );
     let extension: Extension | null;
-    const redactedInstallSource = redactUrlCredentials(installMetadata.source);
+    const redactedInstallSource =
+      gitCredential?.persistence === 'one_time'
+        ? 'credentialed HTTPS Git source'
+        : redactUrlCredentials(installMetadata.source);
 
     const isUpdate = !!previousExtensionConfig;
     const expectedArtifactGeneration = previousExtensionConfig
@@ -1708,7 +1989,9 @@ export class ExtensionManager {
     let tempDir: string | undefined;
     let convertedSourcePath: string | undefined;
     let stagingPath: string | undefined;
+    let archiveSymlinksValidated = false;
     let preparedSettings: PreparedExtensionSettingsMutation | undefined;
+    let preparedGitCredential: PreparedStoredGitCredential | undefined;
 
     let ownershipTransferred = false;
     const endMutation = emitMutation
@@ -1751,37 +2034,55 @@ export class ExtensionManager {
         installMetadata.type === 'github-release'
       ) {
         tempDir = await ExtensionStorage.createTmpDir();
-        try {
-          const result = await downloadFromGitHubRelease(
-            installMetadata,
-            tempDir,
-            signal,
-          );
-          if (
-            installMetadata.type === 'git' ||
-            installMetadata.type === 'github-release'
-          ) {
-            installMetadata.type = result.type;
-            installMetadata.releaseTag = result.tagName;
-          }
-        } catch (_error) {
-          signal?.throwIfAborted();
-          // downloadFromGitHubRelease may have written a partial archive or
-          // extracted files into tempDir before failing (e.g. a repo whose
-          // latest release is a source tarball that isn't a valid extension
-          // archive). Reusing that dirty directory makes `git clone` fail with
-          // "destination path '.' already exists and is not an empty directory".
-          // Recreate a clean tempDir before falling back to a plain clone.
-          // See #6334.
-          await fs.promises.rm(tempDir, { recursive: true, force: true });
-          await fs.promises.mkdir(tempDir, { recursive: true });
+        if (gitCredential) {
+          installMetadata.type = 'git';
+          installMetadata.releaseTag = undefined;
           installMetadata.gitCommit = await cloneFromGit(
             installMetadata,
             tempDir,
             signal,
+            gitCredential,
+            gitCredential.persistence === 'one_time',
           );
-          if (installMetadata.type === 'github-release') {
-            installMetadata.type = 'git';
+        } else {
+          try {
+            const result = await downloadFromGitHubRelease(
+              installMetadata,
+              tempDir,
+              signal,
+            );
+            if (
+              installMetadata.type === 'git' ||
+              installMetadata.type === 'github-release'
+            ) {
+              installMetadata.type = result.type;
+              installMetadata.releaseTag = result.tagName;
+            }
+          } catch (_error) {
+            signal?.throwIfAborted();
+            // Release extraction may leave a partial destination behind.
+            await fs.promises.rm(tempDir, { recursive: true, force: true });
+            await fs.promises.mkdir(tempDir, { recursive: true });
+            // Keep release-first for older Git too: the archive fallback is
+            // only a clone replacement, not a release replacement.
+            if (await shouldUsePublicGitHubArchiveFallback(installMetadata)) {
+              installMetadata.gitCommit =
+                await downloadPublicGitHubArchiveFallback(
+                  installMetadata,
+                  tempDir,
+                  signal,
+                );
+              archiveSymlinksValidated = true;
+            } else {
+              installMetadata.gitCommit = await cloneFromGit(
+                installMetadata,
+                tempDir,
+                signal,
+              );
+              if (installMetadata.type === 'github-release') {
+                installMetadata.type = 'git';
+              }
+            }
           }
         }
         localSourcePath = tempDir;
@@ -1845,10 +2146,40 @@ export class ExtensionManager {
           installMetadata.gitCommit = undefined;
         }
 
+        if (gitCredential?.persistence === 'stored') {
+          installMetadata.type = 'git';
+          installMetadata.credentialPersistence = 'stored';
+        } else if (
+          gitCredential?.persistence === 'one_time' &&
+          !previousExtensionConfig
+        ) {
+          installMetadata = {
+            source: 'snapshot',
+            type: 'snapshot',
+            installId: installMetadata.installId,
+            ...(originSource ? { originSource } : {}),
+            ...(externalContent ? { externalContent: true } : {}),
+            ...(installMetadata.pluginName
+              ? { pluginName: installMetadata.pluginName }
+              : {}),
+          };
+        }
+
         newExtensionConfig = this.loadExtensionConfig({
           extensionDir: localSourcePath,
           workspaceDir: currentDir,
         });
+        const isAgentPlugin = originSource === 'AgentPlugins';
+        const extensionId = getExtensionId(newExtensionConfig, installMetadata);
+        if (isAgentPlugin) {
+          newExtensionConfig = {
+            ...newExtensionConfig,
+            mcpServers: await loadAgentPluginMcpServers(
+              localSourcePath,
+              this.extensionStore.agentPluginDataRoot(extensionId),
+            ),
+          };
+        }
 
         if (isUpdate && installMetadata.autoUpdate) {
           const oldSettings = new Set(
@@ -1884,17 +2215,19 @@ export class ExtensionManager {
           );
         }
 
-        const commands = await loadCommandsFromDir(
-          `${localSourcePath}/commands`,
-        );
+        const commands = isAgentPlugin
+          ? []
+          : await loadCommandsFromDir(`${localSourcePath}/commands`);
         const previousCommands = previous?.commands ?? [];
 
-        const skills = await loadSkillsFromDir(`${localSourcePath}/skills`);
+        const skills = isAgentPlugin
+          ? await loadAgentPluginSkills(localSourcePath)
+          : await loadSkillsFromDir(`${localSourcePath}/skills`);
         const previousSkills = previous?.skills ?? [];
 
-        const subagents = await loadSubagentFromDir(
-          `${localSourcePath}/agents`,
-        );
+        const subagents = isAgentPlugin
+          ? []
+          : await loadSubagentFromDir(`${localSourcePath}/agents`);
         const previousSubagents = previous?.agents ?? [];
 
         if (requestConsent) {
@@ -1907,7 +2240,7 @@ export class ExtensionManager {
             previousCommands,
             previousSkills,
             previousSubagents,
-            originSource: installMetadata.originSource,
+            originSource,
           });
         } else {
           await this.requestConsent({
@@ -1919,12 +2252,11 @@ export class ExtensionManager {
             previousCommands,
             previousSkills,
             previousSubagents,
-            originSource: installMetadata.originSource,
+            originSource,
           });
         }
 
         const destinationPath = path.join(this.configDir, newExtensionName);
-        const extensionId = getExtensionId(newExtensionConfig, installMetadata);
         if (isUpdate && previous?.id !== extensionId) {
           throw new Error(
             `Extension "${newExtensionName}" changed its stable id during update.`,
@@ -1940,7 +2272,41 @@ export class ExtensionManager {
         stagingPath = await this.extensionStore.createStagingDirectory();
 
         if (installMetadata.type !== 'link') {
-          await copyExtension(localSourcePath, stagingPath);
+          if (
+            archiveSymlinksValidated &&
+            localSourcePath !== sourceBeforeConversion
+          ) {
+            // archiveSymlinksValidated was only ever proven for
+            // sourceBeforeConversion. `isAgentPlugin` is true only when
+            // convertCompatibleExtension left the directory unchanged
+            // (extension-converter.ts's AgentPlugins branch never reassigns
+            // its output dir), so gating this on `isAgentPlugin` as well
+            // would make it unreachable: every branch that actually moves
+            // the tree sets a different originSource. A converter that
+            // restructures the tree while preserving symlinks (today's
+            // Gemini/Claude/Qoder converters materialize links instead, but
+            // that's not an invariant) would otherwise carry stale trust
+            // onto a directory that was never actually checked.
+            await assertDirectorySymlinksAreSafe(localSourcePath, signal);
+          }
+          await copyExtension(localSourcePath, stagingPath, {
+            skipSymlinks: isAgentPlugin && !archiveSymlinksValidated,
+            excludeRootGitDirectory: remoteGitInstall,
+          });
+        }
+        await removeGitCredentialSelector(stagingPath);
+        if (gitCredential?.persistence === 'stored') {
+          if (gitCredential.selector) {
+            await writeGitCredentialSelector(
+              stagingPath,
+              gitCredential.selector,
+            );
+          } else {
+            preparedGitCredential = await prepareStoredGitCredential(
+              stagingPath,
+              gitCredential,
+            );
+          }
         }
 
         if (isUpdate) {
@@ -2035,7 +2401,17 @@ export class ExtensionManager {
                   discardSettings: preparedSettings.discard,
                 }
               : {}),
+            ...(preparedGitCredential
+              ? {
+                  credentialStorage: preparedGitCredential.storageType,
+                  commitGitCredential: preparedGitCredential.commit,
+                  discardGitCredential: preparedGitCredential.discard,
+                }
+              : gitCredential?.selector
+                ? { credentialStorage: gitCredential.selector.backend }
+                : {}),
             settingsActivated: false,
+            gitCredentialActivated: false,
             consumed: false,
             disposed: false,
           };
@@ -2053,6 +2429,8 @@ export class ExtensionManager {
             ? {}
             : { expectedArtifactGeneration }),
         });
+        preparedGitCredential?.commit();
+        preparedGitCredential = undefined;
         await preparedSettings?.commit().catch((error) => {
           debugLogger.warn(
             `Extension "${newExtensionName}" settings compatibility cleanup failed: ${getErrorMessage(error)}`,
@@ -2120,7 +2498,7 @@ export class ExtensionManager {
             new ExtensionInstallEvent(
               newExtensionConfig.name,
               newExtensionConfig!.version,
-              redactUrlCredentials(installMetadata.source),
+              redactedInstallSource,
               'success',
             ),
           );
@@ -2132,6 +2510,13 @@ export class ExtensionManager {
           );
         });
       } finally {
+        if (!ownershipTransferred && preparedGitCredential) {
+          await preparedGitCredential.discard().catch((error) => {
+            debugLogger.warn(
+              `Failed to discard prepared extension Git credentials: ${getErrorMessage(error)}`,
+            );
+          });
+        }
         if (!ownershipTransferred && preparedSettings) {
           await preparedSettings.discard().catch((error) => {
             debugLogger.warn(
@@ -2216,7 +2601,7 @@ export class ExtensionManager {
           new ExtensionInstallEvent(
             newExtensionConfig?.name ?? '',
             newExtensionConfig?.version ?? '',
-            redactUrlCredentials(installMetadata.source),
+            redactedInstallSource,
             'error',
           ),
         );
@@ -2287,6 +2672,8 @@ export class ExtensionManager {
                   prepared.expectedArtifactGeneration ?? 0,
               }),
         });
+        prepared.commitGitCredential?.();
+        prepared.gitCredentialActivated = true;
         prepared.settingsActivated = true;
       } catch (error) {
         const telemetryConfig = getTelemetryConfig(
@@ -2423,7 +2810,14 @@ export class ExtensionManager {
       !prepared.settingsActivated && prepared.discardSettings
         ? await Promise.allSettled([prepared.discardSettings()])
         : [];
+    const credentialCleanup =
+      !prepared.gitCredentialActivated && prepared.discardGitCredential
+        ? await Promise.allSettled([prepared.discardGitCredential()])
+        : [];
     const settingsErrors = settingsCleanup.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : [],
+    );
+    const credentialErrors = credentialCleanup.flatMap((result) =>
       result.status === 'rejected' ? [result.reason] : [],
     );
     const paths = [prepared.stagingDirectory, ...prepared.cleanupPaths];
@@ -2442,7 +2836,7 @@ export class ExtensionManager {
         (_target, index) => results[index]?.status === 'rejected',
       );
     }
-    const errors = [...settingsErrors, ...pathErrors];
+    const errors = [...settingsErrors, ...credentialErrors, ...pathErrors];
     prepared.disposed = errors.length === 0;
     return errors;
   }
@@ -2482,6 +2876,7 @@ export class ExtensionManager {
         isUpdate,
         telemetryConfig,
         onCommitted,
+        extension.installMetadata?.credentialPersistence === 'stored',
       );
     } finally {
       endMutation();
@@ -2498,18 +2893,24 @@ export class ExtensionManager {
     try {
       const snapshot = await this.extensionStore.readSnapshot();
       const policy = snapshot.extensions[extensionId];
-      if (!policy) return snapshot;
+      if (!policy || policy.declarationOnly) return snapshot;
       const extension = this.getLoadedExtensions().find(
         (candidate) => candidate.id === extensionId,
       );
-      return await this.uninstallExtensionPolicy(
-        { id: extensionId, name: policy.name },
+      const destinationDirectory =
         extension && extension.installMetadata?.type !== 'link'
           ? extension.path
-          : path.join(this.configDir, policy.name),
+          : path.join(this.configDir, policy.name);
+      const installMetadata =
+        extension?.installMetadata ??
+        this.loadInstallMetadata(destinationDirectory);
+      return await this.uninstallExtensionPolicy(
+        { id: extensionId, name: policy.name },
+        destinationDirectory,
         isUpdate,
         getTelemetryConfig(cwd ?? this.workspaceDir, this.telemetrySettings),
         onCommitted,
+        installMetadata?.credentialPersistence === 'stored',
       );
     } finally {
       endMutation();
@@ -2522,7 +2923,18 @@ export class ExtensionManager {
     isUpdate: boolean,
     telemetryConfig: Config,
     onCommitted?: ExtensionCommitCallback,
+    hasStoredGitCredential = false,
   ): Promise<ExtensionStoreMutationResult> {
+    let deleteGitCredential: (() => Promise<void>) | undefined;
+    let credentialCleanupError: unknown;
+    if (hasStoredGitCredential && !isUpdate) {
+      try {
+        deleteGitCredential =
+          await prepareStoredGitCredentialDeletion(destinationDirectory);
+      } catch (error) {
+        credentialCleanupError = error;
+      }
+    }
     const snapshot = await this.extensionStore.commitArtifact({
       operation: 'uninstall',
       identity,
@@ -2532,6 +2944,19 @@ export class ExtensionManager {
     this.extensionCache?.delete(identity.name);
     if (isUpdate) return snapshot;
     const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> = [];
+    if (deleteGitCredential) {
+      try {
+        await deleteGitCredential();
+      } catch (error) {
+        credentialCleanupError = error;
+      }
+    }
+    if (credentialCleanupError) {
+      warnings.push({
+        code: 'extension_credential_cleanup_failed',
+        error: getErrorMessage(credentialCleanupError),
+      });
+    }
     try {
       this.preferencesStore.clear(identity.name);
     } catch (error) {
@@ -2653,6 +3078,10 @@ export class ExtensionManager {
         `Extension ${extension.name} cannot be updated, type is unknown.`,
       );
     }
+    if (installMetadata.type === 'snapshot') {
+      callback(extension.name, ExtensionUpdateState.NOT_UPDATABLE);
+      throw new ExtensionNotUpdatableError(extension.name);
+    }
     if (installMetadata?.type === 'link') {
       callback(extension.name, ExtensionUpdateState.UP_TO_DATE);
       throw new Error(`Extension is linked so does not need to be updated`);
@@ -2737,13 +3166,29 @@ export class ExtensionManager {
 export async function copyExtension(
   source: string,
   destination: string,
+  options: {
+    skipSymlinks?: boolean;
+    excludeRootGitDirectory?: boolean;
+  } = {},
 ): Promise<void> {
-  await fs.promises.cp(source, destination, {
+  const copySource = options.skipSymlinks
+    ? await fs.promises.realpath(source)
+    : source;
+  await fs.promises.cp(copySource, destination, {
     recursive: true,
-    dereference: true,
+    dereference: !options.skipSymlinks,
     filter: async (src: string) => {
       try {
-        const stats = await fs.promises.stat(src);
+        if (
+          options.excludeRootGitDirectory &&
+          path.relative(copySource, src) === '.git'
+        ) {
+          return false;
+        }
+        const stats = options.skipSymlinks
+          ? await fs.promises.lstat(src)
+          : await fs.promises.stat(src);
+        if (options.skipSymlinks && stats.isSymbolicLink()) return false;
         // Only copy regular files and directories
         // Skip sockets, FIFOs, block devices, and character devices
         return stats.isFile() || stats.isDirectory();
@@ -2759,6 +3204,16 @@ export function getExtensionId(
   config: ExtensionConfig,
   installMetadata?: ExtensionInstallMetadata,
 ): string {
+  if (
+    installMetadata?.installId &&
+    (installMetadata.type === 'snapshot' ||
+      installMetadata.credentialPersistence === 'stored')
+  ) {
+    if (!/^[a-f0-9]{64}$/.test(installMetadata.installId)) {
+      throw new Error('Stored extension install id is invalid.');
+    }
+    return installMetadata.installId;
+  }
   let idValue = config.name;
   let githubUrlParts = null;
   if (

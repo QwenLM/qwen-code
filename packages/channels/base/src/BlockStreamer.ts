@@ -22,7 +22,10 @@ export interface BlockStreamerOptions {
   maxChars: number;
   /** Emit buffered text after this many ms of inactivity. Default: 1500. */
   idleMs: number;
-  /** Callback to deliver a completed block. Called with trimmed text. */
+  /**
+   * Callback to deliver a completed block. Called with trimmed text, plus
+   * one restored trailing newline when the block ended at a line break.
+   */
   send: (text: string) => Promise<void>;
 }
 
@@ -66,6 +69,11 @@ export class BlockStreamer {
     this.buffer = '';
   }
 
+  /** Await already-queued sends without emitting the buffered text. */
+  async drain(): Promise<void> {
+    await this.sending;
+  }
+
   // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
@@ -99,9 +107,13 @@ export class BlockStreamer {
   private emitBlock(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) return;
+    // Restore the line terminator trim removed when the block ended at one:
+    // consumers that track line boundaries (redaction projectors) must be
+    // able to close the line the real newline ended.
+    const block = /\n[^\S\n]*$/.test(text) ? `${trimmed}\n` : trimmed;
     this.blockCount++;
     this.sending = this.sending
-      .then(() => this.opts.send(trimmed))
+      .then(() => this.opts.send(block))
       .catch(() => {});
   }
 

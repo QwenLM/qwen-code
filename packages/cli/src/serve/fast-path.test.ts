@@ -396,8 +396,8 @@ describe('CLI entry import boundary', () => {
   it('does not statically import the full gemini entry before the serve fast path can run', () => {
     const cliSource = readFileSync('src/cli.ts', 'utf8');
 
-    expect(cliSource).not.toContain("import './gemini.js'");
-    expect(cliSource).not.toContain("import { main } from './gemini.js'");
+    expect(cliSource).not.toContain("import './llm.js'");
+    expect(cliSource).not.toContain("import { main } from './llm.js'");
     expect(cliSource).not.toContain("process.argv[2] === 'serve'");
     expect(cliSource).toContain("await import('./serve/fast-path.js')");
   });
@@ -536,6 +536,7 @@ describe('serve fast path argument parsing', () => {
 
     expect(parsed).toEqual({
       kind: 'serve',
+      openWithAuth: false,
       httpBridge: true,
       open: false,
       options: {
@@ -691,6 +692,9 @@ describe('serve fast path argument parsing', () => {
       ['tls-key', ['--tls-key', '/tmp/key.pem']],
       ['web', ['--no-web']],
       ['open', ['--open']],
+      ['open-with-auth', ['--open-with-auth']],
+      ['local-control', ['--local-control']],
+      ['local-control-address', ['--local-control-address', '192.168.1.2']],
       ['http-bridge', ['--no-http-bridge']],
       ['memory-budget-mb', ['--memory-budget-mb', '8192']],
       ['memory-pressure-mode', ['--memory-pressure-mode', 'observe']],
@@ -703,6 +707,7 @@ describe('serve fast path argument parsing', () => {
       ['writer-idle-timeout-ms', ['--writer-idle-timeout-ms', '1000']],
       ['channel-idle-timeout-ms', ['--channel-idle-timeout-ms', '1000']],
       ['initialize-timeout-ms', ['--initialize-timeout-ms', '30000']],
+      ['session-restore-timeout-ms', ['--session-restore-timeout-ms', '60000']],
       ['session-reap-interval-ms', ['--session-reap-interval-ms', '1000']],
       ['session-idle-timeout-ms', ['--session-idle-timeout-ms', '1000']],
       [
@@ -715,6 +720,7 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['restore-ask-user-question', ['--restore-ask-user-question']],
       ['external-tool-guard-mode', ['--external-tool-guard-mode', 'off']],
       [
         'external-tool-guard-endpoint',
@@ -734,6 +740,8 @@ describe('serve fast path argument parsing', () => {
       'external-tool-guard-mode',
       'external-tool-guard-timeout-ms',
       'help',
+      'local-control',
+      'local-control-address',
       'version',
     ]);
 
@@ -840,6 +848,38 @@ describe('serve fast path argument parsing', () => {
     expect(parsed).toMatchObject({
       kind: 'serve',
       options: { experimentalLsp: true },
+    });
+  });
+
+  it('keeps --restore-ask-user-question on the fast path', () => {
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--restore-ask-user-question',
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: { restoreAskUserQuestion: true },
+    });
+  });
+
+  it('keeps authenticated open on the fast path', () => {
+    const parsed = parseServeFastPathArgs(['serve', '--open-with-auth']);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      open: true,
+      openWithAuth: true,
+    });
+  });
+
+  it('lets authenticated open imply --open regardless of --no-open', () => {
+    expect(
+      parseServeFastPathArgs(['serve', '--open-with-auth', '--no-open']),
+    ).toMatchObject({
+      kind: 'serve',
+      open: true,
+      openWithAuth: true,
     });
   });
 
@@ -1892,6 +1932,51 @@ describe('serve fast path environment bootstrap', () => {
     }
   });
 
+  // The fast-path settings.env loop rejects hardcoded exclusions through the
+  // case-folded isHardcodedProjectEnvExclusion predicate. Every other
+  // settings.env fixture uses loader/allowlisted keys, so a regression to
+  // exact-case membership would ship green — this pins a lowercase hardcoded
+  // key (the entrypoint hijack) being rejected from settings.env.
+  it('never applies a case-variant hardcoded exclusion from settings.env on the fast path', () => {
+    useTempQwenHome();
+    const trackedKeys = [
+      'QWEN_CLI_ENTRY',
+      'qwen_cli_entry',
+      'node_extra_ca_certs',
+    ] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-hardcoded-')),
+    );
+
+    try {
+      loadServeFastPathEnvironment(
+        {
+          env: {
+            qwen_cli_entry: '/workspace-a/evil-entry-lower.js',
+            node_extra_ca_certs: '/workspace-a/evil-ca.pem',
+          },
+        },
+        tempWorkspace,
+      );
+      expect(process.env['qwen_cli_entry']).toBeUndefined();
+      expect(process.env['QWEN_CLI_ENTRY']).toBeUndefined();
+      expect(process.env['node_extra_ca_certs']).toBeUndefined();
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+  });
+
   // Daemon-side loadSettings() skips the .env load for untrusted workspaces
   // and only re-runs it later for trusted ones, so a loader key rejected at
   // boot would vanish without a breadcrumb unless the fast path reports it.
@@ -2008,6 +2093,11 @@ describe('serve fast path environment bootstrap', () => {
     writeFileSync(join(secondWorkspace, '.env'), 'LD_PRELOAD=/hijack.so\n');
 
     try {
+      // The stash is a module-global; drain any residue left by earlier tests
+      // so this exact-match assertion does not depend on test declaration
+      // order (partial `-t` selection, --sequence.shuffle, or a new load-
+      // bearing test inserted before this one).
+      consumeServeFastPathRejectedLoaderKeys();
       loadServeFastPathEnvironment({}, firstWorkspace);
       loadServeFastPathEnvironment(
         { env: { LD_PRELOAD: '/hijack.so', NODE_OPTIONS: '--inspect' } },
@@ -2126,6 +2216,39 @@ describe('serve fast path environment bootstrap', () => {
     await bootstrapServeFastPathEnvironment(subDir);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-trusted-child-env');
+  });
+
+  it('does not load a distrusted parent .env for a trusted child workspace', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trusted-child-')),
+    );
+    const childWorkspace = join(tempWorkspace, 'child');
+    mkdirSync(childWorkspace);
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'QWEN_SERVER_TOKEN=from-distrusted-parent-env\n',
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({
+        [tempWorkspace]: TrustLevel.DO_NOT_TRUST,
+        [childWorkspace]: TrustLevel.TRUST_FOLDER,
+      }),
+    );
+
+    await bootstrapServeFastPathEnvironment(childWorkspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('treats TRUST_PARENT as trusting the containing folder', async () => {

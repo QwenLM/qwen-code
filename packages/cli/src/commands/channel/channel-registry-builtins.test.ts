@@ -52,7 +52,7 @@ describe('built-in channel registry', () => {
     expect(catalog.map((entry) => entry.type)).toContain('gitlab');
     expect(
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),
-    ).toEqual(['wecom', 'feishu', 'github', 'gitlab']);
+    ).toEqual(['dws', 'wecom', 'feishu', 'github', 'gitlab']);
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining(
         'Invalid management metadata in "dingtalk" channel: Channel field "settings" cannot be a required object.',
@@ -108,18 +108,27 @@ describe('built-in channel registry', () => {
     const entry = (await supportedChannelCatalog()).find(
       (candidate) => candidate.type === 'valid-nested-type-key',
     );
-    expect(entry).toEqual({
+    expect(entry).toMatchObject({
       type: 'valid-nested-type-key',
       displayName: 'valid-nested-type-key',
       manageable: true,
-      fields: [
-        {
-          key: 'settings',
-          label: 'Settings',
-          kind: 'object',
-          properties: [{ key: 'type', label: 'Type', kind: 'string' }],
-        },
-      ],
     });
+    expect(entry?.fields[0]).toEqual({
+      key: 'settings',
+      label: 'Settings',
+      kind: 'object',
+      properties: [{ key: 'type', label: 'Type', kind: 'string' }],
+    });
+    expect(entry?.fields.map((field) => field.key)).toEqual([
+      'settings',
+      'senderPolicy',
+      'allowedUsers',
+      'groupPolicy',
+      'sessionScope',
+      'multiSession',
+    ]);
+    expect(
+      entry?.fields.find((field) => field.key === 'senderPolicy'),
+    ).toMatchObject({ default: 'pairing' });
   });
 });

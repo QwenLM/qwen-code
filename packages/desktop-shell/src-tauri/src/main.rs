@@ -3,26 +3,39 @@
 mod desktop_state;
 mod runtime;
 
+use command_group::GroupChild;
 use desktop_state::{default_window_size, restore_window, SettingsStore};
-use runtime::{resolve_workspace, DesktopRuntime};
+use runtime::{resolve_workspace, stop_runtime_handle, DesktopRuntime};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
 use tauri::{
     AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WebviewWindow,
     WindowEvent,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_updater::{Update, UpdaterExt};
 use url::Url;
 
 #[cfg(target_os = "windows")]
 const BOOTSTRAP_URL: &str = "http://tauri.localhost";
 #[cfg(not(target_os = "windows"))]
 const BOOTSTRAP_URL: &str = "tauri://localhost";
+#[cfg(target_os = "macos")]
+static FULLSCREEN_HIDE_PENDING: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static FULLSCREEN_HIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
+// Keep the default first-launch workspace aligned with the Electron shell's
+// getDefaultConversationWorkspacePath() in
+// packages/desktop/packages/shared/src/config/storage.ts: ~/Documents/Qwen,
+// relocatable through QWEN_DEFAULT_WORKSPACE_DIR (see default_workspace).
+const DEFAULT_WORKSPACE_DIRECTORY: &str = "Qwen";
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,12 +53,31 @@ struct RuntimeStopped {
     status: String,
 }
 
+// A runtime that has spawned but may still be inside DesktopRuntime::start's
+// startup wait. Shares the child handle with the DesktopRuntime it becomes,
+// so a stop during that window kills the in-flight daemon instead of
+// orphaning it in its own process group.
+struct PendingRuntime {
+    generation: u64,
+    child: Arc<Mutex<Option<GroupChild>>>,
+    stopping: Arc<AtomicBool>,
+}
+
+impl PendingRuntime {
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        stop_runtime_handle(&self.child);
+    }
+}
+
 struct ApplicationState {
     runtime: Mutex<Option<DesktopRuntime>>,
+    pending_runtime: Mutex<Option<PendingRuntime>>,
     settings: SettingsStore,
     log_path: PathBuf,
     origin: Arc<Mutex<Option<Url>>>,
     last_error: Mutex<Option<String>>,
+    last_workspace: Mutex<Option<(PathBuf, bool)>>,
     window_dirty: AtomicBool,
     start_generation: AtomicU64,
     starting: AtomicU64,
@@ -84,12 +116,62 @@ fn main() {
                     .window_dirty
                     .store(true, Ordering::Relaxed);
             }
+            #[cfg(target_os = "macos")]
+            WindowEvent::Focused(true) => {
+                cancel_pending_fullscreen_hide();
+            }
+            #[cfg(target_os = "macos")]
+            WindowEvent::CloseRequested { api, .. } => {
+                save_window_state(app_handle);
+                api.prevent_close();
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    if FULLSCREEN_HIDE_PENDING.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if window.is_fullscreen().unwrap_or(false) {
+                        if window.set_fullscreen(false).is_err() {
+                            FULLSCREEN_HIDE_PENDING.store(false, Ordering::Release);
+                            return;
+                        }
+                        let hide_generation =
+                            FULLSCREEN_HIDE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+                        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Release);
+                        let app = app_handle.clone();
+                        let win = window.clone();
+                        // ponytail: remove this delay when Tauri exposes fullscreen-exit events.
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            let _ = app.run_on_main_thread(move || {
+                                if take_pending_fullscreen_hide(hide_generation) {
+                                    let _ = win.hide();
+                                }
+                            });
+                        });
+                    } else {
+                        let _ = window.hide();
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             WindowEvent::CloseRequested { .. } => save_window_state(app_handle),
             _ => {}
         },
         RunEvent::Exit | RunEvent::ExitRequested { .. } => {
             save_window_state(app_handle);
             stop_runtime(app_handle);
+        }
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } if should_restore_main_window(
+            has_visible_windows,
+            app_handle.get_webview_window("main").is_some_and(|window| {
+                !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false)
+            }),
+        ) =>
+        {
+            focus_main_window(app_handle)
         }
         _ => {}
     });
@@ -154,19 +236,25 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     handle.manage(ApplicationState {
         runtime: Mutex::new(None),
+        pending_runtime: Mutex::new(None),
         settings,
         log_path,
         origin,
         last_error: Mutex::new(None),
+        last_workspace: Mutex::new(None),
         window_dirty: AtomicBool::new(false),
         start_generation: AtomicU64::new(0),
         starting: AtomicU64::new(0),
     });
 
-    if let Some(workspace) = initial_workspace(&handle) {
-        start_runtime_async(handle.clone(), workspace);
-    } else {
-        let _ = handle.emit("workspace-required", ());
+    match initial_workspace(&handle) {
+        Ok((workspace, create_if_missing)) => {
+            start_runtime_async(handle.clone(), workspace, create_if_missing)
+        }
+        Err(error) => {
+            *lock(&handle.state::<ApplicationState>().last_error) = Some(error.clone());
+            let _ = handle.emit("runtime-failed", error);
+        }
     }
     check_updates_silently(handle.clone());
     spawn_window_state_flusher(handle);
@@ -181,6 +269,10 @@ fn bootstrap_state(
     require_bootstrap_origin(&webview)?;
     let starting = state.starting.load(Ordering::SeqCst) != 0;
     let running = lock(&state.runtime).is_some();
+    let workspace = bootstrap_workspace(
+        lock(&state.last_workspace).clone(),
+        state.settings.workspace(),
+    );
     Ok(BootstrapState {
         desktop_version: env!("CARGO_PKG_VERSION").to_string(),
         status: if running {
@@ -190,12 +282,18 @@ fn bootstrap_state(
         } else {
             "idle"
         },
-        workspace: state
-            .settings
-            .workspace()
-            .map(|path| path.to_string_lossy().into_owned()),
+        workspace: workspace.map(|path| path.to_string_lossy().into_owned()),
         error: lock(&state.last_error).clone(),
     })
+}
+
+fn bootstrap_workspace(
+    last_workspace: Option<(PathBuf, bool)>,
+    persisted_workspace: Option<PathBuf>,
+) -> Option<PathBuf> {
+    last_workspace
+        .map(|(workspace, _)| workspace)
+        .or(persisted_workspace)
 }
 
 #[tauri::command]
@@ -221,19 +319,19 @@ async fn choose_workspace(
     let workspace = folder
         .into_path()
         .map_err(|error| format!("Failed to read selected workspace: {error}"))?;
-    start_runtime_async(app, workspace.clone());
+    start_runtime_async(app, workspace.clone(), false);
     Ok(Some(workspace.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
 fn restart_runtime(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
     require_bootstrap_origin(&webview)?;
-    let workspace = app
-        .state::<ApplicationState>()
-        .settings
-        .workspace()
-        .ok_or_else(|| "Choose a workspace before starting Qwen Code.".to_string())?;
-    start_runtime_async(app, workspace);
+    let last_workspace = lock(&app.state::<ApplicationState>().last_workspace).clone();
+    let (workspace, create_if_missing) = match last_workspace {
+        Some(workspace) => workspace,
+        None => initial_workspace(&app)?,
+    };
+    start_runtime_async(app, workspace, create_if_missing);
     Ok(())
 }
 
@@ -258,12 +356,8 @@ fn open_logs(
 #[tauri::command]
 async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
     require_bootstrap_origin(&webview)?;
-    let update = app
-        .updater()
-        .map_err(|error| format!("Failed to initialize updater: {error}"))?
-        .check()
-        .await
-        .map_err(|error| format!("Failed to check for updates: {error}"))?
+    let update = check_for_update(&app)
+        .await?
         .ok_or_else(|| "No desktop update is available.".to_string())?;
     let version = update.version.clone();
     let confirmed = tauri::async_runtime::spawn_blocking({
@@ -295,18 +389,28 @@ async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), St
     Ok(())
 }
 
-fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
+fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bool) {
+    stop_runtime(&app);
     let generation = {
         let state = app.state::<ApplicationState>();
+        *lock(&state.last_workspace) = Some((workspace.clone(), create_if_missing));
         let generation = state.start_generation.fetch_add(1, Ordering::SeqCst) + 1;
         state.starting.store(generation, Ordering::SeqCst);
         generation
     };
-    stop_runtime(&app);
     *lock(&app.state::<ApplicationState>().last_error) = None;
     let _ = app.emit("runtime-starting", workspace.to_string_lossy().into_owned());
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<ApplicationState>();
+        // Creating the default workspace touches ~/Documents, which can raise
+        // the macOS TCC prompt, so it runs here (off the main thread) instead
+        // of during setup.
+        if create_if_missing {
+            if let Err(error) = ensure_workspace_dir(&workspace) {
+                emit_runtime_failure(&app, generation, error);
+                return;
+            }
+        }
         let canonical = match resolve_workspace(&workspace) {
             Ok(path) => path,
             Err(error) => {
@@ -318,16 +422,33 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
             emit_runtime_failure(&app, generation, error);
             return;
         }
-        match DesktopRuntime::start(&app, &canonical, &state.log_path) {
+        let registered = app.clone();
+        match DesktopRuntime::start(&app, &canonical, &state.log_path, move |child, stopping| {
+            let state = registered.state::<ApplicationState>();
+            let pending = PendingRuntime {
+                generation,
+                child,
+                stopping,
+            };
+            let mut slot = lock(&state.pending_runtime);
+            if state.start_generation.load(Ordering::SeqCst) == generation {
+                *slot = Some(pending);
+            } else {
+                drop(slot);
+                pending.stop();
+            }
+        }) {
             Ok(runtime) => {
                 if state.start_generation.load(Ordering::SeqCst) != generation {
                     runtime.stop();
+                    clear_pending_runtime(&state, generation);
                     return;
                 }
                 let origin = match origin_of(runtime.base_url()) {
                     Ok(origin) => origin,
                     Err(error) => {
                         runtime.stop();
+                        clear_pending_runtime(&state, generation);
                         emit_runtime_failure(&app, generation, error);
                         return;
                     }
@@ -335,6 +456,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
                 *lock(&state.origin) = Some(origin);
                 let Some(window) = app.get_webview_window("main") else {
                     runtime.stop();
+                    clear_pending_runtime(&state, generation);
                     emit_runtime_failure(
                         &app,
                         generation,
@@ -344,6 +466,7 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
                 };
                 if let Err(error) = window.navigate(runtime.authenticated_web_url()) {
                     runtime.stop();
+                    clear_pending_runtime(&state, generation);
                     emit_runtime_failure(
                         &app,
                         generation,
@@ -351,14 +474,28 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf) {
                     );
                     return;
                 }
-                *lock(&state.runtime) = Some(runtime);
-                state
+                let mut runtime_slot = lock(&state.runtime);
+                if state.start_generation.load(Ordering::SeqCst) != generation {
+                    drop(runtime_slot);
+                    runtime.stop();
+                    clear_pending_runtime(&state, generation);
+                    return;
+                }
+                *runtime_slot = Some(runtime);
+                drop(runtime_slot);
+                clear_pending_runtime(&state, generation);
+                if state
                     .starting
                     .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst)
-                    .ok();
-                let _ = app.emit("runtime-ready", canonical.to_string_lossy().into_owned());
+                    .is_ok()
+                {
+                    let _ = app.emit("runtime-ready", canonical.to_string_lossy().into_owned());
+                }
             }
-            Err(error) => emit_runtime_failure(&app, generation, error),
+            Err(error) => {
+                clear_pending_runtime(&state, generation);
+                emit_runtime_failure(&app, generation, error);
+            }
         }
     });
 }
@@ -379,15 +516,82 @@ fn emit_runtime_failure(app: &AppHandle, generation: u64, error: String) {
 }
 
 fn stop_runtime(app: &AppHandle) {
-    if let Some(runtime) = lock(&app.state::<ApplicationState>().runtime).take() {
+    let state = app.state::<ApplicationState>();
+    state.start_generation.fetch_add(1, Ordering::SeqCst);
+    state.starting.store(0, Ordering::SeqCst);
+    let runtime = lock(&state.runtime).take();
+    if let Some(runtime) = runtime {
         runtime.stop();
+    }
+    // Kill any daemon still inside DesktopRuntime::start's startup wait.
+    // Shares the child handle with a live runtime, so the take() inside
+    // stop_runtime_handle keeps this idempotent.
+    let pending = lock(&state.pending_runtime).take();
+    if let Some(pending) = pending {
+        pending.stop();
     }
 }
 
-fn initial_workspace(app: &AppHandle) -> Option<PathBuf> {
-    std::env::var_os("QWEN_DESKTOP_WORKSPACE")
+fn clear_pending_runtime(state: &ApplicationState, generation: u64) {
+    let mut pending = lock(&state.pending_runtime);
+    if pending.as_ref().map(|runtime| runtime.generation) == Some(generation) {
+        pending.take();
+    }
+}
+
+// Resolves the initial workspace and whether it is the derived first-launch
+// default that must be created before starting the runtime. Path resolution
+// only: directory creation happens off the main thread in start_runtime_async
+// because the first touch of ~/Documents can trigger the macOS TCC prompt.
+fn initial_workspace(app: &AppHandle) -> Result<(PathBuf, bool), String> {
+    if let Some(workspace) = std::env::var_os("QWEN_DESKTOP_WORKSPACE") {
+        return Ok((PathBuf::from(workspace), false));
+    }
+    if let Some(workspace) = app.state::<ApplicationState>().settings.workspace() {
+        return Ok((workspace, false));
+    }
+    default_workspace(app)
+}
+
+fn default_workspace(app: &AppHandle) -> Result<(PathBuf, bool), String> {
+    // Matches the Electron shell, where an empty override falls back to the
+    // ~/Documents/Qwen default.
+    let override_dir =
+        default_workspace_override_dir(std::env::var_os("QWEN_DEFAULT_WORKSPACE_DIR"));
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Failed to resolve the home directory: {error}"))?;
+    Ok((
+        default_workspace_path(&home, override_dir.as_deref()),
+        true,
+    ))
+}
+
+// An empty override is treated as unset so the ~/Documents/Qwen default wins,
+// mirroring the Electron shell's `||` fallback.
+fn default_workspace_override_dir(value: Option<OsString>) -> Option<PathBuf> {
+    value
         .map(PathBuf::from)
-        .or_else(|| app.state::<ApplicationState>().settings.workspace())
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn default_workspace_path(home: &Path, override_dir: Option<&Path>) -> PathBuf {
+    match override_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => home.join("Documents").join(DEFAULT_WORKSPACE_DIRECTORY),
+    }
+}
+
+// Creates the default workspace directory. Kept separate from path
+// resolution so it can run off the main thread and be tested on its own.
+fn ensure_workspace_dir(workspace: &Path) -> Result<(), String> {
+    fs::create_dir_all(workspace).map_err(|error| {
+        format!(
+            "Failed to create the default workspace {}: {error}",
+            workspace.display()
+        )
+    })
 }
 
 fn desktop_log_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -417,11 +621,30 @@ fn spawn_window_state_flusher(app: AppHandle) {
 }
 
 fn focus_main_window(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    cancel_pending_fullscreen_hide();
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+#[cfg(target_os = "macos")]
+fn cancel_pending_fullscreen_hide() {
+    FULLSCREEN_HIDE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    FULLSCREEN_HIDE_PENDING.store(false, Ordering::Release);
+}
+
+#[cfg(target_os = "macos")]
+fn take_pending_fullscreen_hide(generation: u64) -> bool {
+    FULLSCREEN_HIDE_GENERATION.load(Ordering::Acquire) == generation
+        && FULLSCREEN_HIDE_PENDING.swap(false, Ordering::AcqRel)
+}
+
+#[cfg(target_os = "macos")]
+fn should_restore_main_window(has_visible_windows: bool, main_needs_restore: bool) -> bool {
+    !has_visible_windows || main_needs_restore || FULLSCREEN_HIDE_PENDING.load(Ordering::Relaxed)
 }
 
 fn navigate_to_bootstrap(app: &AppHandle) -> Result<(), String> {
@@ -482,17 +705,14 @@ fn check_updates_silently(app: AppHandle) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        let updater = match app.updater() {
-            Ok(updater) => updater,
-            Err(_) => return,
-        };
-        let Ok(Some(update)) = updater.check().await else {
+        let Ok(Some(update)) = check_for_update(&app).await else {
             return;
         };
         let _ = app.emit("update-available", update.version.clone());
         let version = update.version.clone();
         let confirmed = tauri::async_runtime::spawn_blocking({
             let app = app.clone();
+            let version = version.clone();
             move || {
                 app.dialog()
                     .message(format!(
@@ -511,15 +731,35 @@ fn check_updates_silently(app: AppHandle) {
         if !matches!(confirmed, Ok(true)) {
             return;
         }
-        if update
-            .download_and_install(|_, _| {}, || {})
-            .await
-            .is_err()
-        {
+        if let Err(error) = update.download_and_install(|_, _| {}, || {}).await {
+            let _ = tauri::async_runtime::spawn_blocking({
+                let app = app.clone();
+                let version = version.clone();
+                move || {
+                    app.dialog()
+                        .message(format!(
+                            "Qwen Code Desktop {version} could not be installed.\n\n{error}\n\nSave your work before quitting. Reinstall Qwen Code if it does not reopen."
+                        ))
+                        .title("Qwen Code update failed")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show()
+                }
+            })
+            .await;
             return;
         }
         app.request_restart();
     });
+}
+
+async fn check_for_update(app: &AppHandle) -> Result<Option<Update>, String> {
+    app.updater_builder()
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .build()
+        .map_err(|error| format!("Failed to initialize updater: {error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("Failed to check for updates: {error}"))
 }
 
 fn is_safe_external_url(url: &Url) -> bool {
@@ -535,12 +775,80 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
     use super::{
-        is_allowed_navigation, is_bootstrap_url, is_safe_external_url, is_same_origin, origin_of,
-        BOOTSTRAP_URL,
+        cancel_pending_fullscreen_hide, should_restore_main_window, take_pending_fullscreen_hide,
+        FULLSCREEN_HIDE_GENERATION, FULLSCREEN_HIDE_PENDING,
     };
+    use super::{
+        bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
+        ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_safe_external_url,
+        is_same_origin, origin_of, BOOTSTRAP_URL,
+    };
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::PathBuf;
+    #[cfg(target_os = "macos")]
+    use std::sync::atomic::Ordering;
     use std::sync::Mutex;
     use url::Url;
+
+    #[test]
+    fn bootstrap_prefers_the_workspace_being_started() {
+        let attempted = PathBuf::from("/tmp/attempted");
+        let persisted = PathBuf::from("/tmp/persisted");
+        assert_eq!(
+            bootstrap_workspace(Some((attempted.clone(), false)), Some(persisted.clone())),
+            Some(attempted),
+        );
+        assert_eq!(
+            bootstrap_workspace(None, Some(persisted.clone())),
+            Some(persisted)
+        );
+        assert_eq!(
+            bootstrap_workspace(Some((PathBuf::from("/tmp/first-launch"), true)), None),
+            Some(PathBuf::from("/tmp/first-launch")),
+        );
+        assert_eq!(bootstrap_workspace(None, None), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fullscreen_hide_lifecycle_state() {
+        // has_visible, main_needs_restore, FULLSCREEN_PENDING → expected
+        let cases: &[(bool, bool, bool, bool)] = &[
+            (true, false, false, false),
+            (true, false, true, true),
+            (true, true, false, true),
+            (true, true, true, true),
+            (false, false, false, true),
+            (false, false, true, true),
+            (false, true, false, true),
+            (false, true, true, true),
+        ];
+        for (has_visible, needs_restore, pending, expected) in cases {
+            FULLSCREEN_HIDE_PENDING.store(*pending, Ordering::Relaxed);
+            assert_eq!(
+                should_restore_main_window(*has_visible, *needs_restore),
+                *expected,
+                "has_visible={}, needs_restore={}, pending={}",
+                has_visible,
+                needs_restore,
+                pending,
+            );
+        }
+        FULLSCREEN_HIDE_PENDING.store(false, Ordering::Relaxed);
+
+        FULLSCREEN_HIDE_GENERATION.store(0, Ordering::Relaxed);
+        let first_hide = FULLSCREEN_HIDE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Release);
+        cancel_pending_fullscreen_hide();
+        let second_hide = FULLSCREEN_HIDE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Release);
+        assert!(!take_pending_fullscreen_hide(first_hide));
+        assert!(FULLSCREEN_HIDE_PENDING.load(Ordering::Relaxed));
+        assert!(take_pending_fullscreen_hide(second_hide));
+    }
 
     #[test]
     fn allows_only_the_daemon_origin_in_the_main_window() {
@@ -557,6 +865,77 @@ mod tests {
             &Url::parse("https://example.com/").expect("external"),
             &origin,
         ));
+    }
+
+    #[test]
+    fn creates_and_reuses_the_default_workspace() {
+        let home = std::env::temp_dir().join(format!(
+            "qwen-desktop-default-workspace-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+
+        let workspace = default_workspace_path(&home, None);
+        assert_eq!(workspace, home.join("Documents/Qwen"));
+        ensure_workspace_dir(&workspace).expect("create workspace");
+        ensure_workspace_dir(&workspace).expect("reuse workspace");
+
+        assert!(workspace.is_dir());
+        fs::remove_dir_all(home).expect("cleanup");
+    }
+
+    #[test]
+    fn reports_an_uncreatable_default_workspace() {
+        let home = std::env::temp_dir().join(format!(
+            "qwen-desktop-default-workspace-error-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).expect("create home");
+        fs::write(home.join("Documents"), b"not a directory").expect("block Documents");
+
+        let workspace = default_workspace_path(&home, None);
+        assert!(ensure_workspace_dir(&workspace).is_err());
+        fs::remove_dir_all(home).expect("cleanup");
+    }
+
+    #[test]
+    fn treats_an_unset_or_empty_workspace_override_as_absent() {
+        assert_eq!(default_workspace_override_dir(None), None);
+        assert_eq!(default_workspace_override_dir(Some(OsString::new())), None);
+    }
+
+    #[test]
+    fn uses_a_non_empty_workspace_override_verbatim() {
+        let custom = PathBuf::from("/tmp/qwen-custom-workspace");
+        assert_eq!(
+            default_workspace_override_dir(Some(OsString::from(custom.clone()))),
+            Some(custom)
+        );
+    }
+
+    #[test]
+    fn honors_the_default_workspace_directory_override() {
+        let home = std::env::temp_dir().join(format!(
+            "qwen-desktop-default-workspace-override-home-{}",
+            std::process::id()
+        ));
+        let custom = std::env::temp_dir().join(format!(
+            "qwen-desktop-default-workspace-override-target-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        let _ = fs::remove_dir_all(&custom);
+        fs::create_dir_all(&home).expect("create home");
+
+        let workspace = default_workspace_path(&home, Some(&custom));
+        assert_eq!(workspace, custom);
+        ensure_workspace_dir(&workspace).expect("create override workspace");
+
+        assert!(custom.is_dir());
+        assert!(!home.join("Documents").exists());
+        fs::remove_dir_all(home).expect("cleanup home");
+        fs::remove_dir_all(custom).expect("cleanup override");
     }
 
     #[test]

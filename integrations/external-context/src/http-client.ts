@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const MAX_RESPONSE_BYTES = 1024 * 1024;
+export const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 class ProviderResponseError extends Error {
   constructor() {
@@ -119,14 +119,43 @@ async function readBoundedBody(response: Response): Promise<string> {
     throw new ProviderResponseError();
   }
 
+  // getReader(), not `for await`: async-iterating a ReadableStream needs
+  // [Symbol.asyncIterator] on the TYPE, and whether it is there depends on
+  // which lib set the program resolves — @types/node's stream has it, the
+  // DOM lib's needs lib.dom.asynciterable. That resolution flipped
+  // underneath this file once: installing @types/jsdom at the root (#8693)
+  // dragged lib.dom into this program and failed the build with TS2504 on
+  // this exact line. The reader API types identically in every lib set, so
+  // the build no longer depends on that resolution.
+  const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  for await (const chunk of response.body) {
-    total += chunk.byteLength;
-    if (total > MAX_RESPONSE_BYTES) {
-      throw new ProviderResponseError();
+  let finished = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        finished = true;
+        break;
+      }
+      if (value === undefined) {
+        continue;
+      }
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        throw new ProviderResponseError();
+      }
+      chunks.push(value);
     }
-    chunks.push(chunk);
+  } finally {
+    // Parity with `for await`, whose implicit iterator return() cancels the
+    // stream when the loop exits early (the oversize throw above) and is
+    // awaited before the error propagates — an immediate retry must not
+    // overlap this response's still-settling teardown.
+    if (!finished) {
+      await reader.cancel().catch(() => undefined);
+    }
+    reader.releaseLock();
   }
 
   const body = new Uint8Array(total);

@@ -284,6 +284,15 @@ function makeBridge(): ChannelAgentBridge {
 
 class TestWeComChannel extends WeComChannel {
   readonly envelopes: Envelope[] = [];
+  readonly preflightedInbound = vi.fn();
+
+  protected override async processPreflightedInbound(
+    envelope: Envelope,
+    process: () => Promise<void> = () => this.processInbound(envelope),
+  ): Promise<void> {
+    this.preflightedInbound(envelope);
+    await super.processPreflightedInbound(envelope, process);
+  }
 
   protected override async processInbound(envelope: Envelope): Promise<void> {
     this.envelopes.push(envelope);
@@ -428,6 +437,30 @@ describe('WeComChannel', () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     rmSync(join(tmpdir(), 'channel-files'), { recursive: true, force: true });
+  });
+
+  it('shares attachment routing across senders in chat_thread scope', () => {
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ sessionScope: 'chat_thread' }),
+      makeBridge(),
+    );
+    const routeKey = (
+      channel as unknown as {
+        attachmentRouteKey(
+          senderId: string,
+          chatId: string,
+          threadId?: string,
+        ): string;
+      }
+    ).attachmentRouteKey.bind(channel);
+
+    expect(routeKey('alice', 'chat-1', 'topic-1')).toBe(
+      routeKey('bob', 'chat-1', 'topic-1'),
+    );
+    expect(routeKey('alice', 'chat-1', 'topic-1')).not.toBe(
+      routeKey('alice', 'chat-2', 'topic-1'),
+    );
   });
 
   it('requires botId and secret', () => {
@@ -1946,6 +1979,7 @@ describe('WeComChannel', () => {
 
     client.emit('message.image', payload);
     await vi.waitFor(() => expect(mocks.lookup).toHaveBeenCalledTimes(1));
+    expect(channel.preflightedInbound).toHaveBeenCalledTimes(1);
     inspectable.disconnectGeneration += 1;
     releaseLookup?.([{ address: '93.184.216.34', family: 4 }]);
     await vi.waitFor(() =>
