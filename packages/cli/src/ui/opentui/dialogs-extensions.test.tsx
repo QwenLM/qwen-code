@@ -309,8 +309,12 @@ describe('OpenTuiExtensionsDialog management keys (#44)', () => {
     await press('down'); // uninstall
     await press('return'); // → uninstall-confirm
     expect(screen.getByText(/Are you sure you want to uninstall/)).toBeTruthy();
-    await press('n', 'n'); // back to detail (cursor stays on uninstall)
-    expect(onDetailAction).not.toHaveBeenCalledWith(ROWS[0], 'uninstall');
+    await press('n', 'n'); // back to detail (cursor re-syncs to 0 via resyncKey)
+    // Re-navigate to uninstall (cursor reset by resyncKey on view change).
+    await press('down'); // favorite
+    await press('down'); // change-scope
+    await press('down'); // mark-update
+    await press('down'); // uninstall
     await press('return'); // re-enter confirm
     await press('y', 'y'); // confirm
     expect(onDetailAction).toHaveBeenCalledWith(ROWS[0], 'uninstall');

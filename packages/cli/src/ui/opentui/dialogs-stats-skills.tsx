@@ -104,6 +104,16 @@ export function OpenTuiStatsDialog(props: {
 }) {
   const { config, onClose, isFocused = true } = props;
   const [tab, setTab] = useState<StatsTabName>('session');
+  // Re-render on every telemetry update so stats stay live while the dialog
+  // is open (ink re-renders via SessionStatsProvider's update event).
+  const [, forceUpdate] = useState(0);
+  useEffect(() => {
+    const handler = () => forceUpdate((n) => n + 1);
+    uiTelemetryService.on('update', handler);
+    return () => {
+      uiTelemetryService.off('update', handler);
+    };
+  }, []);
   useEscToClose(onClose, isFocused);
   useKeyboard((key) => {
     if (!isFocused) return;

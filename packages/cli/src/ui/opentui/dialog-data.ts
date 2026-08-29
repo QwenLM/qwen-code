@@ -31,6 +31,7 @@ import {
   getMCPServerStatus,
   isGatedMcpScope,
   isImageCapable,
+  isImageGenerationCapable,
   logModelSlashCommand,
   matchesAnyServerPattern,
   MCPOAuthProvider,
@@ -102,7 +103,10 @@ export function buildModelEntries(
   const entries: OpenTuiModelEntry[] = [];
   for (const model of allModels) {
     if (mode === 'image') {
-      if (model.isRuntimeModel || !model.imageOnly) continue;
+      // ink gates on isImageGenerationCapable (not just imageOnly): dual-role
+      // models with supportsImageGeneration and visionOnly image-capable
+      // models must both appear in the image selector.
+      if (model.isRuntimeModel || !isImageGenerationCapable(model)) continue;
       const selector = encodeVisionModelSelector(
         buildModelSelectionKey(model.authType, model.id, model.baseUrl),
       );

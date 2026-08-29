@@ -284,6 +284,10 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
 
   const detailSelect = useDialogSelect({
     items: detailActions,
+    // Re-sync the cursor when re-entering detail: the action list shrinks
+    // (checked-update state resets) so the stale activeIndex can be out of
+    // range — Enter would read items[5] = undefined.
+    resyncKey: view,
     numbers: false,
     focused: view === 'detail',
     onSelect: (action) => {
