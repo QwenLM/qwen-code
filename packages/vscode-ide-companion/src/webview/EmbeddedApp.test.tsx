@@ -88,6 +88,9 @@ vi.mock('@qwen-code/web-shell', async () => {
           return;
         }
         if (lastReportedError.current === message) return;
+        // App.tsx returns before stamping when no handler is attached, so a
+        // handler that appears later still receives the persistent error.
+        if (!unstableOnError) return;
         lastReportedError.current = message;
         mocks.errorNotifications.current += 1;
         if (mocks.errorNotifications.current > 3) {
@@ -95,7 +98,7 @@ vi.mock('@qwen-code/web-shell', async () => {
           // mirror ever regresses instead of hanging.
           throw new Error('onError notified in a loop');
         }
-        unstableOnError?.(new Error(message));
+        unstableOnError(new Error(message));
         // Delivering an error re-renders the host; force one extra effect
         // run under a fresh callback identity to mirror that churn.
         if (churn < 1) setChurn((count) => count + 1);
@@ -518,6 +521,34 @@ describe('EmbeddedApp host wiring', () => {
     const alerts = container.querySelectorAll('[role="alert"]');
     expect(alerts).toHaveLength(1);
     expect(alerts[0].textContent).toContain('daemon connection lost');
+  });
+
+  it('does not report or stamp an error while no onError handler is attached', async () => {
+    mocks.connectionError.current = 'daemon connection lost';
+    const { WebShellWithProviders } = await import('@qwen-code/web-shell');
+    const WebShell =
+      WebShellWithProviders as unknown as ComponentType<CapturedProps>;
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ container, root });
+
+    await act(async () => {
+      root.render(<WebShell />);
+      await Promise.resolve();
+    });
+    // App.tsx returns before stamping when no handler exists; the mirror must
+    // leave the error unreported and unstamped here.
+    expect(mocks.errorNotifications.current).toBe(0);
+
+    // Because nothing was stamped, a handler attached later still receives
+    // the persistent error exactly once.
+    await act(async () => {
+      root.render(<WebShell onError={() => {}} />);
+      await Promise.resolve();
+    });
+    expect(mocks.errorNotifications.current).toBe(1);
   });
 
   it('releases the panel when a session switch times out', async () => {
