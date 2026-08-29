@@ -15117,6 +15117,96 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
   }
+
+  // R9-1 regression fixture: a superseded restore run must not settle the
+  // successor's pending load. The stale run's `client.resume()` settles in the
+  // microtask queued BEFORE the successor registers its own load, so the stale
+  // run reaches the adoption point while `attachmentLifecycle.pendingLoad` is
+  // already the successor's. Without the attempted-load guard it resolves the
+  // successor's promise even though the successor's own restore never settled.
+  it('does not let a superseded restore settle the successor pending load', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    const sessionA = createMockSession({
+      sessionId: 'session-a',
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(sessionA);
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    const staleRestore = createDeferred<MockSession>();
+    const neverSettles = createDeferred<MockSession>();
+    sdkMocks.MockDaemonSessionClient.resume
+      .mockImplementationOnce(async () => staleRestore.promise)
+      .mockImplementationOnce(async () => neverSettles.promise);
+
+    let firstOutcome: string | undefined;
+    let secondOutcome: string | undefined;
+    act(() => {
+      void requireActions(actions)
+        .resumeSession('session-b')
+        .then(
+          () => {
+            firstOutcome = 'resolved';
+          },
+          () => {
+            firstOutcome = 'rejected';
+          },
+        );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    const sessionB = createMockSession({
+      sessionId: 'session-b',
+      events: createIdleEvents(),
+      replaySnapshot: createTextReplaySnapshot('session b transcript'),
+    });
+
+    await act(async () => {
+      // Queue the stale run's continuation first, then register the successor
+      // load synchronously — the stale run wakes up with pendingLoad already
+      // replaced.
+      staleRestore.resolve(sessionB);
+      void requireActions(actions)
+        .resumeSession('session-b')
+        .then(
+          () => {
+            secondOutcome = 'resolved';
+          },
+          () => {
+            secondOutcome = 'rejected';
+          },
+        );
+      await flushPromises();
+      await flushPromises();
+      await flushPromises();
+    });
+
+    // The first switch was superseded, so it rejects with AbortError.
+    expect(firstOutcome).toBe('rejected');
+    // The successor's own restore never settled, so nothing may settle it.
+    expect(secondOutcome).toBeUndefined();
+
+    await act(async () => {
+      neverSettles.reject(new Error('cleanup'));
+      root?.unmount();
+      root = null;
+      await flushPromises();
+    });
+  });
+
 });
 
 function requireActions<T>(actions: T | undefined): T {
