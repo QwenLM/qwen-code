@@ -15454,6 +15454,78 @@ describe('useLlmStream', () => {
       releaseMainEnd();
     });
 
+    it('commits a concurrent stream own thought at its ToolCallRequest boundary while a foreign deferral is armed (R14-1)', async () => {
+      // Stream B streams Thought TB1, then its ToolCallRequest arrives while
+      // stream A's merge deferral is armed. The owner-mismatch armed branch
+      // must commit B's OWN pending thought before returning bare: B's
+      // thoughtBuffer is reset in the same case, and when TB2 supersedes the
+      // shared slot, TB1 would otherwise be lost from history permanently.
+      const getOnComplete = captureSchedulerOnComplete();
+      const { releaseBtw, releaseMainEnd } =
+        await armMainDeferralWithConcurrentBtwStream([
+          {
+            type: ServerLlmEventType.Thought,
+            value: { subject: '', description: 'btw one thinking' },
+          },
+          {
+            type: ServerLlmEventType.ToolCallRequest,
+            value: {
+              callId: 'tc-btw',
+              name: 'read_file',
+              args: { path: '/btw' },
+              isClientInitiated: false,
+              prompt_id: 'p-btw',
+            },
+          },
+          {
+            type: ServerLlmEventType.Thought,
+            value: { subject: '', description: 'btw two thinking' },
+          },
+          {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          },
+        ]);
+
+      await act(async () => {
+        releaseBtw();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // TB1 committed at B's ToolCallRequest boundary, TB2 at B's Finished
+      // settlement — both thoughts reach history.
+      const btwThoughts = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(btwThoughts.map(([item]) => item.text)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('btw one thinking'),
+          expect.stringContaining('btw two thinking'),
+        ]),
+      );
+
+      // The owning batch still folds the armed snapshot untouched.
+      await act(async () => {
+        await getOnComplete()?.([successfulReadToolCall('main-prompt')]);
+      });
+      const allThoughts = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(allThoughts).toHaveLength(3);
+      expect(allThoughts[2][0].text).toContain('main turn thinking');
+      expect(allThoughts[2][0].toolSummary).toBe('Read /foo');
+      expect(
+        mockAddItem.mock.calls.find(
+          ([item]) =>
+            item.type === 'tool_group' &&
+            item.display?.mergedIntoThought === true,
+        ),
+      ).toBeDefined();
+
+      releaseMainEnd();
+    });
+
     it('should not let a colliding callId from a concurrent batch consume the deferral', async () => {
       const getOnComplete = captureSchedulerOnComplete();
       // Native Gemini functionCall parts carry no wire id: ids are re-minted

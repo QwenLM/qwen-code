@@ -1443,9 +1443,17 @@ export const useLlmStream = (
         // foreign callId in the armed set makes the subset ownership check
         // fail for every completing batch, stranding the deferral (and the
         // frozen thought) until a Content/fallback settles it out of order.
-        // The foreign, tool-first stream has no thought to merge anyway.
+        // The foreign, tool-first stream has no thought to merge anyway —
+        // but a foreign stream that DID stream a thought first (TB1 sitting
+        // in the shared slot) must commit it here: its buffer is reset in
+        // this same case, and when its next thought supersedes the slot the
+        // first thought would otherwise be lost from history (R14-1).
+        // commitOwnPendingThought is payload-protected: when the slot still
+        // holds the armed snapshot it commits nothing.
         if (thoughtMergeDeferralOwnerRef.current === owner) {
           armedCallIds.add(callId);
+        } else {
+          commitOwnPendingThought(userMessageTimestamp, owner);
         }
         return;
       }
@@ -1486,7 +1494,12 @@ export const useLlmStream = (
       thoughtMergeDeferralRef.current = new Set([callId]);
       thoughtMergeDeferralOwnerRef.current = owner;
     },
-    [commitPendingThought, pendingThoughtItemRef, setPendingThoughtItem],
+    [
+      commitOwnPendingThought,
+      commitPendingThought,
+      pendingThoughtItemRef,
+      setPendingThoughtItem,
+    ],
   );
 
   // Resolve the thought commit deferred at the ToolCallRequest boundary.
