@@ -1054,7 +1054,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     });
   });
 
-  it('counts already-bound sessions without rewriting the sidecar', async () => {
+  it('records provenance on a pre-provenance convention occupant once, then rewrites nothing', async () => {
     await seedSession(SESSION_D);
     await seedWorktreeSidecar(SESSION_D, 'pr-123', 'worktree-pr-123');
     const prPath = sessionService.getPrSessionPathForArchiveState(
@@ -1080,14 +1080,83 @@ describe('backfillWorkspaceSessionPrs', () => {
       pullRequests: [pr(123, 'worktree-pr-123')],
     });
 
+    // The occupant is the session's own convention PR persisted before
+    // provenance was recorded: the run promotes it in place (url,
+    // createdAt, position untouched) so every capped writer ranks it the
+    // way this planner does — one migration write, no binding.
+    const result = await backfillWorkspaceSessionPrs(runtime);
+    expect(result).toMatchObject({ bound: 0, alreadyBound: 1, written: 1 });
+    expect(await readSessionPrs(prPath)).toEqual([
+      {
+        number: 123,
+        url: 'https://github.com/o/r/pull/123',
+        createdAt: '2026-08-01T00:00:00.000Z',
+        source: 'worktree',
+      },
+    ]);
+
     const before = await fsp.readFile(prPath, 'utf8');
+    const again = await backfillWorkspaceSessionPrs(runtime);
+    expect(again).toMatchObject({ bound: 0, alreadyBound: 1, written: 0 });
+    expect(await fsp.readFile(prPath, 'utf8')).toBe(before);
+  });
+
+  it('promotes a reviewed occupant the session now exists for, never the reverse', async () => {
+    // `/review 100` bound 100 as a review; the session later gained the
+    // `pr-100` worktree association. The planner protects the number at
+    // convention rank, so the persisted entry must carry that rank too —
+    // otherwise the next capped upsert evicts the session's own PR first.
+    // A `/review` re-mention of a pre-provenance entry is NOT an upgrade
+    // on the ladder (review ranks below unknown provenance) and writes
+    // nothing.
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-100', 'worktree-pr-100');
+    await seedReviewedNumbers(SESSION_A, 100, 100);
+    await seedReviewedNumbers(SESSION_A, 7, 7);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await fsp.mkdir(path.dirname(prPath), { recursive: true });
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: [
+          {
+            number: 7,
+            url: 'https://github.com/o/r/pull/7',
+            createdAt: '2026-08-01T00:00:00.000Z',
+          },
+          {
+            number: 100,
+            url: 'https://github.com/o/r/pull/100',
+            createdAt: '2026-08-01T00:00:01.000Z',
+            state: 'open',
+            source: 'review',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
 
     const result = await backfillWorkspaceSessionPrs(runtime);
 
-    expect(result).toMatchObject({ bound: 0, alreadyBound: 1 });
-    // A re-upsert would refresh createdAt and move the entry to latest,
-    // reshuffling which binding the UI renders — the file must be untouched.
-    expect(await fsp.readFile(prPath, 'utf8')).toBe(before);
+    expect(result).toMatchObject({ bound: 0, alreadyBound: 2, written: 1 });
+    expect(await readSessionPrs(prPath)).toEqual([
+      {
+        number: 7,
+        url: 'https://github.com/o/r/pull/7',
+        createdAt: '2026-08-01T00:00:00.000Z',
+      },
+      {
+        number: 100,
+        url: 'https://github.com/o/r/pull/100',
+        createdAt: '2026-08-01T00:00:01.000Z',
+        state: 'open',
+        source: 'worktree',
+      },
+    ]);
   });
 
   it('scans sessions without worktree sidecars without binding them', async () => {

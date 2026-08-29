@@ -766,9 +766,28 @@ export async function backfillWorkspaceSessionPrs(
         result.alreadyBound += plan.filter((number) =>
           freshNumbers.has(number),
         ).length;
-        const kept = base.filter(
-          (entry) => planSet.has(entry.number) || !plannedFor(entry),
-        );
+        // A re-offered occupant this run ranks higher than its persisted
+        // provenance (a `/review`-bound number the session now exists for
+        // via the `pr-<N>` convention) is promoted in place — url,
+        // createdAt and position untouched, never downgraded — the way
+        // upsertSessionPrs upgrades a same-URL re-offer. Otherwise the
+        // trim above protects the entry only in this planner while every
+        // other capped writer still sees the weaker persisted rank and
+        // evicts the session's own PR first. A new object, so the no-op
+        // check below commits the promotion.
+        const kept = base
+          .filter((entry) => planSet.has(entry.number) || !plannedFor(entry))
+          .map((entry) => {
+            if (!planSet.has(entry.number)) return entry;
+            const stamp: SessionPrSource =
+              entry.number === candidate.conventionNumber
+                ? 'worktree'
+                : 'review';
+            return sessionPrSourceAuthority(stamp) >
+              sessionPrSourceAuthority(entry.source)
+              ? { ...entry, source: stamp }
+              : entry;
+          });
         const additions: SessionPr[] = [];
         for (const number of plan) {
           if (freshNumbers.has(number)) continue;
