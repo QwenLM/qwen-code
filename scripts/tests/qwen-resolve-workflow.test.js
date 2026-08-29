@@ -957,6 +957,25 @@ describe('qwen resolve workflow', () => {
     expect(agentStep).toContain('GITHUB_ENV="$decoy_dir/github-env"');
     expect(agentStep).toContain('GITHUB_PATH="$decoy_dir/github-path"');
     expect(agentStep).toContain('::stop-commands::');
+    // The invocation wiring itself: dropping --prompt would start a yolo
+    // agent with no task, and the auth type selects the OpenAI-compatible
+    // endpoint the secrets are for.
+    expect(agentStep).toContain('--prompt "$PROMPT" \\');
+    expect(agentStep).toContain('--auth-type openai \\');
+    // errexit is off around the invocation only: the parsing-off window
+    // must be closed and the command files truncated on every exit path,
+    // so `set +e` sits between the stop token and the invocation and
+    // `set -e` resumes after the truncation block.
+    const stopIdx = agentStep.indexOf('::stop-commands::');
+    const offIdx = agentStep.indexOf('\n          set +e\n');
+    const statusIdx = agentStep.indexOf('status=$?');
+    const onIdx = agentStep.indexOf('\n          set -e\n');
+    expect(stopIdx).toBeGreaterThan(-1);
+    expect(offIdx).toBeGreaterThan(stopIdx);
+    expect(statusIdx).toBeGreaterThan(offIdx);
+    expect(onIdx).toBeGreaterThan(
+      agentStep.indexOf(': > "${GITHUB_STEP_SUMMARY:?}"'),
+    );
     // A hung agent must end inside the script (GNU timeout), not by the
     // runner's timeout-minutes killing the process tree — only the
     // script-internal timeout reaches the ::stop-commands:: resume and the

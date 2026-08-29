@@ -389,6 +389,15 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     // runner killing the process tree — only then are the resume and the
     // truncation above reached (mirrors 'Run review').
     assert.ok(run.includes('timeout --kill-after=10s'));
+    // The workspace-layer settings file is removed BEFORE qwen starts: a
+    // fork-committed .qwen/settings.json would otherwise outrank the
+    // per-run home written above for the whole run.
+    const settingsRm = run.indexOf('rm -f .qwen/settings.json');
+    assert.ok(settingsRm > -1, 'the workspace settings file must be removed');
+    assert.ok(
+      settingsRm < run.indexOf('timeout --kill-after=10s'),
+      'the workspace settings removal must precede the qwen invocation',
+    );
     assert.ok(run.includes('echo "::stop-commands::${stop_token}"'));
     assert.ok(run.includes("printf '\\n::%s::\\n' \"$stop_token\""));
     assert.ok(run.includes('--approval-mode yolo'));
