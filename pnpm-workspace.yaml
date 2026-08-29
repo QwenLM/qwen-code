@@ -1,0 +1,37 @@
+packages:
+  - 'packages/*'
+  - 'packages/channels/*'
+  - 'integrations/external-context'
+  - 'integrations/external-context-mem0'
+  - '!packages/desktop-shell'
+  - '!packages/live-host'
+
+nodeLinker: hoisted
+linkWorkspacePackages: true
+verifyDepsBeforeRun: false
+
+overrides:
+  typescript: 5.8.3
+  '@microsoft/api-extractor>typescript': 5.9.3
+  '@qwen-code/mobile-mcp>typescript': 5.8.2
+  ansi-regex: 6.2.2
+  'cliui>wrap-ansi': 7.0.0
+  baseline-browser-mapping: ^2.9.19
+  normalize-package-data: ^7.0.1
+  react: ^19.2.4
+  react-dom: ^19.2.4
+  '@types/react': ^19.2.0
+  '@types/react-dom': ^19.2.0
+  axios: ^1.19.0
+
+allowBuilds:
+  '@google/genai': true
+  '@qwen-code/qwen-code-core@file:packages/core': true
+  '@vscode/vsce-sign': true
+  esbuild: true
+  keytar: true
+  msw: true
+  protobufjs: true
+
+minimumReleaseAgeExclude:
+  - '@qwen-code/channel-base@0.22.3'

@@ -17,6 +17,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
+import { hooks as pnpmHooks } from '../../.pnpmfile.mjs';
+
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -31,6 +33,63 @@ function readWorkflow(relativePath) {
 }
 
 describe('package scripts', () => {
+  it('links file-based internal packages to their live pnpm workspaces', () => {
+    const packageJson = {
+      dependencies: {
+        '@qwen-code/qwen-code-core': 'file:../core',
+        fixture: 'file:../fixture',
+      },
+    };
+
+    expect(pnpmHooks.readPackage(packageJson)).toEqual({
+      dependencies: {
+        '@qwen-code/qwen-code-core': 'workspace:*',
+        fixture: 'file:../fixture',
+      },
+    });
+  });
+
+  it('bootstraps worktrees with frozen pnpm dependencies and skips prepare', () => {
+    const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-setup-'));
+    const logFile = path.join(binDir, 'corepack.log');
+
+    try {
+      if (process.platform === 'win32') {
+        writeFileSync(
+          path.join(binDir, 'corepack.cmd'),
+          '@echo %QWEN_SKIP_PREPARE% %*>>"%WORKTREE_SETUP_LOG%"\r\n',
+        );
+      } else {
+        writeFileSync(
+          path.join(binDir, 'corepack'),
+          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $*" >> "$WORKTREE_SETUP_LOG"\n',
+        );
+        chmodSync(path.join(binDir, 'corepack'), 0o755);
+      }
+
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/setup-worktree.js')],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            WORKTREE_SETUP_LOG: logFile,
+          },
+        },
+      );
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim()).toBe(
+        '1 pnpm install --frozen-lockfile --prefer-offline',
+      );
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
   it('does not couple Node REPL to Qwen release versions', () => {
     const versionScript = readFileSync(
       path.join(root, 'scripts/version.js'),

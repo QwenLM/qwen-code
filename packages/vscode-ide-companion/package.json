@@ -291,6 +291,7 @@
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
     "@qwen-code/acp-bridge": "*",
+    "@qwen-code/qwen-code-core": "*",
     "@qwen-code/sdk": "*",
     "@qwen-code/webui": "*",
     "@qwen-code/web-shell": "*",
