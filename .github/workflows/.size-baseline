@@ -41,7 +41,7 @@
 79041 qwen-fleet-shepherd.yml
 20525 qwen-issue-followup-bot.yml
 5760 qwen-pr-safety-precheck.yml
-1741 qwen-resolve-health.yml
+2255 qwen-resolve-health.yml
 27648 qwen-triage-finalize.yml
 350381 qwen-triage.yml
 9657 release-sdk-java.yml

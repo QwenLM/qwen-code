@@ -59,7 +59,12 @@ const FAILED = new Set([
   'push_failed',
   'unknown',
 ]);
-const OK = new Set(['pushed', 'resolved_moved', 'noop', 'dry_run']);
+// Outcomes that reset the failure streak. `skipped`, `noop`, and `dry_run`
+// push nothing and are deliberately counted on neither side: they are neither
+// evidence that the lane is broken nor evidence that a push outage has
+// healed. `resolved_moved` resets the streak (a retryable resolution) but is
+// not recovery evidence either — decide() demands a real `pushed` for that.
+const OK = new Set(['pushed', 'resolved_moved']);
 
 // Classifies a result comment by the fixed sentences `Report result` and
 // `Report skipped request` emit. Order matters: the infra wording is checked
@@ -106,7 +111,7 @@ function headline(body) {
   return (line ?? '').slice(0, 160);
 }
 
-// prs: [{ number, comments: [{ id, user, created_at, body, html_url }] }]
+// prs: [{ number, state, comments: [{ id, user, created_at, updated_at, body, html_url }] }]
 export function assess(prs, options = {}) {
   const opts = { ...DEFAULTS, ...options };
   const now = opts.now instanceof Date ? opts.now : new Date();
@@ -125,6 +130,11 @@ export function assess(prs, options = {}) {
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
     const prResults = [];
     for (const c of comments) {
+      // Only the bot posts result comments; a marker plus the right sentence
+      // from anyone else must neither break a streak nor pose as a recovery.
+      if (c.user !== opts.bot) {
+        continue;
+      }
       const kind = classifyResult(c.body);
       if (kind) {
         prResults.push({
@@ -138,8 +148,20 @@ export function assess(prs, options = {}) {
       }
     }
     results.push(...prResults);
+    // A request on a closed or merged PR can never be answered — the producer
+    // only runs on open PRs — so it must not count as unanswered. Results on
+    // such PRs keep counting: attempts that finished before the PR closed
+    // still feed the streak and the recovery evidence.
+    if (pr.state !== 'open') {
+      continue;
+    }
     const requests = comments.filter(
-      (c) => c.user !== opts.bot && isRequest(c.body),
+      (c) =>
+        c.user !== opts.bot &&
+        // The producer fires on comment creation only; a comment edited into
+        // request shape never ran and never gets a result comment.
+        c.updated_at === c.created_at &&
+        isRequest(c.body),
     );
     for (const req of requests) {
       // Any result after the request answers it. Runs on one PR are
@@ -278,14 +300,17 @@ export function renderUpdate(assessment, options = {}) {
   ].join('\n');
 }
 
+// decide() only emits this once a `pushed` attempt exists, so the comment
+// always names the attempt that recovered the lane.
 export function renderRecovery(assessment, options = {}) {
   const latest = assessment.latestAttempt;
   return [
     HEALTH_MARKER,
-    stateMarker(assessment),
-    latest
-      ? `Recovered: the latest attempt ([#${latest.pr}](${latest.url}), ${fmt(latest.at)}) is \`${latest.kind}\`. Closing.`
-      : 'Recovered: no failing attempt remains in the window. Closing.',
+    `<!-- qwen-resolve-health-state ${JSON.stringify({
+      ...stateOf(assessment),
+      recovered: latest.id,
+    })} -->`,
+    `Recovered: the latest attempt ([#${latest.pr}](${latest.url}), ${fmt(latest.at)}) is \`${latest.kind}\`. Closing.`,
     '',
     renderReport(assessment, options),
   ].join('\n');
@@ -319,21 +344,27 @@ export function decide(assessment, existing, options = {}) {
       }
     }
   } else if (existing) {
-    // Recovery needs positive evidence: a successful attempt the issue has
-    // not seen yet. An alarm that merely stopped being visible — the PRs
+    // Recovery needs positive, push-grade evidence: only a `pushed` result
+    // proves the lane works again (`resolved_moved`, `noop`, and `dry_run`
+    // push nothing). An alarm that merely stopped being visible — the PRs
     // carrying the unanswered requests fell out of the discovery window, or
     // no attempt happened at all — is not a recovery, and closing on it
     // would hide a lane that is still broken.
     const previous = readState(existing.texts);
     const latest = assessment.latestAttempt;
-    const newSuccess =
-      latest && OK.has(latest.kind) && latest.id !== previous?.latest;
-    if (newSuccess) {
-      actions.push({
-        type: 'comment',
-        number: existing.number,
-        body: renderRecovery(assessment, options),
-      });
+    if (latest && latest.kind === 'pushed') {
+      // Comment-then-close is not atomic: if the close fails after the
+      // comment lands, the `recovered` field the comment wrote keeps the
+      // next tick from repeating it while it retries the close. A success
+      // first seen in an alarm update still closes once the alarm clears —
+      // only the recovery comment itself is deduped, never the close.
+      if (!previous?.recovered) {
+        actions.push({
+          type: 'comment',
+          number: existing.number,
+          body: renderRecovery(assessment, options),
+        });
+      }
       actions.push({ type: 'close', number: existing.number });
     }
   }
@@ -364,7 +395,7 @@ function b64(s) {
 }
 
 export function fetchPrs(gh, repo, since) {
-  const numbers = tsvLines(
+  const found = tsvLines(
     gh([
       'api',
       '-X',
@@ -376,32 +407,39 @@ export function fetchPrs(gh, repo, since) {
       'per_page=100',
       '--paginate',
       '--jq',
-      '.items[] | [.number] | @tsv',
+      '.items[] | [.number, .state] | @tsv',
     ]),
-  ).map(([n]) => Number(n));
-  return numbers.map((number) => ({
-    number,
+  ).map(([number, state]) => ({ number: Number(number), state }));
+  return found.map((pr) => ({
+    ...pr,
     comments: tsvLines(
       gh([
         'api',
         '-X',
         'GET',
-        `repos/${repo}/issues/${number}/comments`,
+        `repos/${repo}/issues/${pr.number}/comments`,
         '-f',
         'per_page=100',
         '--paginate',
         '--jq',
-        '.[] | [.id, .user.login, .created_at, .html_url, (.body // "" | @base64)] | @tsv',
+        '.[] | [.id, .user.login, .created_at, .updated_at, .html_url, (.body // "" | @base64)] | @tsv',
       ]),
-    ).map(([id, user, created_at, html_url, body]) => ({
+    ).map(([id, user, created_at, updated_at, html_url, body]) => ({
       id: Number(id),
       user,
       created_at,
+      updated_at,
       html_url,
       body: b64(body),
     })),
   }));
 }
+
+// Logins whose state markers this watch trusts on the tracking issue. The
+// workflow posts with the GITHUB_TOKEN, whose comments attribute to
+// github-actions[bot]; the bot login covers a future switch to the bot PAT.
+// A marker anyone else comments must not override the watch's state.
+const STATE_AUTHORS = new Set(['github-actions[bot]', DEFAULTS.bot]);
 
 export function findOpenIssue(gh, repo, label) {
   const rows = tsvLines(
@@ -434,9 +472,11 @@ export function findOpenIssue(gh, repo, label) {
           'per_page=100',
           '--paginate',
           '--jq',
-          '.[] | [(.body // "" | @base64)] | @tsv',
+          '.[] | [.user.login, (.body // "" | @base64)] | @tsv',
         ]),
-      ).map(([b]) => b64(b));
+      )
+        .filter(([user]) => STATE_AUTHORS.has(user))
+        .map(([, b]) => b64(b));
       return { number: Number(number), texts: [text, ...comments] };
     }
   }

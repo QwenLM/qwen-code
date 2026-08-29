@@ -16,6 +16,7 @@ import {
   assess,
   classifyResult,
   decide,
+  findOpenIssue,
   isRequest,
   main,
   readState,
@@ -36,18 +37,19 @@ const producer = readFileSync(
 
 const BOT = 'qwen-code-dev-bot';
 let nextId = 1000;
-function comment(user, created_at, body, pr = 1) {
+function comment(user, created_at, body, pr = 1, updated_at = created_at) {
   const id = (nextId += 1);
   return {
     id,
     user,
     created_at,
+    updated_at,
     body,
     html_url: `https://github.com/QwenLM/qwen-code/pull/${pr}#issuecomment-${id}`,
   };
 }
-const request = (at, pr, user = 'maintainer') =>
-  comment(user, at, '@qwen-code /resolve', pr);
+const request = (at, pr, user = 'maintainer', updated_at = at) =>
+  comment(user, at, '@qwen-code /resolve', pr, updated_at);
 const result = (at, sentence, pr) =>
   comment(BOT, at, `${RESULT_MARKER}\n${sentence}\n\nDetails.`, pr);
 
@@ -67,6 +69,7 @@ const WORKFLOW_SCOPE =
 const OTHER_PUSH =
   'Qwen Code resolved the merge conflicts, but pushing to `owner/repo` failed.';
 const NOOP = 'Qwen Code checked this PR and did not push changes.';
+const DRY_RUN = 'Qwen Code resolved the merge conflicts in dry-run mode.';
 const UNKNOWN = 'Qwen Code did something this script has never heard of.';
 
 describe('resolve-health: classification', () => {
@@ -77,10 +80,7 @@ describe('resolve-health: classification', () => {
     assert.equal(kind(INFRA_FAILED), 'infra_failed');
     assert.equal(kind(SKIPPED), 'skipped');
     assert.equal(kind(NOOP), 'noop');
-    assert.equal(
-      kind('Qwen Code resolved the merge conflicts in dry-run mode.'),
-      'dry_run',
-    );
+    assert.equal(kind(DRY_RUN), 'dry_run');
     // Of the four "resolved, but" sentences only the moved head is benign
     // (a retry helps); the other three mean the push itself is broken and a
     // retry repeats them, so they are failures.
@@ -258,6 +258,7 @@ describe('resolve-health: assessment', () => {
     const prs = [
       {
         number: 9,
+        state: 'open',
         comments: [
           request('2026-07-01T00:00:00Z', 9),
           result('2026-07-02T00:00:00Z', AGENT_FAILED, 9),
@@ -278,6 +279,7 @@ describe('resolve-health: assessment', () => {
     const prs = [
       {
         number: 7,
+        state: 'open',
         comments: [
           request('2026-08-27T00:00:00Z', 7),
           result('2026-08-27T00:10:00Z', PUSHED, 7),
@@ -288,6 +290,7 @@ describe('resolve-health: assessment', () => {
       },
       {
         number: 8,
+        state: 'open',
         comments: [
           // The bot quoting the command is not a request.
           comment(BOT, '2026-08-26T00:00:00Z', '@qwen-code /resolve', 8),
@@ -310,6 +313,7 @@ describe('resolve-health: assessment', () => {
     const prs = [
       {
         number: 10,
+        state: 'open',
         comments: [
           request('2026-08-27T00:00:00Z', 10),
           request('2026-08-27T00:05:00Z', 10),
@@ -320,6 +324,114 @@ describe('resolve-health: assessment', () => {
     const a = assess(prs, { now, staleHours: 3, unansweredThreshold: 1 });
     assert.equal(a.unanswered.length, 0);
     assert.equal(a.alarm, false);
+  });
+
+  it('only counts result comments the bot posted', () => {
+    // Anyone can comment the marker plus a fixed sentence; a forged success
+    // must not break a failure streak (masking an outage), and forged
+    // failures must not build one (filing a spurious issue).
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 14),
+    );
+    const forgedPush = comment(
+      'stranger',
+      '2026-08-26T00:00:00Z',
+      `${RESULT_MARKER}\n${PUSHED}`,
+      14,
+    );
+    const prs = [
+      { number: 14, state: 'open', comments: [...failures, forgedPush] },
+    ];
+    const a = assess(prs, { now });
+    assert.equal(a.streak, 5);
+    assert.equal(a.alarm, true);
+    // And nothing a stranger posts counts as an attempt at all.
+    const forgedOnly = [
+      {
+        number: 15,
+        state: 'open',
+        comments: [1, 2, 3, 4, 5].map((d) =>
+          comment(
+            'stranger',
+            `2026-08-2${d}T00:00:00Z`,
+            `${RESULT_MARKER}\n${AGENT_FAILED}`,
+            15,
+          ),
+        ),
+      },
+    ];
+    const b = assess(forgedOnly, { now });
+    assert.equal(b.attempts.length, 0);
+    assert.equal(b.alarm, false);
+  });
+
+  it('never counts requests the lane could not have answered', () => {
+    // The producer requires an open PR; a request on a closed or merged PR
+    // gets no result comment ever and must not read as an unanswered one.
+    const prs = ['closed', 'merged', 'closed'].map((state, i) => ({
+      number: 16 + i,
+      state,
+      comments: [request('2026-08-27T00:00:00Z', 16 + i)],
+    }));
+    const a = assess(prs, { now });
+    assert.equal(a.unanswered.length, 0);
+    assert.equal(a.alarm, false);
+    // Results on such PRs keep counting: attempts that finished before the
+    // PR closed still feed the streak and the recovery evidence.
+    prs[0].comments.unshift(result('2026-08-26T00:00:00Z', AGENT_FAILED, 16));
+    const b = assess(prs, { now });
+    assert.equal(b.attempts.length, 1);
+    assert.equal(b.streak, 1);
+  });
+
+  it('does not count a comment edited into a request', () => {
+    // The producer fires on comment creation only; an edit never starts a
+    // run, so an edited comment never receives a result and must not be
+    // tallied as unanswered (a maintainer typo-fixing `/resolv` by editing
+    // would otherwise alarm on a healthy lane).
+    const prs = [
+      {
+        number: 19,
+        state: 'open',
+        comments: [1, 2, 3].map((h) =>
+          request(
+            `2026-08-27T0${h}:00:00Z`,
+            19,
+            'maintainer',
+            `2026-08-27T09:0${h}:00Z`,
+          ),
+        ),
+      },
+    ];
+    const a = assess(prs, { now });
+    assert.equal(a.unanswered.length, 0);
+    assert.equal(a.alarm, false);
+  });
+
+  it('counts no-conflict and dry-run results neither way', () => {
+    // Neither pushes anything: they must not break a push-failure streak
+    // (masking a push outage) and cannot serve as recovery evidence.
+    const alternating = [
+      result('2026-08-21T00:00:00Z', PERMISSION, 20),
+      result('2026-08-21T06:00:00Z', NOOP, 20),
+      result('2026-08-22T00:00:00Z', PERMISSION, 20),
+      result('2026-08-22T06:00:00Z', NOOP, 20),
+      result('2026-08-23T00:00:00Z', PERMISSION, 20),
+      result('2026-08-23T06:00:00Z', NOOP, 20),
+      result('2026-08-24T00:00:00Z', PERMISSION, 20),
+      result('2026-08-24T06:00:00Z', NOOP, 20),
+      result('2026-08-25T00:00:00Z', PERMISSION, 20),
+      result('2026-08-25T06:00:00Z', DRY_RUN, 20),
+    ];
+    const a = assess([{ number: 20, state: 'open', comments: alternating }], {
+      now,
+    });
+    assert.deepEqual(
+      a.attempts.map((r) => r.kind),
+      Array(5).fill('push_failed'),
+    );
+    assert.equal(a.streak, 5);
+    assert.equal(a.alarm, true);
   });
 });
 
@@ -367,6 +479,7 @@ describe('resolve-health: decisions', () => {
       [
         {
           number: 12,
+          state: 'open',
           comments: [1, 2, 3].map((h) =>
             request(`2026-08-27T0${h}:00:00Z`, 12, `writer${h}`),
           ),
@@ -426,9 +539,15 @@ describe('resolve-health: decisions', () => {
       actions[0].body,
       /Recovered: the latest attempt .* is `pushed`/,
     );
-    // Idempotent: the same success seen again does not re-close.
+    // If the close fails after the comment landed, the next tick retries
+    // the close without repeating the recovery comment: the `recovered`
+    // field the comment's state marker wrote dedupes the comment only,
+    // never the close.
     const after = { number: 42, texts: [...existing.texts, actions[0].body] };
-    assert.deepEqual(decide(healthy, after), []);
+    assert.deepEqual(
+      decide(healthy, after).map((a) => a.type),
+      ['close'],
+    );
   });
 
   it('does not treat loss of evidence as recovery', () => {
@@ -439,6 +558,7 @@ describe('resolve-health: decisions', () => {
       [
         {
           number: 12,
+          state: 'open',
           comments: [1, 2, 3].map((h) =>
             request(`2026-08-27T0${h}:00:00Z`, 12),
           ),
@@ -465,6 +585,91 @@ describe('resolve-health: decisions', () => {
     // A success after the issue was filed is what closes it.
     assert.deepEqual(
       decide(healthy, existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+
+  it('does not close an open issue on attempts that pushed nothing', () => {
+    // A push-failure streak opens the issue; a moved head, a no-conflict
+    // run, or a dry run pushes nothing, so none of them is evidence the
+    // push outage healed — even though a moved head resets the streak.
+    // The same failure comments are reused across the assessments so only
+    // the added attempt differs.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, PERMISSION, 21),
+    );
+    const pushOutage = assess(
+      [{ number: 21, state: 'open', comments: [...failures] }],
+      { now },
+    );
+    assert.equal(pushOutage.alarm, true);
+    const existing = { number: 43, texts: [decide(pushOutage, null)[0].body] };
+    const afterMoved = assess(
+      [
+        {
+          number: 21,
+          state: 'open',
+          comments: [...failures, result('2026-08-26T00:00:00Z', MOVED, 21)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(afterMoved.streak, 0); // the streak reset stays
+    assert.deepEqual(decide(afterMoved, existing), []);
+    const afterNoPush = assess(
+      [
+        {
+          number: 21,
+          state: 'open',
+          comments: [
+            ...failures,
+            result('2026-08-26T00:00:00Z', NOOP, 21),
+            result('2026-08-26T01:00:00Z', DRY_RUN, 21),
+          ],
+        },
+      ],
+      { now },
+    );
+    assert.equal(afterNoPush.alarm, true); // noop/dry_run break no streak
+    assert.deepEqual(decide(afterNoPush, existing), []);
+  });
+
+  it('closes on a success that arrived while unanswered requests alarmed', () => {
+    // A success landing on another PR while unanswered requests still hold
+    // the alarm is recorded by the alarm update; once those requests age
+    // out of the window the issue must still close on that success.
+    const requests22 = [1, 2, 3].map((h) =>
+      request(`2026-08-20T0${h}:00:00Z`, 22),
+    );
+    const withSuccess = [
+      { number: 22, state: 'open', comments: requests22 },
+      {
+        number: 23,
+        state: 'open',
+        comments: [result('2026-08-26T00:00:00Z', PUSHED, 23)],
+      },
+    ];
+    const texts = [
+      decide(
+        assess([{ number: 22, state: 'open', comments: requests22 }], {
+          now: new Date('2026-08-20T12:00:00Z'),
+        }),
+        null,
+      )[0].body,
+    ];
+    // The success arrives while the requests still alarm.
+    const mid = assess(withSuccess, { now: new Date('2026-08-26T12:00:00Z') });
+    assert.equal(mid.alarm, true);
+    const update = decide(mid, { number: 44, texts })[0];
+    assert.equal(update.type, 'comment');
+    texts.push(update.body);
+    // The requests age out of the window; the success remains.
+    const cleared = assess(withSuccess, {
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    assert.equal(cleared.alarm, false);
+    assert.deepEqual(
+      decide(cleared, { number: 44, texts }).map((a) => a.type),
       ['comment', 'close'],
     );
   });
@@ -512,6 +717,45 @@ describe('resolve-health: writes', () => {
   });
 });
 
+describe('resolve-health: the tracking issue feed', () => {
+  const b64 = (s) => Buffer.from(s).toString('base64');
+
+  it("trusts only the watch's own comments as state", () => {
+    // Anyone can comment a state marker on the open tracking issue; only
+    // markers the watch itself posted (github-actions[bot] today, the bot
+    // login if it ever switches to the bot PAT) may feed readState — a
+    // forged marker must neither suppress updates nor force a recovery.
+    const botState =
+      '<!-- qwen-resolve-health-state {"streak":1,"unanswered":0,"latest":7} -->';
+    const forgedState =
+      '<!-- qwen-resolve-health-state {"streak":0,"unanswered":0,"latest":null} -->';
+    const gh = (args) => {
+      const path = args[3];
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
+        return [
+          ['91', b64(`${HEALTH_MARKER}\n${botState}`)].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues/91/comments') {
+        return [
+          ['github-actions[bot]', b64(botState)].join('\t'),
+          [BOT, b64(botState)].join('\t'),
+          ['stranger', b64(forgedState)].join('\t'),
+          '',
+        ].join('\n');
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+    const issue = findOpenIssue(gh, 'QwenLM/qwen-code', DEFAULTS.label);
+    assert.equal(issue.number, 91);
+    // Body plus the two bot-authored comments; the stranger's marker is
+    // dropped, so the last marker readState sees is the watch's own.
+    assert.equal(issue.texts.length, 3);
+    assert.equal(readState(issue.texts).streak, 1);
+  });
+});
+
 describe('resolve-health: end to end against a recording gh', () => {
   const b64 = (s) => Buffer.from(s).toString('base64');
   function recordingGh(calls) {
@@ -523,7 +767,7 @@ describe('resolve-health: end to end against a recording gh', () => {
           args[5],
           /^q=repo:QwenLM\/qwen-code is:pr "@qwen-code \/resolve" in:comments updated:>=2026-08-20$/,
         );
-        return '11\n12\n';
+        return '11\topen\n12\topen\n';
       }
       if (path === 'repos/QwenLM/qwen-code/issues/11/comments') {
         assert.ok(args.includes('--paginate') && args.includes('per_page=100'));
@@ -532,12 +776,14 @@ describe('resolve-health: end to end against a recording gh', () => {
             '1',
             'maintainer',
             '2026-08-25T00:00:00Z',
+            '2026-08-25T00:00:00Z',
             'u1',
             b64('@qwen-code /resolve'),
           ].join('\t'),
           [
             '2',
             BOT,
+            '2026-08-25T00:05:00Z',
             '2026-08-25T00:05:00Z',
             'u2',
             b64(`${RESULT_MARKER}\n${INFRA_FAILED}`),
@@ -546,12 +792,14 @@ describe('resolve-health: end to end against a recording gh', () => {
             '3',
             'maintainer',
             '2026-08-26T00:00:00Z',
+            '2026-08-26T00:00:00Z',
             'u3',
             b64('@qwen-code /resolve'),
           ].join('\t'),
           [
             '4',
             BOT,
+            '2026-08-26T00:05:00Z',
             '2026-08-26T00:05:00Z',
             'u4',
             b64(`${RESULT_MARKER}\n${INFRA_FAILED}`),
@@ -564,6 +812,7 @@ describe('resolve-health: end to end against a recording gh', () => {
           [
             '5',
             BOT,
+            '2026-08-26T01:00:00Z',
             '2026-08-26T01:00:00Z',
             'u5',
             b64(`${RESULT_MARKER}\n${AGENT_FAILED}`),
@@ -648,6 +897,80 @@ describe('resolve-health: end to end against a recording gh', () => {
     assert.deepEqual(actions, []);
     assert.ok(
       calls.every((c) => c.args[2] !== 'POST' && c.args[2] !== 'PATCH'),
+    );
+  });
+
+  it('recovers even when a stranger forged the state marker', () => {
+    // Comment ids are public API data, so anyone can comment a marker
+    // recording `recovered` on the open issue; state is read only from the
+    // watch's own comments, so the forgery cannot suppress the recovery.
+    const calls = [];
+    const gh = (args, input) => {
+      calls.push({ args, input });
+      const path = args[3];
+      if (path === 'search/issues') {
+        return '13\topen\n';
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues/13/comments') {
+        return [
+          [
+            '6',
+            'maintainer',
+            '2026-08-26T00:00:00Z',
+            '2026-08-26T00:00:00Z',
+            'u6',
+            b64('@qwen-code /resolve'),
+          ].join('\t'),
+          [
+            '7',
+            BOT,
+            '2026-08-26T01:00:00Z',
+            '2026-08-26T01:00:00Z',
+            'u7',
+            b64(`${RESULT_MARKER}\n${PUSHED}`),
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
+        return [
+          [
+            '92',
+            b64(
+              `${HEALTH_MARKER}\n<!-- qwen-resolve-health-state {"streak":5,"unanswered":0,"latest":3} -->`,
+            ),
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (path === 'repos/QwenLM/qwen-code/issues/92/comments') {
+        return [
+          [
+            'stranger',
+            b64(
+              '<!-- qwen-resolve-health-state {"streak":0,"unanswered":0,"latest":7,"recovered":7} -->',
+            ),
+          ].join('\t'),
+          '',
+        ].join('\n');
+      }
+      if (args[2] === 'POST' || args[2] === 'PATCH') {
+        return '{}';
+      }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+    const { actions } = main({
+      gh,
+      env: { REPO: 'QwenLM/qwen-code' },
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    assert.deepEqual(
+      actions.map((a) => a.type),
+      ['comment', 'close'],
+    );
+    assert.match(
+      actions[0].body,
+      /Recovered: the latest attempt .* is `pushed`/,
     );
   });
 
