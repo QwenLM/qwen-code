@@ -4,10 +4,15 @@ name: 'Main CI Failure Issue'
 
 on:
   workflow_run:
-    # 'Qwen Code CI' is watched for its SCHEDULED run only (see the event
-    # filter below): that nightly is the macOS and Windows lanes' only
-    # trigger outside a pull request, and a lane nobody is told about is a
-    # lane nobody looks at — which is how those two came to stop running.
+    # 'Qwen Code CI' is watched for its SCHEDULED run and its post-merge PUSH
+    # run (see the event filter below — the push arm is not name-scoped, so it
+    # covers this workflow too). The nightly is the macOS and Windows lanes'
+    # only trigger outside a pull request, and a lane nobody is told about is a
+    # lane nobody looks at — which is how those two came to stop running. The
+    # push arm covers ci.yml's post-merge lane on `main`, whose whole point is
+    # to surface a regression as it lands; a failure there files an issue with
+    # `type/bug`, `status/ready-for-agent` and `autofix/approved`, so expect
+    # one per red merge, not per red nightly only.
     workflows: ['E2E Tests', 'SDK Python', 'Qwen Code CI']
     types: ['completed']
     # Trigger-level branch filter, not only the `if` below: 'Qwen Code CI'
