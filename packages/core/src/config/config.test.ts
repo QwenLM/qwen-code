@@ -614,28 +614,55 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
-  it('does not replace the global debug fallback during daemon Config creation or rotation', async () => {
+  // Shared isolation for the debug-fallback tests below. The module-level
+  // vi.mock('node:fs') factory overrides only the sync fs API, so any
+  // un-spied fs.promises call the debug logger makes would hit the real
+  // filesystem (writing into the actual global debug dir). Spy the full
+  // surface the fallback/alias path touches — mkdir, appendFile, unlink,
+  // symlink AND readlink — in one place so the two tests can't drift out of
+  // lockstep, then restore env + logger state on the way out. Only the
+  // appendFile spy is handed to the body; the rest exist purely to keep the
+  // test off disk.
+  async function withDebugFallbackIsolation(
+    run: (appendFileSpy: ReturnType<typeof vi.spyOn>) => Promise<void>,
+  ): Promise<void> {
     const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
     const previousSessionIdEnv = process.env['QWEN_CODE_SESSION_ID'];
-    const bootstrapSessionId = '550e8400-e29b-41d4-a716-446655440000';
-    const daemonSessionId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
-    const rotatedSessionId = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
-    const mkdirSpy = vi
-      .spyOn(fs.promises, 'mkdir')
-      .mockResolvedValue(undefined);
+    const spies = [
+      vi.spyOn(fs.promises, 'mkdir').mockResolvedValue(undefined),
+      vi.spyOn(fs.promises, 'unlink').mockResolvedValue(undefined),
+      vi.spyOn(fs.promises, 'symlink').mockResolvedValue(undefined),
+      vi.spyOn(fs.promises, 'readlink').mockResolvedValue(''),
+    ];
     const appendFileSpy = vi
       .spyOn(fs.promises, 'appendFile')
       .mockResolvedValue(undefined);
-    const unlinkSpy = vi
-      .spyOn(fs.promises, 'unlink')
-      .mockResolvedValue(undefined);
-    const symlinkSpy = vi
-      .spyOn(fs.promises, 'symlink')
-      .mockResolvedValue(undefined);
-
+    const restoreEnv = (key: string, previous: string | undefined) => {
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    };
     try {
       delete process.env['QWEN_DEBUG_LOG_FILE'];
       resetDebugLoggingState();
+      await run(appendFileSpy);
+    } finally {
+      appendFileSpy.mockRestore();
+      for (const spy of spies) spy.mockRestore();
+      resetDebugLoggingState();
+      setDebugLogSession(null);
+      restoreEnv('QWEN_DEBUG_LOG_FILE', previousDebugLogFileEnv);
+      restoreEnv('QWEN_CODE_SESSION_ID', previousSessionIdEnv);
+    }
+  }
+
+  it('does not replace the global debug fallback during daemon Config creation or rotation', async () => {
+    await withDebugFallbackIsolation(async (appendFileSpy) => {
+      const bootstrapSessionId = '550e8400-e29b-41d4-a716-446655440000';
+      const daemonSessionId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      const rotatedSessionId = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
       new Config({ ...baseParams, sessionId: bootstrapSessionId });
       const daemonConfig = sessionIdContext.run(
         daemonSessionId,
@@ -660,24 +687,7 @@ describe('Server Config (config.ts)', () => {
         expect.stringContaining('[DAEMON_FALLBACK] process-scoped message'),
         'utf8',
       );
-    } finally {
-      mkdirSpy.mockRestore();
-      appendFileSpy.mockRestore();
-      unlinkSpy.mockRestore();
-      symlinkSpy.mockRestore();
-      resetDebugLoggingState();
-      setDebugLogSession(null);
-      if (previousDebugLogFileEnv === undefined) {
-        delete process.env['QWEN_DEBUG_LOG_FILE'];
-      } else {
-        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
-      }
-      if (previousSessionIdEnv === undefined) {
-        delete process.env['QWEN_CODE_SESSION_ID'];
-      } else {
-        process.env['QWEN_CODE_SESSION_ID'] = previousSessionIdEnv;
-      }
-    }
+    });
   });
 
   it('claims the global debug fallback on un-contexted rotation (single-session CLI)', async () => {
@@ -685,26 +695,9 @@ describe('Server Config (config.ts)', () => {
     // rotates the Config OUTSIDE any sessionIdContext, and the process-wide
     // debug session must follow the rotated id — otherwise post-rotation
     // logs keep landing in the pre-rotation session's file.
-    const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
-    const previousSessionIdEnv = process.env['QWEN_CODE_SESSION_ID'];
-    const initialSessionId = '550e8400-e29b-41d4-a716-446655440000';
-    const rotatedSessionId = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
-    const mkdirSpy = vi
-      .spyOn(fs.promises, 'mkdir')
-      .mockResolvedValue(undefined);
-    const appendFileSpy = vi
-      .spyOn(fs.promises, 'appendFile')
-      .mockResolvedValue(undefined);
-    const unlinkSpy = vi
-      .spyOn(fs.promises, 'unlink')
-      .mockResolvedValue(undefined);
-    const symlinkSpy = vi
-      .spyOn(fs.promises, 'symlink')
-      .mockResolvedValue(undefined);
-
-    try {
-      delete process.env['QWEN_DEBUG_LOG_FILE'];
-      resetDebugLoggingState();
+    await withDebugFallbackIsolation(async (appendFileSpy) => {
+      const initialSessionId = '550e8400-e29b-41d4-a716-446655440000';
+      const rotatedSessionId = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
       // The fallback holds a live Config reference, so rotating the SAME
       // Config reroutes writes even without the rotation-time claim. The
       // claim is load-bearing for RE-claiming: another Config (transcript
@@ -734,24 +727,7 @@ describe('Server Config (config.ts)', () => {
         expect.stringContaining('[CLI_ROTATION] post-rotation message'),
         'utf8',
       );
-    } finally {
-      mkdirSpy.mockRestore();
-      appendFileSpy.mockRestore();
-      unlinkSpy.mockRestore();
-      symlinkSpy.mockRestore();
-      resetDebugLoggingState();
-      setDebugLogSession(null);
-      if (previousDebugLogFileEnv === undefined) {
-        delete process.env['QWEN_DEBUG_LOG_FILE'];
-      } else {
-        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
-      }
-      if (previousSessionIdEnv === undefined) {
-        delete process.env['QWEN_CODE_SESSION_ID'];
-      } else {
-        process.env['QWEN_CODE_SESSION_ID'] = previousSessionIdEnv;
-      }
-    }
+    });
   });
 
   describe('shell execution config', () => {
