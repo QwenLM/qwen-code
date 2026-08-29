@@ -1060,10 +1060,16 @@ describe('extractCommandRules', () => {
       expect(await extractCommandRules('   ')).toEqual([]);
     });
 
-    it('handles env var prefix', async () => {
+    it('preserves env var prefixes in generated rules', async () => {
       expect(await extractCommandRules('FOO=bar npm install')).toEqual([
-        'npm install',
+        'FOO=bar npm install',
       ]);
+      expect(await extractCommandRules('FOO=bar npm install express')).toEqual([
+        'FOO=bar npm install *',
+      ]);
+      expect(await extractCommandRules('FOO=bar docker compose up -d')).toEqual(
+        ['FOO=bar docker compose up *'],
+      );
     });
 
     it('handles redirected command', async () => {

@@ -10,6 +10,7 @@ import {
   matchesRule,
   resolveToolName,
   splitCompoundCommand,
+  stripLeadingVariableAssignments,
   SHELL_TOOL_NAMES,
   toolMatchesRuleToolName,
 } from './rule-parser.js';
@@ -411,6 +412,21 @@ export class PermissionManager {
       toolAliases,
     ] as const;
 
+    const restrictiveCommand =
+      command !== undefined && SHELL_TOOL_NAMES.has(toolName)
+        ? stripLeadingVariableAssignments(command)
+        : command;
+    const restrictiveMatchArgs = [
+      toolName,
+      restrictiveCommand,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+      toolParams,
+      toolAliases,
+    ] as const;
+
     // Compute the base decision from explicit Bash/file/domain rules.
     // Using an IIFE to keep the priority-cascade logic clean.
     const baseDecision: PermissionDecision = (() => {
@@ -421,14 +437,24 @@ export class PermissionManager {
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'deny';
+        if (
+          matchesRule(rule, ...matchArgs, 'canonical') ||
+          (restrictiveCommand !== command &&
+            matchesRule(rule, ...restrictiveMatchArgs, 'canonical'))
+        )
+          return 'deny';
       }
       // Priority 2: ask rules
       for (const rule of [
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'ask';
+        if (
+          matchesRule(rule, ...matchArgs, 'canonical') ||
+          (restrictiveCommand !== command &&
+            matchesRule(rule, ...restrictiveMatchArgs, 'canonical'))
+        )
+          return 'ask';
       }
       // Priority 3: allow rules
       for (const rule of [
@@ -995,11 +1021,30 @@ export class PermissionManager {
       toolAliases,
     ] as const;
 
+    const restrictiveCommand =
+      command !== undefined && SHELL_TOOL_NAMES.has(toolName)
+        ? stripLeadingVariableAssignments(command)
+        : command;
+    const restrictiveMatchArgs = [
+      toolName,
+      restrictiveCommand,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+      toolParams,
+      toolAliases,
+    ] as const;
+
     for (const rule of [
       ...this.sessionRules.deny,
       ...this.persistentRules.deny,
     ]) {
-      if (matchesRule(rule, ...matchArgs, 'canonical')) {
+      if (
+        matchesRule(rule, ...matchArgs, 'canonical') ||
+        (restrictiveCommand !== command &&
+          matchesRule(rule, ...restrictiveMatchArgs, 'canonical'))
+      ) {
         return rule.raw;
       }
     }
@@ -1150,9 +1195,27 @@ export class PermissionManager {
       toolAliases,
     ] as const;
 
+    const restrictiveCommand =
+      command !== undefined && SHELL_TOOL_NAMES.has(toolName)
+        ? stripLeadingVariableAssignments(command)
+        : command;
+    const restrictiveMatchArgs = [
+      toolName,
+      restrictiveCommand,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+      toolParams,
+      toolAliases,
+    ] as const;
+
     return (
-      restrictiveRules.some((rule) =>
-        matchesRule(rule, ...matchArgs, 'canonical'),
+      restrictiveRules.some(
+        (rule) =>
+          matchesRule(rule, ...matchArgs, 'canonical') ||
+          (restrictiveCommand !== command &&
+            matchesRule(rule, ...restrictiveMatchArgs, 'canonical')),
       ) || allowRules.some((rule) => matchesRule(rule, ...matchArgs))
     );
   }
@@ -1248,8 +1311,26 @@ export class PermissionManager {
       toolAliases,
     ] as const;
 
-    return askRules.some((rule) =>
-      matchesRule(rule, ...matchArgs, 'canonical'),
+    const restrictiveCommand =
+      command !== undefined && SHELL_TOOL_NAMES.has(toolName)
+        ? stripLeadingVariableAssignments(command)
+        : command;
+    const restrictiveMatchArgs = [
+      toolName,
+      restrictiveCommand,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+      toolParams,
+      toolAliases,
+    ] as const;
+
+    return askRules.some(
+      (rule) =>
+        matchesRule(rule, ...matchArgs, 'canonical') ||
+        (restrictiveCommand !== command &&
+          matchesRule(rule, ...restrictiveMatchArgs, 'canonical')),
     );
   }
 

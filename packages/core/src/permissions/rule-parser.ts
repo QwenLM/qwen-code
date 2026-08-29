@@ -971,56 +971,47 @@ export function matchesCommandPattern(
   // This function matches a single pattern against a single simple command.
   // Compound command splitting is handled by the caller (PermissionManager).
   const normalizedCommand = normalizeCommandForPermissionMatch(command);
+  const normalizedPattern = collapseUnquotedWhitespace(pattern.trim());
 
-  // Special case: lone `*` matches any single command
-  if (pattern === '*') {
+  // Special case: lone `*` matches any single command.
+  if (normalizedPattern === '*') {
     return true;
   }
 
-  if (!pattern.includes('*')) {
+  if (!normalizedPattern.includes('*')) {
+    // An assignment-only rule is an identity, not a command prefix. Without
+    // this guard `Bash(FOO=bar)` would authorize `FOO=bar <anything>`.
+    if (isAssignmentOnlyPermissionPattern(normalizedPattern)) {
+      return normalizedCommand === normalizedPattern;
+    }
+
     // No wildcards: prefix matching (backward compat).
     // "git commit" matches "git commit" and "git commit -m test"
     // but NOT "gitcommit".
     return (
-      normalizedCommand === pattern ||
-      normalizedCommand.startsWith(pattern + ' ')
+      normalizedCommand === normalizedPattern ||
+      normalizedCommand.startsWith(normalizedPattern + ' ')
     );
   }
 
   // Build regex from glob pattern with word-boundary semantics.
-  //
-  // We walk through the pattern character by character, building a regex.
-  // When we encounter `*`:
-  //   - If preceded by a space: the space acts as a word boundary before `.*`
-  //   - If preceded by non-space (or at start): `.*` with no boundary constraint
-
   let regex = '^';
   let pos = 0;
 
-  while (pos < pattern.length) {
-    const starIdx = pattern.indexOf('*', pos);
+  while (pos < normalizedPattern.length) {
+    const starIdx = normalizedPattern.indexOf('*', pos);
     if (starIdx === -1) {
-      // No more wildcards; rest is literal, then allow trailing args
-      regex += escapeRegex(pattern.substring(pos));
+      regex += escapeRegex(normalizedPattern.substring(pos));
       break;
     }
 
-    // Add literal part before the `*`
-    const literalBefore = pattern.substring(pos, starIdx);
+    const literalBefore = normalizedPattern.substring(pos, starIdx);
 
-    if (starIdx > 0 && pattern[starIdx - 1] === ' ') {
-      // Word-boundary wildcard: "ls *"
-      // The literal includes the trailing space. The `*` matches
-      // anything after that space (including empty = just "ls").
-      // But the key insight: "ls " was already committed, so
-      // `ls` alone without a trailing space should also match.
-      //
-      // Rewrite: literal without trailing space + (space + anything | end)
+    if (starIdx > 0 && normalizedPattern[starIdx - 1] === ' ') {
       const literalWithoutTrailingSpace = literalBefore.slice(0, -1);
       regex += escapeRegex(literalWithoutTrailingSpace);
       regex += '( .*)?';
     } else {
-      // No word boundary: "ls*" → `ls` followed by anything
       regex += escapeRegex(literalBefore);
       regex += '.*';
     }
@@ -1028,14 +1019,12 @@ export function matchesCommandPattern(
     pos = starIdx + 1;
   }
 
-  // If the pattern does NOT end with `*`, the regex already matches exactly.
-  // If it does end with `*`, the trailing `.*` handles it.
   regex += '$';
 
   try {
     return new RegExp(regex, 's').test(normalizedCommand);
   } catch {
-    return normalizedCommand === pattern;
+    return normalizedCommand === normalizedPattern;
   }
 }
 
@@ -1142,30 +1131,117 @@ function escapeRegex(s: string): string {
   return s.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
 }
 
-const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
+export const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
-function normalizeCommandForPermissionMatch(command: string): string {
-  const trimmed = command.trim();
-  if (!trimmed) {
-    return trimmed;
-  }
-
-  try {
-    const tokens: string[] = [];
-
-    for (const token of parse(trimmed)) {
-      if (typeof token === 'string') {
-        tokens.push(token);
-      } else if (
-        token &&
-        typeof token === 'object' &&
-        'op' in token &&
-        typeof token.op === 'string'
+function permissionMatchTokens(command: string): string[] {
+  const tokens: string[] = [];
+  for (const token of parse(command)) {
+    if (typeof token === 'string') {
+      tokens.push(token);
+    } else if (token && typeof token === 'object' && 'op' in token) {
+      if (
+        token.op === 'glob' &&
+        'pattern' in token &&
+        typeof token.pattern === 'string'
       ) {
+        // shell-quote represents unquoted * / ? words as glob tokens. Keep
+        // the original word so env assignments remain recognizable.
+        tokens.push(token.pattern);
+      } else if (typeof token.op === 'string') {
         tokens.push(token.op);
       }
     }
+  }
+  return tokens;
+}
 
+/**
+ * Return a shell command with only leading NAME=value assignments removed.
+ * Restrictive deny/ask matching uses this legacy identity in addition to the
+ * full identity so the new allow hardening can never narrow a restriction.
+ */
+export function stripLeadingVariableAssignments(command: string): string {
+  const trimmed = command.trim();
+  if (!trimmed) return trimmed;
+
+  try {
+    const tokens = permissionMatchTokens(trimmed);
+    let firstCommandToken = 0;
+    while (
+      firstCommandToken < tokens.length &&
+      ENV_ASSIGNMENT_REGEX.test(tokens[firstCommandToken]!)
+    ) {
+      firstCommandToken++;
+    }
+    if (firstCommandToken === 0) return trimmed;
+    return tokens.slice(firstCommandToken).join(' ');
+  } catch {
+    return trimmed;
+  }
+}
+
+/** Collapse shell-equivalent whitespace outside quotes while retaining quotes. */
+function collapseUnquotedWhitespace(command: string): string {
+  let result = '';
+  let quote: "'" | '"' | '`' | null = null;
+  let escaped = false;
+  let pendingSpace = false;
+
+  for (const ch of command) {
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && quote !== "'") {
+      if (pendingSpace && result) result += ' ';
+      pendingSpace = false;
+      result += ch;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      result += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      if (pendingSpace && result) result += ' ';
+      pendingSpace = false;
+      quote = ch;
+      result += ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (result) pendingSpace = true;
+      continue;
+    }
+    if (pendingSpace && result) result += ' ';
+    pendingSpace = false;
+    result += ch;
+  }
+
+  return result;
+}
+
+function isAssignmentOnlyPermissionPattern(pattern: string): boolean {
+  try {
+    const tokens = permissionMatchTokens(pattern);
+    return (
+      tokens.length > 0 &&
+      tokens.every((token) => ENV_ASSIGNMENT_REGEX.test(token))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizeCommandForPermissionMatch(command: string): string {
+  const trimmed = command.trim();
+  if (!trimmed) return trimmed;
+
+  try {
+    const tokens = permissionMatchTokens(trimmed);
     let firstCommandToken = 0;
     while (
       firstCommandToken < tokens.length &&
@@ -1174,20 +1250,15 @@ function normalizeCommandForPermissionMatch(command: string): string {
       firstCommandToken++;
     }
 
-    // Environment assignments are part of the execution semantics. Any
-    // command-specific Bash pattern (exact, prefix, or glob) must not silently
-    // widen from `cmd` to arbitrary `NAME=value cmd` invocations, because
-    // runtimes and applications may interpret those variables before the
-    // trusted command runs. Preserve the original command whenever such a
-    // prefix is present so the rule must explicitly include it. The lone `*`
-    // rule is the intentional allow-all case.
+    // Allow rules bind to the complete env-prefixed execution identity, but
+    // shell-equivalent unquoted whitespace is canonicalized on both sides.
     if (firstCommandToken > 0) {
-      return trimmed;
+      return collapseUnquotedWhitespace(trimmed);
     }
 
     return tokens.join(' ');
   } catch {
-    return trimmed;
+    return collapseUnquotedWhitespace(trimmed);
   }
 }
 

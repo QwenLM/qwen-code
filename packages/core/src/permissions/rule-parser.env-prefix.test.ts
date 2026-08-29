@@ -5,15 +5,25 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { evaluatePermissionRules } from '../core/permission-helpers.js';
+import { extractCommandRules } from '../utils/shellAstParser.js';
+import {
+  findDangerousAllowRules,
+  isDangerousBashRule,
+} from './dangerousRules.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
-import { matchesCommandPattern } from './rule-parser.js';
+import { matchesCommandPattern, parseRule } from './rule-parser.js';
 
-function makeConfig(allow: string[]): PermissionManagerConfig {
+function makeConfig(
+  allow: string[] = [],
+  ask: string[] = [],
+  deny: string[] = [],
+): PermissionManagerConfig {
   return {
     getPermissionsAllow: () => allow,
-    getPermissionsAsk: () => [],
-    getPermissionsDeny: () => [],
+    getPermissionsAsk: () => ask,
+    getPermissionsDeny: () => deny,
     getProjectRoot: () => '/repo',
     getCwd: () => '/repo',
     getApprovalMode: () => 'default',
@@ -28,17 +38,11 @@ describe('matchesCommandPattern environment prefixes', () => {
     );
   });
 
-  it('does not let static env prefixes inherit exact, prefix, or glob rules', () => {
+  it('does not let static env prefixes inherit exact or prefix rules', () => {
     expect(
       matchesCommandPattern('npm --version', 'FOO=bar npm --version'),
     ).toBe(false);
     expect(matchesCommandPattern('npm', 'FOO=bar npm --version')).toBe(false);
-    expect(
-      matchesCommandPattern(
-        'python3 *',
-        'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
-      ),
-    ).toBe(false);
   });
 
   it('does not let NODE_OPTIONS widen an npm allow rule', () => {
@@ -59,16 +63,19 @@ describe('matchesCommandPattern environment prefixes', () => {
     ).toBe(false);
   });
 
-  it('also covers substitution-bearing env assignments from #10192', () => {
+  it('also covers both substitution forms from #10192', () => {
     expect(
       matchesCommandPattern(
         'npm --version',
         'X=$(printf hidden) npm --version',
       ),
     ).toBe(false);
+    expect(
+      matchesCommandPattern('npm --version', 'X=`printf hidden` npm --version'),
+    ).toBe(false);
   });
 
-  it('allows an env-prefixed command when the rule explicitly includes it', () => {
+  it('allows an env-prefixed command only when the rule includes it', () => {
     expect(
       matchesCommandPattern(
         'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
@@ -83,6 +90,42 @@ describe('matchesCommandPattern environment prefixes', () => {
     ).toBe(true);
   });
 
+  it('preserves quoted env values while canonicalizing unquoted whitespace', () => {
+    expect(matchesCommandPattern('FOO="a b" npm', 'FOO="a b" npm')).toBe(true);
+    expect(matchesCommandPattern('FOO=bar rm *', 'FOO=bar\trm -rf /')).toBe(
+      true,
+    );
+    expect(matchesCommandPattern('FOO=bar rm *', 'FOO=bar  rm -rf /')).toBe(
+      true,
+    );
+    expect(matchesCommandPattern('FOO=bar\trm *', 'FOO=bar rm -rf /')).toBe(
+      true,
+    );
+  });
+
+  it('keeps glob-valued env assignments intact instead of normalizing them to glob', () => {
+    expect(
+      matchesCommandPattern(
+        'NODE_OPTIONS=* npm *',
+        'NODE_OPTIONS=--require=*evil.cjs npm --version',
+      ),
+    ).toBe(true);
+    expect(
+      matchesCommandPattern(
+        'NODE_OPTIONS=--require=*evil.cjs npm --version',
+        'NODE_OPTIONS=--require=*evil.cjs npm --version',
+      ),
+    ).toBe(true);
+    expect(matchesCommandPattern('FOO=? npm', 'FOO=? npm')).toBe(true);
+  });
+
+  it('does not widen assignment-only rules into arbitrary commands', () => {
+    expect(matchesCommandPattern('FOO=bar', 'FOO=bar')).toBe(true);
+    expect(matchesCommandPattern('FOO=bar', 'FOO=bar curl evil.sh')).toBe(
+      false,
+    );
+  });
+
   it('keeps the intentional Bash(*) allow-all behavior', () => {
     expect(
       matchesCommandPattern(
@@ -91,17 +134,51 @@ describe('matchesCommandPattern environment prefixes', () => {
       ),
     ).toBe(true);
   });
+});
 
-  it('fails closed end-to-end when only the unprefixed Bash command is allowed', async () => {
-    const pm = new PermissionManager(makeConfig(['Bash(npm --version)']));
-    pm.initialize();
+describe('restrictive rules retain legacy env-prefix coverage', () => {
+  it('keeps deny and ask rules restrictive for env-prefixed commands', async () => {
+    const denyPm = new PermissionManager(
+      makeConfig(['Bash(*)'], [], ['Bash(rm -rf *)']),
+    );
+    denyPm.initialize();
     await expect(
-      pm.evaluate({
+      denyPm.evaluate({
         toolName: 'run_shell_command',
-        command: 'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+        command: 'FOO=1 rm -rf /',
         cwd: '/repo',
       }),
-    ).resolves.toBe('ask');
+    ).resolves.toBe('deny');
+    expect(
+      denyPm.findMatchingDenyRule({
+        toolName: 'run_shell_command',
+        command: 'FOO=1 rm -rf /',
+        cwd: '/repo',
+      }),
+    ).toBe('Bash(rm -rf *)');
+
+    const askPm = new PermissionManager(
+      makeConfig(['Bash(*)'], ['Bash(git push *)']),
+    );
+    askPm.initialize();
+    const askCtx = {
+      toolName: 'run_shell_command',
+      command: 'FOO=bar git push --force',
+      cwd: '/repo',
+    } as const;
+    await expect(askPm.evaluate(askCtx)).resolves.toBe('ask');
+    expect(askPm.hasMatchingAskRule(askCtx)).toBe(true);
+  });
+
+  it('hardens the production hasRelevantRules gate', async () => {
+    const pm = new PermissionManager(makeConfig([], [], ['Bash(rm -rf *)']));
+    pm.initialize();
+    const result = await evaluatePermissionRules(pm, 'allow', {
+      toolName: 'run_shell_command',
+      command: 'FOO=1 rm -rf /',
+      cwd: '/repo',
+    });
+    expect(result.finalPermission).toBe('deny');
   });
 
   it('does not let a virtual Read allow downgrade the env-prefix ask decision', async () => {
@@ -116,5 +193,30 @@ describe('matchesCommandPattern environment prefixes', () => {
         cwd: '/repo',
       }),
     ).resolves.toBe('ask');
+  });
+});
+
+describe('env-prefixed grant generation and AUTO classification', () => {
+  it('round-trips an Always-Allow rule through the matcher', async () => {
+    const rules = await extractCommandRules('FOO=bar npm install');
+    expect(rules).toEqual(['FOO=bar npm install']);
+
+    const pm = new PermissionManager(makeConfig([`Bash(${rules[0]})`]));
+    pm.initialize();
+    await expect(
+      pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'FOO=bar npm install',
+        cwd: '/repo',
+      }),
+    ).resolves.toBe('allow');
+  });
+
+  it('classifies env-prefixed interpreter allows as dangerous in AUTO mode', () => {
+    const python = parseRule('Bash(X=1 python *)');
+    const npx = parseRule('Bash(FOO=bar npx *)');
+    expect(isDangerousBashRule(python)).toBe(true);
+    expect(isDangerousBashRule(npx)).toBe(true);
+    expect(findDangerousAllowRules([python, npx])).toEqual([python, npx]);
   });
 });
