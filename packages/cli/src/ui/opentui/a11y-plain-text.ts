@@ -19,13 +19,14 @@
 
 import stripAnsiLib from 'strip-ansi';
 
-// strip-ansi 7.x strips the introducer of CSI sequences with private
-// parameter markers (e.g. the SGR mouse report \x1b[<0;5;1M) but leaves
-// their parameter bytes as visible text; remove the full sequence first.
-// The intermediate-byte class (0x20-0x2F) covers DECRQCRA-style sequences
-// whose final byte is preceded by one (e.g. CSI ? … $ y).
-// eslint-disable-next-line no-control-regex
-const PRIVATE_PARAM_CSI = /\x1b\[[?<>=][0-9;:<=>?]*[\x20-\x2F]*[@-~]/g;
+// strip-ansi 7.x does not strip CSI sequences with intermediate bytes
+// (0x20-0x2F) or private parameter markers (e.g. SGR mouse \x1b[<0;5;1M);
+// remove the full CSI production first: parameter bytes 0x30-0x3F,
+// intermediate bytes 0x20-0x2F, final byte 0x40-0x7E — one regex
+// covers both private and non-private CSI.
+/* eslint-disable no-control-regex */
+const CSI_SEQUENCE = /\x1b\[[0-9;:<=>?]*[\x20-\x2F]*[@-~]/g;
+/* eslint-enable no-control-regex */
 
 // strip-ansi also leaves DCS/SOS/PM/APC sequences (only the 2-byte
 // introducer of a DCS is consumed) and unterminated OSC bodies in place;
@@ -39,7 +40,7 @@ const OTHER_ESCAPE_SEQUENCE =
 /** Strips all ANSI escape sequences, leaving the readable text. */
 export function stripAnsi(text: string): string {
   return stripAnsiLib(
-    text.replace(PRIVATE_PARAM_CSI, '').replace(OTHER_ESCAPE_SEQUENCE, ''),
+    text.replace(CSI_SEQUENCE, '').replace(OTHER_ESCAPE_SEQUENCE, ''),
   );
 }
 

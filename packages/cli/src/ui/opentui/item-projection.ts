@@ -746,6 +746,8 @@ export function projectMcpStatus(item: Record<string, unknown>): string {
     lines.push('  - Use /mcp desc to show server and tool descriptions');
     lines.push('  - Use /mcp schema to show tool parameter schemas');
     lines.push('  - Use /mcp nodesc to hide descriptions');
+    lines.push('  - Use /mcp to authenticate with OAuth-enabled servers');
+    lines.push('  - Press Ctrl+T to toggle tool descriptions on/off');
   }
   return lines.join('\n').trimEnd();
 }
