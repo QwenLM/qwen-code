@@ -21566,12 +21566,16 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     '});',
   ];
   // Shell commands writing FILES (path → lines) into the fixture repo.
+  // Lines travel as single-quoted shell words — every byte literal,
+  // backticks and ${ included; a JSON.stringify'd word in bash double
+  // quotes would let ` and $( expand.
+  const shellQuote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
   const fixtureWrite = (files) =>
     Object.entries(files).flatMap(([path, lines]) => [
       ...(path.includes('/')
         ? [`mkdir -p '${path.slice(0, path.lastIndexOf('/'))}'`]
         : []),
-      `printf '%s\\n' ${lines.map((l) => JSON.stringify(l)).join(' ')} > '${path}'`,
+      `printf '%s\\n' ${lines.map(shellQuote).join(' ')} > '${path}'`,
     ]);
   const AGENT_COMMIT = 'echo agent > f.txt && git commit -qam agent';
   const WEAKEN_FIXTURES = {
@@ -22449,6 +22453,275 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       files: { 'pkg/a.test.ts': WT_BASE },
       round: [
         'printf \'%s\\n\' "import { it, expect } from \'vitest\';" \'const fixture = `${`/*`}`;\' "it.skip(\'a\', () => {" "  expect(one()).toBe(1);" "  expect(two()).toBe(2);" "});" > \'pkg/a.test.ts\'',
+        AGENT_COMMIT,
+      ],
+    },
+    // A throwing MEMBER-form assertion — supertest's .expect( rejects
+    // the awaited promise on mismatch. A '.' immediately before expect
+    // must not blind the del side and the blob census to its removal.
+    'supertest-member-expect': {
+      files: {
+        'pkg/a.test.ts': [
+          "import { it } from 'vitest';",
+          "import request from 'supertest';",
+          "it('rejects a missing name with 400', async () => {",
+          "  await request(app).post('/x').expect(400);",
+          "  await request(app).post('/y').expect(400);",
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            "import { it } from 'vitest';",
+            "import request from 'supertest';",
+            "it('rejects a missing name with 400', async () => {",
+            "  await request(app).post('/x').expect(400);",
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A member access with NO call earns no assertion credit: the round
+    // swaps the only throwing assertion for an exported assert alias
+    // that never executes one.
+    'assert-alias-export': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "import assert from 'node:assert';",
+            'export const eq = assert.deepEqual;',
+            "it('a', () => {",
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The backtick-quoted computed accessor: a byte-equivalent
+    // it['skip']( the quote class limited to ' and " cannot see.
+    'skip-backtick-accessor': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it[`skip`]('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The optional-chaining spellings: it?.skip( and it.skip?.( both
+    // register skipped tests in vitest.
+    'skip-optional-chain': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it?.skip('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    'skip-optional-call': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it.skip?.('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The reversed modifier chain: the execution modifier BEHIND the
+    // marker registers the skip too.
+    'skip-reversed-chain': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it.skip.concurrent('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A template hole carrying inner braces (an object literal and an
+    // arrow body): the hole must close on the brace matching ITS ${, or
+    // the stripper re-enters template state on the first } and swallows
+    // the live assertion in BOTH blobs — a symmetric blindness a
+    // comment-out weakening escapes with zero signal.
+    'template-hole-brace': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  const s = `${ ({x: 1}, [1].map((v) => {',
+          '    return v;',
+          '  }),',
+          '    expect(two()).toBe(2)',
+          '  ) }`;',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  const s = `${ ({x: 1}, [1].map((v) => {',
+            '    return v;',
+            '  }),',
+            '  /*',
+            '    expect(two()).toBe(2)',
+            '  */',
+            '  ) }`;',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // Regex-vs-division predecessor contexts: each round replaces a real
+    // assertion with an inert regex-literal decoy whose '/' must open
+    // the regex state, or the leaked text cancels the removal.
+    'regex-decoy-keyword': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  typeof /expect(two()).toBe(2)/;',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    'regex-decoy-division': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  const x = JSON.parse(s) / /expect(two()).toBe(2)/;',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    'regex-decoy-control-paren': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            "  if (one()) /expect(two()).toBe(2)/.test('s');",
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The block-comment twin of skip-comment-shield: the deleted marker
+    // line sits inside a /* span opened above the hunk, so its removal
+    // is a semantic no-op that nets against the genuine skip addition —
+    // only the whole-blob marker delta sees through the cold-start strip.
+    'skip-block-shield': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+          '/*',
+          "it.skip('legacy', () => {});",
+          '*/',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it.skip('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+            '/*',
+            '*/',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The add-side swallow sibling: the /* line the round adds is inert
+    // inside the pre-existing span, but the added-line strip cold-starts
+    // and swallows the genuine marker added in the same stream.
+    'skip-block-swallow': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          '/* legacy',
+          'notes',
+          '*/',
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            '/* legacy',
+            'notes',
+            '/*',
+            '*/',
+            "it.skip('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
         AGENT_COMMIT,
       ],
     },
@@ -24355,6 +24628,118 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // The /* rides inside a nested template literal; it must not open
     // the block-comment state and discard the added it.skip( line.
     const r = runGate({ weaken: 'skip-nested-template-poison' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects removing a throwing member-form expect assertion', () => {
+    // supertest's .expect( rejects the awaited promise on mismatch: the
+    // member call IS the assertion; a '.' immediately before expect may
+    // not blind every arm to its removal.
+    const r = runGate({ weaken: 'supertest-member-expect' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects an assertion swap for a call-less assert member alias', () => {
+    // assert.deepEqual without a call executes no assertion; the alias
+    // line may earn no add-side credit that cancels the removal.
+    const r = runGate({ weaken: 'assert-alias-export' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a backtick-quoted computed skip accessor', () => {
+    // it[`skip`]( registers a skipped test; the backtick quote is a
+    // byte-equivalent of it['skip'](.
+    const r = runGate({ weaken: 'skip-backtick-accessor' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects an optional-chain skip modifier', () => {
+    // it?.skip( registers a skipped test; the '?' ahead of the member
+    // dot must not hide the marker.
+    const r = runGate({ weaken: 'skip-optional-chain' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects an optional-call skip tail', () => {
+    // it.skip?.( registers a skipped test; the ?. call tail is a
+    // byte-equivalent of the plain call.
+    const r = runGate({ weaken: 'skip-optional-call' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects a reversed skip modifier chain', () => {
+    // it.skip.concurrent( registers a skipped test; the execution
+    // modifier behind the marker must not hide it.
+    const r = runGate({ weaken: 'skip-reversed-chain' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects commenting out an assertion inside a template hole', () => {
+    // The hole carries an object literal and an arrow body: it must
+    // close on the brace matching its own ${, or the stripper swallows
+    // the live assertion in BOTH blobs and the comment-out nets to zero.
+    const r = runGate({ weaken: 'template-hole-brace' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a keyword-preceded regex decoy replacing an assertion', () => {
+    // typeof /expect(...)/ opens a regex literal even across the space
+    // after the keyword; the inert decoy must strip out of the blob.
+    const r = runGate({ weaken: 'regex-decoy-keyword' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a division-preceded regex decoy replacing an assertion', () => {
+    // The second '/' of a division chain opens a literal; the division
+    // predecessor must not leak the decoy into the stripped blob.
+    const r = runGate({ weaken: 'regex-decoy-division' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a control-paren-preceded regex decoy replacing an assertion', () => {
+    // if (one()) /re/ opens a literal while foo() / b stays division:
+    // the paren KIND decides, not the ')' character.
+    const r = runGate({ weaken: 'regex-decoy-control-paren' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a skip addition netted against an in-comment deletion', () => {
+    // The deleted marker line sits inside a block comment opened above
+    // the hunk: its removal credit is a no-op the cold-start line strip
+    // cannot see; the whole-blob marker delta carries the state in.
+    const r = runGate({ weaken: 'skip-block-shield' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects a genuine skip swallowed by an added comment opener', () => {
+    // The added /* line is inert inside the pre-existing span, but the
+    // added-line strip cold-starts and swallows the genuine marker that
+    // follows it; the whole-blob census still sees the skip.
+    const r = runGate({ weaken: 'skip-block-swallow' });
     expect(r.status).toBe(1);
     expect(r.rejection).toContain('pkg/a.test.ts');
     expect(r.rejection).toContain('skip/todo marker(s) added');

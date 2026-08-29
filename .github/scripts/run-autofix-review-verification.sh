@@ -1041,8 +1041,14 @@ fi
 #     maximal relaxation, while a bare `expect(` removal still counts (a
 #     multi-line-formatted assertion measures as a removal: the
 #     fail-closed direction, one ack entry answers it) -- or
-#     `assert(`/`assert.` with a left boundary (a member call like
-#     console.assert( prints and continues; it never fails a test). An
+#     `assert(`/`assert.member(` with a left boundary, where the member
+#     arm requires the CALL: a member access alone (an exported alias
+#     like const eq = assert.deepEqual;) executes no assertion, while a
+#     member call like console.assert( prints and continues and never
+#     fails a test. supertest's `.expect(` is the throwing exception --
+#     a MEMBER call whose mismatch rejects the awaited promise -- so it
+#     counts too; an over-count from a rare non-throwing .expect( member
+#     fails closed, one ack entry answers it. An
 #     assertion moved within a file nets zero; one moved OUT of a file
 #     nets negative and is answered by naming its new home. Removed lines
 #     count RAW and added lines count after comment-and-string-aware
@@ -1064,15 +1070,21 @@ fi
 #     rule would otherwise collapse the hunk into a binary banner and zero
 #     every counter;
 #   - a skip/todo marker was added NET: `it`/`test`/`describe` followed by
-#     `.skip`, `.todo`, `.fails`, or `.failing` -- optionally behind a
-#     `.concurrent`/`.sequential`/`.shuffle` chain and chained with
-#     `.each`/`.for` (call tail `(`, `<`, or a tagged template) -- the
-#     computed accessor `it['skip'](`, or `xit(`/`xdescribe(`. Markers are
-#     measured on a joined view, so a newline-split member chain
+#     `.skip`, `.todo`, `.fails`, or `.failing` -- with a `.concurrent`/
+#     `.sequential`/`.shuffle` chain AHEAD of the modifier, behind it, or
+#     both, optionally chained with `.each`/`.for` (call tail `(`, `<`, a
+#     tagged template, or an optional-chaining `?.` before any member dot
+#     or the call) -- the computed accessor `it['skip'](` quoted with a
+#     single, double, or BACKTICK quote, or `xit(`/`xdescribe(`. Markers
+#     are measured on a joined view, so a newline-split member chain
 #     (it / .skip( on two lines) counts like the one-line form, and on the
 #     comment-stripped view on BOTH sides: a deleted comment line that
-#     merely contains marker text earns no removal credit. Markers removed
-#     in the same file net against markers added, so touching an
+#     merely contains marker text earns no removal credit. The line net is
+#     cross-checked against the whole-blob marker delta under the same
+#     code strip the assertion arm uses -- a line strip cold-starts at the
+#     hunk boundary, so block-comment state from unchanged bytes ABOVE the
+#     hunk cannot arrive there; the larger addition signal wins. Markers
+#     removed in the same file net against markers added, so touching an
 #     already-skipped test without adding a marker is not charged.
 #     `.skipIf` is deliberately NOT
 #     a signal -- it is this repo's standard environment guard (237 uses)
@@ -1087,22 +1099,33 @@ fi
 WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**')
 # Member calls like console.assert( print and continue in Node — they
 # never fail a test — so the assert forms carry the left-boundary idiom
-# the skip RE uses. This del-side/blob RE counts a bare expect( call.
-WEAKEN_ASSERT_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.)|(^|[^A-Za-z0-9_$.])expect(\.poll)?\('
+# the skip RE uses, and the member arm requires the CALL: a member
+# access with no call (export const eq = assert.deepEqual;) executes no
+# assertion and earns nothing. supertest's .expect( is the throwing
+# exception — a member call whose mismatch rejects the awaited promise —
+# so the member form counts on every arm. This del-side/blob RE counts a
+# bare expect( call.
+WEAKEN_ASSERT_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.poll)?\(|\.expect(\.poll)?\('
 # Added lines count an expect( only when a matcher chain follows it on
 # the same line: expect('anything') passes for any return value, the
 # maximal relaxation of an assertion. The del side stays bare on
 # purpose: a multi-line-formatted expect(...) then measures as a
-# removal — the fail-closed direction, one ack entry answers it.
-WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.)|(^|[^A-Za-z0-9_$.])expect(\.poll)?\(.*\)[[:space:]]*\.'
+# removal — the fail-closed direction, one ack entry answers it. The
+# member form .expect( IS its own assertion, but it carries the same
+# matcher-tail requirement here on purpose: a bare-added member call
+# then measures as removal-only — the fail-closed direction.
+WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.poll)?\(.*\)[[:space:]]*\.|\.expect(\.poll)?\(.*\)[[:space:]]*\.'
 # Marker shapes beyond the dotted one-line form: a concurrent/
 # sequential/shuffle chain ahead of the modifier (test.concurrent.skip(),
-# describe.concurrent.skip()), the tagged-template each tail
-# (it.skip.each`table`), and the computed-property accessor
-# (it['skip']('a', ...)). Newline-split member chains (it / .skip( on
-# two lines — valid JS running as it.skip) are measured on the joined
-# view weaken_join_markers produces below.
-WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*(\.[[:space:]]*(concurrent|sequential|shuffle)[[:space:]]*)*\.[[:space:]]*(skip|todo|fails|failing)([[:space:]]*\.[[:space:]]*(each|for))?[[:space:]]*[(<`]|(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*\[[[:space:]]*('\''|")(skip|todo|fails|failing)('\''|")[[:space:]]*\][[:space:]]*[(<`]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\('
+# describe.concurrent.skip()) or BEHIND it (it.skip.concurrent( — vitest
+# registers the skip either way), the optional-chaining spellings
+# it?.skip( and it.skip?.(, the tagged-template each tail
+# (it.skip.each`table`), and the computed-property accessor quoted with
+# a single, double, or BACKTICK quote (it['skip']('a', ...)).
+# Newline-split member chains (it / .skip( on two lines — valid JS
+# running as it.skip) are measured on the joined view
+# weaken_join_markers produces below.
+WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*([?]?[.][[:space:]]*(concurrent|sequential|shuffle)[[:space:]]*)*[?]?[.][[:space:]]*(skip|todo|fails|failing)([[:space:]]*[?]?[.][[:space:]]*(each|for|concurrent|sequential|shuffle)[[:space:]]*)*[[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*\[[[:space:]]*('\''|"|`)(skip|todo|fails|failing)('\''|"|`)[[:space:]]*\][[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\('
 # Measured weakenings travel as parallel indexed arrays, never a
 # newline/tab-joined string: filenames are branch-controlled bytes, and a
 # name carrying a newline or tab splits a delimited record into fragments
@@ -1167,17 +1190,21 @@ weaken_strip_comments() {
           continue
         }
         if (q != "") {
-          if (q == "`" && ch == "$" && nx == "{") { out = out ch nx; tpl += 1; q = ""; i += 2; continue }
+          if (q == "`" && ch == "$" && nx == "{") { out = out ch nx; tpl += 1; br[tpl] = 0; q = ""; i += 2; continue }
           if (ch == "\\") { out = out ch nx; i += 2; continue }
           out = out ch
           if (ch == q) q = ""
           i += 1
           continue
         }
-        if (ch == "}" && tpl > 0) { out = out ch; q = "`"; tpl -= 1; i += 1; continue }
+        if (ch == "}" && tpl > 0) {
+          if (br[tpl] > 0) { br[tpl] -= 1 } else { q = "`"; tpl -= 1 }
+          out = out ch; i += 1; continue
+        }
         if (ch == "/" && nx == "/") break
         if (ch == "/" && nx == "*") { inc = 1; i += 2; continue }
         if (ch == "\047" || ch == "\"" || ch == "`") { q = ch }
+        if (ch == "{" && tpl > 0) br[tpl] += 1
         out = out ch; i += 1
       }
       if (q != "`") q = ""
@@ -1190,18 +1217,33 @@ weaken_strip_comments() {
 # credit, and a decoy line inside a block comment opened ABOVE the diff
 # hunk is only inside it when the state arrives from the unchanged bytes.
 # Regex literals are state-tracked too, keyed on the last significant
-# output character: an operator (or line start) ahead opens a literal,
-# a value ahead means division -- so an inert expect( decoy inside
-# /expect(x)?/ earns no credit, and a /[...]/ class carrying /* cannot
-# open the block state and swallow the assertions that follow. Template
-# nesting is tracked by depth: an inner backtick under ${} closes the
-# NESTED template, not the outer one. Single- and double-quoted strings
-# cannot span lines in TS, so a dangling quote at EOL closes there; a
+# TOKEN, not just the last character: a preceding operator (including a
+# division '/'), a regex-head keyword (return/typeof/yield/..., preserved
+# across whitespace), a CONTROL-head close paren, or line start opens a
+# literal; a value ahead (identifier, number, string, call close paren,
+# ']') means division. The char alone cannot tell if (one()) /re/ from
+# foo() / 2, so the paren kind is tracked on a depth stack, and cannot
+# see through the space in typeof /.../. An inert expect( decoy inside
+# /expect(x)?/ thus earns no credit, and a /[...]/ class carrying /*
+# cannot open the block state and swallow the assertions that follow.
+# Template nesting is tracked by depth: an inner backtick under ${}
+# closes the NESTED template, not the outer one, and a hole closes on
+# the brace matching ITS ${ -- per-hole brace depth, not the first }
+# byte, or an object literal inside the hole re-enters template state
+# early and swallows the live code up to the next backtick.
+# Single- and double-quoted strings cannot span lines in TS, so a
+# dangling quote at EOL closes there; a
 # template literal carries on. A regex literal cannot: an unterminated
 # one at EOL drops its state rather than swallowing the next line.
 weaken_strip_code() {
   awk '
-    BEGIN { inc = 0; q = ""; tpl = 0; regx = 0; rcls = 0; last = "" }
+    function flushident() {
+      if (ident == "") return
+      if (ident ~ /^(return|typeof|yield|await|throw|void|delete|do|else|in|of|case|new|instanceof|if|for|while|switch|catch|with)$/) ltok = ident
+      else ltok = "id"
+      ident = ""
+    }
+    BEGIN { inc = 0; q = ""; tpl = 0; regx = 0; rcls = 0; ltok = ""; ident = ""; pd = 0 }
     {
       line = $0; out = ""; n = length(line); i = 1
       regx = 0; rcls = 0
@@ -1215,29 +1257,39 @@ weaken_strip_code() {
           if (ch == "\\") { i += 2 }
           else if (rcls) { if (ch == "]") rcls = 0; i += 1 }
           else if (ch == "[") { rcls = 1; i += 1 }
-          else if (ch == "/") { regx = 0; i += 1 }
+          else if (ch == "/") { regx = 0; ltok = "str"; i += 1 }
           else { i += 1 }
           continue
         }
         if (q != "") {
           if (ch == "\\") { i += 2 }
-          else if (q == "`" && ch == "$" && nx == "{") { tpl += 1; q = ""; i += 2 }
-          else if (ch == q) { q = ""; i += 1 }
+          else if (q == "`" && ch == "$" && nx == "{") { tpl += 1; br[tpl] = 0; q = ""; ltok = ""; i += 2 }
+          else if (ch == q) { q = ""; ltok = "str"; i += 1 }
           else { i += 1 }
           continue
         }
-        if (ch == "}" && tpl > 0) { q = "`"; tpl -= 1; i += 1; continue }
-        if (ch == "/" && nx == "/") break
-        if (ch == "/" && nx == "*") { inc = 1; i += 2; continue }
-        if (ch == "/") {
-          if (last == "" || last ~ /[=(,:;!&|?{}+*%~^<>\[-]/) { regx = 1; i += 1; continue }
-          out = out ch; last = ch; i += 1; continue
+        if (ch == "}" && tpl > 0) {
+          flushident()
+          if (br[tpl] > 0) { br[tpl] -= 1; out = out ch; ltok = "}"; i += 1; continue }
+          q = "`"; tpl -= 1; ltok = ""; i += 1; continue
         }
-        if (ch == "\047" || ch == "\"" || ch == "`") { q = ch; i += 1; continue }
-        out = out ch
-        if (ch !~ /[[:space:]]/) last = ch
-        i += 1
+        if (ch == "/" && nx == "/") break
+        if (ch == "/" && nx == "*") { flushident(); inc = 1; i += 2; continue }
+        if (ch == "/") {
+          flushident()
+          if (ltok == "" || ltok == ")ctl" || ltok ~ /^[=(,:;!&|?{}+*%~^<>\[\/-]$/ || ltok ~ /^(return|typeof|yield|await|throw|void|delete|do|else|in|of|case|new|instanceof)$/) { regx = 1; i += 1; continue }
+          out = out ch; ltok = "/"; i += 1; continue
+        }
+        if (ch == "\047" || ch == "\"" || ch == "`") { flushident(); q = ch; i += 1; continue }
+        if (ch ~ /[A-Za-z0-9_$]/) { ident = ident ch; out = out ch; i += 1; continue }
+        flushident()
+        if (ch == "(") { pd += 1; pk[pd] = (ltok ~ /^(if|for|while|switch|catch|with)$/) ? 1 : 0; ltok = "(" }
+        else if (ch == ")") { ctl = (pd > 0 && pk[pd]); if (pd > 0) pd -= 1; ltok = (ctl ? ")ctl" : ")") }
+        else if (ch !~ /[[:space:]]/) { ltok = ch }
+        if (ch == "{" && tpl > 0) br[tpl] += 1
+        out = out ch; i += 1
       }
+      flushident()
       if (q != "" && q != "`") q = ""
       if (out !~ /^[[:space:]]*$/) print out
     }'
@@ -1261,7 +1313,7 @@ weaken_join_markers() {
 # from origin/main: the same file at that parent decides line authorship,
 # keeping only what the merge resolution itself authored.
 weaken_count_commit_file() {
-  local c="${1}" f="${2}" is_merge="${3}" p2='' have_p2='' kept='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot weaken_has_edits='' weaken_old='' weaken_new='' weaken_old_n weaken_new_n weaken_o weaken_mb_n weaken_p2_n
+  local c="${1}" f="${2}" is_merge="${3}" p2='' have_p2='' kept='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot weaken_has_edits='' weaken_old='' weaken_new='' weaken_old_stripped='' weaken_new_stripped='' weaken_old_n weaken_new_n weaken_o weaken_mb_n weaken_p2_n weaken_old_skip_n weaken_new_skip_n weaken_s weaken_mb_stripped='' weaken_p2_stripped='' weaken_mb_skip_n weaken_p2_skip_n
   if [[ -n "${is_merge}" ]]; then
     # An empty blob is not a missing one: key the freight filter on git
     # show's exit status, so a modify/delete resolution (main deleted the
@@ -1357,21 +1409,41 @@ weaken_count_commit_file() {
     # edited file instead of only the zero-signal ones: symmetric
     # string-and-comment-aware stripping nets every untouched region to
     # zero, so the blob delta sees exactly what the edits removed, and
-    # take whichever signal measures more deletion. A merge's blob delta
+    # take whichever signal measures more deletion. The skip-marker net
+    # gets the same whole-blob backstop below. A merge's blob delta
     # carries main-side freight exactly like the line counts: subtract
     # main's own density delta so it neither charges nor shields.
     weaken_old="$(git show "${c}^:${f}" 2> /dev/null)" || weaken_old=''
     weaken_new="$(git show "${c}:${f}" 2> /dev/null)" || weaken_new=''
-    weaken_old_n="$(weaken_strip_code <<< "${weaken_old}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
-    weaken_new_n="$(weaken_strip_code <<< "${weaken_new}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
+    weaken_old_stripped="$(weaken_strip_code <<< "${weaken_old}")"
+    weaken_new_stripped="$(weaken_strip_code <<< "${weaken_new}")"
+    weaken_old_n="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${weaken_old_stripped}" || true)"
+    weaken_new_n="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${weaken_new_stripped}" || true)"
     weaken_o=$(( weaken_old_n - weaken_new_n ))
+    weaken_old_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_old_stripped}" || true)"
+    weaken_new_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_new_stripped}" || true)"
+    weaken_s=$(( weaken_new_skip_n - weaken_old_skip_n ))
     if [[ -n "${is_merge}" && -z "${kept}" ]]; then
-      weaken_mb_n="$(weaken_strip_code <<< "${base_blob}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
-      weaken_p2_n="$(weaken_strip_code <<< "${p2}" | grep -cE "${WEAKEN_ASSERT_RE}" || true)"
+      weaken_mb_stripped="$(weaken_strip_code <<< "${base_blob}")"
+      weaken_p2_stripped="$(weaken_strip_code <<< "${p2}")"
+      weaken_mb_n="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${weaken_mb_stripped}" || true)"
+      weaken_p2_n="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${weaken_p2_stripped}" || true)"
       weaken_o=$(( weaken_o - (weaken_mb_n - weaken_p2_n) ))
+      weaken_mb_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_mb_stripped}" || true)"
+      weaken_p2_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_p2_stripped}" || true)"
+      weaken_s=$(( weaken_s - (weaken_p2_skip_n - weaken_mb_skip_n) ))
     fi
     if (( weaken_o > 0 && weaken_o > d - a )); then
       d=$(( a + weaken_o ))
+    fi
+    # The skip arm's whole-blob backstop, twin of the assertion one: the
+    # line counts cold-start their comment strip at the hunk boundary, so
+    # a block-comment span opened in unchanged bytes ABOVE the hunk can
+    # hand a deleted in-span marker line removal credit it never earned,
+    # or swallow a genuine marker addition. The blob delta carries the
+    # state in from the unchanged bytes; the larger addition wins.
+    if (( weaken_s > 0 && weaken_s > sa - sd )); then
+      sa=$(( sd + weaken_s ))
     fi
   fi
   if ! weaken_slot="$(weaken_file_slot "${f}")"; then
