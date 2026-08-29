@@ -45,6 +45,7 @@ import {
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
   addDaemonRequestAttribute,
+  resolvePathFromEnv,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -153,6 +154,7 @@ export interface CliArgs {
   promptInteractive: string | undefined;
   systemPrompt: string | undefined;
   appendSystemPrompt: string | undefined;
+  appendSystemPromptFile: string | undefined;
   yolo: boolean | undefined;
   bare: boolean | undefined;
   safeMode?: boolean | undefined;
@@ -607,6 +609,10 @@ export async function parseArguments(): Promise<CliArgs> {
           'append-system-prompt',
           DEFAULT_COMMAND_OPTIONS['append-system-prompt'],
         )
+        .option(
+          'append-system-prompt-file',
+          DEFAULT_COMMAND_OPTIONS['append-system-prompt-file'],
+        )
         .option('sandbox', DEFAULT_COMMAND_OPTIONS.sandbox)
         .option('sandbox-image', DEFAULT_COMMAND_OPTIONS['sandbox-image'])
         .option('yolo', DEFAULT_COMMAND_OPTIONS.yolo)
@@ -968,6 +974,38 @@ export async function loadHierarchicalMemory(
     contextRuleExcludes,
     options,
   );
+}
+
+export function resolveAppendSystemPrompt(
+  inlinePrompt?: string,
+  filePath?: string,
+  envVar: string | undefined = process.env['QWEN_APPEND_SYSTEM_MD'],
+): string | undefined {
+  let fileContent: string | undefined;
+
+  if (filePath) {
+    const resolved = path.resolve(filePath);
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`missing append system prompt file '${resolved}'`);
+    }
+    fileContent = fs.readFileSync(resolved, 'utf8');
+  } else if (envVar) {
+    const resolution = resolvePathFromEnv(envVar);
+    if (resolution.value && !resolution.isDisabled && !resolution.isSwitch) {
+      if (!fs.existsSync(resolution.value)) {
+        throw new Error(
+          `missing append system prompt file '${resolution.value}'`,
+        );
+      }
+      fileContent = fs.readFileSync(resolution.value, 'utf8');
+    }
+  }
+
+  const parts = [inlinePrompt, fileContent].filter((part): part is string =>
+    Boolean(part?.trim()),
+  );
+
+  return parts.length > 0 ? parts.join('\n\n') : undefined;
 }
 
 /**
@@ -1967,7 +2005,10 @@ export async function loadCliConfig(
     debugMode,
     question,
     systemPrompt: argv.systemPrompt,
-    appendSystemPrompt: argv.appendSystemPrompt,
+    appendSystemPrompt: resolveAppendSystemPrompt(
+      argv.appendSystemPrompt,
+      argv.appendSystemPromptFile,
+    ),
     // Legacy fields – kept for backward compatibility with getCoreTools() etc.
     coreTools:
       bareMode || safeMode

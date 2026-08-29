@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 import {
   ToolNames,
   DEFAULT_QWEN_MODEL,
@@ -19,6 +20,7 @@ import {
   isValidSessionId,
   loadCliConfig,
   parseArguments,
+  resolveAppendSystemPrompt,
   SessionIdConflictError,
   type CliArgs,
 } from './config.js';
@@ -573,6 +575,70 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.appendSystemPrompt).toBe('Be extra concise.');
     expect(argv.systemPrompt).toBeUndefined();
+  });
+
+  it('should parse --append-system-prompt-file', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--append-system-prompt-file',
+      '/path/to/append.md',
+    ];
+    const argv = await parseArguments();
+    expect(argv.appendSystemPromptFile).toBe('/path/to/append.md');
+  });
+
+  describe('resolveAppendSystemPrompt', () => {
+    it('returns inline prompt when no file or env var is set', () => {
+      expect(
+        resolveAppendSystemPrompt('inline text', undefined, undefined),
+      ).toBe('inline text');
+    });
+
+    it('reads prompt from file when filePath is provided', () => {
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'readFileSync').mockReturnValue('Appended file text');
+      expect(
+        resolveAppendSystemPrompt(undefined, '/mock/file.md', undefined),
+      ).toBe('Appended file text');
+    });
+
+    it('reads prompt from envVar when provided', () => {
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'readFileSync').mockReturnValue('Appended env text');
+      expect(
+        resolveAppendSystemPrompt(undefined, undefined, '/mock/env-file.md'),
+      ).toBe('Appended env text');
+    });
+
+    it('combines inline prompt and file content', () => {
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'readFileSync').mockReturnValue('File text');
+      expect(
+        resolveAppendSystemPrompt('Inline text', '/mock/file.md', undefined),
+      ).toBe('Inline text\n\nFile text');
+    });
+
+    it('prioritizes filePath over envVar', () => {
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'readFileSync').mockImplementation((p) =>
+        p.toString().includes('flag') ? 'Flag content' : 'Env content',
+      );
+      expect(
+        resolveAppendSystemPrompt(undefined, '/mock/flag.md', '/mock/env.md'),
+      ).toBe('Flag content');
+    });
+
+    it('throws error when file does not exist', () => {
+      vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+      expect(() =>
+        resolveAppendSystemPrompt(
+          undefined,
+          '/non/existent/path.md',
+          undefined,
+        ),
+      ).toThrow("missing append system prompt file '/non/existent/path.md'");
+    });
   });
 
   it('should allow -r flag as alias for --resume', async () => {

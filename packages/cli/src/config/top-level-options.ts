@@ -210,6 +210,11 @@ export const DEFAULT_COMMAND_OPTIONS = {
     description:
       'Append instructions to the main session system prompt for this run. Can be combined with --system-prompt.',
   },
+  'append-system-prompt-file': {
+    type: 'string' as const,
+    description:
+      'Path to a file whose contents are appended to the main session system prompt for this run.',
+  },
   sandbox: {
     alias: 's',
     type: 'boolean' as const,
