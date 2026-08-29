@@ -254,7 +254,7 @@ describe('scheduled-task keepalive', () => {
     });
     await ka.tick();
     ka.stop();
-    expect(names).toEqual([]); // legacy task never gets the ⏰ rename
+    expect(names).toEqual([]); // legacy task is never renamed
   });
 
   it('heartbeats nothing (and does not throw) when there are no tasks', async () => {
@@ -693,7 +693,7 @@ describe('scheduled-task keepalive', () => {
     });
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');
-    expect(names[0]![1].displayName).toContain('⏰');
+    expect(names[0]![1].displayName).toBe('check build');
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('new-sess-1');
   });
@@ -724,7 +724,7 @@ describe('scheduled-task keepalive', () => {
     ka.stop();
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('existing-sess');
-    expect(names[0]![1].displayName).toContain('⏰');
+    expect(names[0]![1].displayName).toBe('lint');
   });
 
   it('does not bind disabled unbound tasks', async () => {
