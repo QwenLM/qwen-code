@@ -8183,6 +8183,7 @@ describe('createServeApp', () => {
               persistence: expected,
             },
           });
+          expect(captured?.installMetadata).not.toHaveProperty('networkPolicy');
           await vi.waitFor(() =>
             expect(bridge.extensionEvents.at(-1)).toMatchObject({
               status: 'installed',
