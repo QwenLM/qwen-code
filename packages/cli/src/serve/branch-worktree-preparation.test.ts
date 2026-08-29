@@ -77,7 +77,13 @@ async function markJournalStale(
   );
 }
 
-async function recoverStalePreparation(sessionService: SessionService) {
+async function recoverStalePreparation(
+  sessionService: SessionService,
+  options: {
+    isWorktreeOccupied?: (worktreePath: string) => boolean;
+    warn?: (message: string, fields?: Record<string, unknown>) => void;
+  } = {},
+) {
   const kill = vi.spyOn(process, 'kill').mockImplementation((pid) => {
     if (pid === stalePid) {
       throw Object.assign(new Error('missing process'), { code: 'ESRCH' });
@@ -88,6 +94,7 @@ async function recoverStalePreparation(sessionService: SessionService) {
     await recoverBranchWorktreePreparations({
       workspaceCwd: root,
       sessionService,
+      ...options,
     });
   } finally {
     kill.mockRestore();
@@ -155,6 +162,24 @@ describe('branch worktree preparation journal', () => {
     ).rejects.toThrow('must be a regular file');
     expect(JSON.parse(await fs.readFile(journalPath, 'utf8')).phase).toBe(
       'planned',
+    );
+  });
+
+  it('preserves an oversized recovery journal without reading it fully', async () => {
+    await fs.mkdir(chatsDir, { recursive: true });
+    await fs.writeFile(journalPath, 'x'.repeat(64 * 1024 + 1), 'utf8');
+    const warn = vi.fn();
+
+    await recoverBranchWorktreePreparations({
+      workspaceCwd: root,
+      sessionService: fakeSessionService(false),
+      warn,
+    });
+
+    await expect(fs.stat(journalPath)).resolves.toBeDefined();
+    expect(warn).toHaveBeenCalledWith(
+      'invalid branch worktree recovery journal preserved',
+      expect.objectContaining({ journalPath }),
     );
   });
 
@@ -267,6 +292,18 @@ describe('branch worktree preparation journal', () => {
       'sidecar-ready',
     );
     await markJournalStale(journal);
+
+    const warn = vi.fn();
+    await recoverStalePreparation(fakeSessionService(false), {
+      isWorktreeOccupied: (candidate) => candidate === created.worktree!.path,
+      warn,
+    });
+    await expect(fs.stat(created.worktree.path)).resolves.toBeDefined();
+    await expect(fs.stat(journalPath)).resolves.toBeDefined();
+    expect(warn).toHaveBeenCalledWith(
+      'branch worktree is still occupied by a live session',
+      { targetSessionId },
+    );
 
     await recoverStalePreparation(fakeSessionService(false));
 

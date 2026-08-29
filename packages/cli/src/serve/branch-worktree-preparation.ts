@@ -24,6 +24,7 @@ import type { BridgeSessionExecutionSnapshot } from '@qwen-code/acp-bridge/bridg
 import { getHeadCommit } from './server/git-branch-ops.js';
 
 const execFileAsync = promisify(execFile);
+const BRANCH_WORKTREE_JOURNAL_MAX_BYTES = 64 * 1024;
 
 export interface BranchWorktreeBaseCheckout {
   repoTop: string;
@@ -108,8 +109,10 @@ async function writeExclusiveFile(
       (fsConstants.O_NOFOLLOW ?? 0),
     0o600,
   );
+  let openedStat: Awaited<ReturnType<typeof handle.stat>> | undefined;
+  let completed = false;
   try {
-    const openedStat = await handle.stat();
+    openedStat = await handle.stat();
     if (!openedStat.isFile() || openedStat.nlink !== 1) {
       throw new Error('Branch worktree journal must be a regular file');
     }
@@ -124,8 +127,24 @@ async function writeExclusiveFile(
     ) {
       throw new Error('Branch worktree journal path changed');
     }
+    completed = true;
   } finally {
     await handle.close();
+    if (!completed && openedStat) {
+      await fs
+        .lstat(filePath)
+        .then(async (pathStat) => {
+          if (
+            pathStat.isFile() &&
+            pathStat.nlink === 1 &&
+            pathStat.dev === openedStat!.dev &&
+            pathStat.ino === openedStat!.ino
+          ) {
+            await fs.unlink(filePath);
+          }
+        })
+        .catch(() => {});
+    }
   }
 }
 
@@ -144,11 +163,17 @@ async function readStrictFile(filePath: string): Promise<string> {
       !openedStat.isFile() ||
       openedStat.nlink !== 1 ||
       openedStat.dev !== pathStat.dev ||
-      openedStat.ino !== pathStat.ino
+      openedStat.ino !== pathStat.ino ||
+      openedStat.size > BRANCH_WORKTREE_JOURNAL_MAX_BYTES
     ) {
       throw new Error('Branch worktree journal path changed');
     }
-    const contents = await handle.readFile('utf8');
+    const buffer = Buffer.alloc(BRANCH_WORKTREE_JOURNAL_MAX_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > BRANCH_WORKTREE_JOURNAL_MAX_BYTES) {
+      throw new Error('Branch worktree journal is too large');
+    }
+    const contents = buffer.subarray(0, bytesRead).toString('utf8');
     const finalStat = await fs.lstat(filePath);
     if (
       !finalStat.isFile() ||
@@ -346,6 +371,7 @@ export function recoverBranchWorktreePreparations(args: {
   workspaceCwd: string;
   sessionService: SessionService;
   assertGenerationOpen?: () => void;
+  isWorktreeOccupied?: (worktreePath: string) => boolean;
   warn?: (message: string, fields?: Record<string, unknown>) => void;
 }): Promise<void> {
   const probeSidecar = args.sessionService.getWorktreeSessionPath(
@@ -481,6 +507,22 @@ export function recoverBranchWorktreePreparations(args: {
           });
         }
         await clearTerminalMetadata(journalPath, journal, args.warn);
+        continue;
+      }
+      let occupied = false;
+      try {
+        occupied = args.isWorktreeOccupied?.(journal.worktreePath) ?? false;
+      } catch (error) {
+        args.warn?.('branch worktree live occupancy is unknown', {
+          targetSessionId: journal.targetSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+      if (occupied) {
+        args.warn?.('branch worktree is still occupied by a live session', {
+          targetSessionId: journal.targetSessionId,
+        });
         continue;
       }
       if (journal.phase !== 'cleanup-intent') {

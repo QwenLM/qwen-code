@@ -27,16 +27,24 @@ import {
   createWorktreeSessionMarker,
   ensureWorktreeSessionMarkerExcluded,
   GitWorktreeService,
+  getSessionRuntimeLiveness,
   readWorktreeSession,
   readWorktreeSessionMarker,
-  isSessionRuntimeActive,
   worktreeBranchForSlug,
+  WorktreeSessionMarkerOwnerChangedError,
   replaceWorktreeSessionMarker,
   writeWorktreeSession,
 } from '@qwen-code/qwen-code-core';
 import type { Config, WorktreeSession } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('WORKTREE_STARTUP');
+
+export class WorktreeOwnershipConflictError extends Error {
+  constructor(readonly ownerSessionId: string) {
+    super(`Worktree is owned by active session ${ownerSessionId}`);
+    this.name = 'WorktreeOwnershipConflictError';
+  }
+}
 
 /**
  * `git rev-parse --abbrev-ref HEAD` returns this literal when the
@@ -395,33 +403,57 @@ export async function persistStartupWorktreeSidecar(
     overriddenSlug = previous.slug;
   }
 
-  if (!context.wasReattached) {
-    await createWorktreeSessionMarker(context.worktreePath, sessionId);
-  } else {
-    const owner = await readWorktreeSessionMarker(context.worktreePath);
-    if (owner === null) {
+  let observedOwner: string | null = null;
+  try {
+    if (!context.wasReattached) {
       await createWorktreeSessionMarker(context.worktreePath, sessionId);
-    } else if (owner === sessionId) {
-      await ensureWorktreeSessionMarkerExcluded(context.worktreePath);
     } else {
-      const ownerActive = await isSessionRuntimeActive(owner, [
-        context.repoRoot,
-        context.worktreePath,
-      ]).catch((error) => {
-        debugLogger.warn(
-          `persistStartupWorktreeSidecar: failed to check owner runtime ${owner}: ${error}`,
+      observedOwner = await readWorktreeSessionMarker(context.worktreePath);
+      if (observedOwner === null) {
+        await createWorktreeSessionMarker(context.worktreePath, sessionId);
+      } else if (observedOwner === sessionId) {
+        await ensureWorktreeSessionMarkerExcluded(context.worktreePath);
+      } else {
+        const ownerLiveness = await getSessionRuntimeLiveness(observedOwner, [
+          context.repoRoot,
+          context.worktreePath,
+        ]).catch((error) => {
+          debugLogger.warn(
+            `persistStartupWorktreeSidecar: failed to check owner runtime ${observedOwner}: ${error}`,
+          );
+          return 'unknown' as const;
+        });
+        if (ownerLiveness === 'active') {
+          throw new WorktreeOwnershipConflictError(observedOwner);
+        }
+        if (ownerLiveness === 'unknown') {
+          debugLogger.warn(
+            `persistStartupWorktreeSidecar: owner runtime ${observedOwner} is unverifiable; adopting the reattached worktree`,
+          );
+        }
+        await replaceWorktreeSessionMarker(
+          context.worktreePath,
+          observedOwner,
+          sessionId,
         );
-        return true;
-      });
-      if (ownerActive) {
-        throw new Error(`Worktree is owned by active session ${owner}`);
       }
-      await replaceWorktreeSessionMarker(
-        context.worktreePath,
-        owner,
-        sessionId,
-      );
     }
+  } catch (error) {
+    if (error instanceof WorktreeOwnershipConflictError) throw error;
+    if (error instanceof WorktreeSessionMarkerOwnerChangedError) {
+      throw new WorktreeOwnershipConflictError(observedOwner ?? '(unknown)');
+    }
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      const currentOwner = await readWorktreeSessionMarker(
+        context.worktreePath,
+      );
+      if (currentOwner !== null && currentOwner !== sessionId) {
+        throw new WorktreeOwnershipConflictError(currentOwner);
+      }
+    }
+    debugLogger.warn(
+      `persistStartupWorktreeSidecar: marker update failed; persisting the sidecar without changing ownership: ${error}`,
+    );
   }
 
   await writeWorktreeSession(sidecarPath, {

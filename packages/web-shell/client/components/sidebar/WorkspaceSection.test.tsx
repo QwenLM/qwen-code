@@ -1037,7 +1037,11 @@ describe('WorkspaceSection git chip', () => {
     });
     await flush();
 
-    expect(workspaceGitCheckout).toHaveBeenCalledWith('main', undefined);
+    expect(workspaceGitCheckout).toHaveBeenCalledWith(
+      'main',
+      undefined,
+      undefined,
+    );
     expect(workspaceGit).toHaveBeenCalledTimes(3);
   });
 

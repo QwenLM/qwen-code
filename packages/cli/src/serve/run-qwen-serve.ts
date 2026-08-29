@@ -3192,6 +3192,25 @@ export async function runQwenServe(
   }
 }
 
+function bridgeHasLiveSessionWithin(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  worktreePath: string,
+): boolean {
+  return bridge.listWorkspaceSessions(workspaceCwd).some((session) => {
+    try {
+      return isWithinRoot(
+        path.resolve(
+          bridge.getSessionExecutionSnapshot(session.sessionId).effectiveCwd,
+        ),
+        path.resolve(worktreePath),
+      );
+    } catch {
+      return true;
+    }
+  });
+}
+
 async function runQwenServeImpl(
   optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps,
@@ -5631,6 +5650,8 @@ async function runQwenServeImpl(
           workspaceRuntimes[0],
         ),
         assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
+        isWorktreeOccupied: (worktreePath) =>
+          bridgeHasLiveSessionWithin(bridge, boundWorkspace, worktreePath),
         warn: (message, fields) => daemonLog.warn(message, fields),
       }).catch((error: unknown) => {
         daemonLog.warn('branch worktree recovery sweep failed', {
@@ -6779,6 +6800,8 @@ async function runQwenServeImpl(
           workspaceCwd: cwd,
           sessionService: createWorkspaceRuntimeSessionService(wsRuntime),
           assertGenerationOpen: () => generationGuard.assertOpen(),
+          isWorktreeOccupied: (worktreePath) =>
+            bridgeHasLiveSessionWithin(wsBridge, cwd, worktreePath),
           warn: (message, fields) => daemonLog.warn(message, fields),
         }).catch((error: unknown) => {
           daemonLog.warn('branch worktree recovery sweep failed', {

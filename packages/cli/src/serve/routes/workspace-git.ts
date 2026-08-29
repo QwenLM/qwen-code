@@ -17,7 +17,7 @@ import {
   resolveBranchWorktreeBaseCheckout,
 } from '../branch-worktree-preparation.js';
 import {
-  resolveSessionManagedGitCwd,
+  resolveSessionManagedGitCwdForRoute,
   resolveTrustedRuntime,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
@@ -80,14 +80,14 @@ export function registerWorkspaceQualifiedGitRoutes(
       deps.sendBridgeError(res, err, { route });
       return;
     }
-    const gitCwd = resolveSessionManagedGitCwd(req, runtime);
-    if (gitCwd === null) {
-      res.status(400).json({
-        error: 'invalid_cwd',
-        message: 'The supplied cwd is not owned by this session',
-      });
-      return;
-    }
+    const gitCwd = resolveSessionManagedGitCwdForRoute(
+      req,
+      res,
+      runtime,
+      route,
+      deps.sendBridgeError,
+    );
+    if (gitCwd === undefined) return;
     let worktreeSupported: boolean | undefined;
     const parsedSessionId = parseCallerSuppliedSessionId(
       req.query['sessionId'],

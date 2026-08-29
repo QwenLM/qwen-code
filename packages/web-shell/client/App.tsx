@@ -5129,6 +5129,8 @@ export function App({
   const [branchSessionDialog, setBranchSessionDialog] = useState<
     { sourceSessionId: string; atRecordId?: string } | undefined
   >(undefined);
+  const branchSessionDialogRef = useRef(branchSessionDialog);
+  branchSessionDialogRef.current = branchSessionDialog;
   const [branchSessionDialogBusy, setBranchSessionDialogBusy] = useState(false);
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
@@ -8643,12 +8645,14 @@ export function App({
         setBranchSessionDialogBusy(false);
         return;
       }
+      const confirmedDialog = branchSessionDialog;
       setBranchSessionDialogBusy(true);
       const result = branchCurrentSession({
-        atRecordId: branchSessionDialog.atRecordId,
+        atRecordId: confirmedDialog.atRecordId,
         ...(isolation === 'worktree' ? { worktree: {} } : {}),
       });
       Promise.resolve(result).finally(() => {
+        if (branchSessionDialogRef.current !== confirmedDialog) return;
         setBranchSessionDialogBusy(false);
         setBranchSessionDialog(undefined);
       });

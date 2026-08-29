@@ -30,11 +30,13 @@ vi.mock('./ui/popover', async () => {
 
 const {
   workspaceGitBranches,
+  workspaceGitCheckout,
   workspaceGitCreateBranch,
   workspaceGit,
   workspaceClient,
 } = vi.hoisted(() => {
   const workspaceGitBranches = vi.fn();
+  const workspaceGitCheckout = vi.fn().mockResolvedValue(undefined);
   const workspaceGitCreateBranch = vi.fn();
   const workspaceGit = vi.fn();
   // A stable client so the popover's memoized workspace handle (and thus its
@@ -43,7 +45,7 @@ const {
     workspaceByCwd: () => ({
       workspaceGitBranches,
       workspaceGit,
-      workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+      workspaceGitCheckout,
       workspaceGitCreateBranch,
       workspaceGitPush: vi
         .fn()
@@ -55,6 +57,7 @@ const {
   };
   return {
     workspaceGitBranches,
+    workspaceGitCheckout,
     workspaceGitCreateBranch,
     workspaceGit,
     workspaceClient,
@@ -162,6 +165,37 @@ describe('BranchPickerPopover actions', () => {
     await flush();
 
     expect(workspaceGitBranches).toHaveBeenCalledWith(
+      '/repo/.qwen/worktrees/test',
+      'session-1',
+    );
+  });
+
+  it('binds worktree checkout mutations to the owning session', async () => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo/.qwen/worktrees/test',
+      available: true,
+      local: [{ name: 'main', isHead: false }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'worktree-test',
+      detached: false,
+    });
+    mount({
+      gitCwd: '/repo/.qwen/worktrees/test',
+      gitSessionId: 'session-1',
+    });
+    await flush();
+
+    clickButton('main');
+    await flush();
+
+    expect(workspaceGitCheckout).toHaveBeenCalledWith(
+      'main',
       '/repo/.qwen/worktrees/test',
       'session-1',
     );

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -15,21 +15,12 @@ import {
   clearWorktreeSession,
   clearWorktreeSessionDurable,
   restoreWorktreeContext,
+  getSessionRuntimeLiveness,
   isSessionRuntimeActive,
   type WorktreeSession,
 } from './worktreeSessionService.js';
 import { Storage } from '../config/storage.js';
 import { writeRuntimeStatus } from '../utils/runtimeStatus.js';
-
-const fsMocks = vi.hoisted(() => ({
-  readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
-}));
-
-vi.mock('node:fs/promises', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs/promises')>();
-  fsMocks.readFile.mockImplementation(actual.readFile);
-  return { ...actual, readFile: fsMocks.readFile };
-});
 
 const sample: WorktreeSession = {
   slug: 'my-feature',
@@ -44,7 +35,6 @@ let tmpDir: string;
 let filePath: string;
 
 beforeEach(async () => {
-  fsMocks.readFile.mockClear();
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wt-session-test-'));
   filePath = path.join(tmpDir, 'test.worktree.json');
 });
@@ -62,19 +52,6 @@ describe('readWorktreeSession', () => {
     await expect(
       readWorktreeSession(filePath, { signal: controller.signal }),
     ).rejects.toBe(reason);
-  });
-
-  it('passes the caller signal to the file read', async () => {
-    await fs.writeFile(filePath, JSON.stringify(sample), 'utf-8');
-    const controller = new AbortController();
-
-    await expect(
-      readWorktreeSession(filePath, { signal: controller.signal }),
-    ).resolves.toEqual(sample);
-    expect(fsMocks.readFile).toHaveBeenLastCalledWith(filePath, {
-      encoding: 'utf-8',
-      signal: controller.signal,
-    });
   });
 
   it('returns null when file does not exist', async () => {
@@ -112,6 +89,23 @@ describe('readWorktreeSession', () => {
     );
     expect(await readWorktreeSession(filePath)).toBeNull();
   });
+
+  it('rejects an oversized sidecar without reading it into memory', async () => {
+    await fs.writeFile(filePath, 'x'.repeat(64 * 1024 + 1), 'utf8');
+    expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not follow a sidecar symlink',
+    async () => {
+      const target = path.join(tmpDir, 'target.json');
+      await fs.writeFile(target, JSON.stringify(sample), 'utf8');
+      await fs.symlink(target, filePath);
+
+      expect(await readWorktreeSession(filePath)).toBeNull();
+      expect(await fs.readFile(target, 'utf8')).toBe(JSON.stringify(sample));
+    },
+  );
 });
 
 describe('writeWorktreeSession', () => {
@@ -206,6 +200,31 @@ describe('isSessionRuntimeActive', () => {
     await expect(
       isSessionRuntimeActive('owner-session', [repoRoot, worktreePath]),
     ).resolves.toBe(true);
+  });
+
+  it('distinguishes missing evidence from confirmed inactivity', async () => {
+    const repoRoot = path.join(tmpDir, 'repo');
+    await fs.mkdir(repoRoot, { recursive: true });
+    Storage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
+
+    await expect(
+      getSessionRuntimeLiveness('owner-session', repoRoot),
+    ).resolves.toBe('unknown');
+    await expect(
+      isSessionRuntimeActive('owner-session', repoRoot),
+    ).resolves.toBe(true);
+
+    await writeRuntimeStatus(
+      new Storage(repoRoot).getRuntimeStatusPath('owner-session'),
+      {
+        sessionId: 'owner-session',
+        workDir: repoRoot,
+        pid: 2147483647,
+      },
+    );
+    await expect(
+      getSessionRuntimeLiveness('owner-session', repoRoot),
+    ).resolves.toBe('inactive');
   });
 
   it('does not trust repo-contained dead runtime status as proof of inactivity', async () => {

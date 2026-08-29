@@ -754,6 +754,15 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'session_not_found') {
+        res.status(404).json({
+          error: errorMessage(err),
+          code: kind,
+          errorKind: kind,
+          ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+        });
+        return;
+      }
       if (kind === 'mcp_budget_would_exceed') {
         const d = data as { serverName?: string };
         res.status(409).json({

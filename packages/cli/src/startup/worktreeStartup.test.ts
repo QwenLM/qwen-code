@@ -15,9 +15,11 @@ import {
   setupStartupWorktree,
   buildStartupWorktreeNotice,
   persistStartupWorktreeSidecar,
+  WorktreeOwnershipConflictError,
 } from './worktreeStartup.js';
 import {
   readWorktreeSessionMarker,
+  readWorktreeSession,
   SessionService,
   Storage,
   writeRuntimeStatus,
@@ -398,6 +400,50 @@ describe('persistStartupWorktreeSidecar', () => {
     } as unknown as Config;
   }
 
+  it.each(['missing', 'foreign-host'] as const)(
+    'adopts an unverifiable %s owner when re-attaching',
+    async (statusKind) => {
+      tempRepo = await makeTempRepo();
+      process.chdir(tempRepo);
+
+      const setup = await setupStartupWorktree(`adopt-${statusKind}`);
+      expect(setup?.ok).toBe(true);
+      if (!setup?.ok) return;
+      await writeWorktreeSessionMarker(
+        setup.context.worktreePath,
+        'old-session',
+      );
+      if (statusKind === 'foreign-host') {
+        const statusPath = new Storage(
+          setup.context.worktreePath,
+        ).getRuntimeStatusPath('old-session');
+        await fs.mkdir(path.dirname(statusPath), { recursive: true });
+        await fs.writeFile(
+          statusPath,
+          JSON.stringify({
+            schema_version: 1,
+            pid: 2147483647,
+            session_id: 'old-session',
+            work_dir: setup.context.worktreePath,
+            hostname: 'another-host',
+            started_at: Date.now() / 1000,
+            qwen_version: null,
+          }),
+          'utf8',
+        );
+      }
+
+      await persistStartupWorktreeSidecar(
+        makeConfig(setup.context.worktreePath, 'new-session'),
+        { ...setup.context, wasReattached: true },
+      );
+
+      expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+        'new-session',
+      );
+    },
+  );
+
   it('adopts a stale marker when re-attaching to an inactive owner', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);
@@ -451,6 +497,28 @@ describe('persistStartupWorktreeSidecar', () => {
     );
   });
 
+  it('persists the sidecar when a non-ownership marker write fails', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const setup = await setupStartupWorktree('marker-write-failure');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    await fs.mkdir(path.join(setup.context.worktreePath, '.qwen-session'), {
+      recursive: true,
+    });
+    const config = makeConfig(setup.context.worktreePath, 'new-session');
+
+    const result = await persistStartupWorktreeSidecar(config, setup.context);
+
+    await expect(
+      readWorktreeSession(result.sidecarPath),
+    ).resolves.toMatchObject({
+      slug: setup.context.slug,
+      worktreePath: setup.context.worktreePath,
+    });
+  });
+
   it('rejects adoption when the owner runtime is still active', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);
@@ -475,7 +543,11 @@ describe('persistStartupWorktreeSidecar', () => {
         makeConfig(setup.context.worktreePath, 'new-session'),
         { ...setup.context, wasReattached: true },
       ),
-    ).rejects.toThrow('Worktree is owned by active session old-session');
+    ).rejects.toMatchObject({
+      name: WorktreeOwnershipConflictError.name,
+      ownerSessionId: 'old-session',
+      message: 'Worktree is owned by active session old-session',
+    });
 
     expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
       'old-session',
@@ -508,7 +580,7 @@ describe('persistStartupWorktreeSidecar', () => {
         makeConfig(setup.context.worktreePath, 'new-session'),
         { ...setup.context, wasReattached: true },
       ),
-    ).rejects.toThrow('Worktree is owned by active session old-session');
+    ).rejects.toBeInstanceOf(WorktreeOwnershipConflictError);
 
     expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
       'old-session',

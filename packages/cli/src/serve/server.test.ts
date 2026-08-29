@@ -14384,6 +14384,53 @@ describe('createServeApp', () => {
       }
     });
 
+    it('restores worktree isolation for a case-normalized session id', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440150';
+      const storageSessionId = sessionId.toUpperCase();
+      const findSessionId = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockResolvedValue(storageSessionId);
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.realpath = (p) => p;
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'case-task',
+          worktreePath: `${WS_BOUND}/.qwen/worktrees/case-task`,
+          worktreeBranch: 'worktree-case-task',
+          originalCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        });
+      mockWt.readMarker = () => Promise.resolve(storageSessionId);
+      mockWt.lstat = () => ({ isFile: () => true }) as fs.Stats;
+
+      try {
+        const res = await request(app)
+          .post(`/session/${sessionId}/load`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toEqual({
+          slug: 'case-task',
+          path: `${WS_BOUND}/.qwen/worktrees/case-task`,
+          branch: 'worktree-case-task',
+        });
+        expect(bridge.changeSessionCwdCalls).toHaveLength(1);
+      } finally {
+        findSessionId.mockRestore();
+        mockWt.readSidecar = undefined;
+        mockWt.readMarker = undefined;
+        mockWt.realpath = undefined;
+        mockWt.lstat = undefined;
+      }
+    });
+
     it('skips worktree restore when its marker has another owner', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -21024,6 +21071,34 @@ describe('createServeApp', () => {
               hasActivePrompt: false,
             };
           },
+          loadImpl: async (req) => ({
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: 'client-worktree-branch',
+            state: {},
+            hasActivePrompt: false,
+            compactedReplay: [
+              {
+                id: 1,
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionId: req.sessionId,
+                  update: {
+                    sessionUpdate: 'available_commands_update',
+                    availableCommands: [],
+                    _meta: {
+                      availableSkills: ['review'],
+                      availableSkillDetails: [
+                        { name: 'review', body: 'private skill body' },
+                      ],
+                    },
+                  },
+                },
+              },
+            ],
+          }),
         });
         bridge.getSessionExecutionSnapshot = () => ({
           workspaceCwd: repo,
@@ -21068,6 +21143,10 @@ describe('createServeApp', () => {
           currentCwd: worktreePath,
           worktree: { slug, path: worktreePath, branch: worktreeBranch },
         });
+        expect(JSON.stringify(res.body)).not.toContain('private skill body');
+        expect(
+          res.body.compactedReplay[0].data.update._meta.availableSkills,
+        ).toEqual(['review']);
         expect(branchSession).toHaveBeenCalledWith(
           'source-session',
           expect.objectContaining({
@@ -21136,138 +21215,157 @@ describe('createServeApp', () => {
       expect(getSessionExecutionSnapshot).not.toHaveBeenCalled();
     });
 
-    it('cleans a prepared worktree when the source becomes busy at dispatch', async () => {
-      const repo = await fsp.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-branch-busy-repo-'),
-      );
-      const runtimeDir = await fsp.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-branch-busy-runtime-'),
-      );
-      const slug = 'busy-race';
-      const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
-      const worktreeBranch = `worktree-${slug}`;
-      try {
-        await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
-        await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
-        await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
-        await execFileAsync(
-          'git',
-          [
-            '-c',
-            'user.name=Qwen Test',
-            '-c',
-            'user.email=qwen@example.com',
-            'commit',
-            '-m',
-            'base',
-          ],
-          { cwd: repo },
+    it.each([
+      {
+        name: 'source becomes busy',
+        error: () => new SessionBusyError('source-session'),
+        status: 409,
+        code: 'session_busy',
+      },
+      {
+        name: 'source transcript is empty',
+        error: () =>
+          Object.assign(new Error('Source session not found or empty'), {
+            data: { errorKind: 'session_not_found' },
+          }),
+        status: 404,
+        code: 'session_not_found',
+      },
+    ])(
+      'cleans a prepared worktree when the $name at dispatch',
+      async ({ error, status, code }) => {
+        const repo = await fsp.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-branch-busy-repo-'),
         );
-        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
-          cwd: repo,
-        });
-        const baseCommit = stdout.trim();
-        mockBranchOps.getHeadCommit = async () => baseCommit;
-        mockWt.impl = () => ({
-          isGitRepository: async () => true,
-          getRepoTopLevel: async () => repo,
-          getCurrentBranch: async () => 'main',
-          getUserWorktreePath: () => worktreePath,
-          createUserWorktree: async () => {
-            await fsp.mkdir(path.dirname(worktreePath), { recursive: true });
-            await execFileAsync(
-              'git',
-              [
-                'worktree',
-                'add',
-                '-b',
-                worktreeBranch,
-                worktreePath,
-                baseCommit,
-              ],
-              { cwd: repo },
-            );
-            return {
-              success: true,
-              worktree: { slug, path: worktreePath, branch: worktreeBranch },
-            };
-          },
-          removePreparedUserWorktree: async (
-            _slug: string,
-            _owner: string,
-            _base: string,
-            onRemoved?: () => Promise<void>,
-          ) => {
-            await execFileAsync('git', ['worktree', 'remove', worktreePath], {
-              cwd: repo,
-            });
-            await onRemoved?.();
-            await execFileAsync('git', ['branch', '-d', worktreeBranch], {
-              cwd: repo,
-            });
-            return { success: true };
-          },
-        });
-        const bridge = fakeBridge({
-          summaryImpl: (sessionId) => {
-            if (sessionId !== 'source-session') {
-              throw new SessionNotFoundError(sessionId);
-            }
-            return {
-              sessionId,
-              workspaceCwd: repo,
-              createdAt: '2026-08-16T00:00:00.000Z',
-              clientCount: 1,
-              hasActivePrompt: false,
-            };
-          },
-        });
-        bridge.getSessionExecutionSnapshot = () => ({
-          workspaceCwd: repo,
-          effectiveCwd: repo,
-        });
-        bridge.branchSession = vi.fn(async () => {
-          throw new SessionBusyError('source-session');
-        });
-        const runtime = makeWorkspaceRuntimeForTest({
-          workspaceId: 'branch-worktree-primary',
-          workspaceCwd: repo,
-          sessionRuntimeBaseDir: runtimeDir,
-          primary: true,
-          bridge,
-        });
-        const app = createServeApp(
-          { ...baseOpts, workspace: repo },
-          undefined,
-          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+        const runtimeDir = await fsp.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-branch-busy-runtime-'),
         );
+        const slug = 'busy-race';
+        const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
+        const worktreeBranch = `worktree-${slug}`;
+        try {
+          await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+          await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
+          await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+          await execFileAsync(
+            'git',
+            [
+              '-c',
+              'user.name=Qwen Test',
+              '-c',
+              'user.email=qwen@example.com',
+              'commit',
+              '-m',
+              'base',
+            ],
+            { cwd: repo },
+          );
+          const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+            cwd: repo,
+          });
+          const baseCommit = stdout.trim();
+          mockBranchOps.getHeadCommit = async () => baseCommit;
+          mockWt.impl = () => ({
+            isGitRepository: async () => true,
+            getRepoTopLevel: async () => repo,
+            getCurrentBranch: async () => 'main',
+            getUserWorktreePath: () => worktreePath,
+            createUserWorktree: async () => {
+              await fsp.mkdir(path.dirname(worktreePath), { recursive: true });
+              await execFileAsync(
+                'git',
+                [
+                  'worktree',
+                  'add',
+                  '-b',
+                  worktreeBranch,
+                  worktreePath,
+                  baseCommit,
+                ],
+                { cwd: repo },
+              );
+              return {
+                success: true,
+                worktree: { slug, path: worktreePath, branch: worktreeBranch },
+              };
+            },
+            removePreparedUserWorktree: async (
+              _slug: string,
+              _owner: string,
+              _base: string,
+              onRemoved?: () => Promise<void>,
+            ) => {
+              await execFileAsync('git', ['worktree', 'remove', worktreePath], {
+                cwd: repo,
+              });
+              await onRemoved?.();
+              await execFileAsync('git', ['branch', '-d', worktreeBranch], {
+                cwd: repo,
+              });
+              return { success: true };
+            },
+          });
+          const bridge = fakeBridge({
+            summaryImpl: (sessionId) => {
+              if (sessionId !== 'source-session') {
+                throw new SessionNotFoundError(sessionId);
+              }
+              return {
+                sessionId,
+                workspaceCwd: repo,
+                createdAt: '2026-08-16T00:00:00.000Z',
+                clientCount: 1,
+                hasActivePrompt: false,
+              };
+            },
+          });
+          bridge.getSessionExecutionSnapshot = () => ({
+            workspaceCwd: repo,
+            effectiveCwd: repo,
+          });
+          bridge.branchSession = vi.fn(async () => {
+            throw error();
+          });
+          const runtime = makeWorkspaceRuntimeForTest({
+            workspaceId: 'branch-worktree-primary',
+            workspaceCwd: repo,
+            sessionRuntimeBaseDir: runtimeDir,
+            primary: true,
+            bridge,
+          });
+          const app = createServeApp(
+            { ...baseOpts, workspace: repo },
+            undefined,
+            { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+          );
 
-        const res = await request(app)
-          .post('/session/source-session/branch')
-          .set('Host', `127.0.0.1:${baseOpts.port}`)
-          .send({ worktree: { slug } });
+          const res = await request(app)
+            .post('/session/source-session/branch')
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ worktree: { slug } });
 
-        expect(res.status).toBe(409);
-        expect(res.body.code).toBe('session_busy');
-        expect(existsSync(worktreePath)).toBe(false);
-        const chatsDir = path.join(
-          new Storage(repo, runtimeDir).getProjectDir(),
-          'chats',
-        );
-        expect(
-          (await fsp.readdir(chatsDir)).filter(
-            (entry) =>
-              entry.startsWith('.branch-worktree-') ||
-              entry.endsWith('.worktree.json'),
-          ),
-        ).toEqual([]);
-      } finally {
-        mockWt.impl = undefined;
-        mockBranchOps.getHeadCommit = undefined;
-        await fsp.rm(repo, { recursive: true, force: true });
-        await fsp.rm(runtimeDir, { recursive: true, force: true });
-      }
-    });
+          expect(res.status).toBe(status);
+          expect(res.body.code).toBe(code);
+          expect(existsSync(worktreePath)).toBe(false);
+          const chatsDir = path.join(
+            new Storage(repo, runtimeDir).getProjectDir(),
+            'chats',
+          );
+          expect(
+            (await fsp.readdir(chatsDir)).filter(
+              (entry) =>
+                entry.startsWith('.branch-worktree-') ||
+                entry.endsWith('.worktree.json'),
+            ),
+          ).toEqual([]);
+        } finally {
+          mockWt.impl = undefined;
+          mockBranchOps.getHeadCommit = undefined;
+          await fsp.rm(repo, { recursive: true, force: true });
+          await fsp.rm(runtimeDir, { recursive: true, force: true });
+        }
+      },
+    );
 
     it('forwards the durable checkpoint id to the bridge', async () => {
       const bridge = fakeBridge();

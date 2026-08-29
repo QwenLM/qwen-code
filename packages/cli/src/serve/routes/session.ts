@@ -3869,7 +3869,10 @@ export function registerSessionRoutes(
                   path.join(realTarget, WORKTREE_SESSION_FILE),
                 );
                 const markerOwner = await readWorktreeSessionMarker(realTarget);
-                if (!markerStat.isFile() || markerOwner !== sessionId) {
+                if (
+                  !markerStat.isFile() ||
+                  markerOwner !== restoredStorageSessionId
+                ) {
                   realTarget = undefined;
                 }
               }
@@ -4411,7 +4414,9 @@ export function registerSessionRoutes(
                   await releaseRestored();
                   return;
                 }
-                res.status(201).json(restored);
+                res
+                  .status(201)
+                  .json(omitSkillDetailsFromReplayArrays(restored));
                 return;
               } catch (error) {
                 if (published) {

@@ -19,6 +19,7 @@ import {
   resolveContainedCwd,
   resolveContainedCwdOrFail,
   resolveSessionManagedGitCwd,
+  resolveSessionManagedGitCwdForRoute,
   resolveRegisteredWorkspaceRuntimeByPathSelector,
   resolveTrustedRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -231,6 +232,31 @@ describe('resolveSessionManagedGitCwd', () => {
       fs.realpathSync(nested),
     );
 
+    fs.writeFileSync(path.join(worktree, '.qwen-session'), 'x'.repeat(257));
+    expect(resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
+    fs.writeFileSync(path.join(worktree, '.qwen-session'), sessionId);
+
+    const validSidecar = fs.readFileSync(sidecarPath, 'utf8');
+    fs.writeFileSync(sidecarPath, '{ malformed');
+    const response = makeResponse();
+    const sendBridgeError = vi.fn();
+    expect(
+      resolveSessionManagedGitCwdForRoute(
+        owned,
+        response,
+        runtime,
+        'GET /workspaces/:workspace/git',
+        sendBridgeError,
+      ),
+    ).toBeUndefined();
+    expect(sendBridgeError).toHaveBeenCalledWith(
+      response,
+      expect.any(SyntaxError),
+      { route: 'GET /workspaces/:workspace/git' },
+    );
+    expect(response.status).not.toHaveBeenCalled();
+    fs.writeFileSync(sidecarPath, validSidecar);
+
     const unbound = { query: { cwd: worktree } } as unknown as Request;
     expect(resolveSessionManagedGitCwd(unbound, runtime)).toBeNull();
 
@@ -244,6 +270,28 @@ describe('resolveSessionManagedGitCwd', () => {
       fs.symlinkSync(target, path.join(worktree, '.qwen-session'));
       expect(resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
     }
+
+    fs.rmSync(path.join(worktree, '.qwen-session'));
+    fs.writeFileSync(path.join(worktree, '.qwen-session'), sessionId);
+    const otherWorktree = path.join(repo, '.qwen', 'worktrees', 'branch-other');
+    execFileSync(
+      'git',
+      [
+        'worktree',
+        'add',
+        '-q',
+        '-b',
+        'worktree-branch-other',
+        otherWorktree,
+        'HEAD',
+      ],
+      { cwd: repo },
+    );
+    fs.writeFileSync(
+      path.join(worktree, '.git'),
+      fs.readFileSync(path.join(otherWorktree, '.git'), 'utf8'),
+    );
+    expect(resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
   });
 
   it('accepts an existing sidecar whose original cwd is a repo subdirectory', () => {
@@ -349,6 +397,38 @@ describe('resolveSessionManagedGitCwd', () => {
       query: { cwd: worktree, sessionId },
     } as unknown as Request;
     expect(resolveSessionManagedGitCwd(request, runtime)).toBeNull();
+  });
+
+  it('fails closed when the workspace git probe fails', () => {
+    const subdirectory = path.join(repo, 'packages', 'app');
+    fs.mkdirSync(subdirectory, { recursive: true });
+    const runtime = {
+      workspaceCwd: repo,
+    } as unknown as WorkspaceRuntime;
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = '';
+    try {
+      expect(
+        resolveSessionManagedGitCwd(fakeReq(subdirectory), runtime),
+      ).toBeNull();
+    } finally {
+      process.env['PATH'] = originalPath;
+    }
+  });
+
+  it('allows a contained cwd when the workspace is deterministically non-git', () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'non-git-'));
+    const subdirectory = path.join(workspace, 'packages', 'app');
+    fs.mkdirSync(subdirectory, { recursive: true });
+    try {
+      expect(
+        resolveSessionManagedGitCwd(fakeReq(subdirectory), {
+          workspaceCwd: workspace,
+        } as unknown as WorkspaceRuntime),
+      ).toBe(fs.realpathSync(subdirectory));
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
   });
 });
 

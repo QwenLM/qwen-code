@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
@@ -13,6 +14,7 @@ import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 
 const RUNTIME_STATUS_SCAN_MAX_DIRS = 5000;
+const WORKTREE_SESSION_MAX_BYTES = 64 * 1024;
 const RUNTIME_STATUS_SCAN_SKIP_DIRS = new Set([
   '.git',
   '.hg',
@@ -98,18 +100,45 @@ export async function readWorktreeSession(
   options: { signal?: AbortSignal } = {},
 ): Promise<WorktreeSession | null> {
   let raw: string;
+  let handle: fs.FileHandle | undefined;
   try {
     options.signal?.throwIfAborted();
-    raw = options.signal
-      ? await fs.readFile(filePath, {
-          encoding: 'utf-8',
-          signal: options.signal,
-        })
-      : await fs.readFile(filePath, 'utf-8');
+    const pathStat = await fs.lstat(filePath);
+    if (!pathStat.isFile() || pathStat.nlink !== 1) return null;
+    handle = await fs.open(
+      filePath,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    );
+    const openedStat = await handle.stat();
+    if (
+      !openedStat.isFile() ||
+      openedStat.nlink !== 1 ||
+      openedStat.dev !== pathStat.dev ||
+      openedStat.ino !== pathStat.ino ||
+      openedStat.size > WORKTREE_SESSION_MAX_BYTES
+    ) {
+      return null;
+    }
+    const buffer = Buffer.alloc(WORKTREE_SESSION_MAX_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > WORKTREE_SESSION_MAX_BYTES) return null;
+    options.signal?.throwIfAborted();
+    const finalStat = await fs.lstat(filePath);
+    if (
+      !finalStat.isFile() ||
+      finalStat.nlink !== 1 ||
+      finalStat.dev !== openedStat.dev ||
+      finalStat.ino !== openedStat.ino
+    ) {
+      return null;
+    }
+    raw = buffer.subarray(0, bytesRead).toString('utf8');
   } catch (error) {
     options.signal?.throwIfAborted();
     if (isNodeError(error) && error.code === 'ENOENT') return null;
     throw error;
+  } finally {
+    await handle?.close();
   }
   options.signal?.throwIfAborted();
   let parsed: unknown;
@@ -157,12 +186,50 @@ export async function createWorktreeSession(
   session: WorktreeSession,
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const handle = await fs.open(filePath, 'wx', 0o600);
+  const handle = await fs.open(
+    filePath,
+    fsConstants.O_WRONLY |
+      fsConstants.O_CREAT |
+      fsConstants.O_EXCL |
+      (fsConstants.O_NOFOLLOW ?? 0),
+    0o600,
+  );
+  let openedStat: Awaited<ReturnType<typeof handle.stat>> | undefined;
+  let written = false;
   try {
+    openedStat = await handle.stat();
+    if (!openedStat.isFile() || openedStat.nlink !== 1) {
+      throw new Error('Worktree session sidecar must be a regular file');
+    }
     await handle.writeFile(`${JSON.stringify(session, null, 2)}\n`, 'utf8');
     await handle.sync();
+    const pathStat = await fs.lstat(filePath);
+    if (
+      !pathStat.isFile() ||
+      pathStat.nlink !== 1 ||
+      pathStat.dev !== openedStat.dev ||
+      pathStat.ino !== openedStat.ino
+    ) {
+      throw new Error('Worktree session sidecar path changed');
+    }
+    written = true;
   } finally {
     await handle.close();
+    if (!written && openedStat) {
+      await fs
+        .lstat(filePath)
+        .then(async (pathStat) => {
+          if (
+            pathStat.isFile() &&
+            pathStat.nlink === 1 &&
+            pathStat.dev === openedStat!.dev &&
+            pathStat.ino === openedStat!.ino
+          ) {
+            await fs.unlink(filePath);
+          }
+        })
+        .catch(() => {});
+    }
   }
   await fsyncParentDirectory(filePath);
 }
@@ -187,6 +254,17 @@ export async function isSessionRuntimeActive(
   sessionId: string,
   projectRoots: string | readonly string[],
 ): Promise<boolean> {
+  return (
+    (await getSessionRuntimeLiveness(sessionId, projectRoots)) !== 'inactive'
+  );
+}
+
+export type SessionRuntimeLiveness = 'active' | 'inactive' | 'unknown';
+
+export async function getSessionRuntimeLiveness(
+  sessionId: string,
+  projectRoots: string | readonly string[],
+): Promise<SessionRuntimeLiveness> {
   const roots = uniquePaths(
     (Array.isArray(projectRoots) ? projectRoots : [projectRoots]).map((root) =>
       path.resolve(root),
@@ -194,6 +272,7 @@ export async function isSessionRuntimeActive(
   );
   const runtimeBases = getRuntimeBaseCandidates(roots);
   let sawDeadRuntimeStatus = false;
+  let sawUnknownRuntimeStatus = false;
 
   for (const runtimeBase of runtimeBases) {
     for (const projectRoot of roots) {
@@ -207,24 +286,28 @@ export async function isSessionRuntimeActive(
         sessionId,
       );
       if (statusState === 'active') {
-        return true;
+        return 'active';
       }
       sawDeadRuntimeStatus ||= statusState === 'dead';
+      sawUnknownRuntimeStatus ||= statusState === 'unknown';
     }
 
     const baseState = await getRuntimeStatusStateInBase(runtimeBase, sessionId);
     if (baseState === 'active') {
-      return true;
+      return 'active';
     }
     sawDeadRuntimeStatus ||= baseState === 'dead';
+    sawUnknownRuntimeStatus ||= baseState === 'unknown';
   }
 
   const scanResult = await scanRuntimeStatusUnderRoots(roots, sessionId);
-  if (scanResult === 'active' || scanResult === 'incomplete') {
-    return true;
+  if (scanResult === 'active') {
+    return 'active';
   }
+  sawUnknownRuntimeStatus ||= scanResult === 'unknown';
 
-  return !sawDeadRuntimeStatus;
+  if (sawUnknownRuntimeStatus || !sawDeadRuntimeStatus) return 'unknown';
+  return 'inactive';
 }
 
 function getRuntimeBaseCandidates(projectRoots: readonly string[]): string[] {
@@ -244,7 +327,7 @@ function getRuntimeBaseCandidates(projectRoots: readonly string[]): string[] {
   return uniquePaths(candidates);
 }
 
-type RuntimeStatusState = 'active' | 'dead' | 'missing';
+type RuntimeStatusState = 'active' | 'dead' | 'unknown' | 'missing';
 
 async function getRuntimeStatusStateInBase(
   runtimeBase: string,
@@ -262,6 +345,7 @@ async function getRuntimeStatusStateInBase(
   }
 
   let sawDeadRuntimeStatus = false;
+  let sawUnknownRuntimeStatus = false;
   for (const entry of entries) {
     if (!entry.isDirectory()) {
       continue;
@@ -277,11 +361,13 @@ async function getRuntimeStatusStateInBase(
       return 'active';
     }
     sawDeadRuntimeStatus ||= statusState === 'dead';
+    sawUnknownRuntimeStatus ||= statusState === 'unknown';
   }
+  if (sawUnknownRuntimeStatus) return 'unknown';
   return sawDeadRuntimeStatus ? 'dead' : 'missing';
 }
 
-type RuntimeStatusScanResult = 'active' | 'dead' | 'not-found' | 'incomplete';
+type RuntimeStatusScanResult = 'active' | 'dead' | 'unknown' | 'not-found';
 
 async function scanRuntimeStatusUnderRoots(
   roots: readonly string[],
@@ -290,13 +376,16 @@ async function scanRuntimeStatusUnderRoots(
   const seen = new Set<string>();
   const state = { dirs: 0 };
   let sawDeadRuntimeStatus = false;
+  let sawUnknownRuntimeStatus = false;
   for (const root of roots) {
     const result = await scanRuntimeStatusDir(root, sessionId, seen, state);
-    if (result === 'active' || result === 'incomplete') {
+    if (result === 'active') {
       return result;
     }
     sawDeadRuntimeStatus ||= result === 'dead';
+    sawUnknownRuntimeStatus ||= result === 'unknown';
   }
+  if (sawUnknownRuntimeStatus) return 'unknown';
   return sawDeadRuntimeStatus ? 'dead' : 'not-found';
 }
 
@@ -307,7 +396,7 @@ async function scanRuntimeStatusDir(
   state: { dirs: number },
 ): Promise<RuntimeStatusScanResult> {
   if (state.dirs >= RUNTIME_STATUS_SCAN_MAX_DIRS) {
-    return 'incomplete';
+    return 'unknown';
   }
   state.dirs++;
 
@@ -328,6 +417,7 @@ async function scanRuntimeStatusDir(
   }
 
   let sawDeadRuntimeStatus = false;
+  let sawUnknownRuntimeStatus = false;
   for (const entry of entries) {
     if (!entry.isDirectory()) {
       continue;
@@ -339,21 +429,19 @@ async function scanRuntimeStatusDir(
         return 'active';
       }
       sawDeadRuntimeStatus ||= baseState === 'dead';
+      sawUnknownRuntimeStatus ||= baseState === 'unknown';
       continue;
     }
     if (shouldSkipRuntimeStatusScanDir(entry.name, dir)) {
       continue;
     }
     const result = await scanRuntimeStatusDir(child, sessionId, seen, state);
-    if (result !== 'not-found') {
-      if (result === 'dead') {
-        sawDeadRuntimeStatus = true;
-        continue;
-      }
-      return result;
-    }
+    if (result === 'active') return 'active';
+    sawDeadRuntimeStatus ||= result === 'dead';
+    sawUnknownRuntimeStatus ||= result === 'unknown';
   }
 
+  if (sawUnknownRuntimeStatus) return 'unknown';
   return sawDeadRuntimeStatus ? 'dead' : 'not-found';
 }
 
@@ -374,7 +462,7 @@ async function getRuntimeStatusPathState(
   }
 
   if (status.hostname !== os.hostname()) {
-    return 'active';
+    return 'unknown';
   }
 
   try {
@@ -384,7 +472,7 @@ async function getRuntimeStatusPathState(
     if (isNodeError(error) && error.code === 'ESRCH') {
       return 'dead';
     }
-    return 'active';
+    return 'unknown';
   }
 }
 

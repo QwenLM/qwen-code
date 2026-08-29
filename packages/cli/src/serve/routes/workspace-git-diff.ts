@@ -14,7 +14,7 @@ import {
 import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
-  resolveSessionManagedGitCwd,
+  resolveSessionManagedGitCwdForRoute,
   resolveTrustedRuntime,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
@@ -204,36 +204,35 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
   },
 ): void {
   app.get('/workspaces/:workspace/git/diff', (req, res) => {
+    const route = 'GET /workspaces/:workspace/git/diff';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    const cwd = resolveSessionManagedGitCwd(req, runtime);
-    if (cwd === null) {
-      res.status(400).json({ error: 'invalid_cwd' });
-      return;
-    }
-    void handleDiffList(
+    const cwd = resolveSessionManagedGitCwdForRoute(
+      req,
       res,
-      cwd,
+      runtime,
+      route,
       deps.sendBridgeError,
-      'GET /workspaces/:workspace/git/diff',
-      () => runtime.generationGuard?.assertOpen(),
+    );
+    if (cwd === undefined) return;
+    void handleDiffList(res, cwd, deps.sendBridgeError, route, () =>
+      runtime.generationGuard?.assertOpen(),
     );
   });
   app.get('/workspaces/:workspace/git/diff/file', (req, res) => {
+    const route = 'GET /workspaces/:workspace/git/diff/file';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    const cwd = resolveSessionManagedGitCwd(req, runtime);
-    if (cwd === null) {
-      res.status(400).json({ error: 'invalid_cwd' });
-      return;
-    }
-    void handleDiffFile(
+    const cwd = resolveSessionManagedGitCwdForRoute(
       req,
       res,
-      cwd,
+      runtime,
+      route,
       deps.sendBridgeError,
-      'GET /workspaces/:workspace/git/diff/file',
-      () => runtime.generationGuard?.assertOpen(),
+    );
+    if (cwd === undefined) return;
+    void handleDiffFile(req, res, cwd, deps.sendBridgeError, route, () =>
+      runtime.generationGuard?.assertOpen(),
     );
   });
 }

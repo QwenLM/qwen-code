@@ -14,6 +14,7 @@ import {
   GitWorktreeService,
   readWorktreeSessionMarker,
   replaceWorktreeSessionMarker,
+  writeWorktreeSessionMarker,
   worktreeBranchForSlug,
 } from './gitWorktreeService.js';
 
@@ -67,6 +68,9 @@ describe('strict worktree session markers', () => {
       ).rejects.toBeDefined();
       await expect(
         replaceWorktreeSessionMarker(repo, 'session-a', 'session-b'),
+      ).rejects.toBeDefined();
+      await expect(
+        writeWorktreeSessionMarker(repo, 'session-b'),
       ).rejects.toBeDefined();
       await expect(readWorktreeSessionMarker(repo)).resolves.toBeNull();
       expect(await fs.readFile(target, 'utf8')).toBe('session-a');
@@ -189,6 +193,54 @@ describe('prepared worktree cleanup', () => {
     await expect(fs.stat(worktreePath)).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+
+  it('preserves files inside an uninitialized tracked submodule', async () => {
+    execFileSync('git', ['commit', '--allow-empty', '-qm', 'base'], {
+      cwd: repo,
+    });
+    const gitlinkCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repo,
+      encoding: 'utf8',
+    }).trim();
+    execFileSync(
+      'git',
+      [
+        'update-index',
+        '--add',
+        '--cacheinfo',
+        `160000,${gitlinkCommit},vendor/module`,
+      ],
+      { cwd: repo },
+    );
+    execFileSync('git', ['commit', '-qm', 'track submodule'], { cwd: repo });
+    const baseCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repo,
+      encoding: 'utf8',
+    }).trim();
+    const service = new GitWorktreeService(repo);
+    const created = await service.createUserWorktree(
+      'submodule-data',
+      baseCommit,
+    );
+    if (!created.success || !created.worktree) {
+      throw new Error(created.error ?? 'worktree creation failed');
+    }
+    await createWorktreeSessionMarker(created.worktree.path, 'session-a');
+    const submodulePath = path.join(created.worktree.path, 'vendor', 'module');
+    await fs.mkdir(submodulePath, { recursive: true });
+    await fs.writeFile(path.join(submodulePath, 'user.txt'), 'keep me', 'utf8');
+
+    await expect(
+      service.removePreparedUserWorktree(
+        'submodule-data',
+        'session-a',
+        baseCommit,
+      ),
+    ).resolves.toMatchObject({ success: false });
+    await expect(
+      fs.readFile(path.join(submodulePath, 'user.txt'), 'utf8'),
+    ).resolves.toBe('keep me');
   });
 
   it('refuses cleanup when the ownership marker is tracked', async () => {

@@ -39,6 +39,14 @@ export function worktreeBranchForSlug(slug: string): string {
  * leak into commits from the linked worktree.
  */
 export const WORKTREE_SESSION_FILE = '.qwen-session';
+const WORKTREE_SESSION_MARKER_MAX_BYTES = 256;
+
+export class WorktreeSessionMarkerOwnerChangedError extends Error {
+  constructor() {
+    super('Worktree session marker owner changed');
+    this.name = 'WorktreeSessionMarkerOwnerChangedError';
+  }
+}
 
 async function fsyncDirectory(directory: string): Promise<void> {
   try {
@@ -95,12 +103,26 @@ export async function writeWorktreeSessionMarker(
   worktreePath: string,
   sessionId: string,
 ): Promise<void> {
-  await fs.writeFile(
-    path.join(worktreePath, WORKTREE_SESSION_FILE),
-    sessionId,
-    'utf8',
-  );
-  await ensureWorktreeSessionMarkerExcluded(worktreePath);
+  const owner = await readWorktreeSessionMarker(worktreePath);
+  if (owner === sessionId) {
+    await ensureWorktreeSessionMarkerExcluded(worktreePath);
+    return;
+  }
+  if (owner !== null) {
+    throw new WorktreeSessionMarkerOwnerChangedError();
+  }
+  await createWorktreeSessionMarker(worktreePath, sessionId);
+}
+
+async function readBoundedMarker(
+  handle: fs.FileHandle,
+): Promise<string | null> {
+  const stat = await handle.stat();
+  if (stat.size > WORKTREE_SESSION_MARKER_MAX_BYTES) return null;
+  const buffer = Buffer.alloc(WORKTREE_SESSION_MARKER_MAX_BYTES + 1);
+  const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+  if (bytesRead > WORKTREE_SESSION_MARKER_MAX_BYTES) return null;
+  return buffer.subarray(0, bytesRead).toString('utf8').trim() || null;
 }
 
 /** Creates a fresh marker without following or replacing an existing path. */
@@ -167,9 +189,9 @@ export async function replaceWorktreeSessionMarker(
     ) {
       throw new Error('Worktree session marker must be a regular file');
     }
-    const currentOwner = (await handle.readFile('utf8')).trim();
+    const currentOwner = await readBoundedMarker(handle);
     if (currentOwner !== expectedOwner) {
-      throw new Error('Worktree session marker owner changed');
+      throw new WorktreeSessionMarkerOwnerChangedError();
     }
     await handle.truncate(0);
     await handle.write(sessionId, 0, 'utf8');
@@ -216,7 +238,7 @@ export async function readWorktreeSessionMarker(
     ) {
       return null;
     }
-    const raw = await handle.readFile('utf8');
+    const raw = await readBoundedMarker(handle);
     const finalStat = await fs.lstat(markerPath);
     if (
       !finalStat.isFile() ||
@@ -226,8 +248,7 @@ export async function readWorktreeSessionMarker(
     ) {
       return null;
     }
-    const trimmed = raw.trim();
-    return trimmed.length > 0 ? trimmed : null;
+    return raw;
   } catch (error) {
     // Distinguish "marker missing" (legitimate — worktree predates the
     // session-ownership guard) from "marker unreadable" (disk error,
@@ -2428,10 +2449,41 @@ export class GitWorktreeService {
       if (!(await checkoutMatches())) {
         return { success: false, error: 'Worktree checkout changed' };
       }
+      const hasPopulatedGitlink = async () => {
+        const index = await worktreeGit.raw(['ls-files', '--stage', '-z']);
+        for (const entry of index.split('\0')) {
+          if (!entry.startsWith('160000 ')) continue;
+          const separator = entry.indexOf('\t');
+          if (separator < 0) return true;
+          const gitlinkPath = path.resolve(
+            worktreePath,
+            entry.slice(separator + 1),
+          );
+          if (
+            gitlinkPath === worktreePath ||
+            !gitlinkPath.startsWith(`${worktreePath}${path.sep}`)
+          ) {
+            return true;
+          }
+          const populated = await fs
+            .lstat(gitlinkPath)
+            .then(async (stat) => {
+              if (!stat.isDirectory()) return true;
+              return (await fs.readdir(gitlinkPath)).length > 0;
+            })
+            .catch((error: NodeJS.ErrnoException) => {
+              if (error.code === 'ENOENT') return false;
+              throw error;
+            });
+          if (populated) return true;
+        }
+        return false;
+      };
       const isClean = async () => {
         const status = await worktreeGit.status();
         return (
           status.isClean() &&
+          !(await hasPopulatedGitlink()) &&
           (
             await worktreeGit.raw([
               'clean',
