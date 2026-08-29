@@ -953,17 +953,12 @@ jobs:
           QWEN_CODE_API_TIMEOUT_MS: '600000'
           QWEN_STREAM_IDLE_TIMEOUT_MS: '600000'
           QWEN_STREAM_MAX_LIFETIME_MS: '1800000'
-          # Evidence-image destination for `qwen review publish-assets` —
-          # OPT-IN by design: the command refuses to push images anywhere the
-          # user did not designate, so with the repository variable unset the
-          # review simply keeps its evidence as prose and local paths. Set the
-          # variable (e.g. to this repository) to let reviews embed capture
-          # PNGs; images land on commit-pinned pr-assets/<pr>-review branches,
-          # pushed with the same CI_BOT_PAT this step already uses for gh.
-          # Retention: the visuals cleanup workflow deletes those branches
-          # only when the variable points at THIS repository — a fork or
-          # scratch destination manages its own retention.
-          QWEN_REVIEW_ASSETS_REPO: '${{ vars.QWEN_REVIEW_ASSETS_REPO }}'
+          # Evidence-image destination for `qwen review publish-assets`.
+          # It must be a dedicated external host repository: project-local
+          # image branches are fetched by ordinary clones and permanently
+          # inflate this repository. Unset or self-targeting configurations
+          # deliberately degrade to prose and local artifact paths.
+          QWEN_REVIEW_ASSETS_REPO: "${{ vars.QWEN_REVIEW_ASSETS_REPO != github.repository && vars.QWEN_REVIEW_ASSETS_REPO || '' }}"
           # Per-run agent home so this review's session/memory cannot leak into
           # the next on the reused self-hosted workspace (reset in "Clean stale
           # agent state"). Must match the QWEN_HOME computed there.
@@ -994,6 +989,22 @@ jobs:
           }
 
           REPO="${GITHUB_REPOSITORY}"
+
+          # Normalize the assets-repo designation before the CLI reads it.
+          # The env-level guard compares the RAW variable, so whitespace
+          # variants (" QwenLM/qwen-code ") and case variants slip past it;
+          # trim both ends and re-check self-targeting case-insensitively
+          # (repository names are case-insensitive). A padded or case-shifted
+          # self-reference must degrade to prose exactly like an unset one.
+          QWEN_REVIEW_ASSETS_REPO="${QWEN_REVIEW_ASSETS_REPO#"${QWEN_REVIEW_ASSETS_REPO%%[![:space:]]*}"}"
+          QWEN_REVIEW_ASSETS_REPO="${QWEN_REVIEW_ASSETS_REPO%"${QWEN_REVIEW_ASSETS_REPO##*[![:space:]]}"}"
+          if [ -n "${QWEN_REVIEW_ASSETS_REPO}" ] &&
+             [ "$(printf '%s' "${QWEN_REVIEW_ASSETS_REPO}" | tr '[:upper:]' '[:lower:]')" = \
+               "$(printf '%s' "${REPO}" | tr '[:upper:]' '[:lower:]')" ]; then
+            QWEN_REVIEW_ASSETS_REPO=''
+          fi
+          export QWEN_REVIEW_ASSETS_REPO
+
           REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
           # Set by configure_qwen_network once the wrapper dir exists.

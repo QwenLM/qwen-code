@@ -8597,6 +8597,14 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid contextMode');
         }
         const contextMode: WorkspaceRememberContextMode = rawContextMode;
+        const rawScope = params['scope'];
+        if (
+          rawScope !== undefined &&
+          rawScope !== 'project' &&
+          rawScope !== 'user'
+        ) {
+          throw RequestError.invalidParams(undefined, 'Invalid scope');
+        }
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -8616,6 +8624,7 @@ class QwenAgent implements Agent {
             projectRoot,
             content: content.trim(),
             contextMode,
+            ...(rawScope ? { scope: rawScope } : {}),
             abortSignal: childSignal,
           });
           if (result.filesTouched.length > 0) {
@@ -8688,6 +8697,14 @@ class QwenAgent implements Agent {
             'Query exceeds maximum size',
           );
         }
+        const rawScope = params['scope'];
+        if (
+          rawScope !== undefined &&
+          rawScope !== 'project' &&
+          rawScope !== 'user'
+        ) {
+          throw RequestError.invalidParams(undefined, 'Invalid scope');
+        }
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -8708,6 +8725,7 @@ class QwenAgent implements Agent {
             .forget(projectRoot, trimmedQuery, {
               config: hiddenConfig,
               abortSignal: childSignal,
+              ...(rawScope ? { scope: rawScope } : {}),
             });
           return {
             summary:
