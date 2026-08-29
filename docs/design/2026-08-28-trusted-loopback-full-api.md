@@ -254,8 +254,10 @@ pure avoids a second token-resolution path and makes direct embeds testable.
 `createServeApp()` rejects `requireAuth: true` without a token before assembling
 the application. That configuration is invalid independently of the socket and
 otherwise leaves non-strict routes open even though the public option claims
-that every route requires a bearer. The exported mutation gate also treats the
-same inconsistent dependency as unauthenticated and fails strict routes closed.
+that every normal API route requires a bearer. The exported mutation gate also
+treats the same inconsistent dependency as unauthenticated and fails strict
+routes closed. Channel webhook ingress remains under its independent
+shared-secret contract.
 
 The app factory does not add the runner's non-loopback/no-token boot check. It
 constructs an Express application and does not own the socket on which an
@@ -383,14 +385,21 @@ logging must not print duplicate secret-bearing URLs.
 The enable route stays primary-only. A paired LAN client may still disable
 Local Control but cannot enable or move it.
 
-### 6. Keep browser and transport defenses unchanged
+### 6. Preserve browser and transport defenses
 
-The following are independent of tokenless full API access and are not changed:
+The loopback Host and same-origin accept sets gain the exact bound loopback
+address so every supported `127.0.0.0/8` bind behaves like the canonical
+loopback names. REST, Web Shell, and WebSocket checks mirror that narrow
+widening. The enforcement mechanisms and remaining defenses stay unchanged:
 
-- loopback Host allowlist and non-loopback boot checks;
-- REST CORS deny-by-default behavior and explicit origin allowlist;
-- same-loopback-origin normalization for the Web Shell;
-- WebSocket Host, Origin, loopback-socket, and listener credential checks;
+- loopback Host validation still rejects unrelated authorities, and
+  non-loopback boot checks are unchanged;
+- REST CORS deny-by-default behavior and the explicit origin allowlist are
+  unchanged;
+- same-loopback-origin normalization for the Web Shell admits the exact bound
+  loopback address without admitting unrelated origins;
+- WebSocket Host and Origin checks admit the same exact bound loopback address,
+  while loopback-socket and listener credential checks are unchanged;
 - Local Control's authority-specific Host/Origin checks;
 - connection, request, body-size, rate, and session limits;
 - channel webhook shared-secret authentication;
@@ -534,9 +543,14 @@ The expected production changes are narrow:
 
 - `packages/cli/src/serve/auth.ts`: deployment-mode and operator-authority
   helpers; mutation-gate dependency and behavior; comments and matrix.
+- `packages/cli/src/serve/loopback-binds.ts`: recognize the complete supported
+  IPv4 loopback range and format bound addresses for authority comparisons.
 - `packages/cli/src/serve/server.ts`: derive trusted-loopback mode once, pass it
   to the mutation gate and Local Control routes, and use it for effective
   session-shell enablement.
+- `packages/cli/src/serve/server/self-origin.ts` and
+  `packages/cli/src/serve/acp-http/index.ts`: align REST/Web Shell and WebSocket
+  Host/Origin checks with the exact bound loopback address.
 - `packages/cli/src/serve/run-qwen-serve.ts`: derive the same mode from the
   resolved token; align bridge/bootstrap shell enablement and startup warning.
 - `packages/cli/src/serve/capabilities.ts`: update the conditional session-shell

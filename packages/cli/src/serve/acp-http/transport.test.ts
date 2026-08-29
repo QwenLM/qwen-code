@@ -10943,6 +10943,7 @@ describe('ACP WebSocket transport security', () => {
       daemonEnv?: Readonly<NodeJS.ProcessEnv>;
       localControlToken?: string;
       hostname?: string;
+      reportedLocalPort?: number;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -10990,6 +10991,14 @@ describe('ACP WebSocket transport security', () => {
       });
       const listeningServer = app.listen(0, '127.0.0.1', () => {
         port = (listeningServer.address() as AddressInfo).port;
+        if (opts.reportedLocalPort !== undefined) {
+          listeningServer.prependListener('upgrade', (_request, socket) => {
+            Object.defineProperty(socket, 'localPort', {
+              configurable: true,
+              value: opts.reportedLocalPort,
+            });
+          });
+        }
         handle?.attachServer(listeningServer);
         acpHandle = handle;
         if (!opts.localControlToken) {
@@ -11123,6 +11132,51 @@ describe('ACP WebSocket transport security', () => {
     });
     expect(result.code).toBe(101);
   });
+
+  it.each([
+    { port: 80, authority: 'localhost', scheme: 'http', expectedCode: 101 },
+    { port: 80, authority: 'localhost', scheme: 'https', expectedCode: 403 },
+    {
+      port: 80,
+      authority: '127.0.0.2',
+      scheme: 'http',
+      expectedCode: 101,
+    },
+    {
+      port: 80,
+      authority: '127.0.0.2',
+      scheme: 'https',
+      expectedCode: 403,
+    },
+    { port: 443, authority: 'localhost', scheme: 'https', expectedCode: 101 },
+    { port: 443, authority: 'localhost', scheme: 'http', expectedCode: 403 },
+    {
+      port: 443,
+      authority: '127.0.0.2',
+      scheme: 'https',
+      expectedCode: 101,
+    },
+    {
+      port: 443,
+      authority: '127.0.0.2',
+      scheme: 'http',
+      expectedCode: 403,
+    },
+  ])(
+    'handles port-less $scheme://$authority on reported port $port with code $expectedCode',
+    async ({ port: reportedLocalPort, authority, scheme, expectedCode }) => {
+      await startServer({
+        hostname: '127.0.0.2',
+        reportedLocalPort,
+      });
+      const result = await wsConnectRaw(
+        '127.0.0.1',
+        `${scheme}://${authority}`,
+        { Host: authority },
+      );
+      expect(result.code).toBe(expectedCode);
+    },
+  );
 
   // ── CSWSH origin check ─────────────────────────────────────────────
   it('rejects WS upgrade with cross-origin Origin header', async () => {

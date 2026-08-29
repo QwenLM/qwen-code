@@ -379,15 +379,19 @@ function isSameLoopbackOrigin(
     allowed.add(`https://${boundHost}:${localPort}`);
   }
   // RFC 7230 §5.4: browsers omit the port in the Origin header when it
-  // matches the scheme default (http→80, https→443). Accept the port-less
-  // forms so the check doesn't fail on default ports.
-  if (localPort === 80 || localPort === 443) {
+  // matches the scheme default (http→80, https→443).
+  if (localPort === 80) {
     for (const host of ['localhost', '127.0.0.1', '[::1]']) {
       allowed.add(`http://${host}`);
-      allowed.add(`https://${host}`);
     }
     if (boundHost) {
       allowed.add(`http://${boundHost}`);
+    }
+  } else if (localPort === 443) {
+    for (const host of ['localhost', '127.0.0.1', '[::1]']) {
+      allowed.add(`https://${host}`);
+    }
+    if (boundHost) {
       allowed.add(`https://${boundHost}`);
     }
   }

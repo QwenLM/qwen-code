@@ -850,6 +850,21 @@ describe('POST /file/upload', () => {
     );
   });
 
+  it('denies a non-trusted tokenless embed before uploading', async () => {
+    await teardown(h);
+    h = await makeHarness({ hostname: '192.0.2.1' });
+    const res = await request(h.app)
+      .post('/file/upload')
+      .set('Content-Type', 'application/octet-stream')
+      .query({ path: 'denied.bin' })
+      .send(Buffer.from('x'));
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('token_required');
+    await expect(
+      fsp.stat(path.join(h.workspace, 'denied.bin')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('rejects "." and ".." basenames with parse_error', async () => {
     const dot = await upload('.').send(Buffer.from('x'));
     expect(dot.status).toBe(400);

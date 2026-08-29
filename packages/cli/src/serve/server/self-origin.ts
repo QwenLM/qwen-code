@@ -48,9 +48,8 @@ export function installSelfOriginStripMiddleware(
           cachedSelfOrigins.add(`https://${boundHost}:${port}`);
         }
         // RFC 7230 §5.4: browsers omit the port in the Origin header when
-        // it matches the scheme default (http→80, https→443). Accept the
-        // port-less forms so the origin check doesn't fail on port 443.
-        if (port === 80 || port === 443) {
+        // it matches the scheme default (http→80, https→443).
+        if (port === 80) {
           for (const host of [
             '127.0.0.1',
             'localhost',
@@ -58,10 +57,20 @@ export function installSelfOriginStripMiddleware(
             'host.docker.internal',
           ]) {
             cachedSelfOrigins.add(`http://${host}`);
-            cachedSelfOrigins.add(`https://${host}`);
           }
           if (boundHost) {
             cachedSelfOrigins.add(`http://${boundHost}`);
+          }
+        } else if (port === 443) {
+          for (const host of [
+            '127.0.0.1',
+            'localhost',
+            '[::1]',
+            'host.docker.internal',
+          ]) {
+            cachedSelfOrigins.add(`https://${host}`);
+          }
+          if (boundHost) {
             cachedSelfOrigins.add(`https://${boundHost}`);
           }
         }

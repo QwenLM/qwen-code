@@ -11215,6 +11215,20 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.2:${opts.port}`);
       expect(res.status).toBe(200);
     });
+
+    it.each([
+      [80, 200],
+      [443, 200],
+      [4170, 403],
+    ])(
+      'handles the port-less bound loopback Host on port %i with status %i',
+      async (port, expectedStatus) => {
+        const opts = { ...baseOpts, hostname: '127.0.0.2', port };
+        const app = createServeApp(opts, () => port);
+        const res = await request(app).get('/health').set('Host', '127.0.0.2');
+        expect(res.status).toBe(expectedStatus);
+      },
+    );
   });
 
   describe('middleware order — auth runs before body parser', () => {
@@ -32242,6 +32256,50 @@ describe('same-origin Origin-stripping middleware', () => {
       .set('Origin', 'http://127.0.0.2:4170');
     expect(res.status).toBe(200);
   });
+
+  it.each([
+    { port: 80, authority: 'localhost', scheme: 'http', expectedStatus: 200 },
+    { port: 80, authority: 'localhost', scheme: 'https', expectedStatus: 403 },
+    {
+      port: 80,
+      authority: '127.0.0.2',
+      scheme: 'http',
+      expectedStatus: 200,
+    },
+    {
+      port: 80,
+      authority: '127.0.0.2',
+      scheme: 'https',
+      expectedStatus: 403,
+    },
+    { port: 443, authority: 'localhost', scheme: 'https', expectedStatus: 200 },
+    { port: 443, authority: 'localhost', scheme: 'http', expectedStatus: 403 },
+    {
+      port: 443,
+      authority: '127.0.0.2',
+      scheme: 'https',
+      expectedStatus: 200,
+    },
+    {
+      port: 443,
+      authority: '127.0.0.2',
+      scheme: 'http',
+      expectedStatus: 403,
+    },
+  ])(
+    'handles port-less $scheme://$authority on port $port with status $expectedStatus',
+    async ({ port, authority, scheme, expectedStatus }) => {
+      const opts = { ...baseOpts, hostname: '127.0.0.2', port };
+      const app = createServeApp(opts, () => port, {
+        bridge: fakeBridge(),
+      });
+      const res = await request(app)
+        .get('/health')
+        .set('Host', authority)
+        .set('Origin', `${scheme}://${authority}`);
+      expect(res.status).toBe(expectedStatus);
+    },
+  );
 });
 
 describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
@@ -33050,14 +33108,26 @@ describe('auth device-flow routes', () => {
     )?.dispose();
   });
 
-  it('POST is allowed on tokenless trusted loopback', async () => {
+  it('POST, GET, and DELETE are allowed on tokenless trusted loopback', async () => {
     const { app } = buildApp({ token: undefined });
-    const res = await request(app)
+    const start = await request(app)
       .post('/workspace/auth/device-flow')
       .set('Host', `127.0.0.1:${baseOpts.port}`)
       .send({ providerId: 'qwen-oauth' });
-    expect(res.status).toBe(201);
-    expect(res.body.providerId).toBe('qwen-oauth');
+    expect(start.status).toBe(201);
+    expect(start.body.providerId).toBe('qwen-oauth');
+    const id = start.body.deviceFlowId as string;
+
+    const read = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(read.status).toBe(200);
+    expect(read.body.deviceFlowId).toBe(id);
+
+    const cancel = await request(app)
+      .delete(`/workspace/auth/device-flow/${id}`)
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(cancel.status).toBe(204);
     (
       app.locals['deviceFlowRegistry'] as DeviceFlowRegistryType | undefined
     )?.dispose();

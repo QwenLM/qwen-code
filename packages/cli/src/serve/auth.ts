@@ -510,8 +510,9 @@ export function requestHasOperatorAuthority(
  * | no token, non-trusted request  | strict=true  | 401 + code      |
  * | no token                       | strict=false | passthrough     |
  *
- * (1) Any token configuration makes the global `bearerAuth` enforce
- *     bearer-required-everywhere; the gate is redundant but harmless.
+ * (1) Any token configuration makes the global `bearerAuth` reject missing
+ *     credentials before a request can reach this gate, so the gate is
+ *     redundant but harmless.
  *
  * The 401 body uses `code: 'token_required'` (distinct from
  * `bearerAuth`'s plain `Unauthorized` shape) so SDK clients can branch

@@ -91,6 +91,7 @@ import {
   isLoopbackBind,
 } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
+import { installSelfOriginStripMiddleware } from './server/self-origin.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveServeToken } from './serve-token.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
@@ -2388,68 +2389,6 @@ function validateRateLimitOptions(opts: ServeOptions): void {
   }
 }
 
-function installSameOriginOriginStrip(
-  app: Application,
-  getPort: () => number,
-  bind: string,
-): void {
-  let cachedStripPort = -1;
-  let cachedSelfOrigins: Set<string> = new Set();
-  const boundHost = isLoopbackBind(bind)
-    ? formatHostForAuthority(bind)
-    : undefined;
-  app.use((req: Request, _res: Response, next: NextFunction) => {
-    const origin = req.headers.origin;
-    if (origin) {
-      const port = getPort();
-      if (port !== cachedStripPort) {
-        cachedStripPort = port;
-        // Both schemes: under `--tls-cert/--tls-key` the loopback web
-        // shell is served over https, so its same-origin requests carry
-        // an `https://` Origin. Loopback hosts are trusted as same-origin
-        // regardless of scheme, so listing both is safe even on plain HTTP
-        // (the https entries simply never match without TLS).
-        cachedSelfOrigins = new Set([
-          `http://127.0.0.1:${port}`,
-          `http://localhost:${port}`,
-          `http://[::1]:${port}`,
-          `http://host.docker.internal:${port}`,
-          `https://127.0.0.1:${port}`,
-          `https://localhost:${port}`,
-          `https://[::1]:${port}`,
-          `https://host.docker.internal:${port}`,
-        ]);
-        if (boundHost) {
-          cachedSelfOrigins.add(`http://${boundHost}:${port}`);
-          cachedSelfOrigins.add(`https://${boundHost}:${port}`);
-        }
-        // RFC 7230 §5.4: browsers omit the port in the Origin header when
-        // it matches the scheme default (http→80, https→443). Accept the
-        // port-less forms so the origin check doesn't fail on port 443.
-        if (port === 80 || port === 443) {
-          for (const host of [
-            '127.0.0.1',
-            'localhost',
-            '[::1]',
-            'host.docker.internal',
-          ]) {
-            cachedSelfOrigins.add(`http://${host}`);
-            cachedSelfOrigins.add(`https://${host}`);
-          }
-          if (boundHost) {
-            cachedSelfOrigins.add(`http://${boundHost}`);
-            cachedSelfOrigins.add(`https://${boundHost}`);
-          }
-        }
-      }
-      if (cachedSelfOrigins.has(origin)) {
-        delete req.headers.origin;
-      }
-    }
-    next();
-  });
-}
-
 export function createLazyBridgeProxy(
   getBridge: () => AcpSessionBridge | undefined,
   getStartupError: () => string | undefined = () => undefined,
@@ -2584,7 +2523,7 @@ function createBootstrapServeApp(input: {
   // at `createApp` time (server.ts).
   const nativeDirectoryPickerAvailable = isNativeDirectoryPickerAvailable();
 
-  installSameOriginOriginStrip(app, getPort, opts.hostname);
+  installSelfOriginStripMiddleware(app, getPort, opts.hostname);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
     app.use(allowOriginCors(parseAllowOriginPatterns(opts.allowOrigins)));
   } else {
