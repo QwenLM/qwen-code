@@ -55,7 +55,8 @@ interface StatusRecord {
   stopClaimed: boolean;
   forbiddenActors: Set<string>;
   lastWriteAt: number;
-  pendingSnapshot?: string;
+  contentVersion: number;
+  hasPendingWrite: boolean;
   flushTimer?: ReturnType<typeof setTimeout>;
   createRetryTimer?: ReturnType<typeof setTimeout>;
   /** Resolves the pending creation backoff early so `ready` settles. */
@@ -116,8 +117,9 @@ export class StatusCardController {
     }
     if (record.terminal) return;
     record.content = boundContent(content);
+    record.contentVersion++;
     if (record.streamFailed) return;
-    record.pendingSnapshot = sanitizeStreamingImageMarkers(record.content);
+    record.hasPendingWrite = true;
     this.scheduleFlush(record);
   }
 
@@ -160,7 +162,7 @@ export class StatusCardController {
       this.flush(record);
       await record.writeChain;
       if (record.streamFailureVersion !== failureVersion) return false;
-      if (record.pendingSnapshot === undefined) break;
+      if (!record.hasPendingWrite) break;
     }
     return !record.terminal && !record.streamFailed;
   }
@@ -205,6 +207,8 @@ export class StatusCardController {
       stopClaimed: false,
       forbiddenActors: new Set(),
       lastWriteAt: Date.now(),
+      contentVersion: 0,
+      hasPendingWrite: false,
       writeChain: Promise.resolve(),
     };
     this.recordsBySegment.set(record.segmentId, record);
@@ -382,20 +386,24 @@ export class StatusCardController {
       record.terminal ||
       record.streamFailed ||
       record.inFlight ||
-      record.pendingSnapshot === undefined
+      !record.hasPendingWrite
     )
       return;
-    record.pendingSnapshot = undefined;
+    record.hasPendingWrite = false;
+    let sentVersion: number | undefined;
+    let contentWritten = false;
     const write = record.writeChain
       .then(async () => {
         const ready = await record.ready;
         if (!ready || record.terminal || record.streamFailed) return;
+        sentVersion = record.contentVersion;
         await this.options.client.openOrUpdateStream({
           outTrackId: record.outTrackId,
           key: 'content',
           content: sanitizeStreamingImageMarkers(record.content),
           finalize: false,
         });
+        contentWritten = true;
         record.streamRetryAttempt = 0;
         await this.updateRunningStatus(record);
       })
@@ -405,7 +413,12 @@ export class StatusCardController {
         record.inFlight = undefined;
       }
       record.lastWriteAt = Date.now();
-      if (record.pendingSnapshot !== undefined) this.scheduleFlush(record);
+      if (contentWritten && record.contentVersion === sentVersion) {
+        record.hasPendingWrite = false;
+      }
+      if (record.hasPendingWrite && record.contentVersion !== sentVersion) {
+        this.scheduleFlush(record);
+      }
     });
     record.inFlight = tracked;
     record.writeChain = tracked;
@@ -434,7 +447,7 @@ export class StatusCardController {
     record.streamRetryTimer = undefined;
     if (record.statusTimer) clearTimeout(record.statusTimer);
     record.statusTimer = undefined;
-    record.pendingSnapshot = undefined;
+    record.hasPendingWrite = false;
     record.abandonCreation?.();
     if (!(await record.ready)) {
       this.removeRecord(record);
@@ -546,11 +559,11 @@ export class StatusCardController {
       !record.terminal &&
       isRetryableDingtalkCardError(error)
     ) {
-      record.pendingSnapshot = sanitizeStreamingImageMarkers(record.content);
+      record.hasPendingWrite = true;
       this.scheduleStreamRetry(record);
     } else if (!record.terminal) {
       record.streamFailed = true;
-      record.pendingSnapshot = undefined;
+      record.hasPendingWrite = false;
       if (record.statusTimer) {
         clearTimeout(record.statusTimer);
         record.statusTimer = undefined;
@@ -594,7 +607,7 @@ export class StatusCardController {
     this.disposed = true;
     for (const record of [...this.recordsBySegment.values()]) {
       record.terminal = true;
-      record.pendingSnapshot = undefined;
+      record.hasPendingWrite = false;
       this.removeRecord(record);
     }
     this.terminalSegmentIds.clear();

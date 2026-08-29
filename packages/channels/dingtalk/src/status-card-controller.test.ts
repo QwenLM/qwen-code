@@ -183,6 +183,34 @@ describe('StatusCardController', () => {
         .mocked(client.openOrUpdateStream)
         .mock.calls.map(([request]) => request.content),
     ).toEqual(['latest', 'latest']);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(controller.flushPending('segment-1')).resolves.toBe(true);
+    expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-arms a flush when content changes during a stream write', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+
+    const writeGate = deferred<void>();
+    vi.mocked(client.openOrUpdateStream).mockImplementationOnce(async () => {
+      await writeGate.promise;
+    });
+    controller.replace(segment(), target, 'second');
+    await vi.advanceTimersByTimeAsync(500);
+    controller.replace(segment(), target, 'third');
+
+    writeGate.resolve();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(
+      vi
+        .mocked(client.openOrUpdateStream)
+        .mock.calls.map(([request]) => request.content),
+    ).toEqual(['second', 'third']);
   });
 
   it('hides streamed image paths in status snapshots', async () => {
