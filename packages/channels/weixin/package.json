@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-weixin",
-  "version": "0.22.3",
+  "version": "0.22.3-nightly.20260829.e5cb60ad48",
   "description": "WeChat (Weixin) channel adapter for Qwen Code",
   "repository": {
     "type": "git",
@@ -33,7 +33,7 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "0.22.3"
+    "@qwen-code/channel-base": "0.22.3-nightly.20260829.e5cb60ad48"
   },
   "devDependencies": {
     "typescript": "^5.0.0"
