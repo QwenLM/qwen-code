@@ -420,6 +420,7 @@ export class LlmClient {
   private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
+  private warnedAboutUnreachableEagerTools = false;
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
   // set is seeded on the first drain from the current skills (the startup
@@ -1666,14 +1667,19 @@ export class LlmClient {
    * backed deferred tools.
    *
    * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
-   * tool_search` or a deny rule), every deferred tool is eagerly revealed
-   * here so it lands in the declaration list. Skipping this would leave the
-   * tool both off the declarations AND off the deferred-summary list (since
-   * `undefined` is returned in that branch) — a silent disappearance that's
-   * harder to diagnose than seeing the tool name absent from `/mcp` output.
+   * tool_search` or a deny rule), deferred tools are eagerly revealed here so
+   * they land in the declaration list. Tools explicitly demoted by
+   * `tools.eager` stay hidden unless the history-reveal pass above already
+   * re-exposed one for a resumed session — that schema stays in the
+   * declarations, so it is not counted unreachable below. Skipping this for
+   * ordinary deferred tools would leave them both off the declarations AND
+   * off the deferred-summary list
+   * (since `undefined` is returned in that branch) — a silent disappearance.
    *
    * Returns `undefined` when ToolSearch is unavailable: reminders must not
-   * advertise tools the model has no way to load on demand.
+   * advertise tools the model has no way to load on demand. Tools held back
+   * by `tools.eager` in that state are unreachable for the session, which is
+   * warned about once per session.
    */
   private resolveDeferredToolsForReminder(
     deferredSummary: readonly DeferredToolSummary[],
@@ -1682,8 +1688,29 @@ export class LlmClient {
     const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
     if (!toolSearchAvailable) {
       if (deferredSummary.length > 0) {
+        const withheld: string[] = [];
         for (const t of deferredSummary) {
+          if (toolRegistry.isPermissionDeferred(t.name)) {
+            // The history-reveal pass runs first at both call sites and
+            // re-exposes resume-referenced tools regardless of why they
+            // are deferred. Such a tool's schema IS in the declarations,
+            // so calling it unreachable would be false for this session.
+            if (!toolRegistry.isDeferredToolRevealed(t.name)) {
+              withheld.push(t.name);
+            }
+            continue;
+          }
           toolRegistry.revealDeferredTool(t.name);
+        }
+        if (withheld.length > 0 && !this.warnedAboutUnreachableEagerTools) {
+          this.warnedAboutUnreachableEagerTools = true;
+          // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
+          console.warn(
+            `tools.eager is holding back ${withheld.length} tool(s) in a session with no tool_search, ` +
+              `so nothing can load them on demand and they are unreachable until restart: ${withheld.join(', ')}. ` +
+              `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to keep them loadable, ` +
+              `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,
+          );
         }
       }
       return undefined;
@@ -3254,6 +3281,15 @@ export class LlmClient {
         }
       }
 
+      // A runtime-scheduled Goal turn is not a session turn. `maxSessionTurns`
+      // counts every model call the user's own prompts drive, tool
+      // continuations included; a Goal that reads a few files per
+      // continuation would spend a user-set cap of N in N/4 continuations
+      // and die mid-run with no resume path in headless. Autonomous Goal
+      // spend is bounded by the Goal's own token budget instead (armed at
+      // creation, re-armed only by an explicit resume or edit), and the
+      // headless host excludes runtime Goal turns from the same cap for the
+      // same reason, so counting them here would split the two ceilings.
       if (messageType !== SendMessageType.Retry && !isGoalRuntimeTurn) {
         // Attribution snapshots are recorded on every non-retry turn. File
         // history snapshots are created only at UserQuery boundaries; later
@@ -3302,11 +3338,12 @@ export class LlmClient {
         }
       }
 
-      // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
-      const boundedTurns =
-        messageType === SendMessageType.Goal
-          ? MAX_TURNS
-          : Math.min(turns, MAX_TURNS);
+      // Ensure turns never exceeds MAX_TURNS to prevent infinite loops. A
+      // runtime Goal turn honours the caller's budget like every other
+      // message type: each continuation is a fresh top-level send that
+      // starts from MAX_TURNS on its own, so nothing about a Goal needs to
+      // outlive one turn's recursion allowance.
+      const boundedTurns = Math.min(turns, MAX_TURNS);
       if (!boundedTurns) {
         this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
         endCurrentInteraction('error', 'max turns exhausted', 'max_turns');
@@ -3324,6 +3361,9 @@ export class LlmClient {
         ) {
           return undefined;
         }
+        // Same ceiling as the session-turn check above, same exclusion: a
+        // runtime Goal turn does not count toward `maxSessionTurns`, so it
+        // must not be refused steer input on that count either.
         const maxSessionTurns = this.config.getMaxSessionTurns();
         if (
           !isGoalRuntimeTurn &&
@@ -4152,7 +4192,16 @@ export class LlmClient {
           // these semantics (fresh DaemonToolLoopState per continuation).
           // Runaway protection is preserved: the cap still bounds each
           // iteration, and the chain itself is bounded by
-          // stopHookBlockingCap / MAX_GOAL_ITERATIONS.
+          // stopHookBlockingCap / MAX_GOAL_ITERATIONS. Those are the only
+          // Goal-specific bounds on this path (a user-set maxSessionTurns
+          // still cuts the chain: each hook hop is a plain send with no
+          // Goal permit, so it counts as a session turn): the legacy hook
+          // Goal recurses inside one sendMessageStream call, so the
+          // runtime's token budget (which meters continuations the Goal
+          // runtime schedules) never sees it, and the recursion budget is
+          // not decremented below because a 50-iteration chain with steer
+          // and next-speaker continues would otherwise exhaust MAX_TURNS
+          // before its own iteration cap.
           this.loopDetector.reset(prompt_id);
 
           const activeGoal = getActiveGoal(this.config.getSessionId());

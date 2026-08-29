@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { HookRunner } from './hookRunner.js';
 import {
   HookEventName,
@@ -85,6 +88,7 @@ describe('HookRunner', () => {
         }
       }),
       kill: vi.fn(),
+      unref: vi.fn(),
     };
     return mockProcess;
   };
@@ -129,6 +133,7 @@ describe('HookRunner', () => {
       exitCode: null,
       signalCode: null,
       kill: vi.fn(),
+      unref: vi.fn(),
       on: vi.fn((event: string, callback: Listener) => {
         addListener(event, callback);
         return mockProcess;
@@ -1143,6 +1148,29 @@ describe('HookRunner', () => {
       );
     });
 
+    it('does not let an apostrophe inside a PowerShell comment corrupt quote tracking for later placeholders', async () => {
+      const mockProcess = createMockProcess(0, 'result');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: "# don't touch this\n(Test-Path $GEMINI_PROJECT_DIR)",
+        source: HooksConfigSource.Project,
+        shell: 'powershell',
+      };
+
+      await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        createMockInput({ cwd: 'C:/proj' }),
+      );
+
+      const spawnCall = mockSpawn.mock.calls[0];
+      expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
+        "# don't touch this\n(Test-Path 'C:/proj')",
+      );
+    });
+
     it('does not let an escaped double quote corrupt bash quote tracking for later placeholders', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
@@ -1220,6 +1248,51 @@ describe('HookRunner', () => {
         const spawnCall = mockSpawn.mock.calls[0];
         expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
           '"echo "C:\\proj";"C:\\proj""',
+        );
+      } finally {
+        if (previousMsystem === undefined) {
+          delete process.env['MSYSTEM'];
+        } else {
+          process.env['MSYSTEM'] = previousMsystem;
+        }
+        if (previousComSpec === undefined) {
+          delete process.env['ComSpec'];
+        } else {
+          process.env['ComSpec'] = previousComSpec;
+        }
+      }
+    });
+
+    it('does not let findCmdTokenEnd swallow a newline into the quoted path', async () => {
+      // hookConfig.shell only overrides to 'bash' | 'powershell'; cmd is only
+      // reachable via the platform's global shell configuration.
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const previousMsystem = process.env['MSYSTEM'];
+      const previousComSpec = process.env['ComSpec'];
+      delete process.env['MSYSTEM'];
+      process.env['ComSpec'] = 'C:\\Windows\\System32\\cmd.exe';
+
+      try {
+        const mockProcess = createMockProcess(0, 'result');
+        mockSpawn.mockImplementation(() => mockProcess);
+
+        const hookConfig: HookConfig = {
+          type: HookType.Command,
+          command: '$QWEN_PROJECT_DIR\\hook.cmd\necho done',
+          source: HooksConfigSource.Project,
+        };
+
+        await hookRunner.executeHook(
+          hookConfig,
+          HookEventName.PreToolUse,
+          createMockInput({ cwd: 'C:\\proj' }),
+        );
+
+        // A newline ends the current command line; `echo done` on the next
+        // line must stay literal, not get pulled into the quoted path.
+        const spawnCall = mockSpawn.mock.calls[0];
+        expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
+          '""C:\\proj\\hook.cmd"\necho done"',
         );
       } finally {
         if (previousMsystem === undefined) {
@@ -1483,6 +1556,12 @@ describe('HookRunner', () => {
   });
 
   describe('process tree cancellation', () => {
+    const parentExitSurvivingEvents = [
+      HookEventName.MessageDisplay,
+      HookEventName.StopFailure,
+      HookEventName.SessionDelete,
+    ] as const;
+
     const hookConfig: HookConfig = {
       type: HookType.Command,
       command: 'long-running-command',
@@ -1492,6 +1571,111 @@ describe('HookRunner', () => {
 
     const createNoSuchProcessError = () =>
       Object.assign(new Error('no such process'), { code: 'ESRCH' });
+
+    it.each(parentExitSurvivingEvents)(
+      'uses a detached parent-independent supervisor for synchronous and async %s hooks',
+      async (eventName) => {
+        mockSpawn.mockImplementation(() => createMockProcess());
+
+        await hookRunner.executeHook(
+          hookConfig,
+          eventName,
+          createMockInput({ hook_event_name: eventName }),
+        );
+        await hookRunner.executeHook(
+          { ...hookConfig, async: true },
+          eventName,
+          createMockInput({ hook_event_name: eventName }),
+        );
+
+        expect(mockSpawn).toHaveBeenCalledTimes(2);
+        for (const call of mockSpawn.mock.calls) {
+          expect(call[0]).toBe(process.execPath);
+          expect(call[1]).toContain('--eval');
+          expect(call[2].stdio).toEqual(['ignore', 'ignore', 'ignore', 'pipe']);
+          expect(call[2].detached).toBe(true);
+        }
+        for (const result of mockSpawn.mock.results) {
+          expect(result.value.unref).toHaveBeenCalledOnce();
+        }
+      },
+    );
+
+    it('removes staged input when the supervisor spawn throws', async () => {
+      const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-spawn-error-'));
+      const originalTmpDir = process.env['TMPDIR'];
+      process.env['TMPDIR'] = tempDir;
+      mockSpawn.mockImplementation(() => {
+        throw new Error('spawn failed');
+      });
+
+      try {
+        const result = await hookRunner.executeHook(
+          hookConfig,
+          HookEventName.SessionDelete,
+          createMockInput({ hook_event_name: HookEventName.SessionDelete }),
+        );
+
+        expect(result.error?.message).toBe('spawn failed');
+        expect(await readdir(tempDir)).toEqual([]);
+      } finally {
+        if (originalTmpDir === undefined) {
+          delete process.env['TMPDIR'];
+        } else {
+          process.env['TMPDIR'] = originalTmpDir;
+        }
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps output capture for process-scoped async hooks', async () => {
+      mockSpawn.mockReturnValue(createMockProcess());
+
+      await hookRunner.executeHook(
+        { ...hookConfig, async: true },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(mockSpawn.mock.calls[0][2].stdio).toEqual([
+        'pipe',
+        'pipe',
+        'pipe',
+      ]);
+    });
+
+    it.each(parentExitSurvivingEvents)(
+      'still cancels a parent-exit-surviving %s hook',
+      async (eventName) => {
+        vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+        const mockProcess = createControllableMockProcess();
+        mockSpawn.mockReturnValue(mockProcess);
+        const killSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation((target, signal) => {
+            if (target === -mockProcess.pid && signal === 0) {
+              throw createNoSuchProcessError();
+            }
+            return true;
+          });
+        const controller = new AbortController();
+
+        const resultPromise = hookRunner.executeHook(
+          hookConfig,
+          eventName,
+          createMockInput({ hook_event_name: eventName }),
+          controller.signal,
+        );
+        controller.abort();
+        mockProcess.emit('close', null);
+        const result = await resultPromise;
+
+        expect(result.error?.message).toBe(
+          'Hook execution cancelled (aborted)',
+        );
+        expect(killSpy).toHaveBeenCalledWith(-mockProcess.pid, 'SIGTERM');
+      },
+    );
 
     it('owns a POSIX process group without signalling it on normal completion', async () => {
       const mockProcess = createMockProcess(0, 'done');

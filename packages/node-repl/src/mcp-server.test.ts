@@ -114,6 +114,24 @@ describe('node_repl MCP server', () => {
     }
   });
 
+  it('advertises the complete Computer Use skill without modification', async () => {
+    const { client, close } = await connected();
+    try {
+      const expected = fs.readFileSync(
+        fileURLToPath(
+          new URL(
+            '../../core/src/skills/bundled/computer-use/SKILL.md',
+            import.meta.url,
+          ),
+        ),
+        'utf8',
+      );
+      expect(client.getInstructions()).toBe(expected);
+    } finally {
+      await close();
+    }
+  });
+
   it('persists bindings across calls and clears them on reset', async () => {
     const { client, close } = await connected();
     try {
