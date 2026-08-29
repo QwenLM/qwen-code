@@ -69,6 +69,31 @@ describe('project runtime settings', () => {
     expect(fs.existsSync(`${settingsPath}.corrupted`)).toBe(false);
   });
 
+  it('does not stamp $version into a readOnly load of an unversioned file', () => {
+    // A readOnly (`/cd` prepare) load is observation-only. Stamping the
+    // version in memory without writing it made the first hot reload
+    // re-parse the un-stamped file into a different shape than the one
+    // the session applied — and invited a later write to persist a bump
+    // the user never asked for.
+    const workspace = path.join(tempDir, 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    const settingsPath = new Storage(workspace).getWorkspaceSettingsPath();
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    const raw = '{"permissions":{"allow":[]}}';
+    fs.writeFileSync(settingsPath, raw);
+
+    const loaded = loadSettings(workspace, {
+      consumeCorruptionEnvVars: false,
+      readOnly: true,
+      skipLoadEnvironment: true,
+      workspaceTrusted: true,
+    });
+
+    expect('$version' in loaded.workspace.settings).toBe(false);
+    expect(loaded.workspace.settings.permissions?.allow).toEqual([]);
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(raw);
+  });
+
   it('migrates a legacy target in memory without touching the file', () => {
     // The `/cd` reloader loads read-only: the target's settings.json must
     // not be rewritten before the move is committed (rollback restores

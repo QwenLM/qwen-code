@@ -7090,9 +7090,15 @@ describe('Server Config (config.ts)', () => {
       .addDirectory('/path/to/runtime-added-directory');
     const previousCronScheduler = config.getCronScheduler();
     const destroyCronScheduler = vi.spyOn(previousCronScheduler, 'destroy');
+    const oldDir = path.resolve('/path/to/project-a');
     const newDir = path.resolve('/path/to/other');
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
-    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    // The directory being left is read BEFORE the chdir; a rollback restores
+    // its environment, so passing the target here would be a real defect.
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValueOnce(oldDir)
+      .mockReturnValue(newDir);
 
     const result = await config.relocateWorkingDirectory(newDir, newDir, {
       trustedFolder: true,
@@ -7103,8 +7109,9 @@ describe('Server Config (config.ts)', () => {
       newDir,
       true,
       ApprovalMode.AUTO,
-      expect.any(String),
+      oldDir,
     );
+    expect(config.shouldLoadMemoryFromIncludeDirectories()).toBe(true);
     expect(commit).toHaveBeenCalledOnce();
     expect(rollback).not.toHaveBeenCalled();
     expect(complete).toHaveBeenCalledOnce();
@@ -7225,6 +7232,34 @@ describe('Server Config (config.ts)', () => {
     );
     expect(config.getTargetDir()).toBe(baseParams.targetDir);
     chdirSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should apply the target runtime trust decision', async () => {
+    // The constructor default is trusted; deleting the re-application
+    // keeps a session trusted in a workspace the runtime declared untrusted.
+    const prepare = vi.fn().mockResolvedValue({
+      config: { trustedFolder: false } as ProjectRuntimeConfig,
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn(),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    expect(config.isTrustedFolder()).toBe(true);
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await config.relocateWorkingDirectory(newDir, newDir, {
+      trustedFolder: false,
+    });
+
+    expect(config.isTrustedFolder()).toBe(false);
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
   });
 
   it('relocateWorkingDirectory should surface prepare-time warnings as refresh errors', async () => {

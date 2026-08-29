@@ -12803,9 +12803,13 @@ class QwenAgent implements Agent {
    * the directory; the global list is only right when no session does.
    */
   private contextFileNamesForCwd(cwd: string): readonly string[] {
+    // The stored directory is normalized (`path.resolve` at construction,
+    // realpath on `/cd`); the host-supplied param is not, so a trailing
+    // slash or `..` spelling must not fall through to the global list.
+    const requested = path.resolve(cwd);
     for (const session of this.sessions.values()) {
       const config = session.getConfig();
-      if (config.getWorkingDir() === cwd) {
+      if (path.resolve(config.getWorkingDir()) === requested) {
         return config.getContextFileNames();
       }
     }

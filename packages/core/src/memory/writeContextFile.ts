@@ -97,12 +97,6 @@ export interface WriteContextFileOptions {
    * Ignored for `global` writes.
    */
   projectRoot: string;
-  /**
-   * Context-file name to write. Defaults to the process-global name; a
-   * caller acting for a session whose `/cd` scoped the names should pass
-   * that session's primary name.
-   */
-  contextFileName?: string;
   /** Rejects a stale caller immediately before a filesystem mutation. */
   assertCanCommit?: () => void;
 }
@@ -155,11 +149,7 @@ export async function writeWorkspaceContextFile(
       `writeWorkspaceContextFile: projectRoot must be absolute, got "${options.projectRoot}"`,
     );
   }
-  const filePath = resolveContextFilePath(
-    options.scope,
-    options.projectRoot,
-    options.contextFileName,
-  );
+  const filePath = resolveContextFilePath(options.scope, options.projectRoot);
 
   // Hold the per-file mutex for the entire read-compose-write sequence
   // INCLUDING the whitespace-only no-op detection. Two concurrent
@@ -241,16 +231,7 @@ async function runWrite(
 function resolveContextFilePath(
   scope: WriteContextFileScope,
   projectRoot: string,
-  contextFileName?: string,
 ): string {
-  // A session that `/cd`-ed into a project with its own `context.fileName`
-  // passes it; the process-global name is only right when no session is
-  // known. Same split as `collectWorkspaceMemoryStatus`.
-  if (contextFileName) {
-    return scope === 'workspace'
-      ? path.join(projectRoot, contextFileName)
-      : path.join(Storage.getGlobalQwenDir(), contextFileName);
-  }
   // Honor `setMemoryFilename()` overrides so POST writes to the same
   // file GET surfaces. With the prior `DEFAULT_CONTEXT_FILENAME` hard-
   // code, a deployment that switched the context filename to

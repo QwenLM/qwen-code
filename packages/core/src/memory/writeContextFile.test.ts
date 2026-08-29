@@ -54,22 +54,6 @@ describe('writeWorkspaceContextFile', () => {
     expect(result.bytesWritten).toBe(Buffer.byteLength(written, 'utf8'));
   });
 
-  it('writes to the caller-supplied context file name', async () => {
-    // A session that `/cd`-ed into a project with `context.fileName` passes
-    // its own name; the process-global name is only right without one.
-    const result = await writeWorkspaceContextFile({
-      scope: 'workspace',
-      mode: 'append',
-      content: '- scoped entry',
-      projectRoot: workspace,
-      contextFileName: 'CONTEXT.md',
-    });
-    expect(result.filePath).toBe(path.join(workspace, 'CONTEXT.md'));
-    await expect(
-      fs.access(path.join(workspace, DEFAULT_CONTEXT_FILENAME)),
-    ).rejects.toThrow();
-  });
-
   it('appends under existing section header', async () => {
     const initial = `# project notes\n\n${MEMORY_SECTION_HEADER}\n- first entry\n`;
     const filePath = path.join(workspace, DEFAULT_CONTEXT_FILENAME);

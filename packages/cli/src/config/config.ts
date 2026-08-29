@@ -1292,9 +1292,12 @@ function resolveDisabledSlashCommands(
 
 /**
  * The runtime-facing projection of `settings.agents`, shared by startup and
- * the `/cd` reloader so the two cannot drift: keys the schema carries but
- * the runtime deliberately ignores (`team`, `crossSessionMessaging`,
- * `crossSessionInbound`) are dropped in both places.
+ * the `/cd` reloader so the two cannot drift. Every schema-declared key the
+ * runtime reads through `Config.getAgentsSettings()` is carried, including
+ * the arena limits. Dropped in both places: `crossSessionMessaging` /
+ * `crossSessionInbound` (read from `settings.merged` elsewhere) and `team`
+ * / `swarm`, which the schema declares as opaque reserved objects with no
+ * keys — `team.maxTeammates` needs a schema entry before it can be carried.
  */
 function projectAgentsSettings(
   agents: Settings['agents'],
@@ -1315,23 +1318,21 @@ function projectAgentsSettings(
       ? {
           worktreeBaseDir: agents.arena.worktreeBaseDir,
           preserveArtifacts: agents.arena.preserveArtifacts ?? false,
+          maxRoundsPerAgent: agents.arena.maxRoundsPerAgent,
+          timeoutSeconds: agents.arena.timeoutSeconds,
         }
       : undefined,
   };
 }
 
+/**
+ * Resolves a settings-sourced directory against a project root. Expand
+ * first, then resolve: `resolvePath` handles every home spelling (`~`,
+ * `%userprofile%`), and an expanded path is absolute, so it is left alone
+ * rather than nailed under the project. Hand-enumerating `~` prefixes here
+ * silently broke `%userprofile%` skill directories.
+ */
 function resolveProjectPath(value: string, baseDir: string): string {
-  const expanded = resolvePath(value);
-  return path.isAbsolute(expanded)
-    ? path.normalize(expanded)
-    : path.resolve(baseDir, expanded);
-}
-
-function resolveProjectSkillPath(value: string, baseDir: string): string {
-  // Expand first, then resolve: `resolvePath` handles every home spelling
-  // (`~`, `%userprofile%`), and an expanded path is absolute, so it is left
-  // alone rather than nailed under the project. Hand-enumerating `~`
-  // prefixes here silently broke `%userprofile%` skill directories.
   const expanded = resolvePath(value);
   return path.isAbsolute(expanded)
     ? path.normalize(expanded)
@@ -1735,7 +1736,7 @@ export function createProjectRuntimeReloader(
                       directory.trim().length > 0,
                   )
                   .map((directory) =>
-                    resolveProjectSkillPath(directory.trim(), targetDir),
+                    resolveProjectPath(directory.trim(), targetDir),
                   ),
           importFormat: runtimeSettings.context?.importFormat ?? 'tree',
           contextFileName:
@@ -2583,7 +2584,7 @@ export async function loadCliConfig(
             .filter(
               (d): d is string => typeof d === 'string' && d.trim().length > 0,
             )
-            .map((d) => resolveProjectSkillPath(d.trim(), cwd)),
+            .map((d) => resolveProjectPath(d.trim(), cwd)),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     eagerTools,

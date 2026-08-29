@@ -275,11 +275,18 @@ describe('createProjectRuntimeReloader', () => {
   });
 
   it('projects agents settings the same way startup does', async () => {
-    // Startup drops schema keys the runtime ignores (`team`, …); a raw
-    // passthrough here applied `team.maxTeammates` only after a `/cd`.
+    // Startup and `/cd` share one projection: every schema-declared key
+    // the runtime reads through `getAgentsSettings()` (arena limits)
+    // survives; `team` is a schema-reserved opaque object and the keys read
+    // from `settings.merged` elsewhere are dropped.
     writeProject(projectA, {});
     writeProject(projectB, {
-      agents: { allowedGrades: ['fast'], team: { maxTeammates: 7 } },
+      agents: {
+        allowedGrades: ['fast'],
+        team: { maxTeammates: 7 },
+        arena: { maxRoundsPerAgent: 3, timeoutSeconds: 120 },
+        crossSessionMessaging: true,
+      },
       worktree: { symlinkDirectories: ['node_modules'] },
     });
 
@@ -292,9 +299,48 @@ describe('createProjectRuntimeReloader', () => {
 
     expect(prepared.config.agents?.allowedGrades).toEqual(['fast']);
     expect('team' in (prepared.config.agents ?? {})).toBe(false);
+    expect(prepared.config.agents?.arena).toMatchObject({
+      maxRoundsPerAgent: 3,
+      timeoutSeconds: 120,
+    });
+    expect('crossSessionMessaging' in (prepared.config.agents ?? {})).toBe(
+      false,
+    );
     expect(prepared.config.worktree?.symlinkDirectories).toEqual([
       'node_modules',
     ]);
+  });
+
+  it('ignores a doubled commit and a rollback or complete before commit', async () => {
+    // A second commit() must not re-pause the watcher (losing the first
+    // resume handle) or re-run the settings swap (a later rollback would
+    // then restore the TARGET project's settings).
+    writeProject(projectA, { disableAllHooks: true });
+    writeProject(projectB, { disableAllHooks: false });
+    const loaded = startupSettings();
+    const workspacePathA = loaded.workspace.path;
+    const resume = vi.fn();
+    const pauseWorkspaceWatching = vi.fn().mockResolvedValue(resume);
+    const replaceWith = vi.spyOn(loaded, 'replaceWith');
+
+    const prepared = await makeReloader(loaded, {
+      settingsWatcher: { pauseWorkspaceWatching },
+    }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
+
+    await prepared.rollback();
+    await prepared.complete();
+    expect(replaceWith).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+
+    await prepared.commit();
+    await prepared.commit();
+    expect(pauseWorkspaceWatching).toHaveBeenCalledOnce();
+    expect(replaceWith).toHaveBeenCalledOnce();
+
+    await prepared.rollback();
+    expect(loaded.workspace.path).toBe(workspacePathA);
+    expect(loaded.merged.disableAllHooks).toBe(true);
+    expect(resume).toHaveBeenCalledOnce();
   });
 
   it('preserves user agent settings when reloading in safe mode', async () => {
@@ -342,6 +388,38 @@ describe('createProjectRuntimeReloader', () => {
     expect(loaded.merged.disableAllHooks).toBe(true);
     expect(resume).toHaveBeenCalledOnce();
     expect(emit).toHaveBeenCalledWith(AppEvent.McpPendingApprovalChanged);
+  });
+
+  it('resumes the watcher exactly once when the switch completes', async () => {
+    writeProject(projectA, {});
+    writeProject(projectB, {});
+    const loaded = startupSettings();
+    const resume = vi.fn();
+    const prepared = await makeReloader(loaded, {
+      settingsWatcher: { pauseWorkspaceWatching: async () => resume },
+    }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
+
+    await prepared.commit();
+    expect(resume).not.toHaveBeenCalled();
+    await prepared.complete();
+    await prepared.complete();
+    expect(resume).toHaveBeenCalledOnce();
+    expect(loaded.workspace.path).toBe(
+      new Storage(projectB).getWorkspaceSettingsPath(),
+    );
+  });
+
+  it('keeps the host cron policy authoritative over the target project setting', async () => {
+    // A channel session runs with cron disabled for its whole life; the
+    // target project's `experimental.cron: true` must not re-enable it.
+    writeProject(projectA, {});
+    writeProject(projectB, { experimental: { cron: true } });
+
+    const prepared = await makeReloader(startupSettings(), {
+      hostPolicy: { cronEnabled: false },
+    }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
+
+    expect(prepared.config.cronEnabled).toBe(false);
   });
 
   it('persists "Always allow" against the target project file in safe mode', async () => {

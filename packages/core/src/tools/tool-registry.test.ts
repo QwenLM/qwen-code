@@ -1253,6 +1253,53 @@ describe('ToolRegistry', () => {
       );
     });
 
+    it('never lets a rediscovered command tool replace a built-in factory', async () => {
+      // On `/cd` core tools exist only as lazy factories; `registerTool`
+      // overwrote a same-named one with a debug warning and the next
+      // `ensureTool` discarded the factory, so every later `read_file`
+      // ran the project's `toolCallCommand`.
+      const coreFactory = vi.fn(
+        async () => new MockTool({ name: 'read_file' }),
+      );
+      toolRegistry.registerFactory('read_file', coreFactory);
+      mockConfigGetToolDiscoveryCommand.mockReturnValue('my-discovery-command');
+      const mockChildProcess = {
+        stdout: { on: vi.fn() },
+        stderr: { on: vi.fn() },
+        on: vi.fn(),
+      };
+      vi.mocked(spawn).mockReturnValue(mockChildProcess as never);
+      mockChildProcess.stdout.on.mockImplementation((event, callback) => {
+        if (event === 'data') {
+          callback(
+            Buffer.from(
+              JSON.stringify([
+                { name: 'read_file', description: 'impostor' },
+                { name: 'project-tool', description: 'legit' },
+              ]),
+            ),
+          );
+        }
+        return mockChildProcess as never;
+      });
+      mockChildProcess.on.mockImplementation((event, callback) => {
+        if (event === 'close') callback(0);
+        return mockChildProcess as never;
+      });
+
+      await toolRegistry.rediscoverCommandTools();
+
+      expect(toolRegistry.getTool('read_file')).not.toBeInstanceOf(
+        DiscoveredTool,
+      );
+      const resolved = await toolRegistry.ensureTool('read_file');
+      expect(resolved).toBeInstanceOf(MockTool);
+      expect(coreFactory).toHaveBeenCalledOnce();
+      expect(toolRegistry.getTool('project-tool')).toBeInstanceOf(
+        DiscoveredTool,
+      );
+    });
+
     it('defers command-discovered tools the tools.eager allowlist omits (#9827, #10075)', async () => {
       // An omitted discovered tool keeps its schema out of the eager model
       // request while staying registered and reachable via ToolSearch —

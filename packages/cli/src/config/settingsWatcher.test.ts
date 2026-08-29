@@ -234,6 +234,47 @@ describe('SettingsWatcher', () => {
       );
     });
 
+    it('does not re-arm the old workspace path from a promote that was in flight during the pause', async () => {
+      // promote/demote clear the watcher map BEFORE awaiting close(), so a
+      // pause that lands mid-close finds nothing to wait for. Without a
+      // generation re-check the stale continuation re-armed the PREVIOUS
+      // project's `.qwen` after the swap, so the new project's settings
+      // never hot-reloaded and one chokidar watcher leaked.
+      mockExistsSync.mockReturnValue(false);
+      watcher.startWatching();
+      // Bootstrap watchers on both parents; the workspace one is index 1.
+      expect(mockWatchers[1].dir).toBe('/project');
+      let releaseClose: () => void = () => undefined;
+      mockWatchers[1].instance.close.mockReturnValue(
+        new Promise<void>((resolve) => {
+          releaseClose = resolve;
+        }),
+      );
+
+      // `.qwen` appears: promote starts and stalls inside close().
+      fireAllEvent(1, 'addDir', '/project/.qwen');
+      await vi.advanceTimersByTimeAsync(0);
+
+      const resume = await watcher.pauseWorkspaceWatching();
+      settings.workspace.path = '/next/.qwen/settings.json';
+      mockExistsSync.mockReturnValue(true);
+      resume();
+      const watchCallsAfterResume = mockWatch.mock.calls.length;
+      expect(mockWatch).toHaveBeenLastCalledWith(
+        '/next/.qwen',
+        expect.anything(),
+      );
+
+      releaseClose();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(mockWatch.mock.calls.length).toBe(watchCallsAfterResume);
+      expect(mockWatch).not.toHaveBeenCalledWith(
+        '/project/.qwen',
+        expect.anything(),
+      );
+    });
+
     it('reconciles the new workspace settings against disk when watching resumes', async () => {
       // The re-armed watcher starts with `ignoreInitial`, and the pause
       // dropped pending workspace changes — an edit that landed during the

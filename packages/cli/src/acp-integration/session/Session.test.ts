@@ -8384,9 +8384,28 @@ describe('Session', () => {
 
       await registerCreateSubSessionTool(mockConfig);
 
-      expect(mockToolRegistry.registerTool).toHaveBeenCalledWith(
+      // Session-OWNED registration: `/cd` rebuilds the project-scoped tool
+      // set and must keep this one, so the plain `registerTool` path
+      // (which the mock delegates to) is not enough of a witness.
+      expect(mockToolRegistry.registerSessionTool).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'create_sub_session' }),
       );
+    });
+
+    it('registers a deferred create_sub_session factory as session-owned', async () => {
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+        getToolRegistrationStatus: vi.fn().mockResolvedValue('deferred'),
+      });
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(
+        mockToolRegistry.registerSessionPermissionDeferredFactory,
+      ).toHaveBeenCalledWith('create_sub_session', expect.any(Function));
+      expect(mockToolRegistry.registerSessionTool).not.toHaveBeenCalled();
     });
 
     it('reveals the deferred tool and refreshes the declarations after registering', async () => {

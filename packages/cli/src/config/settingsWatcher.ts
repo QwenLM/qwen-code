@@ -241,8 +241,8 @@ export class SettingsWatcher {
     settingsPath: string,
   ): Promise<void> {
     if (this.watchStage.get(scope) !== 'bootstrap') return;
-    await this.replaceWatcher(scope);
-    if (!this.started) return;
+    const generation = await this.replaceWatcher(scope);
+    if (!this.started || !this.isCurrentGeneration(scope, generation)) return;
     this.watchTargetDir(scope, settingsPath);
     // Pick up a settings.json that already exists inside the new `.qwen`.
     this.scheduleRefresh(scope);
@@ -254,8 +254,8 @@ export class SettingsWatcher {
     settingsPath: string,
   ): Promise<void> {
     if (this.watchStage.get(scope) !== 'target') return;
-    await this.replaceWatcher(scope);
-    if (!this.started) return;
+    const generation = await this.replaceWatcher(scope);
+    if (!this.started || !this.isCurrentGeneration(scope, generation)) return;
     this.watchParentForDir(scope, settingsPath);
     // Surface the deletion (rawJson goes undefined) to listeners.
     this.scheduleRefresh(scope);
@@ -264,10 +264,15 @@ export class SettingsWatcher {
   /**
    * Bumps the scope generation and closes its current watcher, clearing the
    * map entries before the caller opens the next watcher. Bumping first makes
-   * any in-flight callback from the closing watcher a no-op.
+   * any in-flight callback from the closing watcher a no-op. Returns the
+   * generation the caller now owns: the map entries are cleared BEFORE the
+   * (async) close, so a `pauseWorkspaceWatching` or another replace that
+   * runs during the close finds nothing to wait for and moves on — the
+   * caller must re-check the generation after the await, or it re-arms a
+   * watcher on a path the session has already left.
    */
-  private async replaceWatcher(scope: SettingScope): Promise<void> {
-    this.bumpGeneration(scope);
+  private async replaceWatcher(scope: SettingScope): Promise<number> {
+    const generation = this.bumpGeneration(scope);
     const watcher = this.watchers.get(scope);
     this.watchers.delete(scope);
     this.watchStage.delete(scope);
@@ -278,6 +283,11 @@ export class SettingsWatcher {
         debugLogger.warn('Settings watcher close error:', err);
       }
     }
+    return generation;
+  }
+
+  private isCurrentGeneration(scope: SettingScope, generation: number) {
+    return (this.watchGeneration.get(scope) ?? 0) === generation;
   }
 
   private bumpGeneration(scope: SettingScope): number {

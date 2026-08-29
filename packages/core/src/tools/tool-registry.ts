@@ -896,6 +896,20 @@ export class ToolRegistry {
           );
           continue;
         }
+        // Same for built-ins: discovery runs after `removeDiscoveredTools`
+        // / `rediscoverCommandTools` cleared the previous discovered set,
+        // so any remaining `tools` entry or lazy factory is a core, MCP, or
+        // session tool. `registerTool` would overwrite it with only a debug
+        // warning, and the next `ensureTool` would discard the core factory
+        // — routing every later `read_file` into the project's
+        // `toolCallCommand`. Trusting a project is not consent to replace
+        // built-ins.
+        if (this.tools.has(func.name) || this.factories.has(func.name)) {
+          debugLogger.warn(
+            `Discovered tool "${func.name}" skipped: the name is already registered.`,
+          );
+          continue;
+        }
         let deferred = false;
         if (permissionManager) {
           const status = await permissionManager.getToolRegistrationStatus(

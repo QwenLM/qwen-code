@@ -2524,8 +2524,9 @@ export class Config {
   private preserveRestorableAskUserQuestion = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
   private cronEnabled: boolean = true;
-  /** Recurring cron max age in days, resolved once at construction
-   * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
+  /** Recurring cron max age in days; `Infinity` = no expiry. Resolved at
+   * construction and re-resolved per project by `applyProjectRuntimeConfig`
+   * on `/cd` (the scheduler is destroyed and restarted for the target). */
   private cronRecurringMaxAgeDays: number;
   private lsToolEnabled: boolean = false;
   private agentTeamEnabled: boolean = false;

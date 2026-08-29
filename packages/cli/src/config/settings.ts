@@ -976,7 +976,8 @@ export function loadSettings(
             persistSettingsObject('Error migrating settings file on disk');
           } else if (
             (hasLegacyNumericVersion || hasInvalidVersion) &&
-            !corruptedSaved
+            !corruptedSaved &&
+            !opts.readOnly
           ) {
             // Migration was deemed needed but nothing executed. Normalize version metadata
             // to avoid repeated no-op checks on startup.
@@ -988,13 +989,17 @@ export function loadSettings(
           }
         } else if (
           (!hasVersionKey || hasInvalidVersion || hasLegacyNumericVersion) &&
-          !corruptedSaved
+          !corruptedSaved &&
+          !opts.readOnly
         ) {
           // No migration needed/executable, but version metadata is missing or invalid.
           // Normalize it to current version to avoid repeated startup work.
           // Skip if we just recovered from corruption — the next startup will
           // handle normalization, avoiding an unnecessary writeWithBackupSync
           // that would create a .orig file from the freshly reset settings.
+          // A readOnly (`/cd` prepare) load is observation-only: stamping
+          // `$version` in memory without writing it would make the first
+          // hot reload re-parse an un-stamped file into a different shape.
           settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
           persistSettingsObject('Error normalizing settings version on disk');
         }

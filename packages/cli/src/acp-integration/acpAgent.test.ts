@@ -12252,6 +12252,36 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         autoMemoryDir: '/tmp/qwen-memory-root-test/.qwen/memory',
       },
     });
+    // A live session that `/cd`-ed into a project with its own
+    // `context.fileName` answers for that directory — even when the host
+    // spells the cwd with a trailing slash — instead of the global name.
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'scoped-session',
+      {
+        getConfig: () => ({
+          getWorkingDir: () => '/tmp/qwen-memory-scoped-test',
+          getContextFileNames: () => ['CONTEXT.md'],
+        }),
+      },
+    );
+    await expect(
+      agent.extMethod('qwen/settings/getMemoryPaths', {
+        cwd: '/tmp/qwen-memory-scoped-test/',
+        projectRoot: '/tmp/qwen-memory-scoped-test',
+      }),
+    ).resolves.toEqual({
+      paths: {
+        userMemoryFile: path.join('/tmp/qwen-global-test', 'CONTEXT.md'),
+        projectMemoryFile: path.join(
+          '/tmp/qwen-memory-scoped-test',
+          'CONTEXT.md',
+        ),
+        autoMemoryDir: '/tmp/qwen-memory-scoped-test/.qwen/memory',
+      },
+    });
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.delete(
+      'scoped-session',
+    );
     await expect(
       agent.extMethod('qwen/settings/setMemory', {
         updates: {
