@@ -57,7 +57,15 @@ import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { LlmClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { getSessionProjectDir } from '../utils/sessionIdContext.js';
+import {
+  getSessionProjectDir,
+  sessionIdContext,
+} from '../utils/sessionIdContext.js';
+import {
+  createDebugLogger,
+  resetDebugLoggingState,
+  setDebugLogSession,
+} from '../utils/debugLogger.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -604,6 +612,72 @@ describe('Server Config (config.ts)', () => {
       expect(config.getGeminiClient()).toBe(config.getLlmClient());
       await config.shutdown();
     });
+  });
+
+  it('does not replace the global debug fallback during daemon Config creation or rotation', async () => {
+    const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+    const previousSessionIdEnv = process.env['QWEN_CODE_SESSION_ID'];
+    const bootstrapSessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const daemonSessionId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const rotatedSessionId = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const mkdirSpy = vi
+      .spyOn(fs.promises, 'mkdir')
+      .mockResolvedValue(undefined);
+    const appendFileSpy = vi
+      .spyOn(fs.promises, 'appendFile')
+      .mockResolvedValue(undefined);
+    const unlinkSpy = vi
+      .spyOn(fs.promises, 'unlink')
+      .mockResolvedValue(undefined);
+    const symlinkSpy = vi
+      .spyOn(fs.promises, 'symlink')
+      .mockResolvedValue(undefined);
+
+    try {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+      resetDebugLoggingState();
+      new Config({ ...baseParams, sessionId: bootstrapSessionId });
+      const daemonConfig = sessionIdContext.run(
+        daemonSessionId,
+        () => new Config({ ...baseParams, sessionId: daemonSessionId }),
+      );
+      sessionIdContext.run(daemonSessionId, () => {
+        daemonConfig.startNewSession(rotatedSessionId);
+      });
+
+      process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+      createDebugLogger('DAEMON_FALLBACK').info('process-scoped message');
+
+      await vi.waitFor(() =>
+        expect(appendFileSpy).toHaveBeenCalledWith(
+          Storage.getDebugLogPath(bootstrapSessionId),
+          expect.stringContaining('[DAEMON_FALLBACK] process-scoped message'),
+          'utf8',
+        ),
+      );
+      expect(appendFileSpy).not.toHaveBeenCalledWith(
+        Storage.getDebugLogPath(rotatedSessionId),
+        expect.stringContaining('[DAEMON_FALLBACK] process-scoped message'),
+        'utf8',
+      );
+    } finally {
+      mkdirSpy.mockRestore();
+      appendFileSpy.mockRestore();
+      unlinkSpy.mockRestore();
+      symlinkSpy.mockRestore();
+      resetDebugLoggingState();
+      setDebugLogSession(null);
+      if (previousDebugLogFileEnv === undefined) {
+        delete process.env['QWEN_DEBUG_LOG_FILE'];
+      } else {
+        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+      }
+      if (previousSessionIdEnv === undefined) {
+        delete process.env['QWEN_CODE_SESSION_ID'];
+      } else {
+        process.env['QWEN_CODE_SESSION_ID'] = previousSessionIdEnv;
+      }
+    }
   });
 
   describe('shell execution config', () => {

@@ -57,6 +57,7 @@ import type {
 
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
 import { type SessionGitIntent } from './components/GitModePopover';
+import { LocalControlQrButton } from './components/LocalControlQrButton';
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
@@ -5356,6 +5357,18 @@ export function App({
     | null
   >(null);
   const activePanelRef = useRef(activePanel);
+  // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
+  // Control QR popover). Cleared on any panel close/switch, not just
+  // closePanel — several paths call setActivePanel directly (approval
+  // overlay auto-close, openScheduledTasks, openSplitView, ...).
+  const [settingsInitialCategory, setSettingsInitialCategory] = useState<
+    string | undefined
+  >();
+  useEffect(() => {
+    if (activePanel !== 'settings') {
+      setSettingsInitialCategory(undefined);
+    }
+  }, [activePanel]);
   const closePanel = useCallback(() => setActivePanel(null), []);
   const handleUseSkill = useCallback(
     (name: string) => {
@@ -5511,28 +5524,43 @@ export function App({
     clearSplitSessions();
     openPanel('sessions');
   }, [notifyControlledSplitClose, openPanel]);
-  // Built-in pane action follows the same tokenUsage opt-in as the chat header.
+  const handleOpenLocalControlSettings = useCallback(() => {
+    setSettingsInitialCategory('Daemon');
+    openPanel('settings');
+  }, [openPanel]);
+  // Built-in pane actions: Local Control QR entry is always shown; the token
+  // usage action follows the same tokenUsage opt-in as the chat header.
   // Hosts can override via `renderPaneHeaderActions` to replace or extend it.
   const defaultPaneHeaderActions = useCallback<PaneHeaderActionsRenderer>(
     ({ sessionId, sessionActions }) => (
-      <button
-        type="button"
-        className={styles.tokenUsageHeaderButton}
-        aria-label={t('tokenUsage.open')}
-        title={t('tokenUsage.open')}
-        disabled={!sessionActions}
-        onClick={() =>
-          sessionActions && openTokenUsagePanel(sessionId, sessionActions, true)
-        }
-      >
-        <GaugeIcon size={16} aria-hidden="true" />
-      </button>
+      <>
+        <LocalControlQrButton onOpenSettings={handleOpenLocalControlSettings} />
+        {tokenUsageHeaderItemVisible && (
+          <button
+            type="button"
+            className={styles.tokenUsageHeaderButton}
+            aria-label={t('tokenUsage.open')}
+            title={t('tokenUsage.open')}
+            disabled={!sessionActions}
+            onClick={() =>
+              sessionActions &&
+              openTokenUsagePanel(sessionId, sessionActions, true)
+            }
+          >
+            <GaugeIcon size={16} aria-hidden="true" />
+          </button>
+        )}
+      </>
     ),
-    [openTokenUsagePanel, t],
+    [
+      handleOpenLocalControlSettings,
+      openTokenUsagePanel,
+      t,
+      tokenUsageHeaderItemVisible,
+    ],
   );
   const resolvedPaneHeaderActions =
-    renderPaneHeaderActions ??
-    (tokenUsageHeaderItemVisible ? defaultPaneHeaderActions : undefined);
+    renderPaneHeaderActions ?? defaultPaneHeaderActions;
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
@@ -12555,6 +12583,8 @@ export function App({
                                 ),
                             }
                           : {}),
+                        onOpenLocalControlSettings:
+                          handleOpenLocalControlSettings,
                       })}
                     </div>
                   ) : (
@@ -12586,6 +12616,9 @@ export function App({
                                 sessionActions,
                               )
                           : undefined
+                      }
+                      onOpenLocalControlSettings={
+                        handleOpenLocalControlSettings
                       }
                     />
                   )}
@@ -12745,6 +12778,7 @@ export function App({
                       <SettingsMessage
                         settingsState={targetedWorkspaceSettingsState}
                         embedded
+                        initialCategory={settingsInitialCategory}
                         onLanguageChange={handleSettingsLanguageChange}
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}

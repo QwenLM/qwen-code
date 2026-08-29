@@ -171,6 +171,61 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('pins the pre-verify carried-ledger dedup as a mechanical step (#10105)', () => {
+    const body = coreBody();
+    // The command, not prose: the whole point is that the model is out of
+    // the matching loop, in the spirit of the script-lint gate.
+    expect(body).toContain('review dedup-candidates --plan');
+    // The kept list is what shards — a run that shards the raw union pays
+    // the verify cost the step exists to end.
+    expect(body).toContain(
+      "**Build the verify shards from the report's `kept` list only.**",
+    );
+    // The safe-to-be-wrong direction, both halves: the severity guard and
+    // the posting-layer backstop.
+    expect(body).toContain(
+      'a Critical candidate never drops against a non-Critical entry',
+    );
+    expect(body).toContain(
+      "the posting layer's duplicate drop remains the backstop",
+    );
+    // A dropped candidate's claim survives through the Step 6 ruling — the
+    // sentence that licenses dropping it at all.
+    expect(body).toContain(
+      'a matched posted finding is a ledger entry Step 6 still rules on',
+    );
+    // The pair's reporting transition routes its fresh findings through the
+    // same command (the string occurs in BOTH pair bullets, pinned below),
+    // or the leak reopens the first time a convergence pair reports.
+    expect(body).toContain('the report accumulates within the round');
+    // The ordering the transition owes: the carried-ledger dedup runs BEFORE
+    // the pair's findings merge into the cumulative list, and only its
+    // `kept` list merges. Merging first and deduping after strands every
+    // dropped candidate in the list under its `— [unverified]` tag — never
+    // sharded, never verdict-ruled — and the tag backstop relaunches the
+    // very verifier this step exists to save (or a budget-refused relaunch
+    // leaves the tag for `compose-review` to cap the verdict on).
+    expect(body).toContain(
+      "merge ONLY the report's `kept` list into the cumulative list",
+    );
+    expect(body).toContain(
+      'Dropped candidates never enter the cumulative findings file',
+    );
+    // The 3B pair bullet carries the same clause — a large-diff re-review
+    // with open threads is the motivating shape of this feature, and its
+    // transition must shard the deduped `kept` list, not the raw union.
+    const start = body.indexOf('**The convergence pair — 3B');
+    const end = body.indexOf('**Do not write the reverse auditor');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section3B = body.slice(start, end);
+    expect(section3B).toContain("Step 4's carried-ledger dedup");
+    expect(section3B).toContain('merge only its `kept` list');
+    expect(section3B).toContain(
+      'dropped candidates never enter the cumulative findings file',
+    );
+  });
+
   it('keeps the language-pitfall and wrapper/proxy checks as dedicated high-effort angles', () => {
     // #9788: both rode inside Agent 1a's line-by-line brief as bullets, and
     // the walk's rhythm diluted them — a checklist pattern-match and a

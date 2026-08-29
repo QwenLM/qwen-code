@@ -1395,15 +1395,64 @@ describe('capture-tools step wiring', () => {
     );
   });
 
-  it('passes the assets-repo variable into the review step', () => {
-    // The CLI reads QWEN_REVIEW_ASSETS_REPO from the environment; the run:
-    // script never names it, so only this assertion sees a dropped or
-    // misspelled wiring line.
+  it('keeps review evidence branches out of the project repository', () => {
+    // The CLI reads QWEN_REVIEW_ASSETS_REPO from the environment. The workflow
+    // passes through only a dedicated external host, never this project repo.
     const doc = parse(workflow);
     expect(
       doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review').env
         .QWEN_REVIEW_ASSETS_REPO,
-    ).toBe('${{ vars.QWEN_REVIEW_ASSETS_REPO }}');
+    ).toBe(
+      "${{ vars.QWEN_REVIEW_ASSETS_REPO != github.repository && vars.QWEN_REVIEW_ASSETS_REPO || '' }}",
+    );
+  });
+
+  it('normalizes whitespace and case variants of the assets-repo designation', () => {
+    // The env-level guard compares the RAW variable, so padded or
+    // case-shifted self-references slip past it; the run body trims and
+    // re-checks before the CLI reads the value. Executed, not asserted as
+    // text: a dropped trim or a case-sensitive compare re-enables a
+    // self-targeting designation while every shape assertion stays green.
+    const run = runReviewStep();
+    const marker = '# Normalize the assets-repo designation';
+    const start = run.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    const endMarker = 'export QWEN_REVIEW_ASSETS_REPO';
+    const end = run.indexOf(endMarker, start);
+    expect(end).toBeGreaterThan(-1);
+    const fragment = run.slice(start, end + endMarker.length);
+
+    function normalize(value) {
+      return execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -euo pipefail',
+            'REPO="QwenLM/qwen-code"',
+            'QWEN_REVIEW_ASSETS_REPO="$DESIGNATION"',
+            fragment,
+            'printf "%s" "$QWEN_REVIEW_ASSETS_REPO"',
+          ].join('\n'),
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, DESIGNATION: value },
+        },
+      );
+    }
+
+    // Self-targeting in every disguise degrades to the empty designation.
+    expect(normalize('QwenLM/qwen-code')).toBe('');
+    expect(normalize(' QwenLM/qwen-code ')).toBe('');
+    expect(normalize('qwenlm/QWEN-CODE')).toBe('');
+    expect(normalize('\tQwenLM/qwen-code\n')).toBe('');
+    // An external host survives, trimmed.
+    expect(normalize('other-org/assets')).toBe('other-org/assets');
+    expect(normalize('  other-org/assets  ')).toBe('other-org/assets');
+    // Unset-ish values stay empty.
+    expect(normalize('')).toBe('');
+    expect(normalize('   ')).toBe('');
   });
 });
 
