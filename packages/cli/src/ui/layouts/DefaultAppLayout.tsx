@@ -90,7 +90,7 @@ export const DefaultAppLayout: React.FC = () => {
                 marginX={2}
                 flexDirection="column"
                 width={uiState.mainAreaWidth}
-                height={dialogHeight}
+                maxHeight={dialogHeight}
                 overflow={uiState.constrainHeight ? 'hidden' : undefined}
               >
                 <DialogManager
