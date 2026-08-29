@@ -5,7 +5,7 @@ import {
   usePromptStatus,
   useDaemonSessionOwnerGuard,
   useWorkspaceEventSignals,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 
 const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';

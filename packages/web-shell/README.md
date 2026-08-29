@@ -7,7 +7,6 @@ Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 
 
 - React：`^18.0.0 || ^19.0.0`
 - React DOM：`^18.0.0 || ^19.0.0`
-- `@qwen-code/webui`：`>=0.0.1`
 - `@qwen-code/sdk`：`>=0.1.8`
 - 浏览器环境需要能访问 Qwen Code daemon serve 的 HTTP 接口。
 
@@ -114,7 +113,7 @@ npm install @qwen-code/web-shell
 Peer dependencies 需要同时安装：
 
 ```bash
-npm install react react-dom @qwen-code/webui @qwen-code/sdk
+npm install react react-dom @qwen-code/sdk
 ```
 
 ## 接入方式
@@ -157,8 +156,8 @@ chat + terminal）。宿主自行提供 Provider，WebShell 只消费 hooks。
 import {
   DaemonWorkspaceProvider,
   DaemonSessionProvider,
-} from '@qwen-code/webui/daemon-react-sdk';
-import { WebShell } from '@qwen-code/web-shell';
+  WebShell,
+} from '@qwen-code/web-shell';
 
 export function App() {
   return (
@@ -358,8 +357,7 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 
 ```text
 @qwen-code/sdk/daemon         ← 协议层（SSE, REST, normalizer）
-@qwen-code/webui/daemon-react-sdk  ← React adapter（Provider, hooks, store）
-@qwen-code/web-shell          ← 终端 UI 组件
+@qwen-code/web-shell          ← React adapter（Provider, hooks, store）+ 终端 UI 组件
 ```
 
 - `WebShell` 必须在 `DaemonWorkspaceProvider` 和 `DaemonSessionProvider` 之下使用。

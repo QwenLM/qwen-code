@@ -17,7 +17,7 @@ import {
   useConnection,
   useWorkspace,
   useWorkspaceActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonSessionGroup,
@@ -140,6 +140,10 @@ const SESSION_MENU_PORTAL_STYLE: CSSProperties = {
 const GROUP_MENU_MARGIN = 8;
 const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
 const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
+// Mirrors `SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX` in acp-bridge/session-source.ts
+// (the client cannot import that package). Per-run scheduled task children keep
+// the `default` source type so they list with ordinary conversations.
+const SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX = 'scheduled_task_run:';
 
 type SidebarSessionSource = 'default' | 'channel';
 
@@ -152,6 +156,15 @@ function matchesSessionSource(
     return session.sourceType === undefined || session.sourceType === 'default';
   }
   return true;
+}
+
+function isScheduledTaskSession(session: DaemonSessionSummary): boolean {
+  return (
+    session.sourceType === 'scheduled_task' ||
+    (session.sourceType === 'default' &&
+      session.sourceId?.startsWith(SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX) ===
+        true)
+  );
 }
 
 function getSessionIdentity(
@@ -266,7 +279,6 @@ export type WebShellSidebarSessionActionItem =
 /** Subset of action items that have working inline (hover-button) handlers. */
 export type WebShellSidebarSessionInlineActionItem =
   | 'pin'
-  | 'archive'
   | 'rename'
   | 'export'
   | 'delete';
@@ -279,7 +291,8 @@ export interface WebShellSidebarSessionActionsOptions {
    * archive stays in the dropdown so a stray click on the hover slot cannot
    * archive a session.
    * Only items that also pass their built-in visibility condition are rendered.
-   * Only items with working inline handlers are accepted (details/group are dropdown-only).
+   * Only items with working inline handlers are accepted
+   * (details/group/archive are dropdown-only).
    */
   inlineItems?: readonly WebShellSidebarSessionInlineActionItem[];
 }
@@ -350,9 +363,8 @@ interface WebShellSidebarProps {
   onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
-   * Whether to offer the Session Overview entry point. Gated to large screens
-   * by the app: below that there is no room to make managing several sessions
-   * side by side worthwhile.
+   * Whether to offer the Session Overview entry point. The table handles
+   * narrow widths, so the entry point can be offered at every viewport size.
    */
   canOpenSessionsOverview?: boolean;
   onOpenSplitView: () => void;
@@ -3491,19 +3503,15 @@ export function WebShellSidebar({
     ],
   );
 
-  const filteredSessions = useMemo(() => {
+  const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const sourceScopedSessions = sessions
       .map(applyOptimisticPin)
       .filter((session) =>
         matchesSessionSource(session, selectedSessionSource),
       );
-    const unpinnedSessions =
-      selectedSessionSource === 'channel'
-        ? sourceScopedSessions
-        : sourceScopedSessions.filter((session) => !session.isPinned);
-    const nextSessions = query
-      ? unpinnedSessions.filter((session) => {
+    return query
+      ? sourceScopedSessions.filter((session) => {
           const label = getSessionLabel(session).toLowerCase();
           return (
             label.includes(query) ||
@@ -3511,7 +3519,14 @@ export function WebShellSidebar({
             sessionMatchesGitQuery(session, query)
           );
         })
-      : unpinnedSessions.slice();
+      : sourceScopedSessions;
+  }, [applyOptimisticPin, searchQuery, selectedSessionSource, sessions]);
+  const filteredSessions = useMemo(() => {
+    const unpinnedSessions =
+      selectedSessionSource === 'channel'
+        ? searchedSessions
+        : searchedSessions.filter((session) => !session.isPinned);
+    const nextSessions = unpinnedSessions.slice();
     if (organizationEnabled) {
       return nextSessions;
     }
@@ -3526,13 +3541,7 @@ export function WebShellSidebar({
         (createdTimeById.get(b.sessionId) ?? 0) -
         (createdTimeById.get(a.sessionId) ?? 0),
     );
-  }, [
-    applyOptimisticPin,
-    organizationEnabled,
-    searchQuery,
-    selectedSessionSource,
-    sessions,
-  ]);
+  }, [organizationEnabled, searchedSessions, selectedSessionSource]);
 
   const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
@@ -3568,7 +3577,15 @@ export function WebShellSidebar({
       sessionsByGroupId.set(group.id, []);
     }
     const recentSessions: DaemonSessionSummary[] = [];
-    for (const session of filteredSessions) {
+    // Bucket the search-filtered catalog in one pass, pinned rows included:
+    // they are lifted into the Pinned section, but their group/color section
+    // must keep them, otherwise a section whose members are all pinned
+    // rendered `· 0`, indistinguishable from lost memberships (#10391).
+    // One pass (instead of bucketing the unpinned rows first and appending
+    // the pinned ones) preserves the daemon catalog order — pinned rows sort
+    // first there — so a pinned member is never pushed behind its section's
+    // preview limit by rows it sorts ahead of.
+    for (const session of searchedSessions) {
       // Color takes precedence: the picker keeps color and group mutually
       // exclusive, but stay defensive if a store somehow carries both.
       if (session.color && SESSION_GROUP_COLORS.includes(session.color)) {
@@ -3583,9 +3600,14 @@ export function WebShellSidebar({
           : undefined;
       if (groupSessions) {
         groupSessions.push(session);
-      } else {
-        recentSessions.push(session);
+        continue;
       }
+      // On sources with a Pinned section, a pinned session without a
+      // (renderable) group stays Pinned-section-only; it never spills into
+      // Ungrouped. The channel source has no Pinned section, so its pinned
+      // rows keep the normal Ungrouped bucket.
+      if (session.isPinned && selectedSessionSource !== 'channel') continue;
+      recentSessions.push(session);
     }
     const sections: SessionSection[] = [];
     // Color buckets first, in palette order; only render non-empty ones so the
@@ -3626,7 +3648,14 @@ export function WebShellSidebar({
       });
     }
     return sections;
-  }, [filteredSessions, groups, organizationEnabled, searchQuery, t]);
+  }, [
+    groups,
+    organizationEnabled,
+    searchedSessions,
+    searchQuery,
+    selectedSessionSource,
+    t,
+  ]);
 
   useEffect(() => {
     const activeSections = channelSessionSections ?? sessionSections;
@@ -3814,9 +3843,10 @@ export function WebShellSidebar({
       session: DaemonSessionSummary,
       options: {
         isArchived?: boolean;
+        renameFormDisabled?: boolean;
       } = {},
     ) => {
-      const { isArchived = false } = options;
+      const { isArchived = false, renameFormDisabled = false } = options;
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
@@ -3825,11 +3855,19 @@ export function WebShellSidebar({
       const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
         !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
-      const isEditing = editingSessionIdentity === sessionIdentity;
+      // Pinned group members also render in the Pinned section; callers
+      // suppress the rename form on the duplicate row so only one input can
+      // mount — a rival input's autofocus would blur this one and its blur
+      // handler would cancel the rename.
+      const isEditing =
+        !renameFormDisabled && editingSessionIdentity === sessionIdentity;
       const gitIcon = session.worktree ? (
         <GitForkIcon aria-label={t('sidebar.newWorktreeTask')} />
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
+      ) : null;
+      const scheduledTaskIcon = isScheduledTaskSession(session) ? (
+        <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
       ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       const withDetails = (row: ReactElement) => (
@@ -3876,6 +3914,17 @@ export function WebShellSidebar({
               measureSessionTitleScroll(event.currentTarget)
             }
           >
+            {scheduledTaskIcon && (
+              <span className={styles.sessionStatusSlot}>
+                <span
+                  className={styles.sessionSourceIcon}
+                  data-web-shell-scheduled-task-session
+                  title={t('sidebar.scheduledTasks')}
+                >
+                  {scheduledTaskIcon}
+                </span>
+              </span>
+            )}
             {isEditing ? (
               <form
                 className={styles.renameForm}
@@ -4013,13 +4062,12 @@ export function WebShellSidebar({
       const showDelete = canShowDeleteSession(session);
       const inlineActionCount =
         Number(showPin && inlineActionItems.has('pin')) +
-        Number(showArchive && inlineActionItems.has('archive')) +
         Number(showRename && inlineActionItems.has('rename')) +
         Number(showExport && inlineActionItems.has('export')) +
         Number(showDelete && inlineActionItems.has('delete'));
       const showMoreActions =
         (showPin && !inlineActionItems.has('pin')) ||
-        (showArchive && !inlineActionItems.has('archive')) ||
+        showArchive ||
         (showRename && !inlineActionItems.has('rename')) ||
         canOrganizeSession(session, 'group') ||
         (showExport && !inlineActionItems.has('export')) ||
@@ -4054,8 +4102,24 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
+            {scheduledTaskIcon ? (
+              <span
+                className={styles.sessionSourceIcon}
+                data-web-shell-scheduled-task-session
+                title={t('sidebar.scheduledTasks')}
+              >
+                {scheduledTaskIcon}
+              </span>
+            ) : null}
             {completedUnread ? (
-              <span className={styles.sessionStatusDot} aria-hidden="true" />
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  Boolean(scheduledTaskIcon) && styles.sessionStatusDotOverlay,
+                )}
+                data-web-shell-session-completed-unread
+                aria-hidden="true"
+              />
             ) : null}
           </span>
           {isEditing && canRenameSession(session) ? (
@@ -4155,20 +4219,6 @@ export function WebShellSidebar({
                           onClick: () => handleTogglePin(session),
                         },
                         {
-                          key: 'archive',
-                          icon: <ArchiveIcon size={16} strokeWidth={1.2} />,
-                          label: t('sidebar.archive'),
-                          disabled: busy || isCurrent || running,
-                          title: isCurrent
-                            ? t('sidebar.archiveCurrentDisabled')
-                            : running
-                              ? t('sidebar.archiveRunningDisabled')
-                              : t('sidebar.archive'),
-                          visible:
-                            showArchive && inlineActionItems.has('archive'),
-                          onClick: () => handleArchive(session),
-                        },
-                        {
                           key: 'rename',
                           icon: <PencilIcon size={16} strokeWidth={1.2} />,
                           label: t('sidebar.rename'),
@@ -4263,23 +4313,22 @@ export function WebShellSidebar({
                                   : t('sidebar.pin')}
                               </DropdownMenuItem>
                             )}
-                            {showArchive &&
-                              !inlineActionItems.has('archive') && (
-                                <DropdownMenuItem
-                                  disabled={busy || isCurrent || running}
-                                  title={
-                                    isCurrent
-                                      ? t('sidebar.archiveCurrentDisabled')
-                                      : running
-                                        ? t('sidebar.archiveRunningDisabled')
-                                        : undefined
-                                  }
-                                  onSelect={() => handleArchive(session)}
-                                >
-                                  <ArchiveIcon />
-                                  {t('sidebar.archive')}
-                                </DropdownMenuItem>
-                              )}
+                            {showArchive && (
+                              <DropdownMenuItem
+                                disabled={busy || isCurrent || running}
+                                title={
+                                  isCurrent
+                                    ? t('sidebar.archiveCurrentDisabled')
+                                    : running
+                                      ? t('sidebar.archiveRunningDisabled')
+                                      : undefined
+                                }
+                                onSelect={() => handleArchive(session)}
+                              >
+                                <ArchiveIcon />
+                                {t('sidebar.archive')}
+                              </DropdownMenuItem>
+                            )}
                             {showRename && !inlineActionItems.has('rename') && (
                               <DropdownMenuItem
                                 disabled={busy}
@@ -4424,7 +4473,6 @@ export function WebShellSidebar({
       filteredSessions.length === 0 &&
       (selectedSessionSource === 'channel' ||
         channelSessionSections !== null ||
-        searchQuery.trim() ||
         !organizationEnabled ||
         sessionSections.length === 0)
     ) {
@@ -4482,7 +4530,14 @@ export function WebShellSidebar({
           deleteLabel={t('sidebar.groupDelete')}
           actionsDisabled={groupBusy}
         >
-          {section.sessions.map((session) => renderSessionRow(session))}
+          {section.sessions.map((session) =>
+            renderSessionRow(session, {
+              // Pinned members also render in the Pinned section; while that
+              // section is expanded its row hosts the rename form, so this
+              // duplicate row must not mount a second autofocused input.
+              renameFormDisabled: Boolean(session.isPinned) && pinnedExpanded,
+            }),
+          )}
         </SessionGroupSection>
       );
     });
@@ -4498,6 +4553,7 @@ export function WebShellSidebar({
     handleRenameGroup,
     loading,
     organizationEnabled,
+    pinnedExpanded,
     reload,
     renderSessionRow,
     searchQuery,
@@ -5370,10 +5426,39 @@ export function WebShellSidebar({
                           }
                           renderSessions={!ws.primary}
                           renderSession={(session) =>
-                            renderSessionRow({
-                              ...session,
-                              workspaceCwd: ws.cwd,
-                            })
+                            renderSessionRow(
+                              {
+                                ...session,
+                                workspaceCwd: ws.cwd,
+                              },
+                              {
+                                // Pinned members also render in the
+                                // sidebar-level Pinned section; while that
+                                // section is expanded its row hosts the
+                                // rename form, so this duplicate row must
+                                // not mount a second autofocused input.
+                                // Channel mode has no Pinned section, so
+                                // the workspace row is the only copy and
+                                // must stay editable. The suppression also
+                                // requires the Pinned section to actually
+                                // carry the member: `pinnedSessions` merges
+                                // only the pinned catalog pages and the
+                                // primary sessions page, never this
+                                // workspace's own page, so before the
+                                // pinned page settles (or while it errors)
+                                // this row is the only copy and must host
+                                // the form itself.
+                                renameFormDisabled:
+                                  selectedSessionSource !== 'channel' &&
+                                  Boolean(session.isPinned) &&
+                                  pinnedExpanded &&
+                                  pinnedSessions.some(
+                                    (candidate) =>
+                                      getIdentityForSession(candidate) ===
+                                      getIdentityForSession(session),
+                                  ),
+                              },
+                            )
                           }
                           showSessionDetails={sessionActionItems.has('details')}
                           headerActions={(visible) => {

@@ -29,7 +29,7 @@ const { workspaceGitHubPullRequests, workspaceClient } = vi.hoisted(() => {
   return { workspaceGitHubPullRequests, workspaceClient };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => ({ client: workspaceClient }),
 }));
 
