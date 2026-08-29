@@ -5,6 +5,7 @@
  */
 
 import { configDefaults, defineConfig } from 'vitest/config';
+import { unhandledErrorExemption } from '../vitest-unhandled-error-exemption.js';
 
 export default defineConfig({
   test: {
@@ -41,10 +42,6 @@ export default defineConfig({
     // oversubscribes the 3-core macOS runners. Vitest's default scales with
     // the host cores, which is what every other suite in this repository
     // uses.
-    //
-    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
-    dangerouslyIgnoreUnhandledErrors:
-      process.platform !== 'linux' ||
-      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
+    dangerouslyIgnoreUnhandledErrors: unhandledErrorExemption,
   },
 });

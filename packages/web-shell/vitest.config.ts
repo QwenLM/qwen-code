@@ -1,5 +1,6 @@
 import { configDefaults, defineConfig } from 'vitest/config';
 import { resolve } from 'node:path';
+import { unhandledErrorExemption } from '../../scripts/vitest-unhandled-error-exemption.js';
 
 export default defineConfig({
   root: 'client',
@@ -15,10 +16,7 @@ export default defineConfig({
     outputFile: {
       junit: '../junit.xml',
     },
-    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
-    dangerouslyIgnoreUnhandledErrors:
-      process.platform !== 'linux' ||
-      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
+    dangerouslyIgnoreUnhandledErrors: unhandledErrorExemption,
     coverage: {
       provider: 'v8',
       reportsDirectory: '../coverage',
