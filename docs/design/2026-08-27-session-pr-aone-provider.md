@@ -150,7 +150,10 @@ Per workspace, after candidate collection:
     (the same constant bounds the refresh sweep); the excess counts as
     `unresolved` and the next run retries it. `/review <url>` forms only
     recognise `/pull/<N>` URLs, so Aone `codereview/<id>` links are not a
-    form source (a bare `/review <id>` is).
+    form source (a bare `/review <id>` is); the only `/pull/<N>` form an
+    Aone workspace can see is the fabricated own-remote shape, which is
+    admitted on a FULL-path match (the two-segment repo key collapses
+    nested groups) and supplies the number only — never the URL.
   - Same-PR identity on Aone fails CLOSED: an existing entry passes the
     guard only when it is provably one of this repo's own MRs — either
     mr-view-attested this run, or matching the exact detailUrl SHAPE for

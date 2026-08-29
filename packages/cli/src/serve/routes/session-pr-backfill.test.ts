@@ -414,15 +414,105 @@ describe('backfillWorkspaceSessionPrs', () => {
 
     // Platform detection reads the real origin; the mocked remote lookup
     // must agree so the legacy-shape detector sees the same web root.
-    function aoneOrigin(): void {
+    function aoneOrigin(repoPath = 'jspt/agentic_coding'): void {
       execSync(
-        'git remote add origin git@gitlab.alibaba-inc.com:jspt/agentic_coding.git',
+        `git remote add origin git@gitlab.alibaba-inc.com:${repoPath}.git`,
         { cwd: workspaceCwd, stdio: 'pipe' },
       );
       fetchRemoteWebUrlMock.mockResolvedValue(
-        'https://gitlab.alibaba-inc.com/jspt/agentic_coding',
+        `https://gitlab.alibaba-inc.com/${repoPath}`,
       );
     }
+
+    it('resolves a /review url form through mr view instead of lending its URL', async () => {
+      // The only `/pull/<N>` form an Aone workspace can see is the shape
+      // the pre-Aone backfill fabricated (e.g. pasted from an old badge);
+      // it names the number, never the link — persisting it would freeze
+      // a dead page into the sidecar until a later run repairs it.
+      aoneOrigin();
+      await seedSession(SESSION_A);
+      await appendUserText(
+        SESSION_A,
+        '/review https://gitlab.alibaba-inc.com/jspt/agentic_coding/pull/888',
+      );
+      const backend = fakeAoneBackend({
+        view: vi.fn(async (repoPath: string, id: number) => ({
+          number: id,
+          url: `https://code.alibaba-inc.com/${repoPath}/codereview/${id}`,
+          state: 'open' as const,
+        })),
+      });
+
+      const result = await backfillWorkspaceSessionPrs(
+        runtime,
+        undefined,
+        undefined,
+        { aoneBackend: backend },
+      );
+
+      expect(backend.view).toHaveBeenCalledWith('jspt/agentic_coding', 888);
+      expect(result).toMatchObject({ bound: 1, platform: 'aone' });
+      const prs = await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      );
+      expect(prs).toEqual([
+        {
+          number: 888,
+          url: 'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/888',
+          createdAt: expect.any(String),
+          state: 'open',
+          source: 'review',
+        },
+      ]);
+    });
+
+    it('ignores a /review url form naming a sibling nested-group repo', async () => {
+      // The two-segment repo key collapses `group/subgroup/project` and
+      // `group/subgroup/other` onto the same key; the Aone form gate
+      // compares the full path, so a sibling's form supplies nothing —
+      // not even its number.
+      aoneOrigin('group/subgroup/project');
+      await seedSession(SESSION_A);
+      await appendUserText(
+        SESSION_A,
+        '/review https://gitlab.alibaba-inc.com/group/subgroup/other/pull/5',
+      );
+      await seedSession(SESSION_B);
+      await appendUserText(
+        SESSION_B,
+        '/review https://gitlab.alibaba-inc.com/group/subgroup/project/pull/5',
+      );
+      const backend = fakeAoneBackend();
+
+      const result = await backfillWorkspaceSessionPrs(
+        runtime,
+        undefined,
+        undefined,
+        { aoneBackend: backend },
+      );
+
+      expect(result).toMatchObject({
+        scanned: 2,
+        bound: 1,
+        unresolved: 0,
+        platform: 'aone',
+      });
+      expect(backend.view).toHaveBeenCalledTimes(1);
+      expect(backend.view).toHaveBeenCalledWith('group/subgroup/project', 5);
+      expect(
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        ),
+      ).toBeNull();
+      const prsB = await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      );
+      expect(prsB?.[0]).toMatchObject({
+        number: 5,
+        url: 'https://code.alibaba-inc.com/group/subgroup/project/codereview/5',
+        source: 'review',
+      });
+    });
 
     it('resolves the slug convention through mr view, never fabricating', async () => {
       aoneOrigin();

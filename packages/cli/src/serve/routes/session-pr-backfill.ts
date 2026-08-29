@@ -484,10 +484,20 @@ export async function backfillWorkspaceSessionPrs(
     // the reader fails the WHOLE sidecar closed on one over-long or
     // control-character url — persisting it would wipe every binding and
     // re-poison on each run.
+    // On Aone the capture (`/pull/<N>`) can only ever match the fabricated
+    // `<origin>/pull/<N>` shape the pre-Aone backfill persisted (real MR
+    // links are `…/codereview/<id>`), so a form is admitted only when it
+    // is exactly this workspace's own fabricated shape — a FULL-path
+    // comparison, because the two-segment repo key collapses nested groups
+    // and would let a sibling project's form through — and it supplies
+    // the NUMBER only: the URL always comes from `mr view`.
     const formUrlByNumber = new Map<number, string>(
       candidate.reviewedUrlForms
         .filter((form) => {
           if (!isValidSessionPrUrl(form.url)) return false;
+          if (isLegacyFabricated) {
+            return isLegacyFabricated(form.url, form.number);
+          }
           const repoKey = repoKeyFromWebUrl(form.url);
           return repoKey !== undefined && allowedRepoKeys.has(repoKey);
         })
@@ -505,6 +515,8 @@ export async function backfillWorkspaceSessionPrs(
       namedAsOwn.add(candidate.conventionNumber);
     }
     const lendableFormUrl = (number: number): string | undefined => {
+      // Aone links are never assembled: a form never supplies a URL there.
+      if (resolveAoneUrl) return undefined;
       const url = formUrlByNumber.get(number);
       if (url === undefined || !namedAsOwn.has(number)) return url;
       const key = repoKeyFromWebUrl(url);
