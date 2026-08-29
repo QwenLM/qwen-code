@@ -807,11 +807,7 @@ export class HookRunner {
         shellConfig.executable,
         [
           ...shellConfig.argsPrefix,
-          useVerbatimArguments && command.startsWith('"')
-            ? `"${command}`
-            : useVerbatimArguments
-              ? `"${command}"`
-              : command,
+          useVerbatimArguments ? `"${command}"` : command,
         ],
         {
           env,
