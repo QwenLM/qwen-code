@@ -40,6 +40,7 @@ import {
 } from '../acp-session-bridge.js';
 import type {
   BridgeChannelQuarantinedError,
+  BridgeTimeoutError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
@@ -834,6 +835,28 @@ export function toRpcError(err: unknown): {
           sessionId: restoreError.sessionId,
           action: restoreError.action,
           timeoutMs: restoreError.timeoutMs,
+        },
+      };
+    }
+    case 'BridgeTimeoutError': {
+      const timeoutError = err as BridgeTimeoutError;
+      if (timeoutError.label !== 'newSession') {
+        return {
+          code: RPC.INTERNAL_ERROR,
+          message: 'Internal error',
+          data: { errorKind: 'internal' },
+        };
+      }
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: timeoutError.message,
+        data: {
+          code: 'init_timeout',
+          errorKind: 'init_timeout',
+          httpStatus: 504,
+          retryable: true,
+          retryAfterSeconds: restoreRetryAfterSeconds(timeoutError.timeoutMs),
+          timeoutMs: timeoutError.timeoutMs,
         },
       };
     }
@@ -3918,6 +3941,23 @@ export class AcpDispatcher {
             }
             return;
           }
+          const rawScope = params['scope'];
+          if (
+            rawScope !== undefined &&
+            rawScope !== 'project' &&
+            rawScope !== 'user'
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`scope` must be "project", "user", or omitted',
+                ),
+              );
+            }
+            return;
+          }
           try {
             const available =
               await this.bridge.isWorkspaceMemoryRememberAvailable();
@@ -3941,6 +3981,7 @@ export class AcpDispatcher {
             const task = this.workspaceRememberLane.enqueue({
               content: content.trim(),
               contextMode: rawContextMode,
+              ...(rawScope ? { scope: rawScope } : {}),
               ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
               ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
             });
@@ -4021,6 +4062,23 @@ export class AcpDispatcher {
             }
             return;
           }
+          const rawScope = params['scope'];
+          if (
+            rawScope !== undefined &&
+            rawScope !== 'project' &&
+            rawScope !== 'user'
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`scope` must be "project", "user", or omitted',
+                ),
+              );
+            }
+            return;
+          }
           try {
             const available =
               await this.bridge.isWorkspaceMemoryRememberAvailable();
@@ -4043,6 +4101,7 @@ export class AcpDispatcher {
             }
             const task = this.workspaceRememberLane.enqueueForget({
               query: trimmedQuery,
+              ...(rawScope ? { scope: rawScope } : {}),
               ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
               ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
             });
