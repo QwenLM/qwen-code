@@ -9132,6 +9132,44 @@ describe('Server Config (config.ts)', () => {
       expect(deferred).toContain(ToolNames.LS);
     });
 
+    it('registers an enabled LS eagerly when tools.eager covers it (#10400)', async () => {
+      // Third cell of the LS x tools.eager matrix: enabled AND covered by
+      // the allowlist (via the ListFiles alias) -> registered eagerly via
+      // registerFactory, not demoted to deferred. Guards against a
+      // registerLazy mutant that demotes LS whenever an eager list is
+      // active, ignoring entry coverage (#10400).
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        lsToolEnabled: true,
+        eagerTools: ['Shell', 'ListFiles'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const { registerFactory, registerPermissionDeferredFactory } = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: {
+            prototype: {
+              registerFactory: Mock;
+              registerPermissionDeferredFactory: Mock;
+            };
+          };
+        }
+      ).ToolRegistry.prototype;
+
+      const registered = (registerFactory as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+      const deferred = (
+        registerPermissionDeferredFactory as Mock
+      ).mock.calls.map((call) => call[0]) as string[];
+
+      expect(registered).toContain(ToolNames.LS);
+      expect(deferred).not.toContain(ToolNames.LS);
+    });
+
     it('registers the full built-in set when no permissionsAllow is set (#9827 regression guard)', async () => {
       const params: ConfigParameters = {
         ...baseParams,
