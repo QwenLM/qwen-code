@@ -9,7 +9,7 @@
 // never a throw and never a skip), and the byte slicer is pinned against the
 // re-encode hazard: it must reproduce the exact bytes of the sections it keeps.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   UNHASHABLE,
   changedSince,
@@ -19,14 +19,22 @@ import {
 } from './local-anchor.js';
 import { sliceDiffByLines } from './diff-plan.js';
 import {
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
   symlinkSync,
   writeFileSync,
+  type PathLike,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// Spy-mode interception so the Windows-shaped arms below can force the leaf
+// lstat verdict; everything else delegates to the real implementation.
+vi.mock('node:fs', { spy: true });
+
+const realFs = await vi.importActual<typeof import('node:fs')>('node:fs');
 
 describe('stateIdOf', () => {
   it('is order-independent over files and sensitive to every field', () => {
@@ -251,4 +259,48 @@ describe('isPathProvablyAbsent', () => {
       );
     },
   );
+
+  // Platform-independent arms of the Windows-shaped walk. On POSIX a leaf
+  // under a regular-file component raises ENOTDIR and exits BEFORE the
+  // ancestor walk, so only a spied lstatSync can force the ENOENT leaf
+  // shape Windows reports for that same path — the exact shape a future
+  // "leaf ENOENT ⇒ absent" simplification would restore while every
+  // real-fs test on every POSIX lane stays green (the R19-3 incident).
+  const errno = (code: string) => Object.assign(new Error(code), { code });
+
+  const withLeafErrno = (leaf: string, code: string, run: () => void) => {
+    vi.mocked(lstatSync).mockImplementation(((p: PathLike) => {
+      if (p === leaf) throw errno(code);
+      return realFs.lstatSync(p);
+    }) as unknown as typeof lstatSync);
+    try {
+      run();
+    } finally {
+      vi.mocked(lstatSync).mockRestore();
+    }
+  };
+
+  it('Windows shape: an ENOENT leaf below a regular-file ancestor stays unmeasurable', () => {
+    writeFileSync(join(repo, 'f'), 'a regular file, not a directory\n');
+    const leaf = join(repo, 'f', 'missing.ts');
+    withLeafErrno(leaf, 'ENOENT', () => {
+      expect(isPathProvablyAbsent(repo, join('f', 'missing.ts'))).toBe(false);
+    });
+  });
+
+  it('Windows shape: an ENOENT leaf below a directory ancestor is genuine absence', () => {
+    mkdirSync(join(repo, 'src'));
+    const leaf = join(repo, 'src', 'missing.ts');
+    withLeafErrno(leaf, 'ENOENT', () => {
+      expect(isPathProvablyAbsent(repo, join('src', 'missing.ts'))).toBe(true);
+    });
+  });
+
+  it('a non-ENOENT leaf error is never absence', () => {
+    writeFileSync(join(repo, 'locked.ts'), 'x\n');
+    const leaf = join(repo, 'locked.ts');
+    withLeafErrno(leaf, 'EACCES', () => {
+      expect(isPathProvablyAbsent(repo, 'locked.ts')).toBe(false);
+    });
+  });
 });

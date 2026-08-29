@@ -688,6 +688,8 @@ export function invisibleTrackedPaths(repoRoot: string): string[] | null {
       // `revisionIdentities` apply to undecodable paths. Never exempt it:
       // it stays flagged (R19-1).
       if (p.includes('\ufffd')) return false;
+      // Only ENOENT-proven absence may exempt (R19-2): every unmeasurable
+      // shape the helper refuses stays flagged, never certified.
       return isPathProvablyAbsent(repoRoot, p);
     }),
   );

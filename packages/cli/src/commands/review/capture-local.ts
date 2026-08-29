@@ -187,6 +187,8 @@ function vanishedStillOnDisk(
   const onDisk: string[] = [];
   for (const p of Object.keys(cachedFiles)) {
     if (Object.hasOwn(currentHashes, p)) continue;
+    // Only ENOENT-proven absence may skip the re-check (R19-3): every
+    // unmeasurable shape the helper refuses stays on the on-disk list.
     if (isPathProvablyAbsent(repoRoot, p)) continue;
     onDisk.push(p);
   }
