@@ -4017,6 +4017,16 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
   })();
   const skipExecuted = process.platform === 'win32' || !hasJq;
 
+  // The fixture's child processes must not inherit ambient gitconfig: a
+  // global clone.defaultRemoteName != origin renames the fixture remote
+  // and every executed case dies with "pr head fetch failed" (the shape
+  // the repo's GIT_ISOLATION pattern exists for).
+  const GIT_ISOLATION = {
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+
   const gateStep = () =>
     parse(workflow).jobs['review-pr'].steps.find(
       (s) => s.name === 'Skip base-refresh-only synchronize',
@@ -4108,6 +4118,7 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
   const SETUP = `
     set -euo pipefail
     write_f() { : > f.txt; n=1; while [ "$n" -le 20 ]; do if [ "$n" -eq "$2" ]; then echo "$1"; else echo "$n"; fi; n=$((n+1)); done >> f.txt; }
+    write_e() { : > f.txt; n=1; while [ "$n" -le 20 ]; do if [ "$n" -eq "$2" ]; then echo "$1"; else echo ''; fi; n=$((n+1)); done >> f.txt; }
     git init -q -b main origin
     cd origin
     git config user.email t@t
@@ -4179,6 +4190,29 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
         git add asset.bin
         git commit -q --no-edit
         ;;
+      evil_merge_relocated_hunk)
+        # All-empty context lets the reviewed hunk relocate with
+        # byte-identical surroundings: both digests then differ only in
+        # @@ offsets (stripped), so only the clean-merge tree check sees
+        # the commit-tree-crafted relocation.
+        git checkout -q main
+        write_e '' 0
+        git commit -qam blank-base
+        git checkout -qb pr2 main
+        write_e TEN 10
+        git commit -qam pr-blank-change
+        git rev-parse HEAD > ../R
+        git checkout -q main
+        git branch -D pr
+        git branch -m pr2 pr
+        echo y > other.txt
+        git commit -qam advance
+        write_e TEN 15
+        git add f.txt
+        EVIL_TREE=$(git write-tree)
+        EVIL=$(git commit-tree "$EVIL_TREE" -p "$(cat ../R)" -p "$(git rev-parse main)" -m evil-relocated)
+        git update-ref refs/heads/pr "$EVIL"
+        ;;
       retargeted_base)
         # The round reviewed R against main, then the base is retargeted
         # to release and the PR merges release. The digest equality still
@@ -4211,7 +4245,7 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
     git rev-parse pr > ../H
     git update-ref refs/pull/9/head "$(git rev-parse pr)"
     cd ..
-    git clone -q origin workspace
+    git clone -q --origin origin origin workspace
   `;
 
   function runGate(
@@ -4232,13 +4266,16 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       mkdirSync(bin);
       execFileSync('bash', ['-c', SETUP], {
         cwd: dir,
-        env: { ...process.env, SHAPE: shape, ...shapeEnv },
+        env: { ...process.env, ...GIT_ISOLATION, SHAPE: shape, ...shapeEnv },
       });
       // Runs from the fixture root (cwd of the gate's parent), after the
       // workspace clone exists, so it can plant .git config and refs the
       // hardened gate must ignore.
       if (plant) {
-        execFileSync('bash', ['-c', plant], { cwd: dir });
+        execFileSync('bash', ['-c', plant], {
+          cwd: dir,
+          env: { ...process.env, ...GIT_ISOLATION },
+        });
       }
       const R = readFileSync(join(dir, 'R'), 'utf8').trim();
       const H = readFileSync(join(dir, 'H'), 'utf8').trim();
@@ -4290,6 +4327,7 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
         encoding: 'utf8',
         env: {
           ...process.env,
+          ...GIT_ISOLATION,
           PATH: `${bin}:${process.env.PATH}`,
           GITHUB_OUTPUT: output,
           GITHUB_STEP_SUMMARY: summary,
@@ -4343,6 +4381,37 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       expect(r.posted).toContain('<!-- qwen-review-base-refresh -->');
       expect(r.posted).toContain(r.R);
       expect(r.posted).toContain(r.H);
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'ambient global gitconfig cannot flip a verdict',
+    () => {
+      // Simulates a host whose global gitconfig poisons the children:
+      // clone.defaultRemoteName renames the fixture remote, diff.context=0
+      // collapses the digest context — the isolation env must keep the
+      // ambient config out of SETUP and the gate alike.
+      const dir = mkdtempSync(join(tmpdir(), 'poison-config-'));
+      const poison = join(dir, 'gitconfig');
+      writeFileSync(
+        poison,
+        '[clone]\n\tdefaultRemoteName = upstream\n[diff]\n\tcontext = 0\n',
+      );
+      const saved = process.env.GIT_CONFIG_GLOBAL;
+      process.env.GIT_CONFIG_GLOBAL = poison;
+      try {
+        const skipShape = runGate('update_branch_only');
+        expect(skipShape.status).toBe(0);
+        expect(skipShape.out.skip).toBe('true');
+        const touchShape = runGate('context_touch');
+        expect(touchShape.status).toBe(0);
+        expect(touchShape.out.skip).toBe('false');
+        expect(touchShape.out.reason).toBe('the PR-side diff changed');
+      } finally {
+        if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+        else process.env.GIT_CONFIG_GLOBAL = saved;
+        rmSync(dir, { recursive: true, force: true });
+      }
     },
   );
 
@@ -4560,15 +4629,13 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
   it.skipIf(skipExecuted)(
     'reviews when the base merge rewrote a binary the PR touched',
     () => {
-      // Plain `git diff` renders a binary as the content-free line
-      // "Binary files a/x and b/x differ" — and the sed filter strips the
-      // index line that carries the blob ids — so a merge commit
-      // rewriting the binary hashes identically on both sides; --binary
-      // keeps the real bytes in the digest.
+      // The conflicted binary resolution makes the refresh merge an evil
+      // merge: its tree deviates from its parents' clean merge, which the
+      // walk's tree check rejects before the digest comparison is reached.
       const r = runGate('binary_touch');
       expect(r.status).toBe(0);
       expect(r.out.skip).toBe('false');
-      expect(r.out.reason).toBe('the PR-side diff changed');
+      expect(r.out.reason).toMatch(/deviates from the clean merge/);
     },
   );
 
@@ -4589,6 +4656,99 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       expect(r.status).toBe(0);
       expect(r.out.skip).toBe('false');
       expect(r.out.reason).toBe('no completed automatic round on this PR');
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'never falls through to an older marker beside a newer fail-closed round',
+    () => {
+      // A newer fail-closed round posts its marker with the sha withheld;
+      // the gate must fail open for the re-cover round instead of
+      // certifying from the older valid marker beside it.
+      const r = runGate('update_branch_only', {
+        reviewsFor: (R) =>
+          reviewsFixture(
+            reviewEntry({ sha: R }),
+            reviewEntry({
+              sha: R,
+              submittedAt: '2026-08-27T00:00:00Z',
+              body: ledgerBody(R, { omitSha: true }),
+            }),
+          ),
+      });
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toBe('no completed automatic round on this PR');
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'non-string marker fields drop out instead of aborting every later lookup',
+    () => {
+      // `//` substitutes only null/false, so a numeric `sha` or `base`
+      // reaches test()/gsub() and aborts the whole jq program: every
+      // later lookup on the PR then fails open with "reviewed-head lookup
+      // failed", never naming the cause. Coerced, malformed markers drop
+      // out by their own semantics instead.
+      const markerBody = (payload) =>
+        'marker\n\n<!-- qwen-review-ledger ' + JSON.stringify(payload) + ' -->';
+      // Malformed NEWEST marker: fail open with a named reason, not the
+      // abort's "reviewed-head lookup failed".
+      const newest = runGate('update_branch_only', {
+        reviewsFor: (R) =>
+          reviewsFixture(
+            reviewEntry({ sha: R }),
+            reviewEntry({
+              sha: R,
+              submittedAt: '2026-08-27T00:00:00Z',
+              body: markerBody({ v: 1, round: 4, sha: 123, base: 'main' }),
+            }),
+          ),
+      });
+      expect(newest.status).toBe(0);
+      expect(newest.out.skip).toBe('false');
+      expect(newest.out.reason).toBe('no completed automatic round on this PR');
+      // A numeric `base` beside a valid sha fails open on the base check.
+      const badBase = runGate('update_branch_only', {
+        reviewsFor: (R) =>
+          reviewsFixture(
+            reviewEntry({
+              sha: R,
+              body: markerBody({ v: 1, round: 3, sha: R, base: 123 }),
+            }),
+          ),
+      });
+      expect(badBase.status).toBe(0);
+      expect(badBase.out.skip).toBe('false');
+      expect(badBase.out.reason).toContain("not 'main'");
+      // A malformed OLDER marker is never consulted beside a valid newest.
+      const older = runGate('update_branch_only', {
+        reviewsFor: (R) =>
+          reviewsFixture(
+            reviewEntry({
+              sha: R,
+              submittedAt: '2026-08-25T00:00:00Z',
+              body: markerBody({ v: 1, round: 2, sha: 123, base: 123 }),
+            }),
+            reviewEntry({ sha: R }),
+          ),
+      });
+      expect(older.status).toBe(0);
+      expect(older.out.skip).toBe('true');
+      expect(older.out.reviewed_sha).toBe(older.R);
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'reviews a commit-tree merge that relocates the reviewed hunks',
+    () => {
+      // Parentage and the offset-stripped digest both pass a hand-crafted
+      // two-parent merge whose tree applies the reviewed change at a new
+      // position; only the clean-merge tree check catches it.
+      const r = runGate('evil_merge_relocated_hunk');
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toMatch(/deviates from the clean merge/);
     },
   );
 

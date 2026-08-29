@@ -6,27 +6,30 @@
 #
 # Two facts are certified before any review compute is spent: every
 # first-parent commit since the head the last completed automatic round
-# reviewed is a two-parent merge of the base branch, and the PR's own
-# three-dot diff kept the same canonical digest — every changed and
+# reviewed is a two-parent merge of the base branch whose tree equals
+# its parents' clean merge (a commit-tree-crafted merge relocating the
+# reviewed hunks fails open), and the PR's own three-dot diff kept the
+# same canonical digest — every changed and
 # context byte is hashed, binary bytes included (--binary renders them as
 # content-carrying GIT binary patches, not the content-free "Binary files
 # ... differ" marker), after stripping only unstable diff metadata (index
 # lines, hunk offsets), so an upstream edit touching the PR's own hunks
 # (whitespace included) fails the equality and the full round runs.
 #
-# The reviewed head is the newest SUBMITTED ledger-marked review
-# (APPROVED, CHANGES_REQUESTED, or COMMENTED, with a submitted_at) posted
-# by the AUTHENTICATED account — resolved live via `gh api user`, same
-# norm as the fallback dedup — so a participant posting the marker text
-# in their own review, a PENDING draft, or a DISMISSED review can never
-# certify a head this gate would skip. The marker's PAYLOAD is the
-# certification, not its presence: only markers carrying a valid `sha`
-# anchor are admitted — the review pipeline withholds that field on
-# fail-closed rounds (an undecided blocker, unproven scope, a truncated
-# finding list), exactly the rounds that must not certify — and the
-# marker's recorded `base` must equal the current base ref, or a round
-# that reviewed against the old base would certify a retargeted one.
-# Markers without a `base` field fail open like any unmatched shape.
+# The reviewed head is the newest SUBMITTED bot review carrying a ledger
+# marker (APPROVED, CHANGES_REQUESTED, or COMMENTED, with a submitted_at)
+# posted by the AUTHENTICATED account — resolved live via `gh api user`,
+# same norm as the fallback dedup — so a participant posting the marker
+# text in their own review, a PENDING draft, or a DISMISSED review can
+# never certify a head this gate would skip. The newest marker decides:
+# the review pipeline withholds the marker's `sha` anchor on fail-closed
+# rounds (an undecided blocker, unproven scope, a truncated finding
+# list), so a withheld or malformed anchor fails open instead of falling
+# back to an older marker — certifying while the newest round's debt
+# stays uncovered — and the marker's recorded `base` must equal the
+# current base ref, or a round that reviewed against the old base would
+# certify a retargeted one. Markers without a `base` field fail open
+# like any unmatched shape.
 #
 # Scope limit: docs-only-classified PRs never skip — their automatic
 # rounds are downgraded to medium with --comment stripped, and medium
@@ -97,12 +100,16 @@ decide() {
   local bot_login reviews marker reviewed_base
   bot_login="$(gh api user --jq '.login')" && [[ -n "${bot_login}" ]] || return
   reviews="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --method GET --paginate -F per_page=100)" || return
-  # The marker PAYLOAD is the certification: admit only markers carrying a
-  # valid `sha` anchor (withheld on fail-closed rounds) and report it with
-  # the recorded `base` as "<sha>\t<base>"; anything malformed or withheld
-  # drops out and fails open below. Control characters are stripped from
-  # the untrusted base value so a forged marker cannot inject extra
-  # GITHUB_OUTPUT lines through the reason text.
+  # The marker PAYLOAD is the certification: the newest submitted bot
+  # review carrying a marker decides, and anything malformed or withheld
+  # drops out and fails open — no fall-through to an older marker, since
+  # a fail-closed round withholds its `sha` precisely so the next round
+  # re-covers what it could not certify. Non-string `sha`/`base` values
+  # are coerced before matching so a writer bug drops out instead of
+  # aborting the whole jq program (and every later lookup on the PR).
+  # Control characters are stripped from the untrusted base value so a
+  # forged marker cannot inject extra GITHUB_OUTPUT lines through the
+  # reason text.
   marker="$(
     printf '%s' "${reviews}" | jq -sr --arg login "${bot_login}" '
       [.[][]
@@ -113,10 +120,10 @@ decide() {
        | ((.body // "")
           | capture("<!-- qwen-review-ledger (?<p>\\{.*\\}) -->")
           | .p
-          | fromjson)?
-       | select((.sha? // "") | test("^[0-9a-f]{7,64}$"))
-       | "\(.sha)\t\((.base // "") | gsub("[\\x00-\\x1f\\x7f]"; ""))"]
-      | last // empty'
+          | fromjson)?]
+      | last // empty
+      | select(((.sha? // "") | tostring) | test("^[0-9a-f]{7,64}$"))
+      | "\(.sha)\t\(((.base // "") | tostring) | gsub("[\\x00-\\x1f\\x7f]"; ""))"'
   )" || return
   REVIEWED_SHA="${marker%%$'\t'*}"
   reviewed_base="${marker#*$'\t'}"
@@ -134,7 +141,7 @@ decide() {
   # Bounded walk: a stale reviewed head must not buy an unbounded ancestry
   # scan, and past ten first-parent steps this is not the cheap shape the
   # gate exists for anyway.
-  local count c p2
+  local count c p2 clean_tree walked_tree
   REASON='commit walk failed'
   count="$(git rev-list --first-parent --count "${REVIEWED_SHA}..${EVENT_HEAD_SHA}" 2>/dev/null)" || return
   [[ "${count}" =~ ^[0-9]+$ ]] || return
@@ -149,6 +156,15 @@ decide() {
     if git rev-parse -q --verify "${c}^3" >/dev/null 2>&1; then return; fi
     REASON="merge of a non-base branch since the reviewed head: ${c}"
     git merge-base --is-ancestor "${p2}" "origin/${BASE_REF}" 2>/dev/null || return
+    # Parentage is not content: a commit-tree-crafted merge can carry the
+    # reviewed hunks at a position the offset-stripped digest cannot see,
+    # so require the walked tree to be its parents' clean merge; a git
+    # without --write-tree (< 2.38) fails open through the same || return.
+    REASON="walk commit tree deviates from the clean merge: ${c}"
+    clean_tree="$(git merge-tree --write-tree "${c}^1" "${p2}" 2>/dev/null)" || return
+    clean_tree="${clean_tree%%$'\n'*}"
+    walked_tree="$(git rev-parse -q --verify "${c}^{tree}" 2>/dev/null)" || return
+    [[ "${walked_tree}" = "${clean_tree}" ]] || return
   done
 
   local mb_r mb_h digest_r digest_h
