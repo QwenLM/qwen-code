@@ -72,7 +72,12 @@ function makeSystemMessage(id: string): Message {
   return { id, role: 'system', content: 'heads up', variant: 'error' };
 }
 
-function makeBackgroundNotification(id: string, toolUseId?: string): Message {
+function makeBackgroundNotification(
+  id: string,
+  toolUseId?: string,
+  status = 'completed',
+  timestamp?: number,
+): Message {
   return {
     id,
     role: 'system',
@@ -81,9 +86,10 @@ function makeBackgroundNotification(id: string, toolUseId?: string): Message {
     source: 'background_notification',
     data: {
       kind: 'agent',
-      status: 'completed',
+      status,
       ...(toolUseId ? { toolUseId } : {}),
     },
+    ...(timestamp !== undefined ? { timestamp } : {}),
   };
 }
 
@@ -363,6 +369,43 @@ describe('groupParallelAgents', () => {
       agents: [{ status: 'completed' }, { status: 'completed' }],
     });
   });
+
+  it.each([
+    ['failed', 'failed', 'background'],
+    ['cancelled', 'completed', 'cancelled'],
+    ['canceled', 'completed', 'cancelled'],
+  ] as const)(
+    'normalizes a %s agent notification before grouping',
+    (notificationStatus, toolStatus, rawStatus) => {
+      const items = groupParallelAgents([
+        makeBackgroundAgentToolGroup('a1'),
+        makeBackgroundNotification(
+          'done-a1',
+          'call-a1',
+          notificationStatus,
+          1_234,
+        ),
+      ]);
+
+      expect(items[0]).toMatchObject({
+        type: 'message',
+        message: {
+          role: 'tool_group',
+          tools: [
+            {
+              status: toolStatus,
+              endTime: 1_234,
+              rawOutput: {
+                type: 'task_execution',
+                taskDescription: 'task a1',
+                status: rawStatus,
+              },
+            },
+          ],
+        },
+      });
+    },
+  );
 
   it('does not normalize an explicitly non-terminal agent notification', () => {
     const items = groupParallelAgents([

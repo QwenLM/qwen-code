@@ -2812,7 +2812,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(c.querySelector('[data-testid="assistant-turn-footer"]')).toBeNull();
   });
 
-  it('restores final actions after matched agent notifications even when launch rows stay pending', () => {
+  it('restores final actions and collapses the intermediate report after matched agent notifications', () => {
     const firstAgent = agentMsg('agent-1');
     const secondAgent = agentMsg('agent-2');
     firstAgent.tools[0]!.status = 'pending';
@@ -2839,7 +2839,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       { customization: { renderAssistantTurnFooter } },
     );
 
-    expect(assistantActions(c, 'report')).not.toBe('true');
+    expect(isCollapsed(c, 'report')).toBe(true);
     expect(assistantActions(c, 'final-supplement')).toBe('true');
     expect(renderAssistantTurnFooter.mock.calls.map(([info]) => info)).toEqual(
       expect.arrayContaining([

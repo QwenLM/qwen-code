@@ -30,7 +30,10 @@ import type { PermissionRequest } from '../adapters/types';
 import {
   backgroundShellTaskId,
   isBackgroundSubAgentToolCall,
+  isTerminalBackgroundAgentStatus,
   isSubAgentToolCall,
+  projectTerminalBackgroundAgentTool,
+  type TerminalBackgroundAgentStatus,
 } from '../adapters/toolClassification';
 import { CompactModeContext } from '../WebShellContexts';
 import {
@@ -1722,8 +1725,7 @@ function backgroundAgentCallIds(item: DisplayItem): string[] {
 
 function backgroundAgentCompletionForMessage(message: Message): {
   callId?: string;
-  toolStatus: 'completed' | 'failed';
-  cancelled?: boolean;
+  status: TerminalBackgroundAgentStatus;
   endTime?: number;
 } | null {
   if (
@@ -1741,7 +1743,7 @@ function backgroundAgentCompletionForMessage(message: Message): {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
     return identifiesAgent
       ? {
-          toolStatus: 'completed',
+          status: 'completed',
           ...(message.timestamp !== undefined
             ? { endTime: message.timestamp }
             : {}),
@@ -1754,21 +1756,16 @@ function backgroundAgentCompletionForMessage(message: Message): {
     status?: unknown;
   };
   if (kind !== 'agent' && !(kind === undefined && identifiesAgent)) return null;
-  if (
-    status !== undefined &&
-    status !== 'completed' &&
-    status !== 'failed' &&
-    status !== 'cancelled' &&
-    status !== 'canceled'
-  ) {
-    return null;
-  }
+  const terminalStatus =
+    status === undefined
+      ? 'completed'
+      : isTerminalBackgroundAgentStatus(status)
+        ? status
+        : undefined;
+  if (!terminalStatus) return null;
   return {
     ...(typeof toolUseId === 'string' ? { callId: toolUseId } : {}),
-    toolStatus: status === 'failed' ? 'failed' : 'completed',
-    ...(status === 'cancelled' || status === 'canceled'
-      ? { cancelled: true }
-      : {}),
+    status: terminalStatus,
     ...(message.timestamp !== undefined ? { endTime: message.timestamp } : {}),
   };
 }
@@ -1805,24 +1802,14 @@ function normalizeTerminalBackgroundAgentTools(messages: Message[]): Message[] {
       ) {
         return tool;
       }
+      const normalizedTool = projectTerminalBackgroundAgentTool(
+        tool,
+        update.status,
+        update.endTime,
+      );
+      if (normalizedTool === tool) return tool;
       toolsChanged = true;
-      return {
-        ...tool,
-        status: update.toolStatus,
-        ...(update.endTime !== undefined ? { endTime: update.endTime } : {}),
-        ...(update.cancelled
-          ? {
-              rawOutput: {
-                ...(typeof tool.rawOutput === 'object' &&
-                tool.rawOutput !== null &&
-                !Array.isArray(tool.rawOutput)
-                  ? tool.rawOutput
-                  : {}),
-                status: 'cancelled',
-              },
-            }
-          : {}),
-      };
+      return normalizedTool;
     });
     if (!toolsChanged) return message;
     changed = true;
