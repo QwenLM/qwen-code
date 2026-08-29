@@ -979,24 +979,14 @@ export class WorkflowRunRegistry {
   }
 
   /** Record one sandbox log line without forcing a TUI redraw per line. */
-  onLogAppended(
-    runId: string,
-    line: string,
-    at = Date.now(),
-    expectedEntry?: WorkflowTask,
-  ): void {
+  onLogAppended(runId: string, line: string, at = Date.now()): void {
     const entry = this.entries.get(runId);
-    // Failed runs can emit cleanup logs after their handle is released.
-    // The entry identity admits only the owning run, not a later retry.
-    if (!entry) return;
-    const isOwnedFailedRun =
-      entry.status === 'failed' &&
-      expectedEntry !== undefined &&
-      entry === expectedEntry;
+    // Mirrors setRecentLogs's 'cancelled' allowance: a dialog cancel flips
+    // the status before the sandbox's run-end flush fires its last mirror
+    // lines, and the two persisted log projections must keep agreeing.
     if (
-      !isActiveWorkflowStatus(entry.status) &&
-      entry.status !== 'cancelled' &&
-      !isOwnedFailedRun
+      !entry ||
+      (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')
     )
       return;
     const message = stripAnsiAndControl(line).slice(0, 4_096);
@@ -1088,36 +1078,13 @@ export class WorkflowRunRegistry {
    * (status flips to `'cancelled'` synchronously), then the abort
    * propagates to the tool's catch arm which calls `setRecentLogs`.
    * Without this, dialog-cancelled runs always showed an empty Logs
-   * section.
-   *
-   * R8-1: `'failed'` has the same shape and needs the same allowance,
-   * but only for the handle that is settling right now. An approval
-   * contingency calls `fail()` and aborts the handle; the sandbox still
-   * collects whatever the script's `finally` emits, and that final
-   * account reached here after the entry was already terminal — so the
-   * returned failure kept the external error message while the persisted
-   * entry and snapshot silently lost the cleanup diagnostics. Passing
-   * the settling `handle` is what keeps the allowance narrow: a
-   * replacement run attaches its own handle and the settled run's
-   * finally releases this one, so a stale callback from either side no
-   * longer matches and is still rejected. `'completed'` stays final.
+   * section. `'completed'` / `'failed'` are still rejected — those
+   * terminal states ARE final (no late-arriving logs to absorb).
    */
-  setRecentLogs(
-    runId: string,
-    logs: readonly string[],
-    handle?: WorkflowRunHandle,
-  ): void {
+  setRecentLogs(runId: string, logs: readonly string[]): void {
     const entry = this.entries.get(runId);
     if (!entry) return;
-    if (
-      !isActiveWorkflowStatus(entry.status) &&
-      entry.status !== 'cancelled' &&
-      !(
-        entry.status === 'failed' &&
-        handle !== undefined &&
-        this.handles.get(runId) === handle
-      )
-    )
+    if (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')
       return;
     const tail = logs.length > 100 ? logs.slice(-100) : Array.from(logs);
     entry.recentLogs = tail.map((line) =>

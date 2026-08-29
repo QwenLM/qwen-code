@@ -40,6 +40,7 @@ import {
   Storage,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import { isNativeDirectoryPickerAvailable } from '../../packages/cli/src/serve/native-directory-picker.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -293,6 +294,9 @@ describe('qwen serve — capabilities envelope', () => {
     // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
     // `prompt_absolute_deadline`, `writer_idle_timeout`,
     // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
+    // `native_directory_picker` is host-conditional (the daemon host's GUI
+    // environment, not a spawn flag) and is spliced at its registry
+    // position below.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
@@ -342,7 +346,10 @@ describe('qwen serve — capabilities envelope', () => {
       'auth_provider_install',
       'workspace_memory',
       'workspace_memory_remember',
+      'workspace_memory_remember_project_scope',
+      'workspace_memory_remember_user_scope',
       'workspace_memory_forget',
+      'workspace_memory_forget_scope',
       'workspace_memory_dream',
       'workspace_agents',
       'workspace_agent_generate',
@@ -375,8 +382,8 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_file_upload',
       'session_approval_mode_control',
       'workspace_tool_toggle',
-      'workspace_skill_toggle',
-      'workspace_skill_batch_toggle',
+      'workspace_skill_settings_toggle',
+      'workspace_skill_settings_batch_toggle',
       'extension_batch_activation_v2',
       'workspace_skill_manage',
       'workspace_settings',
@@ -410,9 +417,13 @@ describe('qwen serve — capabilities envelope', () => {
       'persistent_workspace_registration',
       'workspace_display_name',
       'workspace_runtime_removal',
+      ...(isNativeDirectoryPickerAvailable()
+        ? ['native_directory_picker']
+        : []),
       'workspace_qualified_rest_core',
       'extension_management_v2',
       'extension_git_credentials',
+      'extension_local_path_install',
       'workspace_persisted_transcript',
       'workspace_session_export',
       'workspace_archived_session_export',
@@ -420,6 +431,53 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_session_metadata',
       'voice_transcribe',
     ]);
+  });
+});
+
+describe('qwen serve — local Extension install', () => {
+  it('installs an absolute daemon-local directory into managed storage', async () => {
+    const source = path.join(homeDir, 'local-extension-source');
+    mkdirSync(source, { recursive: true });
+    writeFileSync(
+      path.join(source, 'qwen-extension.json'),
+      JSON.stringify({
+        name: 'daemon-local-path-e2e',
+        version: '1.0.0',
+      }),
+      'utf8',
+    );
+
+    const accepted = await client.installExtension({ source, consent: true });
+    await expect
+      .poll(
+        async () =>
+          (await client.extensionOperationStatus(accepted.operationId)).status,
+        { timeout: 10_000 },
+      )
+      .toBe('succeeded');
+
+    const operation = await client.extensionOperationStatus(
+      accepted.operationId,
+    );
+    expect(operation.result).toMatchObject({
+      status: 'installed',
+      source,
+      name: 'daemon-local-path-e2e',
+    });
+    const status = await client.workspaceExtensions();
+    const installed = status.extensions.find(
+      (extension) => extension.name === 'daemon-local-path-e2e',
+    );
+    expect(installed).toMatchObject({
+      source,
+      installType: 'local',
+    });
+    expect(installed?.path).not.toBe(source);
+    expect(
+      installed?.path.startsWith(
+        `${path.join(homeDir, '.qwen', 'extensions')}${path.sep}`,
+      ),
+    ).toBe(true);
   });
 });
 

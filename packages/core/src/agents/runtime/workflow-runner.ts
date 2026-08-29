@@ -251,7 +251,7 @@ export class WorkflowRunner {
       // TUI redraw per line while retaining the real replay timestamp.
       logAppended: (line) => {
         if (!isCurrentEntry()) return;
-        registry?.onLogAppended(runId, line, Date.now(), entry);
+        registry?.onLogAppended(runId, line);
       },
       budgetUpdated: (spent, total) => {
         if (!isCurrentEntry()) return;
@@ -296,7 +296,7 @@ export class WorkflowRunner {
               entry.description = outcome.meta.name;
             }
           }
-          registry?.setRecentLogs(runId, outcome.logs, handle);
+          registry?.setRecentLogs(runId, outcome.logs);
           // A held successful dispatch resolves its gate on abort, so a
           // run whose entry settled terminal mid-script — cancelled via
           // the dialog, or failed via resolvePendingApproval's
@@ -319,8 +319,7 @@ export class WorkflowRunner {
             error instanceof WorkflowExecutionError ? error : undefined;
           const message = extractErrorMessage(error);
           if (entry && details?.meta && !entry.meta) entry.meta = details.meta;
-          if (details?.logs)
-            registry?.setRecentLogs(runId, details.logs, handle);
+          if (details?.logs) registry?.setRecentLogs(runId, details.logs);
           // Mirror of the guard on the success path. When the entry was
           // settled terminal from outside — the dialog's cancel, or the
           // approval contingency's fail — the abort that follows is what

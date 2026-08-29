@@ -939,15 +939,6 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   // one log line, whichever surface reports it first (R11-11).
   let mirroredEscapeKeys = new Set<string>();
 
-  // R8-2: host-side count of dispatches that have crossed into the host
-  // realm and not yet settled. `run()`'s finally uses it to keep the
-  // adoption-escape hook installed while a detached script wrapper can
-  // still be awaiting one — see `scheduleEscapeObservationDrain`. Counted
-  // on the host (not from `unconsumedRoots`) because a root is registered
-  // per observed promise, including aggregates that own no host call.
-  let inFlightDispatches = 0;
-  let notifyDispatchesIdle: (() => void) | undefined;
-
   // Precise attribution: 'dispatch failed' only when the root dispatch
   // itself rejected (marked at the vm boundary), '(result not consumed)'
   // only when the root was never attached to.
@@ -1040,17 +1031,6 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     },
     wfClearUnconsumed: (id: number): void => {
       unconsumedRejections.delete(id);
-    },
-    wfDispatchStarted: (): void => {
-      inFlightDispatches++;
-    },
-    wfDispatchSettled: (): void => {
-      if (inFlightDispatches > 0) inFlightDispatches--;
-      if (inFlightDispatches === 0 && notifyDispatchesIdle) {
-        const resolve = notifyDispatchesIdle;
-        notifyDispatchesIdle = undefined;
-        resolve();
-      }
     },
     // R10-1: teardown discrimination cannot key on the error name alone.
     // The dominant in-flight cancellation path (controller.abort() →
@@ -1428,18 +1408,6 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         return function (...vmArgs) {
           const rootId = __b.wfRegisterRoot();
           const p = new ObservedPromise(function (resolve, reject) {
-            // R8-2: the host-side in-flight count is what bounds the
-            // escape-hook drain in run()'s finally. Mark settlement
-            // exactly once per call — a host fn that throws synchronously
-            // takes the catch arm below after started() already ran, and
-            // a double decrement would retire the hook while dispatches
-            // are still outstanding.
-            var dispatchSettled = false;
-            function markDispatchSettled() {
-              if (dispatchSettled) return;
-              dispatchSettled = true;
-              __b.wfDispatchSettled();
-            }
             function rejectMapped(hostErr) {
               const vmErr = mapDispatchError(hostErr);
               // Stamp the originating root and run BEFORE the error can
@@ -1453,15 +1421,13 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
               } catch (e) {}
               reject(vmErr);
             }
-            __b.wfDispatchStarted();
             try {
               const hostPromise = hostFn.apply(null, vmArgs);
               hostPromise.then(
-                function (value) { markDispatchSettled(); resolve(value); },
-                function (hostErr) { markDispatchSettled(); rejectMapped(hostErr); }
+                function (value) { resolve(value); },
+                rejectMapped
               );
             } catch (hostErr) {
-              markDispatchSettled();
               rejectMapped(hostErr);
             }
           });
@@ -1844,18 +1810,11 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   // telemetry surface. Roots whose rejection the script handled stay
   // silent here too (the contract keys on the root, same as the flush).
   // The hook is installed per run() and matches only this run's stamped
-  // rejections, so concurrent runs don't log into each other.
-  //
-  // R8-2: the hook now outlives the run's settlement by a bounded drain
-  // (see `scheduleEscapeObservationDrain`), which is what keeps an
-  // immediately-cancelled run from turning a detached wrapper's late
-  // rejection into a process-level crash. Two consequences handled here:
-  // rejections marked `__wfAbort` are teardown noise and must stay out of
-  // the log — the same contract `observeDispatch` applies under R11-30,
-  // and it only becomes reachable here because the window now extends
-  // past the abort. Remaining limit: the event itself cannot be cancelled
-  // from inside the sandbox — a host with its own unhandledRejection
-  // listener still observes it.
+  // rejections, so concurrent runs don't log into each other. Known
+  // limits: a rejection landing after this run's flush (a fire-and-
+  // forget dispatch outliving the run) escapes as before, and the event
+  // itself cannot be cancelled from inside the sandbox — a host with
+  // its own unhandledRejection listener still observes it.
   const hookRunId = opts.runId ?? '';
   const adoptionEscapeHook = (
     reason: unknown,
@@ -1865,18 +1824,12 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       if (!reason || typeof reason !== 'object') return;
       const marked = reason as {
         __wfDispatchFailed?: unknown;
-        __wfAbort?: unknown;
         __wfRunId?: unknown;
         __wfRootId?: unknown;
         message?: unknown;
       };
       if (marked.__wfDispatchFailed !== true) return;
       if (String(marked.__wfRunId ?? '') !== hookRunId) return;
-      // Teardown noise: a cancelled/timed-out run's draining dispatches
-      // reject by construction. Suppressing here keeps a correctly
-      // cancelled run's log empty while the listener stays installed to
-      // absorb the escape.
-      if (marked.__wfAbort === true) return;
       const rootId =
         typeof marked.__wfRootId === 'number' ? marked.__wfRootId : undefined;
       if (
@@ -1900,96 +1853,6 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     }
   };
 
-  // R8-2: the escape hook's lifecycle. `run()` used to detach the listener
-  // in its own finally, which is correct only when the run outlives every
-  // dispatch it started. An immediate cancellation breaks that: the abort
-  // arm settles the run now (by design — see the arm's comment), while a
-  // detached async wrapper is still awaiting an aborted dispatch. Its
-  // rejection then lands with no listener on the process, and Node's
-  // default unhandled-rejection mode terminates the host — a workflow
-  // cancel taking down a headless daemon. Node suppresses that default
-  // for as long as ANY 'unhandledRejection' listener is registered, so the
-  // repair is to hold this run's listener across teardown and retire it
-  // once the outstanding dispatches and their rejection events have
-  // drained.
-  //
-  // Bounded three ways, because a listener that outlives its run leaks and
-  // suppresses unrelated crashes: it waits only for THIS sandbox's
-  // in-flight dispatch count to reach zero, waits a fixed number of macrotask
-  // turns for queued rejection events, and rechecks in case teardown started
-  // another dispatch. A hard cap retires it if that chain never drains.
-  const ESCAPE_DRAIN_TURNS = 2;
-  const ESCAPE_DRAIN_CAP_MS = 5_000;
-  let escapeHookInstalled = false;
-  let cancelEscapeDrain: (() => void) | undefined;
-
-  const installEscapeHook = (): void => {
-    // A new run on this sandbox takes ownership of the listener: cancel a
-    // pending drain rather than adding a second copy of the same function
-    // (process.off removes one registration, so a double install would
-    // strand one forever and double-log every escape).
-    cancelEscapeDrain?.();
-    cancelEscapeDrain = undefined;
-    if (escapeHookInstalled) return;
-    process.on('unhandledRejection', adoptionEscapeHook);
-    escapeHookInstalled = true;
-  };
-
-  const removeEscapeHook = (): void => {
-    if (!escapeHookInstalled) return;
-    process.off('unhandledRejection', adoptionEscapeHook);
-    escapeHookInstalled = false;
-  };
-
-  const whenDispatchesIdle = (): Promise<void> =>
-    inFlightDispatches === 0
-      ? Promise.resolve()
-      : new Promise<void>((resolve) => {
-          notifyDispatchesIdle = resolve;
-        });
-
-  const scheduleEscapeObservationDrain = (): void => {
-    if (!escapeHookInstalled) return;
-    // Nothing crossed into the host realm this run, so nothing can reject
-    // later: retire synchronously. This also keeps dispatch-free runs free
-    // of timer dependencies, which the wall-clock backstop's fake-timer
-    // tests rely on (same reason `flushUnconsumedRejections` skips its
-    // yield when no root was ever registered).
-    if (inFlightDispatches === 0 && nextUnconsumedId === 1) {
-      removeEscapeHook();
-      return;
-    }
-    let cancelled = false;
-    cancelEscapeDrain = () => {
-      cancelled = true;
-    };
-    const cap = setTimeout(() => {
-      if (cancelled) return;
-      cancelEscapeDrain = undefined;
-      removeEscapeHook();
-    }, ESCAPE_DRAIN_CAP_MS);
-    // Never let the drain hold a host process open past its own work.
-    cap.unref?.();
-    void (async () => {
-      try {
-        do {
-          await whenDispatchesIdle();
-          for (let turn = 0; turn < ESCAPE_DRAIN_TURNS; turn++) {
-            await new Promise<void>((resolve) => {
-              setImmediate(resolve);
-            });
-          }
-        } while (!cancelled && inFlightDispatches > 0);
-      } finally {
-        clearTimeout(cap);
-        if (!cancelled) {
-          cancelEscapeDrain = undefined;
-          removeEscapeHook();
-        }
-      }
-    })();
-  };
-
   let extractedMeta: WorkflowMeta | null = null;
   return {
     async run(scriptSource: string): Promise<unknown> {
@@ -2004,17 +1867,13 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       unconsumedRejections.clear();
       nextUnconsumedId = 1;
       mirroredEscapeKeys = new Set();
-      // `inFlightDispatches` is deliberately NOT reset here: it counts
-      // host calls that are genuinely outstanding, and a reused sandbox
-      // whose previous run left one draining must keep it counted or the
-      // next drain retires the listener while that call can still reject.
 
       let watchdog: WallClockWatchdog | undefined;
       let stopWatchingState: (() => void) | undefined;
       let rearmWatchdogOnAbort: (() => void) | undefined;
       let settleOnAbort: (() => void) | undefined;
       let wallClockFired = false;
-      installEscapeHook();
+      process.on('unhandledRejection', adoptionEscapeHook);
       try {
         // P4: extract `export const meta = {...}` once before the body runs.
         // The stripped source is what the vm executes; the meta object is
@@ -2144,7 +2003,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // it — still surfaces already-queued mirror entries instead of
         // discarding them with the per-run sandbox.
         await flushUnconsumedRejections();
-        scheduleEscapeObservationDrain();
+        process.off('unhandledRejection', adoptionEscapeHook);
       }
     },
     getPhases: () => [...phases],

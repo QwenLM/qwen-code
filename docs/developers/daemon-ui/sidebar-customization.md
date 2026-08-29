@@ -133,11 +133,11 @@ interface WebShellSidebarFooterOptions {
 }
 ```
 
-| Value                                          | Effect                  |
-| ---------------------------------------------- | ----------------------- |
-| `undefined` (default)                          | All items shown         |
-| `false`                                        | Footer hidden entirely  |
-| `{ items: ['settings', 'theme', 'collapse'] }` | Only listed items shown |
+| Value                                          | Effect                                                                    |
+| ---------------------------------------------- | ------------------------------------------------------------------------- |
+| `undefined` (default)                          | All items shown                                                           |
+| `false`                                        | Footer hidden; the mobile drawer keeps only its close control             |
+| `{ items: ['settings', 'theme', 'collapse'] }` | Only listed items shown; the mobile drawer always keeps its close control |
 
 The footer auto-adapts to narrow widths: labels are hidden and version is
 dropped below certain thresholds.
@@ -175,6 +175,7 @@ interface WebShellSidebarOptions {
   enabled?: boolean; // show/hide sidebar (default: true when passed)
   defaultCollapsed?: boolean; // initial collapsed state (persisted in localStorage)
   showCompactToggle?: boolean; // show the collapse button in the chat area (default: true)
+  showSessionSourceSwitch?: boolean; // show the Tasks/Channels switch (default: true)
   branding?: false | WebShellSidebarBranding;
   primaryNav?: WebShellSidebarPrimaryNavOptions;
   hideProjectHeader?: boolean; // hide "Projects" header row (default: false = shown)
@@ -182,6 +183,21 @@ interface WebShellSidebarOptions {
   footer?: false | WebShellSidebarFooterOptions;
 }
 ```
+
+### Session source switch — `showSessionSourceSwitch`
+
+Set `showSessionSourceSwitch` to `false` when an embedded host should show only
+ordinary task sessions:
+
+```tsx
+sidebar={{
+  showSessionSourceSwitch: false,
+}}
+```
+
+This removes the Tasks/Channels switch and fixes every active, archived, primary,
+and secondary session query to `sourceType: "default"`. Omitting the option keeps
+the current switch and channel-session access unchanged.
 
 ### ③ Project Header — `hideProjectHeader`
 
@@ -207,7 +223,7 @@ type WebShellSidebarSessionActionItem =
   | 'export' // 📤 Export chat history (dropdown menu)
   | 'delete' // 🗑 Delete session (dropdown menu)
   | 'pin' // 📌 Pin/Unpin (inline button)
-  | 'archive'; // 📦 Archive (inline button)
+  | 'archive'; // 📦 Archive (dropdown menu)
 
 /** Subset with working inline (hover-button) handlers. */
 type WebShellSidebarSessionInlineActionItem =
@@ -219,27 +235,29 @@ type WebShellSidebarSessionInlineActionItem =
 
 interface WebShellSidebarSessionActionsOptions {
   items?: readonly WebShellSidebarSessionActionItem[]; // which actions to show (default: all)
-  inlineItems?: readonly WebShellSidebarSessionInlineActionItem[]; // which items appear as inline buttons (default: ['pin', 'archive'])
+  inlineItems?: readonly WebShellSidebarSessionInlineActionItem[]; // which items appear as inline buttons (default: ['pin'])
 }
 ```
 
 Controls which action buttons appear on session rows:
 
 - **`items`**: Master control for all actions (both inline and dropdown). If an item is not in `items`, it's hidden everywhere.
-- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover). Defaults to `['pin', 'archive']`. Only items with working inline handlers can be used: `'pin'`, `'archive'`, `'rename'`, `'export'`, `'delete'`. `'details'` and `'group'` are dropdown-only.
+- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover). Defaults to `['pin']` — archive stays in the dropdown by default because the hover slot sits on the row's click target and is easy to hit by accident. Only items with working inline handlers can be used: `'pin'`, `'archive'`, `'rename'`, `'export'`, `'delete'`. `'details'` and `'group'` are dropdown-only.
 
 **Visibility priority**: Both `items` AND the item's built-in condition AND `inlineItems` must all pass for the inline button to show. For example, `delete` as inline requires `items` to include `'delete'` AND `inlineItems` to include `'delete'`.
 
-| Value                                    | Effect                                     |
-| ---------------------------------------- | ------------------------------------------ |
-| `undefined` (default)                    | All actions shown, pin + archive as inline |
-| `{ inlineItems: ['pin', 'delete'] }`     | Pin + delete as inline buttons             |
-| `{ inlineItems: [] }`                    | No inline buttons at all                   |
-| `{ inlineItems: ['archive', 'export'] }` | Archive + export as inline buttons         |
+| Value                                    | Effect                                |
+| ---------------------------------------- | ------------------------------------- |
+| `undefined` (default)                    | All actions shown, only pin as inline |
+| `{ inlineItems: ['pin', 'delete'] }`     | Pin + delete as inline buttons        |
+| `{ inlineItems: [] }`                    | No inline buttons at all              |
+| `{ inlineItems: ['archive', 'export'] }` | Archive + export as inline buttons    |
 
 The dropdown trigger (⋮) is automatically hidden when no dropdown items
-are enabled. Inline buttons (`pin`, `archive`) are only shown when both
-their capability condition and `items` include them.
+are enabled. Inline buttons are only shown when both their capability
+condition and `items` include them. Archive is disabled on the current
+session and on any session with a running turn, because the daemon closes
+the live session when it archives.
 
 ```tsx
 sidebar={{
@@ -288,14 +306,18 @@ These `WebShellProps` affect sidebar behavior indirectly:
 
 ## Collapsed and mobile states
 
-| State     | Behavior                                           |
-| --------- | -------------------------------------------------- |
-| Expanded  | Full sidebar with text labels                      |
-| Collapsed | Icon-rail mode (logo, pen icon, action icons only) |
-| Mobile    | Drawer slides from left with backdrop overlay      |
+| State     | Behavior                                                                                       |
+| --------- | ---------------------------------------------------------------------------------------------- |
+| Expanded  | Full sidebar with text labels                                                                  |
+| Collapsed | Icon-rail mode (logo, pen icon, action icons only)                                             |
+| Mobile    | Drawer uses 70% of its container, within width limits, with backdrop and footer close controls |
 
 Collapse state is persisted in `localStorage` under the key
 `qwen-code-web-shell-sidebar-collapsed`.
+
+The resized desktop width is restored only in expanded layouts. Opening or
+closing the mobile drawer does not overwrite that width or the persisted
+desktop collapse preference.
 
 ## Source locations
 

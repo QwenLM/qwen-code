@@ -1601,31 +1601,6 @@ describe('WorkflowRunRegistry', () => {
     ]);
   });
 
-  it("onLogAppended after a fail transition writes only for the run's own entry", () => {
-    const r = new WorkflowRunRegistry();
-    const entry = r.register(reg('wf_late_fail_log'));
-    const handle = {
-      runId: 'wf_late_fail_log',
-      abort: vi.fn(),
-    } as unknown as WorkflowRunHandle;
-    r.attachHandle(handle);
-    r.fail(handle.runId, 'approval contingency', 1_100);
-    r.releaseHandle(handle.runId, handle);
-
-    r.onLogAppended(handle.runId, 'late line', 1_200, entry);
-
-    expect(entry.recentLogs).toEqual(['late line']);
-    expect(entry.events.filter((event) => event.type === 'log')).toEqual([
-      expect.objectContaining({ message: 'late line' }),
-    ]);
-
-    const replacement = r.register(reg(handle.runId));
-    r.fail(handle.runId, 'replacement failed', 1_300);
-    r.onLogAppended(handle.runId, 'not mine', 1_400, entry);
-    expect(entry.recentLogs).toEqual(['late line']);
-    expect(replacement.recentLogs).toEqual([]);
-  });
-
   it('normalizes phase titles at the registry boundary', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(reg('wf_phase_titles'));
@@ -1919,58 +1894,6 @@ describe('WorkflowRunRegistry', () => {
     r.fail('wf_fail', 'boom', 2_000);
     r.setRecentLogs('wf_fail', ['too late']);
     expect(r.get('wf_fail')!.recentLogs).toEqual([]);
-  });
-
-  // R8-1: the approval contingency fails the entry and aborts the handle
-  // while the sandbox is still collecting the script's `finally` output.
-  // That final account arrives after the entry is terminal, so the blanket
-  // 'failed' rejection above dropped the cleanup diagnostics from both the
-  // persisted entry and the snapshot while the returned failure kept the
-  // external message. The allowance is keyed on the settling handle, not
-  // on the status, so it cannot absorb a stale callback.
-  it("setRecentLogs after a fail transition writes for the settling run's own handle", () => {
-    const r = new WorkflowRunRegistry();
-    r.register(reg('wf_contingency'));
-    const handle = {
-      runId: 'wf_contingency',
-      abort: vi.fn(),
-    } as unknown as WorkflowRunHandle;
-    r.attachHandle(handle);
-    r.fail('wf_contingency', 'approval contingency', 3_000);
-    r.setRecentLogs('wf_contingency', ['cleanup ran'], handle);
-    const e = r.get('wf_contingency')!;
-    expect(e.recentLogs).toEqual(['cleanup ran']);
-    expect(e.status).toBe('failed');
-    // The log-event window is rebuilt from the same tail, so the two
-    // persisted projections still agree.
-    expect(
-      e.events.filter((event) => event.type === 'log').map((event) => event),
-    ).toMatchObject([{ message: 'cleanup ran' }]);
-  });
-
-  it('setRecentLogs after a fail transition rejects a stale or replaced handle', () => {
-    const r = new WorkflowRunRegistry();
-    r.register(reg('wf_stale'));
-    const handle = {
-      runId: 'wf_stale',
-      abort: vi.fn(),
-    } as unknown as WorkflowRunHandle;
-    r.attachHandle(handle);
-    r.fail('wf_stale', 'boom', 3_000);
-
-    // A different handle — the shape a replacement run would present.
-    const replacement = {
-      runId: 'wf_stale',
-      abort: vi.fn(),
-    } as unknown as WorkflowRunHandle;
-    r.setRecentLogs('wf_stale', ['not mine'], replacement);
-    expect(r.get('wf_stale')!.recentLogs).toEqual([]);
-
-    // ...and once the settling run releases its handle, even the original
-    // no longer matches.
-    r.releaseHandle('wf_stale', handle);
-    r.setRecentLogs('wf_stale', ['too late'], handle);
-    expect(r.get('wf_stale')!.recentLogs).toEqual([]);
   });
 
   // P4 Round 7 (wenshao): WorkflowRunRegistry must expose reset() and

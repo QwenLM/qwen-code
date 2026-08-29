@@ -25,7 +25,11 @@ import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
-import { AcpDispatcher, type LiveSessionIsolation } from './dispatch.js';
+import {
+  AcpDispatcher,
+  type LegacyStandaloneSessionRestorer,
+  type LiveSessionIsolation,
+} from './dispatch.js';
 import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 import type {
   WorkspaceRegistry,
@@ -483,6 +487,7 @@ export interface MountAcpHttpOptions {
     req: IncomingMessage,
   ) => void;
   liveSessionIsolation?: LiveSessionIsolation;
+  standaloneSessionService?: LegacyStandaloneSessionRestorer;
 }
 
 /**
@@ -493,6 +498,8 @@ export interface MountAcpHttpOptions {
  */
 export interface ExtraWsRoute {
   path: string;
+  /** The route resolves its own workspace lifecycle instead of using primary. */
+  bypassPrimaryDrain?: boolean;
   onConnection: (ws: WebSocket, req: IncomingMessage) => void;
 }
 
@@ -1372,6 +1379,9 @@ export function mountAcpHttp(
         sessionRuntimeBaseDir: rt.sessionRuntimeBaseDir,
         workspaceId: rt.workspaceId,
       }),
+      rt.provenance === 'live-conversation'
+        ? opts.standaloneSessionService
+        : undefined,
     );
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
@@ -1844,7 +1854,7 @@ export function mountAcpHttp(
         activeMount = resolvedMount;
       }
 
-      if (activeMount.draining) {
+      if (extraRoute?.bypassPrimaryDrain !== true && activeMount.draining) {
         logReject(`workspace-draining ${activeMount.routeLabel}`);
         socket.write(
           'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n\r\n',
