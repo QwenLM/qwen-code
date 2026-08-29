@@ -7,9 +7,11 @@ import { I18nProvider } from '../i18n';
 import { ChatContextHeader } from './ChatContextHeader';
 
 // The QR entry reads the workspace connection from context.
-vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
   return {
     ...actual,
     useWorkspace: () => ({

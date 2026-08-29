@@ -14,9 +14,18 @@ import {
   afterAll,
   type MockInstance,
 } from 'vitest';
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+
+// Spy-mode interception so the unverifiable-inode degradation test can
+// pose the managed-directory stats; everything else delegates to the real
+// implementation.
+vi.mock('node:fs/promises', { spy: true });
+
+const realFsPromises =
+  await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
@@ -1050,6 +1059,8 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   PROMPT_CANCEL_METHOD,
+  SESSION_INITIALIZATION_DEADLINE_META_KEY,
+  SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -2309,6 +2320,101 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.any(AbortSignal),
       'trusted model-only prompt',
     );
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('aborts trusted session initialization at the bridge deadline', async () => {
+    const innerConfig = await setupSessionMocks('deadline-session');
+    vi.mocked(innerConfig.initialize).mockImplementationOnce(
+      async (options) => {
+        const signal = options?.signal;
+        expect(signal).toBeInstanceOf(AbortSignal);
+        await new Promise<void>((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        });
+      },
+    );
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'expected-capability',
+    );
+
+    await expect(
+      agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: {
+          [SESSION_INITIALIZATION_DEADLINE_META_KEY]: Date.now() + 20,
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: -32603,
+      data: { errorKind: SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND },
+    });
+    expect(vi.mocked(Session)).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each([
+    ['non-positive', () => 0],
+    ['non-integer', () => Date.now() + 0.5],
+    ['non-safe', () => Number.MAX_SAFE_INTEGER + 1],
+    ['beyond the timer range', () => Date.now() + 2_147_483_648],
+  ])(
+    'rejects a %s trusted session initialization deadline before creating state',
+    async (_label, deadline) => {
+      await setupSessionMocks('invalid-deadline-session');
+      const { agent, agentPromise } = await bootInitializedAcpAgent(
+        makeSessionSettings(),
+        'expected-capability',
+      );
+
+      await expect(
+        agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: {
+            [SESSION_INITIALIZATION_DEADLINE_META_KEY]: deadline(),
+          },
+        }),
+      ).rejects.toMatchObject({
+        errorKind: 'invalid_session_initialization_deadline',
+      });
+      expect(vi.mocked(Session)).not.toHaveBeenCalled();
+
+      await expect(
+        agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+      ).resolves.toMatchObject({ sessionId: 'invalid-deadline-session' });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('ignores a forged session initialization deadline from an untrusted parent', async () => {
+    await setupSessionMocks('untrusted-deadline-session');
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+    );
+
+    await expect(
+      agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: {
+          [SESSION_INITIALIZATION_DEADLINE_META_KEY]: Date.now() - 1,
+        },
+      }),
+    ).resolves.toMatchObject({ sessionId: 'untrusted-deadline-session' });
+
     mockConnectionState.resolve();
     await agentPromise;
   });
@@ -4501,18 +4607,20 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const canonicalChild = await fs.realpath(path.join(canonicalRoot, name));
     const rootStats = await fs.lstat(canonicalRoot);
     const childStats = await fs.lstat(canonicalChild);
+    const normalizedInode = (inode: number) =>
+      Number.isSafeInteger(inode) && inode > 0 ? inode : 0;
     return {
       canonicalSessionId: sessionId,
       root: {
         canonicalPath: canonicalRoot,
         device: rootStats.dev,
-        inode: rootStats.ino,
+        inode: normalizedInode(rootStats.ino),
       },
       child: {
         name,
         canonicalPath: canonicalChild,
         device: childStats.dev,
-        inode: childStats.ino,
+        inode: normalizedInode(childStats.ino),
       },
     };
   }
@@ -5413,6 +5521,65 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }
     });
   });
+
+  it.each([0, Number.MAX_SAFE_INTEGER + 1])(
+    'degrades instead of rejecting an unverifiable standalone inode %s',
+    async (inode) => {
+      // Mirrors the conversation-directory-identity degradation test: on a
+      // volume whose file IDs are not verifiable (FAT-style ino 0, or a
+      // Windows ID past the safe-integer range) the expectation builds
+      // with inode 0 and sessionCd must resolve — a predicate that
+      // unconditionally claims verifiability fails the parity check and
+      // reintroduces the 'working directory identity is compromised'
+      // rejection this PR removes.
+      await withEmptyTrustedFolders(async (directory) => {
+        const settings = makeSessionSettings({ mcpServers: {} });
+        const { agent, agentPromise, sessionId, innerConfig } =
+          await bootRelocatableSession(settings, 'expected-capability');
+        const root = path.join(directory, 'Conversations');
+        const target = path.join(root, getConversationDirectoryName(sessionId));
+        await fs.mkdir(target, { recursive: true, mode: 0o700 });
+        const realLstat = realFsPromises.lstat;
+        vi.mocked(fs.lstat).mockImplementation((async (p: string) => {
+          const stats = await realLstat(p);
+          return {
+            ...stats,
+            ino: inode,
+            isDirectory: () => stats.isDirectory(),
+            isSymbolicLink: () => stats.isSymbolicLink(),
+          } as Stats;
+        }) as unknown as typeof fs.lstat);
+        try {
+          const expectation = await managedConversationExpectation(
+            root,
+            sessionId,
+          );
+          expect(expectation.root.inode).toBe(0);
+          expect(expectation.child.inode).toBe(0);
+          innerConfig.getSessionSourceType.mockReturnValue('standalone');
+          innerConfig.getTargetDir.mockReturnValue(
+            expectation.child.canonicalPath,
+          );
+
+          await expect(
+            agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+              sessionId,
+              path: expectation.child.canonicalPath,
+              allowedRoots: [expectation.root.canonicalPath],
+              managedRelocation: 'live-conversation',
+              conversationDirectoryExpectation: expectation,
+            }),
+          ).resolves.toMatchObject({
+            newCwd: expectation.child.canonicalPath,
+          });
+        } finally {
+          vi.mocked(fs.lstat).mockRestore();
+          mockConnectionState.resolve();
+          await agentPromise;
+        }
+      });
+    },
+  );
 
   it('rejects standalone relocation while child-local background work is active', async () => {
     await withEmptyTrustedFolders(async (directory) => {
