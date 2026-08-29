@@ -861,8 +861,17 @@ describe('qwen resolve workflow', () => {
     // `latest` ties every run to the npm release pipeline of the moment: the
     // 2026-08-15 dist-tag pointed at an unresolvable 0.21.12 and 14 runs died
     // on `npm error notarget` before the agent started.
-    expect(agentStep).toMatch(/qwen_cli_version: '\d+\.\d+\.\d+'/);
-    expect(agentStep).not.toContain("qwen_cli_version: 'latest'");
+    const installStep = step(resolveJob, 'Install Qwen CLI');
+    expect(installStep).toMatch(/QWEN_CLI_VERSION: '\d+\.\d+\.\d+'/);
+    expect(installStep).not.toContain("QWEN_CLI_VERSION: 'latest'");
+    expect(installStep).toContain('@qwen-code/qwen-code@${QWEN_CLI_VERSION}');
+    // Direct invocation, not the action: the action runs the CLI with the
+    // runner's real $GITHUB_ENV/$GITHUB_PATH, which the scrub in the later
+    // steps cannot fully undo (see 'hardens the post-agent steps').
+    expect(agentStep).not.toContain('qwen-code-action');
+    expect(agentStep).toContain('GITHUB_ENV="$decoy_dir/github-env"');
+    expect(agentStep).toContain('GITHUB_PATH="$decoy_dir/github-path"');
+    expect(agentStep).toContain('::stop-commands::');
     // A hung agent must not bill the whole 120-minute job; the step timeout
     // and the number quoted in the failure comment must agree.
     const stepTimeout = agentStep.match(/^\s+timeout-minutes: (\d+)$/m);

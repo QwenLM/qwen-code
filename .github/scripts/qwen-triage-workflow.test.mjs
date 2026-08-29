@@ -251,15 +251,40 @@ describe('qwen-triage: agent tool/permission settings', () => {
 // release (#9898) so the agent died at startup, or it hung silently to the job
 // timeout. No sandboxed /resolve run has ever pushed a resolution.
 describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
-  it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
-    assertSettingsContract(resolveConflictsStep, 'resolve_conflicts');
+  // The agent is a direct `qwen` invocation (no qwen-code-action), so the
+  // settings travel as a step env value that the run block writes to a
+  // per-run QWEN_HOME — nothing can be silently dropped by an input name.
+  const resolveSettings = (label) => {
+    assert.ok(resolveConflictsStep, `${label} must keep its agent step`);
+    assert.equal(
+      resolveConflictsStep.uses,
+      undefined,
+      `${label} must invoke qwen directly, not through an action (its $GITHUB_ENV/$GITHUB_PATH cannot be decoyed)`,
+    );
+    const raw = resolveConflictsStep.env?.QWEN_SETTINGS;
+    assert.ok(typeof raw === 'string', `${label} must carry QWEN_SETTINGS`);
+    assert.ok(
+      resolveConflictsStep.run.includes('> "$QWEN_HOME/settings.json"'),
+      `${label} must write QWEN_SETTINGS to the per-run QWEN_HOME`,
+    );
+    const settings = JSON.parse(raw);
+    for (const key of ['coreTools', 'maxSessionTurns', 'sandbox']) {
+      assert.equal(
+        settings[key],
+        undefined,
+        `${label}: v1 top-level \`${key}\` is a legacy key — use the v2 shape`,
+      );
+    }
+    return settings;
+  };
+
+  it('writes its settings to a per-run QWEN_HOME instead of an action input', () => {
+    resolveSettings('resolve_conflicts');
+    assert.equal(resolveConflictsStep.with, undefined);
   });
 
   it('settings is valid JSON pinning the turn cap, allowlist, and sandbox', () => {
-    const settings = assertSettingsContract(
-      resolveConflictsStep,
-      'resolve_conflicts',
-    );
+    const settings = resolveSettings('resolve_conflicts');
     assert.equal(
       settings.model?.maxSessionTurns,
       400,
@@ -294,12 +319,78 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     // `latest` ties the job to the npm release pipeline of the moment: on
     // 2026-08-15 the dist-tag pointed at an unresolvable 0.21.12 and every
     // /resolve died on `npm error notarget` before the agent started.
-    const version = resolveConflictsStep.with?.qwen_cli_version;
-    assert.match(
-      String(version),
-      /^\d+\.\d+\.\d+$/,
-      'qwen_cli_version must be an exact semver, not a dist-tag',
+    const install = resolvePrJob.steps.find(
+      (s) => s.name === 'Install Qwen CLI',
     );
+    assert.ok(install, 'resolve-pr must install the CLI in its own step');
+    assert.match(
+      String(install.env?.QWEN_CLI_VERSION),
+      /^\d+\.\d+\.\d+$/,
+      'QWEN_CLI_VERSION must be an exact semver, not a dist-tag',
+    );
+    assert.ok(
+      install.run.includes('@qwen-code/qwen-code@${QWEN_CLI_VERSION}'),
+      'the install must use the pinned version',
+    );
+  });
+
+  it('decoys the runner command files for the agent invocation', () => {
+    // The agent has arbitrary shell; whatever it appends to $GITHUB_ENV or
+    // $GITHUB_PATH would apply to the credentialed push step of the same
+    // job. The invocation must see invocation-scoped decoys, inside a
+    // parsing-off window, with no token in its environment.
+    const run = resolveConflictsStep.run;
+    for (const file of ['GITHUB_PATH', 'GITHUB_ENV', 'GITHUB_OUTPUT']) {
+      assert.ok(
+        run.includes(`${file}="$decoy_dir/`),
+        `${file} must point at the decoy for the qwen invocation`,
+      );
+    }
+    assert.ok(run.includes('echo "::stop-commands::${stop_token}"'));
+    assert.ok(run.includes("printf '\\n::%s::\\n' \"$stop_token\""));
+    assert.ok(run.includes('--approval-mode yolo'));
+    for (const key of Object.keys(resolveConflictsStep.env)) {
+      assert.ok(
+        !/TOKEN|PAT/.test(key),
+        `agent env must carry no credential, found ${key}`,
+      );
+    }
+  });
+
+  it('hardens every step that runs after the agent', () => {
+    const steps = resolvePrJob.steps;
+    const agentIdx = steps.findIndex((s) => s.id === 'resolve_conflicts');
+    const later = steps.slice(agentIdx + 1).filter((s) => s.run);
+    assert.ok(later.length >= 3, 'expected the post-agent run steps');
+    for (const s of later) {
+      if (s.name === 'Report skipped request') {
+        // Only runs when the agent did not (decision != run).
+        continue;
+      }
+      for (const line of [
+        'PATH=/usr/bin:/bin',
+        'export GIT_CONFIG_COUNT=0',
+        'export GIT_CONFIG_SYSTEM=/dev/null',
+        'export GIT_CONFIG_GLOBAL=/dev/null',
+        'git() { command git -c core.hooksPath=/dev/null -c core.fsmonitor= -c credential.helper= "$@"; }',
+      ]) {
+        assert.ok(
+          s.run.includes(line),
+          `post-agent step '${s.name}' must open with the hardened tool environment: missing ${line}`,
+        );
+      }
+    }
+    // The workspace's own .git/config is the highest-precedence scope and the
+    // agent writes the workspace: it is removed before any check runs.
+    const verify = steps.find((s) => s.id === 'verify');
+    assert.ok(verify.run.includes('rm -f .git/config'));
+    for (const key of ['BASH_ENV', 'LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH']) {
+      assert.equal(verify.env[key], '', `verify must pin ${key} empty`);
+    }
+    const report = steps.find((s) => s.name === 'Report result');
+    assert.ok(report.run.includes('rm -f .git/config'));
+    assert.ok(report.run.includes('export GH_CONFIG_DIR'));
+    assert.ok(report.run.includes('push --no-verify'));
   });
 
   it('keeps resolve-pr on an ephemeral hosted runner', () => {
@@ -345,20 +436,6 @@ describe('qwen-issue-followup-bot.yml: agent settings', () => {
       settings.tools?.sandbox,
       false,
       'tools.sandbox must stay false — the ECS pool has no container runtime',
-    );
-  });
-
-  it('pins the CLI version instead of following `latest`', () => {
-    // The action installs the CLI from npm at run time; `latest` couples every
-    // scheduled run to the release pipeline of the moment — on 2026-08-15 the
-    // dist-tag pointed at an unresolvable 0.21.12 and every consumer following
-    // it died on `npm error notarget`. resolve-pr pins for the same reason;
-    // this must not be the one sibling that keeps following the tag.
-    const version = followupStep.with?.qwen_cli_version;
-    assert.match(
-      String(version),
-      /^\d+\.\d+\.\d+$/,
-      'qwen_cli_version must be an exact semver, not a dist-tag',
     );
   });
 });

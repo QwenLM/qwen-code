@@ -2591,10 +2591,31 @@ jobs:
           write_output decision run
           decision_written=1
 
+      - name: 'Install Qwen CLI'
+        if: "steps.prepare.outputs.decision == 'run'"
+        env:
+          # Pinned, not `latest`. The CLI is installed from npm at run time,
+          # so `latest` makes every /resolve depend on the release pipeline
+          # of the moment: on 2026-08-15 the dist-tag moved to 0.21.12
+          # before the tarball was resolvable and 14 runs in a row died on
+          # `npm error notarget`. 0.21.10 is the last version with a
+          # measured record on this job (16 of 19 requests pushed on
+          # 2026-08-12). Bump it on purpose, after a dry-run /resolve on the
+          # new version.
+          QWEN_CLI_VERSION: '0.21.10'
+        run: |-
+          set -euo pipefail
+          npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${QWEN_CLI_VERSION}"
+          qwen --version
+
+      # The agent is invoked directly rather than through qwen-code-action so
+      # that its process environment can be controlled: the action runs the
+      # CLI with the runner's real $GITHUB_ENV / $GITHUB_PATH, and anything
+      # appended there is applied to every later step of this job — the
+      # credentialed push included. See the decoy note in the run block.
       - name: 'Resolve conflicts'
         if: "steps.prepare.outputs.decision == 'run'"
         id: 'resolve_conflicts'
-        uses: 'QwenLM/qwen-code-action@05f81718976f3b7da657422e6e8e4d372b8621d7'
         # A pushed resolution takes 6 minutes at the median, 41 at p95 and 70
         # at p99 (294 runs, request to result comment); only two ever took
         # longer than 75. The 120-minute job timeout has therefore never ended
@@ -2604,31 +2625,28 @@ jobs:
         # step with this value; a test pins the pair.
         timeout-minutes: 75
         env:
-          PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
-          BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
-          HEAD_REF: '${{ steps.prepare.outputs.head_ref }}'
-        with:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          # Pinned, not `latest`. The action installs the CLI from npm at run
-          # time, so `latest` makes every /resolve depend on the release
-          # pipeline of the moment: on 2026-08-15 the dist-tag moved to
-          # 0.21.12 before the tarball was resolvable and 14 runs in a row
-          # died on `npm error notarget`. 0.21.10 is the last version with a
-          # measured record on this job (16 of 19 requests pushed on
-          # 2026-08-12). Bump it on purpose, the way `uses:` above is bumped,
-          # after a dry-run /resolve on the new version.
-          qwen_cli_version: '0.21.10'
-          # The input name is `settings` — this action version has no
-          # `settings_json` input, and an unknown input is silently dropped.
-          # That is exactly what happened to this block until #9252: every
-          # /resolve run before it ignored the block, and the agent ran without
-          # the turn cap or toolset allowlist.
-          # tools.core specifiers (e.g. `run_shell_command(git add)`) are advisory:
-          # the permission manager keys on the tool name and drops the parenthesised
-          # command. Real containment = write authorization + no agent token +
-          # the scope guard in 'Resolution check' + an ephemeral runner.
+          PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
+          BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
+          HEAD_REF: '${{ steps.prepare.outputs.head_ref }}'
+          # Written to a per-run QWEN_HOME by the run block below. Until
+          # #9252 this block was passed to the action under the wrong input
+          # name and silently dropped, so every /resolve ran without the turn
+          # cap or toolset allowlist; it now takes effect on every run.
+          # tools.core specifiers (e.g. `run_shell_command(git add)`) are
+          # advisory: the permission manager keys on the tool name and drops
+          # the parenthesised command, so the agent has arbitrary shell in
+          # this checkout. Containment therefore lives OUTSIDE the agent: no
+          # token in its environment, runner command files decoyed for its
+          # invocation, every later step scrubbed of planted runner state
+          # (PATH, git config scopes, hooks — see 'Resolution check'), the
+          # scope guard, write authorization, and an ephemeral runner. A
+          # root-capable agent on a hosted runner (passwordless sudo) can in
+          # principle defeat any in-job measure; the structural answer to
+          # that is moving the credentialed push into a downstream job, which
+          # is tracked separately.
           #
           # tools.sandbox is deliberately false. The day #9252 made this block
           # take effect, `sandbox: true` took effect with it, and /resolve went
@@ -2641,8 +2659,8 @@ jobs:
           # even started). No sandboxed /resolve run has ever pushed a
           # resolution; every pushed one ran without the container. Turning the
           # sandbox back on needs the same evidence the other way: a dry-run
-          # with `qwen_debug` that shows the agent finishing inside it.
-          settings: |-
+          # whose logs show the agent finishing inside it.
+          QWEN_SETTINGS: |-
             {
               "model": {
                 "maxSessionTurns": 400
@@ -2669,7 +2687,7 @@ jobs:
                 "sandbox": false
               }
             }
-          prompt: |-
+          PROMPT: |-
             ## Role
 
             You are resolving merge conflicts for PR #${{ steps.resolve.outputs.pr_number }} in this repository. The pull request branch is already checked out. You only need git to resolve the text conflicts; dependencies are not installed. Read ${{ env.WORKDIR }}/context.md first.
@@ -2698,6 +2716,54 @@ jobs:
               End with the project's collapsed Chinese translation: `<details>` / `<summary>中文说明</summary>` / the translated body / `</details>`.
             - If there is no longer a conflict, do not commit. Write `${{ env.WORKDIR }}/no-action.md` explaining what changed.
             - If you cannot confidently resolve the conflict, do not commit. Write `${{ env.WORKDIR }}/failure.md` with the blocker and what you learned.
+        run: |-
+          set -euo pipefail
+          # Per-run agent home: the settings above and nothing inherited from
+          # the runner user's ~/.qwen.
+          QWEN_HOME="${RUNNER_TEMP:?}/qwen-resolve-home"
+          rm -rf "$QWEN_HOME"
+          mkdir -p "$QWEN_HOME"
+          printf '%s\n' "$QWEN_SETTINGS" > "$QWEN_HOME/settings.json"
+          export QWEN_HOME
+          MODEL_ARGS=()
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            MODEL_ARGS=(--model "$OPENAI_MODEL")
+          fi
+          # The agent runs no-sandbox with arbitrary shell and, on a fork PR,
+          # reads attacker-authored files. The runner applies whatever a step
+          # appends to $GITHUB_PATH / $GITHUB_ENV to every LATER step — the
+          # credentialed push included — so every runner command file is
+          # pointed at an invocation-scoped decoy that dies with this step,
+          # the way 'Run review' does. Command parsing is switched off around
+          # the agent for the same reason: a `::set-output`-style line in its
+          # output must stay text. The token is random per attempt so no
+          # agent output can guess it and resume parsing early. The steps
+          # after this one scrub what a decoy cannot reach (the workspace's
+          # .git/config, planted PATH shims) on their side.
+          decoy_dir="$(mktemp -d "${RUNNER_TEMP}/qwen-resolve-decoy.XXXXXX")"
+          stop_token="qwen-resolve-stop-$(date +%s%N)-${RANDOM}${RANDOM}"
+          echo "::stop-commands::${stop_token}"
+          set +e
+          GITHUB_PATH="$decoy_dir/github-path" \
+          GITHUB_ENV="$decoy_dir/github-env" \
+          GITHUB_OUTPUT="$decoy_dir/github-output" \
+          GITHUB_STEP_SUMMARY="$decoy_dir/github-step-summary" \
+          qwen \
+            --auth-type openai \
+            --approval-mode yolo \
+            "${MODEL_ARGS[@]}" \
+            --prompt "$PROMPT" \
+            --output-format stream-json \
+            > "${WORKDIR}/agent.stream-json.log" 2> "${WORKDIR}/agent.stderr.log"
+          status=$?
+          # Diagnostics stay inside the parsing-off window: agent output is
+          # untrusted text. The full logs travel with the run artifact.
+          echo "qwen exited with ${status}; last stderr lines:"
+          tail -n 40 "${WORKDIR}/agent.stderr.log" || true
+          printf '\n::%s::\n' "$stop_token"
+          set -e
+          rm -rf "$decoy_dir"
+          exit "$status"
 
       - name: 'Resolution check'
         id: 'verify'
@@ -2745,6 +2811,11 @@ jobs:
           export GIT_CONFIG_SYSTEM=/dev/null
           export GIT_CONFIG_GLOBAL=/dev/null
           rm -f .git/config
+          # Belt and braces for the config removal: even a git call that
+          # slips in before it cannot run a hook, an fsmonitor command or a
+          # credential helper. `command` also bypasses a shell function of
+          # the same name should one ever reach this process.
+          git() { command git -c core.hooksPath=/dev/null -c core.fsmonitor= -c credential.helper= "$@"; }
 
           # The agent step runs under always(); if it failed at the infrastructure
           # level (API timeout, model quota, action crash) the branch is unmodified
@@ -2850,6 +2921,14 @@ jobs:
         env:
           BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
         run: |-
+          # Runs after the agent: same scrub as 'Resolution check' (which has
+          # already removed the workspace .git/config by now).
+          PATH=/usr/bin:/bin
+          export GIT_CONFIG_COUNT=0
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_GLOBAL=/dev/null
+          git() { command git -c core.hooksPath=/dev/null -c core.fsmonitor= -c credential.helper= "$@"; }
+
           git status --short || true
           git diff "origin/${BASE_REF}...HEAD" > "${WORKDIR}/pr.diff" || true
           for file in context.md address-summary.md no-action.md failure.md pr.diff; do
@@ -2935,6 +3014,12 @@ jobs:
           export GIT_CONFIG_SYSTEM=/dev/null
           export GIT_CONFIG_GLOBAL=/dev/null
           rm -f .git/config
+          # gh reads ~/.config/gh unless told otherwise, and the agent can write
+          # there (http_unix_socket, a host override): give it a fresh, empty
+          # config dir rather than leaving the default in reach.
+          GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP:?}/qwen-resolve-gh.XXXXXX")"
+          export GH_CONFIG_DIR
+          git() { command git -c core.hooksPath=/dev/null -c core.fsmonitor= -c credential.helper= "$@"; }
 
           push_failed=false
 
