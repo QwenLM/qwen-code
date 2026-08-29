@@ -1275,21 +1275,33 @@ export function resolveOutputStyle(
   argvStyle: unknown,
   settingsStyle: unknown,
 ): OutputStyleDefinition | undefined {
-  const fromArgv = argvStyle !== undefined && argvStyle !== null;
-  const raw = fromArgv ? argvStyle : settingsStyle;
+  // yargs collects a repeated string flag into an array; the last value wins,
+  // as it does for every other repeated flag, and the user is told so.
+  let flagValue = argvStyle;
+  if (Array.isArray(argvStyle) && argvStyle.length > 0) {
+    flagValue = argvStyle[argvStyle.length - 1];
+    warnAboutOutputStyle(
+      `--output-style was given ${argvStyle.length} times; using the last value.`,
+    );
+  }
+  // An empty flag (`--output-style ""`) is treated as not given, so it falls
+  // through to the setting; `default` is the explicit way to select no style.
+  const flagGiven =
+    flagValue !== undefined &&
+    flagValue !== null &&
+    !(typeof flagValue === 'string' && flagValue.trim() === '');
+  const raw = flagGiven ? flagValue : settingsStyle;
   if (raw === undefined || raw === null) {
     return undefined;
   }
-  const source = fromArgv ? '--output-style' : 'general.outputStyle';
+  const source = flagGiven ? '--output-style' : 'general.outputStyle';
   if (typeof raw !== 'string') {
     warnAboutOutputStyle(
-      `Invalid output style value (from ${source}); using the default style.`,
+      `Invalid output style value (from ${source}): expected a string, got ${Array.isArray(raw) ? 'an array' : typeof raw}; using the default style.`,
     );
     return undefined;
   }
-  // A repo-committed .qwen/settings.json is untrusted input; strip control
-  // sequences so the warning cannot inject terminal escapes from it.
-  const name = stripAnsiAndControl(raw).trim();
+  const name = sanitizeOutputStyleName(raw);
   if (!name || name.toLowerCase() === 'default') {
     return undefined;
   }
@@ -1299,12 +1311,47 @@ export function resolveOutputStyle(
   }
   const known = BUILT_IN_OUTPUT_STYLES.map((s) => s.name).join(', ');
   warnAboutOutputStyle(
-    `Unknown output style "${name}" (from ${source}); using the default style. Available styles: ${known}.`,
+    `Unknown output style "${truncateForDisplay(name)}" (from ${source}); using the default style. Available styles: ${known}.`,
   );
   return undefined;
 }
 
+/** Longest unknown-style name echoed back verbatim in the warning. */
+const OUTPUT_STYLE_NAME_ECHO_LIMIT = 64;
+
+/**
+ * A repo-committed `.qwen/settings.json` is untrusted input. Beyond the
+ * terminal escapes `stripAnsiAndControl` removes, Unicode format characters
+ * (bidi overrides, zero-width joiners/spaces, BOM) can reorder or hide text
+ * in the echoed name, so they are dropped here as well.
+ */
+function sanitizeOutputStyleName(raw: string): string {
+  return stripAnsiAndControl(raw)
+    .replace(/\p{Cf}/gu, '')
+    .trim();
+}
+
+function truncateForDisplay(name: string): string {
+  return name.length > OUTPUT_STYLE_NAME_ECHO_LIMIT
+    ? `${name.slice(0, OUTPUT_STYLE_NAME_ECHO_LIMIT)}…`
+    : name;
+}
+
+// `loadCliConfig` runs more than once in a process (sandbox host and child,
+// ACP session re-runs); a misconfigured style should be reported once, not on
+// every pass.
+const outputStyleWarningsShown = new Set<string>();
+
+/** Test hook: forget which output-style warnings were already printed. */
+export function resetOutputStyleWarningsForTesting(): void {
+  outputStyleWarningsShown.clear();
+}
+
 function warnAboutOutputStyle(warning: string): void {
+  if (outputStyleWarningsShown.has(warning)) {
+    return;
+  }
+  outputStyleWarningsShown.add(warning);
   debugLogger.warn(warning);
   // eslint-disable-next-line no-console
   console.error(`WARNING: ${warning}`);
@@ -2013,9 +2060,11 @@ export async function loadCliConfig(
     question,
     systemPrompt: argv.systemPrompt,
     appendSystemPrompt: argv.appendSystemPrompt,
+    // Like every other settings-sourced option, the style setting is ignored
+    // in --bare and --safe-mode; the explicit flag still applies.
     outputStyle: resolveOutputStyle(
       argv.outputStyle,
-      settings.general?.outputStyle,
+      bareMode || safeMode ? undefined : settings.general?.outputStyle,
     ),
     // Legacy fields – kept for backward compatibility with getCoreTools() etc.
     coreTools:

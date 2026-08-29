@@ -21,6 +21,7 @@ import {
   parseArguments,
   SessionIdConflictError,
   type CliArgs,
+  resetOutputStyleWarningsForTesting,
 } from './config.js';
 import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
@@ -1460,6 +1461,10 @@ describe('loadCliConfig', () => {
   });
 
   describe('output style', () => {
+    beforeEach(() => {
+      resetOutputStyleWarningsForTesting();
+    });
+
     it('leaves the style unset by default', async () => {
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
@@ -1621,13 +1626,125 @@ describe('loadCliConfig', () => {
       const argv = await parseArguments();
       expect(Array.isArray(argv.outputStyle)).toBe(true);
       const config = await loadCliConfig({}, argv);
-      expect(config.getOutputStyle()).toBeUndefined();
+      expect(config.getOutputStyle()?.name).toBe('Proactive');
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining(
-          'Invalid output style value (from --output-style)',
+          '--output-style was given 2 times; using the last value.',
         ),
       );
     });
+
+    it('names the received shape when the setting is not a string', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 42 as unknown as string } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Invalid output style value (from general.outputStyle): expected a string, got number',
+        ),
+      );
+    });
+
+    it('treats a null setting as no style, without warning', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: null as unknown as string } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('lets an empty --output-style fall through to the setting', async () => {
+      process.argv = ['node', 'script.js', '--output-style', ''];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Concise' } },
+        argv,
+      );
+      expect(config.getOutputStyle()?.name).toBe('Concise');
+    });
+
+    it('does not fall back to the setting when the flag names an unknown style', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js', '--output-style', 'Verbose'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Concise' } },
+        argv,
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+    });
+
+    it('drops bidi and zero-width characters before matching or echoing', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const looksLikeConcise = await loadCliConfig(
+        { general: { outputStyle: 'Con\u200bcise\ufeff' } },
+        argv,
+      );
+      expect(looksLikeConcise.getOutputStyle()?.name).toBe('Concise');
+
+      resetOutputStyleWarningsForTesting();
+      await loadCliConfig(
+        { general: { outputStyle: '\u202eesobreV\u202c' } },
+        argv,
+      );
+      const warning = errorSpy.mock.calls.at(-1)?.[0] as string;
+      expect(warning).toContain('Unknown output style "esobreV"');
+      expect(warning).not.toMatch(
+        /[\u202a-\u202e\u2066-\u2069\u200b-\u200f\ufeff]/,
+      );
+    });
+
+    it('bounds how much of an unknown style name is echoed', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({ general: { outputStyle: 'x'.repeat(500) } }, argv);
+      const warning = errorSpy.mock.calls.at(-1)?.[0] as string;
+      expect(warning).toContain(`"${'x'.repeat(64)}…"`);
+      expect(warning).not.toContain('x'.repeat(65));
+    });
+
+    it('prints a given warning once even when loadCliConfig runs again', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({ general: { outputStyle: 'Verbose' } }, argv);
+      await loadCliConfig({ general: { outputStyle: 'Verbose' } }, argv);
+      expect(
+        errorSpy.mock.calls.filter(([msg]) =>
+          String(msg).includes('Unknown output style "Verbose"'),
+        ),
+      ).toHaveLength(1);
+    });
+
+    it.each(['--bare', '--safe-mode'])(
+      'ignores the setting under %s but still honors the flag',
+      async (flag) => {
+        process.argv = ['node', 'script.js', flag];
+        let argv = await parseArguments();
+        const fromSetting = await loadCliConfig(
+          { general: { outputStyle: 'Concise' } },
+          argv,
+        );
+        expect(fromSetting.getOutputStyle()).toBeUndefined();
+
+        process.argv = ['node', 'script.js', flag, '--output-style', 'Concise'];
+        argv = await parseArguments();
+        const fromFlag = await loadCliConfig({}, argv);
+        expect(fromFlag.getOutputStyle()?.name).toBe('Concise');
+      },
+    );
   });
 
   it('should propagate runtime sleep prevention setting', async () => {
