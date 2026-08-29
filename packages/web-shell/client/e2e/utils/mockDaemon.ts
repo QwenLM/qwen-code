@@ -23,6 +23,9 @@ import {
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
   type DaemonWorkspaceMcpStatus,
+  type WorkspaceExtensionProjection,
+  type DaemonWorkspaceHooksStatus,
+  type DaemonWorkspaceMemoryStatus,
   type DaemonWorkspaceMcpToolsStatus,
   type DaemonWorkspaceProvidersStatus,
   type DaemonWorkspaceSettingsStatus,
@@ -61,6 +64,13 @@ export interface WebShellDaemonScenario {
   extensionOperations: ExtensionActiveOperations;
   extensionUpdateCheck: ExtensionUpdateCheckResponse;
   mcp: DaemonWorkspaceMcpStatus;
+  /**
+   * Per-workspace overrides for the sidebar overview facets, keyed by the
+   * workspace cwd the qualified route names. Unlisted workspaces answer the
+   * scenario-level `mcp` / `skills` and empty daemon-side facets, so a spec
+   * can give a secondary workspace counts that differ from the primary's.
+   */
+  workspaceOverviews: Record<string, WorkspaceOverviewOverrides>;
   channelTypes: DaemonChannelTypeCatalog;
   channels: DaemonChannelsSnapshot;
   pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
@@ -118,6 +128,14 @@ export interface MockDaemonController {
   configOptionRequests(): DaemonRequestRecord[];
 }
 
+export interface WorkspaceOverviewOverrides {
+  mcp?: Partial<DaemonWorkspaceMcpStatus>;
+  skills?: Partial<DaemonWorkspaceSkillsStatus>;
+  extensions?: Partial<WorkspaceExtensionProjection>;
+  memory?: Partial<DaemonWorkspaceMemoryStatus>;
+  hooks?: Partial<DaemonWorkspaceHooksStatus>;
+}
+
 type ScenarioOverrides = Partial<
   Omit<
     WebShellDaemonScenario,
@@ -130,6 +148,7 @@ type ScenarioOverrides = Partial<
     | 'extensionOperations'
     | 'extensionUpdateCheck'
     | 'mcp'
+    | 'workspaceOverviews'
     | 'channelTypes'
     | 'channels'
     | 'pairingRequests'
@@ -150,6 +169,7 @@ type ScenarioOverrides = Partial<
   extensionOperations?: Partial<ExtensionActiveOperations>;
   extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
   mcp?: Partial<DaemonWorkspaceMcpStatus>;
+  workspaceOverviews?: Record<string, WorkspaceOverviewOverrides>;
   channelTypes?: DaemonChannelTypeCatalog;
   channels?: DaemonChannelsSnapshot;
   pairingRequests?: Record<string, DaemonChannelPairingRequest[]>;
@@ -381,6 +401,7 @@ export function createWebShellDaemonScenario(
     extensionOperations,
     extensionUpdateCheck,
     mcp,
+    workspaceOverviews: overrides.workspaceOverviews ?? {},
     channelTypes: overrides.channelTypes ?? [],
     channels: overrides.channels ?? { revision: '1', instances: {} },
     pairingRequests: overrides.pairingRequests ?? {},
@@ -936,20 +957,29 @@ async function handleDaemonRoute(
     await json(route, scenario.skills);
     return;
   }
-  if (method === 'GET' && /^\/workspaces\/[^/]+\/skills\/?$/.test(path)) {
-    await json(route, scenario.skills);
-    return;
-  }
-  // Sidebar workspace overview facets. The qualified extensions route answers
-  // with the workspace projection, not the manager's status document.
+  // Sidebar workspace overview facets, keyed by the workspace the route
+  // names so two workspaces can answer differently. The qualified extensions
+  // route answers with the workspace projection, not the manager's status
+  // document.
   const overviewMatch = path.match(
-    /^\/workspaces\/([^/]+)\/(mcp|extensions|memory|hooks)\/?$/,
+    /^\/workspaces\/([^/]+)\/(mcp|skills|extensions|memory|hooks)\/?$/,
   );
   if (method === 'GET' && overviewMatch) {
     const workspaceCwd = decodeURIComponent(overviewMatch[1] ?? '');
     const facet = overviewMatch[2];
+    const overrides = scenario.workspaceOverviews[workspaceCwd] ?? {};
     if (facet === 'mcp') {
-      await json(route, workspaceMcp(scenario));
+      await json(route, {
+        ...workspaceMcp(scenario),
+        workspaceCwd,
+        ...(overrides.mcp ?? {}),
+      });
+    } else if (facet === 'skills') {
+      await json(route, {
+        ...scenario.skills,
+        workspaceCwd,
+        ...(overrides.skills ?? {}),
+      });
     } else if (facet === 'extensions') {
       await json(route, {
         v: 1,
@@ -959,6 +989,7 @@ async function handleDaemonRoute(
         desiredGeneration: 0,
         appliedGeneration: 0,
         extensions: [],
+        ...(overrides.extensions ?? {}),
       });
     } else if (facet === 'memory') {
       await json(route, {
@@ -969,6 +1000,7 @@ async function handleDaemonRoute(
         totalBytes: 0,
         fileCount: 0,
         ruleCount: 0,
+        ...(overrides.memory ?? {}),
       });
     } else {
       await json(route, {
@@ -978,6 +1010,7 @@ async function handleDaemonRoute(
         disabled: false,
         hooks: [],
         events: {},
+        ...(overrides.hooks ?? {}),
       });
     }
     return;

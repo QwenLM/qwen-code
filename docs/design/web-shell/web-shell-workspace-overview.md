@@ -55,12 +55,18 @@ context files (count). Hooks are available but off by default.
 
 The hover `⋮` on a workspace row replaces the single-item removal menu:
 
-- Rename… (dynamic registration daemons; opens a dialog; an empty name falls
-  back to the folder name), Copy path, New task, New worktree task (only when
+- Rename… (dynamic registration daemons, on registration-backed rows only —
+  the daemon's bound workspace has no registration to persist a name in;
+  opens a dialog; an empty name falls back to the folder name and control
+  characters are refused before the request is sent), Copy path, New task,
+  New worktree task (only when
   the git poll reports a branch — a worktree needs a repository, and the
   composer would otherwise have no chip to show or undo the armed intent).
 - Manage: MCP servers, Skills, Extensions, Channels, Settings, with the chip
-  counts next to the first four.
+  counts next to the first four (part of the item's accessible name). The
+  menu keeps the row's last snapshot while the row is collapsed, so the
+  counts do not vanish on collapse; the action area stays visible while its
+  menu is open so Escape returns focus to the trigger.
 - Reload runtime (`POST /workspaces/:w/reload`), then Remove workspace.
 
 Each entry appears only when the workspace's state allows it: untrusted rows
@@ -76,9 +82,11 @@ cannot open its own view yet; that is layer B1 of the issue.
 `useWorkspaceOverview(client, cwd, { enabled, items })` fans out over
 `client.workspaceByCwd(cwd)` to `/mcp`, `/skills`, `/extensions`,
 `/channels`, `/memory` and `/hooks`, one request per requested facet. Each
-call fails independently — an older daemon without a route, or a transient
-error, leaves that facet `undefined` and keeps the others. A facet keeps its
-last known value across a failed round.
+call fails independently — an older daemon without a route, a transient
+error, or a malformed body — leaves that facet `undefined` and keeps the
+others. A facet keeps its last known value across up to three consecutive
+unanswered rounds, then reads as unavailable, so a route that stays gone
+after a rollback cannot freeze a stale count on the chip.
 
 Fetching is gated on the section being expanded, the workspace trusted and the
 default header rendered (a locked sidebar's custom header has no chip or menu
@@ -103,6 +111,10 @@ workspace, whose sessions the sidebar lists itself, gets its counts passed in.
 - `onOpenWorkspaceManagement(target, workspaceCwd)` and
   `onNewWorktreeSession(workspaceCwd)` are new sidebar callbacks; the app
   wires them to `openPanel` and to a new session armed with worktree intent.
+  The arm is dropped if another session start ran while the creation was in
+  flight, and an armed intent survives a transient git-status gap — only a
+  session, an untrusted workspace, a no-branch answer or a draft workspace
+  switch clears it.
 
 ## Follow-ups (layers B and C in the issue)
 

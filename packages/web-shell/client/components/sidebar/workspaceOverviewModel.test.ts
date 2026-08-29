@@ -234,6 +234,19 @@ describe('summarizeMcp', () => {
       overviewFacetHasIssue({ mcp: spinningUp, fetchedAt: 1 }, 'mcp'),
     ).toBe(false);
 
+    // A server that errored while discovery is still running is an issue
+    // right away; the completed-discovery undershoot is not the only path.
+    const crashedEarly = summarizeMcp(
+      mcpStatus({
+        discoveryState: 'in_progress',
+        servers: [server({ status: 'error', mcpStatus: 'disconnected' })],
+      }),
+    );
+    expect(crashedEarly.failed).toBe(1);
+    expect(
+      overviewFacetHasIssue({ mcp: crashedEarly, fetchedAt: 1 }, 'mcp'),
+    ).toBe(true);
+
     const disabledOnly: WorkspaceOverviewSnapshot = {
       mcp: summarizeMcp(mcpStatus({ servers: [server({ disabled: true })] })),
       fetchedAt: 1,
@@ -361,6 +374,21 @@ describe('mergeOverviewSnapshots', () => {
     const merged = mergeOverviewSnapshots(previous, next, new Set(['mcp']));
     expect(merged.mcp?.initialized).toBe(false);
     expect(isOverviewFacetKnown(merged, 'mcp')).toBe(false);
+  });
+
+  it('drops an expired facet instead of carrying it over', () => {
+    const previous: WorkspaceOverviewSnapshot = {
+      skills: { initialized: true, total: 3, enabled: 3 },
+      context: { initialized: true, fileCount: 1, ruleCount: 2 },
+      fetchedAt: 1,
+    };
+    const merged = mergeOverviewSnapshots(
+      previous,
+      { fetchedAt: 2 },
+      new Set(['skills', 'context']),
+      new Set(['context']),
+    );
+    expect(merged).toEqual({ skills: previous.skills, fetchedAt: 2 });
   });
 
   it('drops facets that are no longer requested', () => {

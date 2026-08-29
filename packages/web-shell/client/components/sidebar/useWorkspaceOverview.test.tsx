@@ -10,6 +10,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import {
+  WORKSPACE_OVERVIEW_MAX_MISSES,
   WORKSPACE_OVERVIEW_POLL_MS,
   useWorkspaceOverview,
   type UseWorkspaceOverviewOptions,
@@ -291,6 +292,102 @@ describe('useWorkspaceOverview', () => {
     });
     await flush();
     expect(latest?.overview?.mcp?.configured).toBe(0);
+  });
+
+  it('ignores an older round that lands after a newer one', async () => {
+    let resolveSlow: (value: unknown) => void = () => {};
+    workspaceSkills
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSlow = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(skillsStatus(2));
+    const client = makeClient(fullHandle);
+    await render(client, '/w', {
+      enabled: true,
+      items: ['skills'],
+      reloadToken: 0,
+    });
+    await flush();
+    expect(latest?.overview).toBeUndefined();
+    // Round 2 (reload token) lands first.
+    await render(client, '/w', {
+      enabled: true,
+      items: ['skills'],
+      reloadToken: 1,
+    });
+    await flush();
+    expect(latest?.overview?.skills?.total).toBe(2);
+    // Round 1 resolves late with older data and must not win.
+    await act(async () => {
+      resolveSlow(skillsStatus(1));
+    });
+    await flush();
+    expect(latest?.overview?.skills?.total).toBe(2);
+  });
+
+  it('drops a facet after consecutive unanswered rounds', async () => {
+    await render(makeClient(fullHandle), '/w', {
+      enabled: true,
+      items: ['skills'],
+      pollIntervalMs: 1_000,
+    });
+    await flush();
+    expect(latest?.overview?.skills?.total).toBe(1);
+    workspaceSkills.mockRejectedValue(new Error('route gone'));
+    for (let round = 1; round < WORKSPACE_OVERVIEW_MAX_MISSES; round += 1) {
+      await act(async () => {
+        vi.advanceTimersByTime(1_000);
+      });
+      await flush();
+      expect(latest?.overview?.skills?.total).toBe(1);
+    }
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+    });
+    await flush();
+    expect(latest?.overview?.skills).toBeUndefined();
+    // A later answer restores it.
+    workspaceSkills.mockResolvedValue(skillsStatus(4));
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+    });
+    await flush();
+    expect(latest?.overview?.skills?.total).toBe(4);
+  });
+
+  it('never carries a facet from the previous cwd into the next one', async () => {
+    const wMcp = vi.fn().mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/w',
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [],
+    });
+    const w2Mcp = vi.fn().mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/w2',
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [],
+    });
+    workspaceByCwd.mockImplementation((cwd: string) =>
+      cwd === '/w2'
+        ? { workspaceMcp: w2Mcp, workspaceSkills }
+        : { workspaceMcp: wMcp, workspaceSkills },
+    );
+    const client = { workspaceByCwd } as unknown as DaemonClient;
+    await render(client, '/w', { enabled: true, items: ['mcp', 'skills'] });
+    await flush();
+    expect(latest?.overview?.skills?.total).toBe(1);
+    // The next workspace cannot answer skills at all.
+    workspaceSkills.mockRejectedValue(new Error('no route'));
+    await render(client, '/w2', { enabled: true, items: ['mcp', 'skills'] });
+    await flush();
+    expect(latest?.overview?.mcp).toBeDefined();
+    expect(latest?.overview?.skills).toBeUndefined();
   });
 
   it('refetches as soon as it is enabled again', async () => {

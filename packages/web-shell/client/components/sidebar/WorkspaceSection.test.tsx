@@ -147,6 +147,7 @@ function renderSection(
     excludePinned: boolean;
     searchQuery: string;
     gitBranchWanted: boolean;
+    compact: boolean;
   }> = {},
 ): void {
   act(() => {
@@ -183,6 +184,7 @@ function renderSection(
           sessionStats={overrides.sessionStats}
           renderSessions={overrides.renderSessions}
           gitBranchWanted={overrides.gitBranchWanted}
+          compact={overrides.compact}
         />
       </I18nProvider>,
     );
@@ -1725,5 +1727,131 @@ describe('WorkspaceSection pinned group members (issue #10391)', () => {
     expect(ungrouped?.textContent).toContain('\u00b7 1');
     expect(ungrouped?.textContent).toContain('Plain session');
     expect(ungrouped?.textContent ?? '').not.toContain('Pinned free');
+  });
+});
+
+describe('WorkspaceSection overview plumbing', () => {
+  it('still fetches for a custom header when header actions consume the snapshot', async () => {
+    const client = makeOverviewClient();
+    const headerActions = vi.fn(() => null);
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      renderHeader: () => <span>custom header</span>,
+      headerActions,
+    });
+    await flush();
+    await flush();
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
+    expect(
+      headerActions.mock.calls.some(([, context]) => Boolean(context.overview)),
+    ).toBe(true);
+    // The path and chips stay hidden under a custom header.
+    expect(
+      container.querySelector('[data-web-shell-workspace-overview]'),
+    ).toBeNull();
+  });
+
+  it('passes compact mode through to the path and chips', async () => {
+    renderSection({
+      client: makeOverviewClient(),
+      expanded: true,
+      overviewEnabled: true,
+      compact: true,
+    });
+    await flush();
+    await flush();
+    const path = container.querySelector<HTMLElement>(
+      '[data-web-shell-workspace-path]',
+    );
+    expect(path?.className).toMatch(/pathCompact/);
+    expect(
+      container.querySelectorAll('[data-web-shell-workspace-overview]').length,
+    ).toBeGreaterThan(0);
+    expect(container.querySelector('[class*="chipLabel"]')).toBeNull();
+  });
+
+  it('keeps the last snapshot for the header actions while collapsed', async () => {
+    const client = makeOverviewClient();
+    const headerActions = vi.fn(() => null);
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      headerActions,
+    });
+    await flush();
+    await flush();
+    expect(
+      headerActions.mock.calls.some(([, context]) => Boolean(context.overview)),
+    ).toBe(true);
+    headerActions.mockClear();
+    renderSection({
+      client,
+      expanded: false,
+      overviewEnabled: true,
+      headerActions,
+    });
+    await flush();
+    const lastCall = headerActions.mock.calls.at(-1);
+    expect(lastCall?.[1].overview).toBeDefined();
+    // Collapsed rows do not refetch.
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
+  });
+
+  it('refetches the facets when the reload token changes', async () => {
+    const client = makeOverviewClient();
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      reloadToken: 0,
+    });
+    await flush();
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      reloadToken: 1,
+    });
+    await flush();
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(2);
+  });
+
+  it('marks the total as a lower bound when the daemon capped its scan', async () => {
+    const workspaceMcp = vi.fn().mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/tmp/other',
+      initialized: true,
+      servers: [],
+    });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        workspaceMcp,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({
+          sessions: [
+            { sessionId: 'a', workspaceCwd: '/tmp/other' },
+            { sessionId: 'b', workspaceCwd: '/tmp/other' },
+            { sessionId: 'c', workspaceCwd: '/tmp/other' },
+          ],
+          // No next page, but the scan hit the daemon's cap.
+          truncated: true,
+        }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    renderSection({
+      client,
+      workspace: { ...trustedWorkspace, id: 'other', cwd: '/tmp/other' },
+      expanded: true,
+      overviewEnabled: true,
+    });
+    await flush();
+    expect(
+      container.querySelector('[class*="headerCountTotal"]')?.textContent,
+    ).toBe('3+');
   });
 });

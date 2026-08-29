@@ -174,10 +174,7 @@ export function WorkspaceMenu({
               `sidebar.overview.${target === 'settings' ? 'settings' : target}`,
             )}
             {count !== undefined && (
-              <span
-                className="text-muted-foreground ml-auto pl-3 text-xs tabular-nums"
-                aria-hidden="true"
-              >
+              <span className="text-muted-foreground ml-auto pl-3 text-xs tabular-nums">
                 {count}
               </span>
             )}

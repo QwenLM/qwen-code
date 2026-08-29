@@ -12675,9 +12675,20 @@ export function App({
                     // createNewSession resets the git intent so a stale one
                     // never leaks into the next session; arm worktree mode
                     // after it settles so the lazily created session picks
-                    // it up on its first prompt.
-                    const created = await createNewSession(workspaceCwd);
-                    if (created) setGitModeIntent({ mode: 'worktree' });
+                    // it up on its first prompt. It bumps the composer
+                    // source version synchronously, and so does every other
+                    // session start — if another one ran while this was
+                    // awaiting, the arm belongs to a draft that no longer
+                    // exists and must not land on whatever came next.
+                    const creating = createNewSession(workspaceCwd);
+                    const armToken = composerSourceVersionRef.current;
+                    const created = await creating;
+                    if (
+                      created &&
+                      composerSourceVersionRef.current === armToken
+                    ) {
+                      setGitModeIntent({ mode: 'worktree' });
+                    }
                     return created;
                   }}
                   branding={sidebarOptions.branding}

@@ -126,9 +126,10 @@ interface WorkspaceSectionProps {
   showSessionDetails?: boolean;
   /**
    * Hover-revealed actions at the right edge of the folder header. Receives
-   * the workspace's overview snapshot (undefined until fetched or when the
-   * overview is disabled) so a menu can show live counts, and the polled git
-   * branch so git-only actions can be withheld from non-git workspaces.
+   * the workspace's overview snapshot — undefined until the first fetch or
+   * when the overview is disabled; the last fetched one while the row is
+   * collapsed — so a menu can show live counts, and the polled git branch
+   * so git-only actions can be withheld from non-git workspaces.
    */
   headerActions?: (
     visible: boolean,
@@ -486,23 +487,42 @@ export function WorkspaceSection({
     workspace.trusted,
   ]);
 
-  // The path and chips block below and the header menu are the snapshot's
-  // only consumers; a custom header renderer (locked sidebar) hides both.
+  // The path and chips block below renders only under the default header;
+  // the header actions (the menu's live counts) are the snapshot's other
+  // consumer and can be wired under a custom header too.
   const overviewVisible =
     overviewEnabled && expanded && !disabled && !renderHeader;
+  const overviewConsumed =
+    overviewEnabled &&
+    expanded &&
+    !disabled &&
+    (!renderHeader || Boolean(headerActions));
   // Facet chips ride the expanded state like the session list: a collapsed
   // row costs nothing, and an untrusted workspace has no runtime to ask. A
   // synthetic fallback workspace has no real cwd, so nothing is fetched.
   const { overview } = useWorkspaceOverview(client, gitPollCwd, {
-    enabled: overviewVisible && workspace.trusted,
+    enabled: overviewConsumed && workspace.trusted,
     items: overviewItems,
     reloadToken,
   });
+  // The header menu stays reachable on a collapsed row, so it keeps the last
+  // snapshot the row fetched (the same retention the session counts get)
+  // instead of dropping its counts the moment the row collapses.
+  const [retainedOverview, setRetainedOverview] =
+    useState<WorkspaceOverviewSnapshot>();
+  useEffect(() => {
+    if (overview) setRetainedOverview(overview);
+  }, [overview]);
   const liveStats = useMemo<WorkspaceSessionStats | undefined>(() => {
     if (!overviewEnabled) return undefined;
     if (sessionStats) return sessionStats;
     if (!sessionsEnabled || sessionsPage === undefined) return undefined;
-    return summarizeSessions(sessions, Boolean(sessionsResult.nextCursor));
+    return summarizeSessions(
+      sessions,
+      // Either more pages follow, or the daemon capped its scan and marked
+      // the page a lower bound.
+      Boolean(sessionsResult.nextCursor) || sessionsResult.truncated === true,
+    );
   }, [
     overviewEnabled,
     sessionStats,
@@ -510,6 +530,7 @@ export function WorkspaceSection({
     sessionsEnabled,
     sessionsPage,
     sessionsResult.nextCursor,
+    sessionsResult.truncated,
   ]);
   // Collapsing a row disables its catalog query, so keep the last counts the
   // row computed: the header keeps telling how busy the workspace is without
@@ -737,7 +758,7 @@ export function WorkspaceSection({
           </BranchPickerPopover>
         )}
         {headerActions?.(actionsVisible, {
-          overview,
+          overview: overview ?? retainedOverview,
           gitBranch: gitStatus?.branch,
         })}
       </div>

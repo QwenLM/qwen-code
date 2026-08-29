@@ -131,6 +131,66 @@ describe('formatOverviewValue', () => {
     ).toBe('2/3');
   });
 
+  it('explains the disabled servers the chip denominator leaves out', async () => {
+    await render(
+      <WorkspaceOverview
+        overview={{
+          mcp: {
+            initialized: true,
+            discoveryState: 'completed',
+            configured: 4,
+            connected: 2,
+            failed: 1,
+            disabled: 1,
+          },
+          fetchedAt: 1,
+        }}
+        items={['mcp']}
+      />,
+    );
+    expect(chip('mcp').textContent).toBe('MCP2/3');
+    expect(chip('mcp').getAttribute('title')).toBe(
+      'MCP: 2 of 4 connected, 1 failed, 1 disabled',
+    );
+  });
+
+  it('renders an uninitialized skills placeholder as unknown', async () => {
+    await render(
+      <WorkspaceOverview
+        overview={{
+          skills: { initialized: false, total: 0, enabled: 0 },
+          fetchedAt: 1,
+        }}
+        items={['skills']}
+      />,
+    );
+    expect(chip('skills').textContent).toBe('Skills—');
+    expect(chip('skills').getAttribute('title')).toBe(
+      'Skills: not initialized yet',
+    );
+  });
+
+  it('renders a workspace without channel instances as 0, not 0/0', () => {
+    expect(
+      formatOverviewValue(
+        { channels: { configured: 0, connected: 0, failed: 0 }, fetchedAt: 1 },
+        'channels',
+      ),
+    ).toBe('0');
+  });
+
+  it('keeps an uninitialized skills placeholder unknown', () => {
+    expect(
+      formatOverviewValue(
+        {
+          skills: { initialized: false, total: 0, enabled: 0 },
+          fetchedAt: 1,
+        },
+        'skills',
+      ),
+    ).toBeUndefined();
+  });
+
   it('shows the active/total split only when they differ', () => {
     expect(
       formatOverviewValue(
@@ -213,6 +273,16 @@ describe('WorkspaceOverview', () => {
     expect(chip('hooks').getAttribute('title')).toBe(
       'Hooks: 3 hooks (disabled)',
     );
+    await render(
+      <WorkspaceOverview
+        overview={{
+          hooks: { initialized: true, count: 1, disabled: false },
+          fetchedAt: 1,
+        }}
+        items={['hooks']}
+      />,
+    );
+    expect(chip('hooks').getAttribute('title')).toBe('Hooks: 1 hook');
   });
 
   it('calls a missing daemon-side facet unavailable, not uninitialized', async () => {

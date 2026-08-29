@@ -43,6 +43,42 @@ function createScenario(): WebShellDaemonScenario {
       ],
     },
     gitStatus: { v: 2, workspaceCwd: PRIMARY_CWD, branch: 'main' },
+    // The secondary workspace answers with its own counts so a row showing
+    // another workspace's facets would be caught.
+    workspaceOverviews: {
+      [SECONDARY_CWD]: {
+        skills: {
+          skills: [
+            {
+              kind: 'skill',
+              status: 'ok',
+              name: 'a',
+              description: '',
+              level: 'project',
+              modelInvocable: true,
+            },
+            {
+              kind: 'skill',
+              status: 'ok',
+              name: 'b',
+              description: '',
+              level: 'project',
+              modelInvocable: true,
+            },
+            {
+              kind: 'skill',
+              status: 'ok',
+              name: 'c',
+              description: '',
+              level: 'project',
+              modelInvocable: true,
+            },
+          ],
+        },
+        memory: { fileCount: 2, ruleCount: 7 },
+        mcp: { servers: [] },
+      },
+    },
     mcp: {
       servers: [
         {
@@ -155,9 +191,8 @@ test('shows facet chips and session counts for the expanded primary workspace', 
   await expect(primaryHeader.getByLabel('2 sessions')).toBeVisible();
 
   // Both workspaces start expanded; the primary section renders first.
-  const chips = sidebar
-    .getByRole('list', { name: 'Workspace overview' })
-    .first();
+  const chipLists = sidebar.getByRole('list', { name: 'Workspace overview' });
+  const chips = chipLists.first();
   await expect(chips.getByLabel(/^MCP:/)).toHaveText('MCP1/2');
   await expect(chips.getByLabel(/^MCP:/)).toHaveAttribute(
     'title',
@@ -171,6 +206,13 @@ test('shows facet chips and session counts for the expanded primary workspace', 
     sidebar.locator('[data-web-shell-workspace-path]').first(),
   ).toHaveText(PRIMARY_CWD);
 
+  // The secondary row shows its own facets, not the primary's.
+  const secondaryChips = chipLists.nth(1);
+  await expect(secondaryChips.getByLabel(/^Skills:/)).toHaveText('Skills3');
+  await expect(secondaryChips.getByLabel(/^Context:/)).toHaveText('Context2');
+  await expect(secondaryChips.getByLabel(/^MCP:/)).toHaveText('MCP0');
+  await expect(chips.getByLabel(/^Skills:/)).toHaveText('Skills1');
+
   // Every expanded workspace is asked for exactly the default facet set
   // (hooks stay opt-in). The dev build runs effects twice under StrictMode,
   // so count distinct facets rather than requests.
@@ -182,7 +224,8 @@ test('shows facet chips and session counts for the expanded primary workspace', 
   await expect
     .poll(() => facets(SECONDARY_CWD))
     .toEqual(['channels', 'extensions', 'mcp', 'memory', 'skills']);
-  // Once settled, nothing keeps polling in the background.
+  // Once settled, nothing bursts within the settle window; the 30 s poll
+  // itself is pinned by the clock-driven spec below.
   const settled = overviewRequests(daemon, PRIMARY_CWD).length;
   await page.waitForTimeout(1_500);
   expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(settled);
@@ -255,4 +298,35 @@ test('opens the workspace menu with management entries on the primary workspace 
   ]);
   await menu.getByRole('menuitem', { name: /^MCP/ }).click();
   await expect(page.getByRole('region', { name: 'MCP Servers' })).toBeVisible();
+});
+
+test('polls an expanded workspace once per 30 s tick and not faster', async ({
+  page,
+}, testInfo) => {
+  const scenario = createScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  // A fake clock lets the spec observe the 30 s cadence without waiting.
+  await page.clock.install();
+  await gotoSession(page, scenario, daemon);
+  const sidebar = page.getByRole('complementary');
+  await expect(
+    sidebar.getByRole('list', { name: 'Workspace overview' }).first(),
+  ).toBeVisible();
+  const facets = (cwd: string) =>
+    [...new Set(overviewRequests(daemon, cwd))].sort();
+  await expect
+    .poll(() => facets(PRIMARY_CWD))
+    .toEqual(['channels', 'extensions', 'mcp', 'memory', 'skills']);
+  const settled = overviewRequests(daemon, PRIMARY_CWD).length;
+
+  // Just short of a tick: no new facet requests.
+  await page.clock.runFor(29_000);
+  await page.waitForTimeout(200);
+  expect(overviewRequests(daemon, PRIMARY_CWD)).toHaveLength(settled);
+
+  // Past the tick: exactly one more round of the default facets.
+  await page.clock.runFor(2_000);
+  await expect
+    .poll(() => overviewRequests(daemon, PRIMARY_CWD).length)
+    .toBe(settled + 5);
 });

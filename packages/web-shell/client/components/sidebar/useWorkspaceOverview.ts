@@ -27,6 +27,13 @@ import {
  */
 export const WORKSPACE_OVERVIEW_POLL_MS = 30_000;
 
+/**
+ * A facet keeps its last known value across this many consecutive rounds
+ * that did not answer for it, then reads as unavailable. Three rounds is a
+ * blip's worth (about 90 s at the default cadence), not a rollback's.
+ */
+export const WORKSPACE_OVERVIEW_MAX_MISSES = 3;
+
 export interface UseWorkspaceOverviewOptions {
   /** Fetch only while true; false clears the snapshot and stops polling. */
   enabled: boolean;
@@ -110,6 +117,8 @@ export function useWorkspaceOverview(
 ): WorkspaceOverviewResult {
   const [overview, setOverview] = useState<WorkspaceOverviewSnapshot>();
   const requestIdRef = useRef(0);
+  // Consecutive rounds each facet went unanswered; bounds the carry-over.
+  const missesRef = useRef<Partial<Record<WorkspaceOverviewItem, number>>>({});
   // Order-insensitive identity so a caller passing a fresh array literal each
   // render does not restart the poll loop.
   const itemsKey = [...new Set(items)].sort().join(',');
@@ -128,15 +137,29 @@ export function useWorkspaceOverview(
     const requestId = ++requestIdRef.current;
     const next = await fetchWorkspaceOverview(client, workspaceCwd, requested);
     if (requestId !== requestIdRef.current) return;
+    const expired = new Set<WorkspaceOverviewItem>();
+    for (const item of requested) {
+      const misses = next[item] ? 0 : (missesRef.current[item] ?? 0) + 1;
+      missesRef.current[item] = misses;
+      if (misses >= WORKSPACE_OVERVIEW_MAX_MISSES) expired.add(item);
+    }
     setOverview((previous) =>
-      mergeOverviewSnapshots(previous, next, requested),
+      mergeOverviewSnapshots(previous, next, requested, expired),
     );
   }, [active, client, requested, workspaceCwd]);
+
+  // A snapshot belongs to one workspace: switching cwd on a live hook must
+  // not let the previous workspace's facets carry over into the next merge.
+  useEffect(() => {
+    missesRef.current = {};
+    setOverview(undefined);
+  }, [workspaceCwd]);
 
   useEffect(() => {
     if (!active) {
       // Invalidate any in-flight round so it cannot land after the clear.
       requestIdRef.current += 1;
+      missesRef.current = {};
       setOverview(undefined);
       return;
     }

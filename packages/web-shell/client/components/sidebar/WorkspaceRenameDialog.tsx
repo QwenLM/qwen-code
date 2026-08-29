@@ -17,6 +17,18 @@ import styles from './WebShellSidebar.module.css';
 /** Mirrors MAX_WORKSPACE_DISPLAY_NAME_LENGTH in the daemon's registration store. */
 export const WORKSPACE_DISPLAY_NAME_MAX_LENGTH = 256;
 
+/**
+ * Mirrors the daemon's rejection of control characters (code points
+ * 0x00–0x1f and 0x7f); a pasted terminal escape would otherwise round-trip
+ * to a generic failure on every save.
+ */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+
+export function isWorkspaceDisplayNameValid(name: string): boolean {
+  return !CONTROL_CHARACTERS.test(name);
+}
+
 interface WorkspaceRenameDialogProps {
   workspace: DaemonWorkspaceCapability;
   busy: boolean;
@@ -35,6 +47,7 @@ export function WorkspaceRenameDialog({
   const [name, setName] = useState(workspace.displayName ?? '');
   const trimmed = name.trim();
   const unchanged = trimmed === (workspace.displayName?.trim() ?? '');
+  const invalid = !isWorkspaceDisplayNameValid(trimmed);
   return (
     <DialogShell
       title={t('sidebar.renameWorkspaceTitle')}
@@ -48,7 +61,7 @@ export function WorkspaceRenameDialog({
         className={styles.confirmContent}
         onSubmit={(event) => {
           event.preventDefault();
-          if (busy || unchanged) return;
+          if (busy || unchanged || invalid) return;
           onSubmit(trimmed === '' ? null : trimmed);
         }}
       >
@@ -68,8 +81,13 @@ export function WorkspaceRenameDialog({
             />
           </Field>
         </FieldGroup>
-        <p className={styles.confirmDescription}>
-          {t('sidebar.workspaceNameHint')}
+        <p
+          className={styles.confirmDescription}
+          role={invalid ? 'alert' : undefined}
+        >
+          {invalid
+            ? t('sidebar.workspaceNameInvalid')
+            : t('sidebar.workspaceNameHint')}
         </p>
         <div className="flex justify-end gap-2">
           <Button
@@ -80,7 +98,7 @@ export function WorkspaceRenameDialog({
           >
             {t('common.cancel')}
           </Button>
-          <Button type="submit" disabled={busy || unchanged}>
+          <Button type="submit" disabled={busy || unchanged || invalid}>
             {t('common.save')}
           </Button>
         </div>

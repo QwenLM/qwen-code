@@ -281,18 +281,22 @@ export function overviewFacetHasIssue(
 
 /**
  * Merge a fresh snapshot over the previous one, keeping a facet's last known
- * value when the new round did not answer for it.
+ * value when the new round did not answer for it — unless the facet is in
+ * `expired`: a route that keeps failing (an older daemon after a rollback)
+ * must eventually show as unavailable instead of a frozen count.
  */
 export function mergeOverviewSnapshots(
   previous: WorkspaceOverviewSnapshot | undefined,
   next: WorkspaceOverviewSnapshot,
   requested: ReadonlySet<WorkspaceOverviewItem>,
+  expired: ReadonlySet<WorkspaceOverviewItem> = new Set(),
 ): WorkspaceOverviewSnapshot {
   if (!previous) return next;
   const merged: WorkspaceOverviewSnapshot = { fetchedAt: next.fetchedAt };
   for (const item of WORKSPACE_OVERVIEW_ITEMS) {
     if (!requested.has(item)) continue;
-    const value = next[item] ?? previous[item];
+    const value =
+      next[item] ?? (expired.has(item) ? undefined : previous[item]);
     // Facet keys and their summary types line up one-to-one; the loop is
     // over the literal union, so assigning through Object.assign only
     // sidesteps the per-key narrowing TypeScript cannot express here.

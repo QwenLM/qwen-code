@@ -144,6 +144,49 @@ describe('WorkspaceRenameDialog', () => {
     expect(saveButton().disabled).toBe(true);
   });
 
+  it('swallows Escape while busy and closes once idle', async () => {
+    const onClose = vi.fn();
+    const props = { workspace, onSubmit: vi.fn(), onClose };
+    await render(<WorkspaceRenameDialog {...props} busy />);
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    expect(onClose).not.toHaveBeenCalled();
+    await render(<WorkspaceRenameDialog {...props} busy={false} />);
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    // DialogShell routes Escape through more than one listener; the contract
+    // here is only that it reaches onClose once the dialog is idle.
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('rejects control characters before they reach the daemon', async () => {
+    const onSubmit = vi.fn();
+    await render(
+      <WorkspaceRenameDialog
+        workspace={workspace}
+        busy={false}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+      />,
+    );
+    await type('Bad \u001b[31mname');
+    expect(saveButton().disabled).toBe(true);
+    expect(document.body.querySelector('[role="alert"]')?.textContent).toBe(
+      'Names cannot contain control characters.',
+    );
+    await submit();
+    expect(onSubmit).not.toHaveBeenCalled();
+    await type('Good name');
+    expect(saveButton().disabled).toBe(false);
+    expect(document.body.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it('locks the form while busy', async () => {
     const onSubmit = vi.fn();
     await render(

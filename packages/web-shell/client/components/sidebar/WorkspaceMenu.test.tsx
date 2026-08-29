@@ -174,6 +174,10 @@ describe('WorkspaceMenu', () => {
       'Reload runtime',
     ]);
     expect(document.body.textContent).toContain('Manage');
+    // The count is part of the item's accessible name, like the chips: the
+    // badge span carries no aria-hidden (the icon SVG legitimately does).
+    expect(items[1]!.querySelector('span[aria-hidden]')).toBeNull();
+    expect(items[1]!.textContent).toBe('MCP3/4');
     await act(async () => {
       click(items[2]!);
     });

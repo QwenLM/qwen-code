@@ -1088,6 +1088,7 @@ export function WebShellSidebar({
     error,
     data: sessionsPage,
     nextCursor: sessionsNextCursor,
+    truncated: sessionsTruncated,
     reload,
     deleteSession,
     exportSession,
@@ -1109,13 +1110,19 @@ export function WebShellSidebar({
   const primarySessionStats = useMemo(
     () =>
       includePrimaryWorkspaceSessions && sessionsPage !== undefined
-        ? summarizeSessions(sessions, Boolean(sessionsNextCursor))
+        ? summarizeSessions(
+            sessions,
+            // Either more pages follow, or the daemon capped its scan and
+            // marked the page a lower bound.
+            Boolean(sessionsNextCursor) || sessionsTruncated === true,
+          )
         : undefined,
     [
       includePrimaryWorkspaceSessions,
       sessions,
       sessionsNextCursor,
       sessionsPage,
+      sessionsTruncated,
     ],
   );
   // The catalog starts with loading=false before its subscription requests
@@ -5694,10 +5701,16 @@ export function WebShellSidebar({
                                   if (!ws.trusted && !canRemove) return null;
                                   const wsCwd = ws.primary ? undefined : ws.cwd;
                                   const realPath = isAbsolutePath(ws.cwd);
+                                  // A display name persists only for registration-backed
+                                  // rows; the daemon's bound (primary) workspace has no
+                                  // registration id, so a rename there would live in
+                                  // memory until the next restart. Trust is not required:
+                                  // the name is registry metadata, not runtime access.
                                   const canRename =
                                     !lockedWorkspaceCwd &&
                                     workspaceRenameEnabled &&
-                                    realPath;
+                                    realPath &&
+                                    !ws.primary;
                                   // Management pages read the connection's bound
                                   // workspace, so only the primary row can open
                                   // its own view today (#10399, layer B1).

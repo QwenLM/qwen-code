@@ -401,7 +401,18 @@ function renderSidebar(
       target: WorkspaceManagementTarget,
       workspaceCwd: string,
     ) => void;
-    workspaceOverview?: false;
+    workspaceOverview?:
+      | false
+      | {
+          items?: readonly (
+            | 'mcp'
+            | 'skills'
+            | 'extensions'
+            | 'channels'
+            | 'context'
+            | 'hooks'
+          )[];
+        };
     onOpenGitDiff?: (cwd: string) => void;
     onNewWorktreeSession?: (cwd?: string) => void;
     onOpenAddWorkspace?: () => void;
@@ -796,6 +807,11 @@ beforeEach(() => {
   exportArchivedSession.mockReset();
   workspace.client.workspaceByCwd.mockImplementation(() => ({
     listWorkspaceSessions,
+    // The header actions poll git; answer as a non-git workspace so the
+    // default harness exercises the known-no-branch path without warnings.
+    workspaceGit: vi
+      .fn()
+      .mockResolvedValue({ v: 2, workspaceCwd: '', branch: null }),
     listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
     workspaceChannelTypes: vi.fn().mockResolvedValue([]),
     workspaceChannels: vi
@@ -3401,6 +3417,102 @@ describe('WebShellSidebar workspace removal', () => {
     // No menu under lock, so no consumer of the branch: nothing polled.
     expect(workspaceAction('/tmp/other')).toBeUndefined();
     expect(workspaceGit).not.toHaveBeenCalled();
+  });
+
+  it('renders only the facets the embedder selected', async () => {
+    renderSidebar({ workspaceOverview: { items: ['mcp'] } });
+    // Chips appear once the first facet round lands.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const kinds = Array.from(
+      container.querySelectorAll<HTMLElement>(
+        '[data-web-shell-workspace-overview]',
+      ),
+    ).map((chip) => chip.getAttribute('data-web-shell-workspace-overview'));
+    expect(kinds.length).toBeGreaterThan(0);
+    expect(new Set(kinds)).toEqual(new Set(['mcp']));
+  });
+
+  it('counts the registered workspaces next to the Projects label', () => {
+    renderSidebar();
+    const badge = container.querySelector<HTMLElement>(
+      '[class*="projectsHeaderCount"]',
+    );
+    expect(badge?.textContent).toBe('3');
+    expect(badge?.getAttribute('aria-label')).toBe('3 workspaces');
+
+    renderSidebar({ workspaces: [capabilities.workspaces[0]!] });
+    expect(
+      container.querySelector('[class*="projectsHeaderCount"]'),
+    ).toBeNull();
+  });
+
+  it('offers rename on registration-backed rows only', () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'dynamic_workspace_registration'],
+    };
+    renderSidebar();
+    // The bound (primary) workspace has no registration to persist a name.
+    act(() => click(workspaceAction('/tmp/project')!));
+    expect(menuItemLabels()).not.toContain('Rename…');
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    // Trust is not required: the name is registry metadata.
+    act(() => click(workspaceAction('/tmp/danger')!));
+    expect(menuItemLabels()).toEqual([
+      'Rename…',
+      'Copy path',
+      'Remove workspace',
+    ]);
+  });
+
+  it('shows the new display name on the row after a rename', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'dynamic_workspace_registration'],
+    };
+    const renamed = {
+      ...capabilities,
+      workspaces: capabilities.workspaces.map((entry) =>
+        entry.id === 'secondary'
+          ? { ...entry, displayName: 'Other API' }
+          : entry,
+      ),
+    };
+    workspaceActions.updateWorkspace.mockResolvedValueOnce(
+      renamed.workspaces[1],
+    );
+    // The refresh lands the updated catalog the sidebar renders rows from.
+    workspace.refreshCapabilities.mockImplementationOnce(async () => {
+      workspace.capabilities = renamed;
+      return renamed;
+    });
+    renderSidebar();
+    expect(container.textContent).toContain('other');
+    expect(container.textContent).not.toContain('Other API');
+    act(() => click(workspaceAction('/tmp/other')!));
+    const rename = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Rename…');
+    act(() => click(rename!));
+    const input = document.querySelector<HTMLInputElement>(
+      '#workspace-display-name',
+    );
+    act(() => setInputValue(input!, 'Other API'));
+    await act(async () => {
+      input!.form!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(document.querySelector('#workspace-display-name')).toBeNull();
+    expect(container.textContent).toContain('Other API');
   });
 
   it('keeps plain folder headers when the overview is switched off', () => {
