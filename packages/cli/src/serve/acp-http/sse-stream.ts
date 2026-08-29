@@ -6,6 +6,7 @@
 
 import type { Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import type { DeliveryResult, TransportStream } from './transport-stream.js';
 
 /**
  * A long-lived Server-Sent-Events writer for the ACP-over-HTTP transport.
@@ -22,13 +23,14 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
  * including the optional ring-buffer `id:` sequencing that drives
  * `Last-Event-ID` resume (see `docs/design/daemon-acp-http/sse-resumable-stream.md`).
  */
-export class SseStream {
+export class SseStream implements TransportStream {
   readonly kind = 'sse' as const;
 
   private writeChain: Promise<void> = Promise.resolve();
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private closed = false;
   private cleanupFn: (() => void) | undefined;
+  private readonly activeWriteClosers = new Set<() => void>();
 
   constructor(
     private readonly res: Response,
@@ -60,7 +62,9 @@ export class SseStream {
 
     this.cleanupFn = () => this.close();
     this.res.req.on('close', this.cleanupFn);
+    this.res.on('close', this.cleanupFn);
     this.res.on('error', this.cleanupFn);
+    this.res.on('finish', this.cleanupFn);
   }
 
   /**
@@ -71,8 +75,23 @@ export class SseStream {
    * terminal frames (no bus id), matching REST `formatSseFrame`.
    */
   send(message: unknown, id?: number): Promise<void> {
+    const payload = Buffer.from(JSON.stringify(message), 'utf8');
+    return this.sendSerialized(payload, id).then(() => undefined);
+  }
+
+  sendSerialized(payload: Buffer, id?: number): Promise<DeliveryResult> {
     const idLine = id !== undefined ? `id: ${id}\n` : '';
-    return this.writeRaw(`${idLine}data: ${JSON.stringify(message)}\n\n`);
+    return this.enqueueWrite(async () => {
+      if (this.closed || this.res.writableEnded) return 'closed';
+      if (idLine && (await this.doWrite(idLine)) !== 'delivered') {
+        return 'closed';
+      }
+      if ((await this.doWrite('data: ')) !== 'delivered') return 'closed';
+      if ((await this.doWrite(payload)) !== 'delivered') return 'closed';
+      const suffix = await this.doWrite('\n\n');
+      if (suffix !== 'delivered') return suffix;
+      return 'delivered';
+    });
   }
 
   get isClosed(): boolean {
@@ -82,10 +101,13 @@ export class SseStream {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    for (const settle of this.activeWriteClosers) settle();
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.cleanupFn) {
       this.res.req.off('close', this.cleanupFn);
+      this.res.off('close', this.cleanupFn);
       this.res.off('error', this.cleanupFn);
+      this.res.off('finish', this.cleanupFn);
       this.cleanupFn = undefined;
     }
     try {
@@ -107,63 +129,101 @@ export class SseStream {
     }
   }
 
-  private writeRaw(chunk: string): Promise<void> {
-    const next = this.writeChain.then(() => this.doWrite(chunk));
+  private writeRaw(chunk: string | Buffer): Promise<void> {
+    return this.enqueueWrite(() => this.doWrite(chunk)).then(() => undefined);
+  }
+
+  private enqueueWrite(
+    write: () => Promise<DeliveryResult>,
+  ): Promise<DeliveryResult> {
+    const run = () => write();
+    const next = this.writeChain.then(run, run);
     // The stream OWNS write-failure handling: callers fire-and-forget
     // (`void stream.send(...)`), so a broken socket would otherwise leave a
     // zombie stream (heartbeats firing, no events delivered, no log). On the
     // first failure, log once and close so the subscription tears down.
-    this.writeChain = next.catch((err: unknown) => {
-      if (!this.closed) {
-        writeStderrLine(
-          `qwen serve: /acp SSE write failed, closing stream: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        this.close();
-      }
-      return undefined;
-    });
-    return next;
+    this.writeChain = next
+      .then(() => undefined)
+      .catch((err: unknown) => {
+        if (!this.closed) {
+          writeStderrLine(
+            `qwen serve: /acp SSE write failed, closing stream: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          this.close();
+        }
+        return undefined;
+      });
+    return next.catch(() => 'failed');
   }
 
-  private doWrite(chunk: string): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+  private doWrite(chunk: string | Buffer): Promise<DeliveryResult> {
+    return new Promise<DeliveryResult>((resolve, reject) => {
       if (this.closed || this.res.writableEnded) {
-        resolve();
+        resolve('closed');
         return;
       }
-      let ok: boolean;
-      try {
-        ok = this.res.write(chunk);
-      } catch (err) {
-        reject(err as Error);
-        return;
-      }
-      if (ok) {
-        resolve();
-        return;
-      }
+      let settled = false;
+      let callbackDone = false;
+      let drainDone = false;
+      let writeReturned: boolean | undefined;
       const cleanup = () => {
+        this.activeWriteClosers.delete(onCloseEv);
         this.res.off('drain', onDrain);
         this.res.off('close', onCloseEv);
+        this.res.off('finish', onCloseEv);
         this.res.off('error', onErrorEv);
       };
-      const onDrain = () => {
+      const settle = (result: DeliveryResult) => {
+        if (settled) return;
+        settled = true;
         cleanup();
-        resolve();
+        resolve(result);
+      };
+      const finishIfReady = () => {
+        if (writeReturned !== undefined && callbackDone && drainDone) {
+          settle('delivered');
+        }
+      };
+      const onDrain = () => {
+        drainDone = true;
+        finishIfReady();
       };
       const onCloseEv = () => {
-        cleanup();
-        resolve();
+        settle(writeReturned === undefined ? 'closed' : 'outcome_unknown');
       };
       const onErrorEv = (err: Error) => {
+        if (settled) return;
+        settled = true;
         cleanup();
         reject(err);
       };
-      this.res.once('drain', onDrain);
       this.res.once('close', onCloseEv);
+      this.res.once('finish', onCloseEv);
       this.res.once('error', onErrorEv);
+      this.activeWriteClosers.add(onCloseEv);
+      try {
+        writeReturned = this.res.write(chunk, (err?: Error | null) => {
+          if (err) {
+            onErrorEv(err);
+            return;
+          }
+          callbackDone = true;
+          finishIfReady();
+        });
+      } catch (err) {
+        onErrorEv(err as Error);
+        return;
+      }
+      if (settled) return;
+      if (!writeReturned) {
+        this.res.once('drain', onDrain);
+      } else {
+        drainDone = true;
+      }
+      finishIfReady();
+      if (this.closed || this.res.writableEnded) onCloseEv();
     });
   }
 }

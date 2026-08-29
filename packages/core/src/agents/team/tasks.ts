@@ -26,7 +26,7 @@ import { Mutex } from 'async-mutex';
 import { isNodeError } from '../../utils/errors.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
-import { getTasksDir } from './teamHelpers.js';
+import { getTasksDir, sanitizeName } from './teamHelpers.js';
 import type { SwarmTask, SwarmTaskStatus } from './types.js';
 
 const debug = createDebugLogger('AGENTS_TEAM_TASKS');
@@ -736,7 +736,13 @@ export async function listTasks(
     if (filters.status !== undefined && t.status !== filters.status) {
       return false;
     }
-    if (filters.owner !== undefined && t.owner !== filters.owner) {
+    if (
+      filters.owner !== undefined &&
+      // Match on canonical identities both ways: owners persisted
+      // before the sanitization landed (#9282) keep their raw spelling
+      // on disk and would otherwise never match any filter.
+      sanitizeName(t.owner ?? '') !== sanitizeName(filters.owner)
+    ) {
       return false;
     }
     if (

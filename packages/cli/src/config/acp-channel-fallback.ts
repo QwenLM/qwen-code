@@ -29,10 +29,10 @@ export function resolveAcpChannelFallback(
 ): string {
   // The desktop marker wins: Tauri sessions are daemon-spawned too, but the
   // launcher identity is the finer-grained signal.
-  if (env[QWEN_CODE_DESKTOP_ENV]) {
+  if (env[QWEN_CODE_DESKTOP_ENV] === '1') {
     return 'desktop';
   }
-  if (env[QWEN_CODE_SERVE_ENV]) {
+  if (env[QWEN_CODE_SERVE_ENV] === '1') {
     return 'daemon';
   }
   return 'ACP';

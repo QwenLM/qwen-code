@@ -19,6 +19,27 @@ import {
 // `src/daemon/index.ts` but not re-exported by the published entry"
 // gap that two-layer SDK re-exports are easy to drift on.
 import type {
+  DaemonClient,
+  CreateStandaloneSessionOptions,
+  DaemonArchiveStandaloneSessionsResult,
+  DaemonDeleteStandaloneSessionsResult,
+  DaemonRestoredStandaloneSession,
+  DaemonSessionRestoreStrategy,
+  DaemonStandaloneBatchError,
+  DaemonStandaloneCreationRecovery,
+  DaemonStandaloneDirectoryResult,
+  DaemonStandaloneFields,
+  DaemonStandaloneMetadataResult,
+  DaemonStandaloneSession,
+  DaemonStandaloneSessionCreating,
+  DaemonStandaloneSessionListOptions,
+  DaemonStandaloneSessionListPage,
+  DaemonStandaloneSessionLookup,
+  DaemonStandaloneSessionSummary,
+  DaemonStandaloneWorkingDirectory,
+  DaemonUnarchiveStandaloneSessionsResult,
+  RestoreStandaloneSessionRequest,
+  WorkspaceDaemonClient,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonChannelControlState,
@@ -77,7 +98,18 @@ import type {
   DaemonSessionDiedData,
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
+  DaemonSessionCatalogVersion,
+  DaemonSessionLiveState,
+  DaemonWorkspaceSessionLiveState,
   DaemonSessionRecapResult,
+  DaemonSkillBatchToggleError,
+  DaemonSkillBatchToggleErrorCode,
+  DaemonSkillBatchToggleItem,
+  DaemonSkillBatchToggleResult,
+  ExtensionDefaultActivationBatchItem,
+  ExtensionMutationResponse,
+  ExtensionWorkspaceActivationBatchItem,
+  ExtensionWorkspaceBatchActivationState,
   DaemonSessionRecordingDegradedData,
   DaemonSessionRecordingDegradedEvent,
   DaemonSessionUpdateData,
@@ -129,10 +161,20 @@ import type {
   DaemonWorkspaceVoiceUpdate,
   KnownDaemonEvent,
 } from '../../src/index.js';
+import {
+  DAEMON_UI_DEBUG_REASONS,
+  DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS,
+  isTaskExecutionMode,
+  selectUnrecognizedDiagnostics,
+  UNRECOGNIZED_DIAGNOSTICS_LIMIT,
+} from '../../src/daemon/index.js';
 import type {
   DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
   DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
   DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
+  DaemonUiDebugReason as DaemonEntryUiDebugReason,
+  DaemonUnrecognizedDiagnostic as DaemonEntryUnrecognizedDiagnostic,
+  DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
 } from '../../src/daemon/index.js';
 
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
@@ -158,6 +200,37 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // failure mode caught for PR-21 auth surface).
     expect(typeof Public.isWorkspaceScopedBudgetEvent).toBe('function');
     expect('projectChatRecordsToDaemonTranscript' in Public).toBe(false);
+    expect(Public.STANDALONE_SESSIONS_CAPABILITY).toBe(
+      'standalone_sessions_v1',
+    );
+    expect(typeof Public.isStandaloneSessionNotFoundError).toBe('function');
+    expect(typeof Public.isStandaloneCreationOutcomeUnknown).toBe('function');
+    expect(typeof Public.DaemonStandaloneProtocolError).toBe('function');
+    expect(typeof Public.DaemonStandaloneCreationOutcomeUnknownError).toBe(
+      'function',
+    );
+  });
+
+  it('exports standalone session SDK types from the package entry', () => {
+    expectTypeOf<CreateStandaloneSessionOptions>().not.toBeNever();
+    expectTypeOf<RestoreStandaloneSessionRequest>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSession>().not.toBeNever();
+    expectTypeOf<DaemonRestoredStandaloneSession>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionSummary>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionLookup>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionListOptions>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionListPage>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneDirectoryResult>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneMetadataResult>().not.toBeNever();
+    expectTypeOf<DaemonArchiveStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonUnarchiveStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonDeleteStandaloneSessionsResult>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneBatchError>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneFields>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionCreating>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneWorkingDirectory>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneCreationRecovery>().not.toBeNever();
+    expectTypeOf<DaemonSessionRestoreStrategy>().not.toBeNever();
   });
 
   it('round-trips a raw DaemonEvent through the public narrow helper', () => {
@@ -293,15 +366,164 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
+    // Batch Skill toggle surface: type-only imports are erased at vitest
+    // runtime, so the prototype check is the fence that actually executes
+    // here; the shape assertions pin the contract for any tsc pass.
+    expect(typeof Public.DaemonClient.prototype.setWorkspaceSkillsEnabled).toBe(
+      'function',
+    );
+    expectTypeOf<
+      Awaited<ReturnType<DaemonClient['setWorkspaceSkillsEnabled']>>
+    >().toEqualTypeOf<DaemonSkillBatchToggleResult>();
+    expectTypeOf<DaemonSkillBatchToggleItem>().toEqualTypeOf<{
+      skillName: string;
+      enabled: boolean;
+      changed: boolean;
+    }>();
+    expectTypeOf<DaemonSkillBatchToggleError>().toEqualTypeOf<{
+      skillName: string;
+      code: DaemonSkillBatchToggleErrorCode;
+      error: string;
+      reason?: 'not_user_invocable' | 'inactive_extension' | 'locked';
+      lockedScope?: 'system' | 'user' | 'systemDefaults';
+    }>();
+    expect(
+      typeof Public.DaemonClient.prototype.setExtensionDefaultActivations,
+    ).toBe('function');
+    expect(
+      typeof Public.WorkspaceDaemonClient.prototype.setExtensionActivations,
+    ).toBe('function');
+    expectTypeOf<
+      Awaited<ReturnType<DaemonClient['setExtensionDefaultActivations']>>
+    >().toEqualTypeOf<ExtensionMutationResponse>();
+    expectTypeOf<
+      Awaited<ReturnType<WorkspaceDaemonClient['setExtensionActivations']>>
+    >().toEqualTypeOf<ExtensionMutationResponse>();
+    expectTypeOf<
+      Parameters<DaemonClient['setExtensionDefaultActivations']>
+    >().toEqualTypeOf<
+      [
+        extensionNames: readonly string[],
+        state: 'enabled' | 'disabled',
+        clientId?: string,
+      ]
+    >();
+    expectTypeOf<
+      Parameters<WorkspaceDaemonClient['setExtensionActivations']>
+    >().toEqualTypeOf<
+      [
+        extensionNames: readonly string[],
+        state: ExtensionWorkspaceBatchActivationState,
+        clientId?: string,
+      ]
+    >();
+    expectTypeOf<ExtensionWorkspaceBatchActivationState>().toEqualTypeOf<
+      'enabled' | 'disabled' | 'inherit'
+    >();
+    expectTypeOf<ExtensionDefaultActivationBatchItem>().toEqualTypeOf<{
+      name: string;
+      defaultActivation: 'enabled' | 'disabled';
+    }>();
+    expectTypeOf<ExtensionWorkspaceActivationBatchItem>().toEqualTypeOf<{
+      name: string;
+      workspaceActivation: 'enabled' | 'disabled' | null;
+      effectiveActivation: 'enabled' | 'disabled';
+    }>();
+    expectTypeOf<
+      NonNullable<
+        NonNullable<
+          Awaited<ReturnType<DaemonClient['extensionOperation']>>['result']
+        >['results']
+      >
+    >().toEqualTypeOf<
+      Array<
+        | ExtensionDefaultActivationBatchItem
+        | ExtensionWorkspaceActivationBatchItem
+      >
+    >();
     // `GET /daemon/status` report surface (PR 5174 client coverage): the
     // envelope plus the sub-shapes UI dashboards need to type against.
     expectTypeOf<DaemonStatusReport>().not.toBeNever();
     expectTypeOf<DaemonLogMode>().not.toBeNever();
     expectTypeOf<DaemonLogHealth>().not.toBeNever();
     expectTypeOf<DaemonLogIssue>().not.toBeNever();
-    expectTypeOf<DaemonStatusReport['limits']>().toMatchTypeOf<{
-      compactedReplayMaxBytes: number;
+    expectTypeOf<
+      DaemonStatusReport['limits']['compactedReplayMaxBytes']
+    >().toEqualTypeOf<number>();
+    expectTypeOf<
+      Pick<
+        DaemonStatusReport['limits'],
+        | 'acpPreAttachMaxFramesPerStream'
+        | 'acpPreAttachMaxFramesPerConnection'
+        | 'acpPreAttachMaxFramesGlobal'
+        | 'acpPreAttachMaxPayloadBytesPerConnection'
+        | 'acpPreAttachMaxPayloadBytesGlobal'
+      >
+    >().toEqualTypeOf<{
+      acpPreAttachMaxFramesPerStream?: number | null;
+      acpPreAttachMaxFramesPerConnection?: number | null;
+      acpPreAttachMaxFramesGlobal?: number | null;
+      acpPreAttachMaxPayloadBytesPerConnection?: number | null;
+      acpPreAttachMaxPayloadBytesGlobal?: number | null;
     }>();
+    expectTypeOf<
+      DaemonStatusReport['limits']['acpPreAttachMaxPayloadBytesGlobal']
+    >().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<
+      Pick<DaemonStatusReport['runtime']['transport']['acp'], 'preAttach'>
+    >().toEqualTypeOf<{
+      preAttach?: {
+        bufferedConnectionFrames: number;
+        bufferedSessionFrames: number;
+        pendingDeliveryFrames: number;
+        usedFrames: number;
+        usedBytes: number;
+        highWaterFrames: number;
+        highWaterBytes: number;
+        guardFailures: number;
+      };
+    }>();
+    expectTypeOf<undefined>().toMatchTypeOf<
+      DaemonStatusReport['runtime']['transport']['acp']['preAttach']
+    >();
+    expectTypeOf<
+      Pick<
+        NonNullable<DaemonStatusReport['full']>['acpConnections'][number],
+        | 'bufferedConnectionFrames'
+        | 'bufferedSessionFrames'
+        | 'pendingDeliveryFrames'
+        | 'preAttachOwnedFrames'
+        | 'preAttachOwnedBytes'
+      >
+    >().toEqualTypeOf<{
+      bufferedConnectionFrames?: number;
+      bufferedSessionFrames?: number;
+      pendingDeliveryFrames?: number;
+      preAttachOwnedFrames?: number;
+      preAttachOwnedBytes?: number;
+    }>();
+    expectTypeOf<
+      NonNullable<
+        DaemonStatusReport['full']
+      >['acpConnections'][number]['preAttachOwnedFrames']
+    >().toEqualTypeOf<number | undefined>();
+    const legacyAcpConnections: NonNullable<
+      DaemonStatusReport['full']
+    >['acpConnections'] = [{}];
+    expect(legacyAcpConnections).toHaveLength(1);
+    expectTypeOf<
+      NonNullable<
+        DaemonStatusReport['full']
+      >['acpConnections'][number]['connectionIdPrefix']
+    >().toEqualTypeOf<string | undefined>();
+    expectTypeOf<undefined>().toMatchTypeOf<
+      NonNullable<DaemonStatusReport['full']>['acpMounts']
+    >();
+    expectTypeOf<
+      NonNullable<
+        NonNullable<DaemonStatusReport['full']>['acpMounts']
+      >[number]['preAttachGuardFailures']
+    >().toEqualTypeOf<number>();
     expectTypeOf<DaemonStatusReport['daemon']>().toMatchTypeOf<{
       runId?: string;
       logMode?: DaemonLogMode;
@@ -315,6 +537,36 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonStatusReportLevel>().not.toBeNever();
     expectTypeOf<DaemonStatusReportSection>().not.toBeNever();
     expectTypeOf<DaemonStatusReportSession>().not.toBeNever();
+  });
+
+  it('exposes the workspace session live-state surface at the public entry', () => {
+    // The prototype checks execute under vitest (type-only imports are
+    // erased). The type shape assertions pin the wire contract via the
+    // package typecheck, which compiles this file through
+    // tsconfig.test-fence.json — the default tsconfig excludes test/.
+    expect(
+      typeof Public.DaemonClient.prototype.getWorkspaceSessionLiveState,
+    ).toBe('function');
+    expect(
+      typeof Public.WorkspaceDaemonClient.prototype.getSessionLiveState,
+    ).toBe('function');
+    expectTypeOf<DaemonSessionCatalogVersion>().toEqualTypeOf<{
+      generation: string;
+      revision: number;
+    }>();
+    expectTypeOf<DaemonSessionLiveState>().toEqualTypeOf<{
+      sessionId: string;
+      clientCount: number;
+      hasActivePrompt: boolean;
+      isWaitingForPermission: boolean;
+      isWaitingForUserQuestion: boolean;
+      updatedAt?: string;
+    }>();
+    expectTypeOf<DaemonWorkspaceSessionLiveState>().toEqualTypeOf<{
+      v: 1;
+      catalogVersion: DaemonSessionCatalogVersion;
+      sessions: DaemonSessionLiveState[];
+    }>();
   });
 
   it('exposes the PR 21 auth device-flow surface at the public entry', () => {
@@ -341,6 +593,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // mismatch.
     expect(Public.DAEMON_ERROR_KINDS).toContain('prompt_deadline_exceeded');
     expect(Public.DAEMON_ERROR_KINDS).toContain('writer_idle_timeout');
+    expect(Public.DAEMON_ERROR_KINDS).toContain('restore_timeout');
   });
 });
 
@@ -439,5 +692,86 @@ describe('runtime MCP add/remove SDK types', () => {
       originatorClientId: 'client-x',
     };
     expect(res.removed).toBe(true);
+  });
+});
+
+describe('daemon UI debug-reason public surface', () => {
+  it('pins the union shipped by @qwen-code/sdk/daemon', () => {
+    // A type-only guard would not hold here: vitest transpiles through
+    // esbuild, which erases `export type` without checking it, and this
+    // package's tsconfig excludes `test/`, so nothing type-checks this file.
+    // The union therefore ships as a closed enum value — matching
+    // DAEMON_ERROR_KINDS and friends — and the runtime assertion below is
+    // what actually fails if the re-export is dropped or the members drift.
+    expect(DAEMON_UI_DEBUG_REASONS).toEqual([
+      'unrecognized_event',
+      'unrecognized_session_update',
+      'malformed_payload',
+    ]);
+    expectTypeOf<DaemonEntryUiDebugReason>().toEqualTypeOf<
+      'unrecognized_event' | 'unrecognized_session_update' | 'malformed_payload'
+    >();
+  });
+});
+
+describe('unrecognized-diagnostic sidechannel public surface (#8823)', () => {
+  it('pins the routed reason subset as a runtime value', () => {
+    // Same esbuild-erasure hazard as DAEMON_UI_DEBUG_REASONS: the router
+    // keys on this array at runtime, so it must ship as a value, and the
+    // subset must stay inside the parent union.
+    expect(DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS).toEqual([
+      'unrecognized_event',
+      'unrecognized_session_update',
+    ]);
+    for (const reason of DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS) {
+      expect(DAEMON_UI_DEBUG_REASONS).toContain(reason);
+    }
+    expectTypeOf<DaemonEntryUnrecognizedDiagnosticReason>().toEqualTypeOf<
+      'unrecognized_event' | 'unrecognized_session_update'
+    >();
+  });
+
+  it('routes every unrecognized_*-prefixed debug reason (#8823)', () => {
+    // Membership is what the router tests, but Web Shell hides debug blocks
+    // by the `unrecognized_` prefix — so any reason added to
+    // DAEMON_UI_DEBUG_REASONS under that prefix must join the routed
+    // subset, otherwise those frames fall through to `appendStatusBlock`
+    // (finalizing the streaming block, consuming the maxBlocks budget)
+    // while renderers hide the resulting block: the #8823 symptoms,
+    // invisible until usage-loss reports arrive.
+    for (const reason of DAEMON_UI_DEBUG_REASONS) {
+      if (!reason.startsWith('unrecognized_')) continue;
+      expect(DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS).toContain(reason);
+    }
+  });
+
+  it('reaches the selector and the cap through the daemon entry', () => {
+    // The PR's Risk & Scope points adapters at `@qwen-code/sdk/daemon`; an
+    // export missing from the barrel is a compile error for every consumer,
+    // so pin reachability the way DAEMON_UI_DEBUG_REASONS is pinned.
+    expect(typeof selectUnrecognizedDiagnostics).toBe('function');
+    expect(UNRECOGNIZED_DIAGNOSTICS_LIMIT).toBe(50);
+    expectTypeOf<DaemonEntryUnrecognizedDiagnostic>().toHaveProperty(
+      'debugReason',
+    );
+  });
+});
+
+describe('task executionMode guard public surface', () => {
+  it('pins the fail-closed literal whitelist at the daemon entry', () => {
+    // webui's projection (`projectSubagentToolUpdate`) and the web-shell
+    // adapter (`daemonToolBlockToToolCall`) both import this guard from
+    // @qwen-code/sdk/daemon; a dropped re-export is a compile error for
+    // them, and a widened or narrowed literal set silently re-routes live
+    // vs recorded classification. Pin the runtime behavior here the way
+    // DAEMON_UI_DEBUG_REASONS pins its closed union.
+    expect(typeof isTaskExecutionMode).toBe('function');
+    expect(isTaskExecutionMode('foreground')).toBe(true);
+    expect(isTaskExecutionMode('background')).toBe(true);
+    expect(isTaskExecutionMode('detached')).toBe(false);
+    expect(isTaskExecutionMode('')).toBe(false);
+    expect(isTaskExecutionMode(undefined)).toBe(false);
+    expect(isTaskExecutionMode(42)).toBe(false);
+    expect(isTaskExecutionMode({})).toBe(false);
   });
 });

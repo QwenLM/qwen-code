@@ -1078,6 +1078,67 @@ describe('AcpFileSystemService', () => {
       });
     });
 
+    it('serializes trusted tool provenance into ACP metadata', async () => {
+      const client = {
+        writeTextFile: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+      const svc = new AcpFileSystemService(
+        client,
+        'session-origin',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      await svc.writeTextFile({
+        path: '/some/file.txt',
+        content: 'hello',
+        toolWriteOrigin: 'write_file',
+        _meta: { encoding: 'utf-16le' },
+      });
+
+      expect(client.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: 'hello',
+        sessionId: 'session-origin',
+        _meta: {
+          encoding: 'utf-16le',
+          'qwen-code/tool-write-origin': {
+            version: 1,
+            source: 'write_file',
+          },
+        },
+      });
+    });
+
+    it('strips caller-supplied provenance without a trusted core origin', async () => {
+      const client = {
+        writeTextFile: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSideConnection;
+      const svc = new AcpFileSystemService(
+        client,
+        'session-untrusted-origin',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      await svc.writeTextFile({
+        path: '/some/file.txt',
+        content: 'hello',
+        _meta: {
+          'qwen-code/tool-write-origin': {
+            version: 1,
+            source: 'write_file',
+          },
+        },
+      });
+
+      expect(client.writeTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        content: 'hello',
+        sessionId: 'session-untrusted-origin',
+      });
+    });
+
     it('preserves a UTF-8 BOM without duplicating an existing marker', async () => {
       const client = {
         writeTextFile: vi.fn().mockResolvedValue(undefined),
@@ -1149,6 +1210,7 @@ describe('AcpFileSystemService', () => {
       const result = await svc.writeTextFile({
         path: '/some/file.txt',
         content: '\uFEFFHello',
+        toolWriteOrigin: 'edit',
         _meta: { bom: true },
       });
 
@@ -1156,6 +1218,7 @@ describe('AcpFileSystemService', () => {
       expect(fallback.writeTextFile).toHaveBeenCalledWith({
         path: '/some/file.txt',
         content: '\uFEFFHello',
+        toolWriteOrigin: 'edit',
         _meta: { bom: true },
       });
       expect(client.writeTextFile).not.toHaveBeenCalled();

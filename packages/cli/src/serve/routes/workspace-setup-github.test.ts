@@ -137,6 +137,7 @@ async function makeHarness(
       ...(opts.hotReload
         ? {
             workspaceTrustHotReloadAvailable: true,
+            getSessionBridges: () => [bridge],
             primaryWorkspaceTrusted: true,
           }
         : {}),

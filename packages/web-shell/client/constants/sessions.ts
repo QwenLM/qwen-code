@@ -9,7 +9,9 @@
  * retention limits cannot drift between the main and split views.
  */
 export const SESSION_LIST_PAGE_SIZE = 1000;
+export const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
 export const SESSION_ORGANIZATION_FEATURE = 'session_organization';
+export const SESSION_LIVE_STATE_FEATURE = 'workspace_session_live_state';
 export const SESSION_TRANSCRIPT_PAGINATION_FEATURE =
   'session_transcript_pagination';
 export const SESSION_MONITOR_TOOL_CORRELATION_FEATURE =
@@ -17,7 +19,7 @@ export const SESSION_MONITOR_TOOL_CORRELATION_FEATURE =
 export const SESSION_SIDE_TASK_FEATURE = 'session_side_task';
 export const WEB_SHELL_SESSION_SOURCE_TYPE = 'default';
 export const WEB_SHELL_SIDE_TASK_SOURCE_TYPE = 'side_task';
-export const WEB_SHELL_HISTORY_PAGE_SIZE = 100;
+export const WEB_SHELL_HISTORY_PAGE_SIZE = 200;
 export const WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS = 500;
 
 /**
@@ -25,11 +27,14 @@ export const WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS = 500;
  * (the main chat and each split pane). The daemon stays the authoritative
  * full-transcript source; this only caps the client's in-memory window.
  *
- * The SDK default (200_000) is far beyond what the virtualized message list
- * renders, and it inflates both the per-dispatch reducer cost (a full
- * block-array copy) and the full-list message normalization. On a large
- * transcript that turns a burst of buffered SSE events — e.g. the stream
- * catching up when the tab returns from being hidden — into a multi-minute
- * main-thread block. Bounding the window keeps very long sessions responsive.
+ * Intentionally equal to the provider's `DEFAULT_MAX_BLOCKS`; the equality is
+ * enforced by `sessions.test.ts` (importing the constant here instead of the
+ * provider would pull the webui barrel into every importer's module graph and
+ * break the enumerative `daemon-react-sdk` mocks in component tests). Bounding
+ * the window keeps very long sessions responsive: the per-dispatch reducer
+ * cost (a full block-array copy) and the full-list message normalization turn
+ * a burst of buffered SSE events — e.g. the stream catching up when the tab
+ * returns from being hidden — into a long main-thread block on large
+ * transcripts.
  */
 export const WEB_SHELL_MAX_TRANSCRIPT_BLOCKS = 50_000;

@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { DaemonSessionContextUsageStatus } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionContextUsageStatus } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 import { ContextUsageMessage } from './ContextUsageMessage';
 
@@ -75,6 +75,22 @@ describe('ContextUsageMessage', () => {
     expect(container.textContent).toContain('Used');
     expect(container.textContent).toContain('Messages');
     expect(container.querySelector('[aria-hidden="true"]')).not.toBeNull();
+  });
+
+  it('escalates the progress-bar color at the shared thresholds', () => {
+    // The panel and the composer ring consume the same threshold helper;
+    // this pins the panel half of that contract (the ring half lives in
+    // ChatEditor.test.tsx). Both thresholds are strict `>`.
+    const filledClass = (container: HTMLElement) =>
+      container
+        .querySelector('[aria-hidden="true"]')!
+        .querySelector('span')!
+        .getAttribute('class') ?? '';
+
+    expect(filledClass(render(makeStatus(60, false)))).toContain('accent');
+    expect(filledClass(render(makeStatus(61, false)))).toContain('warning');
+    expect(filledClass(render(makeStatus(80, false)))).toContain('warning');
+    expect(filledClass(render(makeStatus(81, false)))).toContain('error');
   });
 
   it('uses the pre-conversation view before any token count is available', () => {

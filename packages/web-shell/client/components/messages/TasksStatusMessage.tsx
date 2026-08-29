@@ -16,10 +16,11 @@ import {
 import {
   useActions,
   type DaemonSessionActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
+import { formatContextTokens } from '../../utils/formatTokenCount';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { PlanExecutionView } from './PlanExecutionView';
@@ -97,12 +98,6 @@ function arrangeTasks(
   tasks: DaemonSessionTaskStatus[],
 ): DaemonSessionTaskStatus[] {
   return reorderChildrenUnderParents(sortTasks(tasks));
-}
-
-function formatTokenCount(tokens: number): string {
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
-  return String(tokens);
 }
 
 function statusClassName(status: TaskStatus): string {
@@ -1135,12 +1130,12 @@ function TaskDetail({
   if (agentOutputTokens) {
     subtitleParts.push(
       t('tasks.detail.tokens', {
-        count: formatTokenCount(agentOutputTokens),
+        count: formatContextTokens(agentOutputTokens),
       }),
     );
     compactFields.push({
       label: t('tasks.detail.tokenCount'),
-      value: formatTokenCount(agentOutputTokens),
+      value: formatContextTokens(agentOutputTokens),
     });
   }
 

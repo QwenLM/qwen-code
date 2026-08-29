@@ -7,17 +7,22 @@ import type { ACPToolCall, Message } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 
 const {
+  animationFrameBlocks,
   connection,
+  messagesFromBlocks,
   workspaceActions,
   workspaceClient,
   latestMessageListProps,
   messages,
 } = vi.hoisted(() => ({
+  animationFrameBlocks: [{ id: 'frame-block' }],
   connection: {
     sessionId: 'subagent-session',
     workspaceCwd: '/work/project',
     loadingTranscript: false,
+    catchingUp: true,
   },
+  messagesFromBlocks: vi.fn(),
   workspaceActions: {
     readFile: vi.fn(),
   },
@@ -46,7 +51,7 @@ const {
   ] as Message[],
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: ({ children }: { children: ReactNode }) => children,
   useConnection: () => connection,
   useWorkspace: () => ({ client: workspaceClient }),
@@ -54,21 +59,44 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 }));
 
 vi.mock('../../hooks/useMessages', () => ({
-  useMessages: () => messages,
+  useMessagesFromBlocks: (translator: unknown, blocks: readonly unknown[]) => {
+    messagesFromBlocks(translator, blocks);
+    return messages;
+  },
+}));
+
+vi.mock('../../hooks/useAnimationFrameTranscriptBlocks', () => ({
+  useAnimationFrameTranscriptSnapshot: () => ({
+    blocks: animationFrameBlocks,
+  }),
 }));
 
 vi.mock('../../hooks/useSessionArtifacts', () => ({
   useSessionArtifacts: () => ({ artifacts: [] }),
 }));
 
-vi.mock('../MessageList', () => ({
-  MessageList: (props: Record<string, unknown>) => {
-    latestMessageListProps.current = props;
-    return <div data-testid="subagent-transcript" />;
-  },
-}));
+vi.mock('../../WebShellContexts', async () => {
+  const { createContext } = await import('react');
+  return { CompactModeContext: createContext(false) };
+});
+
+vi.mock('../MessageList', async () => {
+  const React = await import('react');
+  const { CompactModeContext } = await import('../../WebShellContexts');
+  return {
+    MessageList: (props: Record<string, unknown>) => {
+      latestMessageListProps.current = props;
+      const compactMode = React.useContext(CompactModeContext);
+      return React.createElement('div', {
+        'data-testid': 'subagent-transcript',
+        'data-compact-mode': String(compactMode),
+      });
+    },
+  };
+});
 
 const { SubagentDetail } = await import('./SubagentDetail');
+const { CompactModeContext } = await import('../../WebShellContexts');
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -81,13 +109,14 @@ afterEach(() => {
   container = null;
   root = null;
   latestMessageListProps.current = undefined;
+  messagesFromBlocks.mockClear();
   workspaceClient.resolveSubagentSession.mockReset();
 });
 
 it('opens subagent and fork transcript outputs in source-scoped panel tabs', async () => {
   workspaceClient.resolveSubagentSession.mockResolvedValue({
     sessionId: 'subagent-session',
-    status: 'completed',
+    status: 'running',
   });
   const onRightPanelOpen = vi.fn();
   container = document.createElement('div');
@@ -101,8 +130,11 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
           sessionId="parent-session"
           rootToolCallId="agent-1"
           initialRootTool={
-            (messages[0] as Extract<Message, { role: 'tool_group' }>)
-              .tools[0] as ACPToolCall
+            {
+              ...(messages[0] as Extract<Message, { role: 'tool_group' }>)
+                .tools[0],
+              startTime: 40_000,
+            } as ACPToolCall
           }
           workspaceCwd="/work/project"
           onRightPanelOpen={onRightPanelOpen}
@@ -113,9 +145,22 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
   });
 
   expect(latestMessageListProps.current).toMatchObject({
+    activeTurnStartedAt: 40_000,
+    catchingUp: true,
     turnFileChanges: expect.any(Map),
     turnArtifacts: expect.any(Map),
   });
+  // The subagent prompt renders as the transcript's own user bubble (like the
+  // main agent), not as a separate overview block: the first user message is
+  // not hidden and no standalone prompt panel is shown.
+  expect(latestMessageListProps.current?.['hideFirstUserMessage']).toBe(
+    undefined,
+  );
+  expect(container.querySelector('pre[class*="prompt"]')).toBeNull();
+  expect(messagesFromBlocks).toHaveBeenCalledWith(
+    expect.any(Function),
+    animationFrameBlocks,
+  );
 
   const openOutput = latestMessageListProps.current?.[
     'onTurnOutputOpen'
@@ -150,4 +195,41 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
     workspaceCwd: '/work/project',
     workspaceId: 'project-id',
   });
+});
+
+it('renders the subagent transcript with compact mode when the panel provides it', async () => {
+  workspaceClient.resolveSubagentSession.mockResolvedValue({
+    sessionId: 'subagent-session',
+    status: 'running',
+  });
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={true}>
+          <SubagentDetail
+            sessionId="parent-session"
+            rootToolCallId="agent-1"
+            initialRootTool={
+              {
+                ...(messages[0] as Extract<Message, { role: 'tool_group' }>)
+                  .tools[0],
+                startTime: 40_000,
+              } as ACPToolCall
+            }
+            workspaceCwd="/work/project"
+          />
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+    await Promise.resolve();
+  });
+
+  const transcript = container.querySelector(
+    '[data-testid="subagent-transcript"]',
+  );
+  expect(transcript?.getAttribute('data-compact-mode')).toBe('true');
 });

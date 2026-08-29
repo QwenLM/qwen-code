@@ -86,6 +86,20 @@ try (DaemonClient daemon = DaemonClient.builder()
 }
 ```
 
+Callers that need to allocate the session identity before creation can pass an RFC UUID v1-v5. The SDK checks `session_id_override` before the mutation and reports a different returned ID as `SessionCreationOutcomeUnknownException`:
+
+```java
+CreateSessionRequest request = CreateSessionRequest.builder()
+        .sessionId("550E8400-E29B-41D4-A716-446655440000")
+        .build();
+
+try (DaemonSessionClient session = daemon.createSession(request)) {
+    System.out.println(session.getSession().getSessionId());
+}
+```
+
+The daemon normalizes the ID to lowercase and creates a new thread session. This is not an idempotent attach; after an ambiguous create outcome, recover with the known ID rather than retrying creation.
+
 If `qwen serve` requires authentication, add
 `.bearerToken(System.getenv("QWEN_SERVER_TOKEN"))` to the `DaemonClient`
 builder. The SDK sends the bearer on REST and SSE requests and never puts it in
@@ -101,7 +115,7 @@ Creation-time model selection is intentionally not exposed by the Java daemon SD
 
 `PromptRequest.Builder.deadline(Duration)` requests a daemon-enforced prompt deadline and is accepted only when the daemon advertises `prompt_absolute_deadline`; otherwise the SDK fails before sending the prompt. The value must be between 1 and 2,147,483,647 milliseconds, matching the daemon's Node timer range. This is separate from `observationTimeout(Duration)`, which only bounds local SSE observation and never sends a cancel mutation.
 
-Before creating a session, the SDK requires the daemon to advertise the REST transport and `session_scope_override`; this prevents an older daemon from silently ignoring the requested `thread` scope and attaching the client to a shared session. When `client_heartbeat` is advertised, an open session sends a fresh heartbeat every minute so the daemon does not reap an otherwise idle client. Set `heartbeatInterval(Duration.ZERO)` on the `DaemonClient` builder to disable this behavior, or choose a different positive interval. A heartbeat is never retried; the next scheduled heartbeat is a separate keepalive. Prompt observation is bounded to 32 concurrent prompts per client by default and can be adjusted with `maximumConcurrentPrompts`. Admission and terminal future callbacks run away from transport workers; callbacks that remain blocked consume bounded publication capacity. SSE stream cleanup is also bounded, and a close that remains blocked retains its cleanup reservation. Either condition can cause a later `startPrompt` to fail with `DaemonClientCapacityException` rather than dropping a timeout close or growing threads and queued work without limit.
+Before creating a session, the SDK requires the daemon to advertise the REST transport and `session_scope_override`; this prevents an older daemon from silently ignoring the requested `thread` scope and attaching the client to a shared session. When a caller supplies a session ID, the SDK additionally requires `session_id_override` before sending the mutation. When `client_heartbeat` is advertised, an open session sends a fresh heartbeat every minute so the daemon does not reap an otherwise idle client. Set `heartbeatInterval(Duration.ZERO)` on the `DaemonClient` builder to disable this behavior, or choose a different positive interval. A heartbeat is never retried; the next scheduled heartbeat is a separate keepalive. Prompt observation is bounded to 32 concurrent prompts per client by default and can be adjusted with `maximumConcurrentPrompts`. Admission and terminal future callbacks run away from transport workers; callbacks that remain blocked consume bounded publication capacity. SSE stream cleanup is also bounded, and a close that remains blocked retains its cleanup reservation. Either condition can cause a later `startPrompt` to fail with `DaemonClientCapacityException` rather than dropping a timeout close or growing threads and queued work without limit.
 
 An indeterminate completion is an outcome boundary, not a session-reuse boundary. After `PromptAdmissionUnknownException` or `PromptOutcomeIndeterminateException`, that `DaemonSessionClient` permanently rejects further prompts even if local stream cleanup later succeeds; close or destroy the session instead. An observation timeout is published without waiting forever for a blocked stream close, while cleanup continues asynchronously and retains bounded client capacity until it finishes.
 
@@ -128,7 +142,7 @@ public static void runTransportOptionsExample() {
             .setIncludePartialMessages(true)
             .setTurnTimeout(new Timeout(120L, TimeUnit.SECONDS))
             .setMessageTimeout(new Timeout(90L, TimeUnit.SECONDS))
-            .setAllowedTools(Arrays.asList("read_file", "write_file", "list_directory"));
+            .setAllowedTools(Arrays.asList("read_file", "write_file", "glob"));
 
     List<String> result = QwenCodeCli.simpleQuery("who are you, what are your capabilities?", options);
     result.forEach(logger::info);
@@ -206,6 +220,7 @@ The SDK supports different permission modes for controlling tool execution:
 - **`default`**: Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`. Read-only tools execute without confirmation.
 - **`plan`**: Blocks all write tools, instructing AI to present a plan first.
 - **`auto-edit`**: Auto-approve edit tools (`edit`, `write_file`, `notebook_edit`) while other tools require confirmation.
+- **`auto`**: An LLM classifier approves tool calls.
 - **`yolo`**: All tools execute automatically without confirmation.
 
 ### Session Event Consumers and Assistant Content Consumers
@@ -337,9 +352,8 @@ The SDK uses a thread pool for managing concurrent operations with the following
 
 The SDK provides specific exception types for different error scenarios:
 
-- `SessionControlException`: Thrown when there's an issue with session control (creation, initialization, etc.)
+- `SessionControlException`: Thrown when there's an issue with session control, including attempting to use a closed or unavailable session. Session construction and `start()` can throw it directly; `QwenCodeCli.newSession()` wraps lower-level creation and initialization failures in a `RuntimeException`.
 - `SessionSendPromptException`: Thrown when there's an issue sending a prompt or receiving a response
-- `SessionClosedException`: Thrown when attempting to use a closed session
 
 ## FAQ / Troubleshooting
 

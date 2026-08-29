@@ -5,13 +5,13 @@ and remote-control adapters. Lives in the monorepo, not published to npm.
 
 Lift history (#4175 Mode B daemon roadmap):
 
-| Slice                | Scope                                                                                                                                               | Status                          |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| **PR 22a** (#4295)   | Skeleton + `EventBus` + `inMemoryChannel` + `AcpChannel` types + `PermissionMediator` type-only stub                                                | ✅ merged                       |
-| **PR 22b/1** (#4298) | Lift `status` + `workspacePaths` + `bridgeErrors` + `bridgeTypes`                                                                                   | ✅ merged                       |
-| **PR 22b/2** (#4304) | Lift `BridgeOptions` + new `DaemonStatusProvider` injection seam                                                                                    | ✅ merged                       |
-| **F1** (this PR)     | Lift `defaultSpawnChannelFactory` + `BridgeClient` + `createHttpAcpBridge` factory closure + new `BridgeFileSystem` injection seam (22b' scope)     | ✅ in this PR                   |
-| **F3 PR 24**         | Implement the four `PermissionMediator` strategies (`first-responder`, `designated`, `consensus`, `local-only`) + pair-token revocation + audit log | F3 in the feature-cohesive plan |
+| Slice                | Scope                                                                                                                                                                                      | Status         |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------- |
+| **PR 22a** (#4295)   | Skeleton + `EventBus` + `inMemoryChannel` + `AcpChannel` types + `PermissionMediator` type-only stub                                                                                       | ✅ merged      |
+| **PR 22b/1** (#4298) | Lift `status` + `workspacePaths` + `bridgeErrors` + `bridgeTypes`                                                                                                                          | ✅ merged      |
+| **PR 22b/2** (#4304) | Lift `BridgeOptions` + new `DaemonStatusProvider` injection seam                                                                                                                           | ✅ merged      |
+| **F1** (#4490)       | Lift `defaultSpawnChannelFactory` + `BridgeClient` + `createHttpAcpBridge` factory closure + new `BridgeFileSystem` injection seam (22b' scope)                                            | ✅ merged      |
+| **F3 PR 24**         | Implement the four `PermissionMediator` policies (`first-responder`, `designated`, `consensus`, `local-only`) plus audit/emit fan-out; pair-token binding and revocation stay future scope | ✅ implemented |
 
 ## What's here today
 
@@ -25,13 +25,12 @@ Lift history (#4175 Mode B daemon roadmap):
   type contract that `createHttpAcpBridge` (now in this package) plus
   the channels / VSCode IDE companion's own-spawn paths consume via
   `BridgeOptions.channelFactory`.
-- `permission` — type-only `PermissionMediator` interface,
+- `permission` — `PermissionMediator` interface,
   `PermissionPolicy` literal union (4 strategies), and
-  `PermissionResolution` discriminated union. **No implementation
-  yet** — first-responder voting still lives in
-  `BridgeClient.requestPermission` (in `bridgeClient.ts` after F1).
-  F3 PR 24 will move that and add the other three policies behind
-  this interface.
+  `PermissionResolution` discriminated union. `MultiClientPermissionMediator`
+  implements the four policies, owns pending/resolved permission state, and
+  handles strategy dispatch plus audit/emit fan-out; `BridgeClient` only
+  plumbs `requestPermission` into `mediator.request`.
 - `status` (PR 22b/1) — wire-contract status types for
   `/workspace/{mcp,skills,providers,env,preflight}` and
   `/session/:id/{context,supported-commands,tasks}` routes, the
@@ -75,20 +74,20 @@ Lift history (#4175 Mode B daemon roadmap):
   companion consume this directly instead of each reimplementing the
   child lifecycle.
 - `bridgeClient` (F1) — `BridgeClient` class implementing the ACP
-  `Client` surface: first-responder permission flow, session-update
-  fan-out into `EventBus`, child-side `extNotification` routing,
-  early-event buffer + tombstone bookkeeping, inline fs proxy for
-  `writeTextFile` / `readTextFile`. Exports the supporting
-  `PendingPermission` / `PermissionResolutionRecord` /
-  `BridgeClientSessionEntry` types + `MAX_RESOLVED_PERMISSION_RECORDS`
-  cap that the factory's bookkeeping maps consume.
+  `Client` surface: permission requests delegated to
+  `PermissionMediator`, session-update fan-out into `EventBus`,
+  child-side `extNotification` routing, early-event buffer + tombstone
+  bookkeeping, inline fs proxy for `writeTextFile` / `readTextFile`.
+  Exports the supporting `BridgeClientSessionEntry` type consumed by
+  the session-entry lookup passed in by the factory.
 - `bridge` (F1) — `createHttpAcpBridge` factory closure (~3000 LOC)
   - `ChannelInfo` / `SessionEntry` interfaces + factory-only
     helpers (`withTimeout`, `canonicalizeExistingAncestor`,
     `verifyParentWithinWorkspace`, debug log helpers,
-    `hasControlCharacter`) + factory constants. Builds the
-    bookkeeping closures (`resolveEntry`, `registerPending`, etc.)
-    and wires them into `BridgeClient`.
+    `hasControlCharacter`) + factory constants. Owns session
+    bookkeeping, constructs the `MultiClientPermissionMediator` that
+    owns permission state, and passes the session-entry lookup into
+    `BridgeClient`.
 - `bridgeFileSystem` (F1) — `BridgeFileSystem` interface for the
   ACP fs proxy. When wired through `BridgeOptions.fileSystem`,
   `BridgeClient.readTextFile` / `BridgeClient.writeTextFile`
@@ -96,7 +95,11 @@ Lift history (#4175 Mode B daemon roadmap):
   `fs.writeFile` / `fs.readFile` proxy. Production `qwen serve` injects
   `WorkspaceFileSystem` for final ACP `writeTextFile` content writes and for
   defensive handling of unexpected or capability-violating delegated reads;
-  normal same-host text reads stay in the child.
+  normal same-host text reads stay in the child. The interface remains
+  workspace-scoped by default. A daemon-owned adapter may recognize the
+  strict versioned provenance of a final built-in-tool write and use its
+  same-host writer for an external target; this is not a generic ACP
+  capability or authorization token.
 
 ## Imports — root vs subpaths
 
@@ -131,6 +134,6 @@ exported symbols (`createHttpAcpBridge`, `defaultSpawnChannelFactory`,
 - #4175 Mode B daemon roadmap (feature-cohesive F1-F5 plan targeting
   `daemon_mode_b_main`)
 - #3803 `Stage 1.5-prereq AcpChannel lift` (chiga0's original framing)
-- F3 PR 24 will replace the inline first-responder logic in
-  `BridgeClient.requestPermission` with the four `PermissionMediator`
-  strategies declared in `permission.ts`.
+- `permissionMediator.ts` implements the four `PermissionMediator`
+  strategies declared in `permission.ts`; `BridgeClient.requestPermission`
+  delegates to that mediator.

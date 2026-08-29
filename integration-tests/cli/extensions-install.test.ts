@@ -6,7 +6,7 @@
 
 import { expect, test } from 'vitest';
 import { TestRig } from '../test-helper.js';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const extension = `{
@@ -49,4 +49,45 @@ test('installs a local extension, verifies a command, and updates it', async () 
   await rig.runCommand(['extensions', 'uninstall', 'test-extension']);
 
   await rig.cleanup();
+});
+
+test('installs a local Qoder plugin', async () => {
+  const rig = new TestRig();
+  await rig.setup('qoder plugin install test');
+  const manifestDir = join(rig.testDir!, '.qoder-plugin');
+  mkdirSync(manifestDir, { recursive: true });
+  writeFileSync(
+    join(manifestDir, 'plugin.json'),
+    JSON.stringify({ name: 'sample-qoder-plugin', version: '1.0.0' }),
+  );
+  writeFileSync(join(rig.testDir!, 'system-prompt.md'), '# System context');
+  const skillDir = join(rig.testDir!, 'skills', 'sample-skill');
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(
+    join(skillDir, 'SKILL.md'),
+    '---\nname: sample-skill\ndescription: Synthetic skill\n---\n',
+  );
+
+  try {
+    await rig.runCommand(['extensions', 'uninstall', 'sample-qoder-plugin']);
+  } catch {
+    // The extension is not installed yet.
+  }
+  try {
+    const result = await rig.runCommand(
+      ['extensions', 'install', rig.testDir!],
+      { stdin: 'y\n' },
+    );
+    expect(result).toContain('sample-qoder-plugin');
+
+    const listResult = await rig.runCommand(['extensions', 'list']);
+    expect(listResult).toContain('sample-qoder-plugin');
+  } finally {
+    try {
+      await rig.runCommand(['extensions', 'uninstall', 'sample-qoder-plugin']);
+    } catch {
+      // Installation may have failed before the extension was registered.
+    }
+    await rig.cleanup();
+  }
 });

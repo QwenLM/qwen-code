@@ -25,10 +25,29 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { ensureAuthenticated, gh, ghApiAll, setGhHost } from './lib/gh.js';
+import {
+  currentUser,
+  ensureAuthenticated,
+  gh,
+  ghApiAll,
+  setGhHost,
+} from './lib/gh.js';
 import { gitOpt } from './lib/git.js';
 import { worktreePath } from './lib/paths.js';
-import { carriesBlockerSignal, findRootId } from './pr-context.js';
+import {
+  anyRootCarriesCriticalMarker,
+  isBlockerBody,
+  findRootId,
+} from './pr-context.js';
+import { detectPlatformKind } from './lib/platform/registry.js';
+import { ensureAoneAuthenticated } from './lib/platform/aone-client.js';
+import {
+  aoneAccountName,
+  aoneWhoami,
+  getMrAuthorAndHead,
+  listMrComments,
+  type AoneMrComment,
+} from './lib/platform/aone.js';
 
 /** Inline review comment, as listed by `GET /pulls/{n}/comments`. */
 export interface RawStatusComment {
@@ -126,6 +145,7 @@ export function buildThreadStatuses(
   comments: RawStatusComment[],
   prAuthor: string,
   probe: CodeChangeProbe,
+  me: string = '',
 ): ThreadStatus[] {
   const byId = new Map<number, RawStatusComment>();
   for (const c of comments) byId.set(c.id, c);
@@ -143,6 +163,7 @@ export function buildThreadStatuses(
   }
 
   const authorLc = prAuthor.toLowerCase();
+  const meLc = me.toLowerCase();
   const threads: ThreadStatus[] = [];
   for (const root of comments) {
     if (root.in_reply_to_id !== undefined && root.in_reply_to_id !== null) {
@@ -155,12 +176,29 @@ export function buildThreadStatuses(
     const participants = [
       ...new Set([root, ...replies].map((c) => c.user?.login ?? 'unknown')),
     ];
+    // The pipeline's own review summary posts as a pathless global comment:
+    // Aone's flat comment list carries it into this index, while a GitHub
+    // review body is not an inline comment, so only the Aone path can hand
+    // one in. Compose renders its body-listed Criticals with the literal
+    // **[Critical]** prefix, which carriesBlockerSignal's ungated channel
+    // promotes — but a pathless thread never goes outdated and gives Step 6
+    // no location to re-read, so the re-check can never rule it fixed: a
+    // permanent, self-made blocker every round. Drop pathless own-account
+    // roots from blocker promotion. Path-bearing own findings stay
+    // re-checkable and keep theirs, and another account's pathless blocker
+    // keeps its promotion through the ungated channel.
+    const ownPathlessRoot =
+      meLc !== '' &&
+      (root.path ?? '') === '' &&
+      (root.user?.login ?? '').toLowerCase() === meLc;
     threads.push({
       rootId: root.id,
       path: root.path ?? '',
       author: root.user?.login ?? 'unknown',
       createdAt: root.created_at ?? '',
-      isBlocker: carriesBlockerSignal(root.body),
+      isBlocker: ownPathlessRoot
+        ? false
+        : isBlockerBody(root.body, root.user?.login, me),
       anchor: {
         line: root.line ?? null,
         originalLine: root.original_line ?? null,
@@ -314,8 +352,246 @@ interface CommentStatusArgs {
   host?: string;
 }
 
-async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
+/** The platform facts both runners collect before the shared report tail.
+ *  `resolveMe` is the identity lookup the blocker-marker gate calls (and
+ *  only calls) when a comment exists — a throw and an empty answer both
+ *  count as unknown there. */
+interface StatusRunFacts {
+  prAuthor: string;
+  liveHeadBefore: string;
+  liveHeadAfter: string;
+  comments: RawStatusComment[];
+  resolveMe: () => string;
+}
+
+/**
+ * One `a1 repo mr comment list` entry mapped into the GitHub-shaped input
+ * the pure classification core reads. The two shape differences that matter:
+ * a1 comments carry NO commit anchor (code facts degrade to `unknown` — the
+ * probe is never handed a SHA), and a1's explicit `outdated` flag IS
+ * GitHub's `line: null` (the anchor no longer maps to the live head's
+ * diff). A pathless comment is an MR-level one (summaries ride the same
+ * flat list) — file-level in the report's vocabulary, so it never reads as
+ * outdated. A path-bearing comment with no line that the platform does NOT
+ * call outdated is file-scoped the same way: the core derives `outdated`
+ * from a null line on non-file-level threads, so letting it ride `line`
+ * would fabricate a rewrite the platform never reported.
+ */
+export function aoneCommentToStatusComment(c: AoneMrComment): RawStatusComment {
+  const line = typeof c.line === 'number' ? c.line : null;
+  return {
+    id: c.id,
+    user: { login: aoneAccountName(c.author) },
+    body: c.note ?? c.body ?? '',
+    path: c.path,
+    line: c.outdated === true ? null : line,
+    original_line: line,
+    commit_id: undefined,
+    original_commit_id: undefined,
+    in_reply_to_id: c.parentNoteId ?? undefined,
+    created_at:
+      typeof c.createdAt === 'string'
+        ? c.createdAt
+        : typeof c.created_at === 'string'
+          ? c.created_at
+          : '',
+    subject_type:
+      c.path && (line !== null || c.outdated === true) ? 'line' : 'file',
+  };
+}
+
+/** Shared report tail: worktree/drift facts, the identity gate, thread
+ *  classification, and the write + warnings. Both platform runners feed it
+ *  the same shape, so the report contract has one implementation. */
+function writeCommentStatusReport(
+  args: { pr_number: string; owner_repo: string; out: string },
+  facts: StatusRunFacts,
+): void {
   const { pr_number: prNumber, owner_repo: ownerRepo, out } = args;
+  const { prAuthor, liveHeadBefore, liveHeadAfter, comments } = facts;
+
+  const worktree = worktreePath(prNumber);
+  const worktreeHeadSha = gitOpt('-C', worktree, 'rev-parse', 'HEAD');
+  // A null HEAD means the worktree is absent (comment-status run before
+  // fetch-pr, or after cleanup) — every thread's code facts then degrade to
+  // 'unknown', which must not pass silently as if the files were unchanged.
+  const worktreeMissing = worktreeHeadSha === null;
+  // Anchor facts (`line`, outdated) describe the LIVE head — the platform
+  // maps comments against the latest diff it serves. Code facts
+  // (`touchedBy`, changedSinceComment) describe the WORKTREE head — the
+  // code this review rules on. Two distinct conditions:
+  //  - worktreeStale: the checked-out code lags the live head, so the code
+  //    facts describe a SUPERSEDED checkout (this is what staleWorktree means
+  //    per-thread — NOT the union below).
+  //  - headMovedDuringFetch: the head moved between the two samples, so the
+  //    anchor facts may be mixed across commits even if the worktree happens
+  //    to match the final head; that is a separate warning, not staleness.
+  const headMovedDuringFetch =
+    liveHeadBefore !== '' &&
+    liveHeadAfter !== '' &&
+    liveHeadBefore !== liveHeadAfter;
+  const worktreeStale =
+    !worktreeMissing &&
+    liveHeadAfter !== '' &&
+    worktreeHeadSha !== liveHeadAfter;
+  const headDrift = headMovedDuringFetch || worktreeStale;
+
+  // The reviewing account gates the comment marker's blocker promotion —
+  // the same gate pr-context applies, so this report and the context file
+  // agree on what is a blocker. Both unknown shapes fail closed
+  // identically — a thrown lookup AND an empty login (a stubbed or
+  // proxied transport exiting 0 with no output) — when a posted root comment
+  // carries a critical marker: an index that silently undercounts
+  // blockers reads as complete, while the report's degradation contract
+  // is an `error` a consumer sees.
+  let me = '';
+  if (comments.length) {
+    let lookupError: unknown = null;
+    try {
+      me = facts.resolveMe();
+    } catch (err) {
+      lookupError = err;
+    }
+    if (me === '' && anyRootCarriesCriticalMarker(comments)) {
+      throw new Error(
+        `cannot determine the reviewing account (${
+          lookupError === null
+            ? 'empty login'
+            : lookupError instanceof Error
+              ? lookupError.message
+              : String(lookupError)
+        }) while a posted root comment carries a Qwen critical marker — ` +
+          'the blocker signal depends on it; re-run',
+      );
+    }
+  }
+
+  const threads = buildThreadStatuses(
+    comments,
+    prAuthor,
+    makeGitProbe(worktree),
+    me,
+  );
+  if (worktreeStale) {
+    // Denormalize onto every thread: the code facts describe a superseded
+    // checkout, and a jq consumer of threads[] must not need to remember a
+    // top-level flag to see that. Keyed on worktreeStale specifically — a
+    // head that merely moved mid-fetch while the worktree matches the final
+    // head is NOT a superseded checkout.
+    for (const t of threads) t.code.staleWorktree = true;
+  }
+  const summary = summarizeThreads(threads);
+
+  const report = {
+    prNumber,
+    ownerRepo,
+    prAuthor,
+    liveHeadSha: liveHeadAfter,
+    liveHeadBefore,
+    worktreeHeadSha,
+    worktreeMissing,
+    headDrift,
+    headMovedDuringFetch,
+    inlineComments: comments.length,
+    summary,
+    threads,
+  };
+
+  mkdirSync(dirname(out), { recursive: true });
+  const json = JSON.stringify(report, null, 2) + '\n';
+  writeFileSync(out, json, 'utf8');
+  writeStdoutLine(
+    `Wrote comment-status report to ${out} (${comments.length} inline comments in ${summary.threads} threads: ` +
+      `${summary.outdated} outdated, ${summary.blockers} blocker(s), ` +
+      `${summary.changedSinceComment} on files changed since their comment, ` +
+      `${summary.withReplies} with replies, ${summary.authorReplied} answered by the PR author)`,
+  );
+  if (worktreeMissing) {
+    writeStdoutLine(
+      `warning: no worktree at ${worktree} — run \`qwen review fetch-pr\` first. ` +
+        `Every thread's code facts (changedSinceComment, touchedBy) are \`unknown\`; ` +
+        `only the anchor and reply facts are usable.`,
+    );
+  }
+  if (headMovedDuringFetch) {
+    writeStdoutLine(
+      `warning: PR head moved during the comments fetch (${liveHeadBefore.slice(0, 8)} → ${liveHeadAfter.slice(0, 8)}) — ` +
+        `anchor facts may be mixed across commits. Re-run after the push settles.`,
+    );
+  } else if (worktreeStale) {
+    writeStdoutLine(
+      `warning: worktree HEAD ${(worktreeHeadSha ?? '').slice(0, 8)} != live PR head ${liveHeadAfter.slice(0, 8)} — ` +
+        `the PR advanced since fetch-pr. Anchor facts describe the live head; ` +
+        `code facts describe the worktree.`,
+    );
+  }
+  // Same silent-tail hazard pr-context already warns about, with sharper
+  // teeth here: `threads` is sorted by path, so a truncated read drops the
+  // alphabetically-later files WHOLESALE (measured on a 71-thread PR: one
+  // read showed 35 threads and lost 24 blocker-flagged ones), and cut JSON
+  // is not merely incomplete but unparseable.
+  if (json.length > DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD) {
+    writeStdoutLine(
+      `warning: ${out} is ${json.length} chars; read_file returns the first ` +
+        `${DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD} and sets isTruncated — cut JSON does not parse. ` +
+        `Query it with jq (it is machine-shaped), or page with offset/limit until isTruncated is false.`,
+    );
+  }
+}
+
+/** The degraded report both runners fall back to. */
+function writeDegradedCommentStatusReport(
+  args: { pr_number: string; owner_repo: string; out: string },
+  msg: string,
+): void {
+  const { pr_number: prNumber, owner_repo: ownerRepo, out } = args;
+  writeStdoutLine(
+    `warning: comment-status failed: ${msg}. It is an index, not the ` +
+      `evidence — re-derive thread statuses per-comment if needed.`,
+  );
+  mkdirSync(dirname(out), { recursive: true });
+  // Emit the SAME shape as the success report (with an added `error`), not a
+  // stripped one: a consumer reading `report.headDrift` on a stripped report
+  // gets `undefined` (falsy = "no drift"), silently mistaking a total index
+  // failure for a clean "nothing moved". Safe defaults + `error` let a
+  // consumer that checks `error` see the failure and one that reads a fact
+  // get a neutral value, never a misleading one.
+  writeFileSync(
+    out,
+    JSON.stringify(
+      {
+        prNumber,
+        ownerRepo,
+        error: msg,
+        // null, not '': the success path emits '' only for a legitimately
+        // absent author (deleted account). A degraded run knows nothing about
+        // the author, so a structural null (matching worktreeHeadSha below)
+        // keeps a consumer that displays the author name from rendering a
+        // blank as if it were a real empty value.
+        prAuthor: null,
+        liveHeadSha: '',
+        liveHeadBefore: '',
+        worktreeHeadSha: null,
+        // Consistent with `worktreeHeadSha: null` (the success path derives
+        // worktreeMissing from exactly that) and fail-safe: a degraded run
+        // has no usable worktree, so `true` reads code facts as unavailable
+        // rather than falsely asserting the worktree is present.
+        worktreeMissing: true,
+        headDrift: false,
+        headMovedDuringFetch: false,
+        inlineComments: 0,
+        summary: summarizeThreads([]),
+        threads: [],
+      },
+      null,
+      2,
+    ) + '\n',
+    'utf8',
+  );
+}
+
+async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
+  const { pr_number: prNumber, owner_repo: ownerRepo } = args;
   if (ownerRepo.indexOf('/') < 0) {
     throw new Error('owner_repo must look like "owner/repo"');
   }
@@ -379,147 +655,78 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
       // Race-detection sample unavailable; liveHeadBefore is a usable fallback.
     }
 
-    const worktree = worktreePath(prNumber);
-    const worktreeHeadSha = gitOpt('-C', worktree, 'rev-parse', 'HEAD');
-    // A null HEAD means the worktree is absent (comment-status run before
-    // fetch-pr, or after cleanup) — every thread's code facts then degrade to
-    // 'unknown', which must not pass silently as if the files were unchanged.
-    const worktreeMissing = worktreeHeadSha === null;
-    // Anchor facts (`line`, outdated) describe the LIVE head — GitHub maps
-    // comments against the latest diff it serves. Code facts (`touchedBy`,
-    // changedSinceComment) describe the WORKTREE head — the code this review
-    // rules on. Two distinct conditions:
-    //  - worktreeStale: the checked-out code lags the live head, so the code
-    //    facts describe a SUPERSEDED checkout (this is what staleWorktree means
-    //    per-thread — NOT the union below).
-    //  - headMovedDuringFetch: the head moved between the two samples, so the
-    //    anchor facts may be mixed across commits even if the worktree happens
-    //    to match the final head; that is a separate warning, not staleness.
-    const headMovedDuringFetch =
-      liveHeadBefore !== '' &&
-      liveHeadAfter !== '' &&
-      liveHeadBefore !== liveHeadAfter;
-    const worktreeStale =
-      !worktreeMissing &&
-      liveHeadAfter !== '' &&
-      worktreeHeadSha !== liveHeadAfter;
-    const headDrift = headMovedDuringFetch || worktreeStale;
-
-    const threads = buildThreadStatuses(
-      comments,
+    writeCommentStatusReport(args, {
       prAuthor,
-      makeGitProbe(worktree),
-    );
-    if (worktreeStale) {
-      // Denormalize onto every thread: the code facts describe a superseded
-      // checkout, and a jq consumer of threads[] must not need to remember a
-      // top-level flag to see that. Keyed on worktreeStale specifically — a
-      // head that merely moved mid-fetch while the worktree matches the final
-      // head is NOT a superseded checkout.
-      for (const t of threads) t.code.staleWorktree = true;
-    }
-    const summary = summarizeThreads(threads);
-
-    const report = {
-      prNumber,
-      ownerRepo,
-      prAuthor,
-      liveHeadSha: liveHeadAfter,
       liveHeadBefore,
-      worktreeHeadSha,
-      worktreeMissing,
-      headDrift,
-      headMovedDuringFetch,
-      inlineComments: comments.length,
-      summary,
-      threads,
-    };
-
-    mkdirSync(dirname(out), { recursive: true });
-    const json = JSON.stringify(report, null, 2) + '\n';
-    writeFileSync(out, json, 'utf8');
-    writeStdoutLine(
-      `Wrote comment-status report to ${out} (${comments.length} inline comments in ${summary.threads} threads: ` +
-        `${summary.outdated} outdated, ${summary.blockers} blocker(s), ` +
-        `${summary.changedSinceComment} on files changed since their comment, ` +
-        `${summary.withReplies} with replies, ${summary.authorReplied} answered by the PR author)`,
-    );
-    if (worktreeMissing) {
-      writeStdoutLine(
-        `warning: no worktree at ${worktree} — run \`qwen review fetch-pr\` first. ` +
-          `Every thread's code facts (changedSinceComment, touchedBy) are \`unknown\`; ` +
-          `only the anchor and reply facts are usable.`,
-      );
-    }
-    if (headMovedDuringFetch) {
-      writeStdoutLine(
-        `warning: PR head moved during the comments fetch (${liveHeadBefore.slice(0, 8)} → ${liveHeadAfter.slice(0, 8)}) — ` +
-          `anchor facts may be mixed across commits. Re-run after the push settles.`,
-      );
-    } else if (worktreeStale) {
-      writeStdoutLine(
-        `warning: worktree HEAD ${(worktreeHeadSha ?? '').slice(0, 8)} != live PR head ${liveHeadAfter.slice(0, 8)} — ` +
-          `the PR advanced since fetch-pr. Anchor facts describe the live head; ` +
-          `code facts describe the worktree.`,
-      );
-    }
-    // Same silent-tail hazard pr-context already warns about, with sharper
-    // teeth here: `threads` is sorted by path, so a truncated read drops the
-    // alphabetically-later files WHOLESALE (measured on a 71-thread PR: one
-    // read showed 35 threads and lost 24 blocker-flagged ones), and cut JSON
-    // is not merely incomplete but unparseable.
-    if (json.length > DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD) {
-      writeStdoutLine(
-        `warning: ${out} is ${json.length} chars; read_file returns the first ` +
-          `${DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD} and sets isTruncated — cut JSON does not parse. ` +
-          `Query it with jq (it is machine-shaped), or page with offset/limit until isTruncated is false.`,
-      );
-    }
+      liveHeadAfter,
+      comments,
+      resolveMe: currentUser,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    writeStdoutLine(
-      `warning: comment-status failed: ${msg}. It is an index, not the ` +
-        `evidence — re-derive thread statuses per-comment if needed.`,
+    writeDegradedCommentStatusReport(args, msg);
+  }
+}
+
+/** The Aone runner. Same report contract and degradation harness as the
+ *  GitHub path; the platform differences are the data source (a1), the
+ *  comment mapping (no commit anchors, explicit `outdated`), and the
+ *  identity lookup (`a1 auth whoami`). */
+async function runCommentStatusAone(args: CommentStatusArgs): Promise<void> {
+  const { pr_number: prNumber, owner_repo: ownerRepo } = args;
+  if (ownerRepo.indexOf('/') < 0) {
+    throw new Error('owner_repo must look like "owner/repo"');
+  }
+  // Validate the raw token BEFORE coercing, with the same grammar fetch-pr
+  // uses: Number() alone accepts '012'/'1e3'/' 12'/'12.0' and would query a
+  // different MR than the caller's label (and the worktree path) carries.
+  // The skill path rides parse-args' digit grammar; this is the direct-CLI
+  // surface.
+  if (!/^[1-9]\d*$/.test(prNumber)) {
+    throw new Error(
+      'pr_number must be a positive integer (the Aone global MR id)',
     );
-    mkdirSync(dirname(out), { recursive: true });
-    // Emit the SAME shape as the success report (with an added `error`), not a
-    // stripped one: a consumer reading `report.headDrift` on a stripped report
-    // gets `undefined` (falsy = "no drift"), silently mistaking a total index
-    // failure for a clean "nothing moved". Safe defaults + `error` let a
-    // consumer that checks `error` see the failure and one that reads a fact
-    // get a neutral value, never a misleading one.
-    writeFileSync(
-      out,
-      JSON.stringify(
-        {
-          prNumber,
-          ownerRepo,
-          error: msg,
-          // null, not '': the success path emits '' only for a legitimately
-          // absent author (deleted account). A degraded run knows nothing about
-          // the author, so a structural null (matching worktreeHeadSha below)
-          // keeps a consumer that displays the author name from rendering a
-          // blank as if it were a real empty value.
-          prAuthor: null,
-          liveHeadSha: '',
-          liveHeadBefore: '',
-          worktreeHeadSha: null,
-          // Consistent with `worktreeHeadSha: null` (the success path derives
-          // worktreeMissing from exactly that) and fail-safe: a degraded run
-          // has no usable worktree, so `true` reads code facts as unavailable
-          // rather than falsely asserting the worktree is present.
-          worktreeMissing: true,
-          headDrift: false,
-          headMovedDuringFetch: false,
-          inlineComments: 0,
-          summary: summarizeThreads([]),
-          threads: [],
-        },
-        null,
-        2,
-      ) + '\n',
-      'utf8',
+  }
+  const mrId = Number(prNumber);
+
+  try {
+    // The gate doubles as the account read (presubmit's twin consumes it
+    // the same way): a SECOND whoami wired into the identity gate would
+    // re-run the lookup after the MR fetch, where a transient a1 outage
+    // throws and discards a fully fetched index over a query already
+    // answered. The truthy form keeps the gate's legitimate empty-string
+    // answer falling back to a fresh whoami.
+    const gateAccount = ensureAoneAuthenticated();
+
+    // The same two-sample race detection as the GitHub path: `sourceBranch`
+    // IS the head under AGit-Flow, and an amend landing between the sample
+    // and the comment list pairs anchor facts with a stale drift comparison.
+    const before = getMrAuthorAndHead(mrId, ownerRepo);
+    const prAuthor = before.author;
+    const liveHeadBefore = before.headSha;
+
+    const comments = listMrComments(mrId, ownerRepo).map(
+      aoneCommentToStatusComment,
     );
+
+    let liveHeadAfter = liveHeadBefore;
+    try {
+      liveHeadAfter =
+        getMrAuthorAndHead(mrId, ownerRepo).headSha || liveHeadBefore;
+    } catch {
+      // Race-detection sample unavailable; liveHeadBefore is a usable fallback.
+    }
+
+    writeCommentStatusReport(args, {
+      prAuthor,
+      liveHeadBefore,
+      liveHeadAfter,
+      comments,
+      resolveMe: gateAccount ? () => gateAccount : aoneWhoami,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    writeDegradedCommentStatusReport(args, msg);
   }
 }
 
@@ -547,10 +754,15 @@ export const commentStatusCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'GitHub host for this PR (GitHub Enterprise). Routes every gh call in this command via GH_HOST; omit for github.com.',
+          "The host the target lives on. An Aone host (*.alibaba-inc.com) selects the a1 backend; omitted: detected from the clone's origin, else GitHub (GH_HOST, then github.com).",
       }),
   handler: async (argv) => {
-    setGhHost((argv as { host?: string }).host);
+    const host = (argv as { host?: string }).host;
+    if (detectPlatformKind({ host }) === 'aone') {
+      await runCommentStatusAone(argv as unknown as CommentStatusArgs);
+      return;
+    }
+    setGhHost(host);
     await runCommentStatus(argv as unknown as CommentStatusArgs);
   },
 };

@@ -3,11 +3,18 @@ import {
   useActions,
   useConnection,
   usePromptStatus,
+  useDaemonSessionOwnerGuard,
   useWorkspaceEventSignals,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 
 const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
+
+// A stable empty array for sessions whose artifact list cannot load (e.g. a
+// subagent session without an artifacts endpoint). Returning a fresh literal
+// here would change `artifacts` identity every render and re-run every
+// consumer effect that depends on it, which cascades into an update loop.
+const EMPTY_ARTIFACTS: DaemonSessionArtifact[] = [];
 
 export interface SessionArtifactsState {
   artifacts: DaemonSessionArtifact[];
@@ -20,6 +27,10 @@ export interface SessionArtifactsState {
 export function useSessionArtifacts(): SessionArtifactsState {
   const actions = useActions();
   const connection = useConnection();
+  const ownerGuard = useDaemonSessionOwnerGuard();
+  const ownerRef = useRef(ownerGuard.capture());
+  if (!ownerRef.current?.isCurrent()) ownerRef.current = ownerGuard.capture();
+  const owner = ownerRef.current;
   const promptStatus = usePromptStatus();
   const workspaceEventSignals = useWorkspaceEventSignals();
   const artifactsVersion = workspaceEventSignals?.artifactsVersion;
@@ -30,58 +41,37 @@ export function useSessionArtifacts(): SessionArtifactsState {
   const sessionId = connection.sessionId;
   const [artifacts, setArtifacts] = useState<DaemonSessionArtifact[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
-  const loadedSessionIdRef = useRef<string | undefined>(undefined);
+  const loadedOwnerRef = useRef<typeof owner | undefined>(undefined);
+  const loadingOwnerRef = useRef<typeof owner | undefined>(undefined);
   const previousPromptStatusRef = useRef(promptStatus);
   const previousArtifactsVersionRef = useRef(artifactsVersion);
 
   const refresh = useCallback(async () => {
-    const requestId = requestIdRef.current + 1;
-    requestIdRef.current = requestId;
-    if (!sessionId) {
-      loadedSessionIdRef.current = undefined;
+    const requestId = ++requestIdRef.current;
+    if (!sessionId || !isConnected || !supportsArtifacts) {
+      loadedOwnerRef.current = undefined;
+      loadingOwnerRef.current = undefined;
       setArtifacts([]);
-      setError(null);
       setLoading(false);
       return;
     }
-    if (!isConnected) {
-      loadedSessionIdRef.current = undefined;
-      setArtifacts([]);
-      setError(null);
-      setLoading(false);
-      return;
-    }
-    if (!supportsArtifacts) {
-      loadedSessionIdRef.current = undefined;
-      setArtifacts([]);
-      setError(null);
-      setLoading(false);
-      return;
-    }
-    if (
-      loadedSessionIdRef.current !== undefined &&
-      loadedSessionIdRef.current !== sessionId
-    ) {
-      setArtifacts([]);
-    }
+    if (loadedOwnerRef.current !== owner) setArtifacts([]);
+    loadingOwnerRef.current = owner;
     setLoading(true);
     try {
       const result = await actions.loadArtifacts();
-      if (requestIdRef.current !== requestId) return;
-      loadedSessionIdRef.current = sessionId;
+      if (requestIdRef.current !== requestId || !owner.isCurrent()) return;
+      loadedOwnerRef.current = owner;
       setArtifacts(result.artifacts);
-      setError(null);
     } catch {
-      if (requestIdRef.current !== requestId) return;
-      setError(null);
+      // The artifacts panel treats a failed refresh as an empty error state.
     } finally {
       if (requestIdRef.current === requestId) {
         setLoading(false);
       }
     }
-  }, [actions, isConnected, sessionId, supportsArtifacts]);
+  }, [actions, isConnected, owner, sessionId, supportsArtifacts]);
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
 
@@ -110,9 +100,23 @@ export function useSessionArtifacts(): SessionArtifactsState {
   }, [artifactsVersion]);
 
   const artifactById = useMemo(
-    () => new Map(artifacts.map((artifact) => [artifact.id, artifact])),
-    [artifacts],
+    () =>
+      new Map(
+        (loadedOwnerRef.current === owner ? artifacts : []).map((artifact) => [
+          artifact.id,
+          artifact,
+        ]),
+      ),
+    [artifacts, owner],
   );
 
-  return { artifacts, artifactById, loading, error, refresh };
+  const visibleArtifacts =
+    loadedOwnerRef.current === owner ? artifacts : EMPTY_ARTIFACTS;
+  return {
+    artifacts: visibleArtifacts,
+    artifactById,
+    loading: loading && loadingOwnerRef.current === owner,
+    error: null,
+    refresh,
+  };
 }

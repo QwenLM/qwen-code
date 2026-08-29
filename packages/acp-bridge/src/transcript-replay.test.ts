@@ -24,6 +24,7 @@ const GOAL: GoalRecord = {
   evidenceCursor: { recordId: 'record-0' },
   turnCount: 4,
   activeTimeMs: 2000,
+  tokensUsed: 0,
   createdAt: 100,
   updatedAt: 200,
   lastReason: 'continuing',
@@ -66,6 +67,16 @@ function goalStateRecord(
   });
 }
 
+function goalCardRecord(
+  uuid: string,
+  ...items: ReadonlyArray<Record<string, unknown>>
+): TranscriptRecordInput {
+  return record(uuid, 'system', {
+    subtype: 'slash_command',
+    systemPayload: { phase: 'result', outputHistoryItems: items },
+  });
+}
+
 describe('createTranscriptReplayMachine', () => {
   it('does not replay internal Goal runtime prompts as user messages', () => {
     expect(
@@ -79,14 +90,30 @@ describe('createTranscriptReplayMachine', () => {
     ).toEqual([]);
   });
 
+  it('replays user-initiated Goal controls as user messages', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-create', 'create', GOAL),
+    );
+
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: `/goal ${GOAL.objective}` },
+      _meta: {
+        source: 'goal_control',
+        'qwen.session.recordId': 'goal-create',
+      },
+    });
+  });
+
   it('projects goal_state through v2-first metadata', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
       goalStateRecord('goal-create', 'create', GOAL),
     );
 
-    expect(projected).toHaveLength(1);
-    expect(projected[0]?._meta).toMatchObject({
+    expect(projected).toHaveLength(2);
+    expect(projected[1]?._meta).toMatchObject({
       goalState: { v: 2, goal: GOAL, activity: 'idle' },
       goalStatus: { kind: 'set', condition: GOAL.objective },
       'qwen.session.recordId': 'goal-create',
@@ -105,10 +132,45 @@ describe('createTranscriptReplayMachine', () => {
       goalStateRecord('goal-clear', 'clear', null),
     );
 
-    expect(projected[0]?._meta).toMatchObject({
+    expect(projected[1]?._meta).toMatchObject({
       goalState: { v: 2, goal: null, activity: 'idle' },
       goalStatus: { kind: 'cleared', condition: GOAL.objective },
       'qwen.session.recordId': 'goal-clear',
+    });
+  });
+
+  it('replays a legacy paused goal card instead of leaving the set card newest', () => {
+    const machine = createTranscriptReplayMachine();
+    expect(
+      updates(
+        machine,
+        goalCardRecord('goal-set', {
+          type: 'goal_status',
+          kind: 'set',
+          condition: GOAL.objective,
+        }),
+      ),
+    ).toHaveLength(1);
+
+    const projected = updates(
+      machine,
+      goalCardRecord('goal-paused', {
+        type: 'goal_status',
+        kind: 'paused',
+        condition: GOAL.objective,
+        iterations: 4,
+        lastReason: 'paused by the user',
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]?._meta).toMatchObject({
+      goalStatus: {
+        kind: 'paused',
+        condition: GOAL.objective,
+        iterations: 4,
+        lastReason: 'paused by the user',
+      },
     });
   });
 
@@ -130,6 +192,216 @@ describe('createTranscriptReplayMachine', () => {
         durationMs: GOAL.activeTimeMs,
       },
     });
+  });
+
+  it('skips checkpoint bookkeeping goal_state records during replay', () => {
+    const machine = createTranscriptReplayMachine();
+
+    expect(
+      updates(machine, goalStateRecord('goal-create', 'create', GOAL)),
+    ).toHaveLength(2);
+
+    const turned: GoalRecord = {
+      ...GOAL,
+      turnCount: GOAL.turnCount + 1,
+      activeTimeMs: 2100,
+      tokensUsed: 0,
+      updatedAt: 300,
+    };
+    expect(
+      updates(machine, goalStateRecord('goal-turn', 'turn_finished', turned)),
+    ).toHaveLength(1);
+
+    const checkpointed: GoalRecord = {
+      ...turned,
+      evidenceCursor: { recordId: 'checkpoint-1' },
+      evidenceCheckpoint: {
+        checkpointId: 'checkpoint-1',
+        createdAt: 350,
+        claims: [
+          {
+            id: 'checkpoint-1:1',
+            proofKind: 'delivered_output',
+            claim: 'The result was delivered.',
+            sourceRefs: ['assistant-1'],
+          },
+        ],
+      },
+      activeTimeMs: 2500,
+      tokensUsed: 0,
+      updatedAt: 400,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-checkpoint', 'checkpoint', checkpointed),
+      ),
+    ).toEqual([]);
+
+    const rejected: GoalRecord = {
+      ...checkpointed,
+      lastReason: 'More work remains',
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-reject', 'verifier_reject', rejected),
+      ),
+    ).toHaveLength(1);
+
+    const recommitted: GoalRecord = {
+      ...rejected,
+      activeTimeMs: 2900,
+      tokensUsed: 0,
+      updatedAt: 500,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord(
+          'goal-reject-checkpoint',
+          'verifier_reject',
+          recommitted,
+        ),
+      ),
+    ).toEqual([]);
+
+    expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
+  });
+
+  it('persists goalCause so bookkeeping suppression survives a page boundary', () => {
+    const first = createTranscriptReplayMachine();
+    updates(first, goalStateRecord('goal-create', 'create', GOAL));
+    const turned: GoalRecord = {
+      ...GOAL,
+      turnCount: GOAL.turnCount + 1,
+      activeTimeMs: 2100,
+      tokensUsed: 0,
+      updatedAt: 300,
+    };
+    updates(first, goalStateRecord('goal-turn', 'turn_finished', turned));
+    const rejected: GoalRecord = {
+      ...turned,
+      lastReason: 'More work remains',
+      activeTimeMs: 2200,
+      tokensUsed: 0,
+      updatedAt: 310,
+    };
+    expect(
+      updates(
+        first,
+        goalStateRecord('goal-reject', 'verifier_reject', rejected),
+      ),
+    ).toHaveLength(1);
+
+    const state = first.snapshot();
+    expect(state.goalCause).toBe('verifier_reject');
+
+    // A page boundary falls between the genuine rejection and the
+    // shape-equal bookkeeping re-commit; the second machine must still
+    // recognize the re-commit as bookkeeping.
+    const second = createTranscriptReplayMachine({ initialState: state });
+    const recommitted: GoalRecord = {
+      ...rejected,
+      activeTimeMs: 2300,
+      tokensUsed: 0,
+      updatedAt: 320,
+    };
+    expect(
+      updates(
+        second,
+        goalStateRecord(
+          'goal-reject-checkpoint',
+          'verifier_reject',
+          recommitted,
+        ),
+      ),
+    ).toEqual([]);
+    expect(second.snapshot().goalState?.goal).toEqual(recommitted);
+  });
+
+  it('emits a repeated verifier rejection that follows an empty turn', () => {
+    const machine = createTranscriptReplayMachine();
+
+    expect(
+      updates(machine, goalStateRecord('goal-create', 'create', GOAL)),
+    ).toHaveLength(2);
+
+    const turnedOnce: GoalRecord = {
+      ...GOAL,
+      turnCount: GOAL.turnCount + 1,
+      activeTimeMs: 2100,
+      tokensUsed: 0,
+      updatedAt: 300,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-turn-1', 'turn_finished', turnedOnce),
+      ),
+    ).toHaveLength(1);
+
+    const rejectedOnce: GoalRecord = {
+      ...turnedOnce,
+      lastReason: 'More work remains',
+      activeTimeMs: 2200,
+      tokensUsed: 0,
+      updatedAt: 310,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-reject-1', 'verifier_reject', rejectedOnce),
+      ),
+    ).toHaveLength(1);
+
+    const turnedTwice: GoalRecord = {
+      ...rejectedOnce,
+      turnCount: GOAL.turnCount + 2,
+      activeTimeMs: 2300,
+      tokensUsed: 0,
+      updatedAt: 320,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-turn-2', 'turn_finished', turnedTwice),
+      ),
+    ).toHaveLength(1);
+
+    // Shape-equal to the preceding turn_finished record, but its cause is a
+    // genuine rejection, not checkpoint bookkeeping — it must stay visible.
+    const rejectedTwice: GoalRecord = {
+      ...turnedTwice,
+      activeTimeMs: 2400,
+      tokensUsed: 0,
+      updatedAt: 330,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord('goal-reject-2', 'verifier_reject', rejectedTwice),
+      ),
+    ).toHaveLength(1);
+
+    const recommitted: GoalRecord = {
+      ...rejectedTwice,
+      activeTimeMs: 2500,
+      tokensUsed: 0,
+      updatedAt: 340,
+    };
+    expect(
+      updates(
+        machine,
+        goalStateRecord(
+          'goal-reject-2-checkpoint',
+          'verifier_reject',
+          recommitted,
+        ),
+      ),
+    ).toEqual([]);
+
+    expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
   });
 
   it('reports and skips a malformed goal_state record', () => {
@@ -340,6 +612,86 @@ describe('createTranscriptReplayMachine', () => {
   describe('UserPromptSubmit hook context provenance', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
+
+    it('replays daemon attachment references without embedding base64', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-media-ref', 'user', {
+          message: { role: 'user', parts: [{ text: 'describe this' }] },
+          systemPayload: {
+            displayText: 'describe this',
+            hookContext: '',
+            attachmentReferences: [
+              {
+                type: 'image',
+                attachmentId: 'media-1',
+                mimeType: 'image/png',
+                size: 3,
+              },
+            ],
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'describe this' },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'image',
+            attachmentId: 'media-1',
+            mimeType: 'image/png',
+            size: 3,
+          },
+        },
+      ]);
+    });
+
+    it('replays file attachment references for hydration and preview', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-file-ref', 'user', {
+          message: {
+            role: 'user',
+            parts: [{ text: 'check\n\n@attachment:///notes.json' }],
+          },
+          systemPayload: {
+            displayText: 'check\n\n@attachment:///notes.json',
+            hookContext: '',
+            attachmentReferences: [
+              {
+                type: 'resource',
+                attachmentId: 'notes.json',
+                mimeType: 'application/json',
+                size: 6,
+              },
+            ],
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'text',
+            text: 'check',
+          },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'resource',
+            attachmentId: 'notes.json',
+            mimeType: 'application/json',
+            size: 6,
+          },
+        },
+      ]);
+    });
 
     it('replaces text parts with displayText while preserving image parts', () => {
       // displayText must replace all model-facing text while the image part
@@ -624,6 +976,116 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
+  it('replays attachment references from a mid-turn user record', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('mid-turn-media', 'user', {
+        subtype: 'mid_turn_user_message',
+        message: { role: 'user', parts: [{ text: 'inspect image' }] },
+        systemPayload: {
+          displayText: 'inspect image',
+          attachmentReferences: [
+            {
+              type: 'image',
+              attachmentId: 'media-1',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'inspect image' },
+        _meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'image',
+          attachmentId: 'media-1',
+          mimeType: 'image/png',
+          size: 3,
+        },
+        _meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+    ]);
+  });
+
+  it('replays an image-only mid-turn record without its synthetic prefix', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('mid-turn-image-only', 'user', {
+        subtype: 'mid_turn_user_message',
+        message: {
+          role: 'user',
+          parts: [{ text: '[User message received during tool execution]: ' }],
+        },
+        systemPayload: {
+          displayText: '',
+          attachmentReferences: [
+            {
+              type: 'image',
+              attachmentId: 'media-only',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'image',
+          attachmentId: 'media-only',
+          mimeType: 'image/png',
+          size: 3,
+        },
+        _meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+    ]);
+  });
+
+  it('falls back to inline parts for an image-only mid-turn record without references', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('mid-turn-inline-image-only', 'user', {
+        subtype: 'mid_turn_user_message',
+        message: {
+          role: 'user',
+          parts: [{ inlineData: { data: 'AQID', mimeType: 'image/png' } }],
+        },
+        systemPayload: { displayText: '' },
+      }),
+    );
+
+    expect(projected).toMatchObject([
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        _meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+    ]);
+  });
+
   it('projects ordered message parts with source metadata', () => {
     const machine = createTranscriptReplayMachine();
     const projected = updates(
@@ -686,6 +1148,93 @@ describe('createTranscriptReplayMachine', () => {
       }),
     );
     expect([...machine.finalize()]).toEqual([]);
+  });
+
+  it('skips finalize for selected ask_user_question call ids', () => {
+    const machine = createTranscriptReplayMachine({
+      skipFinalizeCallIds: new Set(['call-auq']),
+    });
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+            {
+              functionCall: {
+                id: 'call-bash',
+                name: 'run_shell_command',
+                args: { command: 'ls' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    const finalized = [...machine.finalize()].map((item) => item.update);
+    expect(finalized).toHaveLength(1);
+    expect(finalized[0]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-bash',
+      status: 'failed',
+    });
+    expect(machine.snapshot().pendingToolCalls).toEqual([
+      expect.objectContaining({ callId: 'call-auq' }),
+    ]);
+  });
+
+  it('matches the skip set against raw transcript ids after dedup renames', () => {
+    const machine = createTranscriptReplayMachine({
+      skipFinalizeCallIds: new Set(['call-auq']),
+    });
+    // Two dangling calls with the SAME transcript id: the second is renamed
+    // to `call-auq:2`, but the skip set (derived from chat history) holds
+    // the raw id, so both must stay pending.
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      }),
+    );
+    updates(
+      machine,
+      record('assistant-2', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    expect([...machine.finalize()]).toEqual([]);
+    expect(machine.snapshot().pendingToolCalls).toHaveLength(2);
   });
 
   it('correlates an id-less result only to one same-name pending call', () => {
@@ -812,6 +1361,33 @@ describe('createTranscriptReplayMachine', () => {
       }),
     );
     expect(machine.snapshot().goalState).toBeUndefined();
+  });
+
+  it('drops a malformed goalCause from initialState and reports it', () => {
+    const onDiagnostic = vi.fn();
+    const machine = createTranscriptReplayMachine({
+      onDiagnostic,
+      initialState: {
+        v: 1,
+        pendingToolCalls: [],
+        cumulativeUsage: {
+          promptTokens: 0,
+          cachedTokens: 0,
+          candidateTokens: 0,
+          apiTimeMs: 0,
+        },
+        goalCause: 'bogus',
+      } as unknown as TranscriptReplayStateV1,
+    });
+
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'invalid_replay_state',
+        message: 'Dropped a malformed Goal cause from replay state.',
+        affectsCompleteness: true,
+      }),
+    );
+    expect(machine.snapshot().goalCause).toBeUndefined();
   });
 
   it('emits gaps, todo plans, and cumulative usage deterministically', () => {

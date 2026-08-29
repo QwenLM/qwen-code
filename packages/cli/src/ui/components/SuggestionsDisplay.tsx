@@ -8,6 +8,7 @@ import { useRef } from 'react';
 import { Box, Text, type DOMElement } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { RowMouseController } from './shared/RowMouseController.js';
+import { CompletionCategoryMouseController } from './CompletionCategoryMouseController.js';
 import { PrepareLabel, MAX_WIDTH } from './PrepareLabel.js';
 import { Colors } from '../colors.js';
 import { t } from '../../i18n/index.js';
@@ -45,6 +46,8 @@ interface SuggestionsDisplayProps {
   activeCategory?: SuggestionCategory | 'all';
   /** Ordered list of tabs to show. The tab bar renders only when >2 entries. */
   availableCategories?: Array<SuggestionCategory | 'all'>;
+  /** Activate an exact category tab on click (mouse). */
+  onSelectCategory?: (category: SuggestionCategory | 'all') => void;
 }
 
 function categoryLabel(cat: SuggestionCategory | 'all'): string {
@@ -98,9 +101,11 @@ export function SuggestionsDisplay({
   mouseEnabled,
   activeCategory = 'all',
   availableCategories,
+  onSelectCategory,
 }: SuggestionsDisplayProps) {
   const containerRef = useRef<DOMElement | null>(null);
   const itemRefs = useRef<Array<DOMElement | null>>([]);
+  const categoryRefs = useRef<Array<DOMElement | null>>([]);
 
   if (isLoading) {
     return (
@@ -170,12 +175,29 @@ export function SuggestionsDisplay({
           onSelectIndex={onSelectIndex}
         />
       )}
+      {mouseEnabled &&
+        showTabBar &&
+        availableCategories &&
+        onSelectCategory && (
+          <CompletionCategoryMouseController
+            containerRef={containerRef}
+            categoryRefs={categoryRefs}
+            categories={availableCategories}
+            onSelectCategory={onSelectCategory}
+          />
+        )}
       {showTabBar && availableCategories && (
         <Box flexDirection="row" marginBottom={1}>
           {availableCategories.map((cat, i) => {
             const active = cat === activeCategory;
             return (
-              <Box key={cat} marginLeft={i === 0 ? 0 : 1}>
+              <Box
+                key={cat}
+                marginLeft={i === 0 ? 0 : 1}
+                ref={(node) => {
+                  categoryRefs.current[i] = node;
+                }}
+              >
                 <Text
                   color={
                     active ? theme.background.primary : theme.text.secondary
@@ -187,12 +209,10 @@ export function SuggestionsDisplay({
               </Box>
             );
           })}
-          {/* Mention Ctrl+Tab as an alternative since many terminals
-              intercept Ctrl+←/→ for word-jump (#8069). */}
+          {/* Bare ←/→: the original Ctrl+←/→ was unreachable because terminals
+              and macOS Mission Control intercept it (#8069). */}
           <Box marginLeft={2}>
-            <Text color={theme.text.secondary}>
-              {t('(Ctrl+Tab / Ctrl+Shift+Tab or Ctrl+←/→ to switch)')}
-            </Text>
+            <Text color={theme.text.secondary}>{t('(←/→ to switch)')}</Text>
           </Box>
         </Box>
       )}

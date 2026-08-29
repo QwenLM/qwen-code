@@ -3,15 +3,21 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type {
-  AvailableCommand,
-  BridgeSessionInfo,
-  ChannelAgentBridge,
-  ChannelAgentBridgeSessionOptions,
-  ChannelLoopToolHandler,
-  ToolCallEvent,
+import {
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  resolvePromptImages,
+  type AvailableCommand,
+  type BridgeSessionInfo,
+  type ChannelAgentBridge,
+  type ChannelAgentBridgePromptOptions,
+  type ChannelAgentBridgeSessionOptions,
+  type ChannelLoopToolHandler,
+  type ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import { readAvailableCommandAltNames } from './AcpBridge.js';
+import { sanitizeLogText } from './sanitize.js';
 import {
   ChannelLoopMcpServer,
   type JsonRpcMessage,
@@ -35,9 +41,17 @@ export interface DaemonChannelSessionClient {
   prompt(
     req: {
       prompt: Array<Record<string, unknown>>;
+      _meta?: Record<string, unknown>;
     },
     signal?: AbortSignal,
   ): Promise<{ stopReason?: string; [key: string]: unknown }>;
+  uploadAttachment?(
+    data: Blob,
+    name: string,
+    mimeType: string,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>>;
+  removeAttachment?(attachmentId: string): Promise<boolean>;
   events(opts?: {
     signal?: AbortSignal;
     lastEventId?: number;
@@ -62,7 +76,7 @@ export interface DaemonChannelSessionFactoryRequest {
   sessionId?: string;
   sessionScope?: SessionScope;
   approvalMode?: string;
-  /** Channel instance name stamped as daemon `sourceId` (new sessions only). */
+  /** Channel instance name stamped as daemon `sourceId`. */
   sourceId?: string;
 }
 
@@ -84,6 +98,14 @@ export interface DaemonChannelBridgeOptions {
   modelServiceId?: string;
   sessionScope?: SessionScope;
   channelLoopMcpHost?: DaemonChannelLoopMcpHost;
+  deleteSessionData?: (sessionId: string) => Promise<void>;
+  promptAuthorization?: string;
+  /**
+   * The daemon advertises the `session_attachments` capability. Daemons
+   * predating the attachment upload routes receive prompt images inline
+   * instead, as before the upload path existed.
+   */
+  sessionAttachments?: boolean;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -116,6 +138,80 @@ function getTextContent(content: unknown): string | undefined {
     return undefined;
   }
   return getString(content['text']);
+}
+
+// Mirrors the daemon attachment store's SUPPORTED_IMAGE_MIME_TYPES
+// (packages/acp-bridge/src/sessionAttachments.ts): the store rejects uploads
+// outside that set, and channels/base keeps no acp-bridge dependency, so the
+// set is repeated here and checked before uploading.
+const CHANNEL_IMAGE_EXTENSIONS = ['bmp', 'gif', 'jpeg', 'png', 'webp'];
+
+// Mirrors the store's SESSION_ATTACHMENT_MAX_ITEM_BYTES and empty-image
+// rejection (same file): checked before delivery so one inadmissible image
+// degrades by omission instead of failing the whole turn.
+const CHANNEL_IMAGE_MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+
+// Daemons without `session_attachments` parse the prompt body with
+// express.json({ limit: '10mb' }), so the inline fallback keeps the
+// aggregate base64 payload below that cap with headroom for the text
+// prompt and the JSON envelope.
+const CHANNEL_IMAGE_INLINE_MAX_BASE64_BYTES = 8 * 1024 * 1024;
+
+function channelImageName(mimeType: string, index = 0): string | undefined {
+  if (!mimeType.startsWith('image/')) {
+    return undefined;
+  }
+  const extension = mimeType.slice('image/'.length);
+  if (!CHANNEL_IMAGE_EXTENSIONS.includes(extension)) {
+    return undefined;
+  }
+  return index === 0 ? `image.${extension}` : `image-${index + 1}.${extension}`;
+}
+
+function decodeChannelImage(
+  data: string,
+  oversizedReason: string,
+): { bytes: Buffer } | { skip: string } {
+  // Valid base64 decodes to at most this many bytes, so an oversized image
+  // is rejected on length alone instead of allocating a buffer the size
+  // check would discard. Padding is subtracted only when the input length
+  // completes a quantum: Node's decoder ignores a stray trailing '=' on
+  // malformed input, and counting it would undercount the decoded size.
+  let estimatedBytes = Math.floor((data.length * 3) / 4);
+  if (data.length % 4 === 0) {
+    if (data.endsWith('==')) estimatedBytes -= 2;
+    else if (data.endsWith('=')) estimatedBytes -= 1;
+  }
+  if (estimatedBytes > CHANNEL_IMAGE_MAX_UPLOAD_BYTES) {
+    return { skip: oversizedReason };
+  }
+  const bytes = Buffer.from(data, 'base64');
+  if (bytes.byteLength === 0) {
+    return { skip: 'empty once base64-decoded' };
+  }
+  return { bytes };
+}
+
+/**
+ * Structural match for the daemon SDK's definite prompt-admission
+ * rejections: `DaemonHttpError` from the admission request itself, or
+ * `DaemonPendingPromptLimitError` raised before any request. channels/base
+ * keeps no dependency on the SDK, so match by shape; post-admission turn
+ * errors carry `_daemonTurnError` and must NOT match — by then the daemon
+ * may already have resolved the uploaded attachments.
+ */
+function isDefinitePromptAdmissionRejection(error: unknown): boolean {
+  if (!isRecord(error)) {
+    return false;
+  }
+  if (error['name'] === 'DaemonPendingPromptLimitError') {
+    return true;
+  }
+  return (
+    error['name'] === 'DaemonHttpError' &&
+    typeof error['status'] === 'number' &&
+    error['_daemonTurnError'] !== true
+  );
 }
 
 function getSessionUpdate(data: unknown): Record<string, unknown> | undefined {
@@ -221,20 +317,26 @@ export class DaemonChannelBridge
   >();
   private readonly turnBarriers = new Map<string, () => void>();
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
+  private readonly channelLoopDisabledSessions = new Set<string>();
   private readonly registeredChannelLoopMcpSessions = new Set<string>();
-  private readonly channelLoopMcpRegistrations = new Map<
-    string,
-    Promise<void>
-  >();
+  private readonly channelLoopMcpOperations = new Map<string, Promise<void>>();
   private channelLoopMcpServer: ChannelLoopMcpServer | undefined;
   private connected = false;
   private lifecycleGeneration = 0;
   private latestAvailableCommandsSessionId: string | undefined;
   private lastError: unknown;
+  readonly deleteSessionData?: (sessionId: string) => Promise<void>;
 
   constructor(options: DaemonChannelBridgeOptions) {
     super();
     this.options = options;
+    const deleteSessionData = options.deleteSessionData;
+    if (deleteSessionData) {
+      this.deleteSessionData = async (sessionId) => {
+        await deleteSessionData(sessionId);
+        this.removeSessionBinding(sessionId);
+      };
+    }
     this.on('error', (error) => {
       this.lastError = error;
     });
@@ -292,7 +394,12 @@ export class DaemonChannelBridge
       await this.rejectStaleSession(session);
     }
     this.attachSession(session, bindingToken);
-    await this.registerChannelLoopMcpForSession(session.sessionId);
+    if (options?.enableChannelLoops === false) {
+      this.channelLoopDisabledSessions.add(session.sessionId);
+      void this.reconcileChannelLoopMcpForSession(session.sessionId);
+    } else {
+      await this.reconcileChannelLoopMcpForSession(session.sessionId);
+    }
     return session.sessionId;
   }
 
@@ -309,6 +416,7 @@ export class DaemonChannelBridge
       sessionId,
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
+      ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
     });
     if (lifecycleGeneration !== this.lifecycleGeneration) {
       await this.rejectStaleSession(session);
@@ -322,7 +430,12 @@ export class DaemonChannelBridge
       );
     }
     this.attachSession(session, bindingToken);
-    await this.registerChannelLoopMcpForSession(session.sessionId);
+    if (options?.enableChannelLoops === false) {
+      this.channelLoopDisabledSessions.add(session.sessionId);
+      void this.reconcileChannelLoopMcpForSession(session.sessionId);
+    } else {
+      await this.reconcileChannelLoopMcpForSession(session.sessionId);
+    }
     return session.sessionId;
   }
 
@@ -339,14 +452,16 @@ export class DaemonChannelBridge
         this.resolveChannelLoopToolHandler(sessionId).cancel(sessionId, id),
     });
     for (const sessionId of this.sessions.keys()) {
-      void this.registerChannelLoopMcpForSession(sessionId);
+      if (!this.channelLoopDisabledSessions.has(sessionId)) {
+        void this.reconcileChannelLoopMcpForSession(sessionId);
+      }
     }
   }
 
   async prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: ChannelAgentBridgePromptOptions,
   ): Promise<string> {
     const session = this.ensureSession(sessionId);
     if (this.activePrompts.has(sessionId)) {
@@ -392,19 +507,153 @@ export class DaemonChannelBridge
     this.on('responseBoundary', clearChunks);
     this.on('sessionDied', onSessionDied);
     const turnBarrier = this.createTurnBarrier(sessionId);
-
-    const prompt: Array<Record<string, unknown>> = [];
-    if (options?.imageBase64 && options.imageMimeType) {
-      prompt.push({
-        type: 'image',
-        data: options.imageBase64,
-        mimeType: options.imageMimeType,
-      });
-    }
-    prompt.push({ type: 'text', text });
+    const uploadedAttachmentIds: string[] = [];
+    let rollbackUploadedAttachments = false;
+    const uploadAttachment = session.uploadAttachment?.bind(session);
+    const removeAttachment = session.removeAttachment?.bind(session);
 
     try {
-      const result = await session.prompt({ prompt }, controller.signal);
+      const prompt: Array<Record<string, unknown>> = [];
+      const images = resolvePromptImages(options);
+      if (
+        this.options.sessionAttachments &&
+        uploadAttachment &&
+        removeAttachment
+      ) {
+        try {
+          // Fan the uploads out like the webui's attachment path: names are
+          // index-disambiguated and prompt order comes from the array order,
+          // so nothing serializes the uploads themselves.
+          const uploads = await Promise.allSettled(
+            images.map(async (image, index) => {
+              const name = channelImageName(image.mimeType, index);
+              if (!name) {
+                // One unrecognized subtype must not fail the whole turn;
+                // degrade by omission.
+                process.stderr.write(
+                  `[DaemonChannelBridge] skipped channel image with unsupported MIME type ${sanitizeLogText(image.mimeType, 128)} for session ${sanitizeLogText(sessionId, 128)}\n`,
+                );
+                return undefined;
+              }
+              const decoded = decodeChannelImage(
+                image.data,
+                'above the daemon attachment size limit',
+              );
+              if ('skip' in decoded) {
+                process.stderr.write(
+                  `[DaemonChannelBridge] skipped channel image ${decoded.skip} ${sanitizeLogText(image.mimeType, 128)} for session ${sanitizeLogText(sessionId, 128)}\n`,
+                );
+                return undefined;
+              }
+              const attachment = await uploadAttachment(
+                new Blob([decoded.bytes], {
+                  type: image.mimeType,
+                }),
+                name,
+                image.mimeType,
+                controller.signal,
+              );
+              const attachmentId = getString(attachment['attachmentId']);
+              if (attachmentId) uploadedAttachmentIds.push(attachmentId);
+              return attachment;
+            }),
+          );
+          const failure = uploads.find(
+            (upload): upload is PromiseRejectedResult =>
+              upload.status === 'rejected',
+          );
+          if (failure) {
+            throw failure.reason;
+          }
+          for (const upload of uploads) {
+            if (upload.status === 'fulfilled' && upload.value) {
+              prompt.push(upload.value);
+            }
+          }
+        } catch (error) {
+          rollbackUploadedAttachments = true;
+          throw error;
+        }
+      } else {
+        // Daemons without `session_attachments` take images inline.
+        let inlineBase64Bytes = 0;
+        for (const image of images) {
+          const decoded = decodeChannelImage(
+            image.data,
+            'above the inline image budget',
+          );
+          if ('skip' in decoded) {
+            process.stderr.write(
+              `[DaemonChannelBridge] skipped channel image ${decoded.skip} ${sanitizeLogText(image.mimeType, 128)} for session ${sanitizeLogText(sessionId, 128)}\n`,
+            );
+            continue;
+          }
+          if (
+            inlineBase64Bytes + image.data.length >
+            CHANNEL_IMAGE_INLINE_MAX_BASE64_BYTES
+          ) {
+            process.stderr.write(
+              `[DaemonChannelBridge] skipped channel image to keep the inline prompt under the daemon body limit ${sanitizeLogText(image.mimeType, 128)} for session ${sanitizeLogText(sessionId, 128)}\n`,
+            );
+            continue;
+          }
+          inlineBase64Bytes += image.data.length;
+          prompt.push({
+            type: 'image',
+            data: image.data,
+            mimeType: image.mimeType,
+          });
+        }
+      }
+      prompt.push({ type: 'text', text });
+      if (controller.signal.aborted) {
+        rollbackUploadedAttachments = true;
+        controller.signal.throwIfAborted();
+      }
+      // Always presented: the daemon validates it for the channel-turn
+      // classification as well as the display projection, and channel
+      // prompts without display text still need the classification.
+      const promptAuthorization = this.options.promptAuthorization;
+
+      // Aborted after the uploads settled but before admission: the SDK
+      // rejects an already-aborted signal with a pre-request AbortError that
+      // isDefinitePromptAdmissionRejection does not match, so the uploads
+      // would leak. Non-admission is certain at this point; roll back.
+      if (controller.signal.aborted) {
+        rollbackUploadedAttachments = true;
+        throw controller.signal.reason;
+      }
+
+      let result: { stopReason?: string; [key: string]: unknown };
+      try {
+        result = await session.prompt(
+          {
+            prompt,
+            _meta: {
+              [CHANNEL_PROMPT_META_KEY]: true,
+              ...(promptAuthorization
+                ? {
+                    [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]:
+                      promptAuthorization,
+                  }
+                : {}),
+              ...(options?.displayText !== undefined
+                ? {
+                    [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
+                  }
+                : {}),
+            },
+          },
+          controller.signal,
+        );
+      } catch (error) {
+        // Roll back only when the turn was never admitted; once admitted the
+        // daemon may already have resolved the uploads.
+        if (isDefinitePromptAdmissionRejection(error)) {
+          rollbackUploadedAttachments = true;
+        }
+        throw error;
+      }
       // Prefer turn_complete for deterministic chunk collection (SSE path).
       // Fall back to one event-loop tick for non-SSE prompt paths (blocking
       // HTTP, non-202 responses) where turn_complete never arrives.
@@ -432,6 +681,24 @@ export class DaemonChannelBridge
         this.activePromptControllers.get(sessionId) === controllers
       ) {
         this.activePromptControllers.delete(sessionId);
+      }
+      if (rollbackUploadedAttachments && removeAttachment) {
+        const removals = await Promise.allSettled(
+          uploadedAttachmentIds.map((attachmentId) =>
+            removeAttachment(attachmentId),
+          ),
+        );
+        removals.forEach((removal, index) => {
+          if (removal.status === 'rejected') {
+            const reason =
+              removal.reason instanceof Error
+                ? removal.reason.message
+                : String(removal.reason);
+            process.stderr.write(
+              `[DaemonChannelBridge] failed to remove channel image ${sanitizeLogText(uploadedAttachmentIds[index] ?? '', 128)} for session ${sanitizeLogText(sessionId, 128)} during rollback: ${sanitizeLogText(reason, 256)}\n`,
+            );
+          }
+        });
       }
     }
   }
@@ -700,6 +967,8 @@ export class DaemonChannelBridge
             text
           ) {
             this.emit('backgroundResponse', sessionId, text);
+          } else if (meta['source'] === 'vision_bridge_notice' && text) {
+            this.emit('textChunk', sessionId, text);
           }
           break;
         }
@@ -928,6 +1197,7 @@ export class DaemonChannelBridge
     this.eventControllers.delete(sessionId);
     this.sessions.delete(sessionId);
     this.sessionBindingTokens.delete(sessionId);
+    this.channelLoopDisabledSessions.delete(sessionId);
     this.abortActivePrompts(sessionId);
     this.activePrompts.delete(sessionId);
     this.availableCommandsBySession.delete(sessionId);
@@ -947,63 +1217,65 @@ export class DaemonChannelBridge
       }
     }
     if (unregisterChannelLoopMcp) {
-      this.unregisterChannelLoopMcpForSession(sessionId);
+      void this.reconcileChannelLoopMcpForSession(sessionId);
     }
     return session;
   }
 
-  private async registerChannelLoopMcpForSession(
-    sessionId: string,
-  ): Promise<void> {
-    const host = this.options.channelLoopMcpHost;
-    const server = this.channelLoopMcpServer;
-    if (
-      !host ||
-      !server ||
-      this.registeredChannelLoopMcpSessions.has(sessionId)
-    ) {
-      return;
-    }
-    const pending = this.channelLoopMcpRegistrations.get(sessionId);
-    if (pending) {
-      await pending;
-      return;
-    }
-    const registration = host
-      .register(sessionId, (message) =>
-        server.handleMessage(message, { sessionId }),
-      )
+  private reconcileChannelLoopMcpForSession(sessionId: string): Promise<void> {
+    const previous =
+      this.channelLoopMcpOperations.get(sessionId) ?? Promise.resolve();
+    const operation = previous
+      .catch(() => undefined)
       .then(async () => {
-        if (this.sessions.has(sessionId)) {
-          this.registeredChannelLoopMcpSessions.add(sessionId);
-        } else {
+        const host = this.options.channelLoopMcpHost;
+        const server = this.channelLoopMcpServer;
+        const shouldRegister =
+          host !== undefined &&
+          server !== undefined &&
+          this.sessions.has(sessionId) &&
+          !this.channelLoopDisabledSessions.has(sessionId);
+        if (!shouldRegister) {
+          if (host && this.registeredChannelLoopMcpSessions.has(sessionId)) {
+            await host.unregister(sessionId);
+            this.registeredChannelLoopMcpSessions.delete(sessionId);
+          }
+          return;
+        }
+        if (this.registeredChannelLoopMcpSessions.has(sessionId)) return;
+        await host.register(sessionId, (message) =>
+          server.handleMessage(message, { sessionId }),
+        );
+        this.registeredChannelLoopMcpSessions.add(sessionId);
+        if (
+          !this.sessions.has(sessionId) ||
+          this.channelLoopDisabledSessions.has(sessionId)
+        ) {
           await host.unregister(sessionId);
+          this.registeredChannelLoopMcpSessions.delete(sessionId);
         }
       })
       .catch((error: unknown) => {
         this.lastError = error;
       })
       .finally(() => {
-        if (this.channelLoopMcpRegistrations.get(sessionId) === registration) {
-          this.channelLoopMcpRegistrations.delete(sessionId);
+        if (this.channelLoopMcpOperations.get(sessionId) === operation) {
+          this.channelLoopMcpOperations.delete(sessionId);
         }
       });
-    this.channelLoopMcpRegistrations.set(sessionId, registration);
-    await registration;
-  }
-
-  private unregisterChannelLoopMcpForSession(sessionId: string): void {
-    if (!this.registeredChannelLoopMcpSessions.delete(sessionId)) return;
-    void this.options.channelLoopMcpHost
-      ?.unregister(sessionId)
-      .catch((error: unknown) => {
-        this.lastError = error;
-      });
+    this.channelLoopMcpOperations.set(sessionId, operation);
+    return operation;
   }
 
   private resolveChannelLoopToolHandler(
     sessionId: string,
   ): ChannelLoopToolHandler {
+    if (
+      !this.sessions.has(sessionId) ||
+      this.channelLoopDisabledSessions.has(sessionId)
+    ) {
+      throw new Error('Channel loop tools are unavailable for this session');
+    }
     const handler = this.channelLoopToolHandlers.find(
       (candidate) =>
         candidate.canHandle?.(sessionId) === true ||

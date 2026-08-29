@@ -9,11 +9,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockDebugLogger } = vi.hoisted(() => ({
+const { mockDebugLogger, mockAddDaemonRequestAttribute } = vi.hoisted(() => ({
   mockDebugLogger: {
     debug: vi.fn(),
     warn: vi.fn(),
   },
+  mockAddDaemonRequestAttribute: vi.fn(),
 }));
 
 const { statFault } = vi.hoisted(() => ({
@@ -24,10 +25,15 @@ vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 
+vi.mock('../telemetry/daemon-tracing.js', () => ({
+  addDaemonRequestAttribute: mockAddDaemonRequestAttribute,
+}));
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    open: vi.fn(actual.open),
     stat: async (...args: Parameters<typeof actual.stat>) => {
       const result = await actual.stat(...args);
       if (statFault.zeroInode) {
@@ -41,6 +47,20 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
+  buildApiHistoryFromConversation,
+  getResumeTokenCounts,
+  SessionService,
+} from './sessionService.js';
+import { collectSessionTurnState } from './session-turn-state.js';
+import { recoverGoalFromRecords } from '../goals/goal-persistence.js';
+import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
+import { buildGoalEvidenceCheckpointWindow } from '../goals/goal-evidence.js';
+import {
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  stableSessionArtifactId,
+} from './session-artifact-persistence.js';
+import {
+  clearSessionTranscriptIndexCacheEntriesForTest,
   encodeSessionTranscriptCursor,
   getSessionTranscriptIndexCacheStatsForTest,
   InvalidSessionTranscriptCursorError,
@@ -48,8 +68,11 @@ import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   resetSessionTranscriptIndexCacheForTest,
+  setSessionTranscriptCooperativeReadBudgetForTest,
   setSessionTranscriptExpandedPageBytesForTest,
+  setSessionTranscriptIndexBuildCompleteHookForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
+  setSessionTranscriptSelectedLineReadHookForTest,
   SessionTranscriptCursorCodec,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptReader,
@@ -124,6 +147,7 @@ describe('SessionTranscriptReader', () => {
       sessionId: targetSessionId,
       timestamp: new Date(RECORD_BASE_MS + recordSeq++ * 1000).toISOString(),
       type: uuid.startsWith('a') ? 'assistant' : 'user',
+      provenance: uuid.startsWith('a') ? 'assistant_output' : 'real_user',
       cwd: workspaceDir,
       version: '1.0.0',
       message: {
@@ -409,6 +433,7 @@ describe('SessionTranscriptReader', () => {
             evidenceCursor: { recordId: null },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1,
             updatedAt: 1,
           },
@@ -452,6 +477,7 @@ describe('SessionTranscriptReader', () => {
         activity: 'idle',
         goal: { objective: 'ship backward replay' },
       },
+      goalCause: 'create',
     });
   });
 
@@ -475,6 +501,7 @@ describe('SessionTranscriptReader', () => {
             evidenceCursor: { recordId: null },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1,
             updatedAt: 1,
           },
@@ -503,6 +530,7 @@ describe('SessionTranscriptReader', () => {
             evidenceCursor: { recordId: null },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1,
             updatedAt: 1,
           },
@@ -599,6 +627,1535 @@ describe('SessionTranscriptReader', () => {
     expect(page.hasMore).toBe(false);
   });
 
+  it('derives the side-task boundary from the active chain', async () => {
+    const sessionSource = {
+      ...record('source', null, 'session source'),
+      type: 'system' as const,
+      subtype: 'session_source' as const,
+      systemPayload: {
+        sourceType: 'side_task',
+        sourceId: 'parent-session',
+      },
+    };
+    const inheritedUser = {
+      ...record('parent-u1', 'source', 'parent prompt'),
+      forkedFrom: {
+        sessionId: 'parent-session',
+        messageUuid: 'parent-u1',
+      },
+    };
+    const deadBranchSource = {
+      ...record('dead-source', 'parent-u1', 'dead source'),
+      type: 'system' as const,
+      subtype: 'session_source' as const,
+      systemPayload: {
+        sourceType: 'side_task',
+        sourceId: 'abandoned-parent',
+      },
+    };
+    await writeRecords([
+      sessionSource,
+      inheritedUser,
+      record('side-u1', 'parent-u1', 'side prompt'),
+      deadBranchSource,
+      record('side-a1', 'side-u1', 'side answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 100 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'source',
+      'side-u1',
+      'side-a1',
+    ]);
+  });
+
+  it('derives a fragmented session source from the first fragment', async () => {
+    const source: ChatRecord = {
+      ...record('source', null, ''),
+      type: 'system',
+      subtype: 'session_source',
+      message: undefined,
+      systemPayload: { sourceType: 'daemon' },
+    };
+    const conflictingFragment: ChatRecord = {
+      ...source,
+      systemPayload: { sourceType: 'side_task', sourceId: 'parent-session' },
+    };
+    const inherited = {
+      ...record('parent-u1', 'source', 'parent prompt'),
+      forkedFrom: {
+        sessionId: 'parent-session',
+        messageUuid: 'parent-u1',
+      },
+    };
+    await writeRecords([
+      source,
+      conflictingFragment,
+      inherited,
+      record('u1', 'parent-u1', 'current prompt'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.records.map(({ uuid }) => uuid)).toEqual([
+      'source',
+      'parent-u1',
+      'u1',
+    ]);
+  });
+
+  it('builds a cold runtime projection with full-loader parity', async () => {
+    const source: ChatRecord = {
+      ...record('source', null, 'source'),
+      type: 'system',
+      subtype: 'session_source',
+      message: undefined,
+      systemPayload: { sourceType: 'daemon', sourceId: 'restore-test' },
+    };
+    const firstUser = record('u1', 'source', 'first prompt') as ChatRecord & {
+      promptId: string;
+    };
+    firstUser.promptId = `${sessionId}########3`;
+    const firstAssistant: ChatRecord = {
+      ...record('a1', 'u1', 'first answer'),
+      usageMetadata: {
+        promptTokenCount: 30,
+        candidatesTokenCount: 4,
+        totalTokenCount: 34,
+      },
+    };
+    const compression: ChatRecord = {
+      ...record('compression', 'a1', ''),
+      type: 'system',
+      subtype: 'chat_compression',
+      message: undefined,
+      systemPayload: {
+        compressedHistory: [
+          { role: 'user', parts: [{ text: 'compressed prompt' }] },
+          { role: 'model', parts: [{ text: 'compressed answer' }] },
+        ],
+        info: { newTokenCount: 20, newTokenCountIsEstimated: false },
+      } as ChatRecord['systemPayload'],
+    };
+    const uiEvent = { prompt_id: `${sessionId}########7`, duration_ms: 12 };
+    const telemetry: ChatRecord = {
+      ...record('telemetry', 'compression', ''),
+      type: 'system',
+      subtype: 'ui_telemetry',
+      message: undefined,
+      systemPayload: { uiEvent } as ChatRecord['systemPayload'],
+    };
+    const attributionSnapshot = { v: 1, commits: [] };
+    const attribution: ChatRecord = {
+      ...record('attribution', 'telemetry', ''),
+      type: 'system',
+      subtype: 'attribution_snapshot',
+      message: undefined,
+      systemPayload: {
+        snapshot: attributionSnapshot,
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    const fileHistory: ChatRecord = {
+      ...record('files', 'attribution', ''),
+      type: 'system',
+      subtype: 'file_history_snapshot',
+      message: undefined,
+      systemPayload: {
+        snapshots: [
+          {
+            promptId: `${sessionId}########3`,
+            timestamp: '2026-01-01T00:00:00.000Z',
+            trackedFileBackups: {},
+          },
+        ],
+      },
+    };
+    const goalPayload: GoalStateRecordPayloadV2 = {
+      v: 2,
+      cause: 'create',
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'finish the restore',
+          status: 'active',
+          evidenceCursor: { recordId: 'goal' },
+          turnCount: 1,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    };
+    const goal: ChatRecord = {
+      ...record('goal', 'files', ''),
+      type: 'system',
+      subtype: 'goal_state',
+      message: undefined,
+      systemPayload: goalPayload,
+    };
+    const notification: ChatRecord = {
+      ...record('notification', 'goal', 'background result'),
+      subtype: 'notification',
+      systemPayload: {
+        backgroundTask: { taskId: 'task-1' },
+      } as ChatRecord['systemPayload'],
+    };
+    const artifactId = stableSessionArtifactId(
+      sessionId,
+      'url:https://example.com/report',
+    );
+    const artifact: ChatRecord = {
+      ...record('artifact', 'notification', ''),
+      type: 'system',
+      subtype: 'session_artifact_event',
+      message: undefined,
+      systemPayload: {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId,
+        sequence: 1,
+        recordedAt: '2026-01-01T00:00:01.000Z',
+        changes: [
+          {
+            action: 'created',
+            artifactId,
+            artifact: {
+              id: artifactId,
+              kind: 'link',
+              storage: 'external_url',
+              source: 'client',
+              status: 'available',
+              title: 'Report',
+              url: 'https://example.com/report',
+              retention: 'restorable',
+              clientRetained: true,
+              createdAt: '2026-01-01T00:00:01.000Z',
+              updatedAt: '2026-01-01T00:00:01.000Z',
+              persistedAt: '2026-01-01T00:00:01.000Z',
+            },
+          },
+        ],
+      },
+    };
+    const secondAssistant = record('a2', 'notification', 'after compression');
+    const title: ChatRecord = {
+      ...record('title', 'a2', ''),
+      type: 'system',
+      subtype: 'custom_title',
+      message: undefined,
+      systemPayload: { customTitle: 'Restored', titleSource: 'manual' },
+    };
+    await writeRecords([
+      source,
+      firstUser,
+      firstAssistant,
+      compression,
+      telemetry,
+      attribution,
+      fileHistory,
+      goal,
+      notification,
+      artifact,
+      secondAssistant,
+      title,
+    ]);
+
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const [loaded, projection] = await Promise.all([
+      service.loadSession(sessionId),
+      service.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      }),
+    ]);
+
+    expect(loaded).toBeDefined();
+    expect(projection).toBeDefined();
+    expect(projection?.replay).toBeUndefined();
+    expect(projection?.runtime.apiHistory).toEqual(
+      buildApiHistoryFromConversation(loaded!.conversation),
+    );
+    expect(projection?.runtime.resumeTokenCounts).toEqual(
+      getResumeTokenCounts(loaded!.conversation),
+    );
+    expect(projection?.runtime.fileHistorySnapshots).toEqual(
+      loaded?.fileHistorySnapshots,
+    );
+    expect(projection?.runtime.artifactSnapshot).toEqual(
+      loaded?.artifactSnapshot,
+    );
+    expect(projection?.runtime.recording.lastCompletedUuid).toBe(
+      loaded?.lastCompletedUuid,
+    );
+    const expectedTurnState = collectSessionTurnState(
+      loaded!.conversation.messages,
+      sessionId,
+    );
+    expect(projection?.runtime.recording.turnParentUuids).toEqual(
+      expectedTurnState.turnParentUuids,
+    );
+    expect(projection?.runtime.initialTurn).toBe(expectedTurnState.initialTurn);
+    expect(projection?.runtime.backgroundNotificationTaskIds).toEqual(
+      expectedTurnState.backgroundNotificationTaskIds,
+    );
+    expect(projection?.runtime.uiTelemetryEvents).toEqual([uiEvent]);
+    expect(projection?.runtime.attributionSnapshot).toEqual(
+      attributionSnapshot,
+    );
+    expect(projection?.runtime.recording).toMatchObject({
+      customTitle: 'Restored',
+      titleSource: 'manual',
+      sourceType: 'daemon',
+      sourceId: 'restore-test',
+    });
+    expect(recoverGoalFromRecords(projection!.runtime.goalRecords)).toEqual(
+      recoverGoalFromRecords(loaded!.conversation.messages),
+    );
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.transcript_index_ms',
+      expect.any(Number),
+    );
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.resume_state_select_ms',
+      expect.any(Number),
+    );
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.selected_record_read_ms',
+      expect.any(Number),
+    );
+    for (const attribute of [
+      'transcript_bytes',
+      'records_indexed',
+      'active_records',
+      'selected_records',
+      'selected_bytes',
+      'replay_records',
+      'replay_bytes',
+    ]) {
+      expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+        `qwen-code.daemon.session_restore.${attribute}`,
+        expect.any(Number),
+      );
+    }
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.index_cache_state',
+      'fresh',
+    );
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.replay_mode',
+      'none',
+    );
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.compression_selected',
+      expect.any(Boolean),
+    );
+  });
+
+  it('uses the bounded persisted-title picker instead of the full active chain', async () => {
+    const largeText = 'x'.repeat(70 * 1024);
+    const title: ChatRecord = {
+      ...record('title', 'u1', ''),
+      type: 'system',
+      subtype: 'custom_title',
+      message: undefined,
+      systemPayload: { customTitle: 'Middle title', titleSource: 'manual' },
+    };
+    await writeRecords([
+      record('u1', null, largeText),
+      title,
+      record('a1', 'title', largeText),
+    ]);
+
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const projection = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+
+    expect(service.getSessionTitleInfo(sessionId)).toEqual({});
+    expect(projection?.runtime.recording.customTitle).toBeUndefined();
+    expect(projection?.runtime.recording.titleSource).toBeUndefined();
+  });
+
+  it('matches full-loader artifact selection across an abandoned branch', async () => {
+    const activeArtifactId = stableSessionArtifactId(
+      sessionId,
+      'url:https://example.com/active',
+    );
+    const abandonedArtifactId = stableSessionArtifactId(
+      sessionId,
+      'url:https://example.com/abandoned',
+    );
+    const artifactRecord = (
+      uuid: string,
+      parentUuid: string,
+      sequence: number,
+      artifactId: string,
+      url: string,
+    ): ChatRecord => ({
+      ...record(uuid, parentUuid, ''),
+      type: 'system',
+      subtype: 'session_artifact_event',
+      message: undefined,
+      systemPayload: {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId,
+        sequence,
+        recordedAt: `2026-01-01T00:00:0${sequence}.000Z`,
+        changes: [
+          {
+            action: 'created',
+            artifactId,
+            artifact: {
+              id: artifactId,
+              kind: 'link',
+              storage: 'external_url',
+              source: 'client',
+              status: 'available',
+              title: url,
+              url,
+              retention: 'restorable',
+              clientRetained: true,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+              persistedAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
+        ],
+      },
+    });
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      record('a1', 'u1', 'answer'),
+      record('abandoned', 'a1', 'dead branch'),
+      artifactRecord(
+        'abandoned-artifact',
+        'abandoned',
+        2,
+        abandonedArtifactId,
+        'https://example.com/abandoned',
+      ),
+      artifactRecord(
+        'active-artifact',
+        'a1',
+        1,
+        activeArtifactId,
+        'https://example.com/active',
+      ),
+      record('u2', 'a1', 'next prompt'),
+      record('a2', 'u2', 'next answer'),
+    ]);
+
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const [loaded, projection] = await Promise.all([
+      service.loadSession(sessionId),
+      service.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      }),
+    ]);
+
+    expect(projection?.runtime.artifactSnapshot).toEqual(
+      loaded?.artifactSnapshot,
+    );
+    expect(
+      projection?.runtime.artifactSnapshot?.artifacts.map(({ id }) => id),
+    ).toEqual([activeArtifactId]);
+  });
+
+  it('uses a leading artifact record as the restore start time', async () => {
+    const leadingTimestamp = '2025-12-31T23:59:59.000Z';
+    const artifactId = stableSessionArtifactId(
+      sessionId,
+      'url:https://example.com/leading',
+    );
+    const leadingArtifact: ChatRecord = {
+      ...record('leading-artifact', null, ''),
+      timestamp: leadingTimestamp,
+      type: 'system',
+      subtype: 'session_artifact_event',
+      message: undefined,
+      systemPayload: {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId,
+        sequence: 1,
+        recordedAt: leadingTimestamp,
+        changes: [
+          {
+            action: 'created',
+            artifactId,
+            artifact: {
+              id: artifactId,
+              kind: 'link',
+              storage: 'external_url',
+              source: 'client',
+              status: 'available',
+              title: 'Leading artifact',
+              url: 'https://example.com/leading',
+              retention: 'restorable',
+              clientRetained: true,
+              createdAt: leadingTimestamp,
+              updatedAt: leadingTimestamp,
+              persistedAt: leadingTimestamp,
+            },
+          },
+        ],
+      },
+    };
+    await writeRecords([leadingArtifact, record('u1', null, 'prompt')]);
+
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const [loaded, projection] = await Promise.all([
+      service.loadSession(sessionId),
+      service.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      }),
+    ]);
+
+    expect(projection?.startTime).toBe(loaded?.conversation.startTime);
+    expect(projection?.startTime).toBe(leadingTimestamp);
+  });
+
+  it('preserves physical active-fragment markers for artifact selection', async () => {
+    const artifactId = stableSessionArtifactId(
+      sessionId,
+      'url:https://example.com/fragmented',
+    );
+    const artifact: ChatRecord = {
+      ...record('artifact', 'u1', ''),
+      type: 'system',
+      subtype: 'session_artifact_event',
+      message: undefined,
+      systemPayload: {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId,
+        sequence: 1,
+        recordedAt: '2026-01-01T00:00:01.000Z',
+        changes: [
+          {
+            action: 'created',
+            artifactId,
+            artifact: {
+              id: artifactId,
+              kind: 'link',
+              storage: 'external_url',
+              source: 'client',
+              status: 'available',
+              title: 'Fragmented',
+              url: 'https://example.com/fragmented',
+              retention: 'restorable',
+              clientRetained: true,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+              persistedAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
+        ],
+      },
+    };
+    await writeRecords([
+      record('u1', null, 'first fragment'),
+      artifact,
+      record('u1', null, 'second fragment'),
+      record('dead', null, 'abandoned blocker'),
+      record('u1', null, 'final fragment'),
+    ]);
+
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const [loaded, projection] = await Promise.all([
+      service.loadSession(sessionId),
+      service.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      }),
+    ]);
+
+    expect(projection?.runtime.artifactSnapshot).toEqual(
+      loaded?.artifactSnapshot,
+    );
+    expect(
+      projection?.runtime.artifactSnapshot?.artifacts.map(({ id }) => id),
+    ).toEqual([artifactId]);
+  });
+
+  it('selects recent restore replay with an older Goal bootstrap', async () => {
+    const goalPayload: GoalStateRecordPayloadV2 = {
+      v: 2,
+      cause: 'create',
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'continue',
+          status: 'active',
+          evidenceCursor: { recordId: 'goal' },
+          turnCount: 1,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    };
+    await writeRecords([
+      record('u1', null, 'one'),
+      record('a1', 'u1', 'one answer'),
+      {
+        ...record('goal', 'a1', ''),
+        type: 'system',
+        subtype: 'goal_state',
+        message: undefined,
+        systemPayload: goalPayload,
+      },
+      record('u2', 'goal', 'two'),
+      record('a2', 'u2', 'two answer'),
+      record('u3', 'a2', 'three'),
+      record('a3', 'u3', 'three answer'),
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, {
+      replay: {
+        kind: 'recent',
+        limit: 2,
+        hideInheritedHistory: false,
+      },
+    });
+
+    expect(projection?.replay).toMatchObject({
+      records: [
+        expect.objectContaining({ uuid: 'u3' }),
+        expect.objectContaining({ uuid: 'a3' }),
+      ],
+      hasMore: true,
+      anchorRecordId: 'u3',
+      replay: {
+        goalState: goalPayload.snapshot,
+        goalCause: goalPayload.cause,
+      },
+    });
+  });
+
+  it('applies inherited-history filtering only to replay', async () => {
+    const inheritedUser = {
+      ...record('u1', null, 'inherited prompt'),
+      forkedFrom: { sessionId: 'parent', messageUuid: 'u1' },
+    };
+    const inheritedAssistant = {
+      ...record('a1', 'u1', 'inherited answer'),
+      forkedFrom: { sessionId: 'parent', messageUuid: 'a1' },
+    };
+    const inheritedGoal: ChatRecord = {
+      ...record('goal', 'a1', ''),
+      type: 'system',
+      subtype: 'slash_command',
+      message: undefined,
+      forkedFrom: { sessionId: 'parent', messageUuid: 'goal' },
+      systemPayload: {
+        rawCommand: '/goal inherited goal',
+        phase: 'result',
+        outputHistoryItems: [
+          {
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'inherited goal',
+          },
+        ],
+      },
+    };
+    await writeRecords([
+      inheritedUser,
+      inheritedAssistant,
+      inheritedGoal,
+      record('u2', 'goal', 'branch prompt'),
+      record('a2', 'u2', 'branch answer'),
+    ]);
+    const reader = new SessionTranscriptReader(workspaceDir);
+
+    const visible = await reader.readRestoreProjection(sessionId, {
+      replay: { kind: 'all', hideInheritedHistory: false },
+    });
+    const hidden = await reader.readRestoreProjection(sessionId, {
+      replay: { kind: 'all', hideInheritedHistory: true },
+    });
+
+    expect(visible?.replay?.records.map((item) => item.uuid)).toEqual([
+      'u1',
+      'a1',
+      'goal',
+      'u2',
+      'a2',
+    ]);
+    expect(hidden?.replay?.records.map((item) => item.uuid)).toEqual([
+      'u2',
+      'a2',
+    ]);
+    expect(hidden?.runtime.apiHistory).toEqual(visible?.runtime.apiHistory);
+    expect(visible?.runtime.goalRecoverySourceUuid).toBe('goal');
+    expect(hidden?.runtime.goalRecoverySourceUuid).toBe('goal');
+    expect(hidden?.replay?.goalRecoverySourceUuid).toBeUndefined();
+    expect(hidden?.runtime.goalRecords).toEqual([
+      expect.objectContaining({ uuid: 'goal' }),
+    ]);
+
+    const hiddenLive = await reader.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'all', hideInheritedHistory: true },
+    });
+    expect(hiddenLive?.replay?.records.map((item) => item.uuid)).toEqual([
+      'u2',
+      'a2',
+    ]);
+    expect(hiddenLive?.goalRecoverySourceUuid).toBeUndefined();
+    expect(hiddenLive?.goalRecords).toBeUndefined();
+  });
+
+  it('selects Goal bootstrap precedence from filtered visible history', async () => {
+    const visibleGoal: ChatRecord = {
+      ...record('visible-goal', null, ''),
+      type: 'system',
+      subtype: 'slash_command',
+      message: undefined,
+      systemPayload: {
+        rawCommand: '/goal visible goal',
+        phase: 'result',
+        outputHistoryItems: [
+          { type: 'goal_status', kind: 'set', condition: 'visible goal' },
+        ],
+      },
+    };
+    const hiddenGoal: ChatRecord = {
+      ...record('hidden-goal', 'visible-goal', ''),
+      type: 'system',
+      subtype: 'slash_command',
+      message: undefined,
+      forkedFrom: { sessionId: 'parent', messageUuid: 'hidden-goal' },
+      systemPayload: {
+        rawCommand: '/goal hidden goal',
+        phase: 'result',
+        outputHistoryItems: [
+          { type: 'goal_status', kind: 'set', condition: 'hidden goal' },
+        ],
+      },
+    };
+    await writeRecords([
+      record('u0', null, 'older prompt'),
+      record('a0', 'u0', 'older answer'),
+      { ...visibleGoal, parentUuid: 'a0' },
+      hiddenGoal,
+      record('u1', 'hidden-goal', 'branch prompt'),
+      record('a1', 'u1', 'branch answer'),
+      record('u2', 'a1', 'latest prompt'),
+      record('a2', 'u2', 'latest answer'),
+    ]);
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const options = {
+      replay: {
+        kind: 'recent' as const,
+        limit: 2,
+        hideInheritedHistory: true,
+      },
+    };
+
+    const cold = await reader.readRestoreProjection(sessionId, options);
+    const live = await reader.readLiveRestoreProjection(sessionId, options);
+
+    expect(cold?.replay?.records.map((record) => record.uuid)).toEqual([
+      'u2',
+      'a2',
+    ]);
+    expect(cold?.runtime.goalRecoverySourceUuid).toBe('hidden-goal');
+    expect(cold?.replay?.goalRecoverySourceUuid).toBe('visible-goal');
+    expect(cold?.replay?.goalBootstrapRecords).toEqual([
+      expect.objectContaining({ uuid: 'visible-goal' }),
+    ]);
+    expect(live?.goalRecoverySourceUuid).toBe('visible-goal');
+    expect(live?.goalRecords?.map((record) => record.uuid)).toEqual([
+      'visible-goal',
+    ]);
+  });
+
+  it('uses the aggregated final usage metadata when selecting resume tokens', async () => {
+    const earlier = record('a1', 'u1', 'earlier answer');
+    earlier.usageMetadata = {
+      promptTokenCount: 20,
+      candidatesTokenCount: 3,
+    };
+    const latest = record('a2', 'u2', 'latest answer');
+    latest.usageMetadata = {
+      promptTokenCount: 10,
+      candidatesTokenCount: 2,
+    };
+    const latestFragment = record('a2', 'u2', 'latest tail');
+    latestFragment.usageMetadata = {
+      promptTokenCount: 0,
+      totalTokenCount: 0,
+      candidatesTokenCount: 0,
+    };
+    await writeRecords([
+      record('u1', null, 'first'),
+      earlier,
+      record('u2', 'a1', 'second'),
+      latest,
+      latestFragment,
+    ]);
+
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const [loaded, projection] = await Promise.all([
+      service.loadSession(sessionId),
+      service.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      }),
+    ]);
+
+    expect(projection?.runtime.resumeTokenCounts).toEqual(
+      getResumeTokenCounts(loaded!.conversation),
+    );
+    expect(projection?.runtime.resumeTokenCounts).toMatchObject({
+      promptTokenCount: 20,
+    });
+  });
+
+  it('ignores a later non-snapshot attribution record like the full loader', async () => {
+    const snapshot = {
+      type: 'attribution-snapshot' as const,
+      version: 1,
+      surface: 'cli',
+      fileStates: {},
+      promptCount: 2,
+      promptCountAtLastCommit: 1,
+    };
+    const valid: ChatRecord = {
+      ...record('attribution', 'u1', ''),
+      type: 'system',
+      subtype: 'attribution_snapshot',
+      message: undefined,
+      systemPayload: { snapshot },
+    };
+    const malformed: ChatRecord = {
+      ...record('malformed-attribution', 'attribution', ''),
+      type: 'system',
+      subtype: 'attribution_snapshot',
+      message: undefined,
+      systemPayload: {
+        ignored: true,
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      valid,
+      malformed,
+      record('a1', 'malformed-attribution', 'answer'),
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.attributionSnapshot).toEqual(snapshot);
+  });
+
+  it('rejects a cold projection when the frozen transcript changes', async () => {
+    const filePath = await writeRecords([record('u1', null, 'one')]);
+    let appended = false;
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (builtPath !== filePath || appended) return;
+      appended = true;
+      await fs.appendFile(
+        filePath,
+        `${JSON.stringify(record('a1', 'u1', 'late'))}\n`,
+        'utf8',
+      );
+    });
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readRestoreProjection(
+        sessionId,
+        { replay: { kind: 'none' } },
+      ),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual({
+      entries: 0,
+      byteSize: 0,
+    });
+  });
+
+  it('reports a removed frozen transcript as snapshot-unavailable', async () => {
+    const filePath = await writeRecords([record('u1', null, 'one')]);
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (builtPath === filePath) await fs.unlink(filePath);
+    });
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readRestoreProjection(
+        sessionId,
+        { replay: { kind: 'none' } },
+      ),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual({
+      entries: 0,
+      byteSize: 0,
+    });
+  });
+
+  it('rejects an invalid recent projection before scanning', async () => {
+    const filePath = await writeRecords([record('u1', null, 'one')]);
+    let buildCount = 0;
+    setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
+      if (builtPath === filePath) buildCount++;
+    });
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readRestoreProjection(
+        sessionId,
+        {
+          replay: {
+            kind: 'recent',
+            limit: 0,
+            hideInheritedHistory: false,
+          },
+        },
+      ),
+    ).rejects.toBeInstanceOf(RangeError);
+    expect(buildCount).toBe(0);
+  });
+
+  it('returns no cold projection for empty sessions and rejects foreign ones', async () => {
+    await writeRawTranscript('');
+    const reader = new SessionTranscriptReader(workspaceDir);
+    await expect(
+      reader.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      }),
+    ).resolves.toBeUndefined();
+
+    await writeRawTranscript('{not-json}\n');
+    await expect(
+      reader.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      }),
+    ).resolves.toBeUndefined();
+
+    await writeRecords([record('u1', null, 'foreign')]);
+    await expect(
+      reader.readRestoreProjection(
+        sessionId,
+        { replay: { kind: 'none' } },
+        { validateFirstRecord: () => false },
+      ),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+
+    await expect(
+      reader.readLiveRestoreProjection(
+        sessionId,
+        { replay: { kind: 'none' } },
+        { validateFirstRecord: () => false },
+      ),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('fails closed when a cold restore transcript is missing', async () => {
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readRestoreProjection(
+        sessionId,
+        { replay: { kind: 'none' } },
+      ),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('preserves the real leaf for a metadata-only session', async () => {
+    const source: ChatRecord = {
+      ...record('source', null, ''),
+      type: 'system',
+      subtype: 'session_source',
+      message: undefined,
+      systemPayload: { sourceType: 'daemon', sourceId: 'metadata-only' },
+    };
+    await writeRecords([source]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.apiHistory).toEqual([]);
+    expect(projection?.runtime.recording).toMatchObject({
+      lastCompletedUuid: 'source',
+      sourceType: 'daemon',
+      sourceId: 'metadata-only',
+    });
+  });
+
+  it('restores the last session_model payload', async () => {
+    const firstModel: ChatRecord = {
+      ...record('model-1', null, ''),
+      type: 'system',
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: { modelId: 'old-model', authType: 'openai' },
+    };
+    const laterModel: ChatRecord = {
+      ...record('model-2', 'model-1', ''),
+      type: 'system',
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: {
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+        baseUrl: 'https://example.test/v1',
+      },
+    };
+    await writeRecords([
+      firstModel,
+      laterModel,
+      record('u1', 'model-2', 'prompt'),
+      {
+        ...record('a1', 'u1', 'answer'),
+        model: 'other-turn-model',
+      },
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toEqual({
+      modelId: 'qwen3-coder-plus',
+      authType: 'openai',
+      baseUrl: 'https://example.test/v1',
+    });
+    expect(projection?.runtime.recording.lastAssistantModel).toBe(
+      'other-turn-model',
+    );
+  });
+
+  it('captures lastAssistantModel when no session_model record exists', async () => {
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      {
+        ...record('a1', 'u1', 'answer'),
+        model: 'session-a-model',
+      },
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toBeUndefined();
+    expect(projection?.runtime.recording.lastAssistantModel).toBe(
+      'session-a-model',
+    );
+  });
+
+  it('captures lastAssistantModel on resume when a trailing compression excludes the last assistant record', async () => {
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      {
+        ...record('a1', 'u1', 'answer'),
+        model: 'session-a-model',
+      },
+      {
+        ...record('compression', 'a1', ''),
+        type: 'system',
+        subtype: 'chat_compression',
+        message: undefined,
+        systemPayload: {
+          compressedHistory: [
+            { role: 'user', parts: [{ text: 'compressed prompt' }] },
+            { role: 'model', parts: [{ text: 'compressed answer' }] },
+          ],
+          info: { newTokenCount: 20, newTokenCountIsEstimated: false },
+        } as ChatRecord['systemPayload'],
+      },
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toBeUndefined();
+    expect(projection?.runtime.recording.lastAssistantModel).toBe(
+      'session-a-model',
+    );
+  });
+
+  it('keeps the last valid session_model when a trailing payload is unusable', async () => {
+    const validModel: ChatRecord = {
+      ...record('model-1', null, ''),
+      type: 'system',
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: { modelId: 'qwen3-coder-plus', authType: 'openai' },
+    };
+    const invalidModel = {
+      ...record('model-2', 'model-1', ''),
+      type: 'system' as const,
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: { modelId: 42, authType: 'openai' },
+    };
+    await writeRecords([validModel, invalidModel as unknown as ChatRecord]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toEqual({
+      modelId: 'qwen3-coder-plus',
+      authType: 'openai',
+    });
+  });
+
+  it('drops a session_model payload that is not a usable string pair', async () => {
+    const invalidModel = {
+      ...record('model-1', null, ''),
+      type: 'system' as const,
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: { modelId: 42, authType: 'openai' },
+    };
+    await writeRecords([invalidModel as unknown as ChatRecord]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toBeUndefined();
+  });
+
+  it('preserves malformed compression failure behavior', async () => {
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      {
+        ...record('compression', 'u1', ''),
+        type: 'system',
+        subtype: 'chat_compression',
+        message: undefined,
+        systemPayload: {
+          compressedHistory: { malformed: true },
+        } as unknown as ChatRecord['systemPayload'],
+      },
+      record('a1', 'compression', 'answer'),
+    ]);
+    const loaded = await new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    }).loadSession(sessionId);
+    expect(() => buildApiHistoryFromConversation(loaded!.conversation)).toThrow(
+      TypeError,
+    );
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readRestoreProjection(
+        sessionId,
+        { replay: { kind: 'none' } },
+      ),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it('normalizes Goal candidates without changing recovery precedence', async () => {
+    const validGoal: GoalStateRecordPayloadV2 = {
+      v: 2,
+      cause: 'create',
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'keep the valid v2 state',
+          status: 'active',
+          evidenceCursor: { recordId: 'u1' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    };
+    const legacy: ChatRecord = {
+      ...record('legacy', 'u1', ''),
+      type: 'system',
+      subtype: 'slash_command',
+      message: undefined,
+      systemPayload: {
+        phase: 'result',
+        rawCommand: '/goal legacy',
+        outputHistoryItems: [
+          { type: 'message', text: 'discard me' },
+          { type: 'goal_status', kind: 'set', condition: 'legacy goal' },
+        ],
+      },
+    };
+    const valid: ChatRecord = {
+      ...record('valid-goal', 'legacy', ''),
+      type: 'system',
+      subtype: 'goal_state',
+      message: undefined,
+      systemPayload: validGoal,
+    };
+    const malformed: ChatRecord = {
+      ...record('malformed-goal', 'valid-goal', ''),
+      type: 'system',
+      subtype: 'goal_state',
+      message: undefined,
+      systemPayload: {
+        v: 2,
+        cause: 'create',
+        snapshot: null,
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      legacy,
+      valid,
+      malformed,
+      record('a1', 'malformed-goal', 'answer'),
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(recoverGoalFromRecords(projection!.runtime.goalRecords)).toEqual({
+      kind: 'v2',
+      payload: validGoal,
+    });
+    expect(projection?.runtime.goalRecoverySourceUuid).toBe('valid-goal');
+    expect(projection?.runtime.goalRecords).toEqual([
+      expect.objectContaining({
+        uuid: 'legacy',
+        systemPayload: {
+          phase: 'result',
+          outputHistoryItems: [
+            { type: 'goal_status', kind: 'set', condition: 'legacy goal' },
+          ],
+        },
+      }),
+      expect.objectContaining({ uuid: 'valid-goal', systemPayload: validGoal }),
+      expect.objectContaining({ uuid: 'malformed-goal', systemPayload: null }),
+    ]);
+  });
+
+  it('dispatches a pre-read malformed Goal record to other consumers once', async () => {
+    const malformedGoal: ChatRecord = {
+      ...record('a-goal', 'u1', 'model payload'),
+      subtype: 'goal_state',
+      systemPayload: {
+        malformed: true,
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    await writeRecords([record('u1', null, 'prompt'), malformedGoal]);
+
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const [loaded, projection] = await Promise.all([
+      service.loadSession(sessionId),
+      service.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      }),
+    ]);
+
+    expect(projection?.runtime.apiHistory).toEqual(
+      buildApiHistoryFromConversation(loaded!.conversation),
+    );
+    expect(projection?.runtime.apiHistory).toHaveLength(2);
+    expect(recoverGoalFromRecords(projection!.runtime.goalRecords)).toEqual({
+      kind: 'unsupported',
+      reason: expect.stringContaining('a-goal'),
+    });
+  });
+
+  it('reads a narrow live projection without cold runtime state', async () => {
+    const artifactId = stableSessionArtifactId(
+      sessionId,
+      'url:https://example.com/live',
+    );
+    await writeRecords([
+      record('u1', null, 'one'),
+      {
+        ...record('artifact', 'u1', ''),
+        type: 'system',
+        subtype: 'session_artifact_event',
+        message: undefined,
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId,
+          sequence: 1,
+          recordedAt: '2026-01-01T00:00:01.000Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId,
+              artifact: {
+                id: artifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Live',
+                url: 'https://example.com/live',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-01-01T00:00:01.000Z',
+                updatedAt: '2026-01-01T00:00:01.000Z',
+                persistedAt: '2026-01-01T00:00:01.000Z',
+              },
+            },
+          ],
+        },
+      },
+      record('a1', 'u1', 'one answer'),
+      record('u2', 'a1', 'two'),
+      record('a2', 'u2', 'two answer'),
+    ]);
+    const reader = new SessionTranscriptReader(workspaceDir);
+
+    const liveLoad = await reader.readLiveRestoreProjection(sessionId, {
+      replay: {
+        kind: 'recent',
+        limit: 2,
+        hideInheritedHistory: false,
+      },
+    });
+    const liveResume = await reader.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+
+    expect(liveLoad?.replay?.records.map((item) => item.uuid)).toEqual([
+      'u2',
+      'a2',
+    ]);
+    expect(liveLoad?.artifactSnapshot?.artifacts).toHaveLength(1);
+    expect(liveResume?.replay).toBeUndefined();
+    expect(liveResume?.artifactSnapshot).toEqual(liveLoad?.artifactSnapshot);
+    expect(liveResume).not.toHaveProperty('runtime');
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.index_cache_state',
+      'miss',
+    );
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.index_cache_state',
+      'hit',
+    );
+  });
+
+  it('retains the determining legacy Goal candidate for a recent live page', async () => {
+    const legacyGoal: ChatRecord = {
+      ...record('goal', null, ''),
+      type: 'system',
+      subtype: 'slash_command',
+      message: undefined,
+      systemPayload: {
+        rawCommand: '/goal keep the live goal visible',
+        phase: 'result',
+        outputHistoryItems: [
+          {
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'keep the live goal visible',
+            iterations: 0,
+          },
+        ],
+      },
+    };
+    await writeRecords([
+      legacyGoal,
+      record('u1', 'goal', 'one'),
+      record('a1', 'u1', 'one answer'),
+      record('u2', 'a1', 'two'),
+      record('a2', 'u2', 'two answer'),
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readLiveRestoreProjection(sessionId, {
+      replay: {
+        kind: 'recent',
+        limit: 2,
+        hideInheritedHistory: false,
+      },
+    });
+
+    expect(projection?.replay?.records.map((item) => item.uuid)).toEqual([
+      'u2',
+      'a2',
+    ]);
+    expect(projection?.goalRecoverySourceUuid).toBe('goal');
+    expect(projection?.goalRecords).toEqual([
+      expect.objectContaining({ uuid: 'goal', subtype: 'slash_command' }),
+    ]);
+  });
+
+  it('projects a pending Goal checkpoint window without a full-loader fallback', async () => {
+    const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+    const cursor: ChatRecord = {
+      ...record('cursor', null, ''),
+      type: 'system',
+      subtype: 'goal_runtime',
+      message: undefined,
+    };
+    const evidence = Array.from({ length: 80 }, (_, index) => ({
+      ...record(
+        `a-evidence-${index}`,
+        index === 0 ? 'cursor' : `a-evidence-${index - 1}`,
+        `evidence ${index}`,
+      ),
+      provenance: 'assistant_output' as const,
+      goalContext: permit,
+    }));
+    const fragmentedEvidence: ChatRecord = {
+      ...evidence[0]!,
+      message: { role: 'model', parts: [{ text: 'fragment tail' }] },
+    };
+    const compression: ChatRecord = {
+      ...record('compression', evidence.at(-1)!.uuid, ''),
+      type: 'system',
+      subtype: 'chat_compression',
+      message: undefined,
+      systemPayload: {
+        compressedHistory: [
+          { role: 'user', parts: [{ text: 'summary' }] },
+          { role: 'model', parts: [{ text: 'summary result' }] },
+        ],
+      } as ChatRecord['systemPayload'],
+    };
+    const goalPayload: GoalStateRecordPayloadV2 = {
+      v: 2,
+      cause: 'turn_finished',
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'verify the result',
+          status: 'active',
+          evidenceCursor: { recordId: 'cursor' },
+          turnCount: 1,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      },
+      checkpointPending: {
+        permit,
+        recordUuid: evidence.at(-1)!.uuid,
+      },
+    };
+    const goalState: ChatRecord = {
+      ...record('goal-state', 'compression', ''),
+      type: 'system',
+      subtype: 'goal_state',
+      message: undefined,
+      systemPayload: goalPayload,
+    };
+    const filePath = await writeRecords([
+      cursor,
+      evidence[0]!,
+      fragmentedEvidence,
+      ...evidence.slice(1),
+      compression,
+      goalState,
+    ]);
+    let buildCount = 0;
+    setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
+      if (builtPath === filePath) buildCount++;
+    });
+
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const [loaded, projection] = await Promise.all([
+      service.loadSession(sessionId),
+      service.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      }),
+    ]);
+    const expected = buildGoalEvidenceCheckpointWindow({
+      records: loaded!.conversation.messages,
+      goal: goalPayload.snapshot.goal!,
+      permit,
+    });
+
+    expect(projection?.runtime.goalCheckpointWindow).toEqual(expected);
+    expect(projection?.runtime.goalCheckpointWindow).toMatchObject({
+      shouldCheckpoint: true,
+      truncated: false,
+    });
+    expect(projection?.runtime.goalCheckpointWindow?.evidence).toHaveLength(80);
+    expect(projection?.runtime.goalCheckpointWindow?.evidence[0]?.content).toBe(
+      'evidence 0\nfragment tail',
+    );
+    expect(buildCount).toBe(1);
+  });
+
+  it('defers unavailable pending Goal evidence to runtime recovery', async () => {
+    const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+    const evidence = {
+      ...record('evidence', null, 'result'),
+      provenance: 'assistant_output' as const,
+      goalContext: permit,
+    };
+    const goalState: ChatRecord = {
+      ...record('goal-state', 'evidence', ''),
+      type: 'system',
+      subtype: 'goal_state',
+      message: undefined,
+      systemPayload: {
+        v: 2,
+        cause: 'turn_finished',
+        snapshot: {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'verify the result',
+            status: 'active',
+            evidenceCursor: { recordId: 'missing-cursor' },
+            turnCount: 1,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        },
+        checkpointPending: { permit, recordUuid: evidence.uuid },
+      } satisfies GoalStateRecordPayloadV2,
+    };
+    await writeRecords([evidence, goalState]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.goalCheckpointWindow).toBeUndefined();
+    expect(projection?.runtime.goalRecords).toHaveLength(1);
+    expect(projection?.runtime.goalRecords[0]?.uuid).toBe('goal-state');
+  });
+
   it('keeps backward pages within a normal user turn boundary', async () => {
     const toolCall = record('a-tool', 'u1', 'call tool');
     const toolResult = {
@@ -625,6 +2182,128 @@ describe('SessionTranscriptReader', () => {
       't1',
       'a1',
     ]);
+  });
+
+  it('projects validated branch points for Assistant records in the page', async () => {
+    const user = record('u1', null, 'prompt');
+    const assistant = record('a1', 'u1', 'answer');
+    const checkpoint: ChatRecord = {
+      ...record('checkpoint-1', 'a1', 'ignored'),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([user, assistant, checkpoint]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 2 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toContain('a1');
+    expect(page.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
+    expect(vi.mocked(fs.open)).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not advertise a checkpoint shadowed by an earlier duplicate record', async () => {
+    const ordinary: ChatRecord = {
+      ...record('dup', 'a1', 'ordinary duplicate'),
+      type: 'assistant',
+    };
+    const checkpoint: ChatRecord = {
+      ...record('dup', 'a1', ''),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      record('a1', 'u1', 'answer'),
+      ordinary,
+      checkpoint,
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.branchPointsByAssistantUuid).toBeUndefined();
+  });
+
+  it('does not advertise a checkpoint merged into a subtype-less first duplicate', async () => {
+    const plain: ChatRecord = {
+      ...record('dup', 'a1', ''),
+      type: 'system',
+      message: undefined,
+    };
+    const checkpoint: ChatRecord = {
+      ...record('dup', 'a1', ''),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      record('a1', 'u1', 'answer'),
+      plain,
+      checkpoint,
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.branchPointsByAssistantUuid).toBeUndefined();
+  });
+
+  it('reports a branch point whose checkpoint falls on a later page', async () => {
+    const user = record('u1', null, 'prompt');
+    const assistant = record('a1', 'u1', 'answer');
+    const checkpoint: ChatRecord = {
+      ...record('checkpoint-1', 'a1', 'ignored'),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([
+      user,
+      assistant,
+      checkpoint,
+      record('u2', 'checkpoint-1', 'next prompt'),
+      record('a2', 'u2', 'next answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { limit: 2 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+    expect(page.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
   });
 
   it('keeps a long user turn complete when it exceeds the record limit', async () => {
@@ -1203,6 +2882,63 @@ describe('SessionTranscriptReader', () => {
     }
   });
 
+  it('yields cooperatively after complete scan lines and selected records', async () => {
+    const yielded: number[] = [];
+    let readSettled = false;
+    let siblingRanBeforeSettlement = false;
+    let siblingScheduled = false;
+    setSessionTranscriptCooperativeReadBudgetForTest(
+      1,
+      Number.POSITIVE_INFINITY,
+      () => {
+        yielded.push(yielded.length + 1);
+        if (siblingScheduled) return;
+        siblingScheduled = true;
+        setImmediate(() => {
+          siblingRanBeforeSettlement = !readSettled;
+        });
+      },
+    );
+    await writeRecords([
+      record('u1', null, 'first'),
+      record('a1', 'u1', 'second'),
+      record('u2', 'a1', 'third'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir)
+      .readPage(sessionId)
+      .finally(() => {
+        readSettled = true;
+      });
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1', 'a1', 'u2']);
+    expect(yielded.length).toBeGreaterThanOrEqual(6);
+    expect(siblingRanBeforeSettlement).toBe(true);
+  });
+
+  it('reuses one glued physical line across projection pre-read and dispatch', async () => {
+    const first = record('u1', null, 'first');
+    const second = record('a1', 'u1', 'second');
+    const gluedLine = `${JSON.stringify(first)}${JSON.stringify(second)}`;
+    await writeRawTranscript(`${gluedLine}\n`);
+    const selectedReads: Array<{ offset: number; length: number }> = [];
+    setSessionTranscriptSelectedLineReadHookForTest((offset, length) => {
+      selectedReads.push({ offset, length });
+    });
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.apiHistory).toEqual([
+      first.message,
+      second.message,
+    ]);
+    expect(selectedReads).toEqual([
+      { offset: 0, length: Buffer.byteLength(gluedLine) },
+    ]);
+  });
+
   it('rejects oversized snapshots before indexing', async () => {
     const filePath = await writeRecords([record('u1', null, 'hello')]);
     await fs.truncate(filePath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
@@ -1213,6 +2949,31 @@ describe('SessionTranscriptReader', () => {
       sessionId,
       snapshotSize: SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1,
       maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+    });
+  });
+
+  it('shares an oversized in-flight index without retaining its completion', async () => {
+    const filePath = await writeRecords([
+      record('u1', null, 'hello'),
+      record('a1', 'u1', 'reply'),
+    ]);
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    let buildCount = 0;
+    setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
+      if (builtPath === filePath) buildCount++;
+    });
+    const reader = new SessionTranscriptReader(workspaceDir);
+
+    const [first, second] = await Promise.all([
+      reader.readPage(sessionId),
+      reader.readPage(sessionId),
+    ]);
+
+    expect(buildCount).toBe(1);
+    expect(first.records).toEqual(second.records);
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual({
+      entries: 0,
+      byteSize: 0,
     });
   });
 
@@ -1251,6 +3012,141 @@ describe('SessionTranscriptReader', () => {
     expect(second.records.map((r) => r.uuid)).toEqual(['a1']);
   });
 
+  it('accounts for retained projection hints in the cache byte estimate', async () => {
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const makeHintRecords = (
+      targetSessionId: string,
+      suffix: string,
+    ): ChatRecord[] => {
+      const goalContext = {
+        goalId: `goal-${suffix}`,
+        revision: 1,
+        turnId: `turn-${suffix}`,
+      };
+      return [
+        {
+          ...record('notification', null, 'notice', targetSessionId),
+          subtype: 'notification',
+          goalContext,
+          systemPayload: {
+            displayText: 'notice',
+            backgroundTask: {
+              taskId: `task-${suffix}`,
+              status: 'completed',
+              kind: 'agent',
+            },
+          },
+        },
+        {
+          ...record('assistant', 'notification', 'result', targetSessionId),
+          provenance: 'assistant_output',
+          goalContext,
+        },
+      ];
+    };
+    const shortSessionId = '710e8400-e29b-41d4-a716-446655440000';
+    await writeRecords(
+      makeHintRecords(shortSessionId, 'short'),
+      shortSessionId,
+    );
+    await reader.readPage(shortSessionId);
+    const shortEstimate = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    const longSessionId = '720e8400-e29b-41d4-a716-446655440000';
+    const longSuffix = 'x'.repeat(8 * 1024);
+    await writeRecords(
+      makeHintRecords(longSessionId, longSuffix),
+      longSessionId,
+    );
+    await reader.readPage(longSessionId);
+    const longEstimate = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+
+    expect(longEstimate - shortEstimate).toBeGreaterThan(80 * 1024);
+  });
+
+  it('does not let an evicted pending build overwrite a newer cache entry', async () => {
+    const initial = `${JSON.stringify(record('u1', null, 'hello'))}\n`;
+    const filePath = await writeRawTranscript(initial);
+    const fixed = new Date('2026-02-02T02:02:02.000Z');
+    await fs.utimes(filePath, fixed, fixed);
+
+    let buildCount = 0;
+    let releaseFirstBuild: (() => void) | undefined;
+    const firstBuildBlocked = new Promise<void>((resolve) => {
+      releaseFirstBuild = resolve;
+    });
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (builtPath !== filePath || buildCount++ !== 0) return;
+      await firstBuildBlocked;
+    });
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const staleRead = reader.readPage(sessionId);
+    await vi.waitFor(() => expect(buildCount).toBe(1));
+
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    await fs.writeFile(
+      filePath,
+      initial.replace('"uuid":"u1"', '"uuid":"x1"'),
+      'utf8',
+    );
+    await fs.utimes(filePath, fixed, fixed);
+
+    await expect(reader.readPage(sessionId)).resolves.toMatchObject({
+      records: [expect.objectContaining({ uuid: 'x1' })],
+    });
+
+    releaseFirstBuild?.();
+    await expect(staleRead).rejects.toBeInstanceOf(
+      SessionTranscriptSnapshotUnavailableError,
+    );
+    await expect(reader.readPage(sessionId)).resolves.toMatchObject({
+      records: [expect.objectContaining({ uuid: 'x1' })],
+    });
+  });
+
+  it('does not let a fresh cold projection replace a cached pending build', async () => {
+    const filePath = await writeRecords([
+      record('u1', null, 'hello'),
+      record('a1', 'u1', 'reply'),
+    ]);
+    let buildCount = 0;
+    let releaseCachedBuild: (() => void) | undefined;
+    const cachedBuildBlocked = new Promise<void>((resolve) => {
+      releaseCachedBuild = resolve;
+    });
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (builtPath !== filePath) return;
+      buildCount++;
+      if (buildCount === 1) await cachedBuildBlocked;
+    });
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const cachedRead = reader.readPage(sessionId);
+    await vi.waitFor(() => expect(buildCount).toBe(1));
+
+    await expect(
+      reader.readRestoreProjection(sessionId, { replay: { kind: 'none' } }),
+    ).resolves.toBeDefined();
+    expect(buildCount).toBe(2);
+    expect(getSessionTranscriptIndexCacheStatsForTest()).toEqual({
+      entries: 1,
+      byteSize: 0,
+    });
+
+    releaseCachedBuild?.();
+    await expect(cachedRead).resolves.toMatchObject({
+      records: [
+        expect.objectContaining({ uuid: 'u1' }),
+        expect.objectContaining({ uuid: 'a1' }),
+      ],
+    });
+    expect(
+      getSessionTranscriptIndexCacheStatsForTest().byteSize,
+    ).toBeGreaterThan(0);
+  });
+
   it('evicts the least-recently-used index after 32 cached sessions', async () => {
     const reader = new SessionTranscriptReader(workspaceDir);
     for (let index = 0; index < 33; index++) {
@@ -1281,6 +3177,43 @@ describe('SessionTranscriptReader', () => {
     await expect(reader.readPage(sessionId)).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+
+  it('rejects selected records from a different session', async () => {
+    const foreignSessionId = '660e8400-e29b-41d4-a716-446655440000';
+    await writeRecords([
+      record('u1', null, 'local'),
+      record('a1', 'u1', 'foreign', foreignSessionId),
+    ]);
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readPage(sessionId),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('rejects foreign dead-branch metadata even when no consumer selects it', async () => {
+    const foreignSessionId = '660e8400-e29b-41d4-a716-446655440000';
+    const foreignMetadata: ChatRecord = {
+      ...record('metadata', 'u1', '', foreignSessionId),
+      type: 'system',
+      subtype: 'rewind',
+      message: undefined,
+      systemPayload: { truncatedCount: 1 },
+    };
+    await writeRecords([
+      record('u1', null, 'local'),
+      record('a1', 'u1', 'local reply'),
+      foreignMetadata,
+      record('u2', 'a1', 'next local prompt'),
+      record('a2', 'u2', 'next local reply'),
+    ]);
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readRestoreProjection(
+        sessionId,
+        { replay: { kind: 'none' } },
+      ),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
   });
 
   it('rejects tampered cursor snapshots before cache lookup', async () => {
@@ -1598,7 +3531,10 @@ describe('SessionTranscriptReader', () => {
         records.push(record('af1', 'ar1', 'filler'));
         // A distinct session per variant: rewriting one file in place can
         // keep the inode and byte length, which the index cache keys on.
-        await writeRecords(records, targetSessionId);
+        await writeRecords(
+          records.map((item) => ({ ...item, sessionId: targetSessionId })),
+          targetSessionId,
+        );
 
         const page = await new SessionTranscriptReader(workspaceDir).readPage(
           targetSessionId,
