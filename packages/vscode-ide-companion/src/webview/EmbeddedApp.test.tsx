@@ -62,26 +62,44 @@ vi.mock('@qwen-code/sdk/daemon', () => ({
 }));
 
 vi.mock('@qwen-code/web-shell', async () => {
-  const { useEffect } = await import('react');
+  const { useEffect, useMemo, useRef, useState } = await import('react');
   return {
     WebShellWithProviders: (props: CapturedProps) => {
       mocks.embeddedProps.current = props;
       // Mirror App.tsx's error-notification effect: while a connection error
-      // persists it re-runs whenever the onError prop identity changes — an
-      // unstable callback turns that into an infinite render loop.
+      // persists, each distinct error value is reported once. Hosts may pass
+      // an onError whose identity changes on every render, which re-runs the
+      // effect without re-delivering the already-reported error.
+      const { onError } = props;
+      const lastReportedError = useRef<string | undefined>(undefined);
+      const [churn, setChurn] = useState(0);
+      // A fresh wrapper identity whenever the host's onError identity
+      // changes mirrors a host passing an inline onError; the churn state
+      // below additionally forces the effect to re-run after a delivery,
+      // like the host re-render that delivering the error triggers.
+      const unstableOnError = useMemo(
+        () => (onError ? (error: Error) => onError(error) : undefined),
+        [onError],
+      );
       useEffect(() => {
         const message = mocks.connectionError.current;
-        if (!message) return;
+        if (!message) {
+          lastReportedError.current = undefined;
+          return;
+        }
+        if (lastReportedError.current === message) return;
+        lastReportedError.current = message;
         mocks.errorNotifications.current += 1;
         if (mocks.errorNotifications.current > 3) {
-          // An unstable onError re-runs this effect on every render; fail
-          // fast instead of hanging on the infinite loop.
+          // Value-dedup makes a notify loop impossible; fail fast if this
+          // mirror ever regresses instead of hanging.
           throw new Error('onError notified in a loop');
         }
-        (props.onError as ((error: Error) => void) | undefined)?.(
-          new Error(message),
-        );
-      }, [props.onError]);
+        unstableOnError?.(new Error(message));
+        // Delivering an error re-renders the host; force one extra effect
+        // run under a fresh callback identity to mirror that churn.
+        if (churn < 1) setChurn((count) => count + 1);
+      }, [unstableOnError, churn]);
       return null;
     },
   };
@@ -489,9 +507,10 @@ describe('EmbeddedApp host wiring', () => {
   it('notifies once when a connection error persists instead of looping', async () => {
     mocks.connectionError.current = 'daemon connection lost';
 
-    // An unstable onError re-runs the mirrored notification effect on every
-    // render; the mock trips after three notifications instead of hanging
-    // on the infinite loop.
+    // The mirrored effect re-runs under a fresh onError identity on every
+    // re-render (like a host passing an inline onError); the value-dedup
+    // must still deliver the persistent error exactly once. The mock trips
+    // after three notifications instead of hanging if that ever regresses.
     await renderApp();
     const { container } = mounted[mounted.length - 1];
 

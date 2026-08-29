@@ -347,9 +347,9 @@ export function EmbeddedApp() {
     composerRef.current?.focus?.();
   }, []);
 
-  // Stable identity: Web Shell re-runs its error-notification effect
-  // whenever this callback changes, so a fresh arrow every render would
-  // re-notify — and re-render — forever while a connection error persists.
+  // Web Shell reports each distinct connection error value only once, so a
+  // new identity here (e.g. when `t` is rebuilt on a language switch) re-runs
+  // its notification effect without re-delivering a persisted error.
   const handleShellError = useCallback(
     (error: Error) => {
       clearInsight();
