@@ -1447,13 +1447,20 @@ jobs:
             # The agent runs no-sandbox with the full job environment, and
             # the runner applies whatever it appends to $GITHUB_PATH /
             # $GITHUB_ENV to every LATER step (prepending the path file,
-            # shell lookup included). Point both at invocation-scoped decoys
-            # so appends die with PROXY_BIN no matter how the step exits —
-            # SIGKILL, set -e abort, chmod 444 on the real files, or an
-            # EXIT-trap bypass all become irrelevant because the real
-            # command files are never in the agent's environment.
+            # shell lookup included). Point all four runner command files at
+            # invocation-scoped decoys so appends die with PROXY_BIN no matter
+            # how the step exits — SIGKILL, set -e abort, chmod 444 on the
+            # real files, or an EXIT-trap bypass all become irrelevant because
+            # the real command files are never in the agent's environment, and
+            # a decoyed $GITHUB_STEP_SUMMARY cannot plant attacker text into
+            # the run page. The prefix only reaches the qwen invocation, so
+            # the step's own later writes still hit the real files. This
+            # shield is copied inline in 'Resolve conflicts': keep the decoy
+            # set aligned, edit both copies together.
             GITHUB_PATH="$PROXY_BIN/decoy.github-path" \
             GITHUB_ENV="$PROXY_BIN/decoy.github-env" \
+            GITHUB_OUTPUT="$PROXY_BIN/decoy.github-output" \
+            GITHUB_STEP_SUMMARY="$PROXY_BIN/decoy.github-step-summary" \
             timeout --kill-after=10s "${attempt_timeout}s" qwen \
               --auth-type openai \
               --approval-mode yolo \
@@ -2686,9 +2693,6 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
-          BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
-          HEAD_REF: '${{ steps.prepare.outputs.head_ref }}'
           # Written to a per-run QWEN_HOME by the run block below. Until
           # #9252 this block was passed to the action under the wrong input
           # name and silently dropped, so every /resolve ran without the turn
@@ -2700,11 +2704,16 @@ jobs:
           # token in its environment, runner command files decoyed for its
           # invocation, every later step scrubbed of planted runner state
           # (PATH, git config scopes, hooks — see 'Resolution check'), the
-          # scope guard, write authorization, and an ephemeral runner. A
-          # root-capable agent on a hosted runner (passwordless sudo) can in
-          # principle defeat any in-job measure; the structural answer to
-          # that is moving the credentialed push into a downstream job, which
-          # is tracked separately.
+          # scope guard, write authorization, and an ephemeral runner. Two
+          # residuals stay acknowledged: a root-capable agent on a hosted
+          # runner (passwordless sudo) can in principle defeat any in-job
+          # measure, and even a same-uid process the agent leaves running (a
+          # detached poller) can read later steps' /proc/<pid>/environ and
+          # /proc/<pid>/cmdline for as long as the push token lives there —
+          # no privilege needed, and no in-job scrub reaches a live process.
+          # The structural answer to both is moving the credentialed push
+          # into a downstream job that never ran the agent, which is tracked
+          # separately.
           #
           # tools.sandbox is deliberately false. The day #9252 made this block
           # take effect, `sandbox: true` took effect with it, and /resolve went
@@ -2783,6 +2792,14 @@ jobs:
           mkdir -p "$QWEN_HOME"
           printf '%s\n' "$QWEN_SETTINGS" > "$QWEN_HOME/settings.json"
           export QWEN_HOME
+          # A fork PR can commit its own .qwen/settings.json (the workspace
+          # layer), which the CLI merges ABOVE the user layer written above —
+          # an attacker-authored tools.sandbox or maxSessionTurns would
+          # outrank these settings. Remove the file; it is git-ignored here,
+          # so it can only arrive via a forced add on a fork branch. Do not
+          # rm -rf .qwen/: commands/, skills/ and agents/ under it can be
+          # legitimate tracked content.
+          rm -f .qwen/settings.json
           MODEL_ARGS=()
           if [ -n "${OPENAI_MODEL:-}" ]; then
             MODEL_ARGS=(--model "$OPENAI_MODEL")
@@ -2791,22 +2808,29 @@ jobs:
           # reads attacker-authored files. The runner applies whatever a step
           # appends to $GITHUB_PATH / $GITHUB_ENV to every LATER step — the
           # credentialed push included — so every runner command file is
-          # pointed at an invocation-scoped decoy that dies with this step,
-          # the way 'Run review' does. Command parsing is switched off around
-          # the agent for the same reason: a `::set-output`-style line in its
-          # output must stay text. The token is random per attempt so no
-          # agent output can guess it and resume parsing early. The steps
-          # after this one scrub what a decoy cannot reach (the workspace's
-          # .git/config, planted PATH shims) on their side.
+          # pointed at an invocation-scoped decoy that dies with this step.
+          # This shield is copied inline in 'Run review' (run_review_once):
+          # keep the decoy set aligned, edit both copies together. Command
+          # parsing is switched off around the agent for the same reason: a
+          # `::set-output`-style line in its output must stay text. The token
+          # is random per attempt so no agent output can guess it and resume
+          # parsing early. The steps after this one scrub what a decoy cannot
+          # reach (the workspace's .git/config, planted PATH shims) on their
+          # side.
           decoy_dir="$(mktemp -d "${RUNNER_TEMP}/qwen-resolve-decoy.XXXXXX")"
           stop_token="qwen-resolve-stop-$(date +%s%N)-${RANDOM}${RANDOM}"
           echo "::stop-commands::${stop_token}"
           set +e
+          # GNU timeout (mirroring 'Run review') so a hung agent ends inside
+          # THIS shell: the runner-side timeout-minutes kills the whole
+          # process tree before the resume below and the command-file
+          # truncation can run. 4440s sits just under the 75-minute step
+          # timeout, which stays the outer backstop.
           GITHUB_PATH="$decoy_dir/github-path" \
           GITHUB_ENV="$decoy_dir/github-env" \
           GITHUB_OUTPUT="$decoy_dir/github-output" \
           GITHUB_STEP_SUMMARY="$decoy_dir/github-step-summary" \
-          qwen \
+          timeout --kill-after=10s 4440s qwen \
             --auth-type openai \
             --approval-mode yolo \
             "${MODEL_ARGS[@]}" \
@@ -2814,6 +2838,17 @@ jobs:
             --output-format stream-json \
             > "${WORKDIR}/agent.stream-json.log" 2> "${WORKDIR}/agent.stderr.log"
           status=$?
+          # The decoys only mask THIS invocation's environment: the real
+          # runner command files stay discoverable by the agent (this step's
+          # parent-shell /proc/<pid>/environ is same-uid readable,
+          # $RUNNER_TEMP is enumerable), and anything planted there applies to
+          # every later step — shell lookup included. This step writes nothing
+          # to them and downstream reads only runner-tracked values, so
+          # truncate all four on every exit path before the step ends.
+          : > "${GITHUB_ENV:?}" || true
+          : > "${GITHUB_PATH:?}" || true
+          : > "${GITHUB_OUTPUT:?}" || true
+          : > "${GITHUB_STEP_SUMMARY:?}" || true
           # Diagnostics stay inside the parsing-off window: agent output is
           # untrusted text. The full logs travel with the run artifact.
           echo "qwen exited with ${status}; last stderr lines:"
@@ -2826,6 +2861,7 @@ jobs:
       - name: 'Resolution check'
         id: 'verify'
         if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
+        shell: '/bin/bash --noprofile --norc -eo pipefail {0}'
         # Refs are passed as env vars and only referenced as "$BASE_REF" /
         # "$HEAD_FETCH_REF" inside the script. They must never be inlined as
         # ${{ ... }}: branch names legally contain `$(...)`/backticks, so textual
@@ -2868,6 +2904,18 @@ jobs:
           export GIT_CONFIG_COUNT=0
           export GIT_CONFIG_SYSTEM=/dev/null
           export GIT_CONFIG_GLOBAL=/dev/null
+          # Fail closed if the agent replaced the .git DIRECTORY with a gitfile
+          # (`gitdir: <path>`): git would then read the attacker's local
+          # config — the rm below exits 0 deleting nothing, and a
+          # url.*.insteadOf planted there rewrites the push URL in 'Report
+          # result' with the token in the request path. Test the directory
+          # itself, never `git rev-parse --git-dir`: that would run git
+          # against the attacker's config.
+          if [ ! -d .git ]; then
+            echo ".git is not a directory — workspace tampered after the agent step; refusing."
+            echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
           rm -f .git/config
           # Belt and braces for the config removal: even a git call that
           # slips in before it cannot run a hook, an fsmonitor command or a
@@ -2976,12 +3024,25 @@ jobs:
 
       - name: 'Show run artifacts'
         if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
+        shell: '/bin/bash --noprofile --norc -eo pipefail {0}'
         env:
+          # The BASH_ENV/LD_* pins mirror 'Resolution check': they execute at
+          # process startup, before any body line can unset them.
+          # GIT_EXTERNAL_DIFF is exec'd by the content `git diff` below.
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          GIT_EXTERNAL_DIFF: ''
           BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
         run: |-
           # Runs after the agent: same scrub as 'Resolution check' (which has
           # already removed the workspace .git/config by now).
           PATH=/usr/bin:/bin
+          unset GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
+            GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR GIT_WORK_TREE \
+            GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+            GIT_SHALLOW_FILE GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
           export GIT_CONFIG_COUNT=0
           export GIT_CONFIG_SYSTEM=/dev/null
           export GIT_CONFIG_GLOBAL=/dev/null
@@ -3029,6 +3090,7 @@ jobs:
 
       - name: 'Report result'
         if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
+        shell: '/bin/bash --noprofile --norc -eo pipefail {0}'
         env:
           # The BASH_ENV/LD_* pins mirror 'Resolution check': the agent step can
           # plant them through $GITHUB_ENV, and they execute at process startup.
@@ -3111,6 +3173,14 @@ jobs:
 
           push_fail_reason=''
           if [ "$OUTCOME" = "fixed" ] && [ "$DRY_RUN" != "true" ]; then
+            # Re-assert the .git directory guard (see 'Resolution check'): a
+            # gitfile planted after that step would let a url.*.insteadOf in
+            # the attacker's config rewrite this push URL and carry the token
+            # to the attacker host.
+            if [ ! -d .git ]; then
+              echo ".git is not a directory — workspace tampered after the agent step; refusing to push."
+              exit 1
+            fi
             if [ -z "${PUSH_TOKEN}" ]; then
               echo "::error::CI_DEV_BOT_PAT is required to push conflict fixes."
               exit 1

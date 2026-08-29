@@ -267,6 +267,18 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
       resolveConflictsStep.run.includes('> "$QWEN_HOME/settings.json"'),
       `${label} must write QWEN_SETTINGS to the per-run QWEN_HOME`,
     );
+    assert.ok(
+      resolveConflictsStep.run.includes('export QWEN_HOME'),
+      `${label} must export QWEN_HOME so the qwen process reads the per-run settings`,
+    );
+    // A fork PR can commit .qwen/settings.json (the workspace layer), which
+    // the CLI merges ABOVE the user layer written above — an attacker file
+    // would override tools.sandbox and maxSessionTurns. The run block must
+    // remove it; out-setting it from the user layer cannot work.
+    assert.ok(
+      resolveConflictsStep.run.includes('rm -f .qwen/settings.json'),
+      `${label} must remove a fork-PR-committed workspace settings file`,
+    );
     const settings = JSON.parse(raw);
     for (const key of ['coreTools', 'maxSessionTurns', 'sandbox']) {
       assert.equal(
@@ -340,12 +352,43 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     // job. The invocation must see invocation-scoped decoys, inside a
     // parsing-off window, with no token in its environment.
     const run = resolveConflictsStep.run;
-    for (const file of ['GITHUB_PATH', 'GITHUB_ENV', 'GITHUB_OUTPUT']) {
+    for (const file of [
+      'GITHUB_PATH',
+      'GITHUB_ENV',
+      'GITHUB_OUTPUT',
+      'GITHUB_STEP_SUMMARY',
+    ]) {
       assert.ok(
         run.includes(`${file}="$decoy_dir/`),
         `${file} must point at the decoy for the qwen invocation`,
       );
     }
+    // The decoys only mask the invocation's env: the REAL runner command
+    // files stay discoverable by the agent (the step's parent-shell
+    // /proc/<pid>/environ is same-uid readable, $RUNNER_TEMP is enumerable),
+    // and anything planted there applies to every later step — shell lookup
+    // included. The step must therefore truncate all four after the agent,
+    // on every exit path.
+    const statusIdx = run.indexOf('status=$?');
+    assert.ok(statusIdx > -1, 'the run block must capture the qwen exit status');
+    for (const file of [
+      'GITHUB_ENV',
+      'GITHUB_PATH',
+      'GITHUB_OUTPUT',
+      'GITHUB_STEP_SUMMARY',
+    ]) {
+      const trunc = `: > "\${${file}:?}" || true`;
+      const idx = run.indexOf(trunc);
+      assert.ok(idx > -1, `${file} must be truncated after the qwen invocation`);
+      assert.ok(
+        idx > statusIdx,
+        `${file} truncation must run on the exit path, after status=$?`,
+      );
+    }
+    // A hung agent must end inside the script (GNU timeout), not by the
+    // runner killing the process tree — only then are the resume and the
+    // truncation above reached (mirrors 'Run review').
+    assert.ok(run.includes('timeout --kill-after=10s'));
     assert.ok(run.includes('echo "::stop-commands::${stop_token}"'));
     assert.ok(run.includes("printf '\\n::%s::\\n' \"$stop_token\""));
     assert.ok(run.includes('--approval-mode yolo'));
@@ -353,6 +396,16 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
       assert.ok(
         !/TOKEN|PAT/.test(key),
         `agent env must carry no credential, found ${key}`,
+      );
+    }
+    // Dead keys: the run block reads none of them (PROMPT interpolates
+    // pr_number directly) and the CLI consumes no such env vars — they only
+    // clutter the env surface this step's containment comment says to audit.
+    for (const key of ['PR_NUMBER', 'BASE_REF', 'HEAD_REF']) {
+      assert.equal(
+        resolveConflictsStep.env[key],
+        undefined,
+        `agent env must not carry dead key ${key} (keep the copies on 'Report result' / 'Report skipped request')`,
       );
     }
   });
@@ -369,6 +422,7 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
       }
       for (const line of [
         'PATH=/usr/bin:/bin',
+        'unset GIT_CONFIG_PARAMETERS',
         'export GIT_CONFIG_COUNT=0',
         'export GIT_CONFIG_SYSTEM=/dev/null',
         'export GIT_CONFIG_GLOBAL=/dev/null',
@@ -379,16 +433,52 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
           `post-agent step '${s.name}' must open with the hardened tool environment: missing ${line}`,
         );
       }
+      // BASH_ENV/LD_* execute at process startup, before any body line runs —
+      // every post-agent run step pins them empty at the step boundary.
+      for (const key of [
+        'BASH_ENV',
+        'LD_PRELOAD',
+        'LD_AUDIT',
+        'LD_LIBRARY_PATH',
+      ]) {
+        assert.equal(s.env?.[key], '', `'${s.name}' must pin ${key} empty`);
+      }
+      // A planted $GITHUB_PATH prepend hijacks the runner's shell lookup for
+      // every later step; pin the interpreter absolutely so no shim can stand
+      // in for it (the truncation in the agent step closes the same channel
+      // at the source).
+      assert.match(
+        String(s.shell),
+        /^\/bin\/bash/,
+        `'${s.name}' must pin an absolute shell`,
+      );
     }
     // The workspace's own .git/config is the highest-precedence scope and the
-    // agent writes the workspace: it is removed before any check runs.
+    // agent writes the workspace: it is removed before any check runs. A
+    // gitfile-replaced .git would make the rm a no-op and let a
+    // url.*.insteadOf rewrite the push URL — both guarded steps refuse it.
     const verify = steps.find((s) => s.id === 'verify');
     assert.ok(verify.run.includes('rm -f .git/config'));
-    for (const key of ['BASH_ENV', 'LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH']) {
-      assert.equal(verify.env[key], '', `verify must pin ${key} empty`);
-    }
+    const verifyGuard = verify.run.indexOf('[ ! -d .git ]');
+    assert.ok(
+      verifyGuard > -1,
+      'verify must refuse a gitfile-replaced .git directory',
+    );
+    assert.ok(
+      verifyGuard < verify.run.indexOf('git ls-files -u'),
+      'the .git directory guard must run before the first git use',
+    );
     const report = steps.find((s) => s.name === 'Report result');
     assert.ok(report.run.includes('rm -f .git/config'));
+    const reportGuard = report.run.indexOf('[ ! -d .git ]');
+    assert.ok(
+      reportGuard > -1,
+      'report must re-assert the .git directory guard before the push',
+    );
+    assert.ok(
+      reportGuard < report.run.indexOf('push --no-verify'),
+      'the .git directory guard must run before the credentialed push',
+    );
     assert.ok(report.run.includes('export GH_CONFIG_DIR'));
     assert.ok(report.run.includes('push --no-verify'));
   });
@@ -409,6 +499,19 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
 describe('qwen-issue-followup-bot.yml: agent settings', () => {
   it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
     assertSettingsContract(followupStep, 'the follow-up step');
+  });
+
+  it('pins the CLI version instead of following `latest`', () => {
+    // Unknown `with:` inputs are dropped without error, and the 2026-08-15
+    // notarget outage is why the pin exists: without a contract test a
+    // future rename silently reverts the bot to the dist-tag with nothing
+    // red at merge time. resolve-pr's equivalent pin has two tests; this one
+    // keeps the follow-up bot's covered too.
+    assert.match(
+      String(followupStep.with?.qwen_cli_version),
+      /^\d+\.\d+\.\d+$/,
+      'the follow-up bot must pin an exact CLI version, not a dist-tag',
+    );
   });
 
   it('settings is valid JSON pinning the turn cap and gh allowlist', () => {

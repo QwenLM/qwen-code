@@ -819,8 +819,9 @@ describe('qwen resolve workflow', () => {
     // must not inherit an executable or routable channel to the token.
     const verifyStep = step(resolveJob, 'Resolution check');
     const reportStep = step(resolveJob, 'Report result');
+    const showStep = step(resolveJob, 'Show run artifacts');
 
-    for (const postAgentStep of [verifyStep, reportStep]) {
+    for (const postAgentStep of [verifyStep, reportStep, showStep]) {
       // BASH_ENV and LD_* execute at process startup, before any body line
       // runs — pin them empty at the step boundary, not merely unset in the
       // body.
@@ -828,19 +829,54 @@ describe('qwen resolve workflow', () => {
       expect(postAgentStep).toContain("LD_PRELOAD: ''");
       expect(postAgentStep).toContain("LD_AUDIT: ''");
       expect(postAgentStep).toContain("LD_LIBRARY_PATH: ''");
-      // A planted PATH shim must not resolve git for the guard or the push.
+      // A planted PATH shim must not resolve git for the guard or the push,
+      // and a planted PATH prepend must not stand in for the step shell.
       expect(postAgentStep).toContain('PATH=/usr/bin:/bin');
+      expect(postAgentStep).toContain(
+        "shell: '/bin/bash --noprofile --norc -eo pipefail {0}'",
+      );
       // Host and global config are agent-reachable runner surfaces (url
       // rewrites redirect the token URL); GIT_CONFIG_COUNT injects config
       // through env. None of it may reach the git calls.
       expect(postAgentStep).toContain('export GIT_CONFIG_SYSTEM=/dev/null');
       expect(postAgentStep).toContain('export GIT_CONFIG_GLOBAL=/dev/null');
       expect(postAgentStep).toContain('export GIT_CONFIG_COUNT=0');
+      // GIT_CONFIG_PARAMETERS injects config that survives GIT_CONFIG_COUNT=0
+      // and the /dev/null scopes; GIT_EXTERNAL_DIFF and GIT_EXEC_PATH are
+      // exec channels a content diff can hit. All three steps must drop the
+      // whole list — the comment claims a 'same scrub', so pin it.
+      expect(postAgentStep).toContain('unset GIT_CONFIG_PARAMETERS');
+      // The scrub must execute BEFORE each step's first git/gh use —
+      // relocating it below them re-exposes the checks and the push to
+      // planted state, the exact regression this PR exists to stop.
+      expect(postAgentStep.indexOf('PATH=/usr/bin:/bin')).toBeGreaterThan(-1);
+    }
+    expect(verifyStep.indexOf('PATH=/usr/bin:/bin')).toBeLessThan(
+      verifyStep.indexOf('git ls-files -u'),
+    );
+    expect(reportStep.indexOf('PATH=/usr/bin:/bin')).toBeLessThan(
+      reportStep.indexOf('push --no-verify'),
+    );
+    expect(reportStep.indexOf('PATH=/usr/bin:/bin')).toBeLessThan(
+      reportStep.indexOf('gh pr comment'),
+    );
+
+    for (const postAgentStep of [verifyStep, reportStep]) {
       // The LOCAL .git/config is the highest-precedence scope and the agent
       // writes the workspace — hooks, filters, includes and url rewrites
       // planted there survive GIT_CONFIG_GLOBAL=/dev/null, so it is removed.
       expect(postAgentStep).toContain('rm -f .git/config');
+      // A gitfile-replaced .git (`gitdir: <path>`) makes that rm a no-op and
+      // lets a url.*.insteadOf rewrite the push URL with the token in the
+      // request path — refuse it before any check and before the push.
+      expect(postAgentStep).toContain('[ ! -d .git ]');
     }
+    expect(verifyStep.indexOf('[ ! -d .git ]')).toBeLessThan(
+      verifyStep.indexOf('git ls-files -u'),
+    );
+    expect(reportStep.indexOf('[ ! -d .git ]')).toBeLessThan(
+      reportStep.indexOf('push --no-verify'),
+    );
 
     // The credentialed push itself: hookless and verify-less, so a planted
     // pre-push hook never receives the token URL.
@@ -872,6 +908,31 @@ describe('qwen resolve workflow', () => {
     expect(agentStep).toContain('GITHUB_ENV="$decoy_dir/github-env"');
     expect(agentStep).toContain('GITHUB_PATH="$decoy_dir/github-path"');
     expect(agentStep).toContain('::stop-commands::');
+    // A hung agent must end inside the script (GNU timeout), not by the
+    // runner's timeout-minutes killing the process tree — only the
+    // script-internal timeout reaches the ::stop-commands:: resume and the
+    // command-file truncation (mirrors 'Run review'). The budget stays under
+    // the step timeout, which remains the outer backstop.
+    const timeoutCmd = agentStep.match(/timeout --kill-after=10s (\d+)s qwen/);
+    expect(timeoutCmd).not.toBeNull();
+    // The failure_kind contract depends on the exit code surviving:
+    // swallowing it (`exit 0`, a trailing `|| true`) would let a crashed or
+    // turn-capped agent report success and misroute the comment.
+    expect(agentStep).toContain('status=$?');
+    expect(agentStep).toMatch(/exit "\$status"\s*$/);
+    // The decoys only mask the invocation's env; the real runner command
+    // files stay agent-discoverable and are truncated on every exit path.
+    for (const file of [
+      'GITHUB_ENV',
+      'GITHUB_PATH',
+      'GITHUB_OUTPUT',
+      'GITHUB_STEP_SUMMARY',
+    ]) {
+      expect(agentStep).toContain(`: > "\${${file}:?}" || true`);
+    }
+    expect(agentStep.indexOf('status=$?')).toBeLessThan(
+      agentStep.indexOf(': > "${GITHUB_ENV:?}"'),
+    );
     // A hung agent must not bill the whole 120-minute job; the step timeout
     // and the number quoted in the failure comment must agree.
     const stepTimeout = agentStep.match(/^\s+timeout-minutes: (\d+)$/m);
@@ -880,6 +941,7 @@ describe('qwen resolve workflow', () => {
       resolveJob.indexOf("- name: 'Report result'"),
     );
     expect(reportStep).toContain(`AGENT_TIMEOUT_MINUTES: '${stepTimeout[1]}'`);
+    expect(Number(timeoutCmd[1])).toBeLessThan(Number(stepTimeout[1]) * 60);
     // Read the ceiling instead of duplicating it as a literal: if the job's
     // timeout-minutes drops to or below the step's, the job-level timeout
     // cancels the whole job on a hung agent — the always()-gated 'Resolution
