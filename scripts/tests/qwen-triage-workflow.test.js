@@ -7053,9 +7053,17 @@ describe('stage 1-pre duplicate gate', () => {
     // a fix is split across two closers (A adds L1, B adds L2, this PR adds
     // both): the branch would demand a delta it simultaneously denies.
     // Per-closer quantification matches the "Fully subsumed" check it
-    // negates.
+    // negates, so the enumeration must name every shape that fails
+    // subsumption: a line the closer's patch does not add or delete at all,
+    // one it adds or deletes fewer times, any non-production addition or
+    // deletion, and a line-less section (rename, binary, mode change,
+    // empty file) the closer's patch does not equivalently change at the
+    // same path.
     expect(section).toContain('ITS patch does not add');
     expect(section).toContain('ITS patch does not delete');
+    expect(section).toContain('fewer times than this PR does');
+    expect(section).toContain('any non-production change');
+    expect(section).toContain('does not equivalently change at the same path');
   });
 
   it('guards every patch fetch fail-closed', () => {

@@ -371,9 +371,12 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stag
     triage closes a PR.
   - **Any remaining delta** — no closer fully subsumes this PR: for each
     closer, an added production line ITS patch does not add, a deleted
-    production line ITS patch does not delete, or any non-production
-    addition → submit exactly one `CHANGES_REQUESTED` review: name the
-    resolved closers,
+    production line ITS patch does not delete, a line ITS patch adds or
+    deletes fewer times than this PR does, any non-production change, or a
+    section with no line-level representation (rename, binary, mode change,
+    empty file) ITS patch does not equivalently change at the same path
+    → submit exactly one `CHANGES_REQUESTED` review: name the resolved
+    closers,
     name the remaining delta, ask the author to rebase onto the default
     branch and reduce the PR to that delta (bilingual body whose first
     line is the `<!-- qwen-triage stage=1-pre -->` marker, @mention the
