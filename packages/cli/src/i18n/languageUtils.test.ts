@@ -517,6 +517,15 @@ Always use formal tone.
       expect(() => initializeLlmOutputLanguage('auto')).not.toThrow();
     });
 
+    it('should not throw when the rule file cannot be created', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(fs.mkdirSync).mockImplementation(() => {
+        throw new Error('EACCES: permission denied');
+      });
+
+      expect(() => initializeLlmOutputLanguage()).not.toThrow();
+    });
+
     it('should normalize Chinese locale and create Chinese rule file', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
 
