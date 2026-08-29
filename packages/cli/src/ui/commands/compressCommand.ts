@@ -5,10 +5,15 @@
  */
 
 import type { HistoryItemCompression } from '../types.js';
+import { isCompressionFailureStatus } from '@qwen-code/qwen-code-core';
 import { MessageType } from '../types.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import {
+  formatCompressionTokenCount,
+  getCompressionFailureStatusText,
+} from '../utils/compression-text.js';
 
 // Cap user-supplied compression instructions. The compression side-query has
 // no input-truncation retry today, so an unbounded instruction string would
@@ -16,11 +21,6 @@ import { t } from '../../i18n/index.js';
 // recover from. 2000 chars is generous for human-typed focus directives
 // without exposing that failure mode.
 const MAX_COMPRESS_INSTRUCTIONS_CHARS = 2000;
-
-// Estimated counts (#9309) get a '~' prefix so structured/headless consumers
-// don't treat locally estimated numbers as API-reported token counts.
-const formatTokenCount = (count: number, isEstimated?: boolean) =>
-  isEstimated ? `~${count}` : String(count);
 
 export const compressCommand: SlashCommand = {
   name: 'compress',
@@ -104,17 +104,25 @@ export const compressCommand: SlashCommand = {
             content: 'Compressing context...',
           };
           const compressed = await doCompress();
-          if (!compressed) {
+          if (
+            !compressed ||
+            isCompressionFailureStatus(compressed.compressionStatus)
+          ) {
             yield {
               messageType: 'error' as const,
-              content: t('Failed to compress chat history.'),
+              content: compressed
+                ? getCompressionFailureStatusText({
+                    compressionStatus: compressed.compressionStatus,
+                    originalTokenCount: compressed.originalTokenCount,
+                  })
+                : t('Failed to compress chat history.'),
             };
             return;
           }
           yield {
             messageType: 'info' as const,
             content:
-              `Context compressed (${formatTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
+              `Context compressed (${formatCompressionTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatCompressionTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
               (compressed.warning ? `\n⚠️ ${compressed.warning}` : ''),
           };
         } catch (e) {
@@ -147,7 +155,11 @@ export const compressCommand: SlashCommand = {
         return;
       }
 
-      if (!compressed) {
+      if (
+        !compressed ||
+        (executionMode !== 'interactive' &&
+          isCompressionFailureStatus(compressed.compressionStatus))
+      ) {
         if (executionMode === 'interactive') {
           ui.addItem(
             {
@@ -162,7 +174,12 @@ export const compressCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'error',
-          content: t('Failed to compress chat history.'),
+          content: compressed
+            ? getCompressionFailureStatusText({
+                compressionStatus: compressed.compressionStatus,
+                originalTokenCount: compressed.originalTokenCount,
+              })
+            : t('Failed to compress chat history.'),
         };
       }
 
@@ -196,7 +213,7 @@ export const compressCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content:
-          `${truncationNotice ? `${truncationNotice} ` : ''}Context compressed (${formatTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
+          `${truncationNotice ? `${truncationNotice} ` : ''}Context compressed (${formatCompressionTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatCompressionTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
           (compressed.warning ? `\n⚠️ ${compressed.warning}` : ''),
       };
     } catch (e) {

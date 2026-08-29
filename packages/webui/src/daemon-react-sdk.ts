@@ -197,6 +197,10 @@ export type {
   DaemonTokenUsage,
   /** Model descriptor: id, display label, context window size. */
   DaemonModelInfo,
+  /** Explicit workspace, standalone, or Live product session context. */
+  DaemonProductSessionContext,
+  /** Standalone working-directory and create-recovery state. */
+  DaemonStandaloneConnectionState,
   /** Classified notice category for host-owned UI routing. */
   DaemonNoticeCategory,
   /** Fine-grained operation associated with a session notice. */
