@@ -79,6 +79,14 @@ vi.mock('../GeminiRespondingSpinner.js', () => ({
   GeminiRespondingSpinner: () => <Text>SPINNER</Text>,
 }));
 
+const textSelectionControllerSpy = vi.hoisted(() => vi.fn());
+vi.mock('../../selection/use-text-selection.js', () => ({
+  TextSelectionController: (props: { isActive: boolean }) => {
+    textSelectionControllerSpy(props);
+    return null;
+  },
+}));
+
 const setAgentShellFocusedSpy = vi.hoisted(() => vi.fn());
 vi.mock('../../contexts/AgentViewContext.js', () => ({
   useAgentViewActions: () => ({
@@ -269,12 +277,17 @@ const pageUpToTop = async (view: { stdin: { write: (s: string) => void } }) => {
 describe('AgentChatContent teammate-tab scrolling (#9507)', () => {
   beforeEach(() => {
     setAgentShellFocusedSpy.mockClear();
+    textSelectionControllerSpy.mockClear();
   });
 
   it('VP mode: Page Up scrolls the teammate transcript back to earlier output', async () => {
     const messages = makeMessages(40);
     const view = renderContent(createUIState(), makeCore(messages));
     await settle();
+
+    expect(textSelectionControllerSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ isActive: true }),
+    );
 
     // The viewport starts pinned to the tail, like the main view.
     expect(view.lastFrame()).toContain('user-msg-39');

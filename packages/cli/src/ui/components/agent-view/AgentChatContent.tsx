@@ -34,7 +34,9 @@ import { buildThoughtHeadIdMap } from '../../utils/historyUtils.js';
 import {
   ScrollableList,
   SCROLL_TO_ITEM_END,
+  type ScrollableListRef,
 } from '../shared/ScrollableList.js';
+import { TextSelectionController } from '../../selection/use-text-selection.js';
 
 // Virtual-viewport item wrapper for the VP scroll path. `pending` preserves
 // the committed/live split: items from an executing/confirming tool group
@@ -58,8 +60,7 @@ const agentVpKeyExtractor = (vpItem: AgentVpItem) =>
         // transition, so the key must not encode pending-ness.
         `h-${vpItem.item.id}`;
 const agentVpIsStatic = (vpItem: AgentVpItem) =>
-  vpItem.kind === 'header' ||
-  (vpItem.kind === 'history' && !vpItem.pending);
+  vpItem.kind === 'header' || (vpItem.kind === 'history' && !vpItem.pending);
 
 export interface AgentChatContentProps {
   /** The agent's AgentCore — the source of truth for transcript state. */
@@ -99,6 +100,7 @@ export const AgentChatContent = ({
   } = uiState;
   const { columns: terminalWidth } = useTerminalSize();
   const contentWidth = terminalWidth - 4;
+  const scrollRef = useRef<ScrollableListRef<AgentVpItem>>(null);
 
   // Force re-render on message updates and status changes.
   // STREAM_TEXT is deliberately excluded — model text is shown only after
@@ -334,17 +336,34 @@ export const AgentChatContent = ({
 
   if (useVirtualScroll) {
     return (
-      <ScrollableList
-        hasFocus={!dialogsVisible && !embeddedShellFocused}
-        data={virtualItems}
-        renderItem={renderVirtualItem}
-        estimatedItemHeight={agentVpEstimatedHeight}
-        keyExtractor={agentVpKeyExtractor}
-        initialScrollIndex={virtualItems.length <= 1 ? 0 : SCROLL_TO_ITEM_END}
-        isStaticItem={agentVpIsStatic}
-        containerHeight={Math.max(0, availableTerminalHeight ?? 0)}
-        showScrollbar={uiState.showScrollbar ?? true}
-      />
+      <>
+        <ScrollableList
+          ref={scrollRef}
+          hasFocus={!dialogsVisible && !embeddedShellFocused}
+          data={virtualItems}
+          renderItem={renderVirtualItem}
+          estimatedItemHeight={agentVpEstimatedHeight}
+          keyExtractor={agentVpKeyExtractor}
+          initialScrollIndex={virtualItems.length <= 1 ? 0 : SCROLL_TO_ITEM_END}
+          isStaticItem={agentVpIsStatic}
+          containerHeight={Math.max(0, availableTerminalHeight ?? 0)}
+          showScrollbar={uiState.showScrollbar ?? true}
+        />
+        <TextSelectionController
+          isActive={!dialogsVisible && !embeddedShellFocused}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          getScrollState={() =>
+            scrollRef.current?.getScrollState() ?? {
+              scrollTop: 0,
+              scrollHeight: 0,
+              innerHeight: 0,
+            }
+          }
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
+        />
+      </>
     );
   }
 
