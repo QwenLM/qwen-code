@@ -1592,12 +1592,16 @@ export class SessionService {
   /**
    * Move a prompt terminal ledger sidecar across archive states. Unlike a
    * bare rename, an existing destination does not wedge the pair forever:
-   * the ledger is append-only JSONL, so the source records are concatenated
-   * onto the destination (preserving write order) and the source is
-   * unlinked. Throws propagate to the caller, which owns the warn-only
-   * policy — a ledger problem must never block the transcript move.
+   * the ledger is append-only JSONL, so the older half is concatenated before
+   * the newer half (preserving write order) and the source is unlinked. Throws
+   * propagate to the caller, which owns the warn-only policy — a ledger
+   * problem must never block the transcript move.
    */
-  private moveLedgerSidecar(sourcePath: string, destinationPath: string): void {
+  private moveLedgerSidecar(
+    sourcePath: string,
+    destinationPath: string,
+    action: 'archive' | 'unarchive',
+  ): void {
     if (!fs.existsSync(sourcePath)) {
       return;
     }
@@ -1616,7 +1620,16 @@ export class SessionService {
       const payload = sourceContents.endsWith('\n')
         ? sourceContents
         : `${sourceContents}\n`;
-      fs.appendFileSync(destinationPath, `\n${payload}`, 'utf8');
+      if (action === 'archive') {
+        fs.appendFileSync(destinationPath, `\n${payload}`, 'utf8');
+      } else {
+        const destinationContents = fs.readFileSync(destinationPath, 'utf8');
+        fs.writeFileSync(
+          destinationPath,
+          `${payload}${destinationContents.length > 0 ? '\n' : ''}${destinationContents}`,
+          'utf8',
+        );
+      }
     }
     fs.unlinkSync(sourcePath);
   }
@@ -1707,7 +1720,7 @@ export class SessionService {
     );
     try {
       assertCleanupOwned?.();
-      this.moveLedgerSidecar(sourceLedger, destinationLedger);
+      this.moveLedgerSidecar(sourceLedger, destinationLedger, action);
     } catch (error) {
       if (error instanceof SessionWriterError) throw error;
       assertCleanupOwned?.();

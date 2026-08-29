@@ -24,6 +24,10 @@ import {
   writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
 import {
+  danglingInFlightPromptIds,
+  readPromptLedgerRecords,
+} from '@qwen-code/acp-bridge/promptLedger';
+import {
   SessionArchivedError,
   SessionArchivingError,
   SessionConflictError,
@@ -1156,6 +1160,46 @@ describe('unarchiveDaemonSessions', () => {
       errors: [],
     });
     await expectLifecycleSidecarsMoved(sidecars, 'active');
+  });
+
+  it('keeps archived ledger records before newer active records during reconciliation', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440114';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+    const activeLedger = service.getPromptLedgerPath(sessionId);
+    const archivedPr = service.getPrSessionPathForArchiveState(
+      sessionId,
+      'archived',
+    );
+    const archivedLedger = path.join(
+      path.dirname(archivedPr),
+      `${sessionId}.ledger.jsonl`,
+    );
+    fs.mkdirSync(path.dirname(activeLedger), { recursive: true });
+    fs.mkdirSync(path.dirname(archivedLedger), { recursive: true });
+    fs.writeFileSync(
+      archivedLedger,
+      '{"v":1,"promptId":"p1","state":"in_flight","at":1}\n',
+    );
+    fs.writeFileSync(
+      activeLedger,
+      '{"v":1,"promptId":"p1","terminal":"completed","at":2}\n',
+    );
+
+    const result = await unarchiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toMatchObject({
+      alreadyActive: [sessionId],
+      errors: [],
+    });
+    const records = readPromptLedgerRecords(activeLedger);
+    expect(records.map((record) => record.at)).toEqual([1, 2]);
+    expect(danglingInFlightPromptIds(records)).toEqual([]);
+    expect(fs.existsSync(archivedLedger)).toBe(false);
   });
 
   it('collapses case-variant spellings in one batch to a single unarchive', async () => {
