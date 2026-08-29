@@ -640,7 +640,7 @@ describe('LlmClient Goal admission', () => {
       .mockImplementationOnce(async function* () {
         pending = { objective: 'stale proposal' };
         yield {
-          type: GeminiEventType.Error,
+          type: LlmEventType.Error,
           value: { error: { status: 500 } },
         };
       })
@@ -669,9 +669,13 @@ describe('LlmClient Goal admission', () => {
   it('drops a proposal when cancellation lands during runtime readiness', async () => {
     const { client, config, runtime } = setupGoalClient();
     const controller = new AbortController();
-    Object.assign(config, {
-      takePendingGoalProposal: vi.fn(() => ({ objective: 'ship it' })),
+    let pending: { objective: string } | undefined = { objective: 'ship it' };
+    const takePendingGoalProposal = vi.fn(() => {
+      const proposal = pending;
+      pending = undefined;
+      return proposal;
     });
+    Object.assign(config, { takePendingGoalProposal });
 
     await client['settlePendingGoalProposal'](
       true,
@@ -682,6 +686,10 @@ describe('LlmClient Goal admission', () => {
       },
     );
 
+    // Dropped means taken and not applied: the slot is empty afterwards, so
+    // a later boundary cannot revive the cancelled approval.
+    expect(takePendingGoalProposal).toHaveBeenCalledTimes(1);
+    expect(pending).toBeUndefined();
     expect(runtime.dispatch).not.toHaveBeenCalled();
   });
 

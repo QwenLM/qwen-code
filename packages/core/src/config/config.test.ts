@@ -4693,6 +4693,59 @@ describe('Server Config (config.ts)', () => {
         expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
       },
     );
+    it.each([
+      ['interactive + stream-json', { inputFormat: InputFormat.STREAM_JSON }],
+      ['interactive + Zed', { experimentalZedIntegration: true }],
+    ] as const)(
+      'does not register propose_goal in %s sessions, which resolve to acp',
+      async (_mode, params) => {
+        // isInteractive() is true here but resolveInteractionMode() is 'acp':
+        // the ACP surface bypasses GeminiClient.sendMessageStream, so nothing
+        // would ever settle a parked approval. The gate must be the mode, not
+        // the weaker interactive flag.
+        const config = new Config({
+          ...baseParams,
+          interactive: true,
+          ...params,
+        });
+        await config.initialize();
+
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(config.isInteractive()).toBe(true);
+        expect(registeredNames).toContain(ToolNames.GET_GOAL);
+        expect(registeredNames).not.toContain(ToolNames.PROPOSE_GOAL);
+      },
+    );
+    it('clears a parked propose_goal approval when the Goal runtime is rebuilt', async () => {
+      const config = new Config({ ...baseParams, interactive: true });
+      await config.initialize({ skipLlmInitialization: true });
+
+      expect(config.setPendingGoalProposal({ objective: 'ship it' })).toBe(
+        true,
+      );
+      expect(config.hasPendingGoalProposal()).toBe(true);
+      // Set-once: a second approval cannot overwrite the first.
+      expect(config.setPendingGoalProposal({ objective: 'other' })).toBe(false);
+
+      // A new session rebuilds the runtime; the approval belonged to the old one.
+      config.startNewSession();
+
+      expect(config.hasPendingGoalProposal()).toBe(false);
+      expect(config.takePendingGoalProposal()).toBeUndefined();
+    });
+    it('hands a parked propose_goal approval out exactly once', () => {
+      const config = new Config({ ...baseParams, interactive: true });
+      expect(config.setPendingGoalProposal({ objective: 'ship it' })).toBe(
+        true,
+      );
+      expect(config.takePendingGoalProposal()).toEqual({
+        objective: 'ship it',
+      });
+      expect(config.takePendingGoalProposal()).toBeUndefined();
+      expect(config.hasPendingGoalProposal()).toBe(false);
+    });
     it('does not register propose_goal when goals.modelProposed is disabled', async () => {
       const config = new Config({
         ...baseParams,

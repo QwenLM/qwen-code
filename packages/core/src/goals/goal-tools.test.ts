@@ -1673,6 +1673,31 @@ describe('ProposeGoalTool', () => {
     ).rejects.toThrow(PROPOSE_GOAL_PENDING_MESSAGE);
   });
 
+  it('refuses when the parking slot is taken between the re-check and the park', async () => {
+    // Two approved invocations in one turn can both pass the
+    // hasPendingGoalProposal() re-check before either parks; the set-once
+    // slot refuses the second, and execute() must surface that refusal
+    // instead of reporting "approved".
+    const { runtime, host } = idleRuntime();
+    const config = proposeConfig(runtime, {
+      hasPendingGoalProposal: () => false,
+      setPendingGoalProposal: vi.fn(() => false),
+    });
+    const tool = new ProposeGoalTool(config);
+
+    const { invocation } = await confirm(
+      tool,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(result.llmContent).toBe(PROPOSE_GOAL_PENDING_MESSAGE);
+    expect(config.setPendingGoalProposal).toHaveBeenCalledTimes(1);
+    expect(runtime.getSnapshot().goal).toBeNull();
+    expect(host.started).toHaveLength(0);
+  });
+
   it('sets nothing when the dialog was cancelled', async () => {
     const { runtime, host } = idleRuntime();
     const config = proposeConfig(runtime);

@@ -5542,6 +5542,50 @@ describe('loadCliConfig skills.disabledLevels', () => {
   });
 });
 
+describe('loadCliConfig goals.modelProposed', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('defaults to alwaysAsk when goals.modelProposed is not set', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getModelProposedGoals()).toBe('alwaysAsk');
+  });
+
+  // The wiring line in loadCliConfig is the only way the setting reaches
+  // core; without it "disabled" would be a dead switch and the model would
+  // keep the propose_goal tool.
+  it('passes goals.modelProposed = disabled through to core', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { goals: { modelProposed: 'disabled' } };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getModelProposedGoals()).toBe('disabled');
+  });
+
+  it('falls back to the core default for an unknown value', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings = {
+      goals: { modelProposed: 'auto' },
+    } as unknown as Settings;
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getModelProposedGoals()).toBe('alwaysAsk');
+  });
+});
+
 describe('normalizeModelProposedGoals', () => {
   it('passes the two known modes through and drops anything else', () => {
     expect(normalizeModelProposedGoals('alwaysAsk')).toBe('alwaysAsk');
