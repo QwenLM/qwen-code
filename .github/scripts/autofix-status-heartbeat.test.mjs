@@ -351,11 +351,21 @@ describe('autofix-status-heartbeat loop', () => {
   }
 
   function startLoop(env) {
-    return spawn('bash', [script, 'loop'], {
+    const child = spawn('bash', [script, 'loop'], {
       env,
       stdio: 'ignore',
       detached: true,
     });
+    // Node waits on a detached child until it exits unless it is unref'd,
+    // and node --test carries no per-file timeout: a loop that survives
+    // teardown (a kill losing its race on a loaded host, a child stuck in
+    // uninterruptible IO with SIGKILL pending) would otherwise hold this
+    // file's process — and the CI lane — until the job's 60-minute cap.
+    // killLoop still empties the session; unref only degrades a survivor
+    // from a lane hang to a stray the suite leaves behind (witnessed by
+    // the leak probe below).
+    child.unref();
+    return child;
   }
 
   async function waitFor(predicate, timeoutMs, stepMs = 100) {
@@ -1202,6 +1212,106 @@ describe('autofix-status-heartbeat loop', () => {
       }
     },
   );
+
+  // The leak-probe pair: a loop that survives teardown must degrade to a
+  // stray the suite leaves behind, never a process that holds this file —
+  // and the CI lane — until the job's 60-minute cap. The fixture arms ONLY
+  // in a witness-launched re-run of this file (HB_LEAK_PROBE carries the
+  // leak dir): it starts a loop inside that dir and ends without killing
+  // it, keeping heartbeat.pid intact so the loop never self-exits. With
+  // startLoop's unref dropped, that re-run hangs past the witness budget;
+  // with it, the re-run exits and leaves the loop for the witness to kill.
+  it(
+    'leak-probe fixture: an un-killed loop',
+    {
+      skip: process.env.HB_LEAK_PROBE
+        ? false
+        : 'armed only by the leak witness re-run',
+    },
+    async () => {
+      const leakDir = process.env.HB_LEAK_PROBE;
+      const gh = fakeGhBin(leakDir);
+      // Everything the loop touches lives inside the leak dir, which the
+      // CHILD process never cleans up: the fake gh stays resolvable (a
+      // deleted bin would fall through to a live gh), and heartbeat.pid
+      // stays intact so the loop has no self-exit.
+      const { env } = loopEnv(leakDir, gh, { HB_WORKDIR: leakDir });
+      const child = startLoop(env);
+      assert.ok(child.pid, 'the probe loop must spawn');
+      const registered = await waitFor(
+        () => existsSync(join(leakDir, 'heartbeat.pid')),
+        8000,
+      );
+      assert.ok(
+        registered,
+        'the probe loop must register before the probe ends',
+      );
+    },
+  );
+
+  it('a surviving loop cannot hold the suite process open', async () => {
+    const leakDir = mkdtempSync(join(tmpdir(), 'autofix-heartbeat-leak-'));
+    // NODE_TEST_CONTEXT arrives through the orchestrator's env and would
+    // make the re-run's own node --test refuse to run files ("recursive");
+    // the re-run is a fresh, deliberate runner, not a nested run().
+    const childEnv = { ...process.env, HB_LEAK_PROBE: leakDir };
+    delete childEnv.NODE_TEST_CONTEXT;
+    let res;
+    try {
+      res = spawnSync(
+        process.execPath,
+        [
+          '--test',
+          '--test-name-pattern',
+          '^leak-probe fixture',
+          fileURLToPath(import.meta.url),
+        ],
+        {
+          env: childEnv,
+          encoding: 'utf8',
+          timeout: 30000,
+        },
+      );
+    } finally {
+      // Kill the leaked session BEFORE asserting so a red witness leaves
+      // nothing alive behind.
+      const pidFile = join(leakDir, 'heartbeat.pid');
+      if (existsSync(pidFile)) {
+        const pid = readFileSync(pidFile, 'utf8').trim();
+        if (haveSessionKillTools) {
+          spawnSync('bash', [
+            '-c',
+            `pkill -KILL -s ${pid} 2>/dev/null || true`,
+          ]);
+        }
+        try {
+          process.kill(-Number(pid), 'SIGKILL');
+        } catch {
+          // the group is already gone — nothing left to kill
+        }
+        await waitFor(
+          () =>
+            !haveSessionKillTools ||
+            spawnSync('pgrep', ['-s', pid]).status !== 0,
+          5000,
+          50,
+        );
+      }
+      rmSync(leakDir, { recursive: true, force: true });
+    }
+    // The fixture line in the child's output pins that the re-run actually
+    // executed it — a vacuous pass (nothing matched) must not green this.
+    assert.ok(
+      res.stdout.includes('leak-probe fixture'),
+      `the leak fixture must run in the re-run: ${res.stdout.slice(-500)}`,
+    );
+    assert.equal(
+      res.status,
+      0,
+      `an un-killed loop must not hold the suite process open ` +
+        `(status ${res.status}, signal ${res.signal})`,
+    );
+  });
 
   it(
     'a planted FIFO at heartbeat.pid cannot block the loop past the bounded read',
