@@ -3688,6 +3688,12 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     updateInfo,
     agentViewState.activeView,
+    // The agent tab footer grows with its own status row / queued messages /
+    // input text, none of which the deps above track; AgentComposer syncs
+    // this key to AgentViewContext whenever they change so the footer is
+    // re-measured and the transcript viewport does not stay stale-high
+    // (#9507). Mirrors liveAgentPanelLayoutKey.
+    agentViewState.agentComposerLayoutKey,
     embeddedShellFocused,
     messageQueue.length,
     isInputActive,

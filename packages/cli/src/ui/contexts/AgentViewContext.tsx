@@ -52,6 +52,14 @@ export interface AgentViewState {
   agentShellFocused: boolean;
   /** Last synced text from the active agent tab's input buffer. */
   agentInputBufferText: string;
+  /**
+   * Layout key synced by the active AgentComposer whenever its footer's
+   * height-relevant state changes (status row, queued messages, input text,
+   * streaming state). Consumed by AppContainer's controls-height measure
+   * effect so the agent footer is re-measured on growth; '' before any
+   * agent composer has synced.
+   */
+  agentComposerLayoutKey: string;
   /** Whether the tab bar has keyboard focus (vs the agent input). */
   agentTabBarFocused: boolean;
   /** Per-agent approval modes (keyed by agentId). */
@@ -80,6 +88,7 @@ export interface AgentViewActions {
   unregisterAll(): void;
   setAgentShellFocused(focused: boolean): void;
   setAgentInputBufferText(text: string): void;
+  setAgentComposerLayoutKey(key: string): void;
   setAgentTabBarFocused(focused: boolean): void;
   setAgentApprovalMode(agentId: string, mode: ApprovalMode): void;
   /** Replace the queued follow-up messages for an agent (see state docs). */
@@ -100,6 +109,7 @@ const DEFAULT_STATE: AgentViewState = {
   agents: new Map(),
   agentShellFocused: false,
   agentInputBufferText: '',
+  agentComposerLayoutKey: '',
   agentTabBarFocused: false,
   agentApprovalModes: new Map(),
   agentMessageQueues: new Map(),
@@ -116,6 +126,7 @@ const DEFAULT_ACTIONS: AgentViewActions = {
   unregisterAll: noop,
   setAgentShellFocused: noop,
   setAgentInputBufferText: noop,
+  setAgentComposerLayoutKey: noop,
   setAgentTabBarFocused: noop,
   setAgentApprovalMode: noop,
   setAgentMessageQueue: noop,
@@ -151,6 +162,7 @@ export function AgentViewProvider({
   );
   const [agentShellFocused, setAgentShellFocused] = useState(false);
   const [agentInputBufferText, setAgentInputBufferText] = useState('');
+  const [agentComposerLayoutKey, setAgentComposerLayoutKey] = useState('');
   const [agentTabBarFocused, setAgentTabBarFocused] = useState(false);
   const [agentApprovalModes, setAgentApprovalModes] = useState<
     Map<string, ApprovalMode>
@@ -329,6 +341,7 @@ export function AgentViewProvider({
       agents,
       agentShellFocused,
       agentInputBufferText,
+      agentComposerLayoutKey,
       agentTabBarFocused,
       agentApprovalModes,
       agentMessageQueues,
@@ -338,6 +351,7 @@ export function AgentViewProvider({
       agents,
       agentShellFocused,
       agentInputBufferText,
+      agentComposerLayoutKey,
       agentTabBarFocused,
       agentApprovalModes,
       agentMessageQueues,
@@ -354,6 +368,7 @@ export function AgentViewProvider({
       unregisterAll,
       setAgentShellFocused,
       setAgentInputBufferText,
+      setAgentComposerLayoutKey,
       setAgentTabBarFocused,
       setAgentApprovalMode,
       setAgentMessageQueue,
@@ -368,6 +383,7 @@ export function AgentViewProvider({
       unregisterAll,
       setAgentShellFocused,
       setAgentInputBufferText,
+      setAgentComposerLayoutKey,
       setAgentTabBarFocused,
       setAgentApprovalMode,
       setAgentMessageQueue,
