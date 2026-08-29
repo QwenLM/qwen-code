@@ -104,6 +104,25 @@ describe('createChildAbortController', () => {
     const child = createChildAbortController(parent, 123);
     expect(getMaxListeners(child.signal)).toBe(123);
   });
+
+  it('cleans up and aborts child if parent is aborted at registration', () => {
+    const parent = createAbortController();
+    const originalAddEventListener = parent.signal.addEventListener.bind(
+      parent.signal,
+    );
+    vi.spyOn(parent.signal, 'addEventListener').mockImplementation(
+      (type, listener, options) => {
+        originalAddEventListener(type, listener, options);
+        if (type === 'abort') {
+          parent.abort('interleaved-abort');
+        }
+      },
+    );
+    const child = createChildAbortController(parent);
+    expect(child.signal.aborted).toBe(true);
+    expect(child.signal.reason).toBe('interleaved-abort');
+    expect(getEventListeners(parent.signal, 'abort').length).toBe(0);
+  });
 });
 
 describe('combineAbortSignals', () => {

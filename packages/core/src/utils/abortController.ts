@@ -84,6 +84,11 @@ export function createChildAbortController(
 
   parentSignal.addEventListener('abort', handler, { once: true });
 
+  if (parentSignal.aborted) {
+    weakParent.deref()?.removeEventListener('abort', handler);
+    child.abort(parentSignal.reason);
+  }
+
   child.signal.addEventListener(
     'abort',
     () => {
