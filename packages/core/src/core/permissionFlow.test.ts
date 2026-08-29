@@ -18,6 +18,9 @@ import {
   isPlanModeBlocked,
   isAutoEditApproved,
 } from './permissionFlow.js';
+import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
+import { applySkillAllowedTools } from '../tools/skill-utils.js';
 
 // Mock types for testing
 const mockConfig = (overrides: Partial<Config> = {}): Config =>
@@ -279,6 +282,108 @@ describe('evaluatePermissionFlow', () => {
 
     expect(result.finalPermission).toBe('deny');
     expect(result.denyMessage).toContain('denied by permission rules');
+  });
+});
+
+describe('evaluatePermissionFlow with ask_user_question', () => {
+  const questions = [
+    {
+      question: 'Which check defines success?',
+      header: 'Check',
+      options: [
+        { label: 'npm test', description: 'exit code 0' },
+        { label: 'npm run lint', description: 'no warnings' },
+      ],
+      multiSelect: false,
+    },
+  ];
+
+  const askConfig = (interactive: boolean) =>
+    ({
+      isInteractive: vi.fn().mockReturnValue(interactive),
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getTargetDir: vi.fn().mockReturnValue('/test'),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      getInputFormat: vi.fn().mockReturnValue(undefined),
+    }) as unknown as Config;
+
+  const pmWithSkillGrant = () => {
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+    });
+    pm.initialize();
+    // Exactly what loading a skill whose SKILL.md lists
+    // `allowedTools: [ask_user_question]` does to the session.
+    applySkillAllowedTools(pm, [ToolNames.ASK_USER_QUESTION]);
+    return pm;
+  };
+
+  it("keeps the dialog when a skill's allowedTools grant would otherwise allow the tool", async () => {
+    const config = askConfig(true);
+    const pm = pmWithSkillGrant();
+    const invocation = new AskUserQuestionTool(config).build({ questions });
+
+    const result = await evaluatePermissionFlow(
+      { ...config, getPermissionManager: () => pm } as unknown as Config,
+      invocation,
+      ToolNames.ASK_USER_QUESTION,
+      { questions },
+    );
+
+    // The grant did override the 'ask' default at L4 …
+    expect(result.defaultPermission).toBe('ask');
+    expect(await pm.evaluate(result.pmCtx)).toBe('allow');
+    // … but the invocation still reaches the user, in every approval mode.
+    expect(result.requiresUserInteraction).toBe(true);
+    expect(result.finalPermission).toBe('ask');
+    expect(
+      needsConfirmation(
+        result.finalPermission,
+        ApprovalMode.YOLO,
+        ToolNames.ASK_USER_QUESTION,
+        result.requiresUserInteraction,
+      ),
+    ).toBe(true);
+  });
+
+  it('still lets headless runs skip the tool, where nothing can prompt', async () => {
+    const config = askConfig(false);
+    const pm = pmWithSkillGrant();
+    const invocation = new AskUserQuestionTool(config).build({ questions });
+
+    const result = await evaluatePermissionFlow(
+      { ...config, getPermissionManager: () => pm } as unknown as Config,
+      invocation,
+      ToolNames.ASK_USER_QUESTION,
+      { questions },
+    );
+
+    expect(result.requiresUserInteraction).toBe(false);
+    expect(result.finalPermission).toBe('allow');
+  });
+
+  it('preserves an explicit deny rule for ask_user_question', async () => {
+    const config = askConfig(true);
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [ToolNames.ASK_USER_QUESTION],
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+    });
+    pm.initialize();
+    const invocation = new AskUserQuestionTool(config).build({ questions });
+
+    const result = await evaluatePermissionFlow(
+      { ...config, getPermissionManager: () => pm } as unknown as Config,
+      invocation,
+      ToolNames.ASK_USER_QUESTION,
+      { questions },
+    );
+
+    expect(result.finalPermission).toBe('deny');
   });
 });
 
