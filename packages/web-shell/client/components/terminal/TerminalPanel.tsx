@@ -7,7 +7,7 @@
 import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import '@xterm/xterm/css/xterm.css';
 import { useTheme, type WebShellTheme } from '../../themeContext';
 import { getDaemonToken } from '../../config/daemon';
