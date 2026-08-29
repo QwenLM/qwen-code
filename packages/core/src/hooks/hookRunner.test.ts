@@ -1189,6 +1189,53 @@ describe('HookRunner', () => {
       }
     });
 
+    it('absorbs the literal path suffix after a bare cmd placeholder into the same quoted region', async () => {
+      // hookConfig.shell only overrides to 'bash' | 'powershell'; cmd is only
+      // reachable via the platform's global shell configuration.
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const previousMsystem = process.env['MSYSTEM'];
+      const previousComSpec = process.env['ComSpec'];
+      delete process.env['MSYSTEM'];
+      process.env['ComSpec'] = 'C:\\Windows\\System32\\cmd.exe';
+
+      try {
+        const mockProcess = createMockProcess(0, 'result');
+        mockSpawn.mockImplementation(() => mockProcess);
+
+        const hookConfig: HookConfig = {
+          type: HookType.Command,
+          command: '$QWEN_PROJECT_DIR/.qwen/hooks/check.cmd',
+          source: HooksConfigSource.Project,
+        };
+
+        await hookRunner.executeHook(
+          hookConfig,
+          HookEventName.PreToolUse,
+          createMockInput({ cwd: 'C:\\qwen hook & project' }),
+        );
+
+        // The literal suffix after the placeholder must land inside the
+        // same quote pair as the expanded path — real cmd.exe treats text
+        // right after a closing quote as a new argument, so leaving it
+        // outside would split the executable path into two tokens.
+        const spawnCall = mockSpawn.mock.calls[0];
+        expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
+          '""C:\\qwen hook & project/.qwen/hooks/check.cmd""',
+        );
+      } finally {
+        if (previousMsystem === undefined) {
+          delete process.env['MSYSTEM'];
+        } else {
+          process.env['MSYSTEM'] = previousMsystem;
+        }
+        if (previousComSpec === undefined) {
+          delete process.env['ComSpec'];
+        } else {
+          process.env['ComSpec'] = previousComSpec;
+        }
+      }
+    });
+
     it('splices a bare path into a PowerShell double-quoted placeholder instead of nesting quotes', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
