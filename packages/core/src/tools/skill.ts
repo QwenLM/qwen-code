@@ -62,7 +62,7 @@ How to invoke:
 - Examples:
   - \`skill: "pdf"\` - invoke the pdf skill
   - \`skill: "xlsx"\` - invoke the xlsx skill
-  - \`skill: "ms-office-suite:pdf"\` - invoke using fully qualified name
+  - \`skill: "ms-office-suite:pdf"\` - a name may itself contain a colon; pass it exactly as listed
   - \`skill: "mcp-prompt", args: "topic"\` - invoke a model-invocable command with arguments
 
 Important:
