@@ -28,6 +28,7 @@ const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
 
 function makeTeamConfig(opts?: {
+  registry?: BackgroundTaskRegistry;
   teamManager?: {
     sendMessage: (...args: unknown[]) => Promise<void>;
     broadcast: (...args: unknown[]) => Promise<BroadcastResult>;
@@ -43,7 +44,8 @@ function makeTeamConfig(opts?: {
     : null;
   return {
     getTeamManager: () => teamManager,
-    getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+    getBackgroundTaskRegistry: () =>
+      opts?.registry ?? new BackgroundTaskRegistry(),
     getApprovalMode: () => opts?.approvalMode ?? DEFAULT_MODE,
   } as unknown as Config;
 }
@@ -211,6 +213,40 @@ describe('SendMessageTool — team mode', () => {
     expect(() => tool.build({} as never)).toThrow();
     expect(() => tool.build({ to: 'alice' } as never)).toThrow();
   });
+
+  it('rejects ambiguous teammate and background-task destinations', async () => {
+    const registry = new BackgroundTaskRegistry();
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+    });
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        registry,
+        teamManager: { sendMessage, broadcast: vi.fn() },
+      }),
+    );
+
+    const result = await tool.validateBuildAndExecute(
+      {
+        to: 'alice',
+        task_id: 'agent-1',
+        message: 'ambiguous destination',
+      },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+    expect(result.llmContent).toContain('Only one of "to" or "task_id"');
+    expect(registry.get('agent-1')!.pendingMessages).toEqual([]);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
 });
 
 describe('SendMessageTool — background-task mode', () => {
@@ -226,7 +262,10 @@ describe('SendMessageTool — background-task mode', () => {
     reviveCompletedBackgroundAgent = vi.fn();
     config = {
       getBackgroundTaskRegistry: () => registry,
-      getTeamManager: () => null,
+      getTeamManager: () =>
+        ({
+          getTeamFile: () => ({ members: [{ name: 'qa-reviewer' }] }),
+        }) as ReturnType<Config['getTeamManager']>,
       resumeBackgroundAgent,
       reviveCompletedBackgroundAgent,
     } as unknown as Config;
@@ -320,7 +359,43 @@ describe('SendMessageTool — background-task mode', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.error?.message).toBe('Task not found: nope');
     expect(result.llmContent).toContain('No background task found');
+    expect(result.llmContent).not.toContain('use `to:');
+    expect(result.returnDisplay).toContain('Task not found.');
+    expect(result.returnDisplay).not.toContain('use "to"');
+  });
+
+  it('returns error for non-existent task without an active team', async () => {
+    const noTeamTool = new SendMessageTool(
+      makeTeamConfig({ registry, teamManager: null }),
+    );
+    const result = await noTeamTool.validateBuildAndExecute(
+      { task_id: 'nope', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.llmContent).toContain('No background task found');
+    expect(result.llmContent).not.toContain('use `to:');
+    expect(result.returnDisplay).toContain('Task not found.');
+    expect(result.returnDisplay).not.toContain('use "to"');
+  });
+
+  it('suggests the teammate destination for a matching task ID', async () => {
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'QA Reviewer', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.error?.message).toContain(
+      'use `to: "qa-reviewer"` instead of `task_id`',
+    );
+    expect(result.llmContent).toContain('use `to: "qa-reviewer"`');
+    expect(result.returnDisplay).toContain(
+      'use "to" for teammate "qa-reviewer"',
+    );
   });
 
   it('returns error for a failed (non-running, non-revivable) task', async () => {
