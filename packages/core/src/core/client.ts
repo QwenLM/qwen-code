@@ -3320,6 +3320,15 @@ export class LlmClient {
         }
       }
 
+      // A runtime-scheduled Goal turn is not a session turn. `maxSessionTurns`
+      // counts every model call the user's own prompts drive, tool
+      // continuations included; a Goal that reads a few files per
+      // continuation would spend a user-set cap of N in N/4 continuations
+      // and die mid-run with no resume path in headless. Autonomous Goal
+      // spend is bounded by the Goal's own token budget instead (armed at
+      // creation, re-armed only by an explicit resume or edit), and the
+      // headless host excludes runtime Goal turns from the same cap for the
+      // same reason, so counting them here would split the two ceilings.
       if (messageType !== SendMessageType.Retry && !isGoalRuntimeTurn) {
         // Attribution snapshots are recorded on every non-retry turn. File
         // history snapshots are created only at UserQuery boundaries; later
@@ -3368,11 +3377,12 @@ export class LlmClient {
         }
       }
 
-      // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
-      const boundedTurns =
-        messageType === SendMessageType.Goal
-          ? MAX_TURNS
-          : Math.min(turns, MAX_TURNS);
+      // Ensure turns never exceeds MAX_TURNS to prevent infinite loops. A
+      // runtime Goal turn honours the caller's budget like every other
+      // message type: each continuation is a fresh top-level send that
+      // starts from MAX_TURNS on its own, so nothing about a Goal needs to
+      // outlive one turn's recursion allowance.
+      const boundedTurns = Math.min(turns, MAX_TURNS);
       if (!boundedTurns) {
         this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
         endCurrentInteraction('error', 'max turns exhausted', 'max_turns');
@@ -3390,6 +3400,9 @@ export class LlmClient {
         ) {
           return undefined;
         }
+        // Same ceiling as the session-turn check above, same exclusion: a
+        // runtime Goal turn does not count toward `maxSessionTurns`, so it
+        // must not be refused steer input on that count either.
         const maxSessionTurns = this.config.getMaxSessionTurns();
         if (
           !isGoalRuntimeTurn &&
@@ -4218,7 +4231,16 @@ export class LlmClient {
           // these semantics (fresh DaemonToolLoopState per continuation).
           // Runaway protection is preserved: the cap still bounds each
           // iteration, and the chain itself is bounded by
-          // stopHookBlockingCap / MAX_GOAL_ITERATIONS.
+          // stopHookBlockingCap / MAX_GOAL_ITERATIONS. Those are the only
+          // Goal-specific bounds on this path (a user-set maxSessionTurns
+          // still cuts the chain: each hook hop is a plain send with no
+          // Goal permit, so it counts as a session turn): the legacy hook
+          // Goal recurses inside one sendMessageStream call, so the
+          // runtime's token budget (which meters continuations the Goal
+          // runtime schedules) never sees it, and the recursion budget is
+          // not decremented below because a 50-iteration chain with steer
+          // and next-speaker continues would otherwise exhaust MAX_TURNS
+          // before its own iteration cap.
           this.loopDetector.reset(prompt_id);
 
           const activeGoal = getActiveGoal(this.config.getSessionId());

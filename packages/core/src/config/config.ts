@@ -210,6 +210,7 @@ import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import {
   registerSessionModel,
   registerSessionProjectDir,
+  sessionIdContext,
   unregisterSessionModel,
   unregisterSessionProjectDir,
 } from '../utils/sessionIdContext.js';
@@ -2539,7 +2540,11 @@ export class Config {
     this.sessionData = params.sessionData;
     this.sessionRestoreProjectionSource = params.sessionRestoreProjectionSource;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
-    setDebugLogSession(this);
+    // Daemon Configs use sessionIdContext and must not replace the
+    // single-session CLI fallback with whichever session was created last.
+    if (sessionIdContext.getStore() === undefined) {
+      setDebugLogSession(this);
+    }
     this.debugLogger = createDebugLogger();
     this.embeddingModel = params.embeddingModel ?? DEFAULT_QWEN_EMBEDDING_MODEL;
     this.fileSystemService = new StandardFileSystemService();
@@ -4472,7 +4477,11 @@ export class Config {
     this.getOwnActiveTodoReminders().clear();
     this.getOwnActiveTodoWorkChainOwners().clear();
     this.getOwnActiveTodoReminderTurns().clear();
-    setDebugLogSession(this);
+    // ACP session rotation runs inside sessionIdContext; only the
+    // single-session CLI owns the process-wide fallback.
+    if (sessionIdContext.getStore() === undefined) {
+      setDebugLogSession(this);
+    }
     this.debugLogger = createDebugLogger();
     // Pin the outgoing recorder to the session it wrote so late writes (a
     // turn settling after this rotation) keep targeting that session's
