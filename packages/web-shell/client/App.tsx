@@ -2085,9 +2085,7 @@ export function App({
     setMobileDrawerOpen(false);
     setForceMobileDrawer(false);
   }, []);
-  // The Session Overview panel (mission control for managing many sessions at
-  // once) is only offered on large screens; below that there is no room for it
-  // to be useful.
+  // Split view still needs desktop-scale horizontal room.
   const isLargeScreen = useIsLargeScreen();
   const canDockArtifactPanel = useIsLargeScreen('(min-width: 1001px)');
   const prefersReducedMotion = usePrefersReducedMotion();
@@ -5522,6 +5520,8 @@ export function App({
     // The user left the split of their own accord, so a refresh must not bring
     // it back. (A shrink-fold is transient and deliberately doesn't clear it.)
     clearSplitSessions();
+    // Explicit exit also cancels any pending shrink-fold restore.
+    splitFoldedByShrinkRef.current = false;
     openPanel('sessions');
   }, [notifyControlledSplitClose, openPanel]);
   const handleOpenLocalControlSettings = useCallback(() => {
@@ -5594,12 +5594,10 @@ export function App({
     }
   }, [mainView, splitSessionIds, externalSplitControlled]);
   // If the viewport shrinks below the large-screen breakpoint, fold away the
-  // Session Overview panel and the split view — both are large-screen-only
-  // surfaces whose entry points are hidden on small screens. The split is only
-  // folded, not discarded: growing back past the breakpoint restores it, so a
-  // transient resize is lossless. When a shrink folds the split, its panes
-  // unmount and take keyboard focus with them; flag the composer to be refocused
-  // once the chat is shown again.
+  // split view. It is only folded, not discarded: growing back past the
+  // breakpoint restores it, so a transient resize is lossless. When a shrink
+  // folds the split, its panes unmount and take keyboard focus with them; flag
+  // the composer to be refocused once the chat is shown again.
   const focusComposerAfterSplitCloseRef = useRef(false);
   // True while the split view is only *temporarily* folded away because the
   // window is narrower than the large-screen breakpoint. Growing back past the
@@ -5610,16 +5608,13 @@ export function App({
       // Grew back above the breakpoint: restore a split that a shrink folded
       // away. Standalone/uncontrolled only — a controlled host owns its split
       // lifecycle and re-opens it itself.
-      if (splitFoldedByShrinkRef.current) {
+      if (splitFoldedByShrinkRef.current && !activePanel) {
         splitFoldedByShrinkRef.current = false;
         if (!externalSplitControlled && splitSessionIdsRef.current.length > 0) {
           setMainView((prev) => (prev === 'chat' ? 'split' : prev));
         }
       }
       return;
-    }
-    if (activePanel === 'sessions') {
-      setActivePanel(null);
     }
     if (mainView === 'split') {
       notifyControlledSplitClose();
@@ -5646,8 +5641,8 @@ export function App({
       }
     }
   }, [
-    isLargeScreen,
     activePanel,
+    isLargeScreen,
     mainView,
     notifyControlledSplitClose,
     externalSplitControlled,
@@ -8387,9 +8382,7 @@ export function App({
   ]);
 
   const handleCycleMode = useCallback(() => {
-    const idx = isDaemonApprovalMode(currentMode)
-      ? MODES_CYCLE.indexOf(currentMode)
-      : -1;
+    const idx = MODES_CYCLE.findIndex((mode) => mode === currentMode);
     const next = MODES_CYCLE[(idx + 1) % MODES_CYCLE.length];
     handleSetMode(next);
   }, [currentMode, handleSetMode]);
@@ -8550,13 +8543,8 @@ export function App({
   const createNewSession = useCallback(
     async (
       workspaceCwd?: string,
-      /**
-       * Leave `mainView` alone. The default is to switch to the chat, because a
-       * user who asks for a new chat wants to see it — but the Goals form has to
-       * stay mounted until its prompt is admitted, or a rejection has nowhere to
-       * render. Only that caller passes this.
-       */
-      opts?: { keepView?: boolean },
+      /** Preserve the current full-page view and/or active panel while clearing. */
+      opts?: { keepView?: boolean; keepPanel?: boolean },
     ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       composerSourceVersionRef.current += 1;
@@ -8570,7 +8558,11 @@ export function App({
       closeMobileDrawer();
       // Starting a new chat means the user wants to see it — leave any open
       // Settings/Status panel so the fresh chat is visible (no-op when closed).
-      closePanel();
+      if (!opts?.keepPanel) {
+        // Explicit navigation cancels any pending shrink-fold split restore.
+        splitFoldedByShrinkRef.current = false;
+        closePanel();
+      }
       if (!opts?.keepView) setMainView('chat');
       let focusRequest: number | undefined;
       try {
@@ -9030,6 +9022,8 @@ export function App({
       // Loading another session should reveal its chat, not stay on the
       // Settings/Status panel (no-op when the panel is closed).
       closePanel();
+      // Explicit navigation cancels any pending shrink-fold split restore.
+      splitFoldedByShrinkRef.current = false;
       try {
         await sessionActions.loadSession(sessionId, { workspaceCwd });
         if (sessionOpenInvocationRef.current === invocation) {
@@ -9050,6 +9044,8 @@ export function App({
   // returns to the chat view and reports load failures.
   const handleOpenSessionFromOverview = useCallback(
     (sessionId: string, workspaceCwd?: string) => {
+      // Explicit navigation cancels any pending shrink-fold split restore.
+      splitFoldedByShrinkRef.current = false;
       setMainView('chat');
       void loadSidebarSession(sessionId, workspaceCwd).catch(
         (error: unknown) => {
@@ -12446,7 +12442,7 @@ export function App({
                     closeMobileDrawer();
                     openPanel('sessions');
                   }}
-                  canOpenSessionsOverview={isLargeScreen}
+                  canOpenSessionsOverview
                   onOpenSplitView={() => {
                     closeMobileDrawer();
                     openSplitView();
@@ -12469,6 +12465,7 @@ export function App({
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
                     setMainView('chat');
+                    splitFoldedByShrinkRef.current = false;
                     closePanel();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
@@ -12723,7 +12720,44 @@ export function App({
                       type="button"
                       className={styles.panelBack}
                       data-testid="panel-back"
-                      onClick={closePanel}
+                      onClick={() => {
+                        if (activePanel !== 'sessions') {
+                          closePanel();
+                          return;
+                        }
+                        // Explicit navigation cancels any pending shrink-fold
+                        // split restore.
+                        splitFoldedByShrinkRef.current = false;
+                        const current = connectionRef.current;
+                        const currentWorkspaceCwd =
+                          current.workspaceCwd ||
+                          lockedWorkspaceCwd ||
+                          workspacesRef.current.find(
+                            (entry) => entry.primary,
+                          )?.cwd;
+                        const openInvocation = sessionOpenInvocationRef.current;
+                        void createNewSession(currentWorkspaceCwd).then(
+                          (created) => {
+                            const latest = connectionRef.current;
+                            const latestWorkspaceCwd =
+                              latest.workspaceCwd ||
+                              lockedWorkspaceCwd ||
+                              workspacesRef.current.find(
+                                (entry) => entry.primary,
+                              )?.cwd;
+                            if (
+                              created &&
+                              sessionOpenInvocationRef.current ===
+                                openInvocation &&
+                              (latest.sessionId === undefined ||
+                                (latest.sessionId === current.sessionId &&
+                                  latestWorkspaceCwd === currentWorkspaceCwd))
+                            ) {
+                              onSessionIdChange?.(undefined);
+                            }
+                          },
+                        );
+                      }}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
@@ -12867,9 +12901,52 @@ export function App({
                     ) : (
                       <SessionOverviewPanel
                         onOpenSession={handleOpenSessionFromOverview}
-                        onOpenSplit={openSplitView}
+                        // Split view cannot exist below the breakpoint; the
+                        // panel hides the action when the prop is absent.
+                        onOpenSplit={isLargeScreen ? openSplitView : undefined}
+                        onCurrentSessionRemoved={async (removed) => {
+                          const current = connectionRef.current;
+                          const currentWorkspaceCwd =
+                            current.workspaceCwd ||
+                            lockedWorkspaceCwd ||
+                            workspacesRef.current.find(
+                              (entry) => entry.primary,
+                            )?.cwd;
+                          if (
+                            current.sessionId !== removed.sessionId ||
+                            (currentWorkspaceCwd &&
+                              currentWorkspaceCwd !== removed.workspaceCwd)
+                          ) {
+                            return;
+                          }
+                          const cleared = await createNewSession(
+                            removed.workspaceCwd || undefined,
+                            {
+                              keepView: true,
+                              keepPanel: true,
+                            },
+                          );
+                          const latest = connectionRef.current;
+                          const latestWorkspaceCwd =
+                            latest.workspaceCwd ||
+                            lockedWorkspaceCwd ||
+                            workspacesRef.current.find(
+                              (entry) => entry.primary,
+                            )?.cwd;
+                          if (
+                            cleared &&
+                            (!latestWorkspaceCwd ||
+                              latestWorkspaceCwd === removed.workspaceCwd) &&
+                            (latest.sessionId === removed.sessionId ||
+                              latest.sessionId === undefined)
+                          ) {
+                            onSessionIdChange?.(undefined);
+                          }
+                          return cleared;
+                        }}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
+                        manageLiveState={!sidebarOptions.enabled}
                       />
                     )}
                     </ShadowDomBoundary>

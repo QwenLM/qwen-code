@@ -29,6 +29,8 @@ export type {
   DaemonConnectionState,
   DaemonConnectionStatus,
   DaemonModelInfo,
+  DaemonProductSessionContext,
+  DaemonStandaloneConnectionState,
   DaemonNoticeCategory,
   DaemonNoticeOperation,
   DaemonNoticeSeverity,

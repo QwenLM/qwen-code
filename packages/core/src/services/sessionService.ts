@@ -2928,6 +2928,34 @@ export class SessionService {
     };
   }
 
+  /**
+   * Unarchiving surfaces this session in the active picker again, so if its
+   * stored title is already held by an active session — reachable when a
+   * session was branched to a duplicate name while this one sat archived,
+   * outside the uniqueness scan — give it the next free suffix before the
+   * move so the two don't read as one entry. A collision-free title is left
+   * untouched.
+   */
+  private async retitleIfCollidesWithActive(
+    sessionId: string,
+    archivedFilePath: string,
+  ): Promise<void> {
+    const currentTitle = await this.readSessionDisplayNameFromFile(
+      archivedFilePath,
+    ).catch(() => undefined);
+    if (!currentTitle) return;
+    const normalizedTitle = currentTitle.toLowerCase().trim();
+    const activeTitles = new Set(
+      (
+        await this.findSessionTitlesByPrefixInState(normalizedTitle, 'active')
+      ).map((title) => title.toLowerCase().trim()),
+    );
+    if (!activeTitles.has(normalizedTitle)) return;
+    const baseName = normalizeDerivedBranchTitle(currentTitle) ?? currentTitle;
+    const uniqueTitle = await computeUniqueBranchTitle(baseName, this);
+    await this.renameSession(sessionId, uniqueTitle, 'auto', 'archived');
+  }
+
   async unarchiveSessions(
     sessionIds: string[],
     options: UnarchiveSessionsOptions = {},
@@ -3002,6 +3030,7 @@ export class SessionService {
         await options.assertStorageUnchanged?.();
         options.assertCanMutate?.();
         this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+        await this.retitleIfCollidesWithActive(sessionId, sourcePath);
         try {
           fs.renameSync(sourcePath, targetPath);
         } catch (error) {
@@ -3754,8 +3783,10 @@ export class SessionService {
 
   /**
    * Returns the picker display names in this project that start with `prefix`
-   * (case-insensitive). Single project-wide scan — meant to replace
-   * repeated `findSessionsByTitle()` probes when the caller needs to
+   * (case-insensitive). Scans both the active and archived chats
+   * directories — an archived session's display name must still be counted
+   * as taken, or unarchiving it can surface a duplicate (#9990). Meant to
+   * replace repeated `findSessionsByTitle()` probes when the caller needs to
    * pick the first free numeric suffix in memory.
    *
    * Matches the session picker by preferring `customTitle` and falling back
@@ -3766,8 +3797,23 @@ export class SessionService {
    */
   async findSessionTitlesByPrefix(prefix: string): Promise<string[]> {
     const normalizedPrefix = prefix.toLowerCase().trim();
+    const [active, archived] = await Promise.all([
+      this.findSessionTitlesByPrefixInState(normalizedPrefix, 'active'),
+      this.findSessionTitlesByPrefixInState(normalizedPrefix, 'archived'),
+    ]);
+    // A session file can exist in both `chats/` and `chats/archive/` at once
+    // (the 'conflict' location `unarchiveSessions`/`archiveSessions` know how
+    // to resolve, reachable via an interrupted move); when it does, both
+    // scans read the same file and its title would otherwise appear twice.
+    return [...new Set([...active, ...archived])];
+  }
+
+  private async findSessionTitlesByPrefixInState(
+    normalizedPrefix: string,
+    archiveState: SessionArchiveState,
+  ): Promise<string[]> {
     const titles: string[] = [];
-    const chatsDir = this.getChatsDir();
+    const chatsDir = this.getChatsDirForState(archiveState);
 
     let fileNames: string[];
     try {
