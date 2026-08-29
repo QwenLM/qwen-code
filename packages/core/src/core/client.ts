@@ -496,7 +496,11 @@ export class LlmClient {
     this.loopDetector = new LoopDetectionService(config);
   }
 
-  async initialize(sessionStartSource?: SessionStartSource) {
+  async initialize(
+    sessionStartSource?: SessionStartSource,
+    signal?: AbortSignal,
+  ) {
+    signal?.throwIfAborted();
     const sessionId = this.config.getSessionId();
     this.lastPromptId = sessionId;
 
@@ -517,6 +521,7 @@ export class LlmClient {
       await this.startChat(
         restoreRuntime.apiHistory,
         sessionStartSource ?? SessionStartSource.Resume,
+        signal,
       );
       this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
@@ -548,6 +553,7 @@ export class LlmClient {
       await this.startChat(
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
+        signal,
       );
       this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
@@ -567,12 +573,13 @@ export class LlmClient {
       this.restoreAttributionFromSession(resumedSessionData.conversation);
     } else {
       if (sessionStartSource !== undefined) {
-        await this.startChat(undefined, sessionStartSource);
+        await this.startChat(undefined, sessionStartSource, signal);
       } else {
-        await this.startChat();
+        await this.startChat(undefined, undefined, signal);
       }
     }
 
+    signal?.throwIfAborted();
     this.initializedSessionId = sessionId;
 
     // Clean up stale tool result files from previous sessions (fire-and-forget)
@@ -2000,6 +2007,7 @@ export class LlmClient {
 
   private async fireSessionStartHook(
     source: SessionStartSource,
+    signal?: AbortSignal,
   ): Promise<string | undefined> {
     const hookSystem = this.config.getHookSystem();
     if (
@@ -2011,13 +2019,23 @@ export class LlmClient {
     }
 
     try {
-      const output = await hookSystem.fireSessionStartEvent(
-        source,
-        this.config.getModel() ?? '',
-        this.toPermissionMode(this.config.getApprovalMode()),
-      );
+      const output = signal
+        ? await hookSystem.fireSessionStartEvent(
+            source,
+            this.config.getModel() ?? '',
+            this.toPermissionMode(this.config.getApprovalMode()),
+            undefined,
+            signal,
+          )
+        : await hookSystem.fireSessionStartEvent(
+            source,
+            this.config.getModel() ?? '',
+            this.toPermissionMode(this.config.getApprovalMode()),
+          );
+      signal?.throwIfAborted();
       return output?.getAdditionalContext()?.trim() || undefined;
     } catch (err) {
+      signal?.throwIfAborted();
       this.config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
       return undefined;
     }
@@ -2028,7 +2046,9 @@ export class LlmClient {
     sessionStartSource = extraHistory
       ? SessionStartSource.Resume
       : SessionStartSource.Startup,
+    signal?: AbortSignal,
   ): Promise<LlmChat> {
+    signal?.throwIfAborted();
     this.forceFullIdeContext = true;
     this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
@@ -2141,7 +2161,7 @@ export class LlmClient {
 
       const sessionStartAdditionalContext = await profiler.time(
         'session_start_hook',
-        () => this.fireSessionStartHook(sessionStartSource),
+        () => this.fireSessionStartHook(sessionStartSource, signal),
       );
       this.lastSessionStartContext = sessionStartAdditionalContext;
       this.lastSessionStartSource = sessionStartAdditionalContext
@@ -2162,11 +2182,13 @@ export class LlmClient {
       await profiler.time('set_tools', () =>
         this.setTools({ skipHistoryReveal: true }),
       );
+      signal?.throwIfAborted();
 
       finishProfile(true);
       return this.chat;
     } catch (error) {
       finishProfile(false);
+      signal?.throwIfAborted();
       await reportError(
         error,
         'Error initializing chat session.',
