@@ -6,7 +6,6 @@
 
 import { defineConfig } from 'vitest/config';
 import path from 'node:path';
-import { unhandledErrorExemption } from '../../scripts/vitest-unhandled-error-exemption.js';
 
 export default defineConfig({
   test: {
@@ -36,7 +35,10 @@ export default defineConfig({
     outputFile: {
       junit: 'junit.xml',
     },
-    dangerouslyIgnoreUnhandledErrors: unhandledErrorExemption,
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors:
+      process.platform !== 'linux' ||
+      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
     coverage: {
       // CI consumes coverage only from the ubuntu lane (the upload and the
       // coverage comment both pin coverage-reports-*-ubuntu-latest), and the

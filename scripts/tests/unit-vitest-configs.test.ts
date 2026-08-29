@@ -11,12 +11,13 @@ import { fileURLToPath } from 'node:url';
 import { getWorkspacePackageJsonPaths } from '../workspaces.js';
 
 // Every vitest project that `npm run test:ci` runs on the unit lanes carries
-// the RPC-timeout unhandled-error exemption exported by
-// scripts/vitest-unhandled-error-exemption.js, and the integration lane's
-// config is pinned here as well. The unit-lane project inventory is derived
-// from the workspaces that define a `test:ci` script, so a workspace joining
-// the lane fails this suite until its config is imported below — and a
-// config the lane does not run cannot be pinned silently.
+// the RPC-timeout unhandled-error exemption (a module-level
+// process.platform / RUNNER_ENVIRONMENT read in each vitest config), and the
+// integration lane's config is pinned here as well. The unit-lane project
+// inventory is derived from the workspaces that define a `test:ci` script,
+// so a workspace joining the lane fails this suite until its config is
+// imported below — and a config the lane does not run cannot be pinned
+// silently.
 //
 // The flag reads RUNNER_ENVIRONMENT at config import time (ci.yml's unit
 // test step exports it from `${{ runner.environment }}`), so each case

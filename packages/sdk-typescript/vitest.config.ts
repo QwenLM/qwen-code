@@ -1,6 +1,5 @@
 import { defineConfig } from 'vitest/config';
 import * as path from 'path';
-import { unhandledErrorExemption } from '../../scripts/vitest-unhandled-error-exemption.js';
 
 const timeoutMinutes = Number(process.env['E2E_TIMEOUT_MINUTES'] || '3');
 const testTimeoutMs = timeoutMinutes * 60 * 1000;
@@ -39,7 +38,10 @@ export default defineConfig({
     },
     testTimeout: testTimeoutMs,
     hookTimeout: 10000,
-    dangerouslyIgnoreUnhandledErrors: unhandledErrorExemption,
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors:
+      process.platform !== 'linux' ||
+      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
   },
   resolve: {
     alias: {

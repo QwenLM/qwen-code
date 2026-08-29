@@ -5,7 +5,6 @@
  */
 
 import { defineConfig } from 'vitest/config';
-import { unhandledErrorExemption } from '../../scripts/vitest-unhandled-error-exemption.js';
 
 export default defineConfig({
   test: {
@@ -14,6 +13,9 @@ export default defineConfig({
     // Kernel integration tests spawn real Node child processes.
     testTimeout: 60_000,
     hookTimeout: 60_000,
-    dangerouslyIgnoreUnhandledErrors: unhandledErrorExemption,
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors:
+      process.platform !== 'linux' ||
+      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
   },
 });

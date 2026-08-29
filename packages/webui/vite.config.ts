@@ -8,7 +8,6 @@ import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import dts from 'vite-plugin-dts';
 import { resolve } from 'path';
-import { unhandledErrorExemption } from '../../scripts/vitest-unhandled-error-exemption.js';
 
 /**
  * Vite configuration for @qwen-code/webui library
@@ -76,6 +75,9 @@ export default defineConfig(({ command }) => ({
     cssCodeSplit: false,
   },
   test: {
-    dangerouslyIgnoreUnhandledErrors: unhandledErrorExemption,
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors:
+      process.platform !== 'linux' ||
+      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
   },
 }));
