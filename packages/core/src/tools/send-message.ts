@@ -117,7 +117,9 @@ class SendMessageInvocation extends BaseToolInvocation<
             hint,
           returnDisplay: 'Task not found.',
           error: {
-            message: `Task not found: ${this.params.task_id}`,
+            // The scheduler builds the model-facing error response from
+            // error.message, so the hint must live here to reach the model.
+            message: `Task not found: ${this.params.task_id}` + hint,
             type: ToolErrorType.SEND_MESSAGE_NOT_FOUND,
           },
         };

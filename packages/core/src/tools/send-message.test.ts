@@ -527,9 +527,12 @@ describe('SendMessageTool — destination validation (#10073)', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.llmContent).toContain('No background task found');
-    expect(result.llmContent).toContain('is a team destination');
-    expect(result.llmContent).toContain('use the "to" field');
+    // The scheduler builds the model-facing error response from
+    // error.message, so assert there — not on llmContent, which an
+    // errored ToolResult never forwards to the model.
+    expect(result.error?.message).toContain('Task not found');
+    expect(result.error?.message).toContain('is a team destination');
+    expect(result.error?.message).toContain('use the "to" field');
   });
 
   it('adds no teammate hint when the task_id matches no teammate', async () => {
@@ -550,7 +553,7 @@ describe('SendMessageTool — destination validation (#10073)', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.llmContent).not.toContain('is a team destination');
+    expect(result.error?.message).not.toContain('is a team destination');
   });
 
   it('suggests "to" when the task_id is the reserved leader name', async () => {
@@ -569,7 +572,7 @@ describe('SendMessageTool — destination validation (#10073)', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.llmContent).toContain('is a team destination');
+    expect(result.error?.message).toContain('is a team destination');
   });
 
   it('adds no hint for leader spellings the "to" route would reject', async () => {
@@ -588,7 +591,7 @@ describe('SendMessageTool — destination validation (#10073)', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.llmContent).not.toContain('is a team destination');
+    expect(result.error?.message).not.toContain('is a team destination');
   });
 
   it('suggests "to" when the task_id is the leader agent ID', async () => {
@@ -610,6 +613,6 @@ describe('SendMessageTool — destination validation (#10073)', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.llmContent).toContain('is a team destination');
+    expect(result.error?.message).toContain('is a team destination');
   });
 });
