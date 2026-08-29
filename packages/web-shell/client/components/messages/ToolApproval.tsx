@@ -8,7 +8,7 @@ import {
   useId,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
-import { isAgentTool } from '@qwen-code/webui/daemon-react-sdk';
+import { isAgentTool } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { PlanExecutionView } from './PlanExecutionView';
