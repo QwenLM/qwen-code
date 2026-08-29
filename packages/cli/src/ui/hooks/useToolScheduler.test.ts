@@ -70,7 +70,7 @@ const mockConfig = {
   }),
   getBaseLlmClient: vi.fn(),
   getUseModelRouter: () => false,
-  getGeminiClient: () => null, // No client needed for these tests
+  getLlmClient: () => null, // No client needed for these tests
   getShellExecutionConfig: () => ({ terminalWidth: 80, terminalHeight: 24 }),
   getChatRecordingService: vi.fn(() => undefined),
   getMessageBus: vi.fn().mockReturnValue(undefined),

@@ -303,6 +303,8 @@ export interface DaemonGitBranchInfo {
   name: string;
   isHead: boolean;
   upstream?: string;
+  /** The configured upstream ref no longer exists (git's `[gone]` state). */
+  upstreamGone?: boolean;
   ahead: number;
   behind: number;
   /** Unix epoch seconds of the branch tip commit. */
@@ -2887,6 +2889,7 @@ export interface DaemonSkillToggleResult {
   sessionsFailed: number;
 }
 
+/** Per-target error codes returned by older daemon versions. */
 export type DaemonSkillBatchToggleErrorCode =
   | 'skill_not_found'
   | 'skill_not_toggleable'

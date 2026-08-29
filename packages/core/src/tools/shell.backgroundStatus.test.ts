@@ -97,7 +97,7 @@ describe('background shell status sidecar (integration, real spawn)', () => {
       getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
       isTruncateToolOutputThresholdExplicit: vi.fn().mockReturnValue(false),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
-      getGeminiClient: vi.fn(),
+      getLlmClient: vi.fn(),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
       getFileHistoryService: vi.fn().mockReturnValue(undefined),
       getFileReadCache: vi.fn().mockReturnValue(undefined),

@@ -13,6 +13,7 @@
 // static barrel importer (ACP agent included).
 import { existsSync } from 'node:fs';
 import {
+  canonicalSessionPrUrl,
   fetchGitHubPullRequestIssues,
   fetchGitHubPullRequests,
   readSessionPrs,
@@ -20,6 +21,13 @@ import {
   type SessionPrIssue,
   type SessionPrState,
 } from '@qwen-code/qwen-code-core';
+import {
+  AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+  defaultAoneMrBackend,
+  isAoneDetailUrlForRepo,
+  resolveAoneWorkspaceRepo,
+  type AoneMrBackend,
+} from './aone-mrs.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import type {
   WorkspaceRegistry,
@@ -33,6 +41,17 @@ import { invalidateWorkspaceSessionListCache } from './session-list.js';
 
 export const DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const FIRST_RUN_DELAY_MS = 60_000;
+
+/**
+ * Aggregate deadline for one workspace's capped `mr view` loop. The
+ * per-call timeout bounds a single view; this bounds the loop — worst case
+ * 25 sequential views x 20s would outrun the sweep interval, and the
+ * timer's re-entrancy guard would then pause EVERY workspace's refresh for
+ * the whole stall. Once past the deadline the loop stops starting views;
+ * the remainder degrades exactly like a per-number failure and the
+ * rotating window retries it on later sweeps.
+ */
+export const AONE_SWEEP_VIEW_BUDGET_MS = 60_000;
 
 /**
  * The slice of {@link SessionArchiveCoordinator} the sweep needs: the
@@ -51,6 +70,20 @@ export interface SessionPrRefreshOptions {
    * always passes the app-wide one.
    */
   archiveCoordinator?: SessionPrArchiveLane;
+  /**
+   * The a1 read backend for Aone workspaces. Tests substitute fakes; the
+   * daemon uses {@link defaultAoneMrBackend}.
+   */
+  aoneBackend?: AoneMrBackend;
+  /**
+   * Start offset of the capped Aone view window into the pending set. The
+   * timer advances it per workspace per sweep, so a pending set larger
+   * than the cap is refreshed in consecutive windows instead of starving a
+   * fixed prefix. Defaults to 0.
+   */
+  sweepStart?: number;
+  /** Injectable clock for the aggregate view budget (tests substitute). */
+  now?: () => number;
 }
 
 /**
@@ -85,17 +118,29 @@ export interface SessionPrRefreshResult {
   scanned: number;
   /** Bindings whose state or issue snapshot was rewritten. */
   updated: number;
+  /**
+   * Aone only: how many unique numbers the view loop actually started this
+   * sweep. The timer advances the rotating window by THIS, not the fixed
+   * cap — when the aggregate budget truncates the sweep, the next window
+   * must pick up where this one stopped, or the truncated tail falls in the
+   * gap between consecutive windows and is never revisited. Absent on the
+   * GitHub path.
+   */
+  aoneConsumed?: number;
 }
 
 /**
- * Refreshes the persisted `state` and `issues` snapshots of one workspace's
- * PR bindings. Only merged is terminal (closed PRs can reopen), so
- * workspaces whose bindings are all merged — with an issue snapshot in
- * place — cost no `gh` call at all. Per workspace per sweep: one slim
- * `gh pr list --state all` for states, and one by-number GraphQL lookup
- * for the closing issues (which can change while the PR is open, and which
- * legacy bindings lack). Rewritten in place (order and createdAt
- * preserved).
+ * Refreshes the persisted `state` snapshot of one workspace's PR bindings,
+ * and on GitHub the `issues` snapshot (the closing references) too. Only
+ * merged is terminal (closed PRs can reopen), so workspaces whose bindings
+ * are all merged — with an issue snapshot in place — cost no platform call
+ * at all. GitHub workspaces pay one slim `gh pr list --state all` per sweep
+ * for states plus one by-number GraphQL lookup for the closing issues
+ * (which can change while the PR is open, and which legacy bindings lack);
+ * Aone workspaces pay one `a1 repo mr view` per unique pending number (list
+ * output carries no state+URL pair, and closed MRs are not listable — a
+ * reopen reappears as opened and self-heals). Rewritten in place (order and
+ * createdAt preserved).
  */
 export async function refreshWorkspaceSessionPrStates(
   runtime: WorkspaceRuntime,
@@ -114,8 +159,11 @@ export async function refreshWorkspaceSessionPrStates(
     sessionId: string;
     prPath: string;
     numbers: number[];
+    /** Every stored URL per pending number — the Aone refreshability filter. */
+    urls: Map<number, string[]>;
+    /** GitHub only: bindings whose issue snapshot is refreshed this sweep. */
+    issueEntries: Array<{ number: number; url: string; merged: boolean }>;
   }> = [];
-  let needsStates = false;
   let scanned = 0;
   for (const archiveState of ['active', 'archived'] as const) {
     // Sidecar-driven, not transcript-driven: a binding persisted before the
@@ -147,20 +195,40 @@ export async function refreshWorkspaceSessionPrStates(
       }
       if (!prs) continue;
       scanned += 1;
-      // Only merged is terminal: closed PRs can be reopened, so they keep
-      // participating in the sweep. A merged binding still needs one lookup
-      // when it predates the issue snapshot.
-      if (prs.some((p) => p.state !== 'merged')) needsStates = true;
-      const numbers = prs
+      const pending = prs.filter(
+        // Only merged is terminal: closed PRs can be reopened, so they
+        // keep participating in the sweep.
+        (p) => p.state !== 'merged',
+      );
+      // Closing references change while a PR is open; a merged binding
+      // still needs one lookup when it predates the issue snapshot.
+      const issueEntries = prs
         .filter((p) => p.state !== 'merged' || p.issues === undefined)
-        .map((p) => p.number);
-      if (numbers.length > 0) {
-        pendingNumbers.push({ sessionId, prPath, numbers });
+        .map(({ number, url, state }) => ({
+          number,
+          url,
+          merged: state === 'merged',
+        }));
+      if (pending.length > 0 || issueEntries.length > 0) {
+        const urls = new Map<number, string[]>();
+        for (const entry of pending) {
+          const known = urls.get(entry.number);
+          if (known) known.push(entry.url);
+          else urls.set(entry.number, [entry.url]);
+        }
+        pendingNumbers.push({
+          sessionId,
+          prPath,
+          numbers: pending.map((p) => p.number),
+          urls,
+          issueEntries,
+        });
       }
     }
   }
   if (pendingNumbers.length === 0) return { scanned, updated: 0 };
 
+  assertGenerationOpen();
   // The url rides along with the snapshot: the map is keyed by number, but a
   // binding may point at another repository whose same-numbered PR must
   // never supply this workspace's state or issues.
@@ -168,40 +236,121 @@ export async function refreshWorkspaceSessionPrStates(
     number,
     { state?: SessionPrState; url: string; issues?: SessionPrIssue[] }
   >();
-  if (needsStates) {
-    assertGenerationOpen();
-    const result = await fetchPullRequests(
-      runtime.workspaceCwd,
-      runtime.env.effectiveEnv,
-      { state: 'all', limit: 500, slim: true },
-    );
-    if (result.kind === 'ok') {
-      for (const pr of result.pullRequests) {
-        // The sidecar snapshot has no 'draft' variant — a draft is still open.
-        numberToFetch.set(pr.number, {
-          state: pr.state === 'draft' ? 'open' : pr.state,
-          url: pr.url,
-        });
-      }
-    }
-  }
-  assertGenerationOpen();
-  const issuesResult = await fetchGitHubPullRequestIssues(
+  // Set once the GitHub issue lookup succeeded: only then is a binding the
+  // repository could not resolve given its converging empty snapshot.
+  let issuesFetched = false;
+  const aoneRepo = await resolveAoneWorkspaceRepo(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
-    [...new Set(pendingNumbers.flatMap((target) => target.numbers))],
   );
-  if (issuesResult.kind === 'ok') {
-    for (const [number, { url, issues }] of issuesResult.pullRequests) {
-      // Both queries resolve the same repository, so a number present in
-      // both names one PR; the state (if any) stays from the list query.
-      numberToFetch.set(number, {
-        ...(numberToFetch.get(number) ?? { url }),
-        issues,
-      });
+  let aoneConsumed: number | undefined;
+  if (aoneRepo) {
+    // A number whose every stored URL misses the detailUrl shape of THIS
+    // repo — a foreign manual binding, a legacy fabricated entry awaiting
+    // backfill repair, another repo's same-numbered MR — can never match
+    // an attested detailUrl in updateSessionPrStates; viewing it would
+    // only burn a capped slot, every sweep, forever.
+    const refreshable = new Set<number>();
+    for (const target of pendingNumbers) {
+      for (const [number, urls] of target.urls) {
+        if (refreshable.has(number)) continue;
+        if (
+          urls.some((url) =>
+            isAoneDetailUrlForRepo(aoneRepo.repoPath, number, url),
+          )
+        ) {
+          refreshable.add(number);
+        }
+      }
+    }
+    // Aone's global ids are platform-unique, so a number bound by several
+    // sessions costs one mr view. The cap bounds one sweep's fan-out, and
+    // the window ROTATES: the timer advances sweepStart per workspace per
+    // sweep, so a refreshable set larger than the cap is fully refreshed
+    // in ceil(size/cap) sweeps instead of starving a fixed prefix. A
+    // per-number failure (403/404/timeout) leaves that entry at its last
+    // state; the rotation retries it on a later sweep.
+    const backend = options.aoneBackend ?? defaultAoneMrBackend;
+    const all = [
+      ...new Set(pendingNumbers.flatMap((target) => target.numbers)),
+    ].filter((number) => refreshable.has(number));
+    const start = all.length === 0 ? 0 : (options.sweepStart ?? 0) % all.length;
+    const unique = [...all.slice(start), ...all.slice(0, start)].slice(
+      0,
+      AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+    );
+    const now = options.now ?? Date.now;
+    const deadline = now() + AONE_SWEEP_VIEW_BUDGET_MS;
+    let consumed = 0;
+    for (const number of unique) {
+      // Aggregate budget: stop STARTING views once spent (the view in
+      // flight may still finish out its own per-call timeout); the
+      // remainder degrades like a per-number failure.
+      if (now() > deadline) break;
+      consumed += 1;
+      try {
+        const view = await backend.view(aoneRepo.repoPath, number);
+        numberToFetch.set(view.number, { state: view.state, url: view.url });
+      } catch {
+        // Skip this entry; the rotation retries it on a later sweep.
+      }
+    }
+    // Report how far the window got: the timer advances the rotation by
+    // this, so a budget-truncated sweep's tail is picked up next sweep
+    // instead of falling in the gap between fixed-cap windows.
+    aoneConsumed = consumed;
+    if (numberToFetch.size === 0) {
+      return { scanned, updated: 0, aoneConsumed };
+    }
+  } else {
+    if (pendingNumbers.some((target) => target.numbers.length > 0)) {
+      const result = await fetchPullRequests(
+        runtime.workspaceCwd,
+        runtime.env.effectiveEnv,
+        { state: 'all', limit: 500, slim: true },
+      );
+      if (result.kind === 'ok') {
+        for (const pr of result.pullRequests) {
+          // The sidecar snapshot has no 'draft' variant — a draft is still
+          // open.
+          numberToFetch.set(pr.number, {
+            state: pr.state === 'draft' ? 'open' : pr.state,
+            url: pr.url,
+          });
+        }
+      }
+    }
+    const issueNumbers = [
+      ...new Set(
+        pendingNumbers.flatMap((target) =>
+          target.issueEntries.map((entry) => entry.number),
+        ),
+      ),
+    ];
+    if (issueNumbers.length > 0) {
+      assertGenerationOpen();
+      const issuesResult = await fetchGitHubPullRequestIssues(
+        runtime.workspaceCwd,
+        runtime.env.effectiveEnv,
+        issueNumbers,
+      );
+      if (issuesResult.kind === 'ok') {
+        issuesFetched = true;
+        for (const [number, { url, issues }] of issuesResult.pullRequests) {
+          // Both queries resolve the same repository, so a number present
+          // in both names one PR; the state (if any) stays from the list
+          // query.
+          numberToFetch.set(number, {
+            ...(numberToFetch.get(number) ?? { url }),
+            issues,
+          });
+        }
+      }
+    }
+    if (numberToFetch.size === 0 && !issuesFetched) {
+      return { scanned, updated: 0 };
     }
   }
-  if (numberToFetch.size === 0) return { scanned, updated: 0 };
 
   let updated = 0;
   for (const target of pendingNumbers) {
@@ -211,10 +360,30 @@ export async function refreshWorkspaceSessionPrStates(
     >();
     for (const number of target.numbers) {
       const fetched = numberToFetch.get(number);
-      // Only a number ABSENT from gh's page is skipped (out of the limit
-      // window); a present one is authoritative — including an 'open' that
-      // supersedes a stale 'closed' after a reopen.
+      // Only a number ABSENT from the fetched set is skipped (out of gh's
+      // limit window, or beyond this a1 sweep's view cap); a present one
+      // is authoritative — including an 'open' that supersedes a stale
+      // 'closed' after a reopen.
       if (fetched !== undefined) states.set(number, fetched);
+    }
+    if (issuesFetched) {
+      for (const entry of target.issueEntries) {
+        const fetched = numberToFetch.get(entry.number);
+        if (
+          fetched?.issues !== undefined &&
+          canonicalSessionPrUrl(fetched.url) ===
+            canonicalSessionPrUrl(entry.url)
+        ) {
+          states.set(entry.number, fetched);
+        } else if (entry.merged) {
+          // The repository cannot resolve this binding (another
+          // repository's same-numbered PR), so no lookup can ever snapshot
+          // it; without a converging empty snapshot a merged one would
+          // re-enter the lookup every sweep. Open ones stay pending for
+          // their state anyway and cost the lookup nothing extra.
+          states.set(entry.number, { url: entry.url, issues: [] });
+        }
+      }
     }
     if (states.size === 0) continue;
     const commit = (): Promise<number> =>
@@ -261,7 +430,7 @@ export async function refreshWorkspaceSessionPrStates(
     });
     runtime.bridge.markSessionCatalogChanged();
   }
-  return { scanned, updated };
+  return { scanned, updated, aoneConsumed };
 }
 
 /**
@@ -278,27 +447,72 @@ export function startSessionPrRefreshTimer(deps: {
    * coordinator on the serve app, which is built after this timer starts.
    */
   getArchiveCoordinator?: () => SessionPrArchiveLane | undefined;
+  /**
+   * Test seam: the a1 backend handed to each sweep. The daemon omits it
+   * (the sweep then uses {@link defaultAoneMrBackend}); tests substitute a
+   * fake to observe the rotating view window without a live a1.
+   */
+  aoneBackend?: AoneMrBackend;
+  /**
+   * Test seam: the clock handed to each sweep's aggregate-budget deadline.
+   * The daemon omits it (the sweep then uses Date.now); tests substitute a
+   * controllable clock to drive budget truncation at the timer level.
+   */
+  now?: () => number;
 }): { dispose(): void } | undefined {
   const intervalMs = resolveSessionPrRefreshIntervalMs(deps.env ?? process.env);
   if (intervalMs === undefined) return undefined;
+  // Rotating Aone view-window offset per workspace: each sweep advances the
+  // start by however many views the sweep actually STARTED (not the fixed
+  // cap), so a pending set larger than the cap is fully refreshed over
+  // consecutive sweeps, and a budget-truncated sweep's tail is picked up by
+  // the next window instead of falling in the gap between fixed-cap
+  // windows. Kept monotonic (not mod'd here) — the sweep reduces it modulo
+  // the live set size itself, so a shrinking set never skews the rotation.
+  const aoneSweepOffsets = new Map<string, number>();
   let running = false;
   const tick = async (): Promise<void> => {
     if (running) return;
     running = true;
     try {
       const archiveCoordinator = deps.getArchiveCoordinator?.();
-      for (const runtime of deps.workspaceRegistry.listAll()) {
+      const live = deps.workspaceRegistry.listAll();
+      for (const runtime of live) {
         if (!runtime.trusted) continue;
+        const sweepStart = aoneSweepOffsets.get(runtime.workspaceCwd) ?? 0;
         try {
-          await refreshWorkspaceSessionPrStates(runtime, undefined, {
-            archiveCoordinator,
-          });
+          const result = await refreshWorkspaceSessionPrStates(
+            runtime,
+            undefined,
+            {
+              archiveCoordinator,
+              sweepStart,
+              aoneBackend: deps.aoneBackend,
+              now: deps.now,
+            },
+          );
+          // Only the Aone path reports a consumed window — the GitHub path
+          // never reads the offset, so don't write one for it.
+          if (result.aoneConsumed !== undefined) {
+            aoneSweepOffsets.set(
+              runtime.workspaceCwd,
+              sweepStart + result.aoneConsumed,
+            );
+          }
         } catch (error) {
           // A draining daemon rejects every workspace the same way.
           if (error instanceof DaemonDrainingError) return;
           // A single workspace's failure (including a generation retired
-          // mid-sweep) must not starve the rest.
+          // mid-sweep) must not starve the rest. Leave its offset unmoved
+          // so the next tick retries the same window.
         }
+      }
+      // Prune offsets for workspaces no longer in the registry (removed or
+      // never Aone): the daemon runs indefinitely, so an entry per
+      // ever-seen cwd would grow without bound.
+      const liveCwds = new Set(live.map((r) => r.workspaceCwd));
+      for (const cwd of [...aoneSweepOffsets.keys()]) {
+        if (!liveCwds.has(cwd)) aoneSweepOffsets.delete(cwd);
       }
     } finally {
       running = false;

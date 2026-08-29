@@ -373,6 +373,9 @@ describe('goal runtime', () => {
     expect(host.inputs[0]).not.toHaveProperty('windDown');
     expect(runtime.getSnapshot().goal?.status).toBe('active');
 
+    // The hand-off reached the model: only a delivered wind-down turn
+    // stamps the record.
+    runtime.markTurnDelivered(`goal-runtime:${host.started[1]!.turnId}`);
     await runtime.finishTurn(host.started[1]!);
 
     // The hand-off turn stamps the record, and the stop settles on the
@@ -446,6 +449,9 @@ describe('goal runtime', () => {
     await runtime.finishTurn(host.started[0]!);
     expect(host.started).toHaveLength(2);
     expect(host.inputs[1]).toMatchObject({ windDown: true });
+    // The hand-off reached the model: only a delivered wind-down turn
+    // stamps the record.
+    runtime.markTurnDelivered(`goal-runtime:${host.started[1]!.turnId}`);
     await runtime.finishTurn(host.started[1]!);
 
     await vi.waitFor(() => {
@@ -488,6 +494,9 @@ describe('goal runtime', () => {
 
     spend.set(host.started[0]!.turnId, 1_500);
     await runtime.finishTurn(host.started[0]!);
+    // The hand-off reached the model: only a delivered wind-down turn
+    // stamps the record.
+    runtime.markTurnDelivered(`goal-runtime:${host.started[1]!.turnId}`);
     await runtime.finishTurn(host.started[1]!);
 
     await vi.waitFor(() => {
@@ -548,6 +557,71 @@ describe('goal runtime', () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(inputs.at(-1)).toMatchObject({ windDown: true });
     expect(started).toHaveLength(2);
+  });
+
+  it('grants the hand-off again when its turn finished without being delivered', async () => {
+    // A system message or a direct user query can claim the wind-down
+    // continuation's permit and send its own text under it. The turn then
+    // finishes, but the user never got the hand-off -- so the record must
+    // not say they did, and the next continuation owes it again.
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const spend = new Map<string, number>();
+    const runtime = createGoalRuntime({
+      journal,
+      tokenLedger: {
+        takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+      },
+      tokenBudgetGrant: 1_000,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    spend.set(host.started[0]!.turnId, 1_500);
+    await runtime.finishTurn(host.started[0]!);
+    expect(host.inputs[1]).toMatchObject({ windDown: true });
+
+    // Finished under the wind-down permit, never marked delivered.
+    await runtime.finishTurn(host.started[1]!);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(runtime.getSnapshot().goal).not.toHaveProperty('windDownTurnId');
+    expect(journal.appended.at(-1)!.snapshot.goal).not.toHaveProperty(
+      'windDownTurnId',
+    );
+    expect(host.started).toHaveLength(3);
+    expect(host.inputs[2]).toMatchObject({ windDown: true });
+  });
+
+  it('stops after the hand-off once a delivered wind-down turn finishes', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const spend = new Map<string, number>();
+    const runtime = createGoalRuntime({
+      journal,
+      tokenLedger: {
+        takeGoalTurnTokens: (turnId: string) => spend.get(turnId) ?? 0,
+      },
+      tokenBudgetGrant: 1_000,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    spend.set(host.started[0]!.turnId, 1_500);
+    await runtime.finishTurn(host.started[0]!);
+    const windDown = host.started[1]!;
+    expect(host.inputs[1]).toMatchObject({ windDown: true });
+
+    runtime.markTurnDelivered(`goal-runtime:${windDown.turnId}`);
+    await runtime.finishTurn(windDown);
+
+    await vi.waitFor(() => {
+      expect(runtime.getSnapshot().goal?.status).toBe('usage_limited');
+    });
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      limitKind: 'token_budget',
+      windDownTurnId: windDown.turnId,
+    });
+    expect(host.started).toHaveLength(2);
   });
 
   it('completes a Goal whose hand-off turn proves the objective done', async () => {
