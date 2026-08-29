@@ -23223,7 +23223,12 @@ describe('createAcpSessionBridge', () => {
 
     it('carries persisted source metadata into ACP session restore', async () => {
       for (const action of ['load', 'resume'] as const) {
-        const handle = makeChannel();
+        const handle = makeChannel({
+          extMethodImpl: async (method) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionSource
+              ? { persisted: true }
+              : {},
+        });
         const bridge = makeBridge({
           channelFactory: async () => handle.channel,
         });
@@ -23234,24 +23239,145 @@ describe('createAcpSessionBridge', () => {
           sourceId: 'dingtalk-main',
         };
 
-        if (action === 'load') {
-          await bridge.loadSession(request);
-        } else {
-          await bridge.resumeSession(request);
-        }
+        const restored =
+          action === 'load'
+            ? await bridge.loadSession(request)
+            : await bridge.resumeSession(request);
 
         const call =
           action === 'load'
             ? handle.agent.loadSessionCalls[0]
             : handle.agent.resumeSessionCalls[0];
+        expect(restored).toMatchObject({
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+          sourcePersisted: true,
+        });
         expect(call?._meta).toMatchObject({
           [SESSION_SOURCE_META_KEY]: {
             sourceType: 'channel',
             sourceId: 'dingtalk-main',
           },
         });
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+          params: {
+            sessionId: request.sessionId,
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
+          },
+        });
         await bridge.shutdown();
       }
+    });
+
+    it('backfills missing source metadata when restoring an existing entry', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      const restored = await bridge.resumeSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+
+      expect(restored).toMatchObject({
+        sessionId: session.sessionId,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+        sourcePersisted: true,
+      });
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: session.sessionId,
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        },
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('rejects an existing-entry restore when the channel exits during source persistence', async () => {
+      const sourceStarted = deferred<void>();
+      const sourceRelease = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            sourceStarted.resolve();
+            return sourceRelease.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      const restoring = bridge.resumeSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+      await sourceStarted.promise;
+      handle.crash();
+
+      await expect(restoring).rejects.toThrow(SessionNotFoundError);
+      sourceRelease.resolve({ persisted: false });
+      await bridge.shutdown();
+    });
+
+    it('rejects a cold restore when the channel exits during source persistence', async () => {
+      const sourceStarted = deferred<void>();
+      const sourceRelease = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            sourceStarted.resolve();
+            return sourceRelease.promise;
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const restoring = bridge.resumeSession({
+        sessionId: 'restore-source-channel-exit',
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+      await sourceStarted.promise;
+      handle.crash();
+
+      await expect(restoring).rejects.toThrow(SessionNotFoundError);
+      sourceRelease.resolve({ persisted: false });
+      await bridge.shutdown();
     });
 
     it('does not replace the source when single scope attaches', async () => {
@@ -23279,26 +23405,117 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('passes source metadata in the resume request without a second control call', async () => {
+    it('does not replace an existing source when restore requests a new one', async () => {
       const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: false }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+
+      const restored = await bridge.resumeSession({
+        sessionId: first.sessionId,
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+
+      expect(restored).toMatchObject({
+        sessionId: first.sessionId,
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+      expect(bridge.getSessionSummary(first.sessionId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+      expect(handle.agent.extMethodCalls).not.toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: first.sessionId,
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        },
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('keeps restore live-only when source persistence fails', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionSource) {
+            throw new Error('persist failed');
+          }
+          return {};
+        },
         resumeSessionImpl: () => ({}),
       });
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
       });
 
-      await bridge.resumeSession({
+      const restored = await bridge.resumeSession({
+        sessionId: 'restore-source-failed',
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+
+      expect(restored).toMatchObject({
+        sessionId: 'restore-source-failed',
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+        sourcePersisted: false,
+      });
+      expect(bridge.getSessionSummary('restore-source-failed')).toMatchObject({
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('persists source metadata after resume restores a session', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const restored = await bridge.resumeSession({
         sessionId: 'persisted-live-session',
         workspaceCwd: WS_A,
         sourceType: 'default',
         sourceId: 'realtime_voice:p1:h1:a1:call-1',
       });
 
-      expect(handle.agent.extMethodCalls).not.toContainEqual(
-        expect.objectContaining({
-          method: SERVE_CONTROL_EXT_METHODS.sessionSource,
-        }),
-      );
+      expect(restored).toMatchObject({
+        sourceType: 'default',
+        sourceId: 'realtime_voice:p1:h1:a1:call-1',
+        sourcePersisted: true,
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: 'persisted-live-session',
+          sourceType: 'default',
+          sourceId: 'realtime_voice:p1:h1:a1:call-1',
+        },
+      });
       expect(handle.agent.resumeSessionCalls[0]?._meta).toEqual({
         [SESSION_SOURCE_META_KEY]: {
           sourceType: 'default',
