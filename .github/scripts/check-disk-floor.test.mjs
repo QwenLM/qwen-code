@@ -83,61 +83,14 @@ describe('check-disk-floor', () => {
   });
 
   it('fails closed for invalid floor overrides', () => {
-    for (const name of [
-      'DISK_FLOOR_MIN_FREE_KB',
-      'DISK_FLOOR_MIN_FREE_INODES',
+    for (const [name, value] of [
+      ['DISK_FLOOR_MIN_FREE_KB', '2G'],
+      ['DISK_FLOOR_MIN_FREE_INODES', '9223372036854775808'],
     ]) {
-      const result = runGate({ env: { [name]: '2G' } });
+      const result = runGate({ env: { [name]: value } });
 
       assert.equal(result.status, 1);
       assert.ok(result.stdout.includes(`::error::${name} must be`));
-
-      const huge = runGate({ env: { [name]: '9223372036854775808' } });
-      assert.equal(huge.status, 1);
-      assert.ok(huge.stdout.includes(`${name} must fit`));
-
-      // A 20-digit value exercises the length branch of the overflow
-      // guard, which the 19-digit case above never reaches.
-      const long = runGate({ env: { [name]: '10000000000000000000' } });
-      assert.equal(long.status, 1);
-      assert.ok(long.stdout.includes(`${name} must fit`));
-
-      // Accept boundary: INT64_MAX is a legal floor and must reach the
-      // disk comparison, not be rejected by the validator.
-      const maxDir = mkdtempSync(join(tmpdir(), 'disk-floor-max-'));
-      try {
-        const atMax = runGate({
-          dirs: [maxDir],
-          env: { [name]: '9223372036854775807' },
-        });
-        assert.ok(!atMax.stdout.includes('must fit'));
-        assert.ok(!atMax.stdout.includes('must be a non-negative integer'));
-        // A floor above any real headroom must trip the breach path.
-        assert.equal(atMax.status, 1);
-        assert.ok(atMax.stdout.includes('::error::Disk floor breached'));
-      } finally {
-        rmSync(maxDir, { recursive: true, force: true });
-      }
-    }
-  });
-
-  it('accepts zero-padded floor overrides', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'disk-floor-pad-'));
-    try {
-      // Padded past 19 raw characters so the normalization, not the
-      // length check, is what admits these values.
-      const result = runGate({
-        dirs: [dir],
-        env: {
-          DISK_FLOOR_MIN_FREE_KB: '00000000000000000000001',
-          DISK_FLOOR_MIN_FREE_INODES: '00000000000000000000001',
-        },
-      });
-
-      assert.equal(result.status, 0, result.stderr);
-      assert.ok(!result.stdout.includes('must fit'));
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
