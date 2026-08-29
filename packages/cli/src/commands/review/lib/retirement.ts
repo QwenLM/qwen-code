@@ -938,19 +938,23 @@ export function scheduleReverseAuditRound(
     // certain — no history, an unknown, a yield — falls through to the
     // ordinary rules and stays hot, the same fail-toward-auditing floor as
     // every other refusal in this file. One dry receipt is NOT decisive
-    // when it shares its findings digest with a yielded round: fix-audit
+    // when it shares its findings digest with ANY round the record does
+    // not certify dry — a yield, or an uncertified `unknown`: fix-audit
     // rounds run their first two waves as a convergence pair against the
-    // SAME cumulative list (#10136), so the dry member was built before the
-    // yield's findings entered it — it never saw them, and pricing the
-    // chunk out of the wave on it would certify convergence over live
-    // findings. Serial rounds are untouched: a round built after a yield
-    // carries the merged list's different digest.
+    // SAME cumulative list (#10136), and findings merge into that list
+    // unconditionally — the yield scan refuses a filed finding whose file
+    // line is a substring of a listed entry, classifying the receipt
+    // `unknown` while the orchestrator still merges the finding — so the
+    // dry member was built before those findings entered it. It never saw
+    // them, and pricing the chunk out of the wave on it would certify
+    // convergence over live findings. Serial rounds are untouched: a round
+    // built after merged findings carries the list's different digest.
     if (narrowing != null && !narrowing.deltaChunkIds.has(chunkId)) {
       const latest = audits[audits.length - 1];
       if (latest !== undefined && latest.outcome === 'dry') {
         const staleAgainstYield = audits.some(
           (a) =>
-            a.outcome === 'yielded' &&
+            a.outcome !== 'dry' &&
             a.digests.some((d) => latest.digests.includes(d)),
         );
         if (!staleAgainstYield) {

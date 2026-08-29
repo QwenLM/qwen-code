@@ -2431,6 +2431,15 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     expect(r.cappedBy).not.toContain('unlicensed-deferral');
     expect(r.body).not.toContain('without a posture licence');
     expect(r.deferredCount).toBe(1);
+    // The same body carries the deferral list, and deferral IS the floor's
+    // withholding in this module's terminology — so the open-floor sentence
+    // may not assert the unqualified no-withholding universal the very same
+    // body falsifies; it says the backstop moved nothing and routes the
+    // deferrals to the posture (#10136).
+    expect(r.body).toContain('Deferred under the convergence posture');
+    expect(r.body).toContain('resolved OPEN at compose time');
+    expect(r.body).not.toContain('no finding was withheld by a floor');
+    expect(r.body).not.toContain('没有任何发现被下限扣留');
   });
 
   it('an ABSENT floor beside the plan record claims no deferral beside its inline Suggestion (#10104)', () => {

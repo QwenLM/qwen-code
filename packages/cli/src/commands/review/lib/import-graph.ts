@@ -275,13 +275,13 @@ const CLAUSE_NOISE = new Set(['type', 'typeof', 'default', 'as']);
 
 /**
  * The local bindings an import clause introduces, from the text between the
- * statement keyword and its `from`. A heuristic in the same spirit as
- * `scanImportSpecifiers`, with the same chosen error directions: a name it
- * misses drops a usage line from the seam (the hunk near it may still enter
- * on another line), a name it over-collects marks one line too many — one
- * hunk reviewed once more than needed, never less than the unwidened floor.
+ * statement keyword and its `from`, or `null` when a brace entry the clause
+ * carries does not parse to a binding: a silently skipped entry is an
+ * unenumerated escape, and under-collection is the one error the seam bound
+ * must not make (#10136). Over-collection stays the budgeted cost — a name
+ * too many marks one line too many, never one fewer.
  */
-function clauseBindings(clause: string): string[] {
+function clauseBindings(clause: string): string[] | null {
   const out: string[] = [];
   const push = (raw: string) => {
     const name = raw.trim();
@@ -292,14 +292,15 @@ function clauseBindings(clause: string): string[] {
   const braces = /\{([^}]*)\}/.exec(clause);
   if (braces) {
     for (const entry of braces[1].split(',')) {
+      const name = entry.trim();
+      if (name === '') continue; // a trailing comma binds nothing
       // `a as b` binds the LOCAL alias; `a` alone binds itself. `type x`
       // never reaches runtime, but its usage lines are still seam reads for
       // a reviewer, so type-only names are kept once the keyword is shed.
-      const words = entry
-        .trim()
-        .split(/\s+/)
-        .filter((w) => !CLAUSE_NOISE.has(w));
-      if (words.length > 0) push(words[words.length - 1]);
+      const words = name.split(/\s+/).filter((w) => !CLAUSE_NOISE.has(w));
+      const local = words[words.length - 1];
+      if (local === undefined || !IDENT_RE.test(local)) return null;
+      push(local);
     }
   }
   // The default import: the first identifier after the keyword, outside any
@@ -319,16 +320,61 @@ function clauseBindings(clause: string): string[] {
  * The seam scans run on THIS, because a keyword inside a comment used to
  * displace the clause-bound scan and parse the clause to the wrong bindings
  * (#10136) — comment-awareness is the scan's job, and one strip gives it to
- * every pattern at once. String contents stay: the specifier scan needs its
- * quotes intact, and a keyword inside a string is caught by the doubt check
- * below instead. A `//` inside a string literal blanks to the line's end —
- * the direction is over-marking or doubt, never a silently dropped seam
- * line.
+ * every pattern at once. The walk is string-aware (#10136): a quote or a
+ * backtick opens a literal whose bytes stay intact — the specifier scan
+ * needs its quotes, and a `//` inside `'https://x'`, or an open-block
+ * marker in one string beside a close-block marker in a later one, used to
+ * blank real seam statements off their lines — and quote marks inside a
+ * comment never open a literal. An unterminated quote ends at the line; a
+ * template spans lines.
  */
 function stripComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length));
+  const out = source.split('');
+  const n = source.length;
+  let i = 0;
+  while (i < n) {
+    const c = source.charAt(i);
+    if (c === "'" || c === '"' || c === '`') {
+      i++;
+      while (i < n) {
+        const d = source.charAt(i);
+        if (d === '\\') i += 2;
+        else if (d === c) {
+          i++;
+          break;
+        } else if (c !== '`' && d === '\n') break;
+        else i++;
+      }
+      continue;
+    }
+    if (c === '/' && source.charAt(i + 1) === '/') {
+      while (i < n && source.charAt(i) !== '\n') {
+        out[i] = ' ';
+        i++;
+      }
+      continue;
+    }
+    if (c === '/' && source.charAt(i + 1) === '*') {
+      out[i] = ' ';
+      out[i + 1] = ' ';
+      i += 2;
+      while (
+        i < n &&
+        !(source.charAt(i) === '*' && source.charAt(i + 1) === '/')
+      ) {
+        if (source.charAt(i) !== '\n') out[i] = ' ';
+        i++;
+      }
+      if (i < n) {
+        out[i] = ' ';
+        out[i + 1] = ' ';
+        i += 2;
+      }
+      continue;
+    }
+    i++;
+  }
+  return out.join('');
 }
 
 /**
@@ -347,13 +393,16 @@ function stripComments(source: string): string {
  * the file itself always stays in scope with its brief, so the seam question
  * is asked even when no hunk survives.
  *
- * One read fails CLOSED (#10136): a clause the scan cannot parse to
- * bindings consistent with what the statement visibly declares — a quote
- * inside the clause (no legal clause carries one; a keyword inside a string
- * displaced the bound), or a declaration with an expression between its `=`
- * and a dynamic call (`const api = await import(…)`, whose bindings the
- * line-shape read cannot collect) — marks EVERY line, the doubt shape
- * `widenScope` republishes in full. Under-collection of the oracle is the
+ * One read fails CLOSED (#10136): any read whose bindings cannot be
+ * proven collected marks EVERY line, the doubt shape `widenScope`
+ * republishes in full. The reads that doubt: a clause carrying a quote (no
+ * legal clause has one; a keyword inside a string displaced the bound), a
+ * keyword-bound clause past the 2000-char cap (a barrel re-export the read
+ * cannot enumerate), a brace entry that parses to no identifier, ANY
+ * dynamic `import(` call (its value escapes into expressions the
+ * line-shape read cannot follow — an awaited or wrapped declaration, a
+ * callback parameter), and a `require(` whose own line parses to no
+ * declaration the read can collect. Under-collection of the oracle is the
  * one error the seam bound must not make.
  */
 export function seamLines(
@@ -393,14 +442,26 @@ export function seamLines(
       .matchAll(/(^|[^\w$])(?:import|export)(?![\w$])/g)) {
       start = (km.index ?? 0) + (km[1]?.length ?? 0);
     }
-    const clause =
-      start >= 0 && at - start <= 2000 ? stripped.slice(start, at) : null;
+    const clause = start >= 0 ? stripped.slice(start, at) : null;
     if (clause === null) continue;
+    if (clause.length > 2000) {
+      // Keyword-bound but past the cap the read budgets — a barrel
+      // re-export whose bindings the scan cannot enumerate. Marking the
+      // statement line alone would shed every usage line, so the bound
+      // fails CLOSED instead (#10136).
+      doubt = true;
+      break;
+    }
     if (/['"`]/.test(clause)) {
       doubt = true;
       break;
     }
-    for (const name of clauseBindings(clause)) {
+    const names = clauseBindings(clause);
+    if (names === null) {
+      doubt = true;
+      break;
+    }
+    for (const name of names) {
       bindings.add(name);
     }
   }
@@ -410,35 +471,53 @@ export function seamLines(
     const spec = m[2] ?? m[4];
     if (resolveSpecifier(fromFile, spec, changed, packages) === null) continue;
     const at = m.index ?? 0;
-    const line = lineOf(at);
-    marked.add(line);
+    marked.add(lineOf(at));
+    if (m[2] === undefined) continue; // side-effect `import 'x'`: no bindings
+    // A dynamic `import(` fails closed outright: its value escapes into
+    // expressions the line-shape read cannot follow — a declaration on the
+    // previous line, a `.then` callback's parameter — and a read whose
+    // bindings cannot be proven collected is the one error the seam bound
+    // must not make (#10136).
+    if (m[0].startsWith('import')) {
+      doubt = true;
+      break;
+    }
     // `const { a, b: c } = require('x')` / `const x = require('x')`: the
-    // bindings sit BEFORE the call, on its own line.
+    // bindings sit BEFORE the call, on its own line. Any other shape — a
+    // wrapped or keywordless declaration, an assignment to an existing
+    // binding, a bare side-effect call — parses to no declaration the read
+    // can collect, and fails CLOSED (#10136).
     const lineStart = stripped.lastIndexOf('\n', at - 1) + 1;
     const before = stripped.slice(lineStart, at);
     const decl =
       /(?:const|let|var)\s+(?:\{([^}]*)\}|([A-Za-z_$][\w$]*))\s*=\s*$/.exec(
         before,
       );
-    if (decl) {
-      if (decl[2]) bindings.add(decl[2]);
-      if (decl[1]) {
-        for (const entry of decl[1].split(',')) {
-          const words = entry
-            .trim()
-            .split(/[:\s]+/)
-            .filter(Boolean);
-          const name = words[words.length - 1];
-          if (name && IDENT_RE.test(name)) bindings.add(name);
-        }
-      }
-    } else if (/(?:const|let|var)[^=\n]*=\s*\S/.test(before)) {
-      // A declaration the line-shape read cannot collect — an expression
-      // between its `=` and the call (`const api = await import(…)`). Its
-      // bindings are seam reads this scan cannot see, so fail CLOSED.
+    if (!decl) {
       doubt = true;
       break;
     }
+    if (decl[2]) {
+      bindings.add(decl[2]);
+      continue;
+    }
+    for (const entry of decl[1].split(',')) {
+      const raw = entry.trim();
+      if (raw === '') continue; // a trailing comma binds nothing
+      // Split at `=` BEFORE the rename parse: a default (`moved =
+      // fallback`) binds the imported name, not the fallback expression.
+      const words = raw
+        .split('=')[0]
+        .split(/[:\s]+/)
+        .filter(Boolean);
+      const local = words[words.length - 1];
+      if (!local || !IDENT_RE.test(local)) {
+        doubt = true;
+        break;
+      }
+      bindings.add(local);
+    }
+    if (doubt) break;
   }
   if (doubt) {
     // The clause read could not be trusted: mark every line so `widenScope`

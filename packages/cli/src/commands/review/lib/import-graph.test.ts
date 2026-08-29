@@ -490,6 +490,134 @@ describe('seamLines', () => {
     expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2, 3]);
   });
 
+  it('a wrapped dynamic-import declaration fails closed to the whole file (#10136)', () => {
+    // The declaration split across a newline: the binding sits on the line
+    // BEFORE the call, where the line-shape read of the call's own line
+    // cannot see it. Its usage lines used to drop with no doubt; the scan
+    // fails closed instead.
+    const source = [
+      'const api =', // 1
+      "  await import('./changed.js');", // 2
+      'api.call();', // 3
+      'const unrelated = 1;', // 4
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('a declaration-less dynamic import fails closed to the whole file (#10136)', () => {
+    // The call's value escapes into expressions the line-shape read cannot
+    // follow — a `.then` callback, a promise binding whose `mod` is a seam
+    // read the scan never sees. Both shapes fail closed.
+    const thenForm = [
+      "import('./changed.js').then((mod) => {", // 1
+      '  mod.moved();', // 2
+      '});', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', thenForm, changed)).toEqual([1, 2, 3]);
+
+    const promiseForm = [
+      "const p = import('./changed.js');", // 1
+      'p.then((mod) => {', // 2
+      '  mod.moved();', // 3
+      '});', // 4
+    ].join('\n');
+    expect(seamLines('src/imp.ts', promiseForm, changed)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('a keywordless require declaration fails closed to the whole file (#10136)', () => {
+    // `import x = require(…)` and property assignments carry bindings no
+    // `const|let|var` read collects; both used to mark the statement line
+    // alone and drop every usage line.
+    const importEquals = [
+      "import moved = require('./changed.js');", // 1
+      'moved();', // 2
+      'const unrelated = 1;', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', importEquals, changed)).toEqual([1, 2, 3]);
+
+    const propertyAssign = [
+      "this.api = require('./changed.js');", // 1
+      'api.call();', // 2
+    ].join('\n');
+    expect(seamLines('src/imp.ts', propertyAssign, changed)).toEqual([1, 2]);
+  });
+
+  it('a destructuring the line-shape read cannot collect fails closed (#10136)', () => {
+    // Nested, array, and rest shapes each escape the enumerative brace
+    // read; rather than shed their usage lines they fail closed.
+    const nested = [
+      "const { utils: { format } } = require('./changed.js');", // 1
+      'format(x);', // 2
+    ].join('\n');
+    expect(seamLines('src/imp.ts', nested, changed)).toEqual([1, 2]);
+
+    const arrayShape = [
+      "const [moved] = require('./changed.js');", // 1
+      'moved();', // 2
+    ].join('\n');
+    expect(seamLines('src/imp.ts', arrayShape, changed)).toEqual([1, 2]);
+
+    const restShape = [
+      "const { moved, ...rest } = require('./changed.js');", // 1
+      'rest.moved();', // 2
+      'const unrelated = 1;', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', restShape, changed)).toEqual([1, 2, 3]);
+  });
+
+  it('a destructuring default binds the imported name, not the default (#10136)', () => {
+    const source = [
+      "const { moved = fallback } = require('./changed.js');", // 1
+      'moved();', // 2
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2]);
+  });
+
+  it('a brace entry that parses to no identifier fails closed (#10136)', () => {
+    // A clause entry the word read cannot prove a binding used to skip
+    // silently — an unenumerated escape; the clause read fails CLOSED
+    // instead.
+    const source = [
+      "import { moved = 1 } from './changed.js';", // 1
+      'moved();', // 2
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2]);
+  });
+
+  it('a keyword-bound clause over the 2000-char cap fails closed (#10136)', () => {
+    // A 300-name barrel re-export: keyword-to-`from` distance beyond the
+    // cap the clause read budgets. The capped read used to mark the
+    // statement line alone and drop every usage line; the bound fails
+    // CLOSED instead.
+    const names = Array.from({ length: 300 }, (_, i) => `name${i}`);
+    const source = [
+      `export { ${names.join(', ')} } from './changed.js';`, // 1
+      'name0();', // 2
+      'const unrelated = 1;', // 3
+    ].join('\n');
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2, 3]);
+  });
+
+  it('comment-like markers inside strings do not blank the seam (#10136)', () => {
+    // `//` inside a string literal used to blank to the end of the line —
+    // erasing a real require on it — and a `/*` in one string beside a
+    // `*/` in a later one blanked every line between. The strip is
+    // string-aware: comment bytes blank, string contents stay.
+    const url = [
+      "const u = 'https://x'; const { moved } = require('./changed.js');", // 1
+      'moved();', // 2
+    ].join('\n');
+    expect(seamLines('src/imp.ts', url, changed)).toEqual([1, 2]);
+
+    const blockPair = [
+      "const a = '/*';", // 1
+      "const { moved } = require('./changed.js');", // 2
+      "const b = '*/';", // 3
+      'moved();', // 4
+    ].join('\n');
+    expect(seamLines('src/imp.ts', blockPair, changed)).toEqual([2, 4]);
+  });
+
   it('marks nothing for a file whose imports all resolve elsewhere', () => {
     const source = ["import { a } from './stable.js';", 'a();'].join('\n');
     expect(seamLines('src/imp.ts', source, changed)).toEqual([]);

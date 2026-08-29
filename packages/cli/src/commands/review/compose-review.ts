@@ -5504,17 +5504,34 @@ function composeReviewBody(
       : input.severityFloor === undefined || input.severityFloor === null
         ? '（下限记录缺失，强制读取按开放放行）'
         : '（状态携带了本模块无法识别的下限值，强制读取无法对其生效）';
+  // Beside a non-empty deferral list the open arm may not assert the
+  // no-withholding universal the very same body falsifies: deferral IS the
+  // floor's withholding in this module's terminology — the convergence
+  // posture IS the floor resolution — so beside the list the sentence owns
+  // what the open arm DID (the backstop moved nothing) and routes the
+  // deferrals to the posture, never to a resolved floor (#10136). The
+  // empty-list arm keeps the universal.
+  const fixAuditOpenTailEn =
+    deferredSuggestions.length > 0
+      ? ', so the mechanical backstop moved nothing — the deferrals listed ' +
+        'below were routed by the convergence posture, not moved by a ' +
+        'resolved floor; only the narrowed shape above applied.'
+      : ', so no finding was withheld by a floor — only the narrowed shape ' +
+        'above applied.';
+  const fixAuditOpenTailZh =
+    deferredSuggestions.length > 0
+      ? '，机械兜底未移动任何内容——下方列出的延后由收敛姿态路由，而非已解析下限的移动；只有上述收窄形态生效。'
+      : '，没有任何发现被下限扣留——只有上述收窄形态生效。';
   const fixAuditFloorEn = fixAuditFloorEngaged
     ? 'Findings below Critical were recorded and deferred, never posted — except pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor.'
     : 'The posting floor itself resolved OPEN at compose time this round ' +
       fixAuditOpenCauseEn +
-      ', so no finding was withheld by a floor — only the narrowed shape ' +
-      'above applied.';
+      fixAuditOpenTailEn;
   const fixAuditFloorZh = fixAuditFloorEngaged
     ? '低于 Critical 的发现只记录延后，不发布——除了预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内。'
     : '但本轮发布下限在 compose 期实际解析为开放' +
       fixAuditOpenCauseZh +
-      '，没有任何发现被下限扣留——只有上述收窄形态生效。';
+      fixAuditOpenTailZh;
   const fixAuditSeamEn =
     fixAudit && fixAudit.seamFiles > 0
       ? ` (interaction files seam-bounded: ${fixAudit.seamKept} of ${fixAudit.seamTotal} hunk(s) republished)`

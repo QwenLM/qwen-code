@@ -297,6 +297,30 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 
+  it('a dry receipt sharing its digest with an UNCERTIFIED round does not narrow the chunk out (#10136)', () => {
+    // The twin of the test above with round 1 uncertified instead of
+    // yielded: findings merge into the cumulative list unconditionally —
+    // the yield scan refuses a filed finding whose file line is a
+    // substring of a listed entry, classifying the receipt `unknown`
+    // while the orchestrator still merges the finding. A dry member built
+    // against the SAME digest may never have seen those findings, exactly
+    // as with a yield; pricing the chunk out on it would certify
+    // convergence over live findings. Round 1 here left no transcript at
+    // all — the record's own `unknown` — and the chunk stays hot in `due`,
+    // not merely outside `narrowed`.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), DRY);
+    record(1, 14, 'chunk 14 round 1 territory walk', 'feed01'); // no transcript
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk', 'feed01'), DRY);
+
+    const r3 = scheduleReverseAuditRound(plan, [13, 14], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([14]);
+    expect(r3.narrowed).toEqual([{ chunkId: 13, dryRound: 2 }]);
+    expect(r3.converged).toBe(false);
+  });
+
   it('a retired DELTA chunk still cold-checks; a narrowed one never does', () => {
     dryTwice([13, 14]);
     const narrowing = { deltaChunkIds: new Set([13]) };

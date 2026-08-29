@@ -261,6 +261,57 @@ describe('widenScope seam bound (#10104)', () => {
     ).toBe(assembleSections(selection, widened.paths)?.toString('utf8'));
   });
 
+  it('the doubt shape keeps a clamped pure-deletion hunk (#10136)', () => {
+    // The doubt return marks lines 1..total, but `parseDiff` clamps a
+    // `@@ -1,N +0,0 @@` hunk to new-side [0,0] — no marked line is ever 0,
+    // so hunk matching in the doubt state shed exactly the hunk the doubt
+    // promises to keep. The doubt shape is detected before matching: the
+    // file republishes in full, with NO seam record, exactly like the
+    // unreadable-source doubt state.
+    const impSection = [
+      'diff --git a/src/imp.ts b/src/imp.ts',
+      '--- a/src/imp.ts',
+      '+++ b/src/imp.ts',
+      '@@ -1,2 +0,0 @@',
+      '-deleted line one',
+      '-deleted line two',
+      '@@ -10,3 +8,3 @@',
+      ' function unrelated() {',
+      '-  return 0;',
+      '+  return 1;',
+      ' }',
+      '',
+    ].join('\n');
+    const selection = selectNarrowing(
+      Buffer.from(section('src/changed.ts') + impSection, 'utf8'),
+      Buffer.from(section('src/changed.ts'), 'utf8'),
+    );
+    if (selection === null)
+      throw new Error('the narrowing refused this fixture');
+    // The worktree source trips the oracle's doubt: a dynamic import the
+    // line-shape read cannot collect bindings from.
+    const source = [
+      "const api = await import('./changed.js');",
+      'api.call();',
+    ].join('\n');
+    const widened = widenScope({
+      anchor: 'a'.repeat(40),
+      selection,
+      readWorktree: (rel) => (rel === 'src/imp.ts' ? source : null),
+      seamBound: true,
+    });
+    expect(widened.scope.interaction[0].seam).toBeUndefined();
+    expect(widened.hunkKeep).toBeUndefined();
+    const diff = assembleSections(
+      selection,
+      widened.paths,
+      widened.hunkKeep,
+    )?.toString('utf8');
+    expect(diff).toContain('@@ -1,2 +0,0 @@');
+    expect(diff).toContain('-deleted line one');
+    expect(diff).toContain('+  return 1;');
+  });
+
   it('records nothing and drops nothing when the bound is off', () => {
     const selection = seamSelection();
     const widened = widenScope({

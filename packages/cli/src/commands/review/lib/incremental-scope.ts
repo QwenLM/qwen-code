@@ -138,15 +138,15 @@ export function widenScope(input: WidenInput): WidenedScope {
   // file itself always stays in scope (header at minimum), so its chunk
   // agent is still briefed to re-ask the seam question against the worktree.
   // Every doubt state republishes in full: an unreadable source, a section
-  // with no hunks, a scan that keeps everything, and a FULL-RANGE slice that
-  // classifies heavy (#10136) — each leaves the file exactly as the
-  // unbounded widening published it. The heavy state is a doubt state
-  // because heaviness is classified from the PUBLISHED slice: bounding a
-  // heavy interaction file would flip it non-heavy, `heavyFiles()` would
-  // drop it, and the invariant agents that read it whole from the worktree
-  // — the only auditors of hunks a backward base move smuggles into the
-  // full-range slice — would never launch on exactly the rounds the bound
-  // runs.
+  // with no hunks, a scan that keeps everything, a FULL-RANGE slice that
+  // classifies heavy (#10136), and the oracle's own doubt return — each
+  // leaves the file exactly as the unbounded widening published it. The
+  // heavy state is a doubt state because heaviness is classified from the
+  // PUBLISHED slice: bounding a heavy interaction file would flip it
+  // non-heavy, `heavyFiles()` would drop it, and the invariant agents that
+  // read it whole from the worktree — the only auditors of hunks a backward
+  // base move smuggles into the full-range slice — would never launch on
+  // exactly the rounds the bound runs.
   const hunkKeep = new Map<string, ReadonlySet<number>>();
   const seams = new Map<string, { kept: number; total: number }>();
   if (seamBound === true && interaction.size > 0) {
@@ -180,6 +180,16 @@ export function widenScope(input: WidenInput): WidenedScope {
         continue;
       }
       const lines = seamLines(path, source, touched, packages);
+      // The doubt shape — a read whose bindings cannot be proven collected
+      // marks EVERY line (#10136) — is detected before hunk matching:
+      // `parseDiff` clamps a pure-deletion hunk at the top of a file
+      // (`@@ -1,N +0,0 @@`) to new-side [0,0], no marked line is ever 0,
+      // so matching in the doubt state would shed exactly the hunks the
+      // doubt state promises to keep. A legitimate scan can never mark
+      // more lines than the file has, so the shape is unambiguous; leave
+      // the file unbounded with NO seam record, exactly like the
+      // unreadable-source doubt state.
+      if (lines.length >= fileLines) continue;
       const kept = new Set<number>();
       section.hunks.forEach((h, i) => {
         if (lines.some((ln) => ln >= h.newStart && ln <= h.newEnd)) {
