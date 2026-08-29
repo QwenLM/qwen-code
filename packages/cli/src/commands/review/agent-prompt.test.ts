@@ -7431,7 +7431,7 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
     [
       'an empty hunks file beside a ledger that says something was fixed',
       { hunks: '\n' },
-      /--hunks is empty, but the ledger marks 2 finding\(s\) fixed \(f1, f3\)[\s\S]*a claim, not an edit/,
+      /--hunks is empty, but the ledger marks 2 finding\(s\) fixed \(f1, f3\)[\s\S]*a claim, not an edit[\s\S]*the pre-edit state is gone and the audit cannot[\s\S]*the ledger, not the audit/,
     ],
     [
       'a findings file that is not the artifact',

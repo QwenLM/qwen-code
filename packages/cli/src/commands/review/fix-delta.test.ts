@@ -50,6 +50,35 @@ vi.mock('node:child_process', async (importOriginal) => {
   }) as typeof actual.spawnSync;
   return { ...actual, default: { ...actual, spawnSync }, spawnSync };
 });
+// The DT_UNKNOWN witness needs a dirent stream every predicate refuses —
+// no filesystem constructible on the CI hosts reports unknown types (NFS
+// without d_type, sshfs/FUSE do) — so wrap the real readdirSync behind a
+// switch the test flips, exactly like the child_process record above.
+const readdirHook = vi.hoisted(() => ({
+  unknownDirents: false,
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const readdirSync = ((...args: Parameters<typeof actual.readdirSync>) => {
+    const entries = actual.readdirSync(...args);
+    const opts = args[1];
+    const withTypes =
+      typeof opts === 'object' &&
+      opts !== null &&
+      'withFileTypes' in opts &&
+      opts.withFileTypes === true;
+    if (!readdirHook.unknownDirents || !Array.isArray(entries) || !withTypes) {
+      return entries;
+    }
+    return entries.map((e) => ({
+      name: (e as { name: unknown }).name,
+      isDirectory: () => false,
+      isFile: () => false,
+      isSymbolicLink: () => false,
+    }));
+  }) as typeof actual.readdirSync;
+  return { ...actual, default: { ...actual, readdirSync }, readdirSync };
+});
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
 import {
@@ -149,10 +178,18 @@ describe('fix-delta', () => {
 
   afterEach(() => {
     process.chdir(cwdBefore);
-    rmSync(repo, { recursive: true, force: true });
+    // A `git add` of the 11k-file tree can detach an auto-gc that is still
+    // writing loose objects when the teardown starts; retry the removal.
+    rmSync(repo, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 100,
+    });
     rmSync(out, { recursive: true, force: true });
     gitIsolation.dispose();
     tmpdirOverride.value = undefined;
+    readdirHook.unknownDirents = false;
   });
 
   it('diffs exactly the edits made between the snapshot and now — on top of the reviewed change', () => {
@@ -185,6 +222,11 @@ describe('fix-delta', () => {
     expect(hunks).toContain('+test("bound", () => {});');
     expect(hunks).toContain('diff --git a/gone.ts b/gone.ts');
     expect(hunks).toContain('deleted file mode');
+    // …and the non-ASCII name arrives RAW in the hunks headers too: under
+    // the default `core.quotePath=true` git C-quotes it there while the
+    // summary above prints the raw name — two spellings of one file for
+    // the audit to correlate. The capture pins `core.quotePath=false`.
+    expect(hunks).toContain('diff --git a/文.ts b/文.ts');
     expect(stderr().at(-1)).toMatch(
       /^fix-delta: 4 file\(s\) changed since the snapshot — a\.test\.ts, a\.ts, gone\.ts, 文\.ts$/,
     );
@@ -1838,4 +1880,182 @@ describe('fix-delta', () => {
       runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() }),
     ).toThrow(/not a fix-delta snapshot/);
   });
+
+  it("excludes the command's own in-repo --out and --since files", () => {
+    // The name families are keyed on what the REVIEW flow writes, but
+    // `fix-delta` is a public subcommand whose `--out` takes any path with
+    // no location validation: one that resolves inside the repository
+    // outside those families is captured by the next snapshot and enters
+    // the hunks as bookkeeping. The run's own side paths are excluded
+    // dynamically.
+    const snapIn = join(repo, 'fd-out', 'snap.json');
+    const hunksIn = join(repo, 'fd-out', 'hunks.diff');
+    runFixDelta({ snapshot: true, since: undefined, out: snapIn });
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 9;\n');
+    runFixDelta({ snapshot: false, since: snapIn, out: hunksIn });
+
+    const hunks = readFileSync(hunksIn, 'utf8');
+    expect(hunks).toContain('+export const x = 9;');
+    expect(hunks).not.toContain('fd-out/snap.json');
+    expect(hunks).not.toContain('fd-out/hunks.diff');
+    expect(stderr().at(-1)).toBe(
+      'fix-delta: 1 file(s) changed since the snapshot — a.ts',
+    );
+  });
+
+  it('names a submodule whose dirt hides behind assume-unchanged / skip-worktree bits', () => {
+    // The bits are git's documented local-override practice, and they hide
+    // an entry from BOTH status runs the model reads: the inner probe
+    // answers empty (a false 'clean') and the outer v2 status emits no
+    // entry for the submodule at all, so status-only discovery prints the
+    // bare all-clear while the edit is on disk. Discovery also scans the
+    // index's own gitlinks, and an empty inner answer is confirmed against
+    // the index's tags — never read as clean.
+    const subSrc = plantCommittedSubmodule();
+    try {
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      for (const bit of ['assume-unchanged', 'skip-worktree']) {
+        (writeStderrLine as unknown as Mock).mockClear();
+        gitAt(join(repo, 'sub'), 'update-index', `--${bit}`, 'f.txt');
+        writeFileSync(join(repo, 'sub', 'f.txt'), 'the fix — bit-hidden\n');
+        runFixDelta({
+          snapshot: false,
+          since: snapshotFile(),
+          out: hunksFile(),
+        });
+
+        expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+        const lines = stderr();
+        expect(
+          lines.some(
+            (l) =>
+              /\bsub\b/.test(l) &&
+              l.includes('cannot see') &&
+              l.includes('could not resolve'),
+          ),
+        ).toBe(true);
+        expect(
+          lines.some((l) =>
+            l.includes('the tree is unchanged since the snapshot'),
+          ),
+        ).toBe(false);
+        gitAt(join(repo, 'sub'), 'update-index', `--no-${bit}`, 'f.txt');
+      }
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('discloses the walk it cannot classify when dirents carry no type', () => {
+    // DT_UNKNOWN — a filesystem that does not hand back d_type: every
+    // dirent predicate answers false, and skipping the unclassifiable
+    // child degenerated the walk to 'fully walked, nothing inside',
+    // indistinguishable from empty. No such filesystem is constructible on
+    // the CI hosts, so the dirent stream itself is stubbed; the nested
+    // repository under the walk must still reach a 'cannot see'
+    // disclosure, never the bare all-clear.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ig');
+    const inner = join(repo, 'ig', 'inner');
+    mkdirSync(inner, { recursive: true });
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, 'f.txt'), 'inside\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'init');
+
+    readdirHook.unknownDirents = true;
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(inner, 'f.txt'), 'the fix — uncommitted inside\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('ig/inner') && l.includes('cannot see')),
+    ).toBe(true);
+    expect(
+      lines.some((l) => l.includes('the tree is unchanged since the snapshot')),
+    ).toBe(false);
+  });
+
+  it('excludes a symlink reaching a review worktree, under an ignored directory', () => {
+    // The exclusion keys on the discovered NAME; a link planted at any
+    // other name under a collapsed ignored directory still reaches the
+    // review's own worktree, and the walk probed it as blind-spot dirt —
+    // the very thing the exclusion exists to remove. The target resolves.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ig');
+    mkdirSync(join(repo, 'ig'), { recursive: true });
+    const target = join(repo, '.qwen', 'tmp', 'review-pr-1');
+    mkdirSync(target, { recursive: true });
+    gitAt(target, 'init', '-q', '-b', 'main');
+    gitAt(target, 'config', 'user.email', 't@t.t');
+    gitAt(target, 'config', 'user.name', 't');
+    writeFileSync(join(target, 'f.txt'), 'inside\n');
+    gitAt(target, 'add', '-A');
+    gitAt(target, 'commit', '-qm', 'init');
+    symlinkSync(target, join(repo, 'ig', 'x'));
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(target, 'f.txt'), 'dirtied between the states\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(lines.some((l) => l.includes('cannot see'))).toBe(false);
+    expect(lines.some((l) => l.includes('pre-existing'))).toBe(false);
+    expect(lines.at(-1)).toContain('the tree is unchanged since the snapshot');
+  });
+
+  it('excludes a top-level symlink whose target is a review worktree', () => {
+    // The slashless `?` branch checked the link's own name only, before
+    // any target resolution: a link named outside the families reached the
+    // review's own worktree past the exclusion and reported the review's
+    // state as a blind spot.
+    const target = join(repo, '.qwen', 'tmp', 'review-pr-1');
+    mkdirSync(target, { recursive: true });
+    gitAt(target, 'init', '-q', '-b', 'main');
+    gitAt(target, 'config', 'user.email', 't@t.t');
+    gitAt(target, 'config', 'user.name', 't');
+    writeFileSync(join(target, 'f.txt'), 'inside\n');
+    gitAt(target, 'add', '-A');
+    gitAt(target, 'commit', '-qm', 'init');
+    symlinkSync(target, join(repo, 'x'));
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(target, 'f.txt'), 'dirtied between the states\n');
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(lines.some((l) => l.includes('cannot see'))).toBe(false);
+    expect(lines.some((l) => l.includes('pre-existing'))).toBe(false);
+    expect(lines.at(-1)).toContain('the tree is unchanged since the snapshot');
+  });
+
+  // POSIX-only: a newline in a directory name cannot exist on NTFS.
+  it.skipIf(process.platform === 'win32')(
+    'tolerates a zero-commit nested repo whose name contains a newline',
+    () => {
+      // The tolerated zero-commit note embeds the raw, unquoted path: a
+      // newline in the directory name splits it across two lines, neither
+      // matching line-by-line, and the shape the tolerance exists for
+      // became a hard refusal on both modes.
+      const nested = join(repo, 'bad\nname');
+      mkdirSync(nested);
+      gitAt(nested, 'init', '-q', '-b', 'main');
+
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      writeFileSync(join(repo, 'a.ts'), 'export const x = 3;\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toContain(
+        '+export const x = 3;',
+      );
+    },
+  );
 });

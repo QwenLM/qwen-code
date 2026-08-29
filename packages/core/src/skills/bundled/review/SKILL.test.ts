@@ -1004,6 +1004,15 @@ describe('bundled review skill', () => {
       'The one refusal that is NOT in this class is the empty-hunks refusal',
     );
     expect(step).toContain(
+      'the pre-edit state is gone — there is no re-taking it at refusal time',
+    );
+    expect(step).toContain(
+      'say `Fix audit: not run — snapshot taken after the edits` under the **Fix audit** heading and leave the outcomes untouched',
+    );
+    // …and the impossible remedy the round-8 carve-out prescribed is gone:
+    // at refusal time the edits are already in the tree, so a redo cannot
+    // precede them.
+    expect(step).not.toContain(
       're-take it before the first edit and re-run the audit',
     );
     expect(step).toContain(

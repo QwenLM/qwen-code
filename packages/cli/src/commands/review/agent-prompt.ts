@@ -2381,9 +2381,10 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
       `agent-prompt: --hunks is empty, but the ledger marks ${fixed.length} ` +
         `finding(s) fixed (${ids(fixed)}). A fix that left no hunk ` +
         'in the tree is a claim, not an edit: either the snapshot was taken ' +
-        'AFTER the edits (take it before the first one), or the edits never ' +
-        'landed — in which case those outcomes are wrong and the ledger, not ' +
-        'the audit, is what to correct.',
+        'AFTER the edits — the pre-edit state is gone and the audit cannot ' +
+        'run, so the outcomes stay untouched — or the edits never landed, in ' +
+        'which case those outcomes are wrong and the ledger, not the audit, ' +
+        'is what to correct.',
     );
   }
   const where = (f: Finding): string => {
