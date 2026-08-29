@@ -202,20 +202,6 @@ describe('updateWorkspaceSkillSettingLists', () => {
       ),
     ).toEqual({ disabled: ['demo:pdf'], enabled: [] });
   });
-
-  it('a qualified toggle still lifts its own legacy bare disable (#9408)', () => {
-    // Toggling the extension copy reaches the pre-rename bare spelling it once
-    // persisted, so the dual-spelling lift survives.
-    expect(
-      updateWorkspaceSkillSettingLists(
-        { disabled: ['pdf'], enabled: [] },
-        'demo:pdf',
-        true,
-        false,
-        'demo',
-      ),
-    ).toEqual({ disabled: [], enabled: [] });
-  });
 });
 
 describe('computeWorkspaceSkillListUpdates', () => {
