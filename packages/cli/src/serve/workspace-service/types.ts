@@ -273,6 +273,7 @@ export interface ReloadResponse {
   sessionsSkipped?: string[];
   childReloaded: boolean;
   childError?: string;
+  runtimeEnvironmentApplied?: boolean;
 }
 
 export interface WorkspaceAcpPreheatResult {

@@ -12955,7 +12955,18 @@ class QwenAgent implements Agent {
       session.installManagedConversationActivation(
         async () => {
           this.assertManagedSessionAdmission();
-          reloadEnvironment(settings.merged, config.getTargetDir());
+          const settingsReloaded =
+            settings.reloadScopesFromDiskAtomically?.([
+              SettingScope.User,
+              SettingScope.Workspace,
+            ]) !== false;
+          if (settingsReloaded) {
+            reloadEnvironment(settings.merged, config.getTargetDir());
+          } else {
+            debugLogger.warn(
+              'Deferred session settings reload failed; keeping current environment',
+            );
+          }
           if (options.beforeDeferredWorkspaceActivation) {
             await options.beforeDeferredWorkspaceActivation();
           } else {

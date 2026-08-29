@@ -69,6 +69,10 @@ rebuilds its current generator. If another child reload interleaves with the
 asynchronous generator rebuild, the final refresh repeats before the Session is
 published. Provisional Sessions defer the same authentication rebuild to
 workspace activation.
+Activation atomically re-reads the provisional Session's own user and workspace
+settings before applying its environment, so a Session that waited while the
+settings cache advanced cannot restore a creation-time env snapshot. If that
+read fails, activation leaves the current process environment unchanged.
 
 Deleting a model removes it from future route resolution but does not force an
 already-running Session away from its current generator.
@@ -89,6 +93,12 @@ Mutation responses report one of three additive states:
 An environment snapshot rebuild or env-file read failure counts as an
 incomplete parent refresh and therefore returns `failed`, even if the live ACP
 child reload succeeds.
+
+The same fail-closed environment helper also backs the existing full workspace
+reload. Its response and `settings_reloaded` event therefore expose the
+additive optional `runtimeEnvironmentApplied` boolean; `false` means the child
+reload may have succeeded while the parent spawn environment was deliberately
+left unchanged.
 
 If the child cannot reload either settings scope from disk, it does not apply
 the stale in-memory provider registry and reports a failed child refresh.

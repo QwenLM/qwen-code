@@ -3425,6 +3425,7 @@ export interface DaemonReloadResponse {
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];
   childError?: string;
+  runtimeEnvironmentApplied?: boolean;
 }
 
 /** A bounded, credential-redacted adapter startup diagnostic. */

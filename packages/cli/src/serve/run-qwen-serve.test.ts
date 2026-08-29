@@ -7437,10 +7437,12 @@ describe('runQwenServe runtime startup failures', () => {
         }),
       ).resolves.toEqual({ status: 'failed' });
       expect(reloadEnvironment).not.toHaveBeenCalled();
-      await workspace!.reload({
-        route: 'POST /workspace/reload',
-        workspaceCwd: tmpDir,
-      });
+      await expect(
+        workspace!.reload({
+          route: 'POST /workspace/reload',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: false });
       expect(reloadEnvironment).not.toHaveBeenCalled();
 
       expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
@@ -7450,10 +7452,12 @@ describe('runQwenServe runtime startup failures', () => {
       );
 
       failReloadBuild = false;
-      await workspace!.reload({
-        route: 'POST /workspace/reload',
-        workspaceCwd: tmpDir,
-      });
+      await expect(
+        workspace!.reload({
+          route: 'POST /workspace/reload',
+          workspaceCwd: tmpDir,
+        }),
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: true });
       expect(reloadEnvironment).toHaveBeenCalledOnce();
       expect(primaryRuntimeEnv!.effectiveEnv).toBe(capturedRuntimeEnv);
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('reloaded');
@@ -7628,10 +7632,12 @@ describe('runQwenServe runtime startup failures', () => {
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
 
-      await secondaryRuntime!.workspaceService.reload({
-        route: 'POST /workspace/reload',
-        workspaceCwd: secondary,
-      });
+      await expect(
+        secondaryRuntime!.workspaceService.reload({
+          route: 'POST /workspace/reload',
+          workspaceCwd: secondary,
+        }),
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: true });
       expect(reloadEnvironment).toHaveBeenCalledOnce();
 
       expect(env.overlayKeys).toBe(overlayKeys);
@@ -7656,10 +7662,12 @@ describe('runQwenServe runtime startup failures', () => {
       );
 
       failEnvFileRead = true;
-      await secondaryRuntime!.workspaceService.reload({
-        route: 'POST /workspace/reload',
-        workspaceCwd: secondary,
-      });
+      await expect(
+        secondaryRuntime!.workspaceService.reload({
+          route: 'POST /workspace/reload',
+          workspaceCwd: secondary,
+        }),
+      ).resolves.toMatchObject({ runtimeEnvironmentApplied: false });
       expect(reloadEnvironment).toHaveBeenCalledOnce();
       expect(env.effectiveEnv?.['QWEN_TEST_SECONDARY_ENV']).toBe(
         'provider-reloaded',

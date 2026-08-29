@@ -19629,12 +19629,35 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   it.each(['load', 'resume'] as const)(
     '%s defers standalone restore side effects until managed activation',
     async (action) => {
+      let mergedSettings: Record<string, unknown> = {
+        mcpServers: {},
+        env: { QWEN_TEST_DEFERRED_ENV: 'old' },
+      };
+      const refreshedMergedSettings = {
+        mcpServers: {},
+        env: { QWEN_TEST_DEFERRED_ENV: 'new' },
+      };
+      const reloadScopesFromDiskAtomically = vi.fn(() => {
+        if (reloadScopesFromDiskAtomically.mock.calls.length > 1) {
+          mergedSettings = refreshedMergedSettings;
+        }
+        return true;
+      });
+      const settings = {
+        get merged() {
+          return mergedSettings;
+        },
+        reloadScopesFromDiskAtomically,
+        getUserHooks: vi.fn().mockReturnValue({}),
+        getProjectHooks: vi.fn().mockReturnValue({}),
+      } as unknown as LoadedSettings;
       const innerConfig = bindRestoreMocks({
         sessionExists: true,
         resumedConversation: {
           messages: [{ role: 'user', parts: [{ text: 'restored' }] }],
         },
       });
+      vi.mocked(loadSettings).mockReturnValue(settings);
       const { agent, agentPromise } = await spawnAgent('expected-capability');
 
       try {
@@ -19662,12 +19685,18 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         ).not.toHaveBeenCalled();
         expect(innerConfig.loadPausedBackgroundAgents).not.toHaveBeenCalled();
         expect(lastManagedConversationActivation).toEqual(expect.any(Function));
+        expect(reloadScopesFromDiskAtomically).toHaveBeenCalledOnce();
         vi.mocked(reloadEnvironment).mockClear();
 
         await lastManagedConversationActivation!();
 
+        expect(reloadScopesFromDiskAtomically).toHaveBeenCalledTimes(2);
+        expect(reloadScopesFromDiskAtomically).toHaveBeenLastCalledWith([
+          SettingScope.User,
+          SettingScope.Workspace,
+        ]);
         expect(reloadEnvironment).toHaveBeenCalledWith(
-          expect.any(Object),
+          refreshedMergedSettings,
           '/tmp',
         );
         expect(innerConfig.refreshAuth).toHaveBeenCalledOnce();
@@ -19687,6 +19716,47 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       }
     },
   );
+
+  it('keeps the current environment when deferred activation cannot refresh settings', async () => {
+    const settings = {
+      merged: {
+        mcpServers: {},
+        env: { QWEN_TEST_DEFERRED_ENV: 'stale' },
+      },
+      reloadScopesFromDiskAtomically: vi
+        .fn()
+        .mockReturnValueOnce(true)
+        .mockReturnValueOnce(false),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    bindRestoreMocks({ sessionExists: true });
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+
+    try {
+      await agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        _meta: {
+          [SESSION_SOURCE_META_KEY]: {
+            sourceType: 'standalone',
+            [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+          },
+        },
+      });
+      vi.mocked(reloadEnvironment).mockClear();
+
+      await lastManagedConversationActivation!();
+
+      expect(settings.reloadScopesFromDiskAtomically).toHaveBeenCalledTimes(2);
+      expect(reloadEnvironment).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
 
   it.each(['load', 'resume'] as const)(
     '%s skips the restore hint when the switch is off',
