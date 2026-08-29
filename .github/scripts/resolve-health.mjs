@@ -53,12 +53,20 @@ export function isRequest(body) {
 // counted as a FAILURE on purpose: if the workflow's wording drifts, the watch
 // should raise a visible (and visibly mislabelled) alarm rather than fall
 // silent while the lane is broken. A test pins every producer sentence.
-const FAILED = new Set(['infra_failed', 'agent_failed', 'unknown']);
-const OK = new Set(['pushed', 'resolved_nopush', 'noop', 'dry_run']);
+const FAILED = new Set([
+  'infra_failed',
+  'agent_failed',
+  'push_failed',
+  'unknown',
+]);
+const OK = new Set(['pushed', 'resolved_moved', 'noop', 'dry_run']);
 
 // Classifies a result comment by the fixed sentences `Report result` and
 // `Report skipped request` emit. Order matters: the infra wording is checked
-// before the generic failure wording it replaced for the never-ran case.
+// before the generic failure wording it replaced for the never-ran case, and
+// the one benign "resolved, but" (the head moved — a retry helps) before the
+// three that mean the push itself is broken (token scope, fork permission,
+// unexplained rejection — a retry repeats them).
 export function classifyResult(body) {
   if (!body.includes(RESULT_MARKER)) {
     return null;
@@ -75,8 +83,11 @@ export function classifyResult(body) {
   if (body.includes('in dry-run mode')) {
     return 'dry_run';
   }
+  if (body.includes('head branch changed while resolving')) {
+    return 'resolved_moved';
+  }
   if (body.includes('resolved the merge conflicts, but')) {
-    return 'resolved_nopush';
+    return 'push_failed';
   }
   if (body.includes('did not push changes')) {
     return 'noop';
@@ -99,12 +110,19 @@ function headline(body) {
 export function assess(prs, options = {}) {
   const opts = { ...DEFAULTS, ...options };
   const now = opts.now instanceof Date ? opts.now : new Date();
+  // Events older than the window are invisible, whatever PR carries them:
+  // the search window bounds which PRs are read, not how old their comments
+  // are, and a request or failure from weeks ago must neither alarm nor
+  // reset a streak forever. Compared as ISO strings, like everything else.
+  const windowStart = new Date(
+    now.getTime() - opts.windowDays * 86_400_000,
+  ).toISOString();
   const results = [];
   const unanswered = [];
   for (const pr of prs) {
-    const comments = [...pr.comments].sort((a, b) =>
-      a.created_at.localeCompare(b.created_at),
-    );
+    const comments = [...pr.comments]
+      .filter((c) => c.created_at >= windowStart)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
     const prResults = [];
     for (const c of comments) {
       const kind = classifyResult(c.body);
@@ -123,11 +141,13 @@ export function assess(prs, options = {}) {
     const requests = comments.filter(
       (c) => c.user !== opts.bot && isRequest(c.body),
     );
-    requests.forEach((req, i) => {
-      const next = requests[i + 1]?.created_at ?? '￿';
-      const answered = prResults.some(
-        (r) => r.at > req.created_at && r.at < next,
-      );
+    for (const req of requests) {
+      // Any result after the request answers it. Runs on one PR are
+      // serialised by the workflow's concurrency group, so a later result
+      // implies the earlier run finished — and a retry typed before the
+      // first run reported must not leave the first request "unanswered"
+      // forever because its result landed after the retry's timestamp.
+      const answered = prResults.some((r) => r.at > req.created_at);
       const ageHours = (now.getTime() - Date.parse(req.created_at)) / 3_600_000;
       if (!answered && ageHours >= opts.staleHours) {
         unanswered.push({
@@ -138,7 +158,7 @@ export function assess(prs, options = {}) {
           user: req.user,
         });
       }
-    });
+    }
   }
   results.sort((a, b) => a.at.localeCompare(b.at));
   unanswered.sort((a, b) => a.at.localeCompare(b.at));
@@ -153,6 +173,7 @@ export function assess(prs, options = {}) {
   const streakItems = attempts.slice(attempts.length - streak);
   const infra = streakItems.filter((r) => r.kind === 'infra_failed').length;
   return {
+    windowStart,
     results,
     attempts,
     streak,
@@ -240,7 +261,7 @@ export function renderIssueBody(assessment, options = {}) {
     stateMarker(assessment),
     '`@qwen-code /resolve` is failing in a row. Its baseline is ~84% of agent runs pushing a resolution, so a streak this long almost always means the lane itself is broken — an npm `latest` that does not resolve, a sandbox image that was never published, a workflow file that no longer parses — not the conflicts. Re-running requests will not help until the cause is fixed.',
     '',
-    'How to read the outcomes: `infra_failed` means the agent step ended without running (install, model endpoint, timeout, cancellation — open the workflow run linked from the comment); `agent_failed` means the agent ran and gave up or failed verification. A request with no result comment at all usually means the workflow never started (an invalid workflow file produces exactly that, with no run to look at).',
+    'How to read the outcomes: `infra_failed` means the agent step ended without running (install, model endpoint, timeout, cancellation — open the workflow run linked from the comment); `agent_failed` means the agent ran and gave up or failed verification; `push_failed` means it resolved the conflict but the push was rejected for a reason a retry repeats (token scope, fork permissions); `unknown` means the result comment used wording this watch does not recognise — check for a producer change. A request with no result comment at all usually means the workflow never started (an invalid workflow file produces exactly that, with no run to look at).',
     '',
     renderReport(assessment, options),
     'This issue is maintained by `.github/workflows/qwen-resolve-health.yml`; it comments when the picture changes and closes itself once a `/resolve` succeeds again.',
@@ -298,12 +319,23 @@ export function decide(assessment, existing, options = {}) {
       }
     }
   } else if (existing) {
-    actions.push({
-      type: 'comment',
-      number: existing.number,
-      body: renderRecovery(assessment, options),
-    });
-    actions.push({ type: 'close', number: existing.number });
+    // Recovery needs positive evidence: a successful attempt the issue has
+    // not seen yet. An alarm that merely stopped being visible — the PRs
+    // carrying the unanswered requests fell out of the discovery window, or
+    // no attempt happened at all — is not a recovery, and closing on it
+    // would hide a lane that is still broken.
+    const previous = readState(existing.texts);
+    const latest = assessment.latestAttempt;
+    const newSuccess =
+      latest && OK.has(latest.kind) && latest.id !== previous?.latest;
+    if (newSuccess) {
+      actions.push({
+        type: 'comment',
+        number: existing.number,
+        body: renderRecovery(assessment, options),
+      });
+      actions.push({ type: 'close', number: existing.number });
+    }
   }
   return actions;
 }
@@ -459,12 +491,30 @@ export function main({
   if (!repo) {
     throw new Error('REPO is required (owner/name).');
   }
+  // A dispatch knob is free text; a non-numeric value must fall back to the
+  // default, not to NaN — every comparison against NaN is false, which would
+  // silently turn the alarm off.
+  const knob = (name, fallback) => {
+    const raw = env[name];
+    if (raw === undefined || raw === '') {
+      return fallback;
+    }
+    const n = Number(raw);
+    if (Number.isInteger(n) && n >= 1) {
+      return n;
+    }
+    console.log(
+      `resolve-health: ignoring ${name}=${JSON.stringify(raw)} (not a positive integer); using ${fallback}`,
+    );
+    return fallback;
+  };
   const opts = {
     ...DEFAULTS,
     now,
-    threshold: Number(env.RESOLVE_HEALTH_THRESHOLD ?? DEFAULTS.threshold),
-    unansweredThreshold: Number(
-      env.RESOLVE_HEALTH_UNANSWERED ?? DEFAULTS.unansweredThreshold,
+    threshold: knob('RESOLVE_HEALTH_THRESHOLD', DEFAULTS.threshold),
+    unansweredThreshold: knob(
+      'RESOLVE_HEALTH_UNANSWERED',
+      DEFAULTS.unansweredThreshold,
     ),
   };
   const since = new Date(now.getTime() - opts.windowDays * 86_400_000)

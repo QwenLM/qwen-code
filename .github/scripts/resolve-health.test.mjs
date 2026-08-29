@@ -9,8 +9,10 @@ import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { parse } from 'yaml';
 import {
+  DEFAULTS,
   HEALTH_MARKER,
   RESULT_MARKER,
+  apply,
   assess,
   classifyResult,
   decide,
@@ -58,62 +60,82 @@ const INFRA_FAILED =
 const SKIPPED = 'Qwen Code did not run conflict resolution for this request.';
 const MOVED =
   'Qwen Code resolved the merge conflicts, but the head branch changed while resolving, so the update was not pushed.';
+const PERMISSION =
+  'Qwen Code resolved the merge conflicts, but could not push to `owner/repo`. For a fork PR this needs **Allow edits by maintainers** enabled.';
+const WORKFLOW_SCOPE =
+  'Qwen Code resolved the merge conflicts, but could not push to `owner/repo`: resolving merges the base branch in, which includes its `.github/workflows/**` changes.';
+const OTHER_PUSH =
+  'Qwen Code resolved the merge conflicts, but pushing to `owner/repo` failed.';
 const NOOP = 'Qwen Code checked this PR and did not push changes.';
+const UNKNOWN = 'Qwen Code did something this script has never heard of.';
 
 describe('resolve-health: classification', () => {
   it('recognises every sentence the workflow emits', () => {
-    assert.equal(classifyResult(`${RESULT_MARKER}\n${PUSHED}`), 'pushed');
+    const kind = (s) => classifyResult(`${RESULT_MARKER}\n${s}`);
+    assert.equal(kind(PUSHED), 'pushed');
+    assert.equal(kind(AGENT_FAILED), 'agent_failed');
+    assert.equal(kind(INFRA_FAILED), 'infra_failed');
+    assert.equal(kind(SKIPPED), 'skipped');
+    assert.equal(kind(NOOP), 'noop');
     assert.equal(
-      classifyResult(`${RESULT_MARKER}\n${AGENT_FAILED}`),
-      'agent_failed',
-    );
-    assert.equal(
-      classifyResult(`${RESULT_MARKER}\n${INFRA_FAILED}`),
-      'infra_failed',
-    );
-    assert.equal(classifyResult(`${RESULT_MARKER}\n${SKIPPED}`), 'skipped');
-    assert.equal(
-      classifyResult(`${RESULT_MARKER}\n${MOVED}`),
-      'resolved_nopush',
-    );
-    assert.equal(classifyResult(`${RESULT_MARKER}\n${NOOP}`), 'noop');
-    assert.equal(
-      classifyResult(
-        `${RESULT_MARKER}\nQwen Code resolved the merge conflicts in dry-run mode.`,
-      ),
+      kind('Qwen Code resolved the merge conflicts in dry-run mode.'),
       'dry_run',
     );
+    // Of the four "resolved, but" sentences only the moved head is benign
+    // (a retry helps); the other three mean the push itself is broken and a
+    // retry repeats them, so they are failures.
+    assert.equal(kind(MOVED), 'resolved_moved');
+    assert.equal(kind(PERMISSION), 'push_failed');
+    assert.equal(kind(WORKFLOW_SCOPE), 'push_failed');
+    assert.equal(kind(OTHER_PUSH), 'push_failed');
     // A comment without the marker is not a result, whatever it says.
     assert.equal(classifyResult(PUSHED), null);
     // Drift is loud, not silent: an unrecognised sentence is a failure.
-    assert.equal(
-      classifyResult(`${RESULT_MARKER}\nQwen Code did something new.`),
-      'unknown',
-    );
+    assert.equal(kind(UNKNOWN), 'unknown');
   });
 
   it('classifies every result sentence the producer workflow actually emits', () => {
     // Read the sentences from `resolve-pr`'s report steps rather than from
     // hand-copied constants, so a wording change in the workflow fails here
-    // instead of turning into `unknown` at runtime.
+    // instead of turning into `unknown` at runtime. The echoes escape
+    // backticks (\`) inside double quotes; unescape them so each sentence
+    // is seen whole, not cut at the first backslash (which would collapse
+    // the four "resolved, but" sentences into one prefix).
     const start = producer.indexOf('\n  resolve-pr:');
     const rest = producer.slice(start + 1);
     const next = rest.search(/\n {2}[A-Za-z]/);
     const job = next === -1 ? rest : rest.slice(0, next);
-    const sentences = [...job.matchAll(/echo "(Qwen Code [^"\\]*)/g)].map(
-      (m) => m[1],
-    );
+    const sentences = [...job.matchAll(/echo "((?:[^"\\]|\\.)*)"/g)]
+      .map((m) => m[1].replace(/\\(.)/g, '$1'))
+      .filter((s) => s.startsWith('Qwen Code '));
     assert.ok(
-      sentences.length >= 6,
+      sentences.length >= 8,
       `expected the report sentences, found ${sentences.length}`,
     );
+    const kinds = new Map();
     for (const sentence of sentences) {
       const kind = classifyResult(`${RESULT_MARKER}\n${sentence}`);
       assert.ok(
         kind && kind !== 'unknown',
         `producer sentence is not classified: ${sentence}`,
       );
+      kinds.set(sentence, kind);
     }
+    // The four "resolved, but" producers land on the two sides they belong to.
+    for (const [sentence, kind] of kinds) {
+      if (sentence.includes('head branch changed while resolving')) {
+        assert.equal(kind, 'resolved_moved', sentence);
+      } else if (
+        sentence.includes('could not push') ||
+        sentence.includes('but pushing to')
+      ) {
+        assert.equal(kind, 'push_failed', sentence);
+      }
+    }
+    assert.ok([...kinds.values()].includes('resolved_moved'));
+    assert.ok(
+      [...kinds.values()].filter((k) => k === 'push_failed').length >= 3,
+    );
     // And the constants this file uses are real producer sentences.
     for (const sentence of [PUSHED, AGENT_FAILED, SKIPPED, NOOP]) {
       assert.ok(
@@ -163,9 +185,18 @@ describe('resolve-health: assessment', () => {
       [1, 2, 2],
     );
     assert.equal(a.alarm, true);
-    // A success anywhere after the failures resets the streak.
+    // A moved-head resolution is a success: it resets the streak.
     prs[1].comments.push(result('2026-08-25T00:00:00Z', MOVED, 2));
     assert.equal(assess(prs, { now, threshold: 3 }).streak, 0);
+    // A broken push and an unrecognised sentence both extend it.
+    prs[1].comments.push(result('2026-08-25T01:00:00Z', PERMISSION, 2));
+    prs[1].comments.push(result('2026-08-25T02:00:00Z', UNKNOWN, 2));
+    const b = assess(prs, { now, threshold: 3 });
+    assert.equal(b.streak, 2);
+    assert.deepEqual(
+      b.streakItems.map((r) => r.kind),
+      ['push_failed', 'unknown'],
+    );
   });
 
   it('does not depend on the order PRs or comments arrive in', () => {
@@ -220,13 +251,35 @@ describe('resolve-health: assessment', () => {
     assert.equal(assess(failures(5), { now }).alarm, true);
   });
 
+  it('ignores events older than the window, whatever PR carries them', () => {
+    // The search window bounds PR discovery only; a PR touched yesterday can
+    // carry a request or a failure from a month ago, which must neither
+    // count as unanswered nor sit in the streak.
+    const prs = [
+      {
+        number: 9,
+        comments: [
+          request('2026-07-01T00:00:00Z', 9),
+          result('2026-07-02T00:00:00Z', AGENT_FAILED, 9),
+          result('2026-08-26T00:00:00Z', PUSHED, 9),
+        ],
+      },
+    ];
+    const a = assess(prs, { now, unansweredThreshold: 1 });
+    assert.equal(a.unanswered.length, 0);
+    assert.deepEqual(
+      a.attempts.map((r) => r.kind),
+      ['pushed'],
+    );
+    assert.equal(a.windowStart.slice(0, 10), '2026-08-20');
+  });
+
   it('flags a request with no result once it is older than the stale window', () => {
     const prs = [
       {
         number: 7,
         comments: [
           request('2026-08-27T00:00:00Z', 7),
-          // Answered: a result before the next request.
           result('2026-08-27T00:10:00Z', PUSHED, 7),
           request('2026-08-27T02:00:00Z', 7),
           // Too young to count.
@@ -248,6 +301,25 @@ describe('resolve-health: assessment', () => {
     );
     assert.equal(a.alarm, true);
     assert.equal(assess(prs, { now, staleHours: 3 }).alarm, false);
+  });
+
+  it('treats any later result as the answer, so a retry cannot orphan the first request', () => {
+    // Two requests typed before the first run reports, then one result:
+    // both are answered. Runs on a PR are serialised by the workflow, so a
+    // later result implies the earlier run finished.
+    const prs = [
+      {
+        number: 10,
+        comments: [
+          request('2026-08-27T00:00:00Z', 10),
+          request('2026-08-27T00:05:00Z', 10),
+          result('2026-08-27T00:20:00Z', AGENT_FAILED, 10),
+        ],
+      },
+    ];
+    const a = assess(prs, { now, staleHours: 3, unansweredThreshold: 1 });
+    assert.equal(a.unanswered.length, 0);
+    assert.equal(a.alarm, false);
   });
 });
 
@@ -290,6 +362,32 @@ describe('resolve-health: decisions', () => {
     assert.ok(actions[0].body.includes('3 never reached the agent'));
   });
 
+  it('opens an issue on unanswered requests alone and lists them', () => {
+    const stale = assess(
+      [
+        {
+          number: 12,
+          comments: [1, 2, 3].map((h) =>
+            request(`2026-08-27T0${h}:00:00Z`, 12, `writer${h}`),
+          ),
+        },
+      ],
+      { now },
+    );
+    assert.equal(stale.streak, 0);
+    assert.equal(stale.unanswered.length, 3);
+    const actions = decide(stale, null);
+    assert.equal(actions.length, 1);
+    assert.match(actions[0].title, /0 consecutive failures, 3 unanswered/);
+    assert.ok(actions[0].body.includes('Requests with no result comment:'));
+    assert.ok(actions[0].body.includes('#12 by @writer2'));
+    assert.deepEqual(readState([actions[0].body]), {
+      streak: 0,
+      unanswered: 3,
+      latest: null,
+    });
+  });
+
   it('writes nothing while the picture is unchanged, one comment when it moves', () => {
     const created = decide(failing, null)[0];
     const existing = { number: 42, texts: [created.body] };
@@ -302,7 +400,7 @@ describe('resolve-health: decisions', () => {
             ...[1, 2, 3, 4, 5].map((d) =>
               result(`2026-08-2${d}T00:00:00Z`, INFRA_FAILED, 3),
             ),
-            result('2026-08-26T00:00:00Z', INFRA_FAILED, 3),
+            result('2026-08-26T00:00:00Z', UNKNOWN, 3),
           ],
         },
       ],
@@ -313,6 +411,8 @@ describe('resolve-health: decisions', () => {
     assert.equal(actions[0].type, 'comment');
     assert.equal(actions[0].number, 42);
     assert.equal(readState([...existing.texts, actions[0].body]).streak, 6);
+    // The drifted sentence is visible in the update as what it is.
+    assert.ok(actions[0].body.includes('❌ unknown'));
   });
 
   it('comments the recovery and closes the issue once an attempt succeeds', () => {
@@ -326,6 +426,47 @@ describe('resolve-health: decisions', () => {
       actions[0].body,
       /Recovered: the latest attempt .* is `pushed`/,
     );
+    // Idempotent: the same success seen again does not re-close.
+    const after = { number: 42, texts: [...existing.texts, actions[0].body] };
+    assert.deepEqual(decide(healthy, after), []);
+  });
+
+  it('does not treat loss of evidence as recovery', () => {
+    // An open unanswered-driven issue whose requests fell out of the
+    // discovery window, or a streak that merely dropped below the threshold
+    // with no success: alarm is false, but nothing has been shown to work.
+    const stale = assess(
+      [
+        {
+          number: 12,
+          comments: [1, 2, 3].map((h) =>
+            request(`2026-08-27T0${h}:00:00Z`, 12),
+          ),
+        },
+      ],
+      { now },
+    );
+    const existing = { number: 42, texts: [decide(stale, null)[0].body] };
+    assert.deepEqual(decide(assess([], { now }), existing), []);
+    const belowThreshold = assess(
+      [
+        {
+          number: 3,
+          comments: [
+            result('2026-08-26T00:00:00Z', AGENT_FAILED, 3),
+            result('2026-08-26T01:00:00Z', PERMISSION, 3),
+          ],
+        },
+      ],
+      { now },
+    );
+    assert.equal(belowThreshold.alarm, false);
+    assert.deepEqual(decide(belowThreshold, existing), []);
+    // A success after the issue was filed is what closes it.
+    assert.deepEqual(
+      decide(healthy, existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
   });
 
   it('does nothing when healthy and no issue is open', () => {
@@ -333,11 +474,48 @@ describe('resolve-health: decisions', () => {
   });
 });
 
-describe('resolve-health: end to end against a recording gh', () => {
-  it('reads PRs and comments, finds the marked issue, and only then writes', () => {
+describe('resolve-health: writes', () => {
+  it('creates with the dedup label, comments, and closes through the issues API', () => {
     const calls = [];
-    const b64 = (s) => Buffer.from(s).toString('base64');
     const gh = (args, input) => {
+      calls.push({ args, input: input ? JSON.parse(input) : null });
+      return '{}';
+    };
+    apply(
+      gh,
+      'QwenLM/qwen-code',
+      [
+        { type: 'create', title: 'T', body: 'B' },
+        { type: 'comment', number: 7, body: 'C' },
+        { type: 'close', number: 7 },
+      ],
+      'scope/ci-cd',
+    );
+    assert.deepEqual(
+      calls.map((c) => [c.args[2], c.args[3]]),
+      [
+        ['POST', 'repos/QwenLM/qwen-code/issues'],
+        ['POST', 'repos/QwenLM/qwen-code/issues/7/comments'],
+        ['PATCH', 'repos/QwenLM/qwen-code/issues/7'],
+      ],
+    );
+    assert.deepEqual(calls[0].input, {
+      title: 'T',
+      body: 'B',
+      labels: ['scope/ci-cd'],
+    });
+    assert.deepEqual(calls[1].input, { body: 'C' });
+    assert.deepEqual(calls[2].input, {
+      state: 'closed',
+      state_reason: 'completed',
+    });
+  });
+});
+
+describe('resolve-health: end to end against a recording gh', () => {
+  const b64 = (s) => Buffer.from(s).toString('base64');
+  function recordingGh(calls) {
+    return (args, input) => {
       calls.push({ args, input });
       const path = args[3];
       if (path === 'search/issues') {
@@ -394,11 +572,16 @@ describe('resolve-health: end to end against a recording gh', () => {
         ].join('\n');
       }
       if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
-        // Only OPEN issues carrying the label are candidates; without
-        // `state=open` a closed, older tracking issue would be revived.
+        // Only OPEN issues carrying the dedup label are candidates; without
+        // `state=open` a closed, older tracking issue would be revived, and
+        // without the label every open issue's body is fetched and scanned.
         assert.ok(
           args.includes('state=open'),
           'issue lookup must filter state=open',
+        );
+        assert.ok(
+          args.includes(`labels=${DEFAULTS.label}`),
+          'issue lookup must filter by the dedup label',
         );
         assert.ok(args.includes('--paginate'));
         return [
@@ -420,8 +603,12 @@ describe('resolve-health: end to end against a recording gh', () => {
       }
       throw new Error(`unexpected gh call: ${args.join(' ')}`);
     };
+  }
+
+  it('reads PRs and comments, finds the marked issue, and only then writes', () => {
+    const calls = [];
     const { assessment, actions } = main({
-      gh,
+      gh: recordingGh(calls),
       env: { REPO: 'QwenLM/qwen-code', RESOLVE_HEALTH_THRESHOLD: '3' },
       now: new Date('2026-08-27T12:00:00Z'),
     });
@@ -445,6 +632,23 @@ describe('resolve-health: end to end against a recording gh', () => {
     // No write happens before every read has completed.
     const firstWrite = calls.findIndex((c) => c.args[2] === 'POST');
     assert.ok(calls.slice(firstWrite).every((c) => c.args[2] !== 'GET'));
+  });
+
+  it('falls back to the default threshold on a non-numeric knob instead of NaN', () => {
+    // NaN would make every comparison false — alarm off — and, with an open
+    // issue and no new success, still must not read as a recovery.
+    const calls = [];
+    const { assessment, actions } = main({
+      gh: recordingGh(calls),
+      env: { REPO: 'QwenLM/qwen-code', RESOLVE_HEALTH_THRESHOLD: 'abc' },
+      now: new Date('2026-08-27T12:00:00Z'),
+    });
+    assert.equal(assessment.streak, 3);
+    assert.equal(assessment.alarm, false);
+    assert.deepEqual(actions, []);
+    assert.ok(
+      calls.every((c) => c.args[2] !== 'POST' && c.args[2] !== 'PATCH'),
+    );
   });
 
   it('refuses to run without a repository', () => {
