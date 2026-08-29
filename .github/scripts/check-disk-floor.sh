@@ -21,6 +21,19 @@ set -u
 MIN_FREE_KB="${DISK_FLOOR_MIN_FREE_KB:-2097152}"
 MIN_FREE_INODES="${DISK_FLOOR_MIN_FREE_INODES:-100000}"
 
+case "$MIN_FREE_KB" in
+  '' | *[!0-9]*)
+    echo "::error::DISK_FLOOR_MIN_FREE_KB must be a non-negative integer"
+    exit 1
+    ;;
+esac
+case "$MIN_FREE_INODES" in
+  '' | *[!0-9]*)
+    echo "::error::DISK_FLOOR_MIN_FREE_INODES must be a non-negative integer"
+    exit 1
+    ;;
+esac
+
 TAG="runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-check-disk-floor}]"
 
 if [ "$#" -eq 0 ]; then

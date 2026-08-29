@@ -82,6 +82,18 @@ describe('check-disk-floor', () => {
     }
   });
 
+  it('fails closed for invalid floor overrides', () => {
+    for (const name of [
+      'DISK_FLOOR_MIN_FREE_KB',
+      'DISK_FLOOR_MIN_FREE_INODES',
+    ]) {
+      const result = runGate({ env: { [name]: '2G' } });
+
+      assert.equal(result.status, 1);
+      assert.ok(result.stdout.includes(`::error::${name} must be`));
+    }
+  });
+
   it('warns and proceeds for a missing directory', () => {
     const missing = join(tmpdir(), `disk-floor-missing-${process.pid}`);
     const result = runGate({ dirs: [missing] });
