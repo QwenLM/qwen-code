@@ -90,6 +90,39 @@ describe('package scripts', () => {
     }
   });
 
+  it('preserves a worktree bootstrap interrupt status', () => {
+    const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-signal-'));
+
+    try {
+      if (process.platform === 'win32') {
+        writeFileSync(path.join(binDir, 'corepack.cmd'), '@exit /b 130\r\n');
+      } else {
+        writeFileSync(
+          path.join(binDir, 'corepack'),
+          '#!/bin/sh\nkill -INT $$\n',
+        );
+        chmodSync(path.join(binDir, 'corepack'), 0o755);
+      }
+
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/setup-worktree.js')],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+          },
+        },
+      );
+
+      expect(result.status).toBe(130);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
   it('does not couple Node REPL to Qwen release versions', () => {
     const versionScript = readFileSync(
       path.join(root, 'scripts/version.js'),
