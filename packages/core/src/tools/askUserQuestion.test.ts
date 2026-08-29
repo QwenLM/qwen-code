@@ -203,6 +203,47 @@ describe('AskUserQuestionTool', () => {
     });
   });
 
+  describe('requiresUserInteraction', () => {
+    const params = {
+      questions: [
+        {
+          question: 'Pick a framework?',
+          header: 'Framework',
+          options: [
+            { label: 'React', description: 'A JavaScript library' },
+            { label: 'Vue', description: 'Progressive framework' },
+          ],
+          multiSelect: false,
+        },
+      ],
+    };
+
+    it('requires the dialog in interactive mode so allow rules cannot skip it', () => {
+      // A bare `ask_user_question` allow rule (a skill's `allowedTools`
+      // grant, permissions.allow, "always allow") overrides the 'ask'
+      // default at L4. Without this flag the scheduler would then run the
+      // tool with no dialog and execute() would report "declined".
+      const invocation = tool.build(params);
+      expect(invocation.requiresUserInteraction?.()).toBe(true);
+    });
+
+    it('requires the dialog for ACP hosts that run non-interactively', () => {
+      (mockConfig.isInteractive as Mock).mockReturnValue(false);
+      (mockConfig.getInputFormat as Mock).mockReturnValue('stream-json');
+      expect(tool.build(params).requiresUserInteraction?.()).toBe(true);
+
+      (mockConfig.getInputFormat as Mock).mockReturnValue(undefined);
+      (mockConfig.getExperimentalZedIntegration as Mock).mockReturnValue(true);
+      expect(tool.build(params).requiresUserInteraction?.()).toBe(true);
+    });
+
+    it('does not require a dialog in headless mode, where nothing can prompt', () => {
+      (mockConfig.isInteractive as Mock).mockReturnValue(false);
+      const invocation = tool.build(params);
+      expect(invocation.requiresUserInteraction?.()).toBe(false);
+    });
+  });
+
   describe('execute', () => {
     it('should return error in non-interactive mode', async () => {
       (mockConfig.isInteractive as Mock).mockReturnValue(false);

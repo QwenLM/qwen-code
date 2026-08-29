@@ -2,6 +2,7 @@
 
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   WebShellCustomizationProvider,
@@ -34,6 +35,30 @@ const mockComposerCoreState = vi.hoisted(() => ({
   }>,
   removeTopTag: vi.fn(),
 }));
+
+// Stand in for the branch picker so the tests can assert what the composer
+// hands it (the git status behind its action hints) without driving Radix.
+vi.mock('./BranchPickerPopover', async () => {
+  const { createElement } = await import('react');
+  return {
+    BranchPickerPopover: ({
+      children,
+      status,
+    }: {
+      children?: unknown;
+      status?: { operation?: string; unstaged?: number };
+    }) =>
+      createElement(
+        'div',
+        {
+          'data-testid': 'branch-picker',
+          'data-status-operation': status?.operation ?? undefined,
+          'data-status-unstaged': status?.unstaged ?? undefined,
+        },
+        children,
+      ),
+  };
+});
 
 // Mock useWorkspace so BranchPickerPopover can render without a real provider.
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
@@ -343,6 +368,7 @@ interface ChatEditorRenderProps {
     size?: number;
   }>;
   gitBranch?: string;
+  gitStatus?: DaemonWorkspaceGitStatus;
   workspaceName?: string;
   workspaceTitle?: string;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
@@ -1101,6 +1127,25 @@ describe('ChatEditor git branch toolbar integration', () => {
         '[aria-label="Current Git branch: feature/web-shell"]',
       ),
     ).not.toBeNull();
+  });
+
+  it('hands the workspace git status to the branch picker for its action hints', () => {
+    const container = renderChatEditor({
+      gitBranch: 'feature/web-shell',
+      gitStatus: {
+        v: 2,
+        workspaceCwd: '/repo',
+        branch: 'feature/web-shell',
+        operation: 'rebase',
+        unstaged: 4,
+        computedAt: 1,
+      },
+      visibleToolbarActions: ['gitBranch'],
+    });
+
+    const picker = container.querySelector('[data-testid="branch-picker"]');
+    expect(picker?.getAttribute('data-status-operation')).toBe('rebase');
+    expect(picker?.getAttribute('data-status-unstaged')).toBe('4');
   });
 
   it('hides the git branch indicator without a branch or visible action', () => {
