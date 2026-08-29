@@ -4222,16 +4222,29 @@ reviews (QWEN_CI_REVIEW_EXPECTED_HEAD_SHA) and its guard blocks the
 final post when the head moved, so even the uncancellable per-run-group
 reviews lose their whole run to a head move.
 
-So the retry probes for a live review first, with the scan gate's exact
-probe pair: the statusCheckRollup filter (any live review-pr check from
-the review workflow, trigger-independent), then the runs-API fallback
-for pull_request_target runs still parked in the 10-minute delay window
-with no check-run yet. On a live review the update is DEFERRED, not
-skipped: the same 9999 sentinel MARK_TS the retry branch uses keeps the
-feedback live, the next scan re-runs the round (itself held while the
-review is still in flight), and that round's report step performs the
-refresh once the review has landed. One extra round of latency, bounded
-by MAX_ROUNDS, against hours of discarded review work.
+So the retry probes for a live review first, with the scan gate's probe
+pair: the statusCheckRollup filter (any live review-pr check from the
+review workflow), then the runs-API fallback for runs still parked in
+the 10-minute delay window with no check-run yet. The probe sees
+LIFECYCLE runs only: a command-triggered run executes against the base
+branch, so its review-pr check attaches to main's commit and never
+shows under the PR's rollup (the review ack comment says the same), and
+the runs fallback is event-scoped to pull_request_target exactly like
+the scan gate's (af-099). An in-flight command review therefore does
+NOT hold the refresh, and the merge push can still invalidate its
+posting — the second hazard named above, still open. Giving command
+runs a PR-head-visible signal (a pending check posted at the ack step,
+matched here) is the mechanism fix; it is deliberately deferred — it
+needs a completion/TTL story for stranded pendings and a lockstep
+decision with the scan gate, whose exclusion of command runs (R2-1)
+this probe copies — so this text scopes the hold to what it actually
+sees.
+On a live review the update is DEFERRED, not skipped: the same 9999
+sentinel MARK_TS the retry branch uses keeps the feedback live, the
+next scan re-runs the round (itself held while the review is still in
+flight), and that round's report step performs the refresh once the
+review has landed. One extra round of latency, bounded by MAX_ROUNDS,
+against hours of discarded review work.
 
 Fail-open on probe errors, deliberately: the probe is an optimization,
 and failing closed would wedge stale-base recovery — the path that

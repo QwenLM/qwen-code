@@ -261,7 +261,6 @@ jobs:
       name: 'qwen-pr-review-delay'
       deployment: false
     permissions:
-      actions: 'read'
       contents: 'read'
       pull-requests: 'read'
     outputs:
@@ -299,44 +298,17 @@ jobs:
             echo "should_review=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Head-level dedup: cancel-in-progress fires on `closed` only
-          # (#10110), so an away-and-back push that fits inside the
-          # watcher's poll gap leaves TWO runs owing the same head — the
-          # in-flight one reviews and posts it, and the queued replacement
-          # would review the identical commit again. Every posted review
-          # carries the machine-ledger marker naming the reviewed head; if
-          # the live head already carries one of the bot's reviews, this
-          # run has nothing to do. Fail-open: any lookup trouble falls
-          # through to the review — a missed dedup costs one duplicate
-          # review, a false skip would lose one.
-          # The marker sha is body text the reviewed agent authors, so it
-          # never dedups alone: only the LAST ledger marker per body
-          # counts (compose appends the genuine one last — the CLI's
-          # parseLedger reads the last marker for the same reason), and it
-          # must equal the review's commit_id. Both are CALLER-SUPPLIED on
-          # POST reviews, and the reviewed agent holds the run's bot token,
-          # so a matching pair dedups only corroborated by a state the
-          # agent cannot author — a successful run of THIS workflow,
-          # server-recorded with the candidate as its event head (workflow
-          # runs have no create API). A salvaged historical-head review
-          # posts under a NEWER commit_id, so it never dedups the live head
-          # here. Fail-open like the lookup above: a lost corroboration
-          # costs one duplicate review, a false skip loses one. gh's --jq
-          # accepts a single expression only (no jq argument flags —
-          # fleet-shepherd documents the same limit), so the constant bot
-          # login is interpolated.
-          reviewed_shas="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate \
-            --jq '.[] | select((.user.login // "") == "qwen-code-ci-bot") | ((.body // "") | [match("<!-- qwen-review-ledger [^\n]*"; "g")] | .[-1].string // "") as $marker | (($marker | capture("\"sha\":\"(?<sha>[0-9a-f]{7,64})\"").sha)? // "") as $sha | select(($sha | length) > 0 and $sha == (.commit_id // "")) | $sha' 2>/dev/null)" || reviewed_shas=""
-          if [ -n "$current_head" ] && printf '%s\n' "$reviewed_shas" | grep -qx "$current_head"; then
-            corroborating_runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${current_head}&status=success" \
-              --jq '[.workflow_runs[]? | select(.path == ".github/workflows/qwen-code-pr-review.yml")] | length' 2>/dev/null || true)"
-            case "$corroborating_runs" in ''|*[!0-9]*) corroborating_runs=0 ;; esac
-            if [ "$corroborating_runs" -gt 0 ]; then
-              echo "Skipping delayed review: PR #${PR_NUMBER} head ${current_head} already carries a posted automatic review." >> "$GITHUB_STEP_SUMMARY"
-              echo "should_review=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
+          # No head-level dedup on an already-posted review: the dedup an
+          # earlier round carried keyed on the bot review's ledger anchor
+          # corroborated by a successful run of THIS workflow, but the
+          # reviewed agent authors every input that lookup had — the marker
+          # sha and commit_id are caller-supplied on POST reviews, and
+          # cede/skip/docs-only runs make "a successful run" true without
+          # any posting — so a forged anchor plus one posting-less green
+          # run skipped the live head's review permanently (R13-1). The
+          # cost of no dedup is one duplicate review on an away-and-back
+          # push inside the watcher's poll gap; the dedup's failure
+          # direction was one lost review.
           echo "should_review=true" >> "$GITHUB_OUTPUT"
 
   authorize:

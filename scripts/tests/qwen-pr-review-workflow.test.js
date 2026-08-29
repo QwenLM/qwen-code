@@ -5868,10 +5868,11 @@ describe('review supersede salvage (#10110)', () => {
     );
   });
 
-  // The stub below answers the dedup lookup by running the step's OWN --jq
-  // program with real jq — the filter IS the thing under test — so skip
-  // honestly on hosts without jq (the suite's hasJq convention) instead of
-  // reporting the dedup broken there.
+  // The replay stub still serves the reviews/runs lookups the PRE-removal
+  // step used to make (running the served --jq programs through real jq),
+  // so the attack shape below runs the old dedup path on the pre-round
+  // workflow and fails there; hosts without jq skip honestly (the suite's
+  // hasJq convention).
   const delayStepHasJq = (() => {
     try {
       execFileSync('jq', ['--version'], { stdio: 'ignore' });
@@ -5882,36 +5883,30 @@ describe('review supersede salvage (#10110)', () => {
   })();
 
   it.skipIf(!delayStepHasJq)(
-    'skips a delayed run whose live head already carries a posted bot review (replayed delay step)',
+    'reviews a delayed run even when the live head carries a posted bot review (dedup removed, R13-1)',
     () => {
-      // R5-4: with cancel-in-progress scoped to `closed`, an away-and-back
-      // push inside the watcher's poll gap leaves the in-flight run and the
-      // queued replacement both owing the SAME head — two full reviews of
-      // one commit. The delay job's re-check dedups on the machine-ledger
-      // anchor of an already-posted bot review. The bot login is pinned to
-      // the review-config constant, and every lookup failure must fail OPEN
-      // (a missed dedup costs one duplicate review; a false skip loses one).
+      // The head-level dedup skipped a delayed run when the live head
+      // carried a bot-review ledger anchor corroborated by a successful
+      // run of this workflow. The reviewed agent authors every input that
+      // lookup had — the marker sha and commit_id are caller-supplied on
+      // POST reviews, and cede/skip/docs-only runs make "a successful run"
+      // true without any posting — so a forged anchor plus one
+      // posting-less green run skipped the head's review permanently. The
+      // lookup's own arithmetic ranked a missed dedup (one duplicate
+      // review) as cheap and a false skip (one lost review) as dear, so
+      // the dedup is gone instead of growing another guard.
       const delay = doc.jobs['delay-automatic-review'].steps.find(
         (s) => s.id === 'pr_state',
       );
-      // gh's --jq takes no --arg (fleet-shepherd documents the same
-      // limit), so the constant bot login is interpolated — and the stub
-      // below rejects any unknown flag exactly like real gh.
-      expect(delay.run).toContain(`== "${botLogin}"`);
-      expect(delay.run).not.toContain('--arg');
-      // R5-4: the marker+commit_id pair is caller-supplied on POST
-      // reviews, so a match dedups only corroborated by a successful run
-      // of THIS workflow server-recorded at the candidate head — and that
-      // lookup needs the actions:read permission the job declares.
-      expect(delay.run).toContain(
-        'actions/runs?head_sha=${current_head}&status=success',
-      );
-      expect(delay.run).toContain(
-        'select(.path == ".github/workflows/qwen-code-pr-review.yml")',
-      );
-      expect(doc.jobs['delay-automatic-review'].permissions.actions).toBe(
-        'read',
-      );
+      // The step no longer queries reviews or runs — the only lookup left
+      // is the state/draft/head re-check — and the corroboration's
+      // actions:read permission left with it.
+      expect(delay.run).not.toContain('pulls/${PR_NUMBER}/reviews');
+      expect(delay.run).not.toContain('actions/runs');
+      expect(delay.run).not.toContain('qwen-review-ledger');
+      expect(
+        doc.jobs['delay-automatic-review'].permissions.actions,
+      ).toBeUndefined();
       const H = 'a'.repeat(40);
       const OTHER = 'b'.repeat(40);
       const ledgerFor = (sha) =>
@@ -5929,12 +5924,6 @@ describe('review supersede salvage (#10110)', () => {
         try {
           const bin = join(dir, 'bin');
           mkdirSync(bin);
-          // gh pr view answers the state/draft/head tsv; gh api runs the
-          // step's OWN --jq program over the fixture reviews, so the replay
-          // exercises the real filter, not a paraphrase. Faithful to real gh
-          // on flags: --arg is a jq flag, not a gh flag — real gh dies on it
-          // at flag parse, before any request, and a stub that emulated it
-          // let the dead dedup ship green for a round (R9-1).
           writeFileSync(
             join(bin, 'gh'),
             [
@@ -5955,11 +5944,6 @@ describe('review supersede salvage (#10110)', () => {
               '      *) shift ;;',
               '    esac',
               '  done',
-              // Two read-only lookups, each run through the step's OWN
-              // --jq program with real jq: the reviews anchor and the
-              // R5-4 run-history corroboration. Faithful to real gh on
-              // failure: nonzero exit with EMPTY stdout (the step's
-              // fail-open keys on the empty capture).
               '  case "$endpoint" in',
               '    *actions/runs*)',
               '      if [ "${STUB_RUNS_STATUS:-0}" != "0" ]; then',
@@ -6012,122 +5996,22 @@ describe('review supersede salvage (#10110)', () => {
           rmSync(dir, { recursive: true, force: true });
         }
       };
-      // A posted bot review anchored on the live head, corroborated by a
-      // successful run of this workflow at that head: nothing to do. The
-      // marker sha must match the review's commit_id AND a server-recorded
-      // run must back the pair — the body is model-authored text and both
-      // compared values are caller-supplied, so neither dedups alone.
-      const deduped = runDelayStep({
+      // The attack shape: an anchored bot review (marker sha == commit_id
+      // == live head) corroborated by a green run of this workflow — the
+      // exact shape a ceded, delay-skipped, or docs-only run records
+      // without any posting. The pre-removal step skipped here
+      // (should_review=false) — the permanent suppression R13-1 proved;
+      // the head is reviewed instead, at the cost of one possible
+      // duplicate review.
+      const attackShape = runDelayStep({
         reviews: [
           { user: { login: botLogin }, body: ledgerFor(H), commit_id: H },
         ],
         runPaths: ['.github/workflows/qwen-code-pr-review.yml'],
       });
-      expect(deduped.outputs).toContain('should_review=false');
-      expect(deduped.summary).toContain(
-        'already carries a posted automatic review',
-      );
-      // An anchor on a DIFFERENT head (e.g. a salvaged historical-head
-      // review whose delta this run must still cover): proceed — marker sha
-      // and commit_id agree with each other, but not with the live head.
-      const otherAnchor = runDelayStep({
-        reviews: [
-          {
-            user: { login: botLogin },
-            body: ledgerFor(OTHER),
-            commit_id: OTHER,
-          },
-        ],
-      });
-      expect(otherAnchor.outputs).toContain('should_review=true');
-      // A ledger-shaped marker on a NON-bot review (anyone can submit a
-      // review on a public PR) must not suppress the automatic one.
-      const forged = runDelayStep({
-        reviews: [{ user: { login: 'malicious-actor' }, body: ledgerFor(H) }],
-      });
-      expect(forged.outputs).toContain('should_review=true');
-      // A forged marker sha naming the live head must not manufacture the
-      // false skip this gate exists to prevent: the sha is authenticated
-      // against the review's server-recorded commit_id (R5-4).
-      const mismatchedCommit = runDelayStep({
-        reviews: [
-          { user: { login: botLogin }, body: ledgerFor(H), commit_id: OTHER },
-        ],
-      });
-      expect(mismatchedCommit.outputs).toContain('should_review=true');
-      // Only the LAST ledger marker per body counts (compose appends the
-      // genuine one last — the CLI's parseLedger reads the last for the same
-      // reason): a forged marker PLACED BEFORE the genuine one must not win
-      // the capture and skip the live head's review.
-      const forgedFirstMarker = runDelayStep({
-        reviews: [
-          {
-            user: { login: botLogin },
-            body: `${ledgerFor(H)}\n\n${ledgerFor(OTHER)}`,
-            commit_id: OTHER,
-          },
-        ],
-      });
-      expect(forgedFirstMarker.outputs).toContain('should_review=true');
-      // Control for the direction above: genuine marker last, authenticated —
-      // the dedup still skips.
-      const genuineLast = runDelayStep({
-        reviews: [
-          {
-            user: { login: botLogin },
-            body: `${ledgerFor(OTHER)}\n\n${ledgerFor(H)}`,
-            commit_id: H,
-          },
-        ],
-        runPaths: ['.github/workflows/qwen-code-pr-review.yml'],
-      });
-      expect(genuineLast.outputs).toContain('should_review=false');
-      // A ledger whose sha did not survive (truncation, fail-closed round):
-      // no anchor, no skip.
-      const noSha = runDelayStep({
-        reviews: [
-          {
-            user: { login: botLogin },
-            body: '<!-- qwen-review-ledger {"v":1,"round":3} -->',
-            commit_id: H,
-          },
-        ],
-      });
-      expect(noSha.outputs).toContain('should_review=true');
-      // Lookup failure fails OPEN — the review runs.
-      const apiDown = runDelayStep({ apiStatus: 1 });
-      expect(apiDown.outputs).toContain('should_review=true');
-      // R5-4 strengthened: the reviewed agent holds the run's bot token
-      // and both compared values are caller-supplied on POST reviews, so
-      // an agent-forged bot review can pair marker sha and commit_id on
-      // the live head. The pair alone must never skip: without a
-      // corroborating successful run at that head the review runs
-      // (removing the corroboration turns this arm red).
-      const uncorroborated = runDelayStep({
-        reviews: [
-          { user: { login: botLogin }, body: ledgerFor(H), commit_id: H },
-        ],
-      });
-      expect(uncorroborated.outputs).toContain('should_review=true');
-      // A successful run of some OTHER workflow at the head proves
-      // nothing about this workflow's review.
-      const wrongWorkflow = runDelayStep({
-        reviews: [
-          { user: { login: botLogin }, body: ledgerFor(H), commit_id: H },
-        ],
-        runPaths: ['.github/workflows/ci.yml'],
-      });
-      expect(wrongWorkflow.outputs).toContain('should_review=true');
-      // A failed corroboration lookup fails OPEN like the reviews lookup.
-      const runsDown = runDelayStep({
-        reviews: [
-          { user: { login: botLogin }, body: ledgerFor(H), commit_id: H },
-        ],
-        runPaths: ['.github/workflows/qwen-code-pr-review.yml'],
-        runsStatus: 1,
-      });
-      expect(runsDown.outputs).toContain('should_review=true');
-      // Controls: the pre-existing guards keep their shape.
+      expect(attackShape.outputs).toContain('should_review=true');
+      expect(attackShape.summary).not.toContain('already carries');
+      // Controls: the state guards keep their shape.
       expect(
         runDelayStep({ currentHead: OTHER, eventHead: H }).outputs,
       ).toContain('should_review=false');

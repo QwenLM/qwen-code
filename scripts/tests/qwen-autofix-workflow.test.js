@@ -24676,9 +24676,10 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
     expect(probeAt).toBeGreaterThan(-1);
     expect(updateAt).toBeGreaterThan(probeAt);
     // Both probe layers, mirroring the scan gate: the rollup filter (any
-    // started review-pr check, trigger-independent) and the runs-API
-    // fallback for lifecycle runs still parked in the delay window with no
-    // check-run yet.
+    // started review-pr check) and the runs-API fallback for lifecycle runs
+    // still parked in the delay window with no check-run yet. The probe is
+    // lifecycle-scoped by construction — a command run carries no PR-head
+    // check and the runs fallback is event-scoped (af-155).
     expect(reviewAddressReportStep).toContain('<<< "${ROLLUP_R}"');
     expect(reviewAddressReportStep).toContain(
       'actions/workflows/qwen-code-pr-review.yml',
@@ -24763,7 +24764,10 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
         { ...parked, head_sha: 'other', pull_requests: [{ number: 9729 }] },
       ]),
     ).toBe('true');
-    // Completed runs, non-lifecycle events, and unrelated runs do not hold.
+    // Completed runs, non-lifecycle events, and unrelated runs do not
+    // hold. The command-event exclusion is a DELIBERATE scope, not coverage
+    // (af-155): the hold does not see command runs, and the design doc must
+    // say so instead of claiming a trigger-independent probe.
     expect(probe([{ ...parked, status: 'completed' }])).toBe('false');
     expect(probe([{ ...parked, event: 'issue_comment' }])).toBe('false');
     expect(
@@ -24776,5 +24780,25 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
   it('documents the hold in the design doc', () => {
     expect(designDoc).toContain('<a id="af-149"></a>');
     expect(designDoc).toContain('deferred a stale-base refresh');
+  });
+
+  it('scopes the hold to lifecycle runs instead of claiming trigger independence (R13-2)', () => {
+    // The probe pair is structurally blind to command-triggered review
+    // runs: they execute against the base branch (their review-pr check
+    // attaches to main's commit, never the PR's rollup) and the runs
+    // fallback is event-scoped to pull_request_target. The docs and the
+    // deferred headline must scope the hold to what it sees, so no reader
+    // relies on protection for command runs that does not exist; the
+    // mechanism fix (a PR-head-visible signal posted by command runs) is
+    // deliberately deferred (af-155).
+    expect(designDoc).not.toContain('trigger-independent');
+    expect(designDoc).toContain('The probe sees');
+    expect(designDoc).toContain('LIFECYCLE runs only');
+    expect(reviewAddressReportStep).toContain(
+      'but a lifecycle review of this PR is still in flight',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'Command-triggered reviews are invisible to this probe (af-155)',
+    );
   });
 });

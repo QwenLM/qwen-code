@@ -6268,6 +6268,12 @@ jobs:
                         # Review-in-flight hold for the loop's OWN report-time
                         # head move (#10110): same probe pair as the scan's
                         # dispatch gate (#8888), fail-open on probe errors.
+                        # The probe sees LIFECYCLE runs only: a command run
+                        # executes against the base branch, so its review-pr
+                        # check never shows under this PR's rollup, and the
+                        # runs fallback is event-scoped exactly like the scan
+                        # gate's (af-099) — an in-flight command review does
+                        # NOT hold the refresh (af-155).
                         # Full rationale → qwen-autofix.md#af-155
                         ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup --jq '.statusCheckRollup // []' 2> /dev/null || echo '[]')"
                         REVIEW_LIVE_R="$(jq -r '
@@ -6310,8 +6316,8 @@ jobs:
                   # live, the next round re-runs, and ITS report step performs
                   # the base refresh once the review has landed.
                   MARK_TS='9999-12-31T23:59:59Z'
-                  HEADLINE="🤖 AutoFix deferred a stale-base refresh — the fix did not pass verification and this PR is behind \`${DEFAULT_BRANCH:-main}\`, but a review of this PR is still in flight, and merging main now would cancel it or invalidate its posting (#10110). The refresh and this item's retry move to the next scan."
-                  HEADLINE_ZH="🤖 AutoFix 暂缓了一次过期 base 刷新 —— 修复未通过验证且本 PR 落后于 \`${DEFAULT_BRANCH:-main}\`，但该 PR 上仍有一轮评审在运行，现在合入 main 会取消该评审或使其发布失效（#10110）。base 刷新与此项的重试推迟到下次扫描。"
+                  HEADLINE="🤖 AutoFix deferred a stale-base refresh — the fix did not pass verification and this PR is behind \`${DEFAULT_BRANCH:-main}\`, but a lifecycle review of this PR is still in flight, and merging main now would cancel it or invalidate its posting (#10110). Command-triggered reviews are invisible to this probe (af-155). The refresh and this item's retry move to the next scan."
+                  HEADLINE_ZH="🤖 AutoFix 暂缓了一次过期 base 刷新 —— 修复未通过验证且本 PR 落后于 \`${DEFAULT_BRANCH:-main}\`，但该 PR 上仍有一轮生命周期评审在运行，现在合入 main 会取消该评审或使其发布失效（#10110）。命令触发的评审对本探测不可见（af-155）。base 刷新与此项的重试推迟到下次扫描。"
                 else
                   # Say what actually happens next. The old "A human should
                   # take over this PR" read as a full release, but the loop
