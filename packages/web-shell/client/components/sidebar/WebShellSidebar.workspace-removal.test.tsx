@@ -175,7 +175,7 @@ const {
   };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => connection,
   useActions: () => sessionActions,
   useWorkspace: () => workspace,

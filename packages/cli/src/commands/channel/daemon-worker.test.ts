@@ -434,7 +434,7 @@ function stubProcessSend(send: NodeJS.Process['send'] | undefined): () => void {
 }
 
 describe('createDaemonSessionFactory', () => {
-  it('tags created channel sessions without changing loaded sessions', async () => {
+  it('tags created and resumed channel sessions', async () => {
     const sdk = createSdk();
     const factory = createDaemonSessionFactory({
       client: sdk.client,
@@ -466,6 +466,7 @@ describe('createDaemonSessionFactory', () => {
         workspaceCwd: '/workspace',
         modelServiceId: 'qwen-plus',
         sessionScope: 'thread',
+        sourceType: 'channel',
       },
       'qwen-channel-worker',
     );
@@ -506,12 +507,13 @@ describe('createDaemonSessionFactory', () => {
         workspaceCwd: '/workspace',
         approvalMode: 'yolo',
         sessionScope: 'thread',
+        sourceType: 'channel',
       },
       'qwen-channel-worker',
     );
   });
 
-  it('stamps channel sourceId on created sessions only', async () => {
+  it('stamps channel sourceId on created and resumed sessions', async () => {
     const sdk = createSdk();
     const factory = createDaemonSessionFactory({
       client: sdk.client,
@@ -536,14 +538,14 @@ describe('createDaemonSessionFactory', () => {
       },
       'qwen-channel-worker',
     );
-    // The load branch never re-stamps creation attribution: no sourceId in the
-    // load request even when the factory request carried one.
     expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
       sdk.client,
       'existing-session',
       {
         workspaceCwd: '/workspace',
         sessionScope: 'thread',
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
       },
       'qwen-channel-worker',
     );
