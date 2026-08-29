@@ -8799,6 +8799,9 @@ hello
         client['chat'] = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
+          // Retry turns strip orphaned user entries before sending.
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
         } as unknown as LlmChat;
         const stream = client.sendMessageStream(
           request,
@@ -8941,6 +8944,20 @@ hello
         const request = await runTurn([{ text: 'Hi' }]);
 
         expect(reminderParts(request)).toEqual([CONCISE_REMINDER]);
+      });
+
+      it.each([
+        SendMessageType.Retry,
+        SendMessageType.Notification,
+        SendMessageType.Teammate,
+      ])('stays out of %s turns', async (type) => {
+        vi.mocked(mockConfig.getOutputStyle).mockReturnValue(
+          getBuiltInOutputStyle('Concise'),
+        );
+
+        const request = await runTurn([{ text: 'Hi' }], { type });
+
+        expect(reminderParts(request)).toEqual([]);
       });
 
       it('reminds on cron-fired turns', async () => {
