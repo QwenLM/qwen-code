@@ -15888,6 +15888,67 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('does not attach the sidecar snapshot to a live re-bind of another repository', async () => {
+      // Both bind paths mutate the live entry before the sidecar write, so a
+      // list built in that window still reads the previous binding's
+      // sidecar; matched by number alone, repo-a's issues would ride onto
+      // repo-b's same-numbered PR.
+      const id = '550e8400-e29b-41d4-a716-44665544a006';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 42,
+        url: 'https://github.com/repo-a/o/pull/42',
+        state: 'merged',
+      });
+      await updateSessionPrStates(
+        sidecarPath,
+        new Map([
+          [
+            42,
+            {
+              url: 'https://github.com/repo-a/o/pull/42',
+              issues: [
+                { number: 7, url: 'https://github.com/repo-a/o/issues/7' },
+              ],
+            },
+          ],
+        ]),
+      );
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 42, url: 'https://github.com/repo-b/o/pull/42' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        { number: 42, url: 'https://github.com/repo-b/o/pull/42' },
+      ]);
+    });
+
     it('reads the PR sidecar for live-only sessions so refreshed state wins', async () => {
       // The bind route persists the sidecar before the session's first
       // flush. Until then the row is live-only, and its bind-time state

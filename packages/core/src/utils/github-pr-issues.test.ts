@@ -16,6 +16,7 @@ vi.mock('node:child_process', () => ({
 import { execFile } from 'node:child_process';
 import {
   GITHUB_PR_ISSUES_BATCH_SIZE,
+  SESSION_PR_ISSUE_LIST_LIMIT,
   buildPullRequestIssuesQuery,
   fetchGitHubPullRequestIssues,
   parsePullRequestIssuesResponse,
@@ -64,7 +65,11 @@ describe('buildPullRequestIssuesQuery', () => {
     expect(query).toContain('query($owner: String!, $name: String!)');
     expect(query).toContain('p42: pullRequest(number: 42)');
     expect(query).toContain('p7: pullRequest(number: 7)');
-    expect(query).toContain('closingIssuesReferences(first: 10)');
+    // The sidecar reader voids the whole file above its per-PR cap, so the
+    // fetch bound must be that very constant, not a look-alike literal.
+    expect(query).toContain(
+      `closingIssuesReferences(first: ${SESSION_PR_ISSUE_LIST_LIMIT})`,
+    );
     expect(query).toContain('{ number url state stateReason }');
   });
 });
@@ -79,6 +84,8 @@ describe('parsePullRequestIssuesResponse', () => {
             { number: 11, state: 'CLOSED', stateReason: 'COMPLETED' },
             { number: 12, state: 'CLOSED', stateReason: 'NOT_PLANNED' },
             { number: 13, state: 'CLOSED', stateReason: 'DUPLICATE' },
+            // Legacy closed issues carry no reason at all.
+            { number: 14, state: 'CLOSED' },
           ]),
           p2: {
             number: 2,
@@ -101,6 +108,7 @@ describe('parsePullRequestIssuesResponse', () => {
       'completed',
       'not_planned',
       'not_planned',
+      'completed',
     ]);
     expect(result.get(1)?.issues[0]).toEqual({
       number: 10,
@@ -190,7 +198,7 @@ describe('fetchGitHubPullRequestIssues', () => {
         '-F',
         'name={repo}',
         '-f',
-        expect.stringContaining('p42: pullRequest(number: 42)'),
+        `query=${buildPullRequestIssuesQuery([42])}`,
       ],
       expect.objectContaining({
         cwd: dir,
@@ -222,6 +230,20 @@ describe('fetchGitHubPullRequestIssues', () => {
     expect([
       ...(result.kind === 'ok' ? result.pullRequests.keys() : []),
     ]).toEqual([1]);
+  });
+
+  it('keeps the timeout message when a killed gh left a truncated payload', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockGh(() => ({
+      error: Object.assign(new Error('killed'), { killed: true }),
+      stdout: '{"data":{"repository":{"p1":{"number":1,"url":"https://gi',
+    }));
+
+    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
+      kind: 'failed',
+      message: 'gh api graphql timed out after 10s',
+      gitRoot: dir,
+    });
   });
 
   it('maps a missing gh binary to cli_unavailable', async () => {

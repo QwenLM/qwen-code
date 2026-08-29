@@ -263,6 +263,11 @@ describe('SessionDetailsTooltip', () => {
                       state: 'not_planned',
                     },
                     { number: 9, url: 'https://github.com/o/r/issues/9' },
+                    {
+                      number: 10,
+                      url: 'https://github.com/o/r/issues/10',
+                      state: 'open',
+                    },
                   ],
                 },
               ],
@@ -287,6 +292,7 @@ describe('SessionDetailsTooltip', () => {
       'https://github.com/o/r/issues/7',
       'https://github.com/o/r/issues/8',
       'https://github.com/o/r/issues/9',
+      'https://github.com/o/r/issues/10',
     ]);
     expect(details?.querySelector('a[href^="javascript:"]')).toBeNull();
     const byNumber = (number: number) =>
@@ -305,9 +311,15 @@ describe('SessionDetailsTooltip', () => {
     ).toBe(true);
     expect(rowIcon(9)?.classList.contains('lucide-circle-dot')).toBe(true);
     expect(rowIcon(9)?.className).not.toContain('sessionIssueState');
+    // Open is the dominant live state: green circle-dot, no sr-only suffix.
+    expect(rowIcon(10)?.classList.contains('lucide-circle-dot')).toBe(true);
+    expect(rowIcon(10)?.classList.contains(styles.sessionIssueStateOpen)).toBe(
+      true,
+    );
     expect(byNumber(7)?.textContent).toBe('Issue #7 · Completed');
     expect(byNumber(8)?.textContent).toBe('Issue #8 · Not planned');
     expect(byNumber(9)?.textContent).toBe('Issue #9');
+    expect(byNumber(10)?.textContent).toBe('Issue #10');
     // Issues follow the PR rows.
     const links = [...(details?.querySelectorAll('a[href^="https://"]') ?? [])];
     expect(links.map((link) => link.getAttribute('href'))).toEqual([
@@ -316,6 +328,7 @@ describe('SessionDetailsTooltip', () => {
       'https://github.com/o/r/issues/7',
       'https://github.com/o/r/issues/8',
       'https://github.com/o/r/issues/9',
+      'https://github.com/o/r/issues/10',
     ]);
 
     act(() => root.unmount());

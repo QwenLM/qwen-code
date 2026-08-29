@@ -10,6 +10,7 @@ import {
   SessionOrganizationError,
   Storage,
   readWorktreeSession,
+  canonicalSessionPrUrl,
   readSessionPrs,
   toSessionPrInfo,
   type SessionArchiveState,
@@ -539,7 +540,10 @@ function sidecarToPrInfos(sidecar: readonly SessionPr[]): SessionPrInfo[] {
  * summary rendering: dedupe by number (live url wins, live-only bindings
  * sort latest). For `state` and `issues` the persisted sidecar wins: the
  * refresh timer rewrites them there while the live entry is frozen at
- * bind-time.
+ * bind-time — but only for the same PR (same canonical url), as in every
+ * other merge site: between a cross-repository re-bind's live mutation and
+ * its sidecar write, the stale sidecar still names the other repository's
+ * same-numbered PR, whose snapshot must not attach to the new binding.
  */
 function mergeSummaryPrs(
   persistedPrs: readonly SessionPrInfo[] | undefined,
@@ -555,7 +559,12 @@ function mergeSummaryPrs(
     ),
     ...live.map((l) => {
       const persisted = persistedByNumber.get(l.number);
-      if (!persisted) return l;
+      if (
+        !persisted ||
+        canonicalSessionPrUrl(persisted.url) !== canonicalSessionPrUrl(l.url)
+      ) {
+        return l;
+      }
       return {
         ...l,
         ...(persisted.state ? { state: persisted.state } : {}),

@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
+import { SESSION_PR_ISSUE_LIST_LIMIT } from '../utils/github-pr-issues.js';
 
 /**
  * Persisted GitHub pull request binding for a session. Written by the daemon
@@ -46,9 +47,6 @@ export type SessionPrIssueState = 'open' | 'completed' | 'not_planned';
 
 /** Bound on the persisted PR list; oldest bindings are dropped beyond it. */
 export const SESSION_PR_LIST_LIMIT = 10;
-
-/** Bound on the issues kept per PR; GitHub caps closing references anyway. */
-export const SESSION_PR_ISSUE_LIST_LIMIT = 10;
 
 /** Upper bound for a bound PR URL; generous for enterprise hosts + long paths. */
 export const SESSION_PR_URL_MAX_LENGTH = 2048;

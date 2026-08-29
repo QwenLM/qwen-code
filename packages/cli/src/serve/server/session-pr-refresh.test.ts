@@ -1041,11 +1041,39 @@ describe('refreshWorkspaceSessionPrStates', () => {
       prIssues([[42, [closingIssue(7)]]]),
     );
 
+    // The repository cannot resolve a foreign binding, so the lookup
+    // converges it with an empty snapshot instead of re-querying it every
+    // sweep forever.
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 1,
+    });
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toEqual([]);
+
+    fetchGitHubPullRequestIssuesMock.mockClear();
     expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
       scanned: 1,
       updated: 0,
     });
-    expect((await readSessionPrs(prPath))?.[0]?.issues).toBeUndefined();
+    expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+  });
+
+  it('still snapshots issues when the list query fails', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue(
+      prIssues([[42, [closingIssue(7)]]]),
+    );
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 1,
+    });
+    expect((await readSessionPrs(prPath))?.[0]).toMatchObject({
+      state: 'open',
+      issues: [closingIssue(7)],
+    });
   });
 
   it('still refreshes states when the issue lookup fails', async () => {

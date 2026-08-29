@@ -15,8 +15,13 @@ const GH_MAX_BUFFER = 16 * 1024 * 1024;
 /** Aliased `pullRequest` lookups per GraphQL call; larger batches are chunked. */
 export const GITHUB_PR_ISSUES_BATCH_SIZE = 100;
 
-/** Closing references fetched per PR — mirrors the sidecar's per-PR cap. */
-const CLOSING_ISSUES_PER_PR = 10;
+/**
+ * Closing references fetched per PR, and the bound on the issues a session
+ * PR sidecar entry keeps: the sidecar reader voids the whole file above it,
+ * so the fetch and the schema must share one constant (declared here, the
+ * leaf layer, and imported by the sidecar service).
+ */
+export const SESSION_PR_ISSUE_LIST_LIMIT = 10;
 
 export type GitHubIssueState = 'open' | 'completed' | 'not_planned';
 
@@ -52,7 +57,7 @@ export function buildPullRequestIssuesQuery(
     .map(
       (number) =>
         `p${number}: pullRequest(number: ${number}) { number url ` +
-        `closingIssuesReferences(first: ${CLOSING_ISSUES_PER_PR}) ` +
+        `closingIssuesReferences(first: ${SESSION_PR_ISSUE_LIST_LIMIT}) ` +
         `{ nodes { number url state stateReason } } }`,
     )
     .join(' ');
@@ -204,7 +209,7 @@ export async function fetchGitHubPullRequestIssues(
       }
       return {
         kind: 'failed',
-        message: ghErrorMessage(error, 'gh api graphql'),
+        message: ghErrorMessage(error, 'gh api graphql', GH_TIMEOUT_MS),
         gitRoot,
       };
     }
@@ -215,7 +220,7 @@ export async function fetchGitHubPullRequestIssues(
     } catch (error) {
       return {
         kind: 'failed',
-        message: ghErrorMessage(error, 'gh api graphql'),
+        message: ghErrorMessage(error, 'gh api graphql', GH_TIMEOUT_MS),
         gitRoot,
       };
     }

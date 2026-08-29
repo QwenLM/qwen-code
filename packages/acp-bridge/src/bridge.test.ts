@@ -27915,6 +27915,15 @@ describe('createAcpSessionBridge', () => {
           state: 'merged',
         },
       });
+      // The daemon-derived issue snapshot is repository-specific too.
+      bridge.setSessionPrs?.(session.sessionId, [
+        {
+          number: 9517,
+          url: 'https://github.com/repo-a/o/pull/9517',
+          state: 'merged',
+          issues: [{ number: 7, url: 'https://github.com/repo-a/o/issues/7' }],
+        },
+      ]);
       const effective = bridge.updateSessionMetadata(session.sessionId, {
         pr: {
           number: 9517,
@@ -28017,6 +28026,53 @@ describe('createAcpSessionBridge', () => {
           state: 'merged',
           issues,
         },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('drops client-supplied issues from a bind', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const seeded = [{ number: 7, url: 'https://github.com/o/r/issues/7' }];
+      bridge.seedSessionPrs?.(session.sessionId, [
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          issues: seeded,
+        },
+      ]);
+      const fabricated = { number: 1, url: 'https://github.com/o/r/issues/1' };
+
+      // The input type omits issues; a raw ACP/REST payload can still
+      // carry them, and only the daemon sweep may write the snapshot.
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'open',
+          issues: [fabricated],
+        } as { number: number; url: string },
+      });
+      const fresh = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9501,
+          url: 'https://github.com/o/r/pull/9501',
+          issues: [fabricated],
+        } as { number: number; url: string },
+      });
+
+      expect(fresh.prs).toEqual([
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'open',
+          issues: seeded,
+        },
+        { number: 9501, url: 'https://github.com/o/r/pull/9501' },
       ]);
 
       await bridge.closeSession(session.sessionId);

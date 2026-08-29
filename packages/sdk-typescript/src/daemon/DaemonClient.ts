@@ -5654,7 +5654,10 @@ export class DaemonClient {
    */
   async updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string; pr?: DaemonSessionPrInfo },
+    metadata: {
+      displayName?: string;
+      pr?: Omit<DaemonSessionPrInfo, 'issues'>;
+    },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return await this.fetchWithTimeout(
@@ -6439,7 +6442,10 @@ export class WorkspaceDaemonClient {
 
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string; pr?: DaemonSessionPrInfo },
+    metadata: {
+      displayName?: string;
+      pr?: Omit<DaemonSessionPrInfo, 'issues'>;
+    },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return this.client.workspaceJsonRequest<SessionMetadataResult>(

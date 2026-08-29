@@ -52,6 +52,13 @@ describe('isDaemonSessionPrInfo', () => {
     expect(isDaemonSessionPrInfo({ ...valid, issues: [{ number: 7 }] })).toBe(
       false,
     );
+    expect(
+      isDaemonSessionPrInfo({ ...valid, issues: [{ ...issue, number: 0 }] }),
+    ).toBe(false);
+    expect(
+      isDaemonSessionPrInfo({ ...valid, issues: [{ ...issue, number: 1.5 }] }),
+    ).toBe(false);
+    expect(isDaemonSessionPrInfo({ ...valid, issues: [null] })).toBe(false);
     expect(isDaemonSessionPrInfo({ ...valid, issues: {} })).toBe(false);
   });
 

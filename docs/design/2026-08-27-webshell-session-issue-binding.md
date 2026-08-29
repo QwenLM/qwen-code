@@ -65,13 +65,15 @@ p10303: pullRequest(number: 10303) {
 2. 若存在非 merged 绑定，跑原有 slim `gh pr list --state all` 刷 PR state（不变）。
 3. 对第 1 步的编号去重后跑一次 GraphQL 拿 issues。
 4. 每个 sidecar 一次 `updateSessionPrStates` 原地写入 state + issues：url 不匹配不写；`state` / `issues` 任一缺省则保留原值；都无变化则不写文件。
+5. 收敛：查询成功但仓库解析不到的绑定（指向别的仓库的同号 PR、已删除的 PR）写入空快照 `issues: []`——否则 merged 的外仓绑定会永远重新进入查询，违背"全 merged 且有快照零调用"的不变量。
 
 成本：全 merged 且已有快照的 workspace 零调用；否则多一条 ~1–3s 的 GraphQL。已合入 PR 的 issue 之后被 reopen 不再跟踪（与"merged 是终态"同一取舍）。
 
 ### 线协议与展示
 
 - bridge `SessionPrInfo` / SDK `DaemonSessionPrInfo` 增加 `issues?`；所有 sidecar → 线协议投影统一走 core 新增的 `toSessionPrInfo`（原先散落在 session-list / session.ts / dispatch / backfill / bridge 共 8 处手写的 `{number, url, state?}`）。
-- `mergeSummaryPrs`：`issues` 与 `state` 一样以 sidecar 为准（live entry 停在绑定时刻）。
+- `mergeSummaryPrs`：`issues` 与 `state` 一样以 sidecar 为准（live entry 停在绑定时刻），且与其它合并点一致只在 canonical url 相同时才采用——跨仓库重绑的 live 变更与 sidecar 写入之间，旧 sidecar 仍指向别的仓库的同号 PR。
+- 写入侧类型（bridge `SessionMetadataUpdate.pr`、SDK 三个 `updateSessionMetadata` 参数）用 `Omit<…, 'issues'>`，客户端绑 issue 是编译错误；运行时 bridge 也只从已知快照重建 `issues`。
 - web-shell：
   - `SessionDetailsTooltip` 在 PR 行之后列出 issue（按 url 去重，stacked PR 关同一个 issue 只列一次），复用 GitHub 视觉词汇：open 绿 circle-dot、completed 紫 circle-check、not planned 灰 circle-slash；可见文本 `Issue #N`，sr-only 追加状态。
   - 侧栏搜索 `sessionMatchesGitQuery` 命中 issue 号（带不带 `#` 都行）。
