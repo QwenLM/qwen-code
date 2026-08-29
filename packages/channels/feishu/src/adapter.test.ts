@@ -1924,6 +1924,99 @@ describe('FeishuChannel', () => {
       >(channel, 'extractCardText').bind(channel);
     });
 
+    it('strips named-task attribution from quoted cards', () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-feishu-card-text-'));
+      try {
+        channel = new FeishuChannel(
+          'test',
+          createConfig({ multiSession: true }),
+          createMockBridge(),
+          { stateDir },
+        );
+        extractCardText = getPrivateMethod<
+          (
+            card: Record<string, unknown>,
+            isFromBot?: boolean,
+          ) => string | undefined
+        >(channel, 'extractCardText').bind(channel);
+
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: '\\[Alice · review\\]\n\nAnswer',
+                  },
+                ],
+              },
+            },
+            true,
+          ),
+        ).toBe('Answer');
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content:
+                      '好的，<at id=ou_user></at>\n\n\\[review\\_x\\]\n\nAnswer',
+                  },
+                ],
+              },
+            },
+            true,
+          ),
+        ).toBe('Answer');
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: '\\[review\\]\n\n---\n*已停止生成*',
+                  },
+                ],
+              },
+            },
+            true,
+          ),
+        ).toBeUndefined();
+
+        expect(
+          extractCardText(
+            {
+              body: {
+                elements: [
+                  {
+                    tag: 'markdown',
+                    content: '\\[review\\]\n\nUser-authored content',
+                  },
+                ],
+              },
+            },
+            false,
+          ),
+        ).toBe('\\[review\\]\n\nUser-authored content');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('preserves leading escaped brackets when named tasks are disabled', () => {
+      const card = {
+        body: {
+          elements: [{ tag: 'markdown', content: '\\[review\\]\n\nAnswer' }],
+        },
+      };
+
+      expect(extractCardText(card)).toBe('\\[review\\]\n\nAnswer');
+    });
+
     it('extracts markdown from v2 card format (body.elements)', () => {
       const card = {
         body: {

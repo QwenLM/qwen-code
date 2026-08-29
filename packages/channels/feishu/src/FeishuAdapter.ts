@@ -148,6 +148,8 @@ const FEISHU_STATUS_BLOCK_RE = new RegExp(
   `(?:^|\\n)---\\n\\*${FEISHU_STATUS_LABELS}\\*(?=\\n|$)`,
   'g',
 );
+const FEISHU_SOURCE_LABEL_LINE_RE =
+  /^\\\[(?:[A-Za-z0-9](?:[A-Za-z0-9]|\\[_-]){0,31}|[^\r\n]+ · [A-Za-z0-9](?:[A-Za-z0-9]|\\[_-]){0,31})\\\](?:\n\n?)?/u;
 
 const BASE_URL = 'https://open.feishu.cn/open-apis';
 
@@ -573,7 +575,7 @@ export class FeishuChannel extends ChannelBase {
       const content = JSON.parse(item.body.content);
 
       if (item.msg_type === 'interactive') {
-        return { content: this.extractCardText(content), isFromBot };
+        return { content: this.extractCardText(content, isFromBot), isFromBot };
       } else if (item.msg_type === 'text') {
         return { content: content.text || undefined, isFromBot };
       } else if (item.msg_type === 'post') {
@@ -625,7 +627,10 @@ export class FeishuChannel extends ChannelBase {
    * Supports both v2 format ({ schema, body: { elements } }) and
    * v1/API-returned format ({ title, elements: [[...]] }).
    */
-  private extractCardText(card: Record<string, unknown>): string | undefined {
+  private extractCardText(
+    card: Record<string, unknown>,
+    isFromBot = false,
+  ): string | undefined {
     const lines: string[] = [];
 
     // Try v2 format: { body: { elements: [...] } }
@@ -714,6 +719,9 @@ export class FeishuChannel extends ChannelBase {
     text = text.replace(FEISHU_STATUS_BLOCK_RE, '');
     // Strip greeting prefix like "好的，<at id=xxx></at>\n\n"
     text = text.replace(/^好的，<at[^>]*><\/at>\s*\n*/, '');
+    if (this.config.multiSession && isFromBot) {
+      text = text.replace(FEISHU_SOURCE_LABEL_LINE_RE, '');
+    }
     return text.trim() || undefined;
   }
 
