@@ -1712,4 +1712,19 @@ describe('the worktree prebuild (issue #10108)', () => {
     );
     expect(body).not.toContain('install and build are no-ops');
   });
+
+  it('qualifies the probe-overlap invitation with the dist pre-clean window', () => {
+    // The field invites probes to run before Agent 7 finishes, but Agent
+    // 7's build pre-cleans each package's `dist` before recompiling, so
+    // the invitation must name the window in which a probe importing a
+    // rebuilding sibling resolves against a missing tree — a probe
+    // overlapping Agent 7's build keeps to workspaces outside the closure.
+    const body = coreBody();
+    expect(body).toContain(
+      'but never against a workspace in that closure while Agent 7',
+    );
+    expect(body).toContain(
+      'resolves against a missing or partial `dist` in that window',
+    );
+  });
 });

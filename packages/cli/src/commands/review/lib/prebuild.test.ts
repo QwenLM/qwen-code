@@ -20,7 +20,10 @@ import type { BuildTestReport, CommandResult } from '../build-test.js';
 import {
   PREBUILD_BUDGET_S,
   PREBUILD_COMMAND_TIMEOUT_S,
+  PREBUILD_COVER_HEADROOM_S,
+  PREBUILD_COVER_MS,
   PREBUILD_ENV,
+  prebuildCovered,
   prebuildRequested,
   prebuildWorktree,
 } from './prebuild.js';
@@ -28,15 +31,25 @@ import {
 describe('prebuildRequested', () => {
   const never = () => false;
 
-  it('is on for 1 and true, whatever the case or padding', () => {
-    for (const value of ['1', 'true', ' TRUE ', 'True']) {
-      expect(prebuildRequested({ [PREBUILD_ENV]: value }, never)).toBe(true);
-    }
+  it('is on for 1 alone — the literal the workflow cover gate compares', () => {
+    // A second grammar (a documented `true`) would run the prebuild under
+    // a value the cover gate does not weld for — prebuild without cover.
+    expect(prebuildRequested({ [PREBUILD_ENV]: '1' }, never)).toBe(true);
+    expect(prebuildRequested({ [PREBUILD_ENV]: ' 1 ' }, never)).toBe(true);
   });
 
   it('is off when unset and for every other value', () => {
     expect(prebuildRequested({}, never)).toBe(false);
-    for (const value of ['', '0', 'false', 'yes', 'on']) {
+    for (const value of [
+      '',
+      '0',
+      'false',
+      'true',
+      ' TRUE ',
+      'True',
+      'yes',
+      'on',
+    ]) {
       expect(prebuildRequested({ [PREBUILD_ENV]: value }, never)).toBe(false);
     }
   });
@@ -251,5 +264,76 @@ describe('prebuildWorktree', () => {
     expect(out.installed).toBe(true);
     expect(out.built).toBe(true);
     expect(out.report).toBeNull();
+  });
+});
+
+describe('prebuildCovered', () => {
+  // The guard keys on the EFFECTIVE session shell default — the same value
+  // the caller's shell tool applies to the fetch-pr call — not on the
+  // opt-in's own value, so the CI weld keeps working and a local opt-in
+  // under the built-in default skips instead of dying mid-`npm ci`.
+  let qwenHome: string;
+  let savedHome: string | undefined;
+
+  beforeEach(() => {
+    qwenHome = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-cover-')));
+    savedHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+  });
+
+  afterEach(() => {
+    if (savedHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = savedHome;
+    }
+    rmSync(qwenHome, { recursive: true, force: true });
+  });
+
+  function weld(value: unknown): void {
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ tools: { shell: { defaultTimeoutMs: value } } }),
+    );
+  }
+
+  it('carries the budget plus the headroom the cover is welded with', () => {
+    expect(PREBUILD_COVER_HEADROOM_S).toBeGreaterThan(0);
+    expect(PREBUILD_COVER_MS).toBe(
+      (PREBUILD_BUDGET_S + PREBUILD_COVER_HEADROOM_S) * 1000,
+    );
+    weld(PREBUILD_COVER_MS);
+    expect(prebuildCovered()).toBe(true);
+  });
+
+  it('is not covered by the built-in default of a local session', () => {
+    // No settings at all: the session falls back to the 120000ms built-in,
+    // far below the budget — the documented local opt-in would otherwise
+    // die mid-install with the whole fetch-pr call.
+    expect(prebuildCovered()).toBe(false);
+  });
+
+  it('is not covered by a session default below the cover', () => {
+    weld(PREBUILD_COVER_MS - 1);
+    expect(prebuildCovered()).toBe(false);
+  });
+
+  it('falls back to the built-in for values the runtime gate rejects', () => {
+    // Config admits only in-range integers; anything else never reaches
+    // the shell tool, so the guard must not read it as cover either.
+    for (const value of ['lots', 1.5, -1, 2_147_483_648]) {
+      weld(value);
+      expect(prebuildCovered()).toBe(false);
+    }
+  });
+
+  it('is not covered when the settings cannot be read at all', () => {
+    // A directory where the settings file belongs: existsSync passes, the
+    // read throws — loadSettings' FatalConfigError shape. The prebuild
+    // must not end a review a broken settings file could not otherwise.
+    rmSync(qwenHome, { recursive: true, force: true });
+    mkdirSync(qwenHome);
+    mkdirSync(join(qwenHome, 'settings.json'));
+    expect(prebuildCovered()).toBe(false);
   });
 });

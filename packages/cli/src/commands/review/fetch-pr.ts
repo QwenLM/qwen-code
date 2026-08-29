@@ -104,6 +104,7 @@ import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   PREBUILD_BUDGET_S,
   PREBUILD_ENV,
+  prebuildCovered,
   prebuildRequested,
   prebuildWorktree,
   type WorktreeDependencies,
@@ -203,12 +204,15 @@ type FetchPrResult = PlanReport & {
    * agent starts and outside every agent's budget. `installed: true` means
    * the tree holds a complete `node_modules` (npm's own marker, the gate
    * Agent 7 reads), `built: true` that the scoped build closure compiled too,
-   * so a probe can run a test before Agent 7 finishes; Agent 7's install is
-   * a no-op on such a tree (its build recompiles — the per-package build
-   * script pre-cleans `dist`). Anything else carries a `note` and the review
-   * behaves exactly as it did before the prebuild existed. Absent entirely
-   * when no prebuild was asked for (every local run) and on an empty diff,
-   * where the skill stops before any agent runs.
+   * so a probe can run a test before Agent 7 finishes — but never against a
+   * workspace in that closure while Agent 7's own build is running: the
+   * per-package build script pre-cleans `dist` before each recompile, so an
+   * import of a rebuilding sibling resolves against a missing or partial
+   * `dist` in that window. Agent 7's install is a no-op on such a tree (its
+   * build recompiles). Anything else carries a `note` and the review behaves
+   * exactly as it did before the prebuild existed. Absent entirely when no
+   * prebuild was asked for or its session-shell cover is absent (every local
+   * run) and on an empty diff, where the skill stops before any agent runs.
    */
   dependencies?: WorktreeDependencies;
   /**
@@ -1730,30 +1734,46 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //    throwing — and absent from the report entirely when not asked for,
     //    so every local review reads the plan it always did.
     if (prebuildRequested() && !emptyDiff) {
-      // The call below is a blocking prefix of up to PREBUILD_BUDGET_S that
-      // emits nothing until it returns (runBuildTest captures its stdio), so
-      // a run killed mid-prebuild must leave a line naming where it died.
-      writeStderrLine(
-        `Prebuilding the worktree via build-test (${PREBUILD_ENV}=1, ` +
-          `budget ${PREBUILD_BUDGET_S}s)...`,
-      );
-      result.dependencies = prebuildWorktree({
-        plan: out,
-        worktree: wt,
-        report: tmpFile(`pr-${prNumber}`, 'prebuild.json'),
-      });
-      writeFileSync(out, stringifyPlanReport(result), 'utf8');
-      const deps = result.dependencies;
-      const took = `${Math.round(deps.durationMs / 1000)}s`;
-      writeStderrLine(
-        deps.installed && deps.built
-          ? `Prebuilt the worktree in ${took}: dependencies installed and the ` +
-              `scoped build closure compiled; build-test's install is a no-op ` +
-              `on this tree.`
-          : `Prebuild did not complete in ${took} (installed: ${deps.installed}, ` +
-              `built: ${deps.built}${deps.note ? `; ${deps.note}` : ''}); ` +
-              `build-test installs and builds on its own path as before.`,
-      );
+      if (!prebuildCovered()) {
+        // CI welds the opt-in together with a session-shell default that
+        // carries the budget; a local opt-in has only the built-in 120s
+        // default, and a prebuild started under it dies mid-install with
+        // the whole fetch-pr call — the fail-open path never gets to
+        // record anything. Warn and skip instead: the pre-prebuild flow is
+        // exactly the status quo this module exists to improve on.
+        writeStderrLine(
+          `Prebuild skipped: ${PREBUILD_ENV} is set, but the session shell ` +
+            `default cannot carry the ${PREBUILD_BUDGET_S}s budget — the ` +
+            `covering default is welded only by CI's review workflow. ` +
+            `build-test installs and builds on its own path as before.`,
+        );
+      } else {
+        // The call below is a blocking prefix of up to PREBUILD_BUDGET_S
+        // that emits nothing until it returns (runBuildTest captures its
+        // stdio), so a run killed mid-prebuild must leave a line naming
+        // where it died.
+        writeStderrLine(
+          `Prebuilding the worktree via build-test (${PREBUILD_ENV}=1, ` +
+            `budget ${PREBUILD_BUDGET_S}s)...`,
+        );
+        result.dependencies = prebuildWorktree({
+          plan: out,
+          worktree: wt,
+          report: tmpFile(`pr-${prNumber}`, 'prebuild.json'),
+        });
+        writeFileSync(out, stringifyPlanReport(result), 'utf8');
+        const deps = result.dependencies;
+        const took = `${Math.round(deps.durationMs / 1000)}s`;
+        writeStderrLine(
+          deps.installed && deps.built
+            ? `Prebuilt the worktree in ${took}: dependencies installed and ` +
+                `the scoped build closure compiled; build-test's install is ` +
+                `a no-op on this tree.`
+            : `Prebuild did not complete in ${took} (installed: ${deps.installed}, ` +
+                `built: ${deps.built}${deps.note ? `; ${deps.note}` : ''}); ` +
+                `build-test installs and builds on its own path as before.`,
+        );
+      }
     }
     // Record this session against the plan just written: a later `--resume`
     // reads the ledger to find this attempt's transcripts. After the plan

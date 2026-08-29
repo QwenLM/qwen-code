@@ -281,6 +281,10 @@ const producerMocks = vi.hoisted(() => ({
   // The prebuild runs Agent 7's real build-test against the plan just
   // written; stubbed here because this suite's fs is a mock and the wiring —
   // when it runs, against what, and what lands in the plan — is the contract.
+  // The cover gate beside it is exercised here but owned by prebuild.test.ts;
+  // default-covered so the wiring tests run the prebuild they set the env
+  // for, overridable for the skip path.
+  prebuildCovered: vi.fn(() => true),
   prebuildWorktree: vi.fn(),
 }));
 
@@ -414,11 +418,19 @@ vi.mock('./lib/prebuild.js', async (importOriginal) => {
   // `prebuildRequested` stays real: the env gate — and its refusal of a
   // .env-sourced value — is what the wiring tests below exercise.
   const actual = await importOriginal<typeof import('./lib/prebuild.js')>();
-  return { ...actual, prebuildWorktree: producerMocks.prebuildWorktree };
+  return {
+    ...actual,
+    prebuildCovered: producerMocks.prebuildCovered,
+    prebuildWorktree: producerMocks.prebuildWorktree,
+  };
 });
 
 describe('fetch-pr report assembly', () => {
-  const savedEnv: { sessionId?: string; promptId?: string } = {};
+  const savedEnv: {
+    sessionId?: string;
+    promptId?: string;
+    prebuild?: string;
+  } = {};
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -475,6 +487,15 @@ describe('fetch-pr report assembly', () => {
     savedEnv.promptId = process.env['QWEN_CODE_PROMPT_ID'];
     process.env['QWEN_CODE_SESSION_ID'] = 'session-self';
     process.env['QWEN_CODE_PROMPT_ID'] = 'prompt-now';
+    // Hermetic against the ambient opt-in this same PR welds into CI:
+    // with QWEN_REVIEW_PREBUILD inherited from the environment, every
+    // full-path test passes the REAL env gate (kept real by the mock
+    // above) and dereferences the bare prebuildWorktree stub's undefined
+    // result — and post-merge every review-session shell inherits the
+    // variable. Sanitize at the env level; the prebuild describe below
+    // re-sets it for the tests that are about it.
+    savedEnv.prebuild = process.env['QWEN_REVIEW_PREBUILD'];
+    delete process.env['QWEN_REVIEW_PREBUILD'];
   });
 
   afterEach(() => {
@@ -487,6 +508,11 @@ describe('fetch-pr report assembly', () => {
       delete process.env['QWEN_CODE_PROMPT_ID'];
     } else {
       process.env['QWEN_CODE_PROMPT_ID'] = savedEnv.promptId;
+    }
+    if (savedEnv.prebuild === undefined) {
+      delete process.env['QWEN_REVIEW_PREBUILD'];
+    } else {
+      process.env['QWEN_REVIEW_PREBUILD'] = savedEnv.prebuild;
     }
   });
 
@@ -830,6 +856,10 @@ describe('fetch-pr report assembly', () => {
       savedPrebuild = process.env['QWEN_REVIEW_PREBUILD'];
       process.env['QWEN_REVIEW_PREBUILD'] = '1';
       producerMocks.prebuildWorktree.mockReturnValue(DEPS);
+      // Same reason as the defaults above: clearAllMocks keeps a
+      // mockReturnValue the skip test below sets, so re-assert the
+      // covered default every test starts from.
+      producerMocks.prebuildCovered.mockReturnValue(true);
     });
 
     afterEach(() => {
@@ -895,6 +925,22 @@ describe('fetch-pr report assembly', () => {
       // And the plan is written exactly once — byte-for-byte the pre-prebuild
       // fetch, for every local review.
       expect(planWrites()).toHaveLength(1);
+    });
+
+    it('skips the prebuild and warns when the session-shell cover is absent', async () => {
+      // The local shape: the opt-in is set, but no covering session
+      // default is welded — a prebuild started under the built-in 120s
+      // default dies mid-install with the whole fetch-pr call, so the
+      // review degrades to the pre-prebuild flow instead.
+      producerMocks.prebuildCovered.mockReturnValue(false);
+      const report = await reportFor({});
+      expect(report).not.toHaveProperty('dependencies');
+      expect(producerMocks.prebuildWorktree).not.toHaveBeenCalled();
+      expect(planWrites()).toHaveLength(1);
+      const line = producerMocks.writeStderrLine.mock.calls
+        .map(([l]: unknown[]) => String(l))
+        .find((l) => l.startsWith('Prebuild skipped:'));
+      expect(line).toContain(PREBUILD_ENV);
     });
 
     it('skips the prebuild on an empty diff, where the skill stops before any agent runs', async () => {

@@ -23,19 +23,29 @@
  * with one difference: it runs here, on the orchestrator's clock, with a
  * budget sized to a workflow step instead of a shell tool call. Agent 7 then
  * finds npm's completeness marker, so its own install phase is a no-op, and
- * every probe started before Agent 7 finishes has a tree to run in — its
- * build phase recompiles the closure regardless, because the per-package
- * build script pre-cleans `dist`, so the win is the install and the probes,
- * not a skipped build. Nothing about what runs, or as whom, or with which
- * environment, is decided here — only WHEN.
+ * a probe started before Agent 7 finishes has an installed tree to run in —
+ * with one window to respect: its build phase recompiles the closure
+ * regardless, and the per-package build script pre-cleans `dist` before each
+ * recompile, so between the pre-clean and `tsc` finishing, a probe that
+ * imports a rebuilding sibling resolves against a missing or partial `dist`.
+ * A probe overlapping Agent 7's build must target workspaces outside that
+ * build closure; the win is the install and the probes, not a skipped build.
+ * Nothing about what runs, or as whom, or with which environment, is decided
+ * here — only WHEN.
  *
  * Opt-in by environment ({@link PREBUILD_ENV}), because a local review must
  * not pay a multi-minute blocking prefix nobody asked for — the SKILL's "do
  * not install here" rule stands for the interactive case, and CI's review
- * workflow sets the variable on its `Run review` step. As with
- * `QWEN_REVIEW_SANDBOX`, a value sourced from a `.env` file is ignored: the
- * reviewed repository's own `.qwen/.env` reaches `process.env`, and what a PR
- * can toggle about its own review is the operator's decision, not the PR's.
+ * workflow sets the variable on its `Run review` step. The variable alone is
+ * not sufficient: the prebuild runs inside `fetch-pr` — one shell-tool call —
+ * and a call whose session default cannot carry the budget dies mid-install,
+ * killing the whole review. CI welds a covering session default into the
+ * agent home's settings where it welds the variable; a local run has
+ * neither, so a local opt-in warns and skips ({@link prebuildCovered})
+ * instead of dying. As with `QWEN_REVIEW_SANDBOX`, a value sourced from a
+ * `.env` file is ignored: the reviewed repository's own `.qwen/.env` reaches
+ * `process.env`, and what a PR can toggle about its own review is the
+ * operator's decision, not the PR's.
  *
  * Fail-open by contract. Whatever the prebuild could not do, Agent 7's
  * `build-test` does on its own path exactly as before this module existed:
@@ -47,13 +57,17 @@
 
 import { writeFileSync } from 'node:fs';
 import { isFileSourcedEnvKey } from '../../../config/environment.js';
+import { loadSettings } from '../../../config/settings.js';
 import { runBuildTest, type BuildTestReport } from '../build-test.js';
 import { npmInstallComplete } from './npm-toolchain.js';
 
 /**
- * Set to `1` (or `true`) to run the prebuild. CI's review workflow sets it on
- * the `Run review` step; `scripts/tests/qwen-pr-review-workflow.test.js`
- * pins the workflow literal against this constant.
+ * Set to `1` to run the prebuild — the ONLY accepted value: the workflow's
+ * cover gate compares the same literal, and a second grammar (`true`) would
+ * run the prebuild without the session-shell cover welded for `1`. CI's
+ * review workflow sets it on the `Run review` step;
+ * `scripts/tests/qwen-pr-review-workflow.test.js` pins the workflow literal
+ * against this constant.
  */
 export const PREBUILD_ENV = 'QWEN_REVIEW_PREBUILD';
 
@@ -70,6 +84,44 @@ export const PREBUILD_ENV = 'QWEN_REVIEW_PREBUILD';
  * own deadline doing so.
  */
 export const PREBUILD_BUDGET_S = 1800;
+
+/**
+ * Headroom the session-shell cover must carry ON TOP of the budget, in
+ * seconds. The cover clock starts when the `fetch-pr` call spawns; the
+ * budget clock starts only when the prebuild enters `runBuildTest`. Between
+ * them sits the fetch prefix — PR-ref fetch, `gh` metadata, merge-base/base
+ * fetch, diff capture, plan write — and after it the report rewrite and the
+ * session-ledger append. A cover exactly equal to the budget therefore
+ * expires first in the very hang case the budget exists for: `fetch-pr`
+ * dies before it can record the outcome, and the fail-open contract breaks.
+ * The same timer-vs-budget skew `BUILD_TEST_BUDGET_HEADROOM_S` exists for,
+ * sized to the fetch prefix. Stays below the attempt's GNU timeout: budgets
+ * floor at 90 minutes (`halve_budget_floor` in the review workflow) and the
+ * budget gate refuses the opt-in under anything that cannot carry both.
+ */
+export const PREBUILD_COVER_HEADROOM_S = 600;
+
+/**
+ * The session-shell default a run must have before the prebuild may start:
+ * the budget plus the cover headroom, in milliseconds. CI's review workflow
+ * welds exactly this into the agent home's settings; nothing does locally.
+ */
+export const PREBUILD_COVER_MS =
+  (PREBUILD_BUDGET_S + PREBUILD_COVER_HEADROOM_S) * 1000;
+
+/**
+ * Minimum remainder the attempt budget keeps for the fetch prefix and the
+ * review itself when the prebuild is on, in seconds. The workflow's budget
+ * gate refuses the opt-in when the effective attempt budget minus the
+ * deadline reserve cannot carry `PREBUILD_BUDGET_S` plus this: worst case
+ * the prebuild consumes its whole budget (the hang it exists to bound), and
+ * an attempt that cannot then still run a review dies mid-`npm ci` — GNU
+ * timeout, `OUTCOME='timeout'`, no retry — instead of degrading to the
+ * pre-prebuild flow. Sized to the smallest measured end-to-end review (~30
+ * minutes on a micro diff), which is also what the 90-minute halving floor
+ * leaves exactly enough of.
+ */
+export const PREBUILD_ATTEMPT_MARGIN_S = 1800;
 
 /**
  * Per-command deadline for the prebuild, in seconds. Twenty minutes: the
@@ -118,8 +170,43 @@ export function prebuildRequested(
   env: NodeJS.ProcessEnv = process.env,
   fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
 ): boolean {
-  const raw = env[PREBUILD_ENV]?.trim().toLowerCase();
-  return (raw === '1' || raw === 'true') && !fileSourced(PREBUILD_ENV);
+  return env[PREBUILD_ENV]?.trim() === '1' && !fileSourced(PREBUILD_ENV);
+}
+
+/**
+ * Whether the session shell default in force can carry the prebuild.
+ *
+ * The prebuild runs inside `fetch-pr` — one shell-tool call in the caller's
+ * session — and that call's timer is the session default: per-call timeout
+ * (the skill welds none on `fetch-pr`), then `tools.shell.defaultTimeoutMs`,
+ * then the 120000ms built-in (`shell.ts`). CI's review workflow welds the
+ * cover where it welds the opt-in; a local run has only the built-in, far
+ * below the budget, and a prebuild started under it dies mid-install with
+ * the whole `fetch-pr` call — the fail-open path never gets to record
+ * anything. This gate reads the SAME value the caller's shell tool applies:
+ * operator-controlled scopes only (`skipWorkspaceSettings` — a repository
+ * must not toggle its own review's cover through `.qwen/settings.json`),
+ * with the runtime gate `Config` applies to the value: only in-range
+ * integers reach the shell tool, anything else falls back to the built-in.
+ */
+export function prebuildCovered(): boolean {
+  let raw: unknown;
+  try {
+    raw = loadSettings(undefined, { skipWorkspaceSettings: true }).merged.tools
+      ?.shell?.defaultTimeoutMs;
+  } catch {
+    // An unreadable settings file ends the review nowhere else this early;
+    // it must not end it here either. No readable cover, no prebuild.
+    return false;
+  }
+  const effectiveMs =
+    typeof raw === 'number' &&
+    Number.isInteger(raw) &&
+    raw >= 0 &&
+    raw <= 2_147_483_647
+      ? raw
+      : 120_000; // shell.ts DEFAULT_FOREGROUND_TIMEOUT_MS
+  return effectiveMs >= PREBUILD_COVER_MS;
 }
 
 export interface PrebuildArgs {
