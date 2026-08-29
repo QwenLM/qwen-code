@@ -696,6 +696,7 @@ await agent('scan package.json')
     expect(result).toEqual({
       llmContent: 'Workflow was cancelled before it could start.',
       returnDisplay: 'Workflow cancelled.',
+      aborted: true,
     });
     expect(registry.list()).toHaveLength(0);
     expect(dispatch).not.toHaveBeenCalled();
@@ -730,6 +731,7 @@ await agent('scan package.json')
       expect(result).toEqual({
         llmContent: 'Workflow was cancelled before it could start.',
         returnDisplay: 'Workflow cancelled.',
+        aborted: true,
       });
       expect(registry.list()).toHaveLength(0);
       expect(dispatch).not.toHaveBeenCalled();

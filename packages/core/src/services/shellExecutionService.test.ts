@@ -1714,6 +1714,7 @@ describe('ShellExecutionService', () => {
       );
 
       expect(result.exitCode).toBe(0);
+      expect(result.aborted).toBe(false);
       expect(mockCpSpawn).toHaveBeenCalledWith(
         TASKKILL,
         ['/f', '/pid', String(mockPtyProcess.pid)],
@@ -2874,8 +2875,29 @@ describe('ShellExecutionService child_process fallback', () => {
 
       // Result is the normal exit shape, not the promoted shape.
       expect(result.promoted).toBeUndefined();
-      expect(result.aborted).toBe(true); // abortSignal.aborted is still true
+      expect(result.aborted).toBe(false);
       expect(result.exitCode).toBe(0);
+    });
+
+    it('does not abort a child that completed before cancellation arrived', async () => {
+      mockPlatform.mockReturnValue('linux');
+      const { result } = await simulateExecution(
+        'fast-and-cancelled',
+        (cp, abortController) => {
+          Object.defineProperty(cp, 'exitCode', {
+            value: 0,
+            writable: true,
+            configurable: true,
+          });
+          abortController.abort();
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+      );
+
+      expect(result.aborted).toBe(false);
+      expect(result.exitCode).toBe(0);
+      expect(mockProcessKill).not.toHaveBeenCalled();
     });
 
     it('post-promotion: child exit does NOT re-resolve the result with a non-promoted shape', async () => {

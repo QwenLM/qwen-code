@@ -526,6 +526,7 @@ function backgroundStartCancelledResult(): WorkflowToolResult {
   return {
     llmContent: 'Workflow was cancelled before it could start.',
     returnDisplay: 'Workflow cancelled.',
+    aborted: true,
   };
 }
 

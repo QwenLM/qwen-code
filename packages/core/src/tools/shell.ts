@@ -1808,6 +1808,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return {
       llmContent: 'Command was cancelled by user before it could complete.',
       returnDisplay: 'Command cancelled by user.',
+      aborted: true,
     };
   }
 
@@ -2724,7 +2725,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
       effectiveTimeout > 0 &&
       abortReasonName === 'TimeoutError';
     const wasPromoteRefused =
-      result.aborted &&
       getShellAbortReasonKind(combinedSignal.reason) === 'background';
     // Cooperative mid-execution interruption: the tool observed the
     // abort and killed the child, but resolves error-free. Reported
@@ -2737,7 +2737,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       : undefined;
 
     let llmContent = '';
-    if (result.aborted) {
+    if (result.aborted || wasPromoteRefused) {
       if (wasTimeout) {
         llmContent = timeoutSummary!;
         if (result.output.trim()) {
@@ -2857,6 +2857,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const shouldAppendLongRunHint =
       longRunThreshold !== null &&
       !result.aborted &&
+      !wasPromoteRefused &&
       !isSignalTermination(result.signal) &&
       elapsedMs >= longRunThreshold;
     // Observability: the hint decision is otherwise invisible. If a
@@ -2892,7 +2893,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           ? `${timeoutSummary}\n${result.output}`
           : result.output;
       } else {
-        if (result.aborted) {
+        if (result.aborted || wasPromoteRefused) {
           returnDisplayMessage = wasTimeout
             ? `${timeoutSummary} There was no output before it timed out.`
             : wasPromoteRefused
@@ -3038,8 +3039,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
-        : (!result.aborted && isSignalTermination(result.signal)) ||
-            isShellExitError(this.params.command, result.exitCode)
+        : !result.aborted &&
+            (isSignalTermination(result.signal) ||
+              isShellExitError(this.params.command, result.exitCode))
           ? {
               error: {
                 // Schedulers use error.message as the model-facing response.

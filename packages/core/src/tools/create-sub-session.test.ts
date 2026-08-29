@@ -175,6 +175,7 @@ describe('CreateSubSessionTool', () => {
     const res = await settled;
 
     expect(res.returnDisplay).toBe('Cancelled');
+    expect(res.aborted).toBe(true);
     expect(res.llmContent).toMatch(/cancelled/i);
     // The sub-session is NOT cancelled — it has no abort seam — so the tool
     // must say so rather than implying the work was undone.
@@ -199,6 +200,7 @@ describe('CreateSubSessionTool', () => {
 
     expect(spawner).not.toHaveBeenCalled();
     expect(res.returnDisplay).toBe('Cancelled');
+    expect(res.aborted).toBe(true);
     // Nothing was created, so the message must not hedge.
     expect(res.llmContent).toMatch(/no sub-session was created/i);
     expect(res.llmContent).not.toMatch(/may already have been created/i);
@@ -211,6 +213,7 @@ describe('CreateSubSessionTool', () => {
       .build({ prompt: 'x' })
       .execute(ac.signal);
     expect(res.returnDisplay).not.toBe('Cancelled');
+    expect(res.aborted).toBeUndefined();
     expect(res.llmContent).toContain('done');
   });
 

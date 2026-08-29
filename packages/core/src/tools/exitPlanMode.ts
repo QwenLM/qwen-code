@@ -250,9 +250,12 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     }
     const { snapshot, targetMode } = approval;
     if (signal.aborted) {
-      return this.noActionResult(
-        'Plan exit was cancelled. Remaining in plan mode.',
-      );
+      return {
+        ...this.noActionResult(
+          'Plan exit was cancelled. Remaining in plan mode.',
+        ),
+        aborted: true,
+      };
     }
     if (
       this.config.getApprovalMode() !== ApprovalMode.PLAN ||
@@ -325,9 +328,12 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     }
 
     if (signal.aborted) {
-      return this.noActionResult(
-        'Leader plan approval was cancelled. Remaining in plan mode.',
-      );
+      return {
+        ...this.noActionResult(
+          'Leader plan approval was cancelled. Remaining in plan mode.',
+        ),
+        aborted: true,
+      };
     }
     if (
       this.config.getApprovalMode() !== ApprovalMode.PLAN ||

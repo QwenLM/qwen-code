@@ -796,6 +796,7 @@ describe('ShellTool', () => {
           _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
         });
         expect(result.llmContent).toContain('sed edit applied');
+        expect(result.aborted).toBeUndefined();
       });
 
       it('does not write when sed execution is cancelled after reading', async () => {
@@ -833,6 +834,7 @@ describe('ShellTool', () => {
         expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
         expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
         expect(result.llmContent).toContain('Command was cancelled');
+        expect(result.aborted).toBe(true);
       });
 
       it('awaits an in-flight sed write after cancellation starts', async () => {
@@ -2951,7 +2953,7 @@ describe('ShellTool', () => {
       });
     });
 
-    it('does not report a user-cancelled signal as a tool error', async () => {
+    it('does not report a cancelled PTY exit code as a tool error', async () => {
       const invocation = shellTool.build({
         command: 'cancelled-command',
         is_background: false,
@@ -2959,17 +2961,47 @@ describe('ShellTool', () => {
       const promise = invocation.execute(mockAbortSignal);
       resolveShellExecution({
         output: '',
-        exitCode: null,
-        signal: 15,
+        exitCode: 3,
+        signal: null,
         error: null,
         aborted: true,
+        executionMethod: 'node-pty',
       });
 
       const result = await promise;
 
       expect(result.error).toBeUndefined();
+      expect(result.aborted).toBe(true);
       expect(result.llmContent).toContain('Command was cancelled');
     });
+
+    it.each([
+      ['success', 'echo done', 0, false],
+      ['allowed exit 1', 'grep pattern file', 1, false],
+      ['failure', 'failing-command', 3, true],
+    ])(
+      'preserves a completed %s when cancellation arrives late',
+      async (_label, command, exitCode, hasError) => {
+        const controller = new AbortController();
+        const invocation = shellTool.build({
+          command,
+          is_background: false,
+        });
+        const promise = invocation.execute(controller.signal);
+        controller.abort();
+        resolveShellExecution({
+          output: 'completed',
+          exitCode,
+          error: null,
+          aborted: false,
+        });
+
+        const result = await promise;
+
+        expect(result.aborted).toBeUndefined();
+        expect(result.error !== undefined).toBe(hasError);
+      },
+    );
 
     it.each([
       'grep pattern file',
@@ -6101,11 +6133,10 @@ describe('ShellTool', () => {
         }
       });
 
-      it('promote-refused race (aborted: true, promoted: false after promote signal) is reported as benign race, not "Command timed out"', async () => {
+      it('reports a refused promote as a benign race without relying on aborted', async () => {
         // @tanzhenxin's review on #3894: when PR-3's Ctrl+B keybind
         // fires `promoteAbortController.abort` but the service's race
-        // guard refuses promotion (the child terminated a beat
-        // earlier), the result lands `aborted: true, promoted: false`.
+        // guard refuses promotion (the child terminated a beat earlier).
         // Without excluding the promote signal from the timeout
         // discriminator, the foreground path falsely reports
         // "Command timed out" for a process that finished naturally.
@@ -6128,13 +6159,13 @@ describe('ShellTool', () => {
           | undefined;
         expect(promoteAc).toBeInstanceOf(AbortController);
         // Fire promote AFTER the child supposedly terminated — the
-        // service refuses with `aborted: true, promoted: false`.
+        // service refuses with `aborted: false, promoted: false`.
         promoteAc!.abort({ kind: 'background', shellId: 'bg_late' });
         resolveShellExecution({
           output: 'oops too late\n',
-          exitCode: null,
+          exitCode: 0,
           signal: null,
-          aborted: true,
+          aborted: false,
           promoted: false,
           pid: 33333,
         });
@@ -6147,6 +6178,8 @@ describe('ShellTool', () => {
         expect(String(result.llmContent)).toContain(
           'Command finished before the background-promote',
         );
+        expect(result.error).toBeUndefined();
+        expect(result.aborted).toBeUndefined();
         // Captured output is preserved.
         expect(String(result.llmContent)).toContain('oops too late');
       });

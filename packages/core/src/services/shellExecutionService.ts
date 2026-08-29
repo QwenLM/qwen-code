@@ -185,7 +185,7 @@ export interface ShellExecutionResult {
   signal: number | null;
   /** An error object if the process failed to spawn. */
   error: Error | null;
-  /** A boolean indicating if the command was aborted by the user. */
+  /** Whether cancellation/timeout prevented spawn or drove live termination. */
   aborted: boolean;
   /**
    * True iff execute() returned because of a background-promote abort
@@ -823,6 +823,7 @@ export class ShellExecutionService {
         const sniffChunks: Buffer[] = [];
         let error: Error | null = null;
         let exited = false;
+        let cancelKillDispatched = false;
 
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
@@ -983,7 +984,7 @@ export class ShellExecutionService {
             exitCode: code,
             signal: signal ? os.constants.signals[signal] : null,
             error,
-            aborted: abortSignal.aborted,
+            aborted: cancelKillDispatched,
             pid: undefined,
             executionMethod: 'child_process',
           });
@@ -1335,7 +1336,15 @@ export class ShellExecutionService {
         };
 
         const performCancelKill = async (): Promise<void> => {
-          if (!child.pid || exited) return;
+          if (
+            !child.pid ||
+            exited ||
+            child.exitCode !== null ||
+            child.signalCode !== null
+          ) {
+            return;
+          }
+          cancelKillDispatched = true;
           if (isWindows) {
             const killer = cpSpawn(
               WINDOWS_TASKKILL,
@@ -1915,7 +1924,7 @@ export class ShellExecutionService {
                   exitCode,
                   signal: signal === 0 ? null : (signal ?? null),
                   error,
-                  aborted: abortSignal.aborted,
+                  aborted: cancelKillDispatched,
                   pid: ptyProcess.pid,
                   executionMethod:
                     (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ??

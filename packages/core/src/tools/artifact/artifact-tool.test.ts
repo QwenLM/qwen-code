@@ -67,6 +67,7 @@ describe('ArtifactTool', () => {
       .execute(signal);
 
     expect(res.error).toBeUndefined();
+    expect(res.aborted).toBeUndefined();
     expect(res.llmContent).toMatch(/Published artifact/);
     expect(res.llmContent).toMatch(/file:\/\//);
     expect(openSpy).toHaveBeenCalledTimes(1);
@@ -345,6 +346,7 @@ describe('ArtifactTool', () => {
     );
     const res = await cancelTool.build({ file_path: file }).execute(signal);
     expect(res.error).toBeUndefined();
+    expect(res.aborted).toBe(true);
     expect(res.llmContent).toMatch(/cancelled/i);
     expect(openSpy).not.toHaveBeenCalled();
   });
@@ -366,6 +368,7 @@ describe('ArtifactTool', () => {
     );
     const res = await cancelTool.build({ file_path: file }).execute(signal);
     expect(res.error).toBeUndefined();
+    expect(res.aborted).toBe(true);
     expect(res.llmContent).toMatch(/cancelled/i);
     expect(openSpy).not.toHaveBeenCalled();
   });
@@ -388,6 +391,7 @@ describe('ArtifactTool', () => {
       .build({ file_path: file })
       .execute(controller.signal);
     expect(res.error).toBeUndefined();
+    expect(res.aborted).toBe(true);
     expect(res.llmContent).toMatch(/cancelled/i);
     expect(openSpy).not.toHaveBeenCalled();
   });

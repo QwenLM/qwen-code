@@ -163,7 +163,11 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
             'been created; it runs independently and is not cancelled.'
           : 'create_sub_session was cancelled before it started. No ' +
             'sub-session was created.';
-        return { llmContent: message, returnDisplay: 'Cancelled' };
+        return {
+          llmContent: message,
+          returnDisplay: 'Cancelled',
+          aborted: true,
+        };
       }
 
       // Embed a clickable session link in the display output so the web shell
