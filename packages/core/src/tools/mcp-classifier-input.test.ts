@@ -37,15 +37,18 @@ describe('projectMcpArguments', () => {
     });
   });
 
-  it('projects non-object inputs to an empty object', () => {
+  it('projects non-object inputs to an empty object, flagged when they held content', () => {
     expect(projectMcpArguments(undefined)).toEqual({
       value: {},
       truncated: false,
     });
-    expect(projectMcpArguments('x')).toEqual({ value: {}, truncated: false });
+    expect(projectMcpArguments(null)).toEqual({ value: {}, truncated: false });
+    // An array or a bare string carried content the projection dropped:
+    // reporting it as a plain `{}` would present it as absent.
+    expect(projectMcpArguments('x')).toEqual({ value: {}, truncated: true });
     expect(projectMcpArguments([1, 2])).toEqual({
       value: {},
-      truncated: false,
+      truncated: true,
     });
   });
 
@@ -191,6 +194,33 @@ describe('projectMcpArguments', () => {
 });
 
 describe('buildMcpClassifierInput', () => {
+  it('flags a non-object payload rather than showing an empty call', () => {
+    // The object-shaped projection cannot represent an array or a bare
+    // string, so its content is dropped — but dropping it unflagged would
+    // read as a call that genuinely had no arguments.
+    for (const params of [['secret-1', 'secret-2'], 'contents of .env', 42]) {
+      const input = buildMcpClassifierInput({
+        serverName: 'slack',
+        serverToolName: 'post_message',
+        params,
+      });
+      expect(input.arguments).toEqual({});
+      expect(input.arguments_truncated).toBe(true);
+    }
+  });
+
+  it('leaves an absent payload unflagged', () => {
+    for (const params of [undefined, null, {}]) {
+      const input = buildMcpClassifierInput({
+        serverName: 'slack',
+        serverToolName: 'post_message',
+        params,
+      });
+      expect(input.arguments).toEqual({});
+      expect('arguments_truncated' in input).toBe(false);
+    }
+  });
+
   it('removes Unicode line separators from hostile tool names, keys, and values', () => {
     const separators = '\u2028\u2029\u0085';
     const input = buildMcpClassifierInput({

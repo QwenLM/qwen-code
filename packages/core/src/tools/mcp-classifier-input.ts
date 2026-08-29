@@ -242,7 +242,8 @@ function projectValue(
 
 /**
  * Bound an MCP argument object for inclusion in the classifier prompt.
- * Non-object inputs project to `{}`.
+ * Non-object inputs project to `{}`, flagged as truncated when they carried
+ * content (see {@link projectMcpArgumentsWithBudget}).
  */
 export function projectMcpArguments(args: unknown): ProjectMcpArgumentsResult {
   return projectMcpArgumentsWithBudget(args, {
@@ -256,7 +257,12 @@ function projectMcpArgumentsWithBudget(
   budget: ProjectionBudget,
 ): ProjectMcpArgumentsResult {
   if (args === null || typeof args !== 'object' || Array.isArray(args)) {
-    return { value: {}, truncated: false };
+    // An array, string or number carries content the object-shaped
+    // projection cannot represent; reporting it as a plain `{}` would
+    // present omitted content as absent, which the rest of this module is
+    // careful never to do. Absent params are genuinely empty, so they are
+    // the one non-object input that stays unflagged.
+    return { value: {}, truncated: args !== undefined && args !== null };
   }
   const value = projectValue(args, 0, budget) as Record<string, unknown>;
   return { value, truncated: budget.truncated };

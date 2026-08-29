@@ -408,6 +408,38 @@ describe('buildClassifierContents with a discovered MCP tool', () => {
     expect(pending).toContain('TOKEN=abc');
   });
 
+  it('drops the arguments of an MCP call whose tool left the registry', () => {
+    // The `forwardArguments` opt-out lives on the tool object. A server
+    // removed from settings (or a resume without it) leaves the history
+    // entry with no tool to express it, and the raw arguments are
+    // third-party payload: they must not reach the classifier prompt.
+    const registry = {
+      getTool: () => undefined,
+    } as unknown as ToolRegistry;
+    const messages: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: 'mcp__slack__post_message',
+              args: { channel: '#ops', text: 'AWS_SECRET_ACCESS_KEY=abc123' },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = buildClassifierContents(messages, registry, {
+      toolName: 'read_file',
+      toolParams: { path: 'x.ts' },
+    });
+
+    const prior = (result[0].parts?.[0] as { text: string }).text;
+    expect(prior).toBe('Prior action: mcp__slack__post_message({})');
+    expect(JSON.stringify(result)).not.toContain('AWS_SECRET_ACCESS_KEY');
+  });
+
   it('renders historical MCP calls with their projected arguments too', () => {
     const mcpTool = new DiscoveredMCPTool(
       callableTool,

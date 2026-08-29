@@ -31,6 +31,9 @@
 import type { Content, Part } from '@google/genai';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 
+/** Registered-name prefix every discovered MCP tool carries. */
+const MCP_TOOL_NAME_PREFIX = 'mcp__';
+
 /** The action whose safety the classifier should evaluate. */
 export interface PendingAction {
   toolName: string;
@@ -241,7 +244,8 @@ function formatPendingActionPrompt(
  * Look up the tool in the registry and project the args through
  * `toAutoClassifierInput`. Falls back to the raw args when the tool is unknown
  * or declares no projection. Returns `{}` when the projection returns the
- * empty-string sentinel (tool encoded as "no security relevance").
+ * empty-string sentinel (tool encoded as "no security relevance"), and for an
+ * `mcp__*` name the registry cannot resolve — see below.
  */
 function projectFunctionArgs(
   name: string,
@@ -262,5 +266,14 @@ function projectFunctionArgs(
   }
 
   if (projected === '') return {};
-  return projected && typeof projected === 'object' ? projected : rawArgs;
+  if (projected && typeof projected === 'object') return projected;
+  // The `forwardArguments` opt-out lives on the tool object, so an `mcp__*`
+  // call the registry cannot resolve — its server was removed from settings,
+  // or the session was resumed without it — has nothing left to express it,
+  // and its raw arguments are third-party payload that may carry secrets.
+  // Fail closed to the same `{}` an opted-out MCP tool projects to rather
+  // than forwarding them unbounded. Applies equally when a resolved MCP
+  // tool's projection threw: the fallback must not be the unbounded one.
+  if (name.startsWith(MCP_TOOL_NAME_PREFIX)) return {};
+  return rawArgs;
 }
