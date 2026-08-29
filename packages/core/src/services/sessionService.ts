@@ -1623,6 +1623,7 @@ export class SessionService {
         ? sourceContents
         : `${sourceContents}\n`;
       if (action === 'archive') {
+        assertCanCommit?.();
         fs.appendFileSync(destinationPath, `\n${payload}`, 'utf8');
       } else {
         const destinationContents = fs.readFileSync(destinationPath, 'utf8');

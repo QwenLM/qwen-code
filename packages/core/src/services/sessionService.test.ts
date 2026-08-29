@@ -2847,6 +2847,48 @@ describe('SessionService', () => {
       );
     });
 
+    it('does not append a prompt ledger after writer ownership is lost', async () => {
+      mockActiveSessionOnly();
+      const sourceLedger =
+        '{"v":1,"promptId":"p1","state":"in_flight","at":1}\n';
+      const originalDestination =
+        '{"v":1,"promptId":"p0","state":"committed","at":0}\n';
+      let destinationLedger = originalDestination;
+      let sourceExists = true;
+      vi.spyOn(fs, 'readFileSync').mockReturnValue(sourceLedger);
+      vi.spyOn(fs, 'appendFileSync').mockImplementation(
+        (_filePath, contents) => {
+          destinationLedger += contents.toString();
+        },
+      );
+      unlinkSyncSpy.mockImplementation((filePath) => {
+        if (filePath.toString().endsWith(`/chats/${sessionIdA}.ledger.jsonl`)) {
+          sourceExists = false;
+        }
+      });
+      existsSyncSpy.mockImplementation((filePath) =>
+        filePath.toString().endsWith(`${sessionIdA}.ledger.jsonl`),
+      );
+      const ownershipLost = new SessionWriterLostError();
+      const assertCleanupOwned = vi
+        .fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation(() => {
+          throw ownershipLost;
+        });
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        assertCanMutate: vi.fn(),
+        assertCleanupOwned,
+      });
+
+      expect(result.errors[0]?.error).toBe(ownershipLost);
+      expect(destinationLedger).toBe(originalDestination);
+      expect(sourceExists).toBe(true);
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(3);
+    });
+
     it('should not move worktree sidecar when archiving JSONL fails', async () => {
       mockActiveSessionOnly();
       mockActiveWorktreeSidecarOnly();
