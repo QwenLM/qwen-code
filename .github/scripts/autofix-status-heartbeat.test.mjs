@@ -38,6 +38,12 @@ afterEach(() => {
 // per call), logs the gh-visible env channels the hermetic-pin witness
 // asserts on, fails when GH_FAIL=1, and holds the tick in flight for
 // GH_SLEEP_SECONDS (default 0) so kill-topology tests can land mid-tick.
+// Call records are published by rename: the argv is written to a dotted
+// .partial file (invisible to the `ls -1` call numbering and the `call-`
+// reader filter) and renamed into place, so a reader polling readCalls
+// observes a record only once its content is complete — a bare redirect
+// exposes the file before its content lands, and a content assertion
+// reading that window fails under CPU contention.
 function fakeGhBin(dir) {
   const bin = join(dir, 'bin');
   const records = join(dir, 'calls');
@@ -50,7 +56,8 @@ function fakeGhBin(dir) {
       '#!/usr/bin/env bash',
       'set -u',
       'n=$(( $(ls -1 "${GH_RECORD_DIR}" | wc -l) + 1 ))',
-      'for a in "$@"; do printf \'%s\\0\' "$a"; done > "${GH_RECORD_DIR}/call-${n}"',
+      'for a in "$@"; do printf \'%s\\0\' "$a"; done > "${GH_RECORD_DIR}/.call-${n}.partial"',
+      'mv "${GH_RECORD_DIR}/.call-${n}.partial" "${GH_RECORD_DIR}/call-${n}"',
       '# The in-flight stamp witness: record, FROM INSIDE the bounded',
       '# window, whether heartbeat-tick-inflight brackets this call.',
       'if [ -f "${HB_WORKDIR:-/nonexistent}/heartbeat-tick-inflight" ]; then',
@@ -98,7 +105,8 @@ function fakeTimeoutBin(binDir, dir) {
       '#!/usr/bin/env bash',
       'set -u',
       'n=$(( $(ls -1 "${TIMEOUT_RECORD_DIR}" | wc -l) + 1 ))',
-      'for a in "$@"; do printf \'%s\\0\' "$a"; done > "${TIMEOUT_RECORD_DIR}/call-${n}"',
+      'for a in "$@"; do printf \'%s\\0\' "$a"; done > "${TIMEOUT_RECORD_DIR}/.call-${n}.partial"',
+      'mv "${TIMEOUT_RECORD_DIR}/.call-${n}.partial" "${TIMEOUT_RECORD_DIR}/call-${n}"',
       'shift',
       'exec "$@"',
     ].join('\n'),
@@ -209,6 +217,92 @@ describe('autofix-status-heartbeat body', () => {
     });
     assert.equal(res.status, 2);
     assert.match(res.stderr, /usage:/);
+  });
+});
+
+describe('fake-shim call-record publication', () => {
+  // The loop tests gate on a readCalls(...) count and then assert record
+  // content. Run 33223243920 failed the whole helper-test step with no
+  // identifiable test: a redirect-only publication creates the record file
+  // before its argv content lands, so a poll inside that window reads a
+  // torn record and a content assertion fails under CPU contention. The
+  // rename publication must make that impossible: a record is observable
+  // only complete. The filler argv widens the writer's create-to-content
+  // window from microseconds to milliseconds so a non-atomic writer is
+  // caught reliably, and the post-exit pass keeps the witness honest on a
+  // fast host where the writer wins every poll race.
+  async function witnessAtomicPublication(shimPath, records, env, argv) {
+    const child = spawn(shimPath, argv, {
+      env: { ...process.env, ...env },
+      stdio: 'ignore',
+    });
+    let exited = false;
+    child.on('close', () => {
+      exited = true;
+    });
+    let observations = 0;
+    const assertComplete = () => {
+      for (const call of readCalls(records)) {
+        if (call.length === 0) continue;
+        observations += 1;
+        assert.equal(
+          call.at(-1),
+          '--sentinel-end',
+          `reader observed a torn call record (${call.length}/${argv.length} args)`,
+        );
+      }
+    };
+    while (!exited) {
+      assertComplete();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    assertComplete();
+    assert.ok(
+      observations >= 1,
+      'the reader must observe the published record',
+    );
+  }
+
+  function fillerArgv() {
+    const argv = [
+      'api',
+      'repos/octo/repo/issues/comments/777',
+      '--method',
+      'PATCH',
+    ];
+    for (let i = 0; i < 10000; i++) {
+      argv.push(`filler-${i}-${'x'.repeat(48)}`);
+    }
+    argv.push('--sentinel-end');
+    return argv;
+  }
+
+  it('exposes a gh call record only once its argv is complete', async () => {
+    const dir = freshTmp();
+    const gh = fakeGhBin(dir);
+    await witnessAtomicPublication(
+      join(gh.bin, 'gh'),
+      gh.records,
+      { GH_RECORD_DIR: gh.records },
+      fillerArgv(),
+    );
+  });
+
+  it('exposes a timeout call record only once its argv is complete', async () => {
+    const dir = freshTmp();
+    const gh = fakeGhBin(dir);
+    const timeoutRecords = fakeTimeoutBin(gh.bin, dir);
+    const argv = ['5', 'head', '-c', '64'];
+    for (let i = 0; i < 10000; i++) {
+      argv.push(`filler-${i}-${'x'.repeat(48)}`);
+    }
+    argv.push('--sentinel-end');
+    await witnessAtomicPublication(
+      join(gh.bin, 'timeout'),
+      timeoutRecords,
+      { TIMEOUT_RECORD_DIR: timeoutRecords },
+      argv,
+    );
   });
 });
 
