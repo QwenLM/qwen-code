@@ -38,6 +38,7 @@ import {
 import { prependToFirstTextPart } from '../utils/partUtils.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { SendMessageTool } from '../tools/send-message.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
@@ -182,6 +183,7 @@ describe('getInitialChatHistory', () => {
     getDeferredToolSummary: Mock;
     isDeferredToolRevealed: Mock;
     getMcpServerInstructions: Mock;
+    getTool: Mock;
   };
 
   beforeEach(() => {
@@ -191,6 +193,11 @@ describe('getInitialChatHistory', () => {
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
+      getTool: vi.fn().mockImplementation((name: string) =>
+        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+          ? {}
+          : null,
+      ),
     };
     mockConfig = {
       getSkipStartupContext: vi.fn().mockReturnValue(false),
@@ -414,6 +421,11 @@ describe('stripStartupContext', () => {
         getDeferredToolSummary: vi.fn().mockReturnValue([]),
         isDeferredToolRevealed: vi.fn().mockReturnValue(false),
         getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
+        getTool: vi.fn().mockImplementation((name: string) =>
+          name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+            ? {}
+            : null,
+        ),
       }),
       getWorkspaceContext: vi.fn().mockReturnValue({
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
@@ -479,6 +491,11 @@ describe('startup reminder builders', () => {
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
+      getTool: vi.fn().mockImplementation((name: string) =>
+        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+          ? {}
+          : null,
+      ),
       ...overrides,
     } as unknown as ToolRegistry;
   }
@@ -492,6 +509,29 @@ describe('startup reminder builders', () => {
             { name: 'already_loaded', description: 'Loaded already.' },
           ]),
         isDeferredToolRevealed: vi.fn().mockReturnValue(true),
+      }),
+    );
+
+    expect(reminder).toBeNull();
+  });
+
+  it('returns no reminder when the bridge is incomplete', () => {
+    // With either bridge half unregistered there is no discovery or
+    // invocation path for hidden deferred tools: client.ts eagerly reveals
+    // ordinary deferred tools into the declarations and reports
+    // tools.eager-demoted ones as unreachable, so the reminder must not
+    // advertise them ("invoke it with tool_call" would point at a tool this
+    // session does not have).
+    const reminder = buildDeferredToolsReminder(
+      registry({
+        getDeferredToolSummary: vi.fn().mockReturnValue([
+          { name: 'write_file', description: 'Write a file.' },
+        ]),
+        getTool: vi
+          .fn()
+          .mockImplementation((name: string) =>
+            name === ToolNames.TOOL_SEARCH ? {} : null,
+          ),
       }),
     );
 

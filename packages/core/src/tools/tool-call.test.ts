@@ -16,13 +16,19 @@ import { ToolNames } from './tool-names.js';
 function makeRegistry(
   tools: MockTool[] = [],
   hidden: ReadonlySet<string> = new Set(),
+  options: { withToolSearch?: boolean } = {},
 ): ToolRegistry {
+  const { withToolSearch = true } = options;
   const allTools = new Map<string, AnyDeclarativeTool>([
     [ToolNames.TOOL_CALL, new ToolCallTool()],
+    ...(withToolSearch
+      ? ([[ToolNames.TOOL_SEARCH, new MockTool({ name: ToolNames.TOOL_SEARCH })]] as const)
+      : []),
     ...tools.map((tool) => [tool.name, tool] as const),
   ]);
   return {
     ensureTool: async (name: string) => allTools.get(name),
+    getTool: (name: string) => allTools.get(name),
     isDeferredAndHidden: (name: string) => hidden.has(name),
   } as unknown as ToolRegistry;
 }
@@ -129,5 +135,72 @@ describe('ToolCallTool', () => {
     );
 
     expect(result).toMatchObject({ errorType: ToolErrorType.EXECUTION_DENIED });
+  });
+
+  it('rejects a leader-only target bridged from a subagent context', async () => {
+    const target = new MockTool({
+      name: ToolNames.TEAM_PLAN_APPROVAL,
+      shouldDefer: true,
+    });
+    const result = await runWithAgentContext('worker', () =>
+      resolveDeferredToolCall(makeRegistry([target], new Set([target.name])), {
+        name: target.name,
+        arguments: {},
+      }),
+    );
+
+    expect(result).toMatchObject({
+      errorType: ToolErrorType.EXECUTION_DENIED,
+      error: expect.objectContaining({
+        message: expect.stringContaining('only available to the team leader'),
+      }),
+    });
+  });
+
+  it('resolves a hidden deferred target while both bridge tools are registered', async () => {
+    const target = new MockTool({ name: 'deferred_target', shouldDefer: true });
+    const result = await resolveDeferredToolCall(
+      makeRegistry([target], new Set([target.name])),
+      { name: target.name, arguments: { foo: 'bar' } },
+    );
+
+    expect(result).toMatchObject({
+      tool: expect.objectContaining({ name: target.name }),
+      arguments: { foo: 'bar' },
+    });
+  });
+
+  it('rejects a hidden deferred target when tool_search is not registered', async () => {
+    const target = new MockTool({ name: 'deferred_target', shouldDefer: true });
+    const result = await resolveDeferredToolCall(
+      makeRegistry([target], new Set([target.name]), {
+        withToolSearch: false,
+      }),
+      { name: target.name, arguments: {} },
+    );
+
+    expect(result).toMatchObject({
+      errorType: ToolErrorType.EXECUTION_DENIED,
+      error: expect.objectContaining({
+        message: expect.stringContaining('unreachable'),
+      }),
+    });
+  });
+
+  it('does not suggest tool_search for unknown targets when it is absent', async () => {
+    const result = await resolveDeferredToolCall(
+      makeRegistry([], new Set(), { withToolSearch: false }),
+      { name: 'missing_tool', arguments: {} },
+    );
+
+    expect(result).toMatchObject({
+      errorType: ToolErrorType.TOOL_NOT_REGISTERED,
+    });
+    if ('error' in result) {
+      expect(result.error.message).not.toContain('tool_search');
+      expect(result.error.message).toContain(
+        'No deferred-tool discovery is available',
+      );
+    }
   });
 });

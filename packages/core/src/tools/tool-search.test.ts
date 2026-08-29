@@ -883,6 +883,29 @@ describe('ToolSearchTool', () => {
     expect(content).not.toContain('web_fetch');
   });
 
+  it('excludes already-revealed deferred tools from keyword-search candidates', async () => {
+    // Reveals originate from budget preload, plan-lifecycle setup, history
+    // replay, and session-setup pins; a revealed tool's schema is already in
+    // the declaration list, so keyword search must not re-emit it (the
+    // collectCandidates `isDeferredAndHidden` filter's revealedDeferred arm).
+    registry.registerTool(
+      new MockTool({
+        name: 'zoom_image',
+        shouldDefer: true,
+        searchHint: 'zoom into image details',
+      }),
+    );
+    registry.revealDeferredTool('zoom_image');
+    expect(registry.isDeferredToolRevealed('zoom_image')).toBe(true);
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'zoom' })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).not.toContain('"name":"zoom_image"');
+  });
+
   it('select: for a visibleTool does not trigger reveal or setTools', async () => {
     const visibleConfig = new Config({
       ...baseConfigParams,

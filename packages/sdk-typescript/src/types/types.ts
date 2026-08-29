@@ -412,11 +412,11 @@ export interface QueryOptions {
    * Separately, `tools.eager` in settings.json (requires restart) selects
    * which eager-by-default tool schemas remain eligible for the initial
    * model request. Unlisted non-exempt tools are demoted to deferred and stay
-   * reachable through `tool_search` + `tool_call` while ToolSearch is
-   * registered; when ToolSearch is not registered
-   * (`tools.toolSearch.enabled: false`, a `tool_search` deny rule, or the
-   * automatic DeepSeek opt-out) the demoted tools are out of reach for that
-   * session and a warning is logged. Tools already deferred by default remain
+   * reachable through `tool_search` + `tool_call` while both bridge tools are
+   * registered; when either is unregistered (`tools.toolSearch.enabled: false`
+   * denies both; a `tool_search` or `tool_call` deny rule removes one) the
+   * demoted tools are out of reach for that session and a warning is logged.
+   * Tools already deferred by default remain
    * on demand even when listed; `tools.visible` surfaces one at startup. The
    * allowlist does not affect MCP tools, the `--json-schema`
    * `structured_output` contract, plan-mode lifecycle tools, `task_stop`,
@@ -465,9 +465,9 @@ export interface QueryOptions {
    *   eager-by-default built-in schemas out of the initial model request, set
    *   `tools.eager` in settings.json (requires restart); tools omitted there
    *   are demoted to deferred — still registered and reachable through
-   *   `tool_search` + `tool_call` while ToolSearch is registered; when
-   *   ToolSearch is not registered (`tools.toolSearch.enabled: false`, a
-   *   `tool_search` deny rule, or the automatic DeepSeek opt-out) the demoted
+   *   `tool_search` + `tool_call` while both bridge tools are registered;
+   *   when either is unregistered (`tools.toolSearch.enabled: false` denies
+   *   both; a `tool_search` or `tool_call` deny rule removes one) the demoted
    *   tools are out of reach for that session and a warning is logged (#9827)
    *
    * **Pattern matching:**

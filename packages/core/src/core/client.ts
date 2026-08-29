@@ -418,6 +418,11 @@ export class LlmClient {
   // `announcedDeferredToolNames` is broader and exists for deferred tool-search
   // dedup; MCP add/remove deltas need this narrower model-visible set.
   private announcedMcpToolNames = new Set<string>();
+  // MCP tools eagerly revealed by the incomplete-bridge fallback below.
+  // `rememberAnnouncedDeferredTools` re-seeds `announcedMcpToolNames` from the
+  // reminder list — which is `undefined` in that state — so without this set a
+  // later disconnect of an eagerly revealed tool would never be announced.
+  private eagerlyRevealedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
   private warnedAboutUnreachableEagerTools = false;
@@ -1705,14 +1710,28 @@ export class LlmClient {
             continue;
           }
           toolRegistry.revealDeferredTool(t.name);
+          if (t.serverName) {
+            // Keep the disconnect-announcement path seeded even though the
+            // reminder list is undefined in this state (see the field).
+            this.eagerlyRevealedMcpToolNames.add(t.name);
+          }
         }
         if (withheld.length > 0 && !this.warnedAboutUnreachableEagerTools) {
           this.warnedAboutUnreachableEagerTools = true;
+          const missingHalves: string[] = [];
+          if (!toolRegistry.getTool(ToolNames.TOOL_SEARCH)) {
+            missingHalves.push(ToolNames.TOOL_SEARCH);
+          }
+          if (!toolRegistry.getTool(ToolNames.TOOL_CALL)) {
+            missingHalves.push(ToolNames.TOOL_CALL);
+          }
           // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
           console.warn(
-            `tools.eager is holding back ${withheld.length} tool(s) in a session with no tool_search, ` +
+            `tools.eager is holding back ${withheld.length} tool(s) in a session where the ` +
+              `ToolSearch + ToolCall bridge is incomplete (${missingHalves.join(' and ')} not registered), ` +
               `so nothing can load them on demand and they are unreachable until restart: ${withheld.join(', ')}. ` +
-              `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to keep them loadable, ` +
+              `Enable tools.toolSearch.enabled (which registers both bridge tools) and drop any ` +
+              `tool_search/tool_call deny rule or --exclude-tools entry to keep them loadable, ` +
               `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,
           );
         }
@@ -1735,6 +1754,19 @@ export class LlmClient {
         .filter((tool) => tool.serverName)
         .map((tool) => tool.name),
     );
+    // Re-seed eagerly revealed MCP tools so their later disconnect is still
+    // announced. Runs after the reset above (callers run
+    // resolveDeferredToolsForReminder first, which rebuilds the set); drop
+    // names already gone from the registry so a removal announced before a
+    // restart/compaction is not re-announced.
+    const toolRegistry = this.config.getToolRegistry();
+    for (const name of this.eagerlyRevealedMcpToolNames) {
+      if (toolRegistry.getTool(name)) {
+        this.announcedMcpToolNames.add(name);
+      } else {
+        this.eagerlyRevealedMcpToolNames.delete(name);
+      }
+    }
     this.pendingAddedMcpTools.clear();
     this.pendingRemovedMcpToolNames.clear();
   }
@@ -1780,6 +1812,9 @@ export class LlmClient {
       // a tool actually removed from the registry is unavailable now.
       if (!toolRegistry.getTool(name)) {
         this.pendingRemovedMcpToolNames.add(name);
+        // The removal is about to be announced; forget the eager-reveal seed
+        // so a later startChat does not re-announce the same removal.
+        this.eagerlyRevealedMcpToolNames.delete(name);
       }
     }
 

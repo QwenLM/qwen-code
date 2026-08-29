@@ -1901,6 +1901,10 @@ export class AgentCore {
       // `toolsList` sent to the model. See `CoreToolSchedulerOptions.hasSkillTool`
       // for why the registry cannot answer this and what the predicate owes.
       hasSkillTool: () => this.canInvokeSkill(declaredToolNames),
+      // The gates above checked the model-emitted name; for tool_call bridge
+      // requests that is the wrapper, so the scheduler re-checks the resolved
+      // target against the same execution allowlist.
+      isToolExecutionAllowed: (name) => this.isToolExecutionAllowed(name),
       outputUpdateHandler: (callId, outputChunk) => {
         // Shell liveness heartbeats have no subagent consumer; broadcasting
         // one would overwrite the live output view kept in liveOutputs.
@@ -2174,6 +2178,11 @@ export class AgentCore {
         for (const req of requests) {
           if (emittedCallIds.has(req.callId)) continue;
           emittedCallIds.add(req.callId);
+          // The synthesized cancelled TOOL_RESULT below already went out for
+          // this callId; drop any pending bridge start so a later scheduler
+          // update cannot emit TOOL_CALL *after* the result (and fire
+          // preToolUse for a call that never runs).
+          pendingToolCallStarts.delete(req.callId);
 
           const executionRequest = executionRequestByCallId.get(req.callId);
           const toolName = executionRequest?.name ?? req.name;

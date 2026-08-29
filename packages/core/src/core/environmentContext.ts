@@ -212,6 +212,25 @@ export function buildDeferredToolsReminder(
     .getDeferredToolSummary()
     .filter((tool) => !toolRegistry.isDeferredToolRevealed(tool.name));
 
+  // Nothing to advertise — return before touching the registry's tool lookup,
+  // which callers with minimal registry stubs (e.g. fork-resume tests) may not
+  // implement.
+  if (deferredTools.length === 0) {
+    return null;
+  }
+
+  // Without both bridge halves there is no discovery or invocation path for
+  // hidden deferred tools: the incomplete-bridge fallback in client.ts eagerly
+  // reveals ordinary deferred tools into the declarations and reports
+  // tools.eager-demoted ones as unreachable, so advertising them here would
+  // send the model to tools it cannot invoke.
+  if (
+    !toolRegistry.getTool(ToolNames.TOOL_SEARCH) ||
+    !toolRegistry.getTool(ToolNames.TOOL_CALL)
+  ) {
+    return null;
+  }
+
   return buildDeferredToolsReminderForSummary(
     deferredTools,
     `The following tools are reachable through \`${ToolNames.TOOL_SEARCH}\` and \`${ToolNames.TOOL_CALL}\`. Review a schema with \`select:<name>\` or a keyword query, then invoke it with \`${ToolNames.TOOL_CALL}\`.`,

@@ -97,9 +97,15 @@ export async function resolveDeferredToolCall(
     };
   }
   if (!target) {
+    // The remedy must not advertise a bridge half that is not registered in
+    // this session (a `tool_search` deny rule or `--exclude-tools tool_search`
+    // leaves tool_call as the only half).
+    const remedy = registry.getTool(ToolNames.TOOL_SEARCH)
+      ? ' Run tool_search again to inspect the available tools.'
+      : ' No deferred-tool discovery is available in this session.';
     return {
       error: new Error(
-        `Deferred tool "${invocation.params.name}" is not registered in this session. Run tool_search again to inspect the available tools.`,
+        `Deferred tool "${invocation.params.name}" is not registered in this session.${remedy}`,
       ),
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,
     };
@@ -110,6 +116,18 @@ export async function resolveDeferredToolCall(
         `Tool "${target.name}" is already visible to the model or is not deferred. Call it directly instead of using tool_call.`,
       ),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+    };
+  }
+  // The bridge has two halves: discovery (tool_search) and invocation
+  // (tool_call). When tool_search is unregistered the hidden target cannot
+  // be reviewed, and client.ts already reports such tools as unreachable for
+  // the session — resolution must agree instead of invoking by name.
+  if (!registry.getTool(ToolNames.TOOL_SEARCH)) {
+    return {
+      error: new Error(
+        `Deferred tool "${target.name}" is unreachable in this session: tool_search is not registered, so the ToolSearch + ToolCall bridge is incomplete and deferred tools cannot be invoked via tool_call.`,
+      ),
+      errorType: ToolErrorType.EXECUTION_DENIED,
     };
   }
   if (isPlanLifecycleToolUnavailableInSubagent(target.name)) {

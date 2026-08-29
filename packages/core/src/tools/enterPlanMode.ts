@@ -174,9 +174,11 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
         }
       }
     } catch (error) {
-      // Non-fatal: log the failure but still return success for
-      // entering plan mode. The model can use ToolSearch + ToolCall if the
-      // reveal failed.
+      // Non-fatal: log the failure but still return success for entering
+      // plan mode. exit_plan_mode is constructed alwaysLoad=true, so its
+      // schema stays declared and the model can call it directly even if the
+      // reveal failed (it is never deferred-and-hidden, so the ToolSearch +
+      // ToolCall bridge cannot serve it).
       debugLogger.warn(
         `[EnterPlanModeTool] Failed to reveal exit_plan_mode: ${error instanceof Error ? error.message : String(error)}`,
       );

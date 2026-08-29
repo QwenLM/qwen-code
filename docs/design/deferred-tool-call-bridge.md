@@ -47,8 +47,10 @@ that contain direct calls to deferred tools. Only `tool_search` stops creating
 new reveal state.
 
 Disabling `tools.toolSearch` also disables `tool_call`; the existing fallback
-continues to declare all deferred schemas eagerly. Permission allowlists keep
-both bridge tools registered unless an explicit deny rule removes them.
+continues to declare ordinary deferred schemas eagerly — tools demoted by
+`tools.eager` stay hidden in that mode and are reported as unreachable
+(per-session warning). Permission allowlists keep both bridge tools registered
+unless an explicit deny rule removes them.
 
 ## Verification
 

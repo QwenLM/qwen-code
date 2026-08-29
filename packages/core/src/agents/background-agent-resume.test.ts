@@ -2785,7 +2785,7 @@ describe('BackgroundAgentResumeService', () => {
       .spyOn(AgentHeadless, 'create')
       .mockResolvedValue(subagent as unknown as AgentHeadless);
 
-    const { service } = createService({
+    const { service, stubToolRegistry } = createService({
       currentForkRuntime: {
         systemInstruction: 'current parent system instruction',
         // SKILL must be in the resolved tool surface so the skills branch of
@@ -2815,6 +2815,15 @@ describe('BackgroundAgentResumeService', () => {
         isSkillActive: vi.fn().mockReturnValue(true),
       },
     });
+
+    // The deferred-tools reminder advertises "invoke it with tool_call", so
+    // model a session where the bridge is registered; buildDeferredToolsReminder
+    // suppresses the reminder when either bridge half is absent.
+    stubToolRegistry.getTool.mockImplementation((name: string) =>
+      name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+        ? ({ name } as never)
+        : undefined,
+    );
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
 
