@@ -7,7 +7,7 @@ import type {
   DaemonSettingUpdateResult,
   DaemonWorkspaceSettingsStatus,
   DaemonWorkspaceProviderStatus,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 import {
   SettingsMessage,
@@ -19,9 +19,11 @@ import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
 // The Daemon category renders LocalControlSettingsCard, which reads the
 // workspace connection from context; stub it so the category can be
 // rendered without a DaemonWorkspaceProvider.
-vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
   return {
     ...actual,
     useWorkspace: () => ({

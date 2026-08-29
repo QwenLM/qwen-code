@@ -342,6 +342,18 @@ describe('createAndAttachSessionForPrompt', () => {
     });
   });
 
+  it('records the host source type so embedded channels stay attributable', async () => {
+    const actions = createActions();
+    await prepareSession({
+      sessionActions: actions,
+      sessionSourceType: 'vscode',
+    });
+    expect(actions.createSession).toHaveBeenCalledWith({
+      workspaceCwd: undefined,
+      sourceType: 'vscode',
+    });
+  });
+
   it('forwards branch to createSession and returns the created branch', async () => {
     const actions = createActions({
       createSession: vi.fn(async () => ({

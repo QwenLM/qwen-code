@@ -65,9 +65,11 @@ vi.mock('./BranchPickerPopover', async () => {
 });
 
 // Mock useWorkspace so BranchPickerPopover can render without a real provider.
-vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
   return {
     ...actual,
     useWorkspace: () => ({
