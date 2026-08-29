@@ -15,11 +15,13 @@ vi.mock('../BranchPickerPopover', async () => {
       open,
       onOpenChange,
       side,
+      status,
     }: {
       children: ReactNode;
       open: boolean;
       onOpenChange: (open: boolean) => void;
       side?: string;
+      status?: { branch: string | null; operation?: string };
     }) =>
       createElement(
         'div',
@@ -27,6 +29,8 @@ vi.mock('../BranchPickerPopover', async () => {
           'data-testid': 'branch-picker',
           'data-open': open,
           'data-side': side,
+          'data-status-branch': status?.branch ?? undefined,
+          'data-status-operation': status?.operation ?? undefined,
           onClick: () => onOpenChange(true),
         },
         children,
@@ -124,6 +128,26 @@ describe('EnvironmentPanel', () => {
     expect(view.textContent).toContain('Environment');
     expect(view.textContent).toContain('Unavailable');
     expect(view.textContent).not.toContain('Clean');
+  });
+
+  it('hands its git status to the branch picker for the action hints', () => {
+    const view = mount({
+      gitWorkspaceCwd: '/work/qwen-code',
+      gitCwd: '/work/qwen-code',
+      gitStatus: {
+        v: 2,
+        workspaceCwd: '/work/qwen-code',
+        branch: 'feat/context-panels',
+        operation: 'rebase',
+        computedAt: 1,
+      },
+    });
+
+    const picker = view.querySelector('[data-testid="branch-picker"]');
+    expect(picker?.getAttribute('data-status-branch')).toBe(
+      'feat/context-panels',
+    );
+    expect(picker?.getAttribute('data-status-operation')).toBe('rebase');
   });
 
   it('opens the branch actions without dismissing a floating panel', () => {

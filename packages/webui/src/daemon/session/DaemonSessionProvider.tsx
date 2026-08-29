@@ -24,6 +24,7 @@ import {
   createDaemonTranscriptStore,
   estimateDaemonTranscriptBlockBytes,
   extractServerTimestamp,
+  isTaskExecutionMode,
   isTrimmedPermissionBlockId,
   isTrimmedToolBlockId,
   isUnrecognizedDiagnosticReason,
@@ -518,6 +519,7 @@ function projectSubagentToolUpdate(
   const subagentColor = boundedString(rawOutput?.['subagentColor'], 80);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
   const status = boundedString(rawOutput?.['status'], 80);
+  const executionMode = rawOutput?.['executionMode'];
   const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
   const skills = Array.isArray(rawOutput?.['skills'])
     ? rawOutput['skills']
@@ -548,6 +550,7 @@ function projectSubagentToolUpdate(
         ...(subagentColor ? { subagentColor } : {}),
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
+        ...(isTaskExecutionMode(executionMode) ? { executionMode } : {}),
         ...(terminateReason ? { terminateReason } : {}),
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }

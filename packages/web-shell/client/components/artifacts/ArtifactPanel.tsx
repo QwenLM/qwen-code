@@ -93,6 +93,7 @@ import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
 import { SubagentDetail } from './SubagentDetail';
 import { SideTaskPanel } from './SideTaskPanel';
 import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
+import { TerminalPanel } from '../terminal/TerminalPanel';
 import { TokenUsagePanel } from './TokenUsagePanel';
 import {
   useArtifactWorkspaceTarget,
@@ -211,6 +212,12 @@ export type ArtifactPanelTab =
     }
   | {
       id: string;
+      kind: 'terminal';
+      title: string;
+      workspaceCwd?: string;
+    }
+  | {
+      id: string;
       kind: 'token_usage';
       title: string;
       sessionId?: string;
@@ -271,6 +278,8 @@ interface ArtifactPanelProps {
   ) => void;
   latestReviewAvailable?: boolean;
   onOpenLatestReview?: () => void;
+  /** Open an interactive terminal tab in this panel (shown as an empty-state action). */
+  onOpenTerminal?: () => void;
   items?: readonly WebShellRightPanelItem[];
   sideTaskAvailable?: boolean;
   sideTasks?: readonly SideTaskListItem[];
@@ -330,6 +339,7 @@ export function ArtifactPanel({
   onOpenFilePreview,
   latestReviewAvailable = false,
   onOpenLatestReview,
+  onOpenTerminal,
   items = DEFAULT_RIGHT_PANEL_ITEMS,
   sideTaskAvailable = false,
   sideTasks = [],
@@ -401,8 +411,10 @@ export function ArtifactPanel({
     items.includes('sideTask') &&
     sideTaskAvailable &&
     Boolean(onCreateSideTask);
+  const showTerminalMenuItem = Boolean(onOpenTerminal);
   const showAddMenu =
-    Boolean(activeTab) && (showReviewMenuItem || showSideTaskMenuItems);
+    Boolean(activeTab) &&
+    (showReviewMenuItem || showSideTaskMenuItems || showTerminalMenuItem);
   const activeWorkspaceIdentity =
     activeTab && isWorkspaceScopedTab(activeTab)
       ? {
@@ -482,6 +494,11 @@ export function ArtifactPanel({
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
+                    ) : tab.kind === 'terminal' ? (
+                      <SquareTerminalIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
                     ) : tab.kind === 'image' ? (
                       <ImageIcon
                         className={styles.tabIconSvg}
@@ -554,6 +571,22 @@ export function ArtifactPanel({
                     </span>
                   </DropdownMenuItem>
                 )}
+                {showTerminalMenuItem &&
+                  (showReviewMenuItem || showSideTaskMenuItems) && (
+                    <DropdownMenuSeparator />
+                  )}
+                {showTerminalMenuItem && (
+                  <DropdownMenuItem onSelect={() => onOpenTerminal?.()}>
+                    <SquareTerminalIcon
+                      className={styles.sideTaskNewIcon}
+                      strokeWidth={1.6}
+                      aria-hidden="true"
+                    />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('terminal.title')}
+                    </span>
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           )}
@@ -594,6 +627,23 @@ export function ArtifactPanel({
           activeTab?.kind === 'side_task' ? styles.bodySideTask : ''
         }`.trim()}
       >
+        {tabs
+          .filter((tab) => tab.kind === 'terminal')
+          .map((tab) => (
+            <div
+              key={tab.id}
+              className={`${styles.terminalPane} ${
+                tab.id === activeTab?.id ? '' : styles.terminalPaneHidden
+              }`.trim()}
+              aria-hidden={tab.id === activeTab?.id ? undefined : true}
+            >
+              <TerminalPanel
+                terminalId={tab.id}
+                cwd={tab.workspaceCwd ?? workspaceCwd}
+                active={tab.id === activeTab?.id}
+              />
+            </div>
+          ))}
         {canPreviewAttachment && (
           <button
             type="button"
@@ -622,7 +672,7 @@ export function ArtifactPanel({
             )}
           </button>
         )}
-        {!activeTab ? (
+        {activeTab?.kind === 'terminal' ? null : !activeTab ? (
           <div
             className={styles.emptyActions}
             data-testid="right-panel-empty-actions"
@@ -744,6 +794,28 @@ export function ArtifactPanel({
                   </DropdownMenuContent>
                 </DropdownMenu>
               ))}
+            {onOpenTerminal && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                onClick={() => onOpenTerminal()}
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <SquareTerminalIcon strokeWidth={1.6} />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('terminal.title')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('terminal.open')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
           </div>
         ) : activeTab.kind === 'workflow' ? (
           workflow ? (

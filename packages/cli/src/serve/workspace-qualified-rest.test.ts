@@ -1626,7 +1626,7 @@ describe('workspace-qualified core REST', () => {
         )
         .set('Authorization', 'Bearer secret')
         .set('Host', host())
-        .send({ content: 'Secondary only' });
+        .send({ content: 'Secondary only', scope: 'project' });
       expect(queued.status).toBe(202);
 
       await vi.waitFor(() => {
@@ -1635,6 +1635,7 @@ describe('workspace-qualified core REST', () => {
         ).toHaveBeenCalledWith({
           content: 'Secondary only',
           contextMode: 'workspace',
+          scope: 'project',
         });
       });
       expect(h.primaryBridge.runWorkspaceMemoryRemember).not.toHaveBeenCalled();
@@ -1651,18 +1652,60 @@ describe('workspace-qualified core REST', () => {
         result: { touchedScopes: ['project'] },
       });
 
+      const userScope = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Shared preference', scope: 'user' });
+      expect(userScope.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(
+          h.secondaryBridge.runWorkspaceMemoryRemember,
+        ).toHaveBeenNthCalledWith(2, {
+          content: 'Shared preference',
+          contextMode: 'workspace',
+          scope: 'user',
+        });
+      });
+
+      const invalidScope = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/memory/remember`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ content: 'Wrong scope', scope: 'global' });
+      expect(invalidScope.status).toBe(400);
+      expect(invalidScope.body).toMatchObject({ code: 'invalid_scope' });
+      expect(
+        h.secondaryBridge.runWorkspaceMemoryRemember,
+      ).toHaveBeenCalledTimes(2);
+
       const forget = await request(h.app)
         .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/forget`)
         .set('Authorization', 'Bearer secret')
         .set('Host', host())
-        .send({ query: 'Secondary only' });
+        .send({ query: 'Secondary only', scope: 'user' });
       expect(forget.status).toBe(202);
       await vi.waitFor(() => {
         expect(h.secondaryBridge.runWorkspaceMemoryForget).toHaveBeenCalledWith(
-          { query: 'Secondary only' },
+          { query: 'Secondary only', scope: 'user' },
         );
       });
       expect(h.primaryBridge.runWorkspaceMemoryForget).not.toHaveBeenCalled();
+
+      const invalidForgetScope = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/forget`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ query: 'Wrong scope', scope: 'global' });
+      expect(invalidForgetScope.status).toBe(400);
+      expect(invalidForgetScope.body).toMatchObject({ code: 'invalid_scope' });
+      expect(h.secondaryBridge.runWorkspaceMemoryForget).toHaveBeenCalledTimes(
+        1,
+      );
 
       const dream = await request(h.app)
         .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/dream`)

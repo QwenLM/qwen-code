@@ -13,6 +13,7 @@ import {
   hashDaemonWorkspace,
   readCronTasks,
   Storage,
+  WebTerminalRegistry,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
@@ -60,6 +61,7 @@ import {
   type ExtraWsRoute,
 } from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
+import { createTerminalWsHandler } from './routes/terminal.js';
 import {
   ClientMcpSenderRegistry,
   createClientMcpServerProvider,
@@ -245,6 +247,7 @@ import {
   type WorkspaceManagementHandle,
   type WorkspaceRuntimeRemovalController,
 } from './routes/workspace-management.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   registerWorkspaceGitRoutes,
@@ -590,6 +593,12 @@ export interface ServeAppDeps {
   ) => Promise<void>;
   sessionArtifactsPersistenceAvailable?: boolean;
   /**
+   * Test/embed override for the native directory picker probe. Production
+   * evaluates `isNativeDirectoryPickerAvailable()`; tests pin this so the
+   * capability wiring is assertable on headless hosts too.
+   */
+  nativeDirectoryPickerAvailable?: boolean;
+  /**
    * Reverse tool channel (issue #5626, Phase 2). Shared sender registry that
    * bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
    * child's `client_mcp/message` ext-method. `runQwenServe` constructs ONE and
@@ -894,6 +903,15 @@ export function createServeApp(
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  const webTerminalRegistry = new WebTerminalRegistry();
+  const webTerminalLocals = app.locals as {
+    stopWebTerminalRegistry?: () => void;
+    releaseWebTerminalsForWorkspace?: (workspaceCwd: string) => void;
+  };
+  webTerminalLocals.stopWebTerminalRegistry = () =>
+    webTerminalRegistry.dispose();
+  webTerminalLocals.releaseWebTerminalsForWorkspace = (workspaceCwd) =>
+    webTerminalRegistry.releaseWorkspace(workspaceCwd);
   const acpHttpEnabledAtBoot = resolveAcpHttpEnabled(daemonEnvAtBoot);
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
   const liveVoiceSurfaceAvailable =
@@ -1007,6 +1025,9 @@ export function createServeApp(
       acpHttpEnabled: acpHttpEnabledAtBoot,
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
+      nativeDirectoryPickerAvailable:
+        deps.nativeDirectoryPickerAvailable ??
+        isNativeDirectoryPickerAvailable(),
       workspaceTrustHotReloadAvailable:
         deps.workspaceTrustHotReloadAvailable === true,
       isPrimaryWorkspaceTrusted: () => isPrimaryWorkspaceTrusted(),
@@ -3094,6 +3115,22 @@ export function createServeApp(
           acquireVoiceLease: acquirePrimaryVoiceLease,
         }),
       },
+      createTerminalWsHandler(webTerminalRegistry, (selector) => {
+        const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
+          workspaceRegistry,
+          selector,
+        );
+        if (
+          !runtime ||
+          (runtime.primary ? !isPrimaryWorkspaceTrusted() : !runtime.trusted)
+        ) {
+          return undefined;
+        }
+        return {
+          workspaceCwd: runtime.workspaceCwd,
+          env: getRuntimeEffectiveEnv(runtime.env) ?? daemonEnvAtBoot,
+        };
+      }),
     ],
     workspaceVoiceConnection: (runtime, ws, req) =>
       createVoiceWsConnectionHandler(runtime.workspaceCwd, {
@@ -3184,6 +3221,7 @@ export function createServeApp(
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());
+      stopAppResource(() => webTerminalRegistry.dispose());
       const drains = await Promise.allSettled(pendingDrains);
       stopAppResource(() => acpHandleRef.current?.dispose());
       const bridgeDrains = await Promise.allSettled(

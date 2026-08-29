@@ -1168,6 +1168,21 @@ function discardToolBlock(
   }
 }
 
+/**
+ * The task-display projection carries exactly these two `executionMode`
+ * literals. Fail closed: any other value (corrupted recording, future runtime
+ * mode) must fall back to the legacy argument/status heuristic instead of
+ * forcing a classification. Both consumer-side whitelists — webui's
+ * `projectSubagentToolUpdate` and web-shell's `daemonToolBlockToToolCall` —
+ * call this single guard so live-summary and recorded-transcript clients
+ * accept the same literal set; when a third mode lands, extend it here once.
+ */
+export function isTaskExecutionMode(
+  value: unknown,
+): value is 'foreground' | 'background' {
+  return value === 'foreground' || value === 'background';
+}
+
 function compactTaskExecutionOutput(
   rawOutput: unknown,
   retainSubagentBlocks: boolean,
@@ -1185,6 +1200,7 @@ function compactTaskExecutionOutput(
     'subagentColor',
     'taskDescription',
     'status',
+    'executionMode',
     'terminateReason',
     'tokenCount',
     'executionSummary',
