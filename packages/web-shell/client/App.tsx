@@ -142,6 +142,7 @@ import {
   type ArtifactPanelTab,
   type SideTaskListItem,
 } from './components/artifacts/ArtifactPanel';
+import { releaseWebTerminal } from './components/terminal/TerminalPanel';
 import { Drawer, DrawerContent, DrawerTitle } from './components/ui/drawer';
 import type {
   TurnOutputFileChange,
@@ -366,6 +367,14 @@ const MIN_CHAT_PANE_WIDTH_WITH_ARTIFACT_PANEL = 500;
 const SUBAGENT_PANEL_ANIMATION_FALLBACK_MS = 700;
 const MIN_DOCKED_MESSAGE_AREA_WIDTH = 800;
 const DOCKED_ENVIRONMENT_PANEL_WIDTH = 332;
+
+function isWebTerminalTarget(event: Event): boolean {
+  const target = event.composedPath()[0] ?? event.target;
+  return (
+    target instanceof Element && target.closest('[data-web-terminal]') !== null
+  );
+}
+
 // The docked fullscreen surface contains Tab itself instead of going through
 // Radix FocusScope: FocusScope registers every mounted scope in a
 // module-global stack and pauses the current head even with trapped={false},
@@ -968,6 +977,8 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
+  /** Host-specific label for the Ask User Question free-text choice. */
+  askUserFreeTextLabel?: string;
   /** Called whenever the attached daemon session or workspace changes. */
   onSessionIdChange?: (
     sessionId: string | undefined,
@@ -1999,6 +2010,7 @@ function readScopedModelSetting(
 }
 
 export function App({
+  askUserFreeTextLabel,
   onSessionIdChange,
   onSessionInfoChange,
   onSessionCreated,
@@ -2166,6 +2178,7 @@ export function App({
     if (!mobileDrawerOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
+      if (isWebTerminalTarget(e)) return;
       // A pending tool/permission approval owns Escape (it rejects the call),
       // so don't let the drawer swallow it while a prompt is visible.
       if (pendingApprovalRef.current) return;
@@ -2224,6 +2237,7 @@ export function App({
     if (!sidebarOptions.enabled) return undefined;
     const onKey = (e: KeyboardEvent) => {
       if (!isSidebarToggleShortcut(e)) return;
+      if (isWebTerminalTarget(e)) return;
       // The composer keeps the editor-convention behavior (VS Code toggles
       // the sidebar while the editor is focused), but other editable targets
       // — sidebar search, session rename, settings inputs — must not have
@@ -2270,6 +2284,7 @@ export function App({
   ]);
   const customization = useMemo(
     () => ({
+      askUserFreeTextLabel,
       composerTagIcons,
       builtinAtProviders,
       atProviders,
@@ -2297,6 +2312,7 @@ export function App({
       fileUploadDirectory,
     }),
     [
+      askUserFreeTextLabel,
       composerTagIcons,
       builtinAtProviders,
       atProviders,
@@ -2478,6 +2494,11 @@ export function App({
     ) === true;
   const workspaceDisplayNameSupported =
     workspace.capabilities?.features?.includes('workspace_display_name') ===
+    true;
+  // Headless daemon hosts omit the tag so the Browse affordance stays
+  // hidden instead of failing on every click.
+  const nativeDirectoryPickerSupported =
+    workspace.capabilities?.features?.includes('native_directory_picker') ===
     true;
   const gitHubPrsSupported =
     workspace.capabilities?.features?.includes('workspace_github_prs') === true;
@@ -3136,6 +3157,11 @@ export function App({
             .keys()
             .next().value;
           if (oldestSessionId) {
+            const oldestState =
+              artifactPanelStateBySessionRef.current.get(oldestSessionId);
+            for (const tab of oldestState?.tabs ?? []) {
+              if (tab.kind === 'terminal') releaseWebTerminal(tab.id);
+            }
             artifactPanelStateBySessionRef.current.delete(oldestSessionId);
           }
         }
@@ -3174,6 +3200,9 @@ export function App({
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
+  const webTerminalAvailable =
+    rightPanelItems.includes('terminal') &&
+    connection.capabilities?.features.includes('web_terminal') === true;
   const [sideTaskCatalog, setSideTaskCatalog] = useState<SideTaskCatalogState>({
     items: [],
     loaded: false,
@@ -3217,6 +3246,22 @@ export function App({
     if (createSideTask()) return;
     pushToast('error', t('sideTask.createFailed'));
   }, [createSideTask, pushToast, t]);
+  const openTerminalTab = useCallback(() => {
+    const id = `terminal:${crypto.randomUUID()}`;
+    const count = artifactPanelTabsRef.current.filter(
+      (tab) => tab.kind === 'terminal',
+    ).length;
+    const base = t('terminal.title');
+    const tab: ArtifactPanelTab = {
+      id,
+      kind: 'terminal',
+      title: count === 0 ? base : `${base} (${count + 1})`,
+      workspaceCwd: connection.workspaceCwd,
+    };
+    setArtifactPanelTabs((tabs) => [...tabs, tab]);
+    setActiveArtifactPanelTabId(tab.id);
+    setArtifactPanelOpen(true);
+  }, [connection.workspaceCwd, t]);
   const createSideTaskSession = useCallback(
     async (_tabId: string, parentSessionId: string, title: string) => {
       const ownerCwd = connection.workspaceCwd;
@@ -4063,6 +4108,11 @@ export function App({
   }, [artifactPanelOpen, artifactPanelFullscreen]);
   const closeArtifactPanelTabs = useCallback((tabIds: ReadonlySet<string>) => {
     if (tabIds.size === 0) return;
+    for (const tab of artifactPanelTabsRef.current) {
+      if (tabIds.has(tab.id) && tab.kind === 'terminal') {
+        releaseWebTerminal(tab.id);
+      }
+    }
     setArtifactPanelTabs((tabs) => {
       const nextTabs = tabs.filter((tab) => !tabIds.has(tab.id));
       if (nextTabs.length === tabs.length) return tabs;
@@ -7293,7 +7343,8 @@ export function App({
 
   useEffect(() => {
     const onBtwShortcut = (e: KeyboardEvent) => {
-      if (interactionBlocked || pendingApproval) return;
+      if (interactionBlocked || pendingApproval || isWebTerminalTarget(e))
+        return;
       const message = btwMessage;
       if (!message || message.role !== 'btw') return;
 
@@ -11121,7 +11172,7 @@ export function App({
 
   useEffect(() => {
     const onGlobalShortcut = (e: KeyboardEvent) => {
-      if (interactionBlocked) return;
+      if (interactionBlocked || isWebTerminalTarget(e)) return;
       if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         if (e.key === 'l') {
           e.preventDefault();
@@ -11208,7 +11259,13 @@ export function App({
     const onKeyDown = (e: KeyboardEvent) => {
       // keyCode 229: WebKit marks IME-owned keys this way while isComposing
       // is still false; the IME owns them exactly like composing keys.
-      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      if (
+        e.defaultPrevented ||
+        e.isComposing ||
+        e.keyCode === 229 ||
+        isWebTerminalTarget(e)
+      )
+        return;
       const live = escLiveRef.current;
 
       // The fullscreen right panel (artifacts/subagents) is the topmost
@@ -12376,10 +12433,15 @@ export function App({
               onClose={() => setShowAddWorkspaceDialog(false)}
               onAdd={handleAddWorkspace}
               onSuggest={workspaceActions.suggestWorkspacePaths}
-              onPick={async () => {
-                const result = await workspaceActions.pickWorkspaceDirectory();
-                return result.selected ? result.path : undefined;
-              }}
+              onPick={
+                nativeDirectoryPickerSupported
+                  ? async () => {
+                      const result =
+                        await workspaceActions.pickWorkspaceDirectory();
+                      return result.selected ? result.path : undefined;
+                    }
+                  : undefined
+              }
               persistenceSupported={
                 persistentWorkspaceRegistrationSupported
               }
@@ -13503,6 +13565,7 @@ export function App({
                             onError={reportError}
                             variant="floating"
                             keyboardActive={askUserOverlayVisible}
+                            customInputLabel={askUserFreeTextLabel}
                           />
                         </div>
                       )}
@@ -13967,6 +14030,10 @@ export function App({
                       : 'data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]'
                   }
                   onEscapeKeyDown={(event) => {
+                    if (isWebTerminalTarget(event)) {
+                      event.preventDefault();
+                      return;
+                    }
                     if (event.isComposing || event.keyCode === 229) {
                       // IME owns Escape; keep the dismiss layer from acting
                       // on it. The preserveImeEscape mask above normally
@@ -13986,6 +14053,9 @@ export function App({
                   <WebShellCustomizationProvider value={customization}>
                     <ArtifactPanel
                       {...artifactPanelSharedProps}
+                      onOpenTerminal={
+                        webTerminalAvailable ? openTerminalTab : undefined
+                      }
                       variant="drawer"
                     />
                   </WebShellCustomizationProvider>
@@ -14055,6 +14125,9 @@ export function App({
                     <div className={styles.artifactPanelClip}>
                       <ArtifactPanel
                         {...artifactPanelSharedProps}
+                        onOpenTerminal={
+                          webTerminalAvailable ? openTerminalTab : undefined
+                        }
                         panelWidth={artifactPanelWidth}
                       />
                     </div>

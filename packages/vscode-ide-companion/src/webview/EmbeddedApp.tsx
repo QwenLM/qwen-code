@@ -38,6 +38,7 @@ import {
 import { resolveFileLinkFromAnchor } from './utils/fileLinks.js';
 
 const SESSION_SWITCH_TIMEOUT_MS = 15_000;
+const SESSION_SWITCH_MIN_VISIBLE_MS = 120;
 
 const COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
@@ -251,7 +252,7 @@ interface InsightProgress {
 }
 
 interface EditingMessage {
-  turnIndex: number;
+  turnIndex?: number;
 }
 
 function isAutomaticApprovalMode(modeId: unknown): boolean {
@@ -317,6 +318,12 @@ export function EmbeddedApp() {
   const [switchingSessionId, setSwitchingSessionId] = useState<string>();
   const [creatingSession, setCreatingSession] = useState(false);
   const [editingMessage, setEditingMessage] = useState<EditingMessage>();
+  const latestSubmittedPromptRef = useRef<{
+    sessionId: string;
+    prompt: string;
+  }>();
+  const sessionSwitchStartedAtRef = useRef(0);
+  const sessionSwitchTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const historyButtonRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<WebShellApi | null>(null);
   const composerRef = useRef<WebShellComposerApi | null>(null);
@@ -346,6 +353,15 @@ export function EmbeddedApp() {
     composerRef.current?.clear({ text: true, tags: true });
     composerRef.current?.focus?.();
   }, []);
+
+  useEffect(
+    () => () => {
+      if (sessionSwitchTimerRef.current) {
+        clearTimeout(sessionSwitchTimerRef.current);
+      }
+    },
+    [],
+  );
 
   // Web Shell reports each distinct connection error value only once, so a
   // new identity here (e.g. when `t` is rebuilt on a language switch) re-runs
@@ -844,12 +860,15 @@ export function EmbeddedApp() {
             setEditingMessage(undefined);
             composerRef.current?.clear({ text: true, tags: true });
             setSwitchingSessionId(session.sessionId);
+            sessionSwitchStartedAtRef.current = Date.now();
             setSessionTitle(session.displayName || t('session.past'));
-            setRuntime((current) =>
-              current && current.sessionId !== session.sessionId
-                ? { ...current, sessionId: session.sessionId }
-                : current,
-            );
+            requestAnimationFrame(() => {
+              setRuntime((current) =>
+                current && current.sessionId !== session.sessionId
+                  ? { ...current, sessionId: session.sessionId }
+                  : current,
+              );
+            });
           }}
           onRename={async (session, title) => {
             if (!daemonClient || !runtime.workspaceCwd) return;
@@ -1279,7 +1298,18 @@ export function EmbeddedApp() {
                 : current,
             );
             if (sessionId === switchingSessionId) {
-              setSwitchingSessionId(undefined);
+              const remaining = Math.max(
+                0,
+                SESSION_SWITCH_MIN_VISIBLE_MS -
+                  (Date.now() - sessionSwitchStartedAtRef.current),
+              );
+              if (sessionSwitchTimerRef.current) {
+                clearTimeout(sessionSwitchTimerRef.current);
+              }
+              sessionSwitchTimerRef.current = setTimeout(() => {
+                setSwitchingSessionId(undefined);
+                sessionSwitchTimerRef.current = undefined;
+              }, remaining);
             }
           }}
           onSessionInfoChange={({ sessionId, sessionName }) => {
@@ -1301,6 +1331,7 @@ export function EmbeddedApp() {
           composerToolbarActions={COMPOSER_TOOLBAR_ACTIONS}
           compactComposerOverlays
           autoSubmitSlashCommands
+          askUserFreeTextLabel={t('askUser.other')}
           additionalSlashCommands={slashCommands}
           hiddenSlashCommands={[...VSCODE_HIDDEN_SLASH_COMMANDS]}
           onSlashCommand={({ command, input }) => {
@@ -1325,11 +1356,28 @@ export function EmbeddedApp() {
           userMessageEditing
           cycleModeOnTab
           onUserMessageEditRequest={(turnIndex, content) => {
+            const queuedPrompt = latestSubmittedPromptRef.current;
+            const editsQueuedPrompt =
+              queuedPrompt?.sessionId === runtime.sessionId &&
+              queuedPrompt.prompt !== content;
+            const editContent = editsQueuedPrompt
+              ? queuedPrompt.prompt
+              : content;
             composerRef.current?.clear({ text: true, tags: true });
-            composerRef.current?.setText(content);
+            composerRef.current?.setText(editContent);
             composerRef.current?.focus?.();
-            setEditingMessage({ turnIndex });
+            setEditingMessage({
+              turnIndex: editsQueuedPrompt ? undefined : turnIndex,
+            });
             return true;
+          }}
+          onSessionChange={(event) => {
+            if (event.type === 'submit') {
+              latestSubmittedPromptRef.current = {
+                sessionId: event.sessionId,
+                prompt: event.prompt,
+              };
+            }
           }}
           messageTurnOutputs={['file']}
           onFileReviewOpen={openReviewDiff}
@@ -1352,9 +1400,18 @@ export function EmbeddedApp() {
               }
               const { snapshots } =
                 await daemonClient.getRewindSnapshots(sessionId);
-              const snapshot = snapshots.find(
-                (entry) => entry.turnIndex === editingMessage.turnIndex,
-              );
+              const snapshot =
+                editingMessage.turnIndex === undefined
+                  ? snapshots.reduce<(typeof snapshots)[number] | undefined>(
+                      (latest, entry) =>
+                        !latest || entry.turnIndex > latest.turnIndex
+                          ? entry
+                          : latest,
+                      undefined,
+                    )
+                  : snapshots.find(
+                      (entry) => entry.turnIndex === editingMessage.turnIndex,
+                    );
               if (!snapshot) {
                 throw new Error(t('composer.editExpired'));
               }
