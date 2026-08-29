@@ -1559,14 +1559,14 @@ export const ORPHAN_TOOL_USE_REPAIR_REASON =
  * --- Partial-push marker lifecycle ---------------------------------------
  *
  * Set together on (streamError + hasToolCall + hasContent) inside
- * `processStreamResponse`. Cleared together by `popPartialIfPushed` on a
+ * `processStreamResponse`. Cleared together by `popPendingPartialAssistantTurn` on a
  * retryable error rollback, or flushed together to JSONL by the outer
  * `finally` after the retry loop exits. Defense-in-depth: every
  * history-mutation method (clearHistory / addHistory / setHistory /
  * truncateHistory / stripThoughtsFromHistory /
  * stripOrphanedUserEntriesFromHistory) resets both markers in lockstep so
  * a stale index can't shift onto an unrelated model turn and cause
- * `popPartialIfPushed` to splice the wrong entry. Any single-field reset
+ * `popPendingPartialAssistantTurn` to splice the wrong entry. Any single-field reset
  * is a bug.
  * ============================================================================
  */
@@ -3780,7 +3780,7 @@ export class LlmChat {
           // Pop the partial `model[fc]` FIRST (if processStreamResponse
           // pushed one before re-throwing), THEN the recovery user turn.
           // Reversed order would strand `OUTPUT_RECOVERY_MESSAGE` as a real
-          // user turn. Index-checked pop mirrors `popPartialIfPushed`
+          // user turn. Index-checked pop mirrors `popPendingPartialAssistantTurn`
           // above — see the design note above
           // `ORPHAN_TOOL_USE_REPAIR_REASON` for the wedge mechanism and
           // the partial-push marker lifecycle.
@@ -4740,7 +4740,7 @@ export class LlmChat {
   clearHistory(): void {
     this.history = [];
     // Any pending partial-push state points into the now-empty history;
-    // resetting prevents `popPartialIfPushed` from splicing whatever
+    // resetting prevents `popPendingPartialAssistantTurn` from splicing whatever
     // shows up at that index in a future send (defense-in-depth — the
     // helper also bounds-checks, but a stale marker that happens to
     // line up with a real model turn could otherwise pop the wrong
@@ -4894,7 +4894,7 @@ export class LlmChat {
     this.history = history;
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The
-    // marker MUST be cleared — otherwise `popPartialIfPushed` could find
+    // marker MUST be cleared — otherwise `popPendingPartialAssistantTurn` could find
     // a model turn at the stale index in the replacement history and
     // splice an entry that has nothing to do with the original partial
     // push, corrupting the conversation. Drop the paired deferred-record
@@ -5672,7 +5672,7 @@ export class LlmChat {
       if (streamError !== null) {
         // Stream-error + tool-use partial: defer the JSONL append until
         // the outer retry loop decides whether to roll back this attempt.
-        // If the same send retries successfully, popPartialIfPushed clears
+        // If the same send retries successfully, popPendingPartialAssistantTurn clears
         // this stash and the failed attempt never lands on disk; if the
         // retry path doesn't apply (unretryable break), the stash is
         // flushed at the rethrow site so JSONL stays aligned with the

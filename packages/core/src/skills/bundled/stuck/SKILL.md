@@ -60,13 +60,13 @@ grep -El '"pid"[[:space:]]*:[[:space:]]*<pid>\b' "$RUNTIME_DIR"/projects/*/chats
 
 Note: as in step 2, the `command=` column may include credentials passed as CLI args (e.g., `--openai-api-key=sk-…`). Redact such values to `***` before quoting them in the report.
 
-`-E` is required so `\b` is interpreted as word boundary (BSD `grep` without `-E` treats `\b` as a backspace character, silently returning nothing on macOS). The `-l` flag returns the matching sidecar file path; the basename (stripped of `.runtime.json`) is the session ID for step 3's debug log read. If multiple sidecars match (rare — happens only after PID reuse leaves a stale file), prefer the most recently modified one: `ls -t <matches> | head -n 1`.
+`-E` is required so `\b` is interpreted as word boundary (BSD `grep` without `-E` treats `\b` as a backspace character, silently returning nothing on macOS). The `-l` flag returns the matching sidecar file path; read the `session_id` field from the JSON for step 3's debug log read. If multiple sidecars match, prefer the most recently modified one: `ls -t <matches> | head -n 1`.
 
 Otherwise (no arg, or symptom-only arg), run the general path below:
 
 1. **Enumerate live sessions via the runtime sidecar** (preferred, reliable):
 
-   Qwen Code writes a `runtime.json` sidecar for each interactive session at `"$RUNTIME_DIR"/projects/<sanitized-cwd>/chats/<sessionId>.runtime.json`. Each file contains `{schema_version, pid, session_id, work_dir, hostname, started_at, qwen_version}` — the authoritative source of `(pid, session_id, work_dir)` mappings.
+   Qwen Code writes a runtime sidecar for each interactive session at `"$RUNTIME_DIR"/projects/<sanitized-cwd>/chats/<sessionId>.<pid>.runtime.json`. Each file contains `{schema_version, pid, session_id, work_dir, hostname, started_at, qwen_version}` — the authoritative source of `(pid, session_id, work_dir)` mappings.
 
    Filter to live `(pid, sidecar-path)` pairs in one shot. Use Node (guaranteed available — qwen-code requires it) instead of `jq` (often missing on default macOS / minimal Linux) so this path doesn't silently degrade:
 

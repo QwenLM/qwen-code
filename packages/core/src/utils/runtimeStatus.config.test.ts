@@ -126,7 +126,7 @@ describe('Config.startNewSession runtime.json swap', () => {
     const chatsDir = path.dirname(aPath);
     const entries = await readdir(chatsDir);
     expect(entries.filter((e) => e.endsWith('.runtime.json'))).toEqual([
-      `${sessionA}.runtime.json`,
+      `${sessionA}.${process.pid}.runtime.json`,
     ]);
   });
 });
@@ -217,10 +217,21 @@ describe('Config.startNewSession session-registry patch', () => {
 });
 
 describe('Storage.getRuntimeStatusPath', () => {
-  it('co-locates the sidecar under <projectDir>/chats/', () => {
+  it('co-locates this process sidecar under <projectDir>/chats/', () => {
     const storage = new Storage(tmpDir);
     const p = storage.getRuntimeStatusPath('abc-123');
-    expect(p.endsWith(path.join('chats', 'abc-123.runtime.json'))).toBe(true);
+    expect(
+      p.endsWith(path.join('chats', `abc-123.${process.pid}.runtime.json`)),
+    ).toBe(true);
+    expect(p.startsWith(storage.getProjectDir())).toBe(true);
+  });
+
+  it('can address another pid claim for the same session', () => {
+    const storage = new Storage(tmpDir);
+    const p = storage.getRuntimeStatusPathForPid('abc-123', 12345);
+    expect(p.endsWith(path.join('chats', 'abc-123.12345.runtime.json'))).toBe(
+      true,
+    );
     expect(p.startsWith(storage.getProjectDir())).toBe(true);
   });
 });

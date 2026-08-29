@@ -1256,18 +1256,22 @@ export class Storage {
   }
 
   /**
-   * Path to the runtime-status sidecar JSON for this session.
+   * Path to this process's runtime-status sidecar JSON for this session.
    *
    * Co-located with the per-session chat log under
-   * `<projectDir>/chats/<sessionId>.runtime.json` so external observers
+   * `<projectDir>/chats/<sessionId>.<pid>.runtime.json` so external observers
    * (terminal multiplexers, IDE integrations, status daemons) can scan
    * the same directory used for chat history to find live sessions.
    */
   getRuntimeStatusPath(sessionId: string): string {
+    return this.getRuntimeStatusPathForPid(sessionId, process.pid);
+  }
+
+  getRuntimeStatusPathForPid(sessionId: string, pid: number): string {
     return path.join(
       this.getProjectDir(),
       'chats',
-      `${sessionId}.runtime.json`,
+      `${sessionId}.${pid}.runtime.json`,
     );
   }
 
