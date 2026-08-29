@@ -15,6 +15,7 @@ type Logger = (message: string) => void;
 
 export const runQwenCodeCommand = 'qwen-code.runQwenCode';
 export const showDiffCommand = 'qwenCode.showDiff';
+export const closeDiffCommand = 'qwenCode.closeDiff';
 export const openChatCommand = 'qwen-code.openChat';
 export const openNewChatTabCommand = 'qwenCode.openNewChatTab';
 export const authCommand = 'qwen-code.auth';
@@ -72,6 +73,14 @@ export function registerNewCommands(
           vscode.window.showErrorMessage(`Failed to show diff: ${errorMsg}`);
         }
       },
+    ),
+  );
+
+  disposables.push(
+    vscode.commands.registerCommand(
+      closeDiffCommand,
+      async (filePath: string) =>
+        diffManager.closeDiff(resolveWorkspacePath(filePath), true),
     ),
   );
 
