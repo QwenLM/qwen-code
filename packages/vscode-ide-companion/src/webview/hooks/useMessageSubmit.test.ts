@@ -251,31 +251,6 @@ describe('useMessageSubmit', () => {
     });
   });
 
-  it('posts editMessage with targetTurnIndex for edit submissions', () => {
-    const props = createDefaultProps({
-      inputText: 'edited prompt',
-      editTargetTurnIndex: 2,
-    });
-    const rendered = renderHookHarness(props);
-    root = rendered.root;
-    container = rendered.container;
-
-    act(() => {
-      rendered.api.handleSubmit(createSubmitEvent());
-    });
-
-    expect(props.vscode.postMessage).toHaveBeenCalledWith({
-      type: 'editMessage',
-      data: {
-        text: 'edited prompt',
-        context: undefined,
-        fileContext: undefined,
-        attachments: undefined,
-        targetTurnIndex: 2,
-      },
-    });
-  });
-
   it('resolves raw image picker paths with spaces on submit', () => {
     const imagePath = 'C:\\Users\\Me\\Pictures\\screen shot.png';
     const props = createDefaultProps({

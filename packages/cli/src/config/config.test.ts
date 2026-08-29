@@ -290,6 +290,27 @@ describe('parseArguments', () => {
     process.argv = originalArgv;
   });
 
+  it('includes every approval mode description in --help', async () => {
+    process.argv = ['node', 'script.js', '--help'];
+    const output: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((...args) => {
+      output.push(args.join(' '));
+    });
+    try {
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "0"',
+      );
+      const help = output.join('');
+      for (const mode of ServerConfig.APPROVAL_MODES) {
+        expect(help).toContain(
+          `${mode} (${ServerConfig.APPROVAL_MODE_INFO[mode].description})`,
+        );
+      }
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it('should throw an error when both --prompt and --prompt-interactive are used together', async () => {
     process.argv = [
       'node',
@@ -500,7 +521,7 @@ describe('parseArguments', () => {
   it('rejects --json-schema combined with --input-format stream-json', async () => {
     // The "first valid structured_output call ends the session"
     // contract is incompatible with the long-lived stream-json input
-    // protocol. Also load-bearing: gemini.tsx's
+    // protocol. Also load-bearing: llm.tsx's
     // `process.exit(process.exitCode ?? 0)` plumbing in the stream-json
     // branch explicitly relies on this rejection holding. Pair with
     // --output-format stream-json because input/output formats must
@@ -1148,15 +1169,12 @@ describe('loadCliConfig', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {};
-    const setGeminiMdFilenameSpy = vi.spyOn(
-      ServerConfig,
-      'setGeminiMdFilename',
-    );
+    const setMemoryFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledTimes(1);
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith([
+    expect(setMemoryFilenameSpy).toHaveBeenCalledTimes(1);
+    expect(setMemoryFilenameSpy).toHaveBeenCalledWith([
       ServerConfig.DEFAULT_CONTEXT_FILENAME,
       ServerConfig.AGENT_CONTEXT_FILENAME,
     ]);
@@ -1249,15 +1267,12 @@ describe('loadCliConfig', () => {
         fileName: 'CUSTOM_AGENTS.md',
       },
     };
-    const setGeminiMdFilenameSpy = vi.spyOn(
-      ServerConfig,
-      'setGeminiMdFilename',
-    );
+    const setMemoryFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledTimes(1);
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith('CUSTOM_AGENTS.md');
+    expect(setMemoryFilenameSpy).toHaveBeenCalledTimes(1);
+    expect(setMemoryFilenameSpy).toHaveBeenCalledWith('CUSTOM_AGENTS.md');
   });
 
   it('should propagate stream-json formats to config', async () => {
@@ -2041,6 +2056,33 @@ describe('loadCliConfig', () => {
     expect(config.getSessionId()).toBe(sessionId.toLowerCase());
   });
 
+  it('skips the occupancy check for a daemon-generated sessionId', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    // A failing occupancy scan (EACCES/EMFILE/EIO fail closed) must not
+    // reject an internally generated fresh UUID on the id-less creation hot
+    // path — the check exists for caller-chosen ids only.
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockRejectedValue(
+      new Error('EACCES: chats/archive unreadable'),
+    );
+
+    const config = await loadCliConfig(
+      {},
+      { sessionId, sessionIdGenerated: true } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(config.getSessionId()).toBe(sessionId);
+    expect(
+      mockSessionServiceInstance.findSessionIdIgnoringCase,
+    ).not.toHaveBeenCalled();
+  });
+
   it('should use internal sandbox session ID without treating it as a new session', async () => {
     const sessionId = '123e4567-e89b-12d3-a456-426614174000';
     vi.stubEnv('SANDBOX', 'sandbox-exec');
@@ -2079,9 +2121,9 @@ describe('loadCliConfig', () => {
     const settings: Settings = {};
     const defaultContextFiles = ['QWEN.md', 'AGENTS.md'];
     const getAllSpy = vi
-      .spyOn(ServerConfig, 'getAllGeminiMdFilenames')
+      .spyOn(ServerConfig, 'getAllMemoryFilenames')
       .mockReturnValue(defaultContextFiles);
-    const setFilenameSpy = vi.spyOn(ServerConfig, 'setGeminiMdFilename');
+    const setFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
@@ -2093,8 +2135,8 @@ describe('loadCliConfig', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = { context: { fileName: 'CUSTOM_CONTEXT.md' } };
-    const getAllSpy = vi.spyOn(ServerConfig, 'getAllGeminiMdFilenames');
-    const setFilenameSpy = vi.spyOn(ServerConfig, 'setGeminiMdFilename');
+    const getAllSpy = vi.spyOn(ServerConfig, 'getAllMemoryFilenames');
+    const setFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
@@ -3674,6 +3716,48 @@ describe('loadCliConfig with includeDirectories', () => {
     );
   });
 
+  it('ignores ambient roots and LSP for a host-managed provisional workspace', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-lsp',
+      '--include-directories',
+      path.resolve(path.sep, 'cli', 'path1'),
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      context: {
+        includeDirectories: [path.resolve(path.sep, 'settings', 'path1')],
+        loadFromIncludeDirectories: true,
+      },
+    };
+
+    await loadCliConfig(
+      settings,
+      argv,
+      mockCwd,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { provisionalWorkspace: true },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        targetDir: mockCwd,
+        provisionalWorkspace: true,
+        includeDirectories: [],
+        loadMemoryFromIncludeDirectories: false,
+        lsp: { enabled: false },
+      }),
+    );
+    expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
   it('should ignore implicit startup context inputs in bare mode', async () => {
     const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
     const cliPath = path.resolve(path.sep, 'cli', 'path1');
@@ -4014,6 +4098,129 @@ describe('loadCliConfig safe mode', () => {
     expect(config.getPermissionsAllow()).toEqual([]);
     expect(config.getAutoModeSettings()).toEqual({});
     expect(config.isSafeMode()).toBe(true);
+  });
+});
+
+describe('loadCliConfig tools.eager wiring (#9827, #10075)', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    vi.spyOn(process, 'cwd').mockReturnValue(
+      path.resolve(path.sep, 'home', 'user', 'project'),
+    );
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('passes settings.tools.eager as the eager tool allowlist', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: ['ReadFile', 'Shell'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getEagerTools()).toEqual(['ReadFile', 'Shell']);
+  });
+
+  it('keeps an explicitly empty tools.eager list active', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: [],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    // `[]` is an active allowlist naming nothing (defer everything), unlike
+    // `tools.core`, where an empty list is treated as unset.
+    expect(config.getEagerTools()).toEqual([]);
+  });
+
+  it('warns when normalization drops tools.eager entries (#10075)', async () => {
+    // Normalization strips empty/non-string entries before
+    // PermissionManager.initialize() sees them, and the collapsed list is
+    // still the ACTIVE defer-everything allowlist — the drop must leave a
+    // signal instead of silently demoting the whole toolset.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: [''],
+      },
+    };
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('tools.eager: ignoring 1 unusable entry'),
+    );
+    // The collapse to the active-but-empty allowlist is deliberate
+    // (fail-closed); only the silence was the bug.
+    expect(config.getEagerTools()).toEqual([]);
+    warnSpy.mockRestore();
+  });
+
+  it('does not treat permissions.allow as the eager allowlist', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      permissions: {
+        allow: ['ReadFile', 'Shell'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    // Pure auto-approval grant (#10075) — the eager surface is driven
+    // solely by tools.eager and stays unrestricted here.
+    expect(config.getPermissionsAllow()).toContain('ReadFile');
+    expect(config.getEagerTools()).toBeUndefined();
+  });
+
+  it('does not treat --allowed-tools as the eager allowlist', async () => {
+    process.argv = ['node', 'script.js', '--allowed-tools', 'ReadFile'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    // Auto-approval grant only — the eager surface stays unrestricted.
+    expect(config.getPermissionsAllow()).toContain('ReadFile');
+    expect(config.getEagerTools()).toBeUndefined();
+  });
+
+  it('strips tools.eager in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: ['ReadFile'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getEagerTools()).toBeUndefined();
+  });
+
+  it('strips tools.eager in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: ['ReadFile'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getEagerTools()).toBeUndefined();
   });
 });
 
@@ -4478,9 +4685,19 @@ describe('loadCliConfig approval mode', () => {
   it('should normalize approval mode values from settings', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
-    const settings: Settings = {
-      tools: { approvalMode: ServerConfig.ApprovalMode.AUTO_EDIT },
-    };
+    const settings = {
+      tools: { approvalMode: 'auto_edit' },
+    } as unknown as Settings;
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
+  });
+
+  it('should normalize legacy autoedit approval mode from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings = {
+      tools: { approvalMode: 'autoedit' },
+    } as unknown as Settings;
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
   });
@@ -4684,6 +4901,18 @@ describe('Output format', () => {
     expect(config.getOutputFormat()).toBe(OutputFormat.JSON);
   });
 
+  it('should use stream-json format from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { output: { format: OutputFormat.STREAM_JSON } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getOutputFormat()).toBe(OutputFormat.STREAM_JSON);
+  });
+
   it('should prioritize the format from argv', async () => {
     process.argv = ['node', 'script.js', '--output-format', 'json'];
     const argv = await parseArguments();
@@ -4694,6 +4923,18 @@ describe('Output format', () => {
       [],
     );
     expect(config.getOutputFormat()).toBe(OutputFormat.JSON);
+  });
+
+  it('should prioritize argv over a differing settings format', async () => {
+    process.argv = ['node', 'script.js', '--output-format', 'text'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { output: { format: OutputFormat.STREAM_JSON } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getOutputFormat()).toBe(OutputFormat.TEXT);
   });
 
   it('should error on invalid --output-format argument', async () => {

@@ -197,6 +197,10 @@ export type {
   DaemonTokenUsage,
   /** Model descriptor: id, display label, context window size. */
   DaemonModelInfo,
+  /** Explicit workspace, standalone, or Live product session context. */
+  DaemonProductSessionContext,
+  /** Standalone working-directory and create-recovery state. */
+  DaemonStandaloneConnectionState,
   /** Classified notice category for host-owned UI routing. */
   DaemonNoticeCategory,
   /** Fine-grained operation associated with a session notice. */
@@ -243,6 +247,8 @@ export type {
   DaemonSessionOwnerSnapshot,
   /** Per-model API and token metrics within a stats response. */
   DaemonSessionStatsModelMetrics,
+  /** Per-subagent token metrics within a stats response. */
+  DaemonSessionStatsSource,
   /** Structured session statistics from `GET /session/:id/stats`. */
   DaemonSessionStatsStatus,
   /** Per-tool call count, success/fail, and duration within a stats response. */

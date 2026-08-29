@@ -11,7 +11,7 @@ import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
-} from '../utils/environmentContext.js';
+} from '../core/environmentContext.js';
 import {
   normalizeForEchoCompare,
   sanitizeTitle,
@@ -39,7 +39,7 @@ function makeConfig(opts: MockOptions): {
   const config = {
     getFastModel: vi.fn(() => opts.fastModel ?? undefined),
     getModel: vi.fn(() => 'qwen-plus'),
-    getGeminiClient: vi.fn(() => ({
+    getLlmClient: vi.fn(() => ({
       getHistoryShallow: () => opts.history ?? [],
       getChat: () => ({
         getHistory: () => opts.history ?? [],
@@ -457,7 +457,7 @@ describe('tryGenerateSessionTitle', () => {
     const config = {
       getFastModel: vi.fn(() => 'qwen-turbo'),
       getModel: vi.fn(() => 'qwen-plus'),
-      getGeminiClient: vi.fn(() => ({
+      getLlmClient: vi.fn(() => ({
         getHistoryShallow: () => history,
         getChat: () => ({
           getHistory: () => history,
@@ -639,7 +639,7 @@ describe('tryGenerateSessionTitle', () => {
     const config = {
       getFastModel: vi.fn(() => 'qwen-turbo'),
       getModel: vi.fn(() => 'qwen-plus'),
-      getGeminiClient: vi.fn(() => ({
+      getLlmClient: vi.fn(() => ({
         getHistoryShallow: () => history,
         getChat: () => ({
           getHistory: () => history,

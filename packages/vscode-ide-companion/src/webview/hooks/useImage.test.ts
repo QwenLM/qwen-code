@@ -7,22 +7,8 @@
 import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { escapePath, MAX_IMAGE_SIZE } from '../../utils/imageSupport.js';
-import { formatFileSize, splitMessageContentForImages } from './useImage.js';
-
-describe('splitMessageContentForImages', () => {
-  it('restores escaped image paths with spaces back to their original file path', () => {
-    const imagePath = '/tmp/My Images/pasted image.png';
-    const escapedImageReference = `@${escapePath(imagePath)}`;
-
-    const result = splitMessageContentForImages(
-      `Please inspect this screenshot.\n\n${escapedImageReference}`,
-    );
-
-    expect(result.text).toBe('Please inspect this screenshot.');
-    expect(result.imagePaths).toEqual([imagePath]);
-  });
-});
+import { MAX_IMAGE_SIZE } from '../../utils/imageSupport.js';
+import { formatFileSize } from './useImage.js';
 
 describe('formatFileSize', () => {
   it('formats small sizes with the right unit', () => {

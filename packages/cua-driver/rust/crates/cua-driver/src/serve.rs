@@ -1235,8 +1235,43 @@ unsafe fn named_pipe_client_sid(pipe: *mut std::ffi::c_void) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn named_pipe_sid_is_authorized(expected: Option<&str>, actual: Option<&str>) -> bool {
-    matches!((expected, actual), (Some(expected), Some(actual)) if expected.eq_ignore_ascii_case(actual))
+const TRUSTED_CLIENT_SID_ENV: &str = "CUA_DRIVER_EMBEDDED_TRUSTED_CLIENT_SID";
+
+#[cfg(target_os = "windows")]
+fn valid_windows_sid(value: &str) -> bool {
+    value.len() <= 184
+        && value.starts_with("S-1-")
+        && value[4..].split('-').all(|component| {
+            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn configured_trusted_client_sid(embedded: bool) -> anyhow::Result<Option<String>> {
+    let Some(value) = std::env::var_os(TRUSTED_CLIENT_SID_ENV) else {
+        return Ok(None);
+    };
+    if !embedded {
+        anyhow::bail!("{TRUSTED_CLIENT_SID_ENV} requires --embedded");
+    }
+    let value = value.to_string_lossy().into_owned();
+    if !valid_windows_sid(&value) {
+        anyhow::bail!("{TRUSTED_CLIENT_SID_ENV} is not a valid Windows SID");
+    }
+    Ok(Some(value))
+}
+
+#[cfg(target_os = "windows")]
+fn named_pipe_sid_is_authorized(
+    owner: Option<&str>,
+    delegated: Option<&str>,
+    actual: Option<&str>,
+) -> bool {
+    let Some(actual) = actual else {
+        return false;
+    };
+    owner.is_some_and(|expected| expected.eq_ignore_ascii_case(actual))
+        || delegated.is_some_and(|expected| expected.eq_ignore_ascii_case(actual))
 }
 
 #[cfg(target_os = "windows")]
@@ -1252,10 +1287,15 @@ fn named_pipe_host_pid_is_authorized(expected: Option<u32>, actual: Option<u32>)
 /// connected client's process token before request parsing.
 #[cfg(target_os = "windows")]
 unsafe fn build_pipe_security_attrs(
-    _embedded: bool,
+    owner_sid: &str,
+    trusted_client_sid: Option<&str>,
 ) -> Option<(SecurityAttributesRaw, *mut std::ffi::c_void)> {
-    let sid = current_user_sid_string()?;
-    security_attrs_from_sddl(&format!("D:P(A;;GA;;;{sid})S:(ML;;NW;;;LW)"))
+    let delegated_ace = trusted_client_sid
+        .map(|sid| format!("(A;;GA;;;{sid})"))
+        .unwrap_or_default();
+    security_attrs_from_sddl(&format!(
+        "D:P(A;;GA;;;{owner_sid}){delegated_ace}S:(ML;;NW;;;LW)"
+    ))
 }
 
 #[cfg(target_os = "windows")]
@@ -1280,12 +1320,15 @@ pub async fn run_serve(
 
     eprintln!("Qwen Cua Driver daemon listening on {socket_path}");
 
-    // Build the current-user descriptor once and reuse it for every pipe
-    // instance. Both service and embedded mode fail closed if the ACL cannot
-    // be created; an Everyone ACL would expose the desktop-action endpoint to
-    // unrelated local principals.
+    // Build the descriptor once and reuse it for every pipe instance. An
+    // embedded host may explicitly delegate its trusted session to one exact
+    // sandbox account SID; ordinary daemons remain current-user-only.
     let embedded = cua_driver_core::embedded_mode();
-    let security_attrs = unsafe { build_pipe_security_attrs(embedded) };
+    let owner_sid = unsafe { current_user_sid_string() }
+        .ok_or_else(|| anyhow::anyhow!("resolve current-user SID for named pipe"))?;
+    let trusted_client_sid = configured_trusted_client_sid(embedded)?;
+    let security_attrs =
+        unsafe { build_pipe_security_attrs(&owner_sid, trusted_client_sid.as_deref()) };
     if security_attrs.is_none() {
         anyhow::bail!("failed to build current-user security descriptor for named pipe");
     }
@@ -1345,14 +1388,14 @@ pub async fn run_serve(
         tokio::select! {
             result = server.connect() => {
                 result.map_err(|e| anyhow::anyhow!("named pipe connect: {e}"))?;
-                let expected_sid = unsafe { current_user_sid_string() };
                 let client_process_id =
                     unsafe { named_pipe_client_process_id(server.as_raw_handle().cast()) };
                 let client_sid = unsafe {
                     named_pipe_client_sid(server.as_raw_handle().cast())
                 };
                 if !named_pipe_sid_is_authorized(
-                    expected_sid.as_deref(),
+                    Some(&owner_sid),
+                    trusted_client_sid.as_deref(),
                     client_sid.as_deref(),
                 ) {
                     tracing::warn!(
@@ -1364,11 +1407,19 @@ pub async fn run_serve(
                 let expected_host_process_id = std::env::var("CUA_DRIVER_EMBEDDED_HOST_PID")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok());
+                let delegated_trusted_connection = trusted_client_sid
+                    .as_deref()
+                    .is_some_and(|expected| {
+                        client_sid
+                            .as_deref()
+                            .is_some_and(|actual| expected.eq_ignore_ascii_case(actual))
+                    });
                 let trusted_host_connection = embedded
-                    && named_pipe_host_pid_is_authorized(
-                        expected_host_process_id,
-                        client_process_id,
-                    );
+                    && (delegated_trusted_connection
+                        || named_pipe_host_pid_is_authorized(
+                            expected_host_process_id,
+                            client_process_id,
+                        ));
 
                 let reg = sdk.clone();
                 let shutdown_tx2 = shutdown_tx.clone();
@@ -1697,20 +1748,45 @@ pub async fn run_serve(
 
 #[cfg(all(test, target_os = "windows"))]
 mod named_pipe_authentication_tests {
-    use super::{named_pipe_host_pid_is_authorized, named_pipe_sid_is_authorized};
+    use super::{
+        named_pipe_host_pid_is_authorized, named_pipe_sid_is_authorized, valid_windows_sid,
+    };
 
     #[test]
     fn missing_or_foreign_sid_is_rejected_before_request_parsing() {
-        assert!(!named_pipe_sid_is_authorized(None, Some("S-1-5-21-1")));
-        assert!(!named_pipe_sid_is_authorized(Some("S-1-5-21-1"), None));
+        assert!(!named_pipe_sid_is_authorized(
+            None,
+            None,
+            Some("S-1-5-21-1")
+        ));
         assert!(!named_pipe_sid_is_authorized(
             Some("S-1-5-21-1"),
+            None,
+            None
+        ));
+        assert!(!named_pipe_sid_is_authorized(
+            Some("S-1-5-21-1"),
+            None,
             Some("S-1-5-21-2")
         ));
         assert!(named_pipe_sid_is_authorized(
             Some("S-1-5-21-1"),
+            None,
             Some("s-1-5-21-1")
         ));
+        assert!(named_pipe_sid_is_authorized(
+            Some("S-1-5-21-1"),
+            Some("S-1-5-21-2"),
+            Some("s-1-5-21-2")
+        ));
+    }
+
+    #[test]
+    fn delegated_sid_is_strictly_parsed_before_entering_sddl() {
+        assert!(valid_windows_sid("S-1-5-21-123-456-789-1001"));
+        assert!(!valid_windows_sid("s-1-5-21-1"));
+        assert!(!valid_windows_sid("S-1-5-21-1)(A;;GA;;;WD"));
+        assert!(!valid_windows_sid("S-1-5-"));
     }
 
     #[test]

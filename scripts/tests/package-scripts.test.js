@@ -31,6 +31,21 @@ function readWorkflow(relativePath) {
 }
 
 describe('package scripts', () => {
+  it('does not couple Node REPL to Qwen release versions', () => {
+    const versionScript = readFileSync(
+      path.join(root, 'scripts/version.js'),
+      'utf8',
+    );
+
+    expect(versionScript).toContain(
+      'const workspacesToExclude = [\n' +
+        "  '@qwen-code/sdk',\n" +
+        "  '@qwen-code/mobile-mcp',\n" +
+        "  '@qwen-code/node-repl-mcp',\n" +
+        '];',
+    );
+  });
+
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
     const packageJson = readPackageJson();
 
@@ -515,13 +530,27 @@ describe('package scripts', () => {
         'release-sdk',
         'Publish @qwen-code/sdk',
       ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-sdk',
+        'Publish immutable SDK tarball',
+      ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-node-repl',
+        'Publish immutable Node REPL tarball',
+      ],
       ['.github/workflows/cd-mobile-mcp.yml', 'build-and-publish', 'Publish'],
     ]) {
       const publishJob = getWorkflowJob(readWorkflow(workflowPath), jobName);
       const installStep = getWorkflowStep(publishJob, 'Install npm 11');
+      const publishStep = getWorkflowStep(publishJob, publishStepName);
       expect(installStep).toContain('npm install --global npm@11.19.0');
+      expect(publishJob).toContain("id-token: 'write'");
+      expect(publishStep).toContain('--provenance');
+      expect(publishJob).toContain("name: 'production-release'");
       expect(publishJob.indexOf(installStep)).toBeLessThan(
-        publishJob.indexOf(getWorkflowStep(publishJob, publishStepName)),
+        publishJob.indexOf(publishStep),
       );
     }
 
@@ -530,13 +559,16 @@ describe('package scripts', () => {
       'packages/cli',
       'packages/channels/base',
       'packages/channels/dingtalk',
+      'packages/channels/dws',
       'packages/channels/feishu',
       'packages/channels/github',
       'packages/channels/qqbot',
       'packages/channels/telegram',
       'packages/channels/wecom',
       'packages/channels/weixin',
+      'packages/cua-driver/typescript',
       'packages/mobile-mcp',
+      'packages/node-repl',
       'packages/sdk-typescript',
     ]) {
       const packageJson = JSON.parse(

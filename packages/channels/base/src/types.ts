@@ -61,6 +61,8 @@ export interface ChannelConfig {
   allowedUsers: string[];
   /** Channel routing scope. `thread` is retained for existing configurations only. */
   sessionScope: SessionScope;
+  /** Retain an owner-scoped catalog of named sessions in daemon-managed mode. */
+  multiSession?: boolean;
   cwd: string;
   approvalMode?: string;
   instructions?: string;
