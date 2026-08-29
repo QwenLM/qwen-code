@@ -18,7 +18,11 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { getTeamName, resolveActiveTeamName } from '../agents/team/identity.js';
 import { sanitizeName } from '../agents/team/teamHelpers.js';
-import { assertValidTaskId, listTasks } from '../agents/team/tasks.js';
+import {
+  assertValidTaskId,
+  listTasks,
+  normalizeTaskId,
+} from '../agents/team/tasks.js';
 
 export interface TaskListParams {
   status?: 'pending' | 'in_progress' | 'completed';
@@ -85,8 +89,22 @@ class TaskListInvocation extends BaseToolInvocation<
       }
     }
 
-    const blockedByFilter = this.params.blockedBy?.trim().replace(/^#/, '');
-    if (blockedByFilter) {
+    let blockedByFilter: string | undefined;
+    if (this.params.blockedBy?.trim()) {
+      blockedByFilter = normalizeTaskId(this.params.blockedBy);
+      if (blockedByFilter === undefined) {
+        // Non-blank input that normalizes to nothing (e.g. a bare
+        // '#'): fail closed like the owner path instead of
+        // activating a filter that can never match.
+        const msg =
+          'Cannot filter by blockedBy: blockedBy must be a task ID, ' +
+          'optionally prefixed with #.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
       try {
         assertValidTaskId(blockedByFilter);
       } catch (err) {

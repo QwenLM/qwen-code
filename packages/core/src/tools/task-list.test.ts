@@ -231,6 +231,24 @@ describe('TaskListTool', () => {
         .execute(new AbortController().signal);
       expect(invalid.error).toBeDefined();
     });
+
+    it('rejects a non-blank blockedBy that normalizes to nothing', async () => {
+      await createTask(TEAM, {
+        subject: 'Task A',
+        description: 'desc',
+      });
+
+      // A bare '#' must fail closed like the owner path, not activate
+      // a never-matching '' filter (silent empty board) nor behave as
+      // absent while getDescription() still advertises the filter.
+      for (const blockedBy of ['#', ' #']) {
+        const result = await tool
+          .build({ blockedBy })
+          .execute(new AbortController().signal);
+        expect(result.error).toBeDefined();
+        expect(result.llmContent).toContain('blockedBy');
+      }
+    });
   });
 
   it('returns TaskListResultDisplay', async () => {
