@@ -967,8 +967,22 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
   }
 
   function runReplay(fixture) {
+    // The production step has already scrubbed the workspace before the
+    // replay runs (#10428): no .git/config — so no `origin` remote and no
+    // user.name/email — and no global config. Reproduce that state so the
+    // replay must carry its own identity and fetch by URL.
+    const replayEnv = { ...gitEnv };
+    for (const key of [
+      'GIT_AUTHOR_NAME',
+      'GIT_AUTHOR_EMAIL',
+      'GIT_COMMITTER_NAME',
+      'GIT_COMMITTER_EMAIL',
+    ]) {
+      delete replayEnv[key];
+    }
     const script = [
       'set -euo pipefail',
+      'rm -f .git/config',
       replayFunctions(),
       'replayed_on=""',
       'if replay_on_moved_head; then rc=0; else rc=$?; fi',
@@ -982,7 +996,7 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
     const result = spawnSync('bash', ['-c', script], {
       cwd: fixture.runner,
       env: {
-        ...gitEnv,
+        ...replayEnv,
         PR_NUMBER: '1',
         HEAD_SHA: fixture.originalHead,
         BASE_REF: 'main',
@@ -1044,6 +1058,12 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
       expect(git(fixture.runner, 'log', '-1', '--format=%s', out.head)).toBe(
         'fix: resolve merge conflicts with main',
       );
+      // The scrub removed user.name/email with .git/config; the replay must
+      // bring the bot identity itself (the author is reused from the agent's
+      // commit by -C).
+      expect(
+        git(fixture.runner, 'log', '-1', '--format=%cn <%ce>', out.head),
+      ).toBe('qwen-code-dev-bot <qwen-code-dev-bot@users.noreply.github.com>');
       // Only base-changed files differ from the new head: the scope guard holds.
       expect(
         git(fixture.runner, 'diff', '--name-only', newHead, out.head)

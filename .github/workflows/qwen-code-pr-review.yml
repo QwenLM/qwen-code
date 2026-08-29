@@ -2938,13 +2938,17 @@ jobs:
           #    the same log (`HEAD -> <branch> (stale info)`), so a branch
           #    named e.g. fix/permission-prompt or fix-403-error would match a
           #    permission substring and the replay would never run. A genuine
-          #    permission denial never carries a lease-decline phrase.
+          #    permission denial never carries a lease-decline phrase. The
+          #    same echo cuts the other way: `force-with-lease` and
+          #    `non-fast-forward` are legal branch-name substrings, so match
+          #    git's parenthesised reason — `(stale info)`, `(fetch first)`,
+          #    `(non-fast-forward)` — not the bare words.
           # 3. permission — 403, or a 404 "not found" (GitHub hides repos a token
           #    can't see) which is an access problem in practice.
           classify_push_failure() {
             if grep -qiE 'refusing to allow.*workflow' "$push_log"; then
               push_fail_reason='workflow_scope'
-            elif grep -qiE 'stale info|force-with-lease|non-fast-forward|fetch first' "$push_log"; then
+            elif grep -qiE '\((stale info|fetch first|non-fast-forward)\)' "$push_log"; then
               push_fail_reason='moved'
             elif grep -qiE '403|permission|not authorized|forbidden|protected branch|cannot be updated|not found|does not exist' "$push_log"; then
               push_fail_reason='permission'
@@ -2973,6 +2977,13 @@ jobs:
           replay_on_moved_head() {
             local resolved_commit new_ref new_sha file
             local markers merge_base base_changed replay_changed out_of_scope
+            # The replay commits (`git commit -C` below reuses the agent's
+            # author and message; the committer comes from the environment).
+            # The identity 'Prepare pull request branch' wrote lives in the
+            # workspace .git/config, which the post-agent scrub removes before
+            # this step — so supply it here, never from config.
+            export GIT_COMMITTER_NAME='qwen-code-dev-bot'
+            export GIT_COMMITTER_EMAIL='qwen-code-dev-bot@users.noreply.github.com'
             resolved_commit="$(git rev-parse HEAD)"
             new_ref="refs/remotes/origin/qwen-resolve/pr-${PR_NUMBER}/moved"
             # Fetch by URL, not by remote name: the post-agent scrub removes
