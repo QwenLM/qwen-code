@@ -38,7 +38,7 @@ const sdkMock = vi.hoisted(() => ({
   artifactsVersion: 0,
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useActions: () => sdkMock.actions,
   useConnection: () => sdkMock.connection,
   usePromptStatus: () => sdkMock.promptStatus,
