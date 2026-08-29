@@ -185,11 +185,18 @@ function vanishedStillOnDisk(
   currentHashes: Record<string, string>,
 ): string[] {
   const onDisk: string[] = [];
+  // One memo for this one enumeration (R2-1): a subtree dropped between
+  // rounds sends every vanished path down the same missing ancestor chain,
+  // and sharing the probe results keeps the walk to one probe per ancestor
+  // instead of one per path times depth — the same discipline
+  // `invisibleTrackedPaths` applies (R1-6; see the walk in
+  // isPathProvablyAbsent).
+  const ancestorProbes = new Map<string, boolean>();
   for (const p of Object.keys(cachedFiles)) {
     if (Object.hasOwn(currentHashes, p)) continue;
     // Only ENOENT-proven absence may skip the re-check (R19-3): every
     // unmeasurable shape the helper refuses stays on the on-disk list.
-    if (isPathProvablyAbsent(repoRoot, p)) continue;
+    if (isPathProvablyAbsent(repoRoot, p, ancestorProbes)) continue;
     onDisk.push(p);
   }
   if (onDisk.length === 0) return [];
