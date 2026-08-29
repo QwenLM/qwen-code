@@ -68,6 +68,10 @@ export interface BlockingBackgroundWork {
   /** True when at least one blocking entry is a workflow run (listed via
    *  `/workflows`, not `/tasks`). */
   hasWorkflowRuns: boolean;
+  /** True when at least one blocking workflow run is actually inspectable on
+   *  `/workflows`. A reserved-but-unregistered run is not: that command reads
+   *  `registry.list()`, which the reservation has not entered yet. */
+  hasInspectableWorkflowRuns: boolean;
 }
 
 /**
@@ -175,6 +179,9 @@ export function describeBlockingBackgroundWork(
     lines,
     hasTaskEntries: entries.some((entry) => !entry.isWorkflowRun),
     hasWorkflowRuns: entries.some((entry) => entry.isWorkflowRun),
+    hasInspectableWorkflowRuns: entries.some(
+      (entry) => entry.isWorkflowRun && !entry.isStarting,
+    ),
   };
 }
 
@@ -182,8 +189,9 @@ export function describeBlockingBackgroundWork(
  * Builds the session-switch blocked error: the caller's base message plus
  * one line per blocking entry and a pointer to the command that lists
  * each kind (`/tasks` for agents/shells/monitors, `/workflows` for
- * workflow runs). Falls back to the bare base message when nothing is
- * enumerated (see `describeBlockingBackgroundWork`).
+ * registered workflow runs; a still-starting run is on neither, so it
+ * gets a plain retry hint instead). Falls back to the bare base message
+ * when nothing is enumerated (see `describeBlockingBackgroundWork`).
  */
 export function buildBackgroundWorkBlockedMessage(
   config: Config,
@@ -193,11 +201,16 @@ export function buildBackgroundWorkBlockedMessage(
   if (!blocking) return baseMessage;
   const surfaces = [
     ...(blocking.hasTaskEntries ? ['/tasks'] : []),
-    ...(blocking.hasWorkflowRuns ? ['/workflows'] : []),
+    ...(blocking.hasInspectableWorkflowRuns ? ['/workflows'] : []),
   ].join(' and ');
   return [
     baseMessage,
     ...blocking.lines,
-    `Use ${surfaces} to inspect them, then retry.`,
+    // A reservation is on no surface yet — `/workflows` reads
+    // `registry.list()`, which it has not entered — so pointing there would
+    // send the user to a list that cannot show what is blocking them.
+    surfaces
+      ? `Use ${surfaces} to inspect them, then retry.`
+      : 'Retry once the run has finished starting.',
   ].join('\n');
 }

@@ -329,13 +329,34 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
     expect(summary!.lines[1]).toBe('  [wf_starting] (starting)');
   });
 
-  it('points /clear at /workflows when only a starting run blocks', () => {
+  it('does not send /clear to /workflows for a run it cannot show', () => {
     const message = buildBackgroundWorkBlockedMessage(
       createEnumeratingMockConfig({ startingWorkflows: ['wf_starting'] }),
       'Cannot clear.',
     );
     expect(message).toContain('Cannot clear.');
     expect(message).toContain('  [wf_starting] (starting)');
+    // `/workflows` reads registry.list(), which a reservation has not
+    // entered — pointing there would name a list that cannot show it.
+    expect(message).not.toContain('/workflows');
+    expect(message).toContain('Retry once the run has finished starting.');
+  });
+
+  it('still points at /workflows when a registered run also blocks', () => {
+    const message = buildBackgroundWorkBlockedMessage(
+      createEnumeratingMockConfig({
+        workflows: [
+          {
+            runId: 'wf_running',
+            status: 'running',
+            meta: { name: 'build' },
+            startTime: 1_000,
+          },
+        ],
+        startingWorkflows: ['wf_starting'],
+      }),
+      'Cannot clear.',
+    );
     expect(message).toContain('Use /workflows to inspect them, then retry.');
   });
 
