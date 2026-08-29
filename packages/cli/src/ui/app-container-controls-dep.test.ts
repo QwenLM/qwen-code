@@ -33,6 +33,11 @@ const source = readFileSync(
   'utf8',
 );
 
+const composerSource = readFileSync(
+  join(import.meta.dirname, 'components', 'agent-view', 'AgentComposer.tsx'),
+  'utf8',
+);
+
 /** Extract the dependency array of the controls-height measurement effect. */
 function controlsHeightEffectDeps(): string {
   const measureAt = source.indexOf('measureElement(mainControlsRef.current)');
@@ -65,6 +70,30 @@ describe('AppContainer controls-height measurement wiring', () => {
     // whitespace-tolerantly so prettier reformatting can't break the guard.
     expect(source).toMatch(
       /liveAgentPanelLayoutKey\s*=\s*getLiveAgentPanelLayoutKey\(\s*bgTaskEntries\s*,\s*bgLivePanelFocused\s*,?\s*\)/,
+    );
+  });
+
+  it('lists the agent composer layout key in the measurement effect deps', () => {
+    const deps = controlsHeightEffectDeps();
+    // The #9507 fix: the agent tab footer grows with its own status row /
+    // queued messages / input text, none of which the other deps track;
+    // dropping this entry leaves controlsHeight stale-high on the agent tab
+    // and the viewport pushes the composer and tab bar off the terminal.
+    expect(deps).toContain('agentViewState.agentComposerLayoutKey');
+  });
+
+  it('derives the composer layout key from the footer height-shifting state', () => {
+    // The key must cover every row-count factor the agent footer renders:
+    // loading row (streamingState), terminal status row, queued messages and
+    // input text. Whitespace-tolerant so prettier can't break the guard.
+    expect(composerSource).toMatch(
+      /getAgentComposerLayoutKey\(\{\s*streamingState\s*,\s*statusLabel:\s*statusLabel\?\.text\s*\?\?\s*''\s*,\s*queuedMessageCount:\s*messageQueue\.length\s*,\s*inputText:\s*buffer\.text\s*,?\s*\}\)/,
+    );
+  });
+
+  it('syncs the composer layout key to context for the measure effect', () => {
+    expect(composerSource).toMatch(
+      /useEffect\(\(\)\s*=>\s*\{\s*setAgentComposerLayoutKey\(composerLayoutKey\);\s*\},\s*\[composerLayoutKey,\s*setAgentComposerLayoutKey\]\)/,
     );
   });
 });
