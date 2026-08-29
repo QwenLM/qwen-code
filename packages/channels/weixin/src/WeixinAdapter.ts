@@ -139,15 +139,7 @@ export class WeixinChannel extends ChannelBase {
           referencedText: msg.refText,
         };
 
-        this.handleInboundWithMedia(envelope, msg.image, msg.file).catch(
-          (err) => {
-            const errMsg =
-              err instanceof Error ? err.message : JSON.stringify(err, null, 2);
-            process.stderr.write(
-              `[Weixin:${this.name}] Error handling message: ${errMsg}\n`,
-            );
-          },
-        );
+        await this.handleInboundWithMedia(envelope, msg.image, msg.file);
       },
       abortSignal: this.abortController.signal,
     }).catch((err) => {

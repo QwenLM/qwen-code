@@ -4,6 +4,13 @@ const apiMocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
   sendTyping: vi.fn(),
 }));
+const accountMocks = vi.hoisted(() => ({
+  loadAccount: vi.fn(),
+}));
+const monitorMocks = vi.hoisted(() => ({
+  startPollLoop: vi.fn(),
+  getContextToken: vi.fn(),
+}));
 
 vi.mock('./api.js', async () => {
   const actual = await vi.importActual<typeof import('./api.js')>('./api.js');
@@ -13,6 +20,17 @@ vi.mock('./api.js', async () => {
     sendTyping: apiMocks.sendTyping,
   };
 });
+
+vi.mock('./accounts.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('./accounts.js')>('./accounts.js');
+  return {
+    ...actual,
+    loadAccount: accountMocks.loadAccount,
+  };
+});
+
+vi.mock('./monitor.js', () => monitorMocks);
 
 import { TYPING_KEEPALIVE_MAX_MS, WeixinChannel } from './WeixinAdapter.js';
 import { TypingStatus } from './types.js';
@@ -77,7 +95,59 @@ describe('WeixinChannel', () => {
   beforeEach(() => {
     apiMocks.getConfig.mockReset();
     apiMocks.sendTyping.mockReset();
+    accountMocks.loadAccount.mockReset();
+    monitorMocks.startPollLoop.mockReset();
+    monitorMocks.getContextToken.mockReset();
     vi.useFakeTimers();
+  });
+
+  it('waits for inbound handling and propagates failures to the poll loop', async () => {
+    const channel = createChannel();
+    const handling = deferredPromise<void>();
+    const handleInboundWithMedia = vi.fn().mockReturnValue(handling.promise);
+    (
+      channel as unknown as {
+        handleInboundWithMedia: typeof handleInboundWithMedia;
+      }
+    ).handleInboundWithMedia = handleInboundWithMedia;
+
+    let onMessage:
+      | ((msg: {
+          fromUserId: string;
+          messageId: string;
+          text: string;
+        }) => Promise<void>)
+      | undefined;
+    accountMocks.loadAccount.mockReturnValue({ token: 'token' });
+    monitorMocks.startPollLoop.mockImplementation((options) => {
+      onMessage = options.onMessage;
+      return Promise.resolve();
+    });
+
+    await channel.connect();
+
+    const messagePromise = onMessage!({
+      fromUserId: 'user-1',
+      messageId: 'message-1',
+      text: 'hello',
+    });
+    let settled = false;
+    void messagePromise.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+
+    await Promise.resolve();
+    expect(handleInboundWithMedia).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+
+    handling.reject(new Error('inbound failed'));
+
+    await expect(messagePromise).rejects.toThrow('inbound failed');
   });
 
   afterEach(() => {
