@@ -169,6 +169,23 @@ describe('parseGhPrList', () => {
       'unexpected gh output',
     );
   });
+
+  it('maps the gh state field to merged/closed, falling back to isDraft', () => {
+    const result = parseGhPrList(
+      JSON.stringify([
+        ghPrEntry({ number: 1, state: 'MERGED' }),
+        ghPrEntry({ number: 2, state: 'CLOSED' }),
+        ghPrEntry({ number: 3, state: 'OPEN' }),
+        ghPrEntry({ number: 4, state: 'OPEN', isDraft: true }),
+      ]),
+    );
+    expect(result.map((pr) => pr.state)).toEqual([
+      'merged',
+      'closed',
+      'open',
+      'draft',
+    ]);
+  });
 });
 
 describe('fetchGitHubPullRequests', () => {
@@ -215,6 +232,37 @@ describe('fetchGitHubPullRequests', () => {
         expect.stringContaining('reviewDecision'),
       ],
       expect.objectContaining({ cwd: dir, timeout: 10_000 }),
+      expect.any(Function),
+    );
+  });
+
+  it('uses slim fields and the requested state/limit when asked', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockGhSuccess([ghPrEntry({ state: 'MERGED' })]);
+
+    const result = await fetchGitHubPullRequests(dir, undefined, {
+      state: 'all',
+      limit: 500,
+      slim: true,
+    });
+
+    expect(result).toEqual({
+      kind: 'ok',
+      pullRequests: [expect.objectContaining({ number: 1, state: 'merged' })],
+    });
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'gh',
+      [
+        'pr',
+        'list',
+        '--state',
+        'all',
+        '--limit',
+        '500',
+        '--json',
+        'number,url,headRefName,state',
+      ],
+      expect.objectContaining({ cwd: dir }),
       expect.any(Function),
     );
   });
