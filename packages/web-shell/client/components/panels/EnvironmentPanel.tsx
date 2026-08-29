@@ -251,6 +251,7 @@ export function EnvironmentPanel({
                   gitCwd={gitCwd}
                   gitSessionId={gitSessionId}
                   side="left"
+                  status={gitStatus}
                   onOpenDiff={onOpenGitDiff}
                   onOpenCommit={onOpenGitCommit}
                 >
