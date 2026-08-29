@@ -1738,7 +1738,11 @@ describe('Server Config (config.ts)', () => {
       expect(Object.hasOwn(child, 'workspaceContext')).toBe(true);
       expect(Object.hasOwn(child, 'fileDiscoveryService')).toBe(true);
       expect(parent.getTargetDir()).toBe(path.resolve(TARGET_DIR));
-      expect(parent.getWorkingDir()).toBe(path.resolve('/tmp'));
+      // getWorkingDir() returns the raw stored cwd: the constructor resolves
+      // only targetDir (config.ts stores `params.cwd` verbatim), so this
+      // assertion must NOT path.resolve() — that re-broke both tests on the
+      // windows-latest lane, where resolve('/tmp') is drive-qualified.
+      expect(parent.getWorkingDir()).toBe('/tmp');
     });
 
     it('rebinds agent workspace getters and private field reads together', () => {
@@ -1777,7 +1781,11 @@ describe('Server Config (config.ts)', () => {
       expect(Object.hasOwn(child, 'workspaceContext')).toBe(true);
       expect(Object.hasOwn(child, 'fileDiscoveryService')).toBe(true);
       expect(parent.getTargetDir()).toBe(path.resolve(TARGET_DIR));
-      expect(parent.getWorkingDir()).toBe(path.resolve('/tmp'));
+      // getWorkingDir() returns the raw stored cwd: the constructor resolves
+      // only targetDir (config.ts stores `params.cwd` verbatim), so this
+      // assertion must NOT path.resolve() — that re-broke both tests on the
+      // windows-latest lane, where resolve('/tmp') is drive-qualified.
+      expect(parent.getWorkingDir()).toBe('/tmp');
     });
 
     it('prohibits inherited session-writer lifecycle access', async () => {
