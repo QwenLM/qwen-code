@@ -20,6 +20,42 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
 }));
+
+// Pass-through shims over the two node builtins the race tests intercept.
+// `vi.spyOn` cannot redefine an ESM namespace export, so the mock delegates
+// to the real implementation unless a test arms the hook.
+const nodeHooks = vi.hoisted(() => ({
+  onSpawnSync: null as
+    | null
+    | ((args: unknown[], next: (args: unknown[]) => unknown) => unknown),
+  onLstatSync: null as
+    | null
+    | ((args: unknown[], next: (args: unknown[]) => unknown) => unknown),
+}));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  const spawnSync = (...args: Parameters<typeof actual.spawnSync>) => {
+    const hook = nodeHooks.onSpawnSync;
+    if (!hook) return actual.spawnSync(...args);
+    return hook(args as unknown[], (a) =>
+      (actual.spawnSync as (...x: unknown[]) => unknown)(...a),
+    ) as ReturnType<typeof actual.spawnSync>;
+  };
+  // Named re-exports must be spelled out — including on `default`, which
+  // CJS interop reads named imports through.
+  return { ...actual, default: { ...actual, spawnSync }, spawnSync };
+});
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const lstatSync = (...args: Parameters<typeof actual.lstatSync>) => {
+    const hook = nodeHooks.onLstatSync;
+    if (!hook) return actual.lstatSync(...args);
+    return hook(args as unknown[], (a) =>
+      (actual.lstatSync as (...x: unknown[]) => unknown)(...a),
+    ) as ReturnType<typeof actual.lstatSync>;
+  };
+  return { ...actual, default: { ...actual, lstatSync }, lstatSync };
+});
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
 import {
@@ -159,14 +195,12 @@ describe('runScratchTree', () => {
     expect(r.note).toContain('filter.planted.smudge');
   });
 
-  it('refuses an include redirect in a scanned config file — the screen walks the redirect to the filter behind it', () => {
-    // Each local file is queried with `--file`, which leaves include
-    // directives UNRESOLVED, while the residue measurement's `git status`
-    // reads MERGED config that resolves them — so a `filter.*.clean` hidden
-    // behind the redirect executes on a stat-stale tracked file unless the
-    // screen WALKS the redirect: each target is resolved the way git
-    // resolves it and scanned with the same screen, and the filter that
-    // surfaces behind it is the refusal.
+  it('refuses a filter behind an include redirect — the screen reads the merged config the checkouts read', () => {
+    // The screen lists git's own merged-config resolution per scope, so a
+    // `filter.*.clean` hidden behind an include directive surfaces exactly
+    // the way the residue measurement's `git status` would resolve and
+    // execute it — and the refusal names the key and the scope it surfaced
+    // in.
     const included = join(repo, 'included-config');
     const pwned = join(repo, 'PWNED-include');
     writeFileSync(
@@ -198,14 +232,8 @@ describe('runScratchTree', () => {
     });
 
     expect(r.available).toBe(false);
-    // Pins WHICH arm fired: both refusal notes name the offending keys, so
-    // a mutant routing include keys into the filter arm leaves every other
-    // assertion green while the include-specific note is unreachable.
-    expect(r.note).toContain('include directive(s)');
-    expect(r.note).toContain('include.path');
-    expect(r.note).toContain('includeif.gitdir:');
-    // The walked target's filter is named, not just the redirect.
     expect(r.note).toContain('filter.evil.clean');
+    expect(r.note).toContain('in the review worktree');
     expect(existsSync(pwned)).toBe(false);
   });
 
@@ -231,30 +259,29 @@ describe('runScratchTree', () => {
     const r = run();
 
     expect(r.available).toBe(true);
-    expect(r.note).not.toContain('include directive(s)');
+    expect(r.note).not.toContain('no scratch tree is safe');
   });
 
-  it('refuses an include directive whose target it cannot read — fail closed behind the redirect', () => {
-    // The merged-config reads this command authorises would resolve the
-    // redirect; a target the screen cannot read might hold a filter, so the
-    // doubt is a refusal — never a certification.
+  it('tolerates a MISSING include target — git silently skips it, so the screen does too', () => {
+    // The one doubt git itself resolves: a target that does not exist is
+    // skipped silently by the merged-config read the checkouts run, so
+    // nothing the screen authorises can execute through it. The screen is
+    // git-truthful here — the hand-rolled walk's refusal on this shape was
+    // over-refusal, because the checkouts skip the target the same way.
     git(worktree, 'config', 'include.path', join(repo, 'never-written.config'));
 
     const r = run();
 
-    expect(r.available).toBe(false);
-    expect(r.note).toContain('include directive(s)');
-    expect(r.note).toContain('include.path');
-    expect(r.note).toContain('could not be read');
+    expect(r.available).toBe(true);
   });
 
-  it('refuses an include in ANOTHER worktree’s config naming a directory — the readability check, not git, catches it', () => {
-    // A permission-denied or non-file target reached through the review
-    // worktree's OWN config dies loudly at the identity gate — its own
-    // refusal. Planted in another worktree's config.worktree, the gate
-    // never reads it and only the screen's readability check stands:
-    // without it the walk's `git config --file` dies the way git dies, and
-    // the death reads as "no match" — a certification over the doubt.
+  it('refuses an include in ANOTHER worktree’s config naming a directory — the scope’s listing dies, so the screen cannot prove it inert', () => {
+    // git's merged read dies loudly on a directory include target. Planted
+    // in another worktree's config.worktree, the death belongs to THAT
+    // scope's listing — and a scope the screen cannot list is one it
+    // cannot prove inert: a checkout inside the tree would read the same
+    // config and die the same way, but the screen answers for what it
+    // could not list, never for what it never read.
     const first = run();
     expect(first.available).toBe(true);
     const common = execFileSync(
@@ -280,18 +307,16 @@ describe('runScratchTree', () => {
     const r = run();
 
     expect(r.available).toBe(false);
-    expect(r.note).toContain('include directive(s)');
-    expect(r.note).toContain('could not be read');
+    expect(r.note).toContain('could not be listed');
   });
 
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'refuses an include whose target exists but cannot be read — permission-denied fails closed',
     () => {
-      // The chmod half of the readability check: the target exists and is a
-      // file, so the stat passes — only the R_OK probe catches it. Planted
-      // in another worktree's config.worktree, where the identity gate's
-      // merged read never reaches it (a permission-denied target there dies
-      // loudly, its own refusal).
+      // The chmod half: git dies "unable to access" on a permission-denied
+      // include target, and the scope's listing death is the refusal.
+      // Planted in another worktree's config.worktree, where the review
+      // worktree's own listing never reaches it.
       const first = run();
       expect(first.available).toBe(true);
       const common = execFileSync(
@@ -317,16 +342,17 @@ describe('runScratchTree', () => {
         const r = run();
 
         expect(r.available).toBe(false);
-        expect(r.note).toContain('include directive(s)');
-        expect(r.note).toContain('could not be read');
+        expect(r.note).toContain('could not be listed');
       } finally {
         chmodSync(locked, 0o644);
       }
     },
   );
 
-  it('refuses a filter hidden behind a chain of include redirects', () => {
-    // The walk is transitive: a filter two redirects deep still surfaces.
+  it('refuses a filter hidden behind a chain of include redirects — the merged resolution surfaces it', () => {
+    // The closure is transitive: a filter two redirects deep still
+    // surfaces — because git's own resolution lists it, not because a
+    // hand-rolled walk chased it.
     const first = join(repo, 'include-first');
     const second = join(repo, 'include-second');
     const pwned = join(repo, 'PWNED-chain');
@@ -337,9 +363,241 @@ describe('runScratchTree', () => {
     const r = run();
 
     expect(r.available).toBe(false);
-    expect(r.note).toContain('include directive(s)');
     expect(r.note).toContain('filter.evil.clean');
     expect(existsSync(pwned)).toBe(false);
+  });
+
+  it('tolerates the user’s own GLOBAL filter — their contract, not the planting surface', () => {
+    // The listing blanks the scopes the user owns: a git-lfs-shaped filter
+    // in the user's global config runs in every git command they run, the
+    // checkouts included — refusing it would refuse the user's own setup,
+    // and a probe's planting surface is the repo-local files.
+    git(worktree, 'config', '--global', 'filter.lfs.clean', 'cat');
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+  });
+
+  it('refuses a filter behind an includeIf whose condition carries a space', () => {
+    // A repository whose PATH carries the space: the hand-rolled screen
+    // split git's rendered output at the first space and walked nothing
+    // past one, while git's own resolution evaluates the condition and
+    // lists the filter behind it.
+    const spaced = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen scratch tree-')),
+    );
+    try {
+      git(spaced, 'init', '-q', '-b', 'main');
+      git(spaced, 'config', 'user.email', 't@t.t');
+      git(spaced, 'config', 'user.name', 't');
+      writeFileSync(join(spaced, 'a.ts'), 'export const x = 1;\n');
+      git(spaced, 'add', '-A');
+      git(spaced, 'commit', '-qm', 'head');
+      const spacedWorktree = join(spaced, 'wt');
+      git(spaced, 'worktree', 'add', '--detach', '-q', spacedWorktree, 'HEAD');
+      const pwned = join(spaced, 'PWNED-space');
+      const included = join(spaced, 'included-config');
+      writeFileSync(included, `[filter "evil"]\n\tsmudge = touch ${pwned}\n`);
+      writeFileSync(
+        join(spaced, '.git', 'config'),
+        `\n[includeIf "gitdir:${join(spaced, '.git')}/"]\n\tpath = ${included}\n`,
+        { flag: 'a' },
+      );
+      const attributes = execFileSync(
+        'git',
+        [
+          'rev-parse',
+          '--path-format=absolute',
+          '--git-path',
+          'info/attributes',
+        ],
+        { cwd: spacedWorktree, encoding: 'utf8' },
+      ).trim();
+      writeFileSync(attributes, 'a.ts filter=evil\n');
+
+      const r = runScratchTree({
+        worktree: spacedWorktree,
+        label: 'verify--round-1--space',
+      });
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('filter.evil.smudge');
+      expect(existsSync(pwned)).toBe(false);
+    } finally {
+      rmSync(spaced, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses the include target git resolves — boundary whitespace is part of the path', () => {
+    // `path = " x.cfg"`: git keeps the boundary space and reads
+    // `<gitdir>/ x.cfg` — which holds the filter — while a trimmed walk
+    // read the clean decoy beside it and certified the closure.
+    const pwned = join(repo, 'PWNED-boundary');
+    writeFileSync(
+      join(repo, '.git', ' x.cfg'),
+      `[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+    );
+    writeFileSync(join(repo, '.git', 'x.cfg'), '[decoy "x"]\n\tclean = true\n');
+    const attributes = execFileSync(
+      'git',
+      ['rev-parse', '--path-format=absolute', '--git-path', 'info/attributes'],
+      { cwd: worktree, encoding: 'utf8' },
+    ).trim();
+    writeFileSync(attributes, 'a.ts filter=evil\n');
+    writeFileSync(
+      join(repo, '.git', 'config'),
+      '\n[include]\n\tpath = " x.cfg"\n',
+      { flag: 'a' },
+    );
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.smudge');
+    expect(existsSync(pwned)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses an include value git cannot expand — the resolver dies, so the screen dies',
+    () => {
+      // `~user/` naming no passwd entry: git's expansion fails and the
+      // whole config dies loudly — every git call of this command included,
+      // so the refusal fires at the first one. The hand-rolled walk
+      // resolved the same spelling to a clean DECOY under the including
+      // file's directory and certified it.
+      mkdirSync(join(repo, '.git', '~nosuchuser99x'), { recursive: true });
+      writeFileSync(
+        join(repo, '.git', '~nosuchuser99x', 'evil.config'),
+        '[decoy "x"]\n\tclean = true\n',
+      );
+      git(worktree, 'config', 'include.path', '~nosuchuser99x/evil.config');
+
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('could not expand include path');
+    },
+  );
+
+  it('refuses a shallow include whose target a never-matching chain reached past the depth cap first', () => {
+    // Sixteen includeIf hops that never match, ending at the filter file,
+    // written BEFORE the shallow include.path naming the same file: the
+    // hand-rolled walk memoized the file clean at the depth cap without
+    // scanning it, and the shallow directive memo-hit-skipped it — while
+    // git never walks a condition that does not match and resolves the
+    // shallow include to the filter.
+    const pwned = join(repo, 'PWNED-chain-cap');
+    const filterFile = join(repo, 'chain-target');
+    writeFileSync(filterFile, `[filter "evil"]\n\tsmudge = touch ${pwned}\n`);
+    let prev = filterFile;
+    for (let i = 16; i >= 1; i--) {
+      const link = join(repo, `chain-${i}`);
+      writeFileSync(
+        link,
+        `[includeIf "gitdir:/nonexistent-${i}/"]\n\tpath = ${prev}\n`,
+      );
+      prev = link;
+    }
+    writeFileSync(
+      join(repo, '.git', 'config'),
+      `\n[includeIf "gitdir:/nonexistent-0/"]\n\tpath = ${prev}\n\n[include]\n\tpath = ${filterFile}\n`,
+      { flag: 'a' },
+    );
+    const attributes = execFileSync(
+      'git',
+      ['rev-parse', '--path-format=absolute', '--git-path', 'info/attributes'],
+      { cwd: worktree, encoding: 'utf8' },
+    ).trim();
+    writeFileSync(attributes, 'a.ts filter=evil\n');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.smudge');
+    expect(existsSync(pwned)).toBe(false);
+  });
+
+  it('refuses when the planted key count would kill a smaller listing buffer', () => {
+    // One runnable filter plus 50 000 decoy `filter.*` keys: the rendered
+    // listing passes 1 MiB, and a screen that died on its own output
+    // answered clean over it. The merged listing runs a 64 MiB buffer and
+    // refuses.
+    const pwned = join(repo, 'PWNED-buffer');
+    const lines = ['[filter "evil"]', `\tsmudge = touch ${pwned}`];
+    for (let i = 0; i < 50_000; i++) {
+      lines.push(
+        `[filter "decoy-${'x'.repeat(30)}-${i}"]`,
+        '\trequired = false',
+      );
+    }
+    writeFileSync(join(repo, '.git', 'config'), `\n${lines.join('\n')}\n`, {
+      flag: 'a',
+    });
+    const attributes = execFileSync(
+      'git',
+      ['rev-parse', '--path-format=absolute', '--git-path', 'info/attributes'],
+      { cwd: worktree, encoding: 'utf8' },
+    ).trim();
+    writeFileSync(attributes, 'a.ts filter=evil\n');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.smudge');
+    expect(existsSync(pwned)).toBe(false);
+  });
+
+  it('never executes the user’s GLOBAL fsmonitor or hooksPath — the spawns blank what the screen declines to refuse', () => {
+    // The refusal fires before any spawn runs when the keys sit in the
+    // REPO-local config. The user's GLOBAL fsmonitor and hooksPath remain
+    // their contract — they reach every git command the user runs, these
+    // spawns included — so the checkout-carrying calls blank fsmonitor
+    // beside the hooksPath override, and the residue status blanks both:
+    // the measurement and the reset must not become the execution.
+    const fsmon = join(repo, 'GLOBAL-fsmonitor-ran');
+    const hookMark = join(repo, 'GLOBAL-hook-ran');
+    const hooks = join(repo, 'global-hooks');
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(
+      join(hooks, 'post-index-change'),
+      `#!/bin/sh\ntouch ${hookMark}\n`,
+    );
+    chmodSync(join(hooks, 'post-index-change'), 0o755);
+    git(worktree, 'config', '--global', 'core.fsmonitor', `touch ${fsmon}`);
+    git(worktree, 'config', '--global', 'core.hooksPath', hooks);
+    // A stat-stale tracked file: the residue status refreshes the index.
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(worktree, 'a.ts'), stale, stale);
+
+    const calls: string[][] = [];
+    nodeHooks.onSpawnSync = (args, next) => {
+      const gitArgs = args[1];
+      if (Array.isArray(gitArgs)) calls.push([...(gitArgs as string[])]);
+      return next(args);
+    };
+    try {
+      run(); // create — worktree add consults the fsmonitor
+      run(); // reset — checkout --force consults it again
+    } finally {
+      nodeHooks.onSpawnSync = null;
+    }
+
+    expect(existsSync(fsmon)).toBe(false);
+    expect(existsSync(hookMark)).toBe(false);
+    // And the blanks are visible on the spawns themselves — the hook
+    // execution above is git-version dependent, the arguments are not.
+    const statuses = calls.filter((c) => c.includes('status'));
+    expect(statuses.length).toBeGreaterThan(0);
+    for (const c of statuses) {
+      expect(c).toContain('core.fsmonitor=');
+      expect(c).toContain('core.hooksPath=/dev/null/no-hooks');
+    }
+    const checkouts = calls.filter((c) => c.includes('checkout'));
+    expect(checkouts.length).toBeGreaterThan(0);
+    for (const c of checkouts) {
+      expect(c).toContain('core.fsmonitor=');
+    }
   });
 
   it('places it BESIDE the review worktree, never inside it', () => {
@@ -1426,7 +1684,7 @@ describe('runScratchTree --standalone', () => {
     expect(existsSync(pwned)).toBe(false);
   });
 
-  it('refuses an include redirect in BOTH shapes — the walk surfaces the filter behind it', () => {
+  it('refuses an include redirect in BOTH shapes — the merged-config screen surfaces the filter behind it', () => {
     // The include directive sits in the common config; the filter it
     // redirects to never appears in a scanned file, so a screen keyed on
     // filter keys alone answers clean — while the shared-worktree
@@ -1447,16 +1705,11 @@ describe('runScratchTree --standalone', () => {
 
     const linked = runScratchTree({ worktree, label: 'verify--round-1--inc' });
     expect(linked.available).toBe(false);
-    // Pins WHICH arm fired in each shape: both refusal notes name the
-    // offending keys, so a mutant routing include keys into the filter arm
-    // leaves the key-name assertions green in both.
-    expect(linked.note).toContain('include directive(s)');
-    expect(linked.note).toContain('include.path');
+    expect(linked.note).toContain('filter.evil.clean');
 
     const r = run();
     expect(r.available).toBe(false);
-    expect(r.note).toContain('include directive(s)');
-    expect(r.note).toContain('include.path');
+    expect(r.note).toContain('filter.evil.clean');
     expect(existsSync(pwned)).toBe(false);
     expect(r.path).toBeUndefined();
   });
@@ -1484,7 +1737,7 @@ describe('runScratchTree --standalone', () => {
 
     const r = run();
     expect(r.available).toBe(true);
-    expect(r.note).not.toContain('include directive(s)');
+    expect(r.note).not.toContain('no scratch tree is safe');
   });
 
   it('refuses a filter.<name>.process plant in BOTH shapes — `git status` executes it exactly like clean', () => {
@@ -1506,6 +1759,60 @@ describe('runScratchTree --standalone', () => {
     const r = run();
     expect(r.available).toBe(false);
     expect(r.note).toContain('filter.evil.process');
+    expect(existsSync(pwned)).toBe(false);
+    expect(r.path).toBeUndefined();
+  });
+
+  it('refuses repo-local core.fsmonitor in BOTH shapes — the checkouts would execute it', () => {
+    // One plain write into the common config, no attributes needed: the
+    // linked rebuild's `worktree add` and the reset's `checkout --force`
+    // each EXECUTE a repo-local fsmonitor (measured live) — so the screen
+    // refuses the key the way it refuses the filter namespace, while the
+    // user's GLOBAL fsmonitor remains their own contract.
+    const pwned = join(repo, 'PWNED-fsmonitor');
+    git(repo, 'config', 'core.fsmonitor', `touch ${pwned}`);
+
+    const linked = runScratchTree({
+      worktree,
+      label: 'verify--round-1--fsmon',
+    });
+    expect(linked.available).toBe(false);
+    expect(linked.note).toContain('core.fsmonitor');
+
+    const r = run();
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('core.fsmonitor');
+    expect(existsSync(pwned)).toBe(false);
+    expect(r.path).toBeUndefined();
+  });
+
+  it('refuses repo-local core.hooksPath — the residue measurement writes the index through it', () => {
+    // hooksPath plus an executable post-index-change and a stat-stale
+    // tracked file: the residue `git status` every shape runs after the
+    // screen refreshes the index, and the write fires the hook on git
+    // versions that fire it — so the screen refuses the key outright,
+    // before any measurement runs.
+    const pwned = join(repo, 'PWNED-hookspath');
+    const dir = join(repo, 'evil-hooks');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'post-index-change'),
+      `#!/bin/sh\ntouch ${pwned}\n`,
+    );
+    chmodSync(join(dir, 'post-index-change'), 0o755);
+    git(repo, 'config', 'core.hooksPath', dir);
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(worktree, 'a.ts'), stale, stale);
+
+    const linked = runScratchTree({
+      worktree,
+      label: 'verify--round-1--hooks',
+    });
+    expect(linked.available).toBe(false);
+    expect(linked.note).toContain('core.hookspath');
+
+    const r = run();
+    expect(r.available).toBe(false);
     expect(existsSync(pwned)).toBe(false);
     expect(r.path).toBeUndefined();
   });
@@ -1564,6 +1871,66 @@ describe('runScratchTree --standalone', () => {
     expect(second.available).toBe(true);
     expect(lstatSync(second.path!).isSymbolicLink()).toBe(false);
     expect(existsSync(join(victim, 'keep'))).toBe(true);
+  });
+
+  it('refuses a symlink raced back into the window between the discard and the clone', () => {
+    // The discard and the clone are two syscalls apart on a predictable
+    // path. The shim stands a symlink back up the moment the leaf is GONE —
+    // the exact shape the absence check refuses — and the refusal must fire
+    // before any clone is aimed at the link.
+    run(); // a tree stands at the path
+    const tree = scratchWorktreePath(worktree, 'prose-exec--round-1--abc123');
+    const victim = join(repo, 'attack-target');
+    mkdirSync(victim, { recursive: true });
+    nodeHooks.onLstatSync = (args, next) => {
+      if (args[0] === tree && !existsSync(tree)) {
+        symlinkSync(victim, tree, 'dir');
+      }
+      return next(args);
+    };
+    try {
+      const r = run();
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('reappeared between the discard and the clone');
+      // The clone never ran: the victim holds nothing, no path certified.
+      expect(existsSync(join(victim, '.git'))).toBe(false);
+      expect(r.path).toBeUndefined();
+    } finally {
+      nodeHooks.onLstatSync = null;
+    }
+  });
+
+  it('refuses a symlink swapped in while the clone runs — and wipes what landed inside it', () => {
+    // The belt over the window the clone itself spans: the shim lets the
+    // REAL clone finish into the directory the command made, then swaps the
+    // leaf for a symlink. Without the post-clone re-lstat the checkout
+    // below would run through the link — `remote remove` dies, but only
+    // after `checkout --force` already ran against whichever repository
+    // discovery walks up to from the victim.
+    run();
+    const tree = scratchWorktreePath(worktree, 'prose-exec--round-1--abc123');
+    const victim = join(repo, 'attack-target');
+    mkdirSync(victim, { recursive: true });
+    nodeHooks.onSpawnSync = (args, next) => {
+      const r = next(args);
+      const gitArgs = args[1];
+      if (Array.isArray(gitArgs) && (gitArgs as string[]).includes('clone')) {
+        rmSync(tree, { recursive: true, force: true });
+        symlinkSync(victim, tree, 'dir');
+      }
+      return r;
+    };
+    try {
+      const r = run();
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('swapped for a symlink during the clone');
+      // The victim stays empty and the user's repository is untouched —
+      // still on its branch: nothing ran through the link.
+      expect(existsSync(join(victim, '.git'))).toBe(false);
+      expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('main');
+    } finally {
+      nodeHooks.onSpawnSync = null;
+    }
   });
 
   it('refuses when an ancestor of the scratch path is a symlink', () => {

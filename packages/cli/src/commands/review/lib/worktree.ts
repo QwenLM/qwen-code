@@ -922,9 +922,15 @@ export function worktreeResidue(
       // runs a command on `status`, and this tree's config is writable by
       // anything running as the user. Emptying it here is the same discipline
       // as the checkouts' `core.hooksPath` — the tripwire is the one command
-      // that must not be steerable by the tree it is measuring.
+      // that must not be steerable by the tree it is measuring. `status`
+      // WRITES the index too — a stat-stale tracked file refreshes it — and
+      // the write fires `post-index-change` from a repo-local `core.hooksPath`
+      // (measured live on git 2.43), so the hook directory is blanked here the
+      // way the checkouts blank it.
       '-c',
       'core.fsmonitor=',
+      '-c',
+      'core.hooksPath=/dev/null/no-hooks',
       'status',
       '--porcelain',
       '--untracked-files=all',

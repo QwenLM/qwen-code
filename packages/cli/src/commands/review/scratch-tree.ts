@@ -47,35 +47,36 @@
 // repository are another matter, and this command still makes two: the linked
 // shape's checkouts run through the user's merged config, and EVERY shape
 // measures the shared worktree's residue with a `git status` that re-reads
-// stat-stale files through configured filter commands. So a screen over the
-// repo-local config remains — narrowed from the earlier allowlist screen over
-// the shared common dir, which could not close (the surface it screened is
-// git-defined and grows across versions, its inputs live on the very surface
-// an attacker writes, and it refused the config state the pipeline's own CI
-// checkout writes, so the isolation never engaged where it was deployed). The
-// screen now refuses what can EXECUTE — the `filter.` namespace, whose
-// command-valued keys an attributes file selects — and WALKS include
-// redirects, refusing only the ones a filter actually surfaces behind (or
-// whose target it cannot read), so the credential-shaped includes the
-// pipeline's own CI checkout writes scan clean.
+// stat-stale files through configured filter commands, runs any configured
+// fsmonitor and writes the index through any configured hooksPath. So a
+// screen over the repo-local config remains — narrowed from the earlier
+// allowlist screen over the shared common dir, which could not close (the
+// surface it screened is git-defined and grows across versions, its inputs
+// live on the very surface an attacker writes, and it refused the config
+// state the pipeline's own CI checkout writes, so the isolation never engaged
+// where it was deployed). The screen refuses what can EXECUTE — the
+// `filter.` namespace, `core.fsmonitor` and `core.hooksPath` — and reads the
+// closure from git's own merged-config resolution rather than from a model of
+// it: a hand-rolled walk of includes and conditions diverged from git on six
+// executed shapes, and every divergence was a bypass. The credential-shaped
+// includes the pipeline's own CI checkout writes scan clean — they surface
+// nothing executable.
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import {
-  accessSync,
-  constants,
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   assertWritableOutPath,
@@ -179,22 +180,30 @@ export interface ScratchTreeArgs {
 }
 
 /**
- * `git`, with the user's hooks out of the way.
+ * `git`, with the user's hooks and filesystem monitor out of the way.
  *
  * A scratch tree is a LINKED worktree, so its hooks resolve to the common dir —
  * the user's own `.git/hooks`. `git worktree add` and `checkout` both fire
  * `post-checkout` from there, which means this command would run whatever hooks
  * that repository has (and whatever a probe managed to write into it) as a side
  * effect of creating or resetting a tree. Pointing `core.hooksPath` at a path
- * that holds no hooks covers the HOOKS; it does not cover content FILTERS —
- * command-valued keys of the `filter.` namespace (smudge, clean, process) are
- * config-driven, and a checkout runs whichever ones an attributes file selects.
- * `runScratchTree` detects that surface in the repository's own config and
- * refuses rather than run it (see `localFilterCommands`). What a probe does
- * with its own shell is the probe's business, and the report says plainly that
- * the common dir is shared rather than isolated.
+ * that holds no hooks covers hooks; `core.fsmonitor` is the other command-valued
+ * key the same checkouts execute — a repo-local value fires on `worktree add`
+ * and on the reset's `checkout --force` alike (measured live), so it is blanked
+ * here the way worktreeResidue blanks it on the residue measurement.
+ * `runScratchTree` refuses a repository whose LOCAL config carries either key
+ * (see `localFilterCommands`); the blanks are the belt over values the user's
+ * GLOBAL config still carries — those remain the user's own contract, like any
+ * git command they run, but the measurement and reset must not become the
+ * execution. What a probe does with its own shell is the probe's business, and
+ * the report says plainly that the common dir is shared rather than isolated.
  */
-const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
+const NO_HOOKS = [
+  '-c',
+  'core.hooksPath=/dev/null/no-hooks',
+  '-c',
+  'core.fsmonitor=',
+];
 
 /**
  * The repo-local config surface the checkouts and the residue measurement
@@ -207,216 +216,156 @@ const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
  * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
  * wipe the common dir, so a filter planted while reviewing one PR fires on
  * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The local config files
- * are checked with `--file` rather than merged config because filters in the
- * user's global config (git-lfs is the common one) are the user's own
- * contract, exactly like any git command they run — while a probe's planting
- * surface is the repo-local files. The state cannot be told apart from a
- * filter the user set deliberately, and cannot be safely wiped, so a hit is a
- * refusal upstream, not a cleanup here.
+ * planted by reviewing a malicious PR, measured live. `core.fsmonitor` and
+ * `core.hooksPath` are the same class: a command and a hook directory the
+ * very calls this screen guards execute — the fsmonitor on every `worktree
+ * add` and reset checkout, the hooksPath through the residue measurement's
+ * index write — each reproduced end-to-end from one repo-local write.
  *
- * The screen refuses the whole `filter.` namespace rather than enumerating
- * its command-valued keys: smudge and clean are the pair a checkout runs,
- * but `filter.<name>.process` is the third command-valued key of the family
- * and `git status` executes it exactly like clean — which is what the
- * shared-worktree residue measurement runs. A boolean like
- * `filter.<name>.required` is refused along with them: a screen whose
- * answer is a refusal loses nothing by refusing a namespace, and the next
- * key git adds to it is refused too, by construction.
- *
- * An include directive in a scanned file is WALKED, not refused outright:
- * `--file` reads leave it unresolved, so a filter defined behind the redirect
- * is invisible to a per-file scan, while every checkout this command
- * authorises and EVERY shape's shared-worktree residue measurement read
- * MERGED config, which resolves it and executes whatever filter surfaces.
- * Each directive's target is resolved the way git resolves it (`~/`
- * expansion; a relative path is relative to the file holding the directive),
- * then scanned with this same screen, transitively — so a filter two
- * redirects deep still surfaces, and the refusal names the redirect chain.
- * A target that cannot be read is a refusal too: the screen cannot then
- * prove the redirect inert, and the merged-config reads would resolve it.
- * `includeIf` conditions are deliberately not evaluated: a filter surfacing
- * behind a redirect whose condition never holds is a refusal the screen can
- * explain; a condition misjudged inert is the execution the screen exists to
- * prevent. The credential-shaped includes the pipeline's own CI checkout
- * writes (`includeIf.gitdir:` pointing at an `[http] extraheader` file) scan
- * clean here — the earlier arm that refused every directive refused the
- * deployment itself, on every call, in both shapes. `include`/`includeIf`
- * sections resolve exactly one variable — `path` — so keys in those
- * namespaces without it are inert and skipped. The user's global config is
- * still never scanned, whatever it includes.
+ * The screen reads that surface the way the EXECUTIONS read it — git's own
+ * merged-config resolution, listed with `config --list --name-only -z` per
+ * scope — because a hand-rolled model of it diverged on six executed shapes
+ * (a condition carrying a space; a file first reached past the depth cap
+ * memoized clean; a listing killed by its own buffer; a realpath collapse of
+ * two symlinked paths; a boundary-whitespace include value; a `~user/`
+ * passwd expansion), each one a bypass. Serialization, include walking,
+ * `includeIf` condition evaluation, depth caps and value semantics now come
+ * from the same resolver the checkouts read. The scopes the user owns —
+ * global, system, XDG — are blanked for the listing: a git-lfs filter in the
+ * user's own config is their contract, not a plant, while the planting
+ * surface is the repo-local closure, exactly what remains visible. A scope
+ * git cannot list is a refusal: the checkouts read that same config, and
+ * what the screen cannot list it cannot prove inert. A MISSING include
+ * target is the one doubt git itself resolves — silently skipping it — so
+ * the screen skips it too; nothing executes that git would not execute.
  */
 interface FilterScreen {
-  /** `filter.` keys sitting directly in a scanned repo-local file. */
-  filters: string[];
-  /**
-   * Include directive keys that warrant a refusal: their target defines
-   * `filter.` keys (named in `surfacedFilters`) or cannot be read (named in
-   * `unreadableTargets`). Every redirect on the chain is named, so the note
-   * reaches whichever one the user can actually remove.
-   */
-  includes: string[];
-  /** `filter.` keys found by walking include targets. */
-  surfacedFilters: string[];
-  /** Include targets the screen could not read. */
-  unreadableTargets: string[];
+  /** Executable keys each scope's merged config resolved, labelled by scope. */
+  hits: Array<{ scope: string; keys: string[] }>;
+  /** Scopes whose merged config git could not list. Doubt is a refusal. */
+  unlisted: Array<{ scope: string; why: string }>;
 }
 
-/** The screen's scan: the filter namespace and the two include namespaces. */
-const SCREEN_KEYS = '^(filter\\.|include\\.|includeif\\.)';
+/**
+ * The keys whose values are commands — or a hook directory — the guarded
+ * checkouts execute. The WHOLE `filter.` namespace rather than its
+ * command-valued keys: smudge and clean are the pair a checkout runs, but
+ * `filter.<name>.process` is the third and `git status` executes it exactly
+ * like clean — which is what the shared-worktree residue measurement runs.
+ * Refusing the namespace costs nothing over refusing its command keys, and
+ * the next key git adds to it is refused too, by construction.
+ */
+function isScreenedName(name: string): boolean {
+  return (
+    name.startsWith('filter.') ||
+    name === 'core.fsmonitor' ||
+    name === 'core.hookspath'
+  );
+}
 
 /**
- * Scans one file and — transitively — the targets of its include
- * directives, and answers whether the file's closure warrants a refusal:
- * a `filter.` key, or an include target that cannot be read. The answer is
- * memoized per file so a target two directives share is scanned once but
- * refuses for BOTH: each directive whose closure surfaces a filter names
- * its own key in the refusal, however many paths reach the same file.
- * `chain` is the include keys traversed to reach `file` — empty for the
- * repo-local candidates themselves — and names every redirect on the path.
+ * Lists one scope's merged config and records what warrants a refusal:
+ * screened keys the closure resolved, or the listing itself failing. `-z`
+ * because a config subsection may carry a newline, which would otherwise
+ * frame a different name than git resolved; the 64 MiB buffer because a
+ * screen whose own listing dies on a planted key count answers "clean" over
+ * its own corpse otherwise.
  */
-function walkConfigFile(
-  worktree: string,
-  file: string,
-  depth: number,
-  chain: string[],
-  memo: Map<string, boolean>,
+function screenScope(
+  scope: string,
+  spawn: { cwd: string; env: NodeJS.ProcessEnv },
   screen: FilterScreen,
-): boolean {
-  let real: string;
-  try {
-    real = realpathSync(file);
-  } catch {
-    // Only a walked include reaches this function with a path that may not
-    // exist; the repo-local candidates are existence-checked by the caller.
-    if (chain.length > 0) {
-      for (const key of chain) pushUnique(screen.includes, key);
-      pushUnique(screen.unreadableTargets, file);
-    }
-    return chain.length > 0;
+): void {
+  const r = spawnSync('git', ['config', '--list', '--name-only', '-z'], {
+    cwd: spawn.cwd,
+    env: spawn.env,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+    screen.unlisted.push({
+      scope,
+      why: r.error
+        ? ((r.error as NodeJS.ErrnoException).code ?? r.error.message)
+        : `git config exited ${r.status}${
+            typeof r.stderr === 'string' && r.stderr.trim() !== ''
+              ? `: ${r.stderr.trim()}`
+              : ''
+          }`,
+    });
+    return;
   }
-  const seen = memo.get(real);
-  if (seen !== undefined) {
-    if (seen) {
-      for (const via of chain) pushUnique(screen.includes, via);
-    }
-    return seen;
+  const keys = new Set<string>();
+  for (const name of r.stdout.split('\0')) {
+    if (name && isScreenedName(name)) keys.add(name);
   }
-  // In-progress marker before the scan: an include cycle returns to it and
-  // stops there. git caps include chains at depth 10 and dies past it —
-  // loudly, so nothing executes silently — and the cap is a belt over that.
-  memo.set(real, false);
-  if (depth > 16) return false;
-  // cwd is the review worktree, never the scanned file's own directory:
-  // once `extensions.worktreeConfig` is on, discovery from inside a
-  // REGISTERED worktree's admin dir reads that worktree's own config during
-  // setup and dies on the very include shapes this scan is looking for.
-  // The identity gate above already proved git runs from `worktree`.
-  const r = spawnSync(
-    'git',
-    ['config', '--file', file, '--get-regexp', SCREEN_KEYS],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
-  );
-  // Exit 1 is "no match" — a clean file. A file git cannot parse or read
-  // answers non-zero too; the repo-local ones were existence-checked, and an
-  // include target that fails here is handled by the readability check the
-  // caller ran before recursing, so nothing is lost in either shape.
-  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return false;
-  let bad = false;
-  for (const line of r.stdout.split('\n')) {
-    const sep = line.indexOf(' ');
-    const key = sep === -1 ? line : line.slice(0, sep);
-    if (!key) continue;
-    if (key.startsWith('filter.')) {
-      const list = chain.length === 0 ? screen.filters : screen.surfacedFilters;
-      pushUnique(list, key);
-      for (const via of chain) pushUnique(screen.includes, via);
-      bad = true;
-      continue;
-    }
-    if (!key.endsWith('.path')) continue;
-    const value = sep === -1 ? '' : line.slice(sep + 1).trim();
-    const target = resolveIncludeTarget(dirname(file), value);
-    const subChain = [...chain, key];
-    if (target === null || !readableFile(target)) {
-      for (const via of subChain) pushUnique(screen.includes, via);
-      pushUnique(screen.unreadableTargets, target ?? value);
-      bad = true;
-      continue;
-    }
-    if (walkConfigFile(worktree, target, depth + 1, subChain, memo, screen))
-      bad = true;
-  }
-  memo.set(real, bad);
-  return bad;
+  if (keys.size > 0) screen.hits.push({ scope, keys: [...keys] });
 }
 
 /**
- * The target an include directive names, resolved the way git resolves it:
- * `~/` expands against HOME, an absolute path stands, anything else is
- * relative to the file holding the directive. `null` for a value git would
- * not treat as a path at all (empty).
+ * The screen's answer for every merged-config scope a checkout this command
+ * authorises reads. Scope one is the review worktree's own merged config:
+ * the rebuild's `worktree add` runs from there, and EVERY shape measures the
+ * shared worktree with a `git status` from there. The reset's checkout runs
+ * in the SCRATCH tree, so every registered worktree's per-worktree scope
+ * follows: `GIT_DIR` aimed at the admin entry reads the common config plus
+ * that entry's own `config.worktree` (when `extensions.worktreeConfig` is
+ * on) exactly the way a command run inside the tree does — same resolver,
+ * same condition evaluation, so nothing surfaces for the screen that would
+ * not surface for the checkout.
  */
-function resolveIncludeTarget(fromDir: string, value: string): string | null {
-  if (value === '') return null;
-  if (value === '~') return homedir();
-  if (value.startsWith('~/')) return join(homedir(), value.slice(2));
-  return isAbsolute(value) ? value : resolve(fromDir, value);
-}
-
-function readableFile(path: string): boolean {
-  try {
-    if (!statSync(path).isFile()) return false;
-    accessSync(path, constants.R_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function pushUnique(list: string[], value: string): void {
-  if (!list.includes(value)) list.push(value);
-}
-
 function localFilterCommands(worktree: string): FilterScreen {
-  const screen: FilterScreen = {
-    filters: [],
-    includes: [],
-    surfacedFilters: [],
-    unreadableTargets: [],
-  };
-  const files = spawnSync(
-    'git',
-    ['rev-parse', '--git-common-dir', '--git-dir'],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
-  );
-  if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return screen;
-  }
-  const [commonDir, gitDir] = files.stdout.trim().split('\n');
-  const common = resolve(worktree, commonDir);
-  const candidates = [
-    join(common, 'config'),
-    join(resolve(worktree, gitDir), 'config.worktree'),
-  ];
-  // Every OTHER worktree's per-worktree config too. This screen runs against
-  // the review worktree, but the checkout it authorises runs in the SCRATCH
-  // tree, whose own `<common>/worktrees/<label>/config.worktree` is honored
-  // once `extensions.worktreeConfig` is on and was never read here — a filter
-  // planted there executed during the reset while this function reported the
-  // repository clean. The admin directory is one `readdir`, and a filter in
-  // any of these is a plant whichever tree carries it.
+  const screen: FilterScreen = { hits: [], unlisted: [] };
+  const blanks = mkdtempSync(join(tmpdir(), 'qwen-config-screen-'));
   try {
-    for (const entry of readdirSync(join(common, 'worktrees'))) {
-      candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
+    const blankFile = join(blanks, 'blank');
+    writeFileSync(blankFile, '');
+    const xdgGit = join(blanks, 'xdg', 'git');
+    mkdirSync(xdgGit, { recursive: true });
+    writeFileSync(join(xdgGit, 'config'), '');
+    const env = sanitizedGitEnv();
+    env['GIT_CONFIG_GLOBAL'] = blankFile;
+    env['GIT_CONFIG_SYSTEM'] = blankFile;
+    env['XDG_CONFIG_HOME'] = join(blanks, 'xdg');
+    screenScope('the review worktree', { cwd: worktree, env }, screen);
+    const common = spawnSync('git', ['rev-parse', '--git-common-dir'], {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
+    if (
+      common.error ||
+      common.status !== 0 ||
+      typeof common.stdout !== 'string'
+    ) {
+      screen.unlisted.push({
+        scope: 'the worktree scopes',
+        why: common.error
+          ? ((common.error as NodeJS.ErrnoException).code ??
+            common.error.message)
+          : `git rev-parse exited ${common.status}`,
+      });
+      return screen;
     }
-  } catch {
-    // No linked worktrees registered: the two candidates above are all of it.
-  }
-  const memo = new Map<string, boolean>();
-  for (const file of candidates) {
-    if (!existsSync(file)) continue;
-    walkConfigFile(worktree, file, 0, [], memo, screen);
+    const commonDir = resolve(worktree, common.stdout.trim());
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(join(commonDir, 'worktrees'));
+    } catch {
+      // No linked worktrees registered — scope one was the whole closure.
+    }
+    for (const entry of entries) {
+      screenScope(
+        `worktrees/${entry}`,
+        {
+          cwd: worktree,
+          env: { ...env, GIT_DIR: join(commonDir, 'worktrees', entry) },
+        },
+        screen,
+      );
+    }
+  } finally {
+    rmSync(blanks, { recursive: true, force: true });
   }
   return screen;
 }
@@ -445,6 +394,23 @@ function buildStandaloneTree(
   tree: string,
   headSha: string,
 ): void {
+  // The discard above and the clone below are two syscalls apart, and the
+  // path is predictable: a same-user process can stand a symlink back up the
+  // instant the discard clears it, and `git clone` FOLLOWS a symlinked
+  // destination — materialising the whole clone inside whichever directory
+  // the link names while the report certifies the link itself (measured
+  // live). The leaf must still be ABSENT before anything is built there.
+  try {
+    lstatSync(tree);
+    throw new Error(
+      `the scratch path ${tree} reappeared between the discard and the clone`,
+    );
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  // Create the destination ourselves: a link raced into the window after the
+  // check above then dies EEXIST at the mkdir instead of being followed.
+  mkdirSync(tree);
   git(
     worktree,
     'clone',
@@ -463,6 +429,24 @@ function buildStandaloneTree(
     worktree,
     tree,
   );
+  // Belt over the window the clone itself spans: a link swapped in after the
+  // mkdir is still followed by git, so re-lstat immediately after — and wipe
+  // what landed inside the target, because clone only fills a destination
+  // that was EMPTY, so the target holds this clone and nothing else. The
+  // same one-syscall narrowing the reset gate's pre-mutation re-check makes.
+  if (lstatSync(tree).isSymbolicLink()) {
+    let target: string | null = null;
+    try {
+      target = realpathSync(tree);
+    } catch {
+      // A link that no longer resolves has nothing to wipe.
+    }
+    rmSync(tree, { force: true });
+    if (target !== null) rmSync(target, { recursive: true, force: true });
+    throw new Error(
+      `the scratch path ${tree} was swapped for a symlink during the clone`,
+    );
+  }
   git(tree, 'checkout', '--quiet', '--force', '--detach', headSha);
   git(tree, 'remote', 'remove', 'origin');
 }
@@ -768,57 +752,44 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   }
 
   // BEFORE any checkout or measurement runs — the reuse path's reset and the
-  // rebuild path's `worktree add` both execute configured content filters,
-  // and EVERY shape then measures the SHARED worktree with a `git status`
-  // that re-reads stat-stale files through filter commands of the `filter.`
-  // namespace (see worktreeResidue). A standalone clone's checkout reads the
-  // CLONE's config, which holds none of these — but the shared measurement
-  // it still runs can execute them, so the screen covers both shapes.
+  // rebuild path's `worktree add` both execute configured content filters
+  // and fsmonitor commands, and EVERY shape then measures the SHARED
+  // worktree with a `git status` that re-reads stat-stale files through
+  // filter commands and writes the index through a planted hooksPath (see
+  // worktreeResidue). A standalone clone's checkout reads the CLONE's
+  // config, which holds none of these — but the shared measurement it still
+  // runs can execute them, so the screen covers both shapes.
   const screened = localFilterCommands(worktree);
-  if (screened.filters.length > 0) {
+  if (screened.unlisted.length > 0) {
     return unavailable(
-      `the repository's local config defines filter config ${screened.filters
-        .map(inertPath)
-        .join(', ')} — ` +
-        'keys of the `filter.` namespace are commands waiting for an attributes file to select them ' +
-        '(smudge, clean and process alike): the linked shape runs them through its checkouts, ' +
-        'and EVERY shape through the shared-worktree residue measurement, whose `git status` ' +
-        're-reads stat-stale files through them (hooks are disabled, filters are config-driven). ' +
-        'Two plain writes into the common dir are enough to plant both the filter and the ' +
-        'attributes that select it. Remove the filter config — or the attributes file that ' +
-        'uses it — if it is not yours; until then no scratch tree is safe to create or reset.',
+      `the repository's merged config could not be listed (${screened.unlisted
+        .map((u) => `${u.scope}: ${inertPath(u.why)}`)
+        .join('; ')}) — the checkouts this command authorises and the ` +
+        'shared-worktree residue measurement read that very config, and what ' +
+        'the screen cannot list it cannot prove inert. No scratch tree is ' +
+        'safe to create or reset until the config parses again.',
     );
   }
-  if (screened.includes.length > 0) {
-    const reasons: string[] = [];
-    if (screened.surfacedFilters.length > 0) {
-      reasons.push(
-        `following the redirect surfaces filter config ${screened.surfacedFilters
-          .map(inertPath)
-          .join(
-            ', ',
-          )}: the checkouts this command authorises and every shape's ` +
-          'shared-worktree residue measurement read MERGED config, which resolves ' +
-          'the redirect and runs those filters',
-      );
-    }
-    if (screened.unreadableTargets.length > 0) {
-      reasons.push(
-        `the redirect's target could not be read (${screened.unreadableTargets
-          .map(inertPath)
-          .join(
-            ', ',
-          )}), so the screen cannot prove no filter hides behind it — ` +
-          'and the merged-config reads this command authorises would resolve it',
-      );
+  if (screened.hits.length > 0) {
+    const named = screened.hits.flatMap((h) =>
+      h.keys.map((k) => `${inertPath(k)} in ${h.scope}`),
+    );
+    // A planted key COUNT is itself the attack shape that killed the old
+    // screen's buffer; name ten, count the rest.
+    const shown = named.slice(0, 10);
+    if (named.length > shown.length) {
+      shown.push(`${named.length - shown.length} more`);
     }
     return unavailable(
-      `the repository's local config redirects the very surface this screen ` +
-        `reads — include directive(s) ${screened.includes
-          .map(inertPath)
-          .join(', ')} — and ${reasons.join('; and ')}. ` +
-        'Remove the filter config behind the redirect — or the include directive ' +
-        'that names it — until then no scratch tree is safe to create or reset.',
+      `the repository's local config resolves ${shown.join(', ')} into the ` +
+        'very merged config the checkouts read — `filter.*` keys are commands ' +
+        'a checkout runs on attributed files and the shared-worktree residue ' +
+        '`git status` runs on stat-stale ones, `core.fsmonitor` is a command ' +
+        'those same calls run on any index refresh, and `core.hooksPath` is a ' +
+        'hook directory the residue measurement reaches when it writes the ' +
+        'index. Two plain writes into the common dir plant any of them, and ' +
+        'nothing this command runs wipes it. Remove what is not yours; until ' +
+        'then no scratch tree is safe to create or reset.',
     );
   }
 
