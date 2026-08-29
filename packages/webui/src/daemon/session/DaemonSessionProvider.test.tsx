@@ -12293,6 +12293,404 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('fails closed when an idle reload lacks the restored prompt terminal', async () => {
+    const ringEvicted = createDeferred<void>();
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-restored-terminal-missing',
+      hasActivePrompt: true,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 10,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-restored',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'partial answer' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: async function* ringEvictedEvents() {
+        await ringEvicted.promise;
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'ring_evicted' },
+        } satisfies DaemonEvent;
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: firstSession.sessionId,
+      hasActivePrompt: false,
+      replaySnapshot: { compactedReplay: [], liveJournal: [] },
+      events: createPendingEvents(reloaded),
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+    const settlements: DaemonPromptSettledEvent[] = [];
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      ringEvicted.resolve();
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([]);
+    expect(promptStatus).toBe('idle');
+  });
+
+  it('re-correlates a restored successor after replay finishes the pinned prompt', async () => {
+    const ringEvicted = createDeferred<void>();
+    const successorCompleted = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-restored-successor',
+      hasActivePrompt: true,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 10,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-finished',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'finished answer' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: async function* ringEvictedEvents() {
+        await ringEvicted.promise;
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'ring_evicted' },
+        } satisfies DaemonEvent;
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: firstSession.sessionId,
+      hasActivePrompt: true,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 11,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-finished',
+            data: { promptId: 'prompt-finished', stopReason: 'end_turn' },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: async function* successorEvents() {
+        yield {
+          id: 12,
+          v: 1,
+          type: 'session_update',
+          promptId: 'prompt-successor',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'successor answer' },
+            },
+          },
+        } satisfies DaemonEvent;
+        yield {
+          id: 13,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-successor',
+          data: { promptId: 'prompt-successor', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        successorCompleted.resolve();
+      },
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+    const settlements: DaemonPromptSettledEvent[] = [];
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      ringEvicted.resolve();
+      await successorCompleted.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('idle');
+    expect(settlements).toEqual([
+      expect.objectContaining({
+        promptId: 'prompt-successor',
+        outcome: 'completed',
+      }),
+    ]);
+  });
+
+  it('does not adopt a queued prompt while correlating a restored terminal', async () => {
+    const terminalDelivered = createDeferred<void>();
+    const sessionId = 'session-restored-queued-correlation';
+    const session = createMockSession({
+      sessionId,
+      hasActivePrompt: true,
+      events: async function* queuedThenTerminal() {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'pending_prompt_added',
+          data: {
+            sessionId,
+            promptId: 'prompt-queued',
+            text: 'queued request',
+          },
+        } satisfies DaemonEvent;
+        yield {
+          id: 2,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-restored',
+          data: { promptId: 'prompt-restored', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        terminalDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+    const settlements: DaemonPromptSettledEvent[] = [];
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await terminalDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('idle');
+    expect(settlements).toEqual([
+      expect.objectContaining({ promptId: 'prompt-restored' }),
+    ]);
+  });
+
+  it('does not attribute an uncorrelated historical terminal to a restored prompt', async () => {
+    const ringEvicted = createDeferred<void>();
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-restored-uncorrelated-terminal',
+      hasActivePrompt: true,
+      events: async function* ringEvictedEvents() {
+        await ringEvicted.promise;
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'ring_evicted' },
+        } satisfies DaemonEvent;
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: firstSession.sessionId,
+      hasActivePrompt: false,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 10,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-historical',
+            data: { promptId: 'prompt-historical', stopReason: 'end_turn' },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: createPendingEvents(reloaded),
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+    const settlements: DaemonPromptSettledEvent[] = [];
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      ringEvicted.resolve();
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([]);
+    expect(promptStatus).toBe('idle');
+  });
+
+  it('settles an unbound restored prompt on a promptId-less terminal', async () => {
+    const terminalDelivered = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-restored-unbound-terminal',
+      hasActivePrompt: true,
+      events: async function* promptIdlessTerminal() {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'turn_complete',
+          data: { stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        terminalDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+    const settlements: DaemonPromptSettledEvent[] = [];
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await terminalDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('idle');
+    expect(settlements).toEqual([]);
+  });
+
+  it('preserves restored prompt correlation across degraded reconnect replay', async () => {
+    const ringEvicted = createDeferred<void>();
+    const terminalDelivered = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-restored-degraded-correlation',
+      hasActivePrompt: true,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 10,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-correct',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'correct partial answer' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: async function* ringEvictedEvents() {
+        await ringEvicted.promise;
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'ring_evicted' },
+        } satisfies DaemonEvent;
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: firstSession.sessionId,
+      hasActivePrompt: true,
+      replayDegraded: true,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 11,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-stale',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'stale replay tail' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: async function* correctTerminal() {
+        yield {
+          id: 12,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-correct',
+          data: { promptId: 'prompt-correct', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        terminalDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+    const settlements: DaemonPromptSettledEvent[] = [];
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      ringEvicted.resolve();
+      await terminalDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(promptStatus).toBe('idle');
+    expect(settlements).toEqual([
+      expect.objectContaining({
+        promptId: 'prompt-correct',
+        transcriptComplete: false,
+      }),
+    ]);
+  });
+
   it('defers catch-up settlement until a truncated replay is repaired', async () => {
     const ringEvicted = createDeferred<void>();
     const repairLoad = createDeferred<MockSession>();
@@ -16107,11 +16505,12 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('bounds prompt settlement duplicate retention', async () => {
+    const continueAfterBoundary = createDeferred<void>();
     const streamCompleted = createDeferred<void>();
     sdkMocks.sessions.push(
       createMockSession({
         events: async function* manyTerminalEvents() {
-          for (let index = 0; index <= 1024; index += 1) {
+          for (let index = 0; index < 1024; index += 1) {
             yield {
               id: index + 1,
               v: 1,
@@ -16124,14 +16523,29 @@ describe('DaemonSessionProvider', () => {
             } satisfies DaemonEvent;
           }
           yield {
+            id: 1025,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-0',
+            data: { promptId: 'prompt-0', stopReason: 'end_turn' },
+          } satisfies DaemonEvent;
+          await continueAfterBoundary.promise;
+          yield {
             id: 1026,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-1024',
+            data: { promptId: 'prompt-1024', stopReason: 'end_turn' },
+          } satisfies DaemonEvent;
+          yield {
+            id: 1027,
             v: 1,
             type: 'turn_complete',
             promptId: 'prompt-0',
             data: { promptId: 'prompt-0', stopReason: 'end_turn' },
           } satisfies DaemonEvent;
           yield {
-            id: 1027,
+            id: 1028,
             v: 1,
             type: 'turn_complete',
             promptId: 'prompt-1024',
@@ -16150,6 +16564,15 @@ describe('DaemonSessionProvider', () => {
 
     await renderWithProvider(<Harness />, { autoConnect: true });
     await act(async () => {
+      await vi.waitFor(() => expect(settlements).toHaveLength(1024));
+      await flushPromises();
+    });
+    expect(
+      settlements.filter((event) => event.promptId === 'prompt-0'),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      continueAfterBoundary.resolve();
       await streamCompleted.promise;
       await flushPromises();
     });

@@ -291,6 +291,7 @@ function findReplayActivePromptId(
 ): string | undefined {
   let activePromptId: string | undefined;
   for (const event of events) {
+    if (isPendingPromptEvent(event)) continue;
     const promptId = eventPromptId(event);
     if (!promptId) continue;
     if (event.type === 'turn_complete' || event.type === 'turn_error') {
@@ -303,20 +304,6 @@ function findReplayActivePromptId(
     activePromptId ??= promptId;
   }
   return activePromptId;
-}
-
-function findLastReplayTerminalPromptId(
-  events: readonly DaemonEvent[],
-): string | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (event?.type !== 'turn_complete' && event?.type !== 'turn_error') {
-      continue;
-    }
-    const promptId = eventPromptId(event);
-    if (promptId) return promptId;
-  }
-  return undefined;
 }
 
 function getPersistedReplayRecordId(event: DaemonEvent): string | undefined {
@@ -1973,15 +1960,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             restoredActivePromptTrackingRef.current?.sessionId ===
               activeSession.sessionId
           ) {
+            const tracking = restoredActivePromptTrackingRef.current;
+            if (
+              tracking.promptId !== undefined &&
+              replayEvents.some(
+                (event) =>
+                  (event.type === 'turn_complete' ||
+                    event.type === 'turn_error') &&
+                  eventPromptId(event) === tracking.promptId,
+              )
+            ) {
+              tracking.promptId = undefined;
+            }
             const replayPromptId = findReplayActivePromptId(replayEvents);
-            if (replayPromptId) {
-              restoredActivePromptTrackingRef.current.promptId = replayPromptId;
+            if (
+              replayPromptId &&
+              (tracking.promptId === undefined || !tracking.replayDegraded)
+            ) {
+              tracking.promptId = replayPromptId;
             }
           }
           const catchUpRestoredPromptId =
             restoredActivePrompt && activeSession.hasActivePrompt !== true
-              ? (restoredActivePromptTrackingRef.current?.promptId ??
-                findLastReplayTerminalPromptId(replayEvents))
+              ? restoredActivePromptTrackingRef.current?.promptId
               : undefined;
           const markerStillVisible =
             repairingEpisode?.markerBlockId !== undefined &&
@@ -2439,6 +2440,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // so dropping it unpins busy-session snapshots that can reach
             // tens of MiB after adaptive journal growth.
             activeSession.consumeReplaySnapshot();
+          }
+          if (restoredActivePrompt && activeSession.hasActivePrompt !== true) {
+            // A fresh /load snapshot is authoritative. If it reports no active
+            // prompt and replay contains no correlated terminal, end the
+            // restored busy state without inventing a settlement for an
+            // unrelated historical turn.
+            settleRestoredActivePrompt();
+            if (!hasSessionActivePrompt()) setPromptStatus('idle');
           }
           setConnection((current) => ({
             ...current,
@@ -2910,6 +2919,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 terminalPromptId &&
                 event.type !== 'turn_complete' &&
                 event.type !== 'turn_error' &&
+                !isPendingPromptEvent(event) &&
                 trackedRestoredPrompt !== undefined &&
                 trackedRestoredPrompt.promptId === undefined
               ) {
@@ -2917,7 +2927,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }
               const settlesTrackedRestoredPrompt =
                 restoredActivePrompt &&
-                terminalPromptId !== undefined &&
                 (event.type === 'turn_complete' ||
                   event.type === 'turn_error') &&
                 (trackedRestoredPrompt?.promptId === undefined ||

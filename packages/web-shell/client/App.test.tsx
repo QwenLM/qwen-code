@@ -13064,6 +13064,86 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('delivers a settlement observed only by a split provider', async () => {
+    const onAssistantTurnSettled = vi.fn();
+    const { container } = renderApp({
+      onAssistantTurnSettled,
+      splitSessionIds: ['session-1'],
+    });
+    await flush();
+
+    const splitSettlementButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="split-report-settlement"]',
+    );
+    expect(splitSettlementButton).not.toBeNull();
+    act(() => splitSettlementButton!.click());
+
+    expect(onAssistantTurnSettled).toHaveBeenCalledOnce();
+    expect(onAssistantTurnSettled).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      promptId: 'prompt-shared',
+      outcome: 'completed',
+      transcriptComplete: true,
+    });
+  });
+
+  it('bounds assistant settlement dispatcher duplicate retention', async () => {
+    const onAssistantTurnSettled = vi.fn();
+    renderApp({ onAssistantTurnSettled });
+    await flush();
+
+    act(() => {
+      for (let index = 0; index < 1024; index += 1) {
+        testState.promptSettledListener?.({
+          sessionId: 'session-1',
+          promptId: `prompt-${index}`,
+          outcome: 'completed',
+          transcriptComplete: true,
+        });
+      }
+      testState.promptSettledListener?.({
+        sessionId: 'session-1',
+        promptId: 'prompt-0',
+        outcome: 'completed',
+        transcriptComplete: true,
+      });
+    });
+    expect(onAssistantTurnSettled).toHaveBeenCalledTimes(1024);
+
+    act(() => {
+      testState.promptSettledListener?.({
+        sessionId: 'session-1',
+        promptId: 'prompt-1024',
+        outcome: 'completed',
+        transcriptComplete: true,
+      });
+      testState.promptSettledListener?.({
+        sessionId: 'session-1',
+        promptId: 'prompt-0',
+        outcome: 'completed',
+        transcriptComplete: true,
+      });
+      testState.promptSettledListener?.({
+        sessionId: 'session-1',
+        promptId: 'prompt-1024',
+        outcome: 'completed',
+        transcriptComplete: true,
+      });
+    });
+
+    expect(onAssistantTurnSettled).toHaveBeenCalledTimes(1026);
+    expect(
+      onAssistantTurnSettled.mock.calls.filter(
+        ([event]) => event.promptId === 'prompt-0',
+      ),
+    ).toHaveLength(2);
+    expect(
+      onAssistantTurnSettled.mock.calls.filter(
+        ([event]) => event.promptId === 'prompt-1024',
+      ),
+    ).toHaveLength(1);
+  });
+
   it('gates direct submissions and dispatches compatible submit events', async () => {
     const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
     const onSessionChange = vi.fn();

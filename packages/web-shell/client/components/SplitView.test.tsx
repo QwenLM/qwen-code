@@ -235,6 +235,13 @@ describe('SplitView', () => {
       '[data-testid="settlement-observer"]',
     );
     expect(observers).toHaveLength(2);
+    for (const sessionId of ['s1', 's3']) {
+      expect(
+        container!.querySelector(
+          `[data-session="${sessionId}"] [data-testid="settlement-observer"]`,
+        ),
+      ).not.toBeNull();
+    }
 
     act(() => {
       observers[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
