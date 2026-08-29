@@ -129,7 +129,7 @@ export interface WebShellChatHeaderOptions {
   items?: readonly WebShellChatHeaderItem[];
 }
 
-export type WebShellRightPanelItem = 'review' | 'sideTask';
+export type WebShellRightPanelItem = 'review' | 'sideTask' | 'terminal';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to all actions. */
@@ -166,6 +166,8 @@ export interface ChatHeaderRenderInfo {
   onRightPanelOpenChange: (open: boolean) => void;
   /** Opens token usage for the current session, when available. */
   onOpenTokenUsage?: () => void;
+  /** Opens Settings deep-linked to Local Control (Daemon category). */
+  onOpenLocalControlSettings?: () => void;
 }
 
 /**
