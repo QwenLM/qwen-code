@@ -2862,6 +2862,9 @@ jobs:
           # The replay merges the base branch again; without this the step's
           # `set -u` aborts on the first ${BASE_REF} — a test pins env coverage.
           BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
+          # Test hook for the replay's fetch URL; empty in production, where
+          # the replay fetches https://github.com/<repo>.git.
+          RESOLVE_ORIGIN_URL: ''
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           DRY_RUN: '${{ env.DRY_RUN }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
@@ -2972,7 +2975,11 @@ jobs:
             local markers merge_base base_changed replay_changed out_of_scope
             resolved_commit="$(git rev-parse HEAD)"
             new_ref="refs/remotes/origin/qwen-resolve/pr-${PR_NUMBER}/moved"
-            git fetch origin "+refs/pull/${PR_NUMBER}/head:${new_ref}" || { replay_give_up "could not fetch the new head."; return 1; }
+            # Fetch by URL, not by remote name: the post-agent scrub removes
+            # the workspace .git/config (and with it the `origin` remote)
+            # before any credentialed step runs. RESOLVE_ORIGIN_URL exists so
+            # the fixture test can point this at a local bare repository.
+            git fetch "${RESOLVE_ORIGIN_URL:-https://github.com/${REPO}.git}" "+refs/pull/${PR_NUMBER}/head:${new_ref}" || { replay_give_up "could not fetch the new head."; return 1; }
             new_sha="$(git rev-parse "$new_ref")"
             if [ "$new_sha" = "$HEAD_SHA" ]; then
               replay_give_up "the PR head is still ${HEAD_SHA}; the push was declined for another reason."

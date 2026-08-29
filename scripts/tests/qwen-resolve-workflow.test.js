@@ -986,6 +986,10 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
         PR_NUMBER: '1',
         HEAD_SHA: fixture.originalHead,
         BASE_REF: 'main',
+        REPO: 'QwenLM/qwen-code',
+        // The replay fetches by URL (the scrub removes the `origin` remote
+        // with .git/config); point it at the fixture's bare repository.
+        RESOLVE_ORIGIN_URL: fixture.origin,
       },
       encoding: 'utf8',
     });
@@ -1106,6 +1110,12 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
     );
     expect(replay).toContain('comm -23 <(printf');
     expect(replay).not.toContain('qwen-code-action');
+    // The credentialed steps remove the workspace .git/config — and with it
+    // the `origin` remote — before they run, so the replay must fetch by URL.
+    expect(replay).toContain(
+      'git fetch "${RESOLVE_ORIGIN_URL:-https://github.com/${REPO}.git}"',
+    );
+    expect(replay).not.toContain('git fetch origin');
     // And the comment says a replay happened.
     expect(reportStep).toContain('the resolution was replayed on top of it');
   });
