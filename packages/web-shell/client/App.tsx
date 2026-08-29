@@ -1083,7 +1083,12 @@ export interface WebShellProps {
    * at most once per animation frame during active generation.
    */
   onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
-  /** Called when a critical error occurs (auth failure, session gone, etc). */
+  /**
+   * Called when a critical error occurs (auth failure, session gone, etc).
+   * Each distinct connection error value is reported once; reporting resets
+   * when the connection recovers. Replacing the handler while an error
+   * persists does not re-deliver that error.
+   */
   onError?: (error: Error) => void;
   /** Called when `/bug` is invoked. Receives system info. If omitted, web-shell opens the report URL itself. */
   onBugReport?: (info: BugReportInfo) => void;
@@ -8140,8 +8145,8 @@ export function App({
     onConnectionChange?.(connection.status);
   }, [connection.status, onConnectionChange]);
 
-  // Report each distinct connection.error value only once. Hosts such as the
-  // VS Code embedded app pass an inline onError and update their own state
+  // Report each distinct connection.error value only once. Hosts may pass an
+  // inline onError (or one whose identity changes) and update their own state
   // when it fires; the resulting re-render then hands this effect a fresh
   // callback identity, which would re-notify the same persistent error
   // forever (#10406).

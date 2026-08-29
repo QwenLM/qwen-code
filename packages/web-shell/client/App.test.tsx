@@ -24137,9 +24137,9 @@ describe('fileUploadEnabled customization plumbing', () => {
 
 describe('App connection error reporting (#10406)', () => {
   it('reports a persistent connection error once even while host re-renders pass a fresh inline onError', async () => {
-    // Daemon unreachable: connection.error persists. The embedded host
-    // (EmbeddedApp) stores each reported error in its own state, which
-    // re-renders the host and hands App a fresh inline onError. Before the
+    // Daemon unreachable: connection.error persists. A host may store each
+    // reported error in its own state, which re-renders the host and hands
+    // App an onError with a fresh identity (inline or otherwise). Before the
     // fix, every new callback identity re-fired the notification effect for
     // the same persistent error — an infinite re-render loop.
     mockConnection.error = 'daemon unreachable';
