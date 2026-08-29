@@ -22,8 +22,9 @@
 
 import type { CommandModule } from 'yargs';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { REVIEW_TMP_DIR } from './lib/paths.js';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { tmpFile } from './lib/paths.js';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
@@ -253,37 +254,111 @@ const STOP_REASON_REFUSAL: Record<string, string> = {
 };
 
 /**
- * The fence `run.ts` applies to the same decided-stop decision: the capture
- * stamps its stop sidecar with the run id the parent published, and the
- * `stopReRule` grant is read against that stamp — a plan-shape match alone
- * is what a stale stop plan left behind by an earlier round matches just as
- * well. No published id (an interactive round no `review run` gate reads) →
- * no fence to match, the plan-shape check stands alone. A published id with
- * no sidecar stamped by it → refused.
+ * The cache ledger's bytes bound into the stop fence — the SHA-256 of the
+ * file the plan names, or null when there is no file to hash. A cache that
+ * does not exist holds no findings, so null IS a stampable value: the
+ * capture stamps it when nothing was cached, and the grant fails closed on
+ * a file that appeared since.
  */
-function stopSidecarFenced(env: NodeJS.ProcessEnv | undefined): boolean {
-  const runId = (env ?? process.env)['QWEN_REVIEW_RUN_ID'];
-  if (typeof runId !== 'string' || runId === '') return true;
-  let names: string[];
+function cacheFindingsHash(cachePath: string | undefined): string | null {
+  if (typeof cachePath !== 'string' || cachePath === '') return null;
   try {
-    names = readdirSync(REVIEW_TMP_DIR);
+    return createHash('sha256').update(readFileSync(cachePath)).digest('hex');
   } catch {
-    return false;
+    return null;
   }
-  for (const name of names) {
-    // `stopNameFor`'s shape: `qwen-review-<stem>-stop.json`. The target
-    // class is not knowable here; match the family and let the stamp decide.
-    if (!/^qwen-review-.*-stop\.json$/.test(name)) continue;
-    try {
-      const stop = JSON.parse(
-        readFileSync(join(REVIEW_TMP_DIR, name), 'utf8'),
-      ) as { runId?: unknown };
-      if (stop.runId === runId) return true;
-    } catch {
-      continue;
-    }
+}
+
+/**
+ * The fence `run.ts` applies to the same decided-stop decision, read
+ * against the ONE sidecar the capture could have stamped for THIS plan —
+ * never the family: a family scan let a sidecar stamped for another target
+ * vouch for this one. The fence binds what it finds three ways — the run
+ * id the parent published, the plan's own stop reason (the licence-bearing
+ * field is the capture's, not the plan's; `run.ts`'s `readStopSidecar`
+ * reads it from the sidecar too), and the cache ledger's content hash the
+ * capture stamped at stop time, so the grant's baseline is the ledger the
+ * capture saw. No published id (an interactive round no `review run` gate
+ * reads) → no fence to match, the plan-shape check stands alone. Anything
+ * else — no usable target, a missing or foreign-stamped sidecar, a
+ * departed reason, cache path, or hash — fails closed. Returns null when
+ * the fence passes; the refusal line's second half otherwise.
+ */
+function stopSidecarFenceRefusal(
+  planPath: string | undefined,
+  planStopReason: string,
+  env: NodeJS.ProcessEnv | undefined,
+): string | null {
+  const runId = (env ?? process.env)['QWEN_REVIEW_RUN_ID'];
+  if (typeof runId !== 'string' || runId === '') return null;
+  let plan: { target?: unknown; cachePath?: unknown } | null;
+  try {
+    plan = JSON.parse(readFileSync(planPath ?? '', 'utf8')) as {
+      target?: unknown;
+      cachePath?: unknown;
+    };
+  } catch {
+    plan = null;
   }
-  return false;
+  const target =
+    plan !== null && typeof plan.target === 'string' && plan.target !== ''
+      ? plan.target
+      : null;
+  if (target === null) {
+    return (
+      'a run id is published but the plan carries no usable target — the ' +
+      'sidecar the capture stamped for this re-rule cannot be located.'
+    );
+  }
+  let stop: {
+    runId?: unknown;
+    reason?: unknown;
+    cachePath?: unknown;
+    findingsHash?: unknown;
+  };
+  try {
+    stop = JSON.parse(readFileSync(tmpFile(target, 'stop.json'), 'utf8')) as {
+      runId?: unknown;
+      reason?: unknown;
+      cachePath?: unknown;
+      findingsHash?: unknown;
+    };
+  } catch {
+    return (
+      'a run id is published but no stop sidecar carries its stamp — a ' +
+      'stale or foreign stop plan matches the shape but never the fence.'
+    );
+  }
+  if (stop.runId !== runId) {
+    return (
+      'a run id is published but no stop sidecar carries its stamp — a ' +
+      'stale or foreign stop plan matches the shape but never the fence.'
+    );
+  }
+  if (stop.reason !== planStopReason) {
+    return (
+      `the stamped stop sidecar records reason '${String(stop.reason)}', ` +
+      `not the plan's '${planStopReason}' — the licence is the capture's ` +
+      'own decision, not a reason chosen for it.'
+    );
+  }
+  const planCachePath =
+    plan !== null && typeof plan.cachePath === 'string' && plan.cachePath !== ''
+      ? plan.cachePath
+      : null;
+  if (stop.cachePath !== planCachePath) {
+    return (
+      'the stamped stop sidecar names a different cache than the plan — ' +
+      "the grant's baseline must be the ledger the capture saw."
+    );
+  }
+  if (stop.findingsHash !== cacheFindingsHash(planCachePath ?? undefined)) {
+    return (
+      'the cache findings are not the ones the capture stamped — the ' +
+      'ledger moved between capture and compose.'
+    );
+  }
+  return null;
 }
 
 /**
@@ -293,7 +368,10 @@ function stopSidecarFenced(env: NodeJS.ProcessEnv | undefined): boolean {
  * cross-check binds a re-assertion's content against it). Null when the
  * plan names no cache or the ledger cannot be read: the completeness check
  * then refuses, because a re-rule whose baseline cannot be read cannot be
- * shown complete. The cache is model-written (Step 8's prose rules), so
+ * shown complete. One exception: a cache file that does not exist recorded
+ * no findings, so the baseline is EMPTY, not unreadable — that is the
+ * nothing-open stop's no-event compose. The cache is model-written (Step
+ * 8's prose rules), so
  * every entry is re-validated, and a shape violation is an unreadable
  * baseline — never a skipped row: skipping shrinks the open set below what
  * the ledger really holds, and the grant would issue over Criticals it
@@ -310,7 +388,14 @@ function openLedgerCriticalEntries(
     if (typeof plan.cachePath !== 'string' || plan.cachePath === '') {
       return null;
     }
-    const cache = JSON.parse(readFileSync(plan.cachePath, 'utf8')) as unknown;
+    let cacheRaw: string;
+    try {
+      cacheRaw = readFileSync(plan.cachePath, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      return null;
+    }
+    const cache = JSON.parse(cacheRaw) as unknown;
     if (typeof cache !== 'object' || cache === null || Array.isArray(cache)) {
       return null;
     }
@@ -3658,8 +3743,11 @@ function composeReviewBody(
   // re-assertion binds by CONTENT against them, not by id alone.
   const ledgerTitles = new Map<string, string>();
   // Re-assertions the id binding admitted but no recorded title vouched
-  // for — they lose the verify-floor exemption below.
+  // for — they lose the verify-floor exemption below, and (on a granted
+  // stop, where no tool ran this round) a deterministic tag on one is
+  // prose, not provenance, so it loses the deterministic exception too.
   let unvouchedReAssertions = 0;
+  let unvouchedTaggedReAssertions = 0;
   const stopReRuleGranted = (() => {
     const srr = input.stopReRule;
     if (srr === undefined) return false;
@@ -3696,12 +3784,13 @@ function composeReviewBody(
           'grant fails closed on a reason it cannot rule.',
       );
     }
-    if (!stopSidecarFenced(input.env)) {
-      throw new Error(
-        'stopReRule refused: a run id is published but no stop sidecar ' +
-          'carries its stamp — a stale or foreign stop plan matches the ' +
-          'shape but never the fence.',
-      );
+    const fenceRefusal = stopSidecarFenceRefusal(
+      input.planPath,
+      stopReason,
+      input.env,
+    );
+    if (fenceRefusal !== null) {
+      throw new Error(`stopReRule refused: ${fenceRefusal}`);
     }
     const ledger = openLedgerCriticalEntries(input.planPath);
     if (ledger === null) {
@@ -3809,7 +3898,18 @@ function composeReviewBody(
     // the equality exact. An id alone would let a brand-new claim wear a
     // verified id's exemption. An entry the ledger recorded no title for
     // keeps its id binding but loses the verify-floor exemption below.
-    const bindEntry = (claim: { id?: string; title: string }): void => {
+    const bindEntry = (
+      claim: { id?: string; fixInduced: boolean; title: string },
+      scanText?: string,
+    ): void => {
+      if (claim.fixInduced) {
+        throw new Error(
+          `stopReRule refused: ${claim.id ?? 'a body Critical'} carries ` +
+            'the (fix-induced) marking — a stop re-rule posts only ' +
+            're-assertions of verified findings, never new work under ' +
+            'an old id.',
+        );
+      }
       const id = claim.id;
       if (id === undefined || !stopRulings.has(id)) {
         throw new Error(
@@ -3828,6 +3928,9 @@ function composeReviewBody(
       const recorded = ledgerTitles.get(id);
       if (recorded === undefined) {
         unvouchedReAssertions++;
+        if (scanText !== undefined && DETERMINISTIC_TAG_RE.test(scanText)) {
+          unvouchedTaggedReAssertions++;
+        }
       } else if (recorded !== claim.title) {
         throw new Error(
           `stopReRule refused: ${id} is re-asserted with content that ` +
@@ -3844,6 +3947,7 @@ function composeReviewBody(
         readClaim(
           stripForUnattributedPost(entry).replace(LEADING_INVISIBLE_RE, ''),
         ),
+        entry,
       );
     }
     for (const entry of relocatedEntries) {
@@ -3910,7 +4014,15 @@ function composeReviewBody(
   );
   const nonDeterministicBodyCriticals =
     ownBodyCriticals.filter((x) => !DETERMINISTIC_TAG_RE.test(x)).length +
-    (relocatedCount - relocatedDeterministic);
+    (relocatedCount - relocatedDeterministic) +
+    // On a granted stop no tool ran this round, so an UNVOUCHED
+    // re-assertion's `[build]`/`[test]`/`[probe]` substring is prose, not
+    // provenance, and may not feed the deterministic exception the
+    // softening reads. Vouched re-assertions keep theirs — they re-assert
+    // findings a full round verified, tag and all — and the CLI-minted
+    // nonConvergence Critical is deterministic by provenance and never
+    // rides this term.
+    (stopReRuleGranted ? unvouchedTaggedReAssertions : 0);
   const criticalsNeedingVerify = stopReRuleGranted
     ? // Every posted blocker on a granted stop re-rule is a re-assertion,
       // under its original id, of a finding a previous full round verified —

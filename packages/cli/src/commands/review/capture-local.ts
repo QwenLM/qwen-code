@@ -1148,7 +1148,22 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // so a parent polling `qwen-review-<target>-plan.json` found nothing for
   // every file review and reported "Review did not complete" over a decided
   // round. This name is derived from the same `target` the parent derives.
+  const cachePath = cachePathFor(target, sourcePath);
   if (nothingToReview) {
+    // The baseline's content bound into the stamp: the compose grant
+    // re-hashes the cache the plan names and refuses on any departure, so
+    // a ledger edited between capture and compose fails closed like a
+    // foreign stamp. Null is a stampable value — no cache existed at this
+    // stop, so no findings were seen, and the fence fails closed on a file
+    // appearing since.
+    let findingsHash: string | null = null;
+    try {
+      findingsHash = createHash('sha256')
+        .update(readFileSync(cachePath))
+        .digest('hex');
+    } catch {
+      // No cache file at this stop.
+    }
     writeFileSync(
       tmpFile(target, 'stop.json'),
       `${JSON.stringify(
@@ -1163,6 +1178,10 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
           ...(process.env['QWEN_REVIEW_RUN_ID']
             ? { runId: process.env['QWEN_REVIEW_RUN_ID'] }
             : {}),
+          // The compose fence's binding fields: the cache the grant must
+          // read, and the hash its content must still carry.
+          cachePath,
+          findingsHash,
         },
         null,
         2,
@@ -1204,7 +1223,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // diverges from any hand recipe). A round-2 medium review of
     // `srclink/foo.ts` predicted `srclink_foo.ts.json`, found nothing, and
     // ruled on zero ledger entries over a Critical that still stood.
-    cachePath: cachePathFor(target, sourcePath),
+    cachePath,
     cacheCandidatePath,
     ...(candidateWritten ? { cacheCandidateStateId: candidate.stateId } : {}),
     ...planEffortField(args.effort),

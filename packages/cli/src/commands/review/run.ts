@@ -428,7 +428,9 @@ export function newestArtifactSince(
  * two incremental stops, judged on clean-tree; SKILL Step 1's capture-stop
  * branches, machine-checked by compose-review's stopReRule gate) — and gates
  * here exactly like a full round; a stop whose ledger holds nothing open
- * completes with no event and exits 0. Known residual: the PR-target stops
+ * composes a no-event Comment the same way, so a decided stop with NO
+ * composed artifact is a re-rule the compose gate refused — no verdict,
+ * never a silent completion. Known residual: the PR-target stops
  * (up-to-date, empty-diff) write only the stop sidecar — they consume no
  * plan, so the stopReRule grant is unreachable there and no verdict composes;
  * a gate-only PR re-run exits 0 even when the PR cache still holds open
@@ -755,7 +757,17 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // one poll tick.
   const stop =
     capturedStop ?? nothingToReviewFrom(targetClass, cutoffMs, runId);
-  const completed = composed !== null || stop !== null;
+  // The PR stops (up-to-date, empty-diff) consume no plan and compose no
+  // verdict — the sidecar alone completes the round. Every DECIDED capture
+  // stop composes one: the re-rule of the ledger's open Criticals, or a
+  // no-event Comment when nothing is open (SKILL Step 1's stop branches).
+  // A decided stop with no composed artifact is therefore a re-rule the
+  // compose gate REFUSED — no verdict was produced, and the round must not
+  // exit 0 over the ledger's still-open Criticals like a clean stop.
+  const completed =
+    composed !== null ||
+    (stop !== null &&
+      (stop.reason === 'up-to-date' || stop.reason === 'empty-diff'));
   // A stop carries no synthesised event, deliberately: the stop's rendered
   // blocker list comes from the cache ledger, which only a cache-writing
   // round rewrites — a stop never does — so a blocker fixed and committed

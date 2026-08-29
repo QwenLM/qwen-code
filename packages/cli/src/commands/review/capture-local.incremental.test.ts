@@ -12,6 +12,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   mkdtempSync,
   rmSync,
@@ -470,6 +471,44 @@ describe('capture-local — round-2 regressions from the stop work', () => {
       readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
     ) as Record<string, unknown>;
     expect(sidecar['runId']).toBe('run-abc');
+  });
+
+  it('stamps the fence’s binding fields — null hash when no cache was seen', () => {
+    // A first clean-tree stop saw no cache: null is the stampable value,
+    // and the compose fence fails closed on a cache file appearing since.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'all committed');
+    const plan = capture();
+    expect(plan['nothingToReview']).toEqual({ reason: 'clean-tree' });
+    const sidecar = JSON.parse(
+      readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(sidecar['cachePath']).toBe(plan['cachePath']);
+    expect(sidecar['findingsHash']).toBeNull();
+  });
+
+  it('stamps the cache a cached stop saw — the ledger’s content hash', () => {
+    // The compose grant re-hashes the cache the plan names and refuses on
+    // any departure, so a ledger edited between capture and compose fails
+    // closed like a foreign stamp.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    recordOpenCritical(cachePath);
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    expect(second['nothingToReview']).toEqual({
+      reason: 'unchanged-since-last-round',
+    });
+    const sidecar = JSON.parse(
+      readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(sidecar['cachePath']).toBe(second['cachePath']);
+    expect(sidecar['findingsHash']).toBe(
+      createHash('sha256').update(readFileSync(cachePath)).digest('hex'),
+    );
   });
 });
 

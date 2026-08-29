@@ -15582,6 +15582,7 @@ describe('composeReview — the decided-stop re-rule', () => {
         diffLines: 0,
         srcDiffLines: 0,
         skippedFiles: [],
+        target: 'local',
         cachePath: opts.cacheFile ?? cachePath,
         ...(opts.stop === false
           ? {}
@@ -15608,6 +15609,43 @@ describe('composeReview — the decided-stop re-rule', () => {
       bodyCriticals: ['R1-1: the mechanism still fires — re-read at HEAD'],
       ...over,
     });
+  }
+
+  function stampStopSidecar(
+    opts: {
+      name?: string;
+      reason?: string;
+      runId?: string;
+      target?: string;
+      cacheFile?: string;
+    } = {},
+  ): string {
+    const cachePath =
+      opts.cacheFile ??
+      join(dir, `review-cache-${opts.name ?? 'default'}.json`);
+    let findingsHash: string | null = null;
+    try {
+      findingsHash = createHash('sha256')
+        .update(readFileSync(cachePath))
+        .digest('hex');
+    } catch {
+      // A cache that does not exist stamps null — the fence re-hashes.
+    }
+    mkdirSync(join(dir, '.qwen/tmp'), { recursive: true });
+    const sidecarPath = join(
+      dir,
+      `.qwen/tmp/qwen-review-${opts.target ?? 'local'}-stop.json`,
+    );
+    writeFileSync(
+      sidecarPath,
+      JSON.stringify({
+        reason: opts.reason ?? 'unchanged-since-last-round',
+        runId: opts.runId ?? 'run-X',
+        cachePath,
+        findingsHash,
+      }),
+    );
+    return sidecarPath;
   }
 
   it('composes REQUEST_CHANGES from a standing re-rule, floors skipped', () => {
@@ -15679,11 +15717,7 @@ describe('composeReview — the decided-stop re-rule', () => {
   it('honours the runId fence when a parent published one', () => {
     const env = { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' };
     expect(() => reRule({ env })).toThrow(/no stop sidecar/);
-    mkdirSync(join(dir, '.qwen/tmp'), { recursive: true });
-    writeFileSync(
-      join(dir, '.qwen/tmp/qwen-review-local-stop.json'),
-      JSON.stringify({ reason: 'unchanged-since-last-round', runId: 'run-X' }),
-    );
+    stampStopSidecar({ runId: 'run-X' });
     const r = reRule({ env });
     expect(r.event).toBe('REQUEST_CHANGES');
   });
@@ -15711,6 +15745,39 @@ describe('composeReview — the decided-stop re-rule', () => {
       bodyCriticals: [],
     });
     expect(r.event).toBe('COMMENT');
+  });
+
+  it('does not let an unvouched re-assertion’s tag defeat the unverified softening', () => {
+    // A title-less ledger entry binds on id alone; its re-assertion is
+    // unvouched, and on a granted stop no tool ran this round — so a
+    // `[test]` substring on it is prose, not provenance, and may not feed
+    // the deterministic exception that keeps a Request changes hard.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'tagged-unvouched',
+        ledger: [{ id: 'R1-1', severity: 'Critical', status: 'open' }],
+      }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+      bodyCriticals: ['R1-1: [test] the claim'],
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('keeps a vouched re-assertion’s deterministic tag', () => {
+    // The exception stays for entries the ledger's recorded title vouched
+    // for: they re-assert findings a full round verified, tag and all.
+    const title = '[test] the mechanism still fires — re-read at HEAD';
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'tagged-vouched',
+        ledger: [{ id: 'R1-1', severity: 'Critical', status: 'open', title }],
+      }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+      bodyCriticals: [`R1-1: ${title}`],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
   });
 
   it('refuses an unknown stop reason — the grant fails closed', () => {
@@ -15831,18 +15898,90 @@ describe('composeReview — the decided-stop re-rule', () => {
     );
   });
 
-  it('refuses a sidecar stamped by a different run', () => {
-    mkdirSync(join(dir, '.qwen/tmp'), { recursive: true });
-    writeFileSync(
-      join(dir, '.qwen/tmp/qwen-review-local-stop.json'),
-      JSON.stringify({
-        reason: 'unchanged-since-last-round',
-        runId: 'run-OLD',
+  it('refuses a (fix-induced) marking riding a stop re-rule', () => {
+    // The marking says NEW work under an old id; a stop re-rule posts only
+    // re-assertions of verified findings — nothing was reviewed this round
+    // that could have induced a fix-induced defect.
+    expect(() =>
+      reRule({
+        bodyCriticals: [
+          'R1-1 (fix-induced): the mechanism still fires — re-read at HEAD',
+        ],
       }),
-    );
+    ).toThrow(/carries the \(fix-induced\) marking/);
+  });
+
+  it('refuses a sidecar stamped by a different run', () => {
+    stampStopSidecar({ runId: 'run-OLD' });
     expect(() =>
       reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' } }),
     ).toThrow(/no stop sidecar/);
+  });
+
+  it('refuses a stamped sidecar whose stem differs from the plan’s target', () => {
+    // The fence reads the ONE sidecar the plan's target names — a stamp
+    // vouching for another target (the old family scan admitted it) must
+    // not vouch for this re-rule.
+    stampStopSidecar({ runId: 'run-X', target: 'other' });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' } }),
+    ).toThrow(/no stop sidecar/);
+  });
+
+  it('refuses a same-stem sidecar whose reason departs from the plan’s', () => {
+    // The licence-bearing reason is the capture's: a plan claiming a
+    // wider-licencing reason than the sidecar recorded must not ride it.
+    stampStopSidecar({ runId: 'run-X', reason: 'clean-tree' });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' } }),
+    ).toThrow(/records reason/);
+  });
+
+  it('refuses a sidecar naming a different cache than the plan', () => {
+    stampStopSidecar({
+      runId: 'run-X',
+      cacheFile: join(dir, 'another-cache.json'),
+    });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' } }),
+    ).toThrow(/names a different cache/);
+  });
+
+  it('refuses when the ledger moved between capture and compose', () => {
+    const env = { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' };
+    const planPath = stopPlan({ name: 'moved' });
+    stampStopSidecar({ name: 'moved', runId: 'run-X' });
+    // Control: the untouched ledger composes.
+    expect(reRule({ env, planPath }).event).toBe('REQUEST_CHANGES');
+    // Tamper: a phantom open Critical appended after the stamp.
+    const cachePath = join(dir, 'review-cache-moved.json');
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as {
+      findings: unknown[];
+    };
+    cache.findings.push({
+      id: 'R9-9',
+      severity: 'Critical',
+      status: 'open',
+      title: 'phantom',
+    });
+    writeFileSync(cachePath, JSON.stringify(cache));
+    expect(() => reRule({ env, planPath })).toThrow(
+      /not the ones the capture stamped/,
+    );
+  });
+
+  it('refuses a plan carrying no usable target under a published run id', () => {
+    const planPath = stopPlan({ name: 'no-target' });
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    delete plan['target'];
+    writeFileSync(planPath, JSON.stringify(plan));
+    stampStopSidecar({ name: 'no-target', runId: 'run-X' });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' }, planPath }),
+    ).toThrow(/no usable target/);
   });
 
   it('refuses a superseded ruling that re-asserts its body Critical', () => {
@@ -15860,14 +15999,25 @@ describe('composeReview — the decided-stop re-rule', () => {
         planPath: stopPlan({ name: 'no-cache', cacheFile: '' }),
       }),
     ).toThrow(/ledger the plan names cannot be read/);
-    expect(() =>
-      reRule({
-        planPath: stopPlan({
-          name: 'gone-cache',
-          cacheFile: join(dir, 'no-such-cache.json'),
-        }),
-      }),
-    ).toThrow(/ledger the plan names cannot be read/);
+  });
+
+  it('treats a cache that does not exist as an empty ledger, not an unreadable one', () => {
+    // A decided stop whose round never cached anything composes its
+    // no-event verdict over zero entries; the fence's findings hash binds
+    // the absence on the run-fenced path.
+    const planPath = stopPlan({
+      name: 'gone-cache',
+      cacheFile: join(dir, 'no-such-cache.json'),
+    });
+    expect(() => reRule({ planPath })).toThrow(
+      /R1-1 matches no open ledger Critical/,
+    );
+    const r = reRule({
+      planPath,
+      stopReRule: { dispositions: [] },
+      bodyCriticals: [],
+    });
+    expect(r.event).toBe('COMMENT');
   });
 
   it('refuses a duplicate disposition for one id', () => {

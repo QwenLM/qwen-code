@@ -1190,7 +1190,8 @@ describe('review run (handler)', () => {
         opts: { env: Record<string, string> },
       ) => {
         // Step 1: the capture decides nothing to review and writes the stop
-        // sidecar, stamped by THIS run.
+        // sidecar, stamped by THIS run; the nothing-open ledger composes a
+        // no-event Comment.
         mkdirSync(REVIEW_TMP_DIR, { recursive: true });
         writeFileSync(
           join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
@@ -1198,6 +1199,11 @@ describe('review run (handler)', () => {
             reason: 'clean-tree',
             runId: opts.env['QWEN_REVIEW_RUN_ID'],
           }),
+          'utf8',
+        );
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+          JSON.stringify({ event: 'COMMENT', verdictLine: 'Verdict: Comment' }),
           'utf8',
         );
         child = new FakeChild();
@@ -1223,6 +1229,7 @@ describe('review run (handler)', () => {
 
     const result = JSON.parse(outs.join(''));
     expect(result.completed).toBe(true);
+    expect(result.event).toBe('COMMENT');
     expect(process.exitCode).toBe(0);
   });
 
@@ -1248,6 +1255,11 @@ describe('review run (handler)', () => {
           }),
           'utf8',
         );
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+          JSON.stringify({ event: 'COMMENT', verdictLine: 'Verdict: Comment' }),
+          'utf8',
+        );
         child = new FakeChild();
         return child;
       },
@@ -1261,6 +1273,7 @@ describe('review run (handler)', () => {
 
     const result = JSON.parse(outs.join(''));
     expect(result.completed).toBe(true);
+    expect(result.event).toBe('COMMENT');
     expect(process.exitCode).toBe(0);
   });
 
@@ -1286,6 +1299,11 @@ describe('review run (handler)', () => {
             reason: 'clean-tree',
             runId: opts.env['QWEN_REVIEW_RUN_ID'],
           }),
+          'utf8',
+        );
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+          JSON.stringify({ event: 'COMMENT', verdictLine: 'Verdict: Comment' }),
           'utf8',
         );
         // Close synchronously on the next microtask — before ANY timer.
@@ -1346,12 +1364,11 @@ describe('review run (handler)', () => {
     expect(process.exitCode).toBe(3);
   });
 
-  it('exits 0 under --fail-on for a decided stop round', async () => {
-    // A stop whose ledger holds nothing open composes no verdict and
-    // synthesises none: the ledger it renders
-    // is rewritten only by a cache-writing round, so a blocker fixed and
-    // committed stays `open` there — gating on it was a failure no action
-    // could clear. The gate fires only on a composed REQUEST_CHANGES.
+  it('exits 0 under --fail-on for a nothing-open stop round that composed', async () => {
+    // Every decided stop composes a verdict now — a nothing-open ledger
+    // composes a no-event Comment (SKILL Step 1's stop branches) — so the
+    // composed artifact, not the sidecar alone, completes the round. The
+    // gate still fires only on a composed REQUEST_CHANGES.
     spawnMock.mockImplementation(
       (
         _cmd: unknown,
@@ -1369,6 +1386,14 @@ describe('review run (handler)', () => {
             }),
             'utf8',
           );
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+            JSON.stringify({
+              event: 'COMMENT',
+              verdictLine: 'Verdict: Comment',
+            }),
+            'utf8',
+          );
           child.emit('close', 0);
         });
         return child;
@@ -1379,8 +1404,44 @@ describe('review run (handler)', () => {
 
     const result = JSON.parse(outs.join(''));
     expect(result.completed).toBe(true);
-    expect(result.event).toBeNull();
+    expect(result.event).toBe('COMMENT');
     expect(process.exitCode).toBe(0);
+  });
+
+  it('exits 1 when a decided stop never composed a verdict — the refused re-rule', async () => {
+    // The consumption gap: a re-rule the compose gate refused leaves a stop
+    // sidecar with NO composed artifact while the cache ledger still holds
+    // its open Criticals. That shape must read as "no verdict" (exit 1),
+    // never exit 0 under --fail-on like a clean stop.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+            JSON.stringify({
+              reason: 'unchanged-since-last-round',
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.event).toBeNull();
+    expect(process.exitCode).toBe(1);
   });
 
   it('a PR stop exits 0 over the PR cache’s open Criticals — disclosed residual', async () => {

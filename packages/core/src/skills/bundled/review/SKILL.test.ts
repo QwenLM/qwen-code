@@ -51,6 +51,17 @@ function incidentHeadings(): string[] {
 }
 
 describe('bundled review skill', () => {
+  it('composes EVERY decided stop — a refused re-rule must not hide behind a clean-stop exit', () => {
+    // `qwen review run` completes a decided stop only when a composed
+    // verdict exists: a nothing-open ledger composes a no-event Comment,
+    // and a stop with no composed artifact is a re-rule the compose gate
+    // refused — exit 1, never a silent exit 0 over standing blockers.
+    const body = skillBody();
+    expect(body).toContain('the stop STILL composes before stopping');
+    expect(body).toContain('`stopReRule: { dispositions: [] }`');
+    expect(body).toContain('decided stop with no composed artifact');
+  });
+
   it('routes scope-emptied findings by cited path — superseded only when the bytes are gone', () => {
     // The stop gate cannot tell "every anchored path vanished" from
     // "anchored paths sit byte-identical to the reviewed round" — the slice
