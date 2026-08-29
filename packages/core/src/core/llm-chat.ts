@@ -47,6 +47,7 @@ import {
 } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
 import type { ContentGenerator, InputModalities } from './contentGenerator.js';
+import type { ResolvedGeneratorForModel } from './baseLlmClient.js';
 import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
@@ -58,6 +59,7 @@ import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
@@ -322,12 +324,13 @@ export function redactApprovedPlansInHistory(
  */
 export function redactStructuredOutputArgsForRecording(
   part: Part,
-): { functionCall: NonNullable<Part['functionCall']> } | null {
+): (Part & { functionCall: NonNullable<Part['functionCall']> }) | null {
   if (!part.functionCall) return null;
   if (part.functionCall.name !== ToolNames.STRUCTURED_OUTPUT) {
-    return { functionCall: part.functionCall };
+    return { ...part, functionCall: part.functionCall };
   }
   return {
+    ...part,
     functionCall: {
       ...part.functionCall,
       args: { ...STRUCTURED_OUTPUT_REDACTED_ARGS },
@@ -336,28 +339,13 @@ export function redactStructuredOutputArgsForRecording(
 }
 
 /**
- * Join thought parts into the single thought content part an assistant
- * record carries: texts concatenated in order with `joinWith`, first
- * `thoughtSignature` wins. The one implementation is shared by
- * `processStreamResponse` (contiguous fragments of one thought, joined
- * with `''`) and `buildRecordMessageFromHistoryParts` (one complete
- * trimmed thought per merged attempt, joined with a blank line) so the
- * record shape has a single owner.
+ * Join fragments of one thought block and retain the first signature.
  */
-function buildThoughtContentPart(
-  parts: readonly Part[],
-  joinWith = '',
-): Part | undefined {
-  let texts = parts
+function buildThoughtContentPart(parts: readonly Part[]): Part | undefined {
+  const texts = parts
     .filter((part) => part.thought)
     .map((part) => (typeof part.text === 'string' ? part.text : ''));
-  if (joinWith !== '') {
-    // Complete per-thought pieces: trim each so the separator is the only
-    // boundary whitespace. Fragment joins (`''`) must keep interior
-    // whitespace untouched.
-    texts = texts.map((text) => text.trim()).filter((text) => text !== '');
-  }
-  const thoughtText = texts.join(joinWith).trim();
+  const thoughtText = texts.join('').trim();
   if (thoughtText === '') {
     return undefined;
   }
@@ -372,94 +360,15 @@ function buildThoughtContentPart(
 }
 
 /**
- * Project an in-memory history turn's parts into the message shape every
- * other `recordAssistantTurn` call site writes: optional thought part
- * first, then one trimmed `{text}` built from the non-thought text parts,
- * then functionCall parts passed through
- * `redactStructuredOutputArgsForRecording`. Anything else
- * (`inlineData`/`fileData`) is dropped — no other assistant record carries
- * those, and persisting them would both bloat the JSONL and hand transcript
- * consumers a message shape they never otherwise see.
- *
- * Exported for tests.
+ * Copy a surviving history turn into its durable record while applying the
+ * same structured-output redaction as the ordinary recording path.
  */
-export function buildRecordMessageFromHistoryParts(parts: Part[]): Part[] {
-  // A coalesced recovery turn carries one thought part per merged attempt,
-  // and keeping only the first would silently drop each continuation's
-  // thinking from the transcript. `buildThoughtContentPart` is shared with
-  // `processStreamResponse` so the merged record's thought shape cannot
-  // drift from the per-stream records around it.
-  const thoughtPart = buildThoughtContentPart(parts, '\n\n');
-  if (thoughtPart && parts.filter((part) => part.thought).length > 1) {
-    // Each signature covers only the one attempt's thought it was issued
-    // with. Keeping the first alongside text joined from every attempt
-    // persists a pair the model never produced, and `--resume` re-feeds it
-    // to a signature-verifying backend. Absence degrades gracefully; a
-    // wrong pair does not.
-    delete thoughtPart.thoughtSignature;
-  }
-  const contentText = parts
-    .filter((part) => !part.thought && typeof part.text === 'string')
-    .map((part) => part.text)
-    .join('')
-    .trim();
-  const functionCallParts = parts
-    .map((part) =>
-      part.functionCall ? redactStructuredOutputArgsForRecording(part) : null,
-    )
-    .filter(
-      (part): part is { functionCall: NonNullable<Part['functionCall']> } =>
-        part !== null,
-    );
-  return [
-    ...(thoughtPart ? [thoughtPart] : []),
-    ...(contentText ? [{ text: contentText }] : []),
-    ...functionCallParts,
-  ];
-}
-
-/**
- * Merge token usage across every deferred recovery attempt into one usage
- * object for the single merged transcript record. That record replaces N
- * per-attempt records, so it must carry the whole turn's output spend:
- * output-side counts (`candidatesTokenCount`, `thoughtsTokenCount`) are
- * summed across attempts — and `totalTokenCount` raised by the same amount —
- * while prompt-side counts stay the final attempt's, since every attempt
- * re-sends the same grown prompt and summing those would multiply-count the
- * shared context. When the final attempt reports no usage at all there is no
- * prompt-side baseline to merge into, so the record honestly carries none
- * rather than a fabricated output-only object.
- *
- * Exported for tests.
- */
-export function mergeDeferredUsageMetadata(
-  records: ReadonlyArray<{ tokens?: GenerateContentResponseUsageMetadata }>,
-): GenerateContentResponseUsageMetadata | undefined {
-  const finalTokens = records[records.length - 1]?.tokens;
-  if (finalTokens === undefined) {
-    return undefined;
-  }
-  let extraCandidates = 0;
-  let extraThoughts = 0;
-  for (const record of records.slice(0, -1)) {
-    extraCandidates += record.tokens?.candidatesTokenCount ?? 0;
-    extraThoughts += record.tokens?.thoughtsTokenCount ?? 0;
-  }
-  const extraTotal = extraCandidates + extraThoughts;
-  if (extraTotal === 0) {
-    return finalTokens;
-  }
-  const merged: GenerateContentResponseUsageMetadata = { ...finalTokens };
-  if (extraCandidates > 0) {
-    merged.candidatesTokenCount =
-      (merged.candidatesTokenCount ?? 0) + extraCandidates;
-  }
-  if (extraThoughts > 0) {
-    merged.thoughtsTokenCount =
-      (merged.thoughtsTokenCount ?? 0) + extraThoughts;
-  }
-  merged.totalTokenCount = (merged.totalTokenCount ?? 0) + extraTotal;
-  return merged;
+function buildRecordMessageFromHistoryParts(parts: Part[]): Part[] {
+  return parts.map((part) =>
+    part.functionCall
+      ? redactStructuredOutputArgsForRecording(part)!
+      : { ...part },
+  );
 }
 
 /**
@@ -719,6 +628,7 @@ const MAX_RETAINED_ROUTE_COUNTS = 8;
  * message so the model can continue from where it left off.
  */
 const MAX_OUTPUT_RECOVERY_ATTEMPTS = 3;
+const TERMINAL_CHUNK_DRAIN_TIMEOUT_MS = 1_000;
 
 /**
  * The resume instruction shared by every recovery user-turn, whatever cut the
@@ -1530,6 +1440,9 @@ function stripThoughtPartsFromContent(content: Content): Content | null {
   if (parts.length === 0) {
     return null;
   }
+  if (parts.length === content.parts.length) {
+    return content;
+  }
 
   return {
     ...content,
@@ -2114,8 +2027,7 @@ export class LlmChat {
    */
   private pendingPartialAssistantTurnIndex: number | null = null;
   private pendingPartialAssistantRecord:
-    | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
-    | null = null;
+    Parameters<ChatRecordingService['recordAssistantTurn']>[0] | null = null;
 
   /**
    * MAX_TOKENS output-recovery turns whose durable JSONL record is deferred.
@@ -2125,13 +2037,19 @@ export class LlmChat {
    * and its continuations stash their record args here instead of writing
    * immediately, and the recovery block flushes exactly one merged record
    * (derived from the coalesced history turn) once recovery settles — keeping
-   * the durable record and in-memory history in agreement the same way the
-   * transport-cut continuation path does. A list, so every degraded exit
+   * the durable message projection aligned with live history, including
+   * non-text payloads. A list, so every degraded exit
    * (escalation discard, functionCall skip, abandonment) stays lossless.
    */
-  private deferredMaxTokensRecords: Array<
-    Parameters<ChatRecordingService['recordAssistantTurn']>[0]
-  > = [];
+  private deferredMaxTokensRecords: Array<{
+    record: Parameters<ChatRecordingService['recordAssistantTurn']>[0];
+    modelContent: Content;
+  }> = [];
+  private deferredMaxTokensRecordTarget: Content | undefined;
+  private activeRecoveryUserContent: Content | undefined;
+  private activeRecoveryModelContent: Content | undefined;
+
+  private historyMutationVersion = 0;
 
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
@@ -2164,6 +2082,75 @@ export class LlmChat {
   private clearPendingPartialState(): void {
     this.pendingPartialAssistantTurnIndex = null;
     this.pendingPartialAssistantRecord = null;
+  }
+
+  private clearDeferredMaxTokensRecords(): void {
+    this.deferredMaxTokensRecords.length = 0;
+    this.deferredMaxTokensRecordTarget = undefined;
+  }
+
+  private settleDeferredMaxTokensRecords(): void {
+    const target = this.deferredMaxTokensRecordTarget;
+    if (target && this.history.includes(target)) {
+      this.flushDeferredMaxTokensRecords();
+    } else {
+      this.clearDeferredMaxTokensRecords();
+    }
+  }
+
+  private flushDeferredMaxTokensRecords(): void {
+    const records = this.deferredMaxTokensRecords;
+    const mergedTurn = this.deferredMaxTokensRecordTarget;
+    this.deferredMaxTokensRecords = [];
+    this.deferredMaxTokensRecordTarget = undefined;
+    if (records.length === 0) return;
+
+    if (mergedTurn?.role !== 'model' || !this.history.includes(mergedTurn)) {
+      debugLogger.warn(
+        `[MAX_TOKENS_DEFER] Dropping ${records.length} deferred record(s): ` +
+          'their model turn no longer survives in live history.',
+      );
+      return;
+    }
+    const ownedRecords = records.filter(
+      ({ modelContent }) => modelContent === mergedTurn,
+    );
+    if (ownedRecords.length === 0) {
+      debugLogger.warn(
+        `[MAX_TOKENS_DEFER] Dropping ${records.length} deferred record(s): ` +
+          'none belong to the surviving model turn.',
+      );
+      return;
+    }
+    const finalRecord = ownedRecords[ownedRecords.length - 1]!.record;
+    const hasResumeBoundary = (
+      record: Parameters<ChatRecordingService['recordAssistantTurn']>[0],
+    ) =>
+      (record.tokens?.promptTokenCount ?? 0) > 0 ||
+      (record.tokens?.totalTokenCount ?? 0) > 0;
+    const latestRecordWithResumeBoundary = ownedRecords.findLast(({ record }) =>
+      hasResumeBoundary(record),
+    )?.record;
+    const latestRecordWithTokens = ownedRecords.findLast(
+      ({ record }) => record.tokens !== undefined,
+    )?.record;
+    try {
+      const usageRecord = hasResumeBoundary(finalRecord)
+        ? finalRecord
+        : (latestRecordWithResumeBoundary ??
+          (finalRecord.tokens ? finalRecord : latestRecordWithTokens));
+      this.chatRecordingService?.recordAssistantTurn({
+        ...finalRecord,
+        tokens: usageRecord?.tokens,
+        goalTokensAlreadyAccumulated: usageRecord?.goalTokensAlreadyAccumulated,
+        message: buildRecordMessageFromHistoryParts(mergedTurn.parts ?? []),
+      });
+    } catch (error) {
+      debugLogger.error(
+        '[RECOVERY_FLUSH] Failed to persist deferred JSONL record: ' +
+          (error instanceof Error ? error.message : String(error)),
+      );
+    }
   }
 
   private popPendingPartialAssistantTurn(): void {
@@ -2472,6 +2459,20 @@ export class LlmChat {
     this.tokenCountsByRouteKey.delete(this.tokenCountsRouteKey);
   }
 
+  private recoveryCompressionNoopInfo(): ChatCompressionInfo {
+    const originalTokenCount =
+      this.lastPromptTokenCount || estimateContentTokens(this.history);
+    const isEstimated =
+      this.lastPromptTokenCount === 0 || this.promptCountIsEstimateDerived();
+    return {
+      originalTokenCount,
+      newTokenCount: originalTokenCount,
+      originalTokenCountIsEstimated: isEstimated,
+      newTokenCountIsEstimated: isEstimated,
+      compressionStatus: CompressionStatus.NOOP,
+    };
+  }
+
   /**
    * Attempt to compress this chat's history.
    *
@@ -2489,6 +2490,12 @@ export class LlmChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
+    if (
+      this.activeRecoveryUserContent ||
+      this.deferredMaxTokensRecords.length > 0
+    ) {
+      return this.recoveryCompressionNoopInfo();
+    }
     // Counts from a pre-switch route must not anchor compression admission
     // or sizing for this route (#9454). In-send callers pass the request
     // route so the adoption never re-adopts the active route's retained
@@ -2636,6 +2643,12 @@ export class LlmChat {
     info: ChatCompressionInfo;
     microcompactMeta?: MicrocompactMeta;
   } {
+    if (
+      this.activeRecoveryUserContent ||
+      this.deferredMaxTokensRecords.length > 0
+    ) {
+      return { info: this.recoveryCompressionNoopInfo() };
+    }
     // A pre-switch route's count must not anchor fast-compression sizing
     // for the active route (#9454).
     this.adoptTokenCountsForRoute();
@@ -2786,43 +2799,51 @@ export class LlmChat {
     options?: LlmChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
-    const fullTurnRoute = model.endsWith('\0');
-    const exactRoute = fullTurnRoute
-      ? await this.config
-          .getBaseLlmClient()
-          .resolveForModel(model.slice(0, -1), { failClosed: true })
-      : undefined;
-    if (exactRoute) {
-      model = exactRoute.model;
-    }
-    // Both arms are one call: for a non-exact send `exactRoute` is
-    // undefined, and `resolvedModelIdentity`'s second parameter defaults to
-    // `getContentGeneratorConfig()` — including when passed an explicit
-    // undefined. Keeping a single call site means a future change to how
-    // the request route is identified cannot drift between the arms.
-    const requestRouteKey = this.config.getModelRouteIdentity(
-      model,
-      exactRoute?.contentGeneratorConfig,
-    );
-    // Counts recorded for a route other than this request's target must not
-    // anchor its admission/clamp/compression decisions (#9454). Comparing
-    // against the REQUEST route — resolved above — keeps an exact `\0`
-    // route's decisions off the active route's counts, and a differing
-    // `model` param gets its own identity instead of borrowing the active
-    // route's. The crossing retains the current counts under their own
-    // route key so a later turn back on that route restores them (#9506).
-    this.adoptTokenCountsForRoute(requestRouteKey);
-    const requestModalities =
-      exactRoute?.contentGeneratorConfig.modalities ??
-      this.config.getEffectiveInputModalities();
-
-    await this.sendPromise;
-
+    const previousSendPromise = this.sendPromise;
     let streamDoneResolver: () => void;
     const streamDonePromise = new Promise<void>((resolve) => {
       streamDoneResolver = resolve;
     });
     this.sendPromise = streamDonePromise;
+    await previousSendPromise;
+
+    let exactRoute: ResolvedGeneratorForModel | undefined;
+    let requestRouteKey: string;
+    let requestModalities: InputModalities;
+    try {
+      const fullTurnRoute = model.endsWith('\0');
+      exactRoute = fullTurnRoute
+        ? await this.config
+            .getBaseLlmClient()
+            .resolveForModel(model.slice(0, -1), { failClosed: true })
+        : undefined;
+      if (exactRoute) {
+        model = exactRoute.model;
+      }
+      // Both arms are one call: for a non-exact send `exactRoute` is
+      // undefined, and `resolvedModelIdentity`'s second parameter defaults to
+      // `getContentGeneratorConfig()` — including when passed an explicit
+      // undefined. Keeping a single call site means a future change to how
+      // the request route is identified cannot drift between the arms.
+      requestRouteKey = this.config.getModelRouteIdentity(
+        model,
+        exactRoute?.contentGeneratorConfig,
+      );
+      // Counts recorded for a route other than this request's target must not
+      // anchor its admission/clamp/compression decisions (#9454). Comparing
+      // against the REQUEST route — resolved above — keeps an exact `\0`
+      // route's decisions off the active route's counts, and a differing
+      // `model` param gets its own identity instead of borrowing the active
+      // route's. The crossing retains the current counts under their own
+      // route key so a later turn back on that route restores them (#9506).
+      this.adoptTokenCountsForRoute(requestRouteKey);
+      requestModalities =
+        exactRoute?.contentGeneratorConfig.modalities ??
+        this.config.getEffectiveInputModalities();
+    } catch (error) {
+      streamDoneResolver!();
+      throw error;
+    }
 
     // Clear any partial-push marker left over from a prior unretryable
     // break path — the marker is per-send; carrying it across sends
@@ -3255,6 +3276,9 @@ export class LlmChat {
         self.config,
         'Qwen Code is streaming a model response',
       );
+      let rollbackActiveRecoveryAttempt: (() => void) | undefined;
+      let abandonActiveRecoveryAttempt: (() => void) | undefined;
+      let abandonEscalatedAttempt: (() => void) | undefined;
       try {
         // Surface a successful auto-compression to the caller as the first
         // event in the stream. Failed/skipped compaction attempts are silent.
@@ -3363,6 +3387,8 @@ export class LlmChat {
           effectiveInitialMaxOutputTokens < escalatedLimit;
 
         let lastFinishReason: string | undefined;
+        let maxTokensCommittedModelContent: Content | undefined;
+        let maxTokensCommittedHistoryMutationVersion: number | undefined;
 
         /**
          * Contents for the next attempt. Identical to `requestContents` on
@@ -3502,7 +3528,17 @@ export class LlmChat {
                 streamYieldedFunctionCall = true;
               }
               const fr = firstCandidateFinishReason(chunk);
-              if (fr) lastFinishReason = fr;
+              if (fr) {
+                lastFinishReason = fr;
+                if (fr === FinishReason.MAX_TOKENS) {
+                  const committedModel = self.history.at(-1);
+                  if (committedModel?.role === 'model') {
+                    maxTokensCommittedModelContent = committedModel;
+                    maxTokensCommittedHistoryMutationVersion =
+                      self.historyMutationVersion;
+                  }
+                }
+              }
               yield { type: StreamEventType.CHUNK, value: chunk };
             }
 
@@ -3963,50 +3999,166 @@ export class LlmChat {
         // streams still need the same InvalidStreamError retry guard as the
         // main send loop; otherwise a leaked protocol-tag turn would bypass
         // the primary rollback/retry path entirely.
+        let recoveryAttemptInFlight = false;
+        let activeRecoveryDeferredRecordCount: number | undefined;
+        let activeRecoveryHistoryMutationVersion: number | undefined;
+        let activeRecoveryVisibleParts: Part[] = [];
+        let activeRecoveryVisibleTokens:
+          GenerateContentResponseUsageMetadata | undefined;
+        const activeRecoveryAttemptIsCurrent = () =>
+          self.historyMutationVersion ===
+            activeRecoveryHistoryMutationVersion &&
+          (self.history.at(-1) === self.activeRecoveryUserContent ||
+            (self.history.at(-2) === self.activeRecoveryUserContent &&
+              self.history.at(-1) === self.activeRecoveryModelContent));
         const rollbackRecoveryAttempt = () => {
-          // Pop the partial `model[fc]` FIRST (if processStreamResponse
-          // pushed one before re-throwing), THEN the recovery user turn.
-          // Reversed order would strand `OUTPUT_RECOVERY_MESSAGE` as a real
-          // user turn. Index-checked pop mirrors `popPendingPartialAssistantTurn`
-          // above — see the design note above
-          // `ORPHAN_TOOL_USE_REPAIR_REASON` for the wedge mechanism and
-          // the partial-push marker lifecycle.
-          const expectedIdx = self.pendingPartialAssistantTurnIndex;
-          const lastIdx = self.history.length - 1;
-          if (
-            expectedIdx !== null &&
-            self.history.length > 0 &&
-            self.history[lastIdx]?.role === 'model'
-          ) {
-            if (expectedIdx !== lastIdx) {
-              debugLogger.warn(
-                `[RECOVERY_POP] Marker/last-index mismatch: ` +
-                  `marker=${expectedIdx}, lastIdx=${lastIdx}, ` +
-                  `historyLength=${self.history.length}. Popping ` +
-                  `last entry as best-effort rollback — investigate ` +
-                  `any history mutation between processStreamResponse's ` +
-                  `partial push and this catch.`,
-              );
+          // Remove only entries owned by this attempt. A public mutation can
+          // append or replace history while the generator is suspended.
+          if (self.activeRecoveryModelContent) {
+            const recoveryModelIndex = self.history.indexOf(
+              self.activeRecoveryModelContent,
+            );
+            if (recoveryModelIndex >= 0) {
+              self.history.splice(recoveryModelIndex, 1);
             }
-            self.history.pop();
-            self.clearPendingPartialState();
+          }
+          if (self.activeRecoveryUserContent) {
+            const recoveryUserIndex = self.history.indexOf(
+              self.activeRecoveryUserContent,
+            );
+            if (recoveryUserIndex >= 0) {
+              self.history.splice(recoveryUserIndex, 1);
+            }
           }
           if (
-            self.history.length > 0 &&
-            self.history[self.history.length - 1].role === 'user'
+            activeRecoveryDeferredRecordCount !== undefined &&
+            self.deferredMaxTokensRecords.length >
+              activeRecoveryDeferredRecordCount
           ) {
-            self.history.pop();
+            self.deferredMaxTokensRecords.length =
+              activeRecoveryDeferredRecordCount;
+            if (activeRecoveryDeferredRecordCount === 0) {
+              self.deferredMaxTokensRecordTarget = undefined;
+            }
           }
+          self.clearPendingPartialState();
+        };
+        rollbackActiveRecoveryAttempt = () => {
+          if (!recoveryAttemptInFlight) return;
+          rollbackRecoveryAttempt();
+          recoveryAttemptInFlight = false;
+          self.activeRecoveryUserContent = undefined;
+          self.activeRecoveryModelContent = undefined;
+          activeRecoveryDeferredRecordCount = undefined;
+          activeRecoveryHistoryMutationVersion = undefined;
+          activeRecoveryVisibleParts = [];
+          activeRecoveryVisibleTokens = undefined;
+        };
+        abandonActiveRecoveryAttempt = () => {
+          if (
+            !recoveryAttemptInFlight ||
+            activeRecoveryVisibleParts.length === 0 ||
+            !activeRecoveryAttemptIsCurrent()
+          ) {
+            rollbackActiveRecoveryAttempt?.();
+            return;
+          }
+          const recoveryUserIndex = self.history.indexOf(
+            self.activeRecoveryUserContent!,
+          );
+          const recoveryBase = self.history[recoveryUserIndex - 1];
+          if (recoveryBase?.role !== 'model') {
+            rollbackActiveRecoveryAttempt?.();
+            return;
+          }
+          recoveryBase.parts = appendRecoveryContinuationParts(
+            recoveryBase.parts,
+            activeRecoveryVisibleParts,
+          );
+          if (activeRecoveryVisibleTokens) {
+            const deferredRecord = self.deferredMaxTokensRecords.findLast(
+              ({ modelContent }) => modelContent === recoveryBase,
+            );
+            if (deferredRecord) {
+              deferredRecord.record.tokens = activeRecoveryVisibleTokens;
+              if (turnGoalContext && self.chatRecordingService) {
+                self.chatRecordingService.recordGoalTurnUsage(
+                  turnGoalContext,
+                  activeRecoveryVisibleTokens,
+                );
+                deferredRecord.record.goalTokensAlreadyAccumulated = true;
+              }
+            }
+          }
+          if (self.activeRecoveryModelContent) {
+            const recoveryModelIndex = self.history.indexOf(
+              self.activeRecoveryModelContent,
+            );
+            if (recoveryModelIndex >= 0) {
+              self.history.splice(recoveryModelIndex, 1);
+            }
+          }
+          self.history.splice(recoveryUserIndex, 1);
+          self.clearPendingPartialState();
+          recoveryAttemptInFlight = false;
+          self.activeRecoveryUserContent = undefined;
+          self.activeRecoveryModelContent = undefined;
+          activeRecoveryDeferredRecordCount = undefined;
+          activeRecoveryHistoryMutationVersion = undefined;
+          activeRecoveryVisibleParts = [];
+          activeRecoveryVisibleTokens = undefined;
+        };
+        const completeActiveRecoveryAttempt = () => {
+          if (!recoveryAttemptInFlight) return;
+          if (!activeRecoveryAttemptIsCurrent()) {
+            rollbackActiveRecoveryAttempt?.();
+            return;
+          }
+          if (self.coalesceRecoveryPairs(1) !== 1) {
+            throw new Error(
+              'Failed to coalesce a completed output-recovery continuation.',
+            );
+          }
+          recoveryAttemptInFlight = false;
+          self.activeRecoveryUserContent = undefined;
+          self.activeRecoveryModelContent = undefined;
+          activeRecoveryDeferredRecordCount = undefined;
+          activeRecoveryHistoryMutationVersion = undefined;
         };
         type InvalidStreamRetryEvent =
           | Extract<StreamEvent, { type: StreamEventType.CHUNK }>
           | Extract<StreamEvent, { type: StreamEventType.RETRY }>;
+        const makeRecoveryStopEvent = (): InvalidStreamRetryEvent => ({
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: { role: 'model', parts: [] },
+                finishReason: FinishReason.STOP,
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        });
+        if (
+          lastError === null &&
+          lastFinishReason === FinishReason.MAX_TOKENS &&
+          maxTokensCommittedModelContent !== undefined &&
+          (self.historyMutationVersion !==
+            maxTokensCommittedHistoryMutationVersion ||
+            self.history.at(-1) !== maxTokensCommittedModelContent)
+        ) {
+          lastFinishReason = FinishReason.STOP;
+          self.settleDeferredMaxTokensRecords();
+          yield makeRecoveryStopEvent();
+        }
         const streamWithInvalidStreamRetries = async function* (
           buildAttempt: () => {
             requestContents: Content[];
             params: SendMessageParameters;
             rollback: () => void;
+            isCurrent?: () => boolean;
             recordDeferral?: 'on-max-tokens' | 'always';
+            onModelTurnCommitted?: (content: Content) => void;
           },
           retryEvent: Extract<StreamEvent, { type: StreamEventType.RETRY }> = {
             type: StreamEventType.RETRY,
@@ -4018,6 +4170,11 @@ export class LlmChat {
           for (;;) {
             const attemptState = buildAttempt();
             try {
+              if (attemptState.isCurrent && !attemptState.isCurrent()) {
+                attemptState.rollback();
+                yield makeRecoveryStopEvent();
+                return;
+              }
               const acceptQuietToolResultCompletion =
                 acceptQuietToolResultCompletionOnNextAttempt;
               acceptQuietToolResultCompletionOnNextAttempt = false;
@@ -4032,8 +4189,39 @@ export class LlmChat {
                 undefined,
                 attemptState.recordDeferral,
                 acceptQuietToolResultCompletion,
+                attemptState.onModelTurnCommitted,
               );
-              for await (const chunk of stream) {
+              let terminalChunks: GenerateContentResponse[] | undefined;
+              const streamIterator = stream[Symbol.asyncIterator]();
+              try {
+                for (;;) {
+                  if (attemptState.isCurrent && !attemptState.isCurrent()) {
+                    attemptState.rollback();
+                    yield makeRecoveryStopEvent();
+                    return;
+                  }
+                  const next = await streamIterator.next();
+                  if (attemptState.isCurrent && !attemptState.isCurrent()) {
+                    attemptState.rollback();
+                    yield makeRecoveryStopEvent();
+                    return;
+                  }
+                  if (next.done) break;
+                  const chunk = next.value;
+                  if (
+                    attemptState.recordDeferral !== undefined &&
+                    (terminalChunks !== undefined ||
+                      firstCandidateFinishReason(chunk) !== undefined)
+                  ) {
+                    (terminalChunks ??= []).push(chunk);
+                  } else {
+                    yield { type: StreamEventType.CHUNK, value: chunk };
+                  }
+                }
+              } finally {
+                await streamIterator.return?.(undefined);
+              }
+              for (const chunk of terminalChunks ?? []) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
               }
               return;
@@ -4103,6 +4291,8 @@ export class LlmChat {
           let recoveryParams: SendMessageParameters = params;
 
           if (shouldEscalateMaxOutputTokens) {
+            let escalatedCommittedModelContent: Content | undefined;
+            let escalatedCommittedHistoryMutationVersion: number | undefined;
             debugLogger.info(
               `Output truncated at ${effectiveInitialMaxOutputTokens} tokens. ` +
                 `Escalating to ${escalatedLimit} tokens.`,
@@ -4125,7 +4315,55 @@ export class LlmChat {
                   `record(s) replaced by the escalated attempt`,
               );
             }
-            self.deferredMaxTokensRecords.length = 0;
+            self.clearDeferredMaxTokensRecords();
+            const escalatedHistoryMutationVersion = self.historyMutationVersion;
+            let escalatedVisibleParts: Part[] = [];
+            let escalatedVisibleTokens:
+              GenerateContentResponseUsageMetadata | undefined;
+            let escalatedAttemptCommitted = false;
+            abandonEscalatedAttempt = () => {
+              if (escalatedAttemptCommitted) {
+                return;
+              }
+              if (
+                escalatedVisibleParts.length === 0 ||
+                self.historyMutationVersion !== escalatedHistoryMutationVersion
+              ) {
+                self.popPendingPartialAssistantTurn();
+                return;
+              }
+              const modelContent: Content = {
+                role: 'model',
+                parts: appendRecoveryContinuationParts(
+                  undefined,
+                  escalatedVisibleParts,
+                ),
+              };
+              self.history.push(modelContent);
+              try {
+                self.chatRecordingService?.recordAssistantTurn({
+                  model,
+                  message: buildRecordMessageFromHistoryParts(
+                    modelContent.parts ?? [],
+                  ),
+                  tokens: escalatedVisibleTokens,
+                  contextWindowSize: cgConfigForThresholds?.contextWindowSize,
+                  ...(turnGoalContext
+                    ? { goalContext: { ...turnGoalContext } }
+                    : {}),
+                });
+              } catch (recordErr) {
+                debugLogger.error(
+                  '[MAX_TOKENS_DEFER] Failed to persist visible escalated output: ' +
+                    (recordErr instanceof Error
+                      ? recordErr.message
+                      : String(recordErr)),
+                );
+              }
+              escalatedAttemptCommitted = true;
+              escalatedVisibleParts = [];
+              escalatedVisibleTokens = undefined;
+            };
             // Signal UI to discard partial output
             yield {
               type: StreamEventType.RETRY,
@@ -4141,20 +4379,66 @@ export class LlmChat {
             };
             recoveryParams = escalatedParams;
             recoveryFinishReason = undefined;
-            for await (const event of streamWithInvalidStreamRetries(() => ({
-              requestContents,
-              params: escalatedParams,
-              rollback: () => self.popPendingPartialAssistantTurn(),
-              // Still a possible MAX_TOKENS turn the recovery loop will own.
-              recordDeferral: 'on-max-tokens',
-            }))) {
+            for await (const event of streamWithInvalidStreamRetries(() => {
+              escalatedVisibleParts = [];
+              escalatedVisibleTokens = undefined;
+              escalatedAttemptCommitted = false;
+              return {
+                requestContents,
+                params: escalatedParams,
+                rollback: () => {
+                  self.popPendingPartialAssistantTurn();
+                  escalatedVisibleParts = [];
+                  escalatedVisibleTokens = undefined;
+                },
+                isCurrent: () =>
+                  self.historyMutationVersion ===
+                  escalatedHistoryMutationVersion,
+                // The escalated turn replaces the initial truncated turn, so
+                // its record remains owned until either STOP or MAX_TOKENS is
+                // committed.
+                recordDeferral: 'always',
+              };
+            })) {
               if (event.type === StreamEventType.RETRY) {
                 yield event;
                 continue;
               }
               const fr = firstCandidateFinishReason(event.value);
-              if (fr) recoveryFinishReason = fr;
+              escalatedVisibleTokens =
+                event.value.usageMetadata ?? escalatedVisibleTokens;
+              if (!fr) {
+                escalatedVisibleParts.push(
+                  ...(event.value.candidates?.[0]?.content?.parts ?? []),
+                );
+              }
+              if (fr) {
+                escalatedAttemptCommitted = true;
+                escalatedVisibleParts = [];
+                recoveryFinishReason = fr;
+                if (fr === FinishReason.MAX_TOKENS) {
+                  const committedModel = self.history.at(-1);
+                  if (committedModel?.role === 'model') {
+                    escalatedCommittedModelContent = committedModel;
+                    escalatedCommittedHistoryMutationVersion =
+                      self.historyMutationVersion;
+                  }
+                }
+              }
               yield event;
+            }
+            escalatedAttemptCommitted = true;
+            escalatedVisibleParts = [];
+            if (
+              recoveryFinishReason === FinishReason.MAX_TOKENS &&
+              escalatedCommittedModelContent !== undefined &&
+              (self.historyMutationVersion !==
+                escalatedCommittedHistoryMutationVersion ||
+                self.history.at(-1) !== escalatedCommittedModelContent)
+            ) {
+              recoveryFinishReason = FinishReason.STOP;
+              self.settleDeferredMaxTokensRecords();
+              yield makeRecoveryStopEvent();
             }
           } else {
             debugLogger.info(
@@ -4168,11 +4452,20 @@ export class LlmChat {
           // response in history and inject a recovery message so the model can
           // continue from where it left off.
           let recoveryCount = 0;
-          let successfulRecoveries = 0;
+          const recoverySessionHistoryMutationVersion =
+            self.historyMutationVersion;
           while (
             recoveryFinishReason === FinishReason.MAX_TOKENS &&
             recoveryCount < MAX_OUTPUT_RECOVERY_ATTEMPTS
           ) {
+            if (
+              self.historyMutationVersion !==
+              recoverySessionHistoryMutationVersion
+            ) {
+              recoveryFinishReason = FinishReason.STOP;
+              yield makeRecoveryStopEvent();
+              break;
+            }
             // Skip recovery when the truncated turn already contains a
             // functionCall. Injecting a plain user message between a
             // functionCall and its functionResponse produces an invalid API
@@ -4201,11 +4494,28 @@ export class LlmChat {
             const recoveryUserContent = createUserContent([
               { text: buildOutputRecoveryMessage(lastEntry) },
             ]);
+            const recoveryBaseModelContent = lastEntry;
+            const recoveryHistoryMutationVersion =
+              recoverySessionHistoryMutationVersion;
+            self.activeRecoveryUserContent = recoveryUserContent;
+            self.activeRecoveryModelContent = undefined;
+            activeRecoveryHistoryMutationVersion =
+              recoveryHistoryMutationVersion;
             // Signal UI/turn to clear pending (incomplete) tool calls.
             // isContinuation tells the UI to keep the text buffer so the
             // model's continuation appends to the previous partial output.
             yield { type: StreamEventType.RETRY, isContinuation: true };
             recoveryFinishReason = undefined;
+            if (
+              self.historyMutationVersion !== recoveryHistoryMutationVersion ||
+              self.history.at(-1) !== recoveryBaseModelContent
+            ) {
+              self.activeRecoveryUserContent = undefined;
+              activeRecoveryHistoryMutationVersion = undefined;
+              recoveryFinishReason = FinishReason.STOP;
+              yield makeRecoveryStopEvent();
+              break;
+            }
 
             // Re-clamp maxOutputTokens for THIS iteration: the prompt has
             // grown by the previous partial response, so the value clamped
@@ -4274,18 +4584,31 @@ export class LlmChat {
             try {
               for await (const event of streamWithInvalidStreamRetries(
                 () => {
+                  self.activeRecoveryUserContent = recoveryUserContent;
+                  self.activeRecoveryModelContent = undefined;
+                  activeRecoveryDeferredRecordCount =
+                    self.deferredMaxTokensRecords.length;
+                  activeRecoveryHistoryMutationVersion =
+                    recoveryHistoryMutationVersion;
+                  activeRecoveryVisibleParts = [];
+                  activeRecoveryVisibleTokens = undefined;
                   self.history.push(recoveryUserContent);
+                  recoveryAttemptInFlight = true;
                   return {
                     requestContents: self.getRequestHistoryForRoute(
                       currentUserContent,
                       requestModalities,
                     ),
                     params: iterationParams,
-                    rollback: rollbackRecoveryAttempt,
+                    rollback: rollbackActiveRecoveryAttempt!,
+                    isCurrent: activeRecoveryAttemptIsCurrent,
                     // Always defer: even the final STOP continuation must be
                     // coalesced into the single merged record, not written
                     // separately.
                     recordDeferral: 'always',
+                    onModelTurnCommitted: (content) => {
+                      self.activeRecoveryModelContent = content;
+                    },
                   };
                 },
                 { type: StreamEventType.RETRY, isContinuation: true },
@@ -4294,16 +4617,31 @@ export class LlmChat {
                   yield event;
                   continue;
                 }
+                if (
+                  recoveryAttemptInFlight &&
+                  self.activeRecoveryModelContent
+                ) {
+                  completeActiveRecoveryAttempt();
+                }
                 const fr = firstCandidateFinishReason(event.value);
-                if (fr) recoveryFinishReason = fr;
+                if (!fr) {
+                  activeRecoveryVisibleParts.push(
+                    ...(event.value.candidates?.[0]?.content?.parts ?? []),
+                  );
+                }
+                activeRecoveryVisibleTokens =
+                  event.value.usageMetadata ?? activeRecoveryVisibleTokens;
+                if (fr) {
+                  recoveryFinishReason = fr;
+                  completeActiveRecoveryAttempt();
+                }
                 yield event;
               }
-              // Iteration fully succeeded: both the user recovery turn and
-              // the model continuation turn are now in history and can be
-              // coalesced back into the preceding model entry after the loop.
-              successfulRecoveries++;
+              if (recoveryAttemptInFlight) {
+                completeActiveRecoveryAttempt();
+              }
             } catch (recoveryError) {
-              rollbackRecoveryAttempt();
+              rollbackActiveRecoveryAttempt();
               debugLogger.warn(
                 `Recovery attempt ${recoveryCount} failed: ${recoveryError}`,
               );
@@ -4312,75 +4650,12 @@ export class LlmChat {
               // response with no end marker. Uses STOP because partial
               // chunks from prior successful iterations are already in
               // the transcript and represent the user-visible response.
-              yield {
-                type: StreamEventType.CHUNK,
-                value: {
-                  candidates: [
-                    {
-                      content: { role: 'model', parts: [] },
-                      finishReason: FinishReason.STOP,
-                    },
-                  ],
-                } as unknown as GenerateContentResponse,
-              };
+              yield makeRecoveryStopEvent();
               break;
             }
           }
 
-          // Coalesce completed recovery pairs back into the preceding model
-          // turn so the OUTPUT_RECOVERY_MESSAGE control prompt does not
-          // persist as a synthetic user turn in durable history. The user
-          // never sent that message, and leaving it in history would bias
-          // later turns and pollute compression / replay / export.
-          const coalescedPairs =
-            successfulRecoveries > 0
-              ? self.coalesceRecoveryPairs(successfulRecoveries)
-              : 0;
-
-          // Flush the deferred JSONL records. When every recovery pair merged
-          // cleanly into one history turn, write a single record built from
-          // that coalesced turn — projected through
-          // `buildRecordMessageFromHistoryParts` so its message keeps the
-          // record shape every other assistant record uses (one trimmed text
-          // part, structured_output args redacted, no inlineData/fileData) —
-          // and the durable transcript `--resume` reads carries the same
-          // merged content as in-memory history. If nothing coalesced
-          // (recovery skipped on a functionCall turn) or the merge bailed
-          // defensively, fall back to the per-attempt records, which still
-          // match the un-coalesced history.
-          const deferredRecords = self.deferredMaxTokensRecords;
-          self.deferredMaxTokensRecords = [];
-          if (deferredRecords.length > 0) {
-            const mergedTurn = self.history[self.history.length - 1];
-            if (
-              successfulRecoveries > 0 &&
-              coalescedPairs === successfulRecoveries &&
-              mergedTurn?.role === 'model'
-            ) {
-              debugLogger.debug(
-                `[MAX_TOKENS_DEFER] Flushing one merged record from ` +
-                  `${deferredRecords.length} deferred attempt(s) ` +
-                  `(coalescedPairs=${coalescedPairs})`,
-              );
-              self.chatRecordingService?.recordAssistantTurn({
-                ...deferredRecords[deferredRecords.length - 1]!,
-                tokens: mergeDeferredUsageMetadata(deferredRecords),
-                message: buildRecordMessageFromHistoryParts(
-                  mergedTurn.parts ?? [],
-                ),
-              });
-            } else {
-              debugLogger.debug(
-                `[MAX_TOKENS_DEFER] Flushing ${deferredRecords.length} ` +
-                  `deferred record(s) per-attempt (coalescedPairs=` +
-                  `${coalescedPairs}, successfulRecoveries=` +
-                  `${successfulRecoveries})`,
-              );
-              for (const record of deferredRecords) {
-                self.chatRecordingService?.recordAssistantTurn(record);
-              }
-            }
-          }
+          self.flushDeferredMaxTokensRecords();
         }
 
         if (lastError) {
@@ -4640,7 +4915,10 @@ export class LlmChat {
         }
       } finally {
         sleepInhibitorHandle.release();
-        streamDoneResolver!();
+        abandonActiveRecoveryAttempt?.();
+        abandonEscalatedAttempt?.();
+        self.activeRecoveryUserContent = undefined;
+        self.activeRecoveryModelContent = undefined;
         // Flush any deferred partial-tool_use record. Covers both the
         // post-retry-loop unretryable break AND the max-tokens
         // escalation throw (the escalated processStreamResponse can
@@ -4664,32 +4942,11 @@ export class LlmChat {
           self.clearPendingPartialState();
         }
         // Flush any MAX_TOKENS records still deferred when the block did not
-        // reach its own emit point — consumer abandonment mid-recovery (the
-        // generator's `.return()` runs this `finally`) or a throw escaping the
-        // recovery block (e.g. the escalated attempt exhausting invalid-stream
-        // retries). Written as-is (per attempt): lossless, and identical to the
-        // pre-fix output for these degraded paths. The normal path already
-        // drained and cleared the list before getting here.
-        if (self.deferredMaxTokensRecords.length > 0) {
-          const stranded = self.deferredMaxTokensRecords;
-          self.deferredMaxTokensRecords = [];
-          debugLogger.debug(
-            `[MAX_TOKENS_DEFER] Flushing ${stranded.length} stranded ` +
-              `deferred record(s) on abandoned/failed recovery`,
-          );
-          for (const record of stranded) {
-            try {
-              self.chatRecordingService?.recordAssistantTurn(record);
-            } catch (recordErr) {
-              debugLogger.error(
-                '[RECOVERY_FLUSH] Failed to persist deferred JSONL record: ' +
-                  (recordErr instanceof Error
-                    ? recordErr.message
-                    : String(recordErr)),
-              );
-            }
-          }
-        }
+        // reach its normal emit point. The helper always derives one record
+        // from the surviving trailing model turn, so abandonment cannot
+        // recreate adjacent assistant turns in the resume transcript.
+        self.flushDeferredMaxTokensRecords();
+        streamDoneResolver!();
       }
     })();
   }
@@ -4718,15 +4975,25 @@ export class LlmChat {
     transportContinuationPrefix?: string,
     recordDeferral?: 'on-max-tokens' | 'always',
     acceptQuietToolResultCompletion = false,
+    onModelTurnCommitted?: (content: Content) => void,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
+    const streamAbortController = new AbortController();
+    const requestAbortSignal = params.config?.abortSignal;
+    const streamAbortSignal = requestAbortSignal
+      ? AbortSignal.any([requestAbortSignal, streamAbortController.signal])
+      : streamAbortController.signal;
     const apiCall = () =>
       generator.generateContentStream(
         {
           model,
           contents: requestContents,
-          config: { ...this.generationConfig, ...params.config },
+          config: {
+            ...this.generationConfig,
+            ...params.config,
+            abortSignal: streamAbortSignal,
+          },
         },
         prompt_id,
       );
@@ -4802,6 +5069,8 @@ export class LlmChat {
       transportContinuationPrefix,
       recordDeferral,
       acceptQuietToolResultCompletion,
+      onModelTurnCommitted,
+      () => streamAbortController.abort(),
     );
   }
 
@@ -5019,38 +5288,40 @@ export class LlmChat {
    * Clears the chat history.
    */
   clearHistory(): void {
+    this.historyMutationVersion++;
     this.history = [];
     // Any pending partial-push state points into the now-empty history;
     // resetting prevents `popPendingPartialAssistantTurn` from splicing whatever
     // shows up at that index in a future send (defense-in-depth — the
     // helper also bounds-checks, but a stale marker that happens to
     // line up with a real model turn could otherwise pop the wrong
-    // entry). The deferred-record stash is dropped for the same reason:
-    // a later flush would append a turn that doesn't match the (now-
-    // empty) live history.
+    // entry). The deferred record is dropped because its target no longer
+    // survives in the now-empty live history.
     this.clearPendingPartialState();
+    this.settleDeferredMaxTokensRecords();
   }
 
   /**
    * Adds a new entry to the chat history.
    */
   addHistory(content: Content): void {
+    this.historyMutationVersion++;
     this.history.push(content);
-    // addHistory only runs between sends, so the partial-push marker
-    // should already be cleared. If it is not, a new caller is
-    // violating that invariant — surface it at error level so the
-    // offending stack is visible. See the design note above
-    // `ORPHAN_TOOL_USE_REPAIR_REASON` for the marker lifecycle.
+    // addHistory may run while output recovery is suspended, but the
+    // unrelated partial-push marker should already be clear. If it is not,
+    // surface the violating stack. See the design note above
+    // `ORPHAN_TOOL_USE_REPAIR_REASON` for that marker's lifecycle.
     if (
       this.pendingPartialAssistantTurnIndex !== null ||
       this.pendingPartialAssistantRecord !== null
     ) {
       debugLogger.error(
         '[INVARIANT_VIOLATION] addHistory called while a partial-push ' +
-          'marker is active — clearing it.',
+          'marker is active — settling it.',
       );
     }
     this.clearPendingPartialState();
+    this.settleDeferredMaxTokensRecords();
   }
 
   /**
@@ -5109,7 +5380,18 @@ export class LlmChat {
           args: { ...functionCall.args, plan: replacement },
         },
       };
-      this.history[i] = { ...entry, parts: newParts };
+      const replacementEntry = { ...entry, parts: newParts };
+      this.history[i] = replacementEntry;
+      if (entry === this.deferredMaxTokensRecordTarget) {
+        this.deferredMaxTokensRecordTarget = replacementEntry;
+        for (const deferred of this.deferredMaxTokensRecords) {
+          if (deferred.modelContent === entry) {
+            deferred.modelContent = replacementEntry;
+          }
+        }
+      }
+      this.historyMutationVersion++;
+      this.settleDeferredMaxTokensRecords();
       return true;
     }
     return false;
@@ -5158,7 +5440,41 @@ export class LlmChat {
       planPath,
     );
     if (redacted) {
+      const previousHistory = this.history;
+      const deferredTarget = this.deferredMaxTokensRecordTarget;
+      const deferredTargetIndex = deferredTarget
+        ? previousHistory.indexOf(deferredTarget)
+        : -1;
+      const recoveryUserIndex = this.activeRecoveryUserContent
+        ? previousHistory.indexOf(this.activeRecoveryUserContent)
+        : -1;
+      const recoveryModelIndex = this.activeRecoveryModelContent
+        ? previousHistory.indexOf(this.activeRecoveryModelContent)
+        : -1;
       this.history = redacted;
+      if (deferredTargetIndex >= 0) {
+        const replacement = redacted[deferredTargetIndex];
+        if (replacement?.role === 'model') {
+          this.deferredMaxTokensRecordTarget = replacement;
+          for (const deferred of this.deferredMaxTokensRecords) {
+            if (deferred.modelContent === deferredTarget) {
+              deferred.modelContent = replacement;
+            }
+          }
+        }
+      }
+      if (recoveryUserIndex >= 0) {
+        const replacement = redacted[recoveryUserIndex];
+        if (replacement?.role === 'user') {
+          this.activeRecoveryUserContent = replacement;
+        }
+      }
+      if (recoveryModelIndex >= 0) {
+        const replacement = redacted[recoveryModelIndex];
+        if (replacement?.role === 'model') {
+          this.activeRecoveryModelContent = replacement;
+        }
+      }
     } else {
       // hasPlanCall was true, so a null here means every exit_plan_mode
       // call was skipped (unapproved, id-less, or plan text differing
@@ -5172,16 +5488,68 @@ export class LlmChat {
   }
 
   setHistory(history: Content[]): void {
+    this.historyMutationVersion++;
+    const deferredTarget = this.deferredMaxTokensRecordTarget;
+    const activeRecoveryUser = this.activeRecoveryUserContent;
+    const activeRecoveryModel = this.activeRecoveryModelContent;
     this.history = history;
+    const findReplacement = (
+      target: Content | undefined,
+      label: string,
+    ): Content | undefined => {
+      if (!target) return undefined;
+      const identical = history.find((entry) => entry === target);
+      if (identical) return identical;
+      let equivalent: Content | undefined;
+      for (const entry of history) {
+        if (!isDeepStrictEqual(entry, target)) continue;
+        if (equivalent) {
+          debugLogger.warn(
+            `[MAX_TOKENS_DEFER] Cannot rebind ${label}: replacement ` +
+              'history contains multiple equivalent entries.',
+          );
+          return undefined;
+        }
+        equivalent = entry;
+      }
+      return equivalent;
+    };
+    const replacementTarget = findReplacement(
+      deferredTarget,
+      'deferred model turn',
+    );
+    if (deferredTarget && replacementTarget?.role === 'model') {
+      this.deferredMaxTokensRecordTarget = replacementTarget;
+      for (const deferred of this.deferredMaxTokensRecords) {
+        if (deferred.modelContent === deferredTarget) {
+          deferred.modelContent = replacementTarget;
+        }
+      }
+    }
+    const replacementRecoveryUser = findReplacement(
+      activeRecoveryUser,
+      'active recovery user turn',
+    );
+    if (replacementRecoveryUser?.role === 'user') {
+      this.activeRecoveryUserContent = replacementRecoveryUser;
+    }
+    const replacementRecoveryModel = findReplacement(
+      activeRecoveryModel,
+      'active recovery model turn',
+    );
+    if (replacementRecoveryModel?.role === 'model') {
+      this.activeRecoveryModelContent = replacementRecoveryModel;
+    }
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The
     // marker MUST be cleared — otherwise `popPendingPartialAssistantTurn` could find
     // a model turn at the stale index in the replacement history and
     // splice an entry that has nothing to do with the original partial
-    // push, corrupting the conversation. Drop the paired deferred-record
-    // stash too: its referent (the model turn at the old index) is gone.
+    // push, corrupting the conversation. Settle the paired deferred record
+    // against an exact surviving object or a unique equivalent clone.
     this.clearPendingPartialState();
     this.redactApprovedPlansFromLoadedHistory();
+    this.settleDeferredMaxTokensRecords();
     // Wholesale replacement can drop resident skill bodies (compression,
     // /restore, session-manager load_history, ACP restoreSessionHistory
     // all land here). Conservatively clear the tracking so an evicted
@@ -5194,7 +5562,12 @@ export class LlmChat {
 
   truncateHistory(keepCount: number): void {
     const prevLen = this.history.length;
-    this.history = this.history.slice(0, keepCount);
+    const nextHistory = this.history.slice(0, keepCount);
+    if (nextHistory.length === prevLen) {
+      return;
+    }
+    this.historyMutationVersion++;
+    this.history = nextHistory;
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
     // both fields rather than try to fix them up — they're per-send and
@@ -5210,18 +5583,43 @@ export class LlmChat {
       );
     }
     this.clearPendingPartialState();
+    this.settleDeferredMaxTokensRecords();
   }
 
   stripThoughtsFromHistory(): void {
-    this.history = this.history
-      .map(stripThoughtPartsFromContent)
+    const deferredTarget = this.deferredMaxTokensRecordTarget;
+    let nextDeferredTarget = deferredTarget;
+    let changed = false;
+    const nextHistory = this.history
+      .map((content) => {
+        const stripped = stripThoughtPartsFromContent(content);
+        changed ||= stripped !== content;
+        if (content === deferredTarget) {
+          nextDeferredTarget = stripped ?? undefined;
+          if (stripped) {
+            for (const deferred of this.deferredMaxTokensRecords) {
+              if (deferred.modelContent === content) {
+                deferred.modelContent = stripped;
+              }
+            }
+          }
+        }
+        return stripped;
+      })
       .filter((content): content is Content => content !== null);
+    if (!changed) {
+      this.clearPendingPartialState();
+      return;
+    }
+    this.historyMutationVersion++;
+    this.history = nextHistory;
+    this.deferredMaxTokensRecordTarget = nextDeferredTarget;
     // Filter+map replaces `this.history` with a new array, so any pending
     // partial-push marker is now indexed against an array that no longer
-    // exists. Clear it for the same reason setHistory does — and drop
-    // the paired deferred-record stash so a later flush can't land a
-    // turn that doesn't exist in live history.
+    // exists. Clear it for the same reason setHistory does, then settle the
+    // deferred record against the stripped target object.
     this.clearPendingPartialState();
+    this.settleDeferredMaxTokensRecords();
   }
 
   /**
@@ -5254,6 +5652,9 @@ export class LlmChat {
       }
       strippedEntries.unshift(this.history.pop()!);
     }
+    if (strippedEntries.length > 0) {
+      this.historyMutationVersion++;
+    }
     // Today this is safe even without the reset — only trailing user
     // entries are popped, which can't shift the index of an earlier
     // `model` partial. But every other history-mutation method now
@@ -5276,6 +5677,9 @@ export class LlmChat {
       );
     }
     this.clearPendingPartialState();
+    if (strippedEntries.length > 0) {
+      this.settleDeferredMaxTokensRecords();
+    }
     return strippedEntries;
   }
 
@@ -5290,7 +5694,31 @@ export class LlmChat {
     injected: Array<{ callId: string; name: string }>;
     droppedDuplicates: Array<{ callId: string; name: string }>;
   } {
-    return repairOrphanedToolUseTurns(this.history, reason, options);
+    const before = this.history.map((entry) => ({
+      entry,
+      parts: entry.parts ? [...entry.parts] : undefined,
+    }));
+    const result = repairOrphanedToolUseTurns(this.history, reason, options);
+    const changed =
+      this.history.length !== before.length ||
+      this.history.some((entry, index) => {
+        const previous = before[index];
+        if (entry !== previous?.entry) return true;
+        if (entry.parts === undefined || previous.parts === undefined) {
+          return entry.parts !== previous.parts;
+        }
+        return (
+          entry.parts.length !== previous.parts.length ||
+          entry.parts.some(
+            (part, partIndex) => part !== previous.parts![partIndex],
+          )
+        );
+      });
+    if (changed) {
+      this.historyMutationVersion++;
+      this.settleDeferredMaxTokensRecords();
+    }
+    return result;
   }
 
   setTools(tools: Tool[]): void {
@@ -5354,22 +5782,19 @@ export class LlmChat {
     // still be coalesced. See `deferredMaxTokensRecords`.
     recordDeferral?: 'on-max-tokens' | 'always',
     acceptQuietToolResultCompletion = false,
+    onModelTurnCommitted?: (content: Content) => void,
+    abortStream?: () => void,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
+    const streamHistoryMutationVersion = this.historyMutationVersion;
     const allModelParts: Part[] = [];
     const usedToolCallIds = collectToolCallIdsFromHistory(this.history);
     const rawToolCallIdsInCurrentTurn = new Set<string>();
     const reservedToolCallIds = new Map<string, string>();
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
-    let coercedUsage:
-      | {
-          promptTokenCount: number;
-          totalTokenCount: number;
-          candidatesTokenCount: number;
-          cachedContentTokenCount: number;
-          thoughtsTokenCount: number;
-        }
-      | undefined;
+    let coercedUsage: Partial<GenerateContentResponseUsageMetadata> | undefined;
+    let deferredRecord:
+      Parameters<ChatRecordingService['recordAssistantTurn']>[0] | undefined;
 
     let hasToolCall = false;
     let hasFinishReason = false;
@@ -5382,6 +5807,8 @@ export class LlmChat {
     // decision consumes; do not capture earlier or the two decisions can
     // disagree on suppressed or stripped finish chunks.
     let yieldedFinishReason: FinishReason | undefined;
+    let firstObservedTerminalFinishReason: string | undefined;
+    const terminalChunks: GenerateContentResponse[] = [];
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let pendingProtocolParts: Part[] = [];
     const takePendingProtocolParts = (): Part[] => {
@@ -5415,9 +5842,56 @@ export class LlmChat {
     // the post-loop block for why this is needed to keep tool_use/tool_result
     // pairing intact across the failure.
     let streamError: unknown = null;
+    const streamIterator = streamResponse[Symbol.asyncIterator]();
+    let streamFinished = false;
+    let terminalDrainTimedOut = false;
+    let terminalDrainTimeout: ReturnType<typeof delay> | undefined;
 
     try {
-      for await (const chunk of streamResponse) {
+      for (;;) {
+        let next: IteratorResult<GenerateContentResponse>;
+        if (terminalChunks.length > 0) {
+          terminalDrainTimeout ??= delay(TERMINAL_CHUNK_DRAIN_TIMEOUT_MS);
+          const nextPromise = streamIterator.next();
+          const outcome = await Promise.race([
+            nextPromise.then((result) => ({
+              timedOut: false as const,
+              result,
+            })),
+            terminalDrainTimeout.promise.then(() => ({
+              timedOut: true as const,
+            })),
+          ]);
+          if (outcome.timedOut) {
+            terminalDrainTimedOut = true;
+            abortStream?.();
+            void nextPromise.catch(() => undefined);
+            debugLogger.warn(
+              `Provider stream did not close within ${TERMINAL_CHUNK_DRAIN_TIMEOUT_MS}ms after a recovery terminal chunk; continuing without later metadata.`,
+            );
+            break;
+          }
+          next = outcome.result;
+        } else {
+          next = await streamIterator.next();
+        }
+        if (next.done) {
+          streamFinished = true;
+          break;
+        }
+        const chunk = next.value;
+        const incomingFinishReason = firstCandidateFinishReason(chunk);
+        if (
+          firstObservedTerminalFinishReason !== undefined &&
+          (chunk.candidates?.length ?? 0) > 0
+        ) {
+          debugLogger.warn(
+            'Discarding provider candidate output received after a terminal chunk.',
+          );
+          chunk.candidates = [];
+        } else if (incomingFinishReason !== undefined) {
+          firstObservedTerminalFinishReason = incomingFinishReason;
+        }
         const preparations = getToolCallPreparations(chunk);
         if (preparations.length > 0) {
           setToolCallPreparations(
@@ -5554,11 +6028,21 @@ export class LlmChat {
           // Stash coerced values so recordAssistantTurn can reuse them
           // without re-calling coerceUsageCount inline.
           coercedUsage = {
-            promptTokenCount,
-            totalTokenCount,
-            candidatesTokenCount,
-            cachedContentTokenCount,
-            thoughtsTokenCount,
+            ...(usageMetadata.promptTokenCount !== undefined
+              ? { promptTokenCount }
+              : {}),
+            ...(usageMetadata.totalTokenCount !== undefined
+              ? { totalTokenCount }
+              : {}),
+            ...(usageMetadata.candidatesTokenCount !== undefined
+              ? { candidatesTokenCount }
+              : {}),
+            ...(usageMetadata.cachedContentTokenCount !== undefined
+              ? { cachedContentTokenCount }
+              : {}),
+            ...(usageMetadata.thoughtsTokenCount !== undefined
+              ? { thoughtsTokenCount }
+              : {}),
           };
           const lastPromptTokenCount = hasUsablePromptTokenCount
             ? promptTokenCount
@@ -5607,6 +6091,7 @@ export class LlmChat {
           }
         }
 
+        const observedTerminalFinishReason = firstCandidateFinishReason(chunk);
         if (isToolResultContinuation) {
           // Do not let consumers commit Finished before post-stream validation
           // can reject a semantically empty continuation.
@@ -5625,8 +6110,8 @@ export class LlmChat {
           !protocolTagDetector.blockingOutput
         ) {
           // Capture the finish reason from exactly the chunks the outer send
-          // loop will consume (last-wins via `firstCandidateFinishReason`,
-          // after the tool-result-continuation strip above), so the
+          // loop will consume (after the tool-result-continuation strip
+          // above), so the
           // record-deferral decision below cannot disagree with the
           // recovery-entry decision: a finish reason on a suppressed or
           // stripped chunk never reaches the outer loop, and one this
@@ -5635,11 +6120,58 @@ export class LlmChat {
           if (yieldedChunkFinishReason) {
             yieldedFinishReason = yieldedChunkFinishReason as FinishReason;
           }
-          yield chunk;
+          const shouldStartTerminalBuffer =
+            (isToolResultContinuation &&
+              observedTerminalFinishReason !== undefined &&
+              (recordDeferral === 'always' ||
+                observedTerminalFinishReason === FinishReason.MAX_TOKENS)) ||
+            (yieldedChunkFinishReason !== undefined &&
+              (recordDeferral === 'always' ||
+                (recordDeferral === 'on-max-tokens' &&
+                  yieldedChunkFinishReason === FinishReason.MAX_TOKENS)));
+          if (terminalChunks.length > 0 || shouldStartTerminalBuffer) {
+            terminalChunks.push(chunk);
+          } else {
+            yield chunk;
+          }
         }
       }
     } catch (e) {
-      streamError = e;
+      if (terminalChunks.length > 0) {
+        debugLogger.warn(
+          `Provider stream failed after a terminal chunk; keeping the completed turn and ignoring the trailing error: ${e}`,
+        );
+      } else {
+        streamError = e;
+      }
+    } finally {
+      terminalDrainTimeout?.skip();
+      if (!streamFinished) {
+        const returnPromise = streamIterator.return?.(undefined);
+        if (terminalDrainTimedOut) {
+          void returnPromise?.catch(() => undefined);
+        } else {
+          await returnPromise;
+        }
+      }
+    }
+
+    if (
+      terminalChunks.length > 0 &&
+      this.historyMutationVersion !== streamHistoryMutationVersion
+    ) {
+      debugLogger.warn(
+        'Discarding a terminal response because history changed while the provider stream was closing.',
+      );
+      yield {
+        candidates: [
+          {
+            content: { role: 'model', parts: [] },
+            finishReason: FinishReason.STOP,
+          },
+        ],
+      } as unknown as GenerateContentResponse;
+      return;
     }
 
     if (
@@ -5784,10 +6316,15 @@ export class LlmChat {
     const lacksVisibleToolResultProgress =
       isToolResultContinuation &&
       (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
+    const emptyMaxTokensOwnedByRecovery =
+      !isToolResultContinuation &&
+      recordDeferral === 'on-max-tokens' &&
+      yieldedFinishReason === FinishReason.MAX_TOKENS;
     let acceptedQuietToolResultCompletion = false;
     if (
       streamError === null &&
       !hasToolCall &&
+      !emptyMaxTokensOwnedByRecovery &&
       (!hasFinishReason || !hasAnyContent || lacksVisibleToolResultProgress)
     ) {
       if (!hasFinishReason) {
@@ -5925,6 +6462,7 @@ export class LlmChat {
     if (
       willPersistToHistory &&
       (acceptedQuietToolResultCompletion ||
+        emptyMaxTokensOwnedByRecovery ||
         thoughtContentPart ||
         contentText ||
         hasToolCall ||
@@ -5932,7 +6470,9 @@ export class LlmChat {
     ) {
       const contextWindowSize =
         this.config.getContentGeneratorConfig()?.contextWindowSize;
-      const recordArgs = {
+      const recordArgs: Parameters<
+        ChatRecordingService['recordAssistantTurn']
+      >[0] = {
         model,
         message: acceptedQuietToolResultCompletion
           ? acceptedTurnParts
@@ -5957,6 +6497,18 @@ export class LlmChat {
         contextWindowSize,
         ...(goalContext ? { goalContext: { ...goalContext } } : {}),
       };
+      if (
+        streamError === null &&
+        recordArgs.tokens &&
+        recordArgs.goalContext &&
+        this.chatRecordingService
+      ) {
+        this.chatRecordingService.recordGoalTurnUsage(
+          recordArgs.goalContext,
+          recordArgs.tokens,
+        );
+        recordArgs.goalTokensAlreadyAccumulated = true;
+      }
       if (streamError !== null) {
         // Stream-error + tool-use partial: defer the JSONL append until
         // the outer retry loop decides whether to roll back this attempt.
@@ -5984,15 +6536,15 @@ export class LlmChat {
             FinishReason.MAX_TOKENS)
       ) {
         // MAX_TOKENS output-recovery owns this turn: stash the record so the
-        // recovery block can emit a single merged one matching coalesced
-        // history. The append-only transcript cannot be coalesced after the
-        // fact, so it must not be written here.
-        this.deferredMaxTokensRecords.push(recordArgs);
+        // recovery block can emit one merged record projection of the
+        // coalesced history turn. The append-only transcript cannot be
+        // coalesced after the fact, so it must not be written here.
+        deferredRecord = recordArgs;
         debugLogger.debug(
           `[MAX_TOKENS_DEFER] Deferring assistant record ` +
             `(mode=${recordDeferral}, yielded=${yieldedFinishReason}, ` +
             `deferred=${deferredFinishReason}, stashed=` +
-            `${this.deferredMaxTokensRecords.length})`,
+            `${this.deferredMaxTokensRecords.length + 1})`,
         );
       } else {
         this.chatRecordingService?.recordAssistantTurn(recordArgs);
@@ -6022,13 +6574,15 @@ export class LlmChat {
       // tightened without the other and the JSONL recording silently
       // desyncs from in-memory history.
       if (willPersistToHistory) {
-        this.history.push({
+        const modelContent: Content = {
           role: 'model',
           parts: [
             ...(thoughtContentPart ? [thoughtContentPart] : []),
             ...consolidatedHistoryParts,
           ],
-        });
+        };
+        this.history.push(modelContent);
+        onModelTurnCommitted?.(modelContent);
         // Track the pushed turn so the outer sendMessageStream retry loop
         // can roll it back if it decides to retry the same send. Without
         // this, a successful retry would leave the failed attempt's
@@ -6061,10 +6615,22 @@ export class LlmChat {
       throw streamError;
     }
 
-    this.history.push({
+    const modelContent: Content = {
       role: 'model',
       parts: acceptedTurnParts,
-    });
+    };
+    this.history.push(modelContent);
+    if (deferredRecord) {
+      this.deferredMaxTokensRecords.push({
+        record: deferredRecord,
+        modelContent,
+      });
+      this.deferredMaxTokensRecordTarget ??= modelContent;
+    }
+    onModelTurnCommitted?.(modelContent);
+    for (const terminalChunk of terminalChunks) {
+      yield terminalChunk;
+    }
     if (deferredFinishReason) {
       yield {
         candidates: [{ finishReason: deferredFinishReason }],
@@ -6082,35 +6648,45 @@ export class LlmChat {
    * Expected tail shape per iteration (walking from the back):
    *   [..., precedingModel, userRecovery, modelContinuation]
    *
-   * If any pair doesn't match that shape the method bails defensively
-   * rather than corrupting history.
+   * Every pair is validated before history is changed. If any pair doesn't
+   * match that shape the method returns zero without mutating history.
    *
-   * Returns the number of pairs actually merged. The deferred-record flush
-   * relies on this: it emits one merged transcript record only when every pair
-   * coalesced (return value === pairCount), otherwise it keeps the per-attempt
-   * records so the durable transcript still matches the un-merged history.
+   * Returns the number of pairs actually merged. Recovery completes one pair
+   * at a time before exposing its terminal event; rejection rolls that pair
+   * back so the durable transcript can never contain adjacent assistant turns.
    */
   private coalesceRecoveryPairs(pairCount: number): number {
+    const initialLength = this.history.length;
+    for (let i = 0; i < pairCount; i++) {
+      const modelContinuation = this.history[initialLength - 1 - i * 2];
+      const userRecovery = this.history[initialLength - 2 - i * 2];
+      const precedingModel = this.history[initialLength - 3 - i * 2];
+      if (
+        modelContinuation?.role !== 'model' ||
+        userRecovery?.role !== 'user' ||
+        precedingModel?.role !== 'model'
+      ) {
+        return 0;
+      }
+    }
+
     for (let i = 0; i < pairCount; i++) {
       const len = this.history.length;
-      if (len < 3) return i;
-
       const modelContinuation = this.history[len - 1]!;
-      const userRecovery = this.history[len - 2]!;
       const precedingModel = this.history[len - 3]!;
-
-      if (
-        modelContinuation.role !== 'model' ||
-        userRecovery.role !== 'user' ||
-        precedingModel.role !== 'model'
-      ) {
-        return i;
-      }
 
       precedingModel.parts = appendRecoveryContinuationParts(
         precedingModel.parts,
         modelContinuation.parts,
       );
+      for (const deferred of this.deferredMaxTokensRecords) {
+        if (deferred.modelContent === modelContinuation) {
+          deferred.modelContent = precedingModel;
+        }
+      }
+      if (this.deferredMaxTokensRecordTarget === modelContinuation) {
+        this.deferredMaxTokensRecordTarget = precedingModel;
+      }
       // Drop the (userRecovery, modelContinuation) pair.
       this.history.splice(len - 2, 2);
     }

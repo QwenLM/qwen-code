@@ -924,11 +924,8 @@ export class ChatRecordingService {
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
   private pinnedSessionId: string | undefined;
   private state:
-    | 'inactive'
-    | 'active'
-    | 'closing'
-    | 'closed'
-    | 'integrity_failed' = 'inactive';
+    'inactive' | 'active' | 'closing' | 'closed' | 'integrity_failed' =
+    'inactive';
   private binding:
     | {
         readonly sessionId: string;
@@ -1002,8 +999,7 @@ export class ChatRecordingService {
    */
   private lastAttributionSnapshotJson: string | undefined;
   private cachedGitBranch:
-    | { cwd: string; branch: string | undefined }
-    | undefined;
+    { cwd: string; branch: string | undefined } | undefined;
 
   /**
    * Approximate bytes of JSONL content accepted after the last
@@ -1057,8 +1053,7 @@ export class ChatRecordingService {
   }
 
   private readPersistedTitleInfo():
-    | { title?: string; source?: TitleSource }
-    | undefined {
+    { title?: string; source?: TitleSource } | undefined {
     try {
       return this.config
         .getSessionService()
@@ -1160,8 +1155,7 @@ export class ChatRecordingService {
       if (record.type !== 'system') continue;
       if (record.subtype === 'custom_title') {
         const payload = record.systemPayload as
-          | CustomTitleRecordPayload
-          | undefined;
+          CustomTitleRecordPayload | undefined;
         this.currentCustomTitle = payload?.customTitle;
         this.currentTitleSource = payload?.titleSource;
       } else if (record.subtype === 'parent_session') {
@@ -1170,8 +1164,7 @@ export class ChatRecordingService {
         )?.parentSessionId;
       } else if (record.subtype === 'session_source') {
         const payload = record.systemPayload as
-          | SessionSourceRecordPayload
-          | undefined;
+          SessionSourceRecordPayload | undefined;
         this.currentSourceType = payload?.sourceType;
         this.currentSourceId = payload?.sourceId;
       } else if (record.subtype === 'session_model') {
@@ -2073,6 +2066,13 @@ export class ChatRecordingService {
     this.goalTurnSpend.tokens += total;
   }
 
+  recordGoalTurnUsage(
+    goalContext: GoalTurnPermit,
+    usage: GenerateContentResponseUsageMetadata,
+  ): void {
+    this.accumulateGoalTurnTokens(goalContext.turnId, usage);
+  }
+
   /**
    * The tokens billed to `turnId`, consuming them so a turn is counted once.
    *
@@ -2103,6 +2103,7 @@ export class ChatRecordingService {
     tokens?: GenerateContentResponseUsageMetadata;
     contextWindowSize?: number;
     goalContext?: GoalTurnPermit;
+    goalTokensAlreadyAccumulated?: boolean;
   }): void {
     try {
       const record: ChatRecord = {
@@ -2119,7 +2120,7 @@ export class ChatRecordingService {
 
       if (data.tokens) {
         record.usageMetadata = data.tokens;
-        if (data.goalContext) {
+        if (data.goalContext && !data.goalTokensAlreadyAccumulated) {
           this.accumulateGoalTurnTokens(data.goalContext.turnId, data.tokens);
         }
       }
@@ -2289,8 +2290,7 @@ export class ChatRecordingService {
           : []),
       ];
       let recordingToolCallResult:
-        | (Partial<ToolCallResponseInfo> & { status: Status })
-        | undefined;
+        (Partial<ToolCallResponseInfo> & { status: Status }) | undefined;
       if (toolCallResult) {
         const recordableToolCallResult = { ...toolCallResult };
         delete recordableToolCallResult.persistedOutputFiles;

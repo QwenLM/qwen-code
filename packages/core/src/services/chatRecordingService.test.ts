@@ -2587,8 +2587,7 @@ describe('ChatRecordingService', () => {
       service.recordUserMessage([{ text: 'after failure' }]);
       await expect(service.flush()).rejects.toBe(writeError);
       expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
-      expect(listener).toHaveBeenCalledOnce();
-      expect(listener).toHaveBeenCalledWith({
+      expect(listener).toHaveBeenCalledExactlyOnceWith({
         sessionId: 'test-session-id',
         error: writeError,
       });
@@ -3476,6 +3475,31 @@ describe('Goal turn token ledger', () => {
 
     expect(appended).toHaveLength(3);
     expect(service.takeGoalTurnTokens('turn-1')).toBe(1_000);
+  });
+
+  it('does not bill usage again when the model call was already accumulated', () => {
+    const service = Object.create(
+      ChatRecordingService.prototype,
+    ) as ChatRecordingService;
+    const appended: unknown[] = [];
+    Object.assign(service, {
+      createBaseRecord: () => ({ type: 'assistant' }),
+      appendRecord: (record: unknown) => appended.push(record),
+      maybeTriggerAutoTitle: () => {},
+    });
+    const goalContext = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+    const tokens = { totalTokenCount: 250 };
+
+    service.recordGoalTurnUsage(goalContext, tokens);
+    service.recordAssistantTurn({
+      model: 'qwen',
+      tokens,
+      goalContext,
+      goalTokensAlreadyAccumulated: true,
+    });
+
+    expect(appended).toHaveLength(1);
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(250);
   });
 
   function recorderForGoalSpend() {
