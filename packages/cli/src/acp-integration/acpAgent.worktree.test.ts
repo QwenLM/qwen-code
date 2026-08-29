@@ -242,6 +242,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     TodoCreated: 'TodoCreated',
     TodoCompleted: 'TodoCompleted',
   },
+  // Real pass-through: newSessionConfig binds the session's debug-log context
+  // via sessionIdContext.run, so the mock must expose the actual store.
+  sessionIdContext: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).sessionIdContext,
 }));
 
 vi.mock('./runtimeOutputDirContext.js', () => ({
@@ -286,6 +291,9 @@ vi.mock('../config/settings-cache.js', async () => {
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  // newSessionConfig's catch narrows on this class; without the export an
+  // unrelated error in the try block surfaces as a confusing mock error.
+  SessionIdConflictError: class SessionIdConflictError extends Error {},
 }));
 vi.mock('./session/Session.js', () => ({
   Session: vi.fn(),
