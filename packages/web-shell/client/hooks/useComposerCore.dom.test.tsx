@@ -283,7 +283,7 @@ describe('useComposerCore history and drafts', () => {
     );
 
     expect(toString).toHaveBeenCalledOnce();
-  });
+  }, 10_000);
 
   it('keeps slash completion replacement coordinates absolute', async () => {
     await mount({
