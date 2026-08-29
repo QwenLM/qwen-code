@@ -93,18 +93,17 @@ export async function evaluatePermissionFlow(
   // Grant-safe aliases are deliberately collision-filtered. If we have an
   // authoritative raw MCP identity but an incomplete registry mock, fail
   // closed for grants by dropping lossy legacy aliases instead of restoring
-  // the collision behavior this PR removes.
+  // the collision behavior this PR removes. If no raw identity is available,
+  // retain the pre-existing aliases because there is no authoritative identity
+  // to replace them with.
   const grantLegacyAliases =
-    toolName.startsWith('mcp__') && legacyAliases && rawMcpToolName
+    toolName.startsWith('mcp__') && legacyAliases
       ? toolRegistry && typeof registryAliasResolver === 'function'
         ? registryAliasResolver.call(toolRegistry, toolName, legacyAliases)
-        : []
-      : toolName.startsWith('mcp__') &&
-          legacyAliases &&
-          toolRegistry &&
-          typeof registryAliasResolver === 'function'
-        ? registryAliasResolver.call(toolRegistry, toolName, legacyAliases)
-        : legacyAliases;
+        : rawMcpToolName
+          ? []
+          : legacyAliases
+      : legacyAliases;
 
   const permissionAliases = rawMcpToolName
     ? [...new Set([...(grantLegacyAliases ?? []), rawMcpToolName])]
@@ -143,16 +142,29 @@ export async function evaluatePermissionFlow(
       ),
     ];
 
+    // PermissionManager guarantees deny > ask only within one evaluate call.
+    // These contexts intentionally represent different MCP spellings, so keep
+    // searching after an ask: a deny that matches a later spelling must still
+    // win globally. The first matching ask is applied only if no deny exists.
+    let restrictiveAskCtx: PermissionCheckContext | undefined;
     for (const ctx of restrictiveContexts) {
       if (!pm.hasRelevantRules(ctx)) continue;
       const decision = await pm.evaluate(ctx);
-      if (decision === 'deny' || decision === 'ask') {
-        finalPermission = decision;
+      if (decision === 'deny') {
+        finalPermission = 'deny';
         restrictiveMatchCtx = ctx;
-        if (decision === 'ask' && pm.hasMatchingAskRule(ctx)) {
-          pmForcedAsk = true;
-        }
         break;
+      }
+      if (decision === 'ask' && !restrictiveAskCtx) {
+        restrictiveAskCtx = ctx;
+      }
+    }
+
+    if (!restrictiveMatchCtx && restrictiveAskCtx) {
+      finalPermission = 'ask';
+      restrictiveMatchCtx = restrictiveAskCtx;
+      if (pm.hasMatchingAskRule(restrictiveAskCtx)) {
+        pmForcedAsk = true;
       }
     }
   }

@@ -765,7 +765,8 @@ export class AgentCore {
             : undefined;
         return !disallowed.some((pattern) =>
           t.name!.startsWith('mcp__')
-            ? matchesMcpPattern(pattern, t.name!, rawMcpToolName)
+            ? matchesMcpPattern(pattern, t.name!, rawMcpToolName) ||
+              matchesMcpPattern(pattern, t.name!)
             : pattern === t.name,
         );
       });
@@ -774,7 +775,7 @@ export class AgentCore {
     return toolsList;
   }
 
-  // ─── Reasoning Loop ───────────────────────────────────────
+  // ─── Reasoning Loop ────────────────────────────────────────
 
   /**
    * Runs the inner model reasoning loop.
