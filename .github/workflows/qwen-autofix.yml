@@ -186,6 +186,18 @@ env:
   # rounds.
   # Full rationale → qwen-autofix.md#af-081
   TIMEOUT_WINDOW_CAP: '3'
+  # Convergence-signal circuit breaker — the off-ramp the round and growth
+  # brakes cannot provide (#10107): N consecutive review rounds carrying a
+  # machine-readable non-convergence code, with no trusted-human response
+  # in between, pause the loop. Tunable without a code change; a malformed
+  # value falls back to its default at the read site.
+  # Full rationale → qwen-autofix.md#af-151
+  CONVERGENCE_BREAK_ROUNDS: '${{ vars.QWEN_AUTOFIX_CONVERGENCE_BREAK_ROUNDS || 3 }}'
+  # Which codes count as the signal (jq-ready JSON array). The vocabulary
+  # is the review CLI's RECOMMENDATION_CODES, published per round as `rec`
+  # in the posted ledger marker; a test pins this list inside it.
+  # 'land-and-defer' is deliberately absent — see af-151.
+  CONVERGENCE_SIGNAL_CODES: '["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -3125,10 +3137,84 @@ jobs:
               echo "🫥 #${PR}: conflict handoff pending in the live window — skipping the stale-base update (the loop does not move the head while parked)"
               fleet_row "${PR}" 'conflict-parked' 'conflict handoff pending — no stale-base head move while parked'
             fi
+            # Convergence-signal circuit breaker (#10107): the verdict is
+            # derived HERE, above the stale-base update, and the update's
+            # gate refuses a parked PR beside the conflict park: a base
+            # merge into a parked PR re-fires every synchronize-triggered
+            # workflow on the new head, and the base-merge round reviews
+            # an unchanged diff — its clean marker resets the streak,
+            # silently lifting the park with zero human activity (af-108's
+            # exact hazard, the one the conflict park above was added
+            # for). The notice's promise that base conflicts stay
+            # unhandled while paused only holds with this guard. The
+            # verdict and the park action BOTH sit above the idle
+            # fast-path (an idle parked PR must still reach its notice),
+            # and BOTH stale-base gates reuse this one derivation, so the
+            # reads cannot drift. Mirrored live in prepare; keep in
+            # lockstep.
+            # Full rationale → qwen-autofix.md#af-152
+            gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
+              | jq -s 'add // []' > "${WORKDIR}/rv.json"
+            gh api "repos/${REPO}/pulls/${PR}/comments" --paginate \
+              | jq -s 'add // []' > "${WORKDIR}/rc.json"
+            [[ "${CONVERGENCE_BREAK_ROUNDS}" =~ ^[1-9][0-9]{0,2}$ ]] || CONVERGENCE_BREAK_ROUNDS=3
+            CONV_SINCE="${REARM_KEY}"
+            [[ "${CONV_SINCE}" == 'none' ]] && CONV_SINCE=''
+            CONV_HUMAN_AT="$(jq -rs \
+              --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson trust "${TRUSTED_ASSOC}" '
+              (.[0] | map(select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                | select(((.author_association // "") | IN($trust[])))
+                | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED", "APPROVED", "DISMISSED")) | (.submitted_at // "")))
+              + (.[1] | map(select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                | select(((.author_association // "") | IN($trust[]))) | (.created_at // "")))
+              + (.[2] | map(select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                | select(((.author_association // "") | IN($trust[])))
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("^\\s*@qwen-code /") | not) | (.created_at // "")))
+              | max // ""' "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json" 2> /dev/null || echo "")"
+            [[ "${CONV_HUMAN_AT}" > "${CONV_SINCE}" ]] && CONV_SINCE="${CONV_HUMAN_AT}"
+            CONV_STREAK="$(jq -r --arg rb "${REVIEW_BOT}" --arg since "${CONV_SINCE}" \
+              --argjson codes "${CONVERGENCE_SIGNAL_CODES}" '
+              [ .[] | select((.user.login // "") == $rb)
+                | select((.submitted_at // "") > $since)
+                | {at: (.submitted_at // ""),
+                   marker: ((.body // "") | [ scan("<!-- qwen-review-ledger (.*?) -->") ] | last | .[0] // "")}
+                | select(.marker != "")
+                | .led = (.marker | try fromjson catch null)
+                | select(.led | type == "object")
+                | {at, round: (.led.round // 0),
+                   rec: (.led.rec | if type == "array" then . else [] end)} ]
+              | sort_by(.at) | group_by(.round) | map(last) | sort_by(.at)
+              | reduce .[] as $r (0; if ($r.rec | any(. as $c | $codes | index($c))) then . + 1 else 0 end)' \
+              "${WORKDIR}/rv.json" 2> /dev/null || echo 0)"
+            [[ "${CONV_STREAK}" =~ ^[0-9]+$ ]] || CONV_STREAK=0
+            CONV_PARKED='false'
+            if [[ "${CONV_STREAK}" -ge "${CONVERGENCE_BREAK_ROUNDS}" ]]; then
+              CONV_PARKED='true'
+            else
+              # Release census = the park's own enumeration: a posted notice
+              # HOLDS the park until the boundary itself moves (a trusted-
+              # human response or a re-arm). Any clean round resets the
+              # streak — including the review a maintainer push triggers via
+              # synchronize — but must not silently release: the dedup
+              # counts notices newer than the boundary, so a release-then-
+              # re-trip would re-park under the stale notice with no fresh
+              # one. If the signal resumes, the streak census above re-parks
+              # loudly; this hold only keeps the quiet middle honest.
+              # Mirrored live in prepare and in the report guard; keep in
+              # lockstep. Full rationale → qwen-autofix.md#af-152
+              CONV_NOTICES="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg since "${CONV_SINCE}" '
+                [ .[] | select((.user.login // "") == $ab)
+                  | select((.body // "") | contains("<!-- autofix-convergence-break -->"))
+                  | select((.created_at // "") > $since) ] | length' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
+              [[ "${CONV_NOTICES}" =~ ^[0-9]+$ ]] || CONV_NOTICES=0
+              [[ "${CONV_NOTICES}" != "0" ]] && CONV_PARKED='true'
+            fi
             # Auto-update a PR that is red ONLY because of a stale base (see the
             # MAIN_GREEN_CHECKS rationale above).
             # Full rationale → qwen-autofix.md#af-109
-            if [[ -n "${MAIN_HEAD}" && -n "${PR_HEAD_OID}" && "${CONFLICT_PARKED}" != 'true' ]]; then
+            if [[ -n "${MAIN_HEAD}" && -n "${PR_HEAD_OID}" && "${CONFLICT_PARKED}" != 'true' && "${CONV_PARKED}" != 'true' ]]; then
               # STALE_BASE_REDS is pure jq over data already in memory
               # (CHECKS_JSON, MAIN_GREEN_CHECKS) — free, and far more selective
               # than the compare round-trip.
@@ -3198,6 +3284,79 @@ jobs:
               fi
             fi
 
+            # Convergence-signal circuit breaker (#10107): the park action on
+            # the verdict derived above the stale-base update — a base merge
+            # into a parked PR would self-lift it (see the read site's
+            # comment). ABOVE the idle fast-path: a parked PR whose signal
+            # rounds all sit at or below the eval watermark IS the idle case,
+            # and the notice and fleet row this action writes are the park's
+            # only visible escalation — below the fast-path they would never
+            # be reached. A parked PR spends no dispatch, no runner, and no
+            # round either way: the `continue` precedes target emission. Both
+            # gates reuse the SAME derivation — re-reading here could drift.
+            # Full rationale → qwen-autofix.md#af-152
+            if [[ "${CONV_PARKED}" == 'true' ]]; then
+              echo "🛑 #${PR}: convergence park active (streak ${CONV_STREAK}/${CONVERGENCE_BREAK_ROUNDS}) — paused until a human weighs in"
+              fleet_row "${PR}" 'convergence-parked' "park active (streak ${CONV_STREAK}/${CONVERGENCE_BREAK_ROUNDS}) — a maintainer response or ${RETRY_COMMAND} resumes"
+              # The UNION of signal codes observed since the boundary, for
+              # the notice — wider than the trailing streak the breaker
+              # acted on (a round that reset the streak still contributes).
+              # The notice's wording claims exactly this union.
+              CONV_CODES="$(jq -r --arg rb "${REVIEW_BOT}" --arg since "${CONV_SINCE}" \
+                --argjson codes "${CONVERGENCE_SIGNAL_CODES}" '
+                [ .[] | select((.user.login // "") == $rb)
+                  | select((.submitted_at // "") > $since)
+                  | ((.body // "") | [ scan("<!-- qwen-review-ledger (.*?) -->") ] | last | .[0] // "")
+                  | select(. != "") | (try fromjson catch null) | select(type == "object")
+                  | (.rec | if type == "array" then . else [] end) | .[] ]
+                | map(select(. as $c | $codes | index($c))) | unique | join(", ")' \
+                "${WORKDIR}/rv.json" 2> /dev/null || echo '')"
+              [[ -z "${CONV_CODES}" ]] && CONV_CODES='non-convergence'
+              # Once per boundary, not per window: a resumed-then-re-parked
+              # loop earned a fresh notice — the earlier one is older than
+              # the human activity that resumed it.
+              CONV_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg since "${CONV_SINCE}" '
+                [ .[] | select((.user.login // "") == $ab)
+                  | select((.body // "") | contains("<!-- autofix-convergence-break -->"))
+                  | select((.created_at // "") > $since) ] | length' "${WORKDIR}/ic.json")"
+              if [[ "${DRY_RUN}" == "true" ]]; then
+                echo "🧪 DRY-RUN: would post convergence-break notice on #${PR} (codes: ${CONV_CODES})"
+              elif [[ "${CONV_NOTICED}" == "0" ]]; then
+                # Consent may have moved since PR_META: skip wins everywhere,
+                # and a label added moments ago must not receive a notice.
+                LIVE_LABELS_JSON="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null || echo '')"
+                LIVE_LABELS="$(jq -r '[.labels[]?.name] | join(" ")' <<< "${LIVE_LABELS_JSON}" 2> /dev/null || echo '')"
+                if [[ -z "${LIVE_LABELS_JSON}" ]] || [[ " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "* ]]; then
+                  echo "🧭 convergence-break notice skipped: label state '${LIVE_LABELS:-unreadable}' (fail closed) on #${PR}"
+                else
+                  # Convention: verify the PAT identity before ANY write. A
+                  # rotated PAT would post under a foreign login the dedup
+                  # (which counts AUTOFIX_BOT comments only) can never see —
+                  # reposting the notice every scan. Memoized per scan run.
+                  if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
+                    SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
+                  fi
+                  if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                    echo "::warning::convergence-break notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                  else
+                    # The release lever only exists under the takeover label: on
+                    # any other bot PR `/takeover stop` hits the remove branch's
+                    # logged no-op, so branch the wording like the cap notices
+                    # and offer takeover itself.
+                    if [[ "${HAS_TAKEOVER}" == "true" ]]; then
+                      CONV_BODY="$(printf '⏸️ AutoFix paused by a review convergence signal: %s consecutive automated review round(s) signalled machine-readable non-convergence (codes observed since the last maintainer response, or the window start if none: %s) — the reviewer keeps finding new defects at a rate that is not falling while the loop keeps widening the diff, so another automatic round is unlikely to converge this PR. The loop resumes once a maintainer responds on this PR (a review or comment counts, and steers the next rounds), and pauses again if the signal persists for %s more round(s). Alternatives: split the recurring cluster into its own PR, batch the remaining fixes into one push, comment `%s` to re-arm a fresh window, or `%s stop` to release takeover. While paused, new feedback and base conflicts stay unhandled.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已因评审收敛信号暂停：%s 轮自动评审连续发出机器可读的不收敛信号（自上次维护者响应以来观察到的信号码；若无响应则自窗口开始：%s）——评审仍在以不降的速率发现新缺陷，而循环在继续扩大 diff，再跑一轮自动修复难以收敛本 PR。维护者在本 PR 上作出回应后循环自动恢复（评论或评审均可，并将作为后续轮次的指引）；若信号再持续 %s 轮会再次暂停。可选做法：把反复出问题的簇拆成独立 PR、把剩余修复攒成一批一次推送、评论 `%s` 重开计数窗口、或评论 `%s stop` 释放接管。暂停期间，新反馈与 base 冲突不会被处理。\n\n</details>\n\n<!-- autofix-convergence-break -->' "${CONV_STREAK}" "${CONV_CODES}" "${CONVERGENCE_BREAK_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${CONV_STREAK}" "${CONV_CODES}" "${CONVERGENCE_BREAK_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"
+                    else
+                      CONV_BODY="$(printf '⏸️ AutoFix paused by a review convergence signal: %s consecutive automated review round(s) signalled machine-readable non-convergence (codes observed since the last maintainer response, or the window start if none: %s) — the reviewer keeps finding new defects at a rate that is not falling while the loop keeps widening the diff, so another automatic round is unlikely to converge this PR. The loop resumes once a maintainer responds on this PR (a review or comment counts, and steers the next rounds), and pauses again if the signal persists for %s more round(s). Alternatives: split the recurring cluster into its own PR, batch the remaining fixes into one push, comment `%s` to re-arm a fresh window, or `%s` to take it over with the raised cap. While paused, new feedback and base conflicts stay unhandled.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已因评审收敛信号暂停：%s 轮自动评审连续发出机器可读的不收敛信号（自上次维护者响应以来观察到的信号码；若无响应则自窗口开始：%s）——评审仍在以不降的速率发现新缺陷，而循环在继续扩大 diff，再跑一轮自动修复难以收敛本 PR。维护者在本 PR 上作出回应后循环自动恢复（评论或评审均可，并将作为后续轮次的指引）；若信号再持续 %s 轮会再次暂停。可选做法：把反复出问题的簇拆成独立 PR、把剩余修复攒成一批一次推送、评论 `%s` 重开计数窗口、或评论 `%s` 以更高轮次上限接管。暂停期间，新反馈与 base 冲突不会被处理。\n\n</details>\n\n<!-- autofix-convergence-break -->' "${CONV_STREAK}" "${CONV_CODES}" "${CONVERGENCE_BREAK_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${CONV_STREAK}" "${CONV_CODES}" "${CONVERGENCE_BREAK_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"
+                    fi
+                    if ! gh pr comment "${PR}" --repo "${REPO}" --body "${CONV_BODY}"; then
+                      echo "::warning::convergence-break notice failed for #${PR}; will retry next scan"
+                    fi
+                  fi
+                fi
+              fi
+              continue
+            fi
+
             N_FAILED_CHECKS="$(jq --arg wm "${EFF_WM}" '
               [ .[]
                 | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
@@ -3218,10 +3377,6 @@ jobs:
               ' <<< "${CHECKS_JSON}")"
             fi
 
-            gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
-              | jq -s 'add // []' > "${WORKDIR}/rv.json"
-            gh api "repos/${REPO}/pulls/${PR}/comments" --paginate \
-              | jq -s 'add // []' > "${WORKDIR}/rc.json"
             N_REVIEWS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
               [ .[]
@@ -4448,6 +4603,64 @@ jobs:
             if [[ "${CONFLICT_WAKE}" == "0" ]]; then
               STALE='true'
               echo "🫥 conflict handoff pending: a growth audit returned conflict in this window and no trusted human has responded since — idling without an agent run or comment"
+            fi
+          fi
+          # Convergence-break mirror (#10107): a target can be emitted
+          # moments before the tripping review lands, or forced past the
+          # scan, so the leg re-derives the scan gate's reading live and
+          # idles. Keep the two in lockstep; the notice stays the scan's
+          # job — this leg discards without comment, like the park above.
+          # Full rationale → qwen-autofix.md#af-153
+          if [[ "${STALE}" != 'true' ]]; then
+            [[ "${CONVERGENCE_BREAK_ROUNDS}" =~ ^[1-9][0-9]{0,2}$ ]] || CONVERGENCE_BREAK_ROUNDS=3
+            LIVE_CONV_SINCE="${LIVE_REARM_KEY}"
+            [[ "${LIVE_CONV_SINCE}" == 'none' ]] && LIVE_CONV_SINCE=''
+            LIVE_CONV_HUMAN_AT="$(jq -rs \
+              --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson trust "${TRUSTED_ASSOC}" '
+              (.[0] | map(select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                | select(((.author_association // "") | IN($trust[])))
+                | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED", "APPROVED", "DISMISSED")) | (.submitted_at // "")))
+              + (.[1] | map(select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                | select(((.author_association // "") | IN($trust[]))) | (.created_at // "")))
+              + (.[2] | map(select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                | select(((.author_association // "") | IN($trust[])))
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("^\\s*@qwen-code /") | not) | (.created_at // "")))
+              | max // ""' "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json" 2> /dev/null || echo "")"
+            [[ "${LIVE_CONV_HUMAN_AT}" > "${LIVE_CONV_SINCE}" ]] && LIVE_CONV_SINCE="${LIVE_CONV_HUMAN_AT}"
+            LIVE_CONV_STREAK="$(jq -r --arg rb "${REVIEW_BOT}" --arg since "${LIVE_CONV_SINCE}" \
+              --argjson codes "${CONVERGENCE_SIGNAL_CODES}" '
+              [ .[] | select((.user.login // "") == $rb)
+                | select((.submitted_at // "") > $since)
+                | {at: (.submitted_at // ""),
+                   marker: ((.body // "") | [ scan("<!-- qwen-review-ledger (.*?) -->") ] | last | .[0] // "")}
+                | select(.marker != "")
+                | .led = (.marker | try fromjson catch null)
+                | select(.led | type == "object")
+                | {at, round: (.led.round // 0),
+                   rec: (.led.rec | if type == "array" then . else [] end)} ]
+              | sort_by(.at) | group_by(.round) | map(last) | sort_by(.at)
+              | reduce .[] as $r (0; if ($r.rec | any(. as $c | $codes | index($c))) then . + 1 else 0 end)' \
+              "${WORKDIR}/rv.json" 2> /dev/null || echo 0)"
+            [[ "${LIVE_CONV_STREAK}" =~ ^[0-9]+$ ]] || LIVE_CONV_STREAK=0
+            if [[ "${LIVE_CONV_STREAK}" -ge "${CONVERGENCE_BREAK_ROUNDS}" ]]; then
+              STALE='true'
+              echo "🫥 convergence break pending: the last ${LIVE_CONV_STREAK} review round(s) carried a non-convergence signal and no trusted human has responded since — idling without an agent run or comment"
+            else
+              # The scan gate's park HOLD, kept in lockstep: a posted notice
+              # keeps the leg STALE until the boundary itself moves, so an
+              # in-flight round cannot land on a PR the scan still holds
+              # parked after a clean round reset the streak.
+              LIVE_CONV_NOTICES="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg since "${LIVE_CONV_SINCE}" '
+                [ .[] | select((.user.login // "") == $ab)
+                  | select((.body // "") | contains("<!-- autofix-convergence-break -->"))
+                  | select((.created_at // "") > $since) ] | length' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
+              [[ "${LIVE_CONV_NOTICES}" =~ ^[0-9]+$ ]] || LIVE_CONV_NOTICES=0
+              if [[ "${LIVE_CONV_NOTICES}" != "0" ]]; then
+                STALE='true'
+                echo "🫥 convergence park holds: a convergence-break notice is newer than any maintainer response — idling without an agent run or comment"
+              fi
             fi
           fi
           # Which trusted humans have exhausted their per-window regular
@@ -5959,12 +6172,100 @@ jobs:
                 # same report posts — waking the very park it establishes.
                 # Full rationale → qwen-autofix.md#af-143
                 if [[ "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
-                  MAIN_HEAD_R="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH:-main}" --jq '.sha' 2> /dev/null || echo '')"
-                  if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then
-                    CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
-                    if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]] \
-                      && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
-                      STALE_BASE_RETRY=true
+                  # Convergence-break report guard (#10122): this job cannot
+                  # see the scan's CONV_PARKED, and this round's inputs froze
+                  # at prepare time — a PR parked AFTER prepare (the scan's
+                  # next tick; the same race af-153's mirror covers for
+                  # dispatch) would merge main in here when the round fails,
+                  # self-lifting the park (af-152's exact hazard). Re-derive
+                  # the breaker's reading over fresh fetches — the programs
+                  # are the scan gate's verbatim; keep in lockstep — and skip
+                  # the merge while it holds.
+                  # Full rationale → qwen-autofix.md#af-154
+                  CONV_PARKED_R='false'
+                  # Each fetch sits in an errexit-exempt condition: under the
+                  # step shell's -eo pipefail a transient gh failure (5xx,
+                  # secondary rate limit, network reset) would otherwise abort
+                  # the whole step before the report comment and eval marker
+                  # post, so the watermark never advances and the same feedback
+                  # re-dispatches. A failed fetch also leaves the derivation
+                  # below reading an empty park state, so the merge gate fails
+                  # CLOSED on it — skipping update-branch keeps the park
+                  # invariant; the step still posts the report.
+                  CONV_FETCH_R='true'
+                  if ! gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
+                    | jq -s 'add // []' > "${WORKDIR}/rv.report.json"; then
+                    CONV_FETCH_R='false'
+                  fi
+                  if ! gh api "repos/${REPO}/pulls/${PR}/comments" --paginate \
+                    | jq -s 'add // []' > "${WORKDIR}/rc.report.json"; then
+                    CONV_FETCH_R='false'
+                  fi
+                  if ! gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+                    | jq -s 'add // []' > "${WORKDIR}/ic.report.json"; then
+                    CONV_FETCH_R='false'
+                  fi
+                  CONV_REARM_KEY_R="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+                    [ .[] | select((.user.login // "") == $ab)
+                      | select(((.body // "") | contains("<!-- takeover-ack engaged -->"))
+                            or ((.body // "") | contains("<!-- autofix-rearm -->")))
+                      | .created_at ] | max // "none"' "${WORKDIR}/ic.report.json" || echo none)"
+                  [[ "${CONVERGENCE_BREAK_ROUNDS}" =~ ^[1-9][0-9]{0,2}$ ]] || CONVERGENCE_BREAK_ROUNDS=3
+                  CONV_SINCE_R="${CONV_REARM_KEY_R}"
+                  [[ "${CONV_SINCE_R}" == 'none' ]] && CONV_SINCE_R=''
+                  CONV_HUMAN_AT_R="$(jq -rs \
+                    --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+                    --argjson trust "${TRUSTED_ASSOC}" '
+                    (.[0] | map(select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                      | select(((.author_association // "") | IN($trust[])))
+                      | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED", "APPROVED", "DISMISSED")) | (.submitted_at // "")))
+                    + (.[1] | map(select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                      | select(((.author_association // "") | IN($trust[]))) | (.created_at // "")))
+                    + (.[2] | map(select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                      | select(((.author_association // "") | IN($trust[])))
+                      | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                      | select((.body // "") | test("^\\s*@qwen-code /") | not) | (.created_at // "")))
+                    | max // ""' "${WORKDIR}/rv.report.json" "${WORKDIR}/rc.report.json" "${WORKDIR}/ic.report.json" 2> /dev/null || echo "")"
+                  [[ "${CONV_HUMAN_AT_R}" > "${CONV_SINCE_R}" ]] && CONV_SINCE_R="${CONV_HUMAN_AT_R}"
+                  CONV_STREAK_R="$(jq -r --arg rb "${REVIEW_BOT}" --arg since "${CONV_SINCE_R}" \
+                    --argjson codes "${CONVERGENCE_SIGNAL_CODES}" '
+                    [ .[] | select((.user.login // "") == $rb)
+                      | select((.submitted_at // "") > $since)
+                      | {at: (.submitted_at // ""),
+                         marker: ((.body // "") | [ scan("<!-- qwen-review-ledger (.*?) -->") ] | last | .[0] // "")}
+                      | select(.marker != "")
+                      | .led = (.marker | try fromjson catch null)
+                      | select(.led | type == "object")
+                      | {at, round: (.led.round // 0),
+                         rec: (.led.rec | if type == "array" then . else [] end)} ]
+                    | sort_by(.at) | group_by(.round) | map(last) | sort_by(.at)
+                    | reduce .[] as $r (0; if ($r.rec | any(. as $c | $codes | index($c))) then . + 1 else 0 end)' \
+                    "${WORKDIR}/rv.report.json" 2> /dev/null || echo 0)"
+                  [[ "${CONV_STREAK_R}" =~ ^[0-9]+$ ]] || CONV_STREAK_R=0
+                  if [[ "${CONV_STREAK_R}" -ge "${CONVERGENCE_BREAK_ROUNDS}" ]]; then
+                    CONV_PARKED_R='true'
+                  else
+                    # The scan gate's park HOLD, kept in lockstep: a posted
+                    # notice keeps the park until the boundary itself moves.
+                    CONV_NOTICES_R="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg since "${CONV_SINCE_R}" '
+                      [ .[] | select((.user.login // "") == $ab)
+                        | select((.body // "") | contains("<!-- autofix-convergence-break -->"))
+                        | select((.created_at // "") > $since) ] | length' "${WORKDIR}/ic.report.json" 2> /dev/null || echo 0)"
+                    [[ "${CONV_NOTICES_R}" =~ ^[0-9]+$ ]] || CONV_NOTICES_R=0
+                    [[ "${CONV_NOTICES_R}" != "0" ]] && CONV_PARKED_R='true'
+                  fi
+                  if [[ "${CONV_PARKED_R}" == 'true' ]]; then
+                    echo "🫥 #${PR}: convergence-parked — the stale-base merge would self-lift the park; skipping update-branch"
+                  elif [[ "${CONV_FETCH_R}" != 'true' ]]; then
+                    echo "🫥 #${PR}: convergence guard fetch failed — the park state is unreadable; skipping the stale-base merge (fail closed)"
+                  else
+                    MAIN_HEAD_R="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH:-main}" --jq '.sha' 2> /dev/null || echo '')"
+                    if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then
+                      CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
+                      if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]] \
+                        && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
+                        STALE_BASE_RETRY=true
+                      fi
                     fi
                   fi
                 fi
