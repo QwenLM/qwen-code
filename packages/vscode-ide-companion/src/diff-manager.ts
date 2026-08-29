@@ -16,6 +16,7 @@ import {
   findLeftGroupOfChatWebview,
   findRightGroupOfChatWebview,
 } from './utils/editorGroupUtils.js';
+import { resolveWorkspacePath } from './utils/file-path.js';
 
 export class DiffContentProvider implements vscode.TextDocumentContentProvider {
   private content = new Map<string, string>();
@@ -45,7 +46,14 @@ export class DiffContentProvider implements vscode.TextDocumentContentProvider {
 
 // Information about a diff view that is currently open.
 interface DiffInfo {
+  // The path exactly as the caller supplied it (normalized only). The CLI keys
+  // its pending openDiff promises by the string it sent, so this is what has to
+  // go back out in the accepted/closed notifications.
   originalFilePath: string;
+  // The same file resolved against the workspace. Everything that has to match
+  // a path — closing, deduping, focusing, active-editor tracking — compares
+  // this, so a caller may open with one form and close with the other.
+  resolvedFilePath: string;
   oldContent: string;
   newContent: string;
   leftDocUri: vscode.Uri;
@@ -109,7 +117,7 @@ export class DiffManager {
   ): boolean {
     for (const diffInfo of this.diffDocuments.values()) {
       if (
-        diffInfo.originalFilePath === filePath &&
+        diffInfo.resolvedFilePath === filePath &&
         diffInfo.oldContent === oldContent &&
         diffInfo.newContent === newContent
       ) {
@@ -125,9 +133,9 @@ export class DiffManager {
    * @returns True if an existing diff view was found and focused, false otherwise
    */
   private async focusExistingDiff(filePath: string): Promise<boolean> {
-    const normalizedPath = path.normalize(filePath);
+    const resolvedPath = resolveWorkspacePath(path.normalize(filePath));
     for (const [, diffInfo] of this.diffDocuments.entries()) {
-      if (diffInfo.originalFilePath === normalizedPath) {
+      if (diffInfo.resolvedFilePath === resolvedPath) {
         const rightDocUri = diffInfo.rightDocUri;
         const leftDocUri = diffInfo.leftDocUri;
 
@@ -169,14 +177,17 @@ export class DiffManager {
     newContent: string,
   ): Promise<void>;
   async showDiff(filePath: string, a: string, b?: string): Promise<void> {
-    const haveOld = typeof b === 'string';
-    const oldContent = haveOld ? a : await this.readOldContentFromFs(filePath);
-    const newContent = haveOld ? (b as string) : a;
     const normalizedPath = path.normalize(filePath);
-    const key = this.makeKey(normalizedPath, oldContent, newContent);
+    const resolvedPath = resolveWorkspacePath(normalizedPath);
+    const haveOld = typeof b === 'string';
+    const oldContent = haveOld
+      ? a
+      : await this.readOldContentFromFs(resolvedPath);
+    const newContent = haveOld ? (b as string) : a;
+    const key = this.makeKey(resolvedPath, oldContent, newContent);
 
     // Check if a diff view with the same content already exists
-    if (this.hasExistingDiff(normalizedPath, oldContent, newContent)) {
+    if (this.hasExistingDiff(resolvedPath, oldContent, newContent)) {
       const last = this.recentlyShown.get(key) || 0;
       const now = Date.now();
       if (now - last < DiffManager.DEDUPE_WINDOW_MS) {
@@ -187,21 +198,21 @@ export class DiffManager {
         return;
       }
       // Outside the dedupe window: softly focus the existing diff
-      await this.focusExistingDiff(normalizedPath);
+      await this.focusExistingDiff(resolvedPath);
       this.recentlyShown.set(key, now);
       return;
     }
     // Left side: old content using qwen-diff scheme
     // Use Uri.file() to properly handle Windows paths (e.g., C:\Users\...)
     // then change the scheme to our custom diff scheme
-    const leftDocUri = vscode.Uri.file(normalizedPath).with({
+    const leftDocUri = vscode.Uri.file(resolvedPath).with({
       scheme: DIFF_SCHEME,
       query: `old&rand=${Math.random()}`,
     });
     this.diffContentProvider.setContent(leftDocUri, oldContent);
 
     // Right side: new content using qwen-diff scheme
-    const rightDocUri = vscode.Uri.file(normalizedPath).with({
+    const rightDocUri = vscode.Uri.file(resolvedPath).with({
       scheme: DIFF_SCHEME,
       query: `new&rand=${Math.random()}`,
     });
@@ -209,13 +220,14 @@ export class DiffManager {
 
     this.addDiffDocument(rightDocUri, {
       originalFilePath: normalizedPath,
+      resolvedFilePath: resolvedPath,
       oldContent,
       newContent,
       leftDocUri,
       rightDocUri,
     });
 
-    const diffTitle = `${path.basename(normalizedPath)} (Before ↔ After)`;
+    const diffTitle = `${path.basename(resolvedPath)} (Before ↔ After)`;
     await vscode.commands.executeCommand(
       'setContext',
       'qwen.diff.isVisible',
@@ -253,16 +265,17 @@ export class DiffManager {
    * Closes an open diff view for a specific file.
    */
   async closeDiff(filePath: string, suppressNotification = false) {
-    const normalizedPath = path.normalize(filePath);
-    let uriToClose: vscode.Uri | undefined;
+    const resolvedPath = resolveWorkspacePath(path.normalize(filePath));
+    let openDiff: DiffInfo | undefined;
     for (const [, diffInfo] of this.diffDocuments.entries()) {
-      if (diffInfo.originalFilePath === normalizedPath) {
-        uriToClose = diffInfo.rightDocUri;
+      if (diffInfo.resolvedFilePath === resolvedPath) {
+        openDiff = diffInfo;
         break;
       }
     }
 
-    if (uriToClose) {
+    if (openDiff) {
+      const uriToClose = openDiff.rightDocUri;
       const rightDoc = await vscode.workspace.openTextDocument(uriToClose);
       const modifiedContent = rightDoc.getText();
       await this.closeDiffEditor(uriToClose);
@@ -272,7 +285,10 @@ export class DiffManager {
             jsonrpc: '2.0',
             method: 'ide/diffClosed',
             params: {
-              filePath,
+              // Echo the path the diff was opened with, not the one we were
+              // asked to close: the CLI keys its pending promise by the former
+              // and the two can now legitimately differ in form.
+              filePath: openDiff.originalFilePath,
               content: modifiedContent,
             },
           }),
@@ -343,7 +359,7 @@ export class DiffManager {
       isVisible = this.diffDocuments.has(editor.document.uri.toString());
       if (!isVisible) {
         for (const document of this.diffDocuments.values()) {
-          if (document.originalFilePath === editor.document.uri.fsPath) {
+          if (document.resolvedFilePath === editor.document.uri.fsPath) {
             isVisible = true;
             break;
           }

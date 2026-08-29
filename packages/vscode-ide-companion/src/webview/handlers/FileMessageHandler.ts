@@ -21,7 +21,7 @@ import {
   type FileSearch,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errorMessage.js';
-import { shouldResolveAgainstWorkspace } from '../../utils/file-path.js';
+import { resolveWorkspacePath } from '../../utils/file-path.js';
 
 /**
  * File message handler
@@ -562,15 +562,7 @@ export class FileMessageHandler extends BaseMessageHandler {
       const lineNumber = this.toZeroBasedEditorPosition(lineStr);
       const columnNumber = this.toZeroBasedEditorPosition(columnStr);
 
-      // Convert to absolute path if relative
-      let absolutePath = path;
-      if (shouldResolveAgainstWorkspace(path)) {
-        // Relative path - resolve against workspace
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-        if (workspaceFolder) {
-          absolutePath = vscode.Uri.joinPath(workspaceFolder.uri, path).fsPath;
-        }
-      }
+      const absolutePath = resolveWorkspacePath(path);
 
       // Open the document
       const uri = vscode.Uri.file(absolutePath);

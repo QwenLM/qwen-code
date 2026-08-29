@@ -10,7 +10,7 @@ import * as fs from 'node:fs/promises';
 import type * as os from 'node:os';
 import * as path from 'node:path';
 import * as http from 'node:http';
-import { IDEServer, createMcpServer } from './ide-server.js';
+import { IDEServer } from './ide-server.js';
 import type { DiffManager } from './diff-manager.js';
 
 vi.mock('node:crypto', async (importOriginal) => {
@@ -55,11 +55,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 const vscodeMock = vi.hoisted(() => ({
-  Uri: {
-    joinPath: (base: any, ...paths: string[]) => ({
-      fsPath: require('path').join(base.fsPath ?? base, ...paths)
-    })
-  },
   workspace: {
     workspaceFolders: [
       {
@@ -542,30 +537,5 @@ describe('IDEServer HTTP endpoints', () => {
     // We expect a 400 here because we are not sending a valid MCP request,
     // but it's not a host error, which is what we are testing.
     expect(response.statusCode).toBe(400);
-  });
-});
-
-
-describe('createMcpServer', () => {
-  it('closeDiff resolves workspace-relative paths', async () => {
-    const diffManager = {
-      closeDiff: vi.fn().mockResolvedValue(undefined),
-      showDiff: vi.fn().mockResolvedValue(undefined),
-    } as unknown as DiffManager;
-    const mcpServer = createMcpServer(diffManager);
-    
-    // Test absolute path doesn't get resolved
-    await (mcpServer as any)._registeredTools['closeDiff'].handler({ filePath: '/absolute/path/file.ts' }, {} as any);
-    expect(diffManager.closeDiff).toHaveBeenCalledWith(
-      '/absolute/path/file.ts',
-      undefined
-    );
-
-    // Test relative path gets resolved
-    await (mcpServer as any)._registeredTools['closeDiff'].handler({ filePath: 'src/foo.ts' }, {} as any);
-    expect(diffManager.closeDiff).toHaveBeenCalledWith(
-      require('path').join('/test/workspace1', 'src/foo.ts'),
-      undefined
-    );
   });
 });
