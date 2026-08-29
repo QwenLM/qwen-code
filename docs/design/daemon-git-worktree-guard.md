@@ -110,21 +110,27 @@ the post-`-C` cwd, so relative targets resolve against the final cwd of the
 `-C` chain regardless of argv order.
 
 On Windows the command normally runs under cmd.exe or PowerShell, where a
-backslash is a literal path separator rather than a POSIX escape, so the
-tokenizer masks every backslash behind a placeholder for the POSIX-shaped
-parse and restores it in the tokens afterwards — an unquoted `C:\repo` keeps
-its separators instead of collapsing into a mangled relative word that could
-neither be contained (denying legitimate commands) nor resolved (allowing
-relocated ones through the nearest-existing-ancestor fallback). The masking is
-gated on the detected shell rather than the platform: under Git Bash
-(MSYSTEM/MINGW or a msys/cygwin TERM) the shell is bash, a backslash is a
-POSIX escape, and the un-masked parse already matches the executing shell, so
-those runs are left alone. Masking is also applied only when it cannot change
-the parse: a segment whose masked parse diverges from its raw parse — a `\"`
-that closes a quoted section early, a `\#` that becomes a comment and hides
-the relocation after it, a token structure that differs at all — fails closed
-as unparseable rather than trusting a reading that disagrees with the
-executing shell. Physical resolution strips a target's root before walking its
+backslash is a literal path separator rather than a POSIX escape. The
+tokenizer models POSIX `sh`, so an unquoted `C:\repo\sub` would arrive with
+each `\x` consumed as an escape for `x`, mangling the path into a relative
+word that could neither be contained (denying legitimate commands) nor
+resolved (letting relocated ones through the nearest-existing-ancestor
+fallback). `preserveWindowsPathSeparators()` rewrites the segment before
+tokenisation so the separators survive: it escapes the backslash itself and
+leaves the following character its ordinary role, and inside double quotes it
+doubles every backslash, matching how cmd.exe and PowerShell split the argv
+they execute. The rewrite is gated on the detected shell rather than the
+platform: under Git Bash (MSYSTEM/MINGW or a msys/cygwin TERM) the shell is
+bash, a backslash is a POSIX escape, and the un-rewritten parse already
+matches the executing shell, so those runs are left alone.
+
+cmd.exe also rewrites its own command line before executing it: outside double
+quotes `^` escapes the next character, and `%…%`/`!…!` pairs expand at
+execution time. The POSIX tokenizer reads all three as literal text, so the
+executed argv could carry a relocation the analysis never saw.
+`containsCmdRewriteSyntax()` denies any such command outright instead of
+guessing at it; PowerShell and bash lanes are exempt because neither applies
+those rewrites. Physical resolution strips a target's root before walking its
 components, so an absolute `C:\repo` resolves from `C:\` onward instead of onto
 a doubled `C:\C:\repo`, and a UNC target drops its `\\server\share` prefix
 whole. Non-Windows parsing and resolution are unchanged.

@@ -32,7 +32,10 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
-import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
+import {
+  invalidateWorkspaceSessionListCache,
+  listLiveWorkspaceSessionsForResponse,
+} from './server/session-list.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import {
   ChannelWorkerControlError,
@@ -67,6 +70,7 @@ import {
   SERVE_CAPABILITY_REGISTRY,
   type ServeProtocolVersion,
 } from './capabilities.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import type {
   CancelNotification,
   PromptRequest,
@@ -87,6 +91,7 @@ import {
   readSessionPrs,
   upsertSessionPr,
   type Extension,
+  type ExtensionInstallMetadata,
   type CommittedExtensionMutation,
   type PrepareExtensionInstallOptions,
   type PreparedExtensionMutation,
@@ -161,10 +166,7 @@ import { isValidSessionId } from '../config/config.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import { getRateLimiter } from './rate-limit.js';
-import {
-  WorkspaceSkillNotToggleableError,
-  type DaemonWorkspaceService,
-} from './workspace-service/types.js';
+import type { DaemonWorkspaceService } from './workspace-service/types.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   createWorkspaceGenerationGuard,
@@ -564,7 +566,10 @@ const EXPECTED_STAGE1_FEATURES = [
   'auth_provider_install',
   'workspace_memory',
   'workspace_memory_remember',
+  'workspace_memory_remember_project_scope',
+  'workspace_memory_remember_user_scope',
   'workspace_memory_forget',
+  'workspace_memory_forget_scope',
   'workspace_memory_dream',
   'workspace_agents',
   'workspace_agent_generate',
@@ -580,6 +585,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_status',
   'session_close',
   'session_archive',
+  'session_storage_conflict_repair',
   'session_metadata',
   'session_organization',
   'session_export',
@@ -612,8 +618,8 @@ const EXPECTED_STAGE1_FEATURES = [
   // init scaffold, and MCP server restart).
   'session_approval_mode_control',
   'workspace_tool_toggle',
-  'workspace_skill_toggle',
-  'workspace_skill_batch_toggle',
+  'workspace_skill_settings_toggle',
+  'workspace_skill_settings_batch_toggle',
   'extension_batch_activation_v2',
   'workspace_skill_manage',
   'workspace_permissions',
@@ -651,6 +657,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_qualified_rest_core',
   'extension_management_v2',
   'extension_git_credentials',
+  'extension_local_path_install',
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
@@ -685,6 +692,12 @@ const EXPECTED_REGISTERED_FEATURES = [
     if (feature === 'mcp_guardrail_events') {
       return [feature, 'external_tool_guard'];
     }
+    if (feature === 'session_tasks') {
+      return [feature, 'scheduled_task_session_reuse'];
+    }
+    if (feature === 'session_export') {
+      return [feature, 'standalone_sessions_v1'];
+    }
     return [feature];
   }).filter(
     (f) =>
@@ -713,6 +726,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
       f !== 'extension_git_credentials' &&
+      f !== 'extension_local_path_install' &&
       f !== 'workspace_persisted_transcript' &&
       f !== 'workspace_session_export' &&
       f !== 'workspace_archived_session_export' &&
@@ -766,11 +780,13 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_display_name',
   'scratch_workspace_registration',
   'workspace_runtime_removal',
+  'native_directory_picker',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
   'workspace_qualified_memory',
   'extension_management_v2',
   'extension_git_credentials',
+  'extension_local_path_install',
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
@@ -782,6 +798,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'browser_automation_mcp',
   'voice_transcribe',
   'realtime_voice',
+  'web_terminal',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -1335,6 +1352,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     .toString(36)
     .slice(2)}`;
   const changeSessionCwdCalls: Array<{ sessionId: string; path: string }> = [];
+  const sessionCwds = new Map<string, string>();
   const setSessionWorktreeCalls: Array<{
     sessionId: string;
     worktree: { slug: string; path: string; branch: string };
@@ -1693,6 +1711,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       durationMs: 0,
       promptCount: 0,
       models: {},
+      sources: [],
       tools: {
         totalCalls: 0,
         totalSuccess: 0,
@@ -2122,6 +2141,17 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       const result = await resumeImpl(req);
       resumeCalls.push(req);
       return result;
+    },
+    async restoreStandaloneSession(action, req) {
+      const restoreRequest = { ...req, sourceType: 'standalone' };
+      if (action === 'load') {
+        const result = await loadImpl(restoreRequest);
+        loadCalls.push(restoreRequest);
+        return { ...result, sourceType: 'standalone' };
+      }
+      const result = await resumeImpl(restoreRequest);
+      resumeCalls.push(restoreRequest);
+      return { ...result, sourceType: 'standalone' };
     },
     // Keep non-async so prompt admission failures can throw synchronously.
     sendPrompt(sessionId, req, signal, context) {
@@ -2583,8 +2613,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async changeSessionCwd(sessionId, req) {
       changeSessionCwdCalls.push({ sessionId, path: req.path });
       if (opts.changeSessionCwdImpl) {
-        return opts.changeSessionCwdImpl(sessionId, req);
+        const result = await opts.changeSessionCwdImpl(sessionId, req);
+        sessionCwds.set(sessionId, result.newCwd);
+        return result;
       }
+      sessionCwds.set(sessionId, req.path);
       return {
         sessionId,
         previousCwd: '/fake/previous',
@@ -2592,6 +2625,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         warnings: [],
       };
     },
+    getSessionCurrentCwd(sessionId) {
+      return sessionCwds.get(sessionId) ?? '/fake/current';
+    },
+    async commitManagedConversationBinding() {},
+    async releaseManagedConversationBinding() {},
     setSessionWorktree(sessionId, worktree) {
       setSessionWorktreeCalls.push({ sessionId, worktree });
     },
@@ -2752,9 +2790,7 @@ describe('createServeApp', () => {
       // Conditional tags (currently `require_auth`) are absent unless
       // a runtime toggle is supplied; this is the "no toggles passed"
       // baseline that older clients see on a default-loopback daemon.
-      expect(getAdvertisedServeFeatures()).toEqual([
-        ...EXPECTED_STAGE1_FEATURES,
-      ]);
+      expect(getAdvertisedServeFeatures()).toEqual(EXPECTED_STAGE1_FEATURES);
       expect(getServeFeatures()).toEqual(getAdvertisedServeFeatures());
     });
 
@@ -2791,6 +2827,15 @@ describe('createServeApp', () => {
       ).toContain('voice_transcribe');
     });
 
+    it('advertises `web_terminal` only with the ACP HTTP surface', () => {
+      expect(
+        getAdvertisedServeFeatures(undefined, { acpHttpEnabled: true }),
+      ).toContain('web_terminal');
+      expect(
+        getAdvertisedServeFeatures(undefined, { acpHttpEnabled: false }),
+      ).not.toContain('web_terminal');
+    });
+
     it('honors every entry in CONDITIONAL_SERVE_FEATURES (PR #4236 review #3254467192 — drift insurance)', () => {
       // Iterate the Map so any future conditional tag added here whose
       // predicate isn't honored by `getAdvertisedServeFeatures` fails
@@ -2813,6 +2858,20 @@ describe('createServeApp', () => {
           expect(predicate({})).toBe(false);
           expect(
             getAdvertisedServeFeatures(undefined, { requireAuth: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'standalone_sessions_v1') {
+          expect(predicate({ standaloneSessionsAvailable: true })).toBe(true);
+          expect(predicate({ standaloneSessionsAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              standaloneSessionsAvailable: true,
+            }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
@@ -2965,6 +3024,24 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               sessionGenerationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'scheduled_task_session_reuse') {
+          expect(predicate({ currentSessionSchedulingAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({ currentSessionSchedulingAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              currentSessionSchedulingAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -3173,6 +3250,24 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'native_directory_picker') {
+          expect(predicate({ nativeDirectoryPickerAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({ nativeDirectoryPickerAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              nativeDirectoryPickerAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_trust_hot_reload') {
           expect(predicate({ workspaceTrustHotReloadAvailable: true })).toBe(
             true,
@@ -3367,6 +3462,18 @@ describe('createServeApp', () => {
               acpHttpEnabled: true,
               realtimeVoiceEnabled: true,
             }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, { acpHttpEnabled: false }),
+          ).not.toContain(feature);
+          continue;
+        }
+        if (feature === 'web_terminal') {
+          expect(predicate({ acpHttpEnabled: true })).toBe(true);
+          expect(predicate({ acpHttpEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { acpHttpEnabled: true }),
           ).toContain(feature);
           expect(
             getAdvertisedServeFeatures(undefined, { acpHttpEnabled: false }),
@@ -3922,6 +4029,46 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it('advertises the scoped workspace-memory tags on the wire', async () => {
+      // The three tags this PR adds are pinned against a real `/capabilities`
+      // body only in integration-tests/cli/qwen-serve-routes.test.ts, which no
+      // workspace test command collects and which CI skipped at this PR's
+      // head — so a descriptor that never reached the envelope would have
+      // shipped green. The registry assertions in 'serve capability registry'
+      // prove the entries exist; this proves the daemon advertises them, in
+      // the order a client reading the list positionally expects.
+      const res = await request(
+        createServeApp(baseOpts, undefined, { bridge: fakeBridge() }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      const features = res.body.features as string[];
+      expect(features).toEqual(
+        expect.arrayContaining([
+          'workspace_memory_remember_project_scope',
+          'workspace_memory_remember_user_scope',
+          'workspace_memory_forget_scope',
+        ]),
+      );
+      // Each scoped tag sits directly behind the unscoped tag it refines, so
+      // a client that feature-detects `workspace_memory_remember` and then
+      // reads forward finds the scope support without a second lookup.
+      const window = features.slice(
+        features.indexOf('workspace_memory'),
+        features.indexOf('workspace_memory_dream') + 1,
+      );
+      expect(window).toEqual([
+        'workspace_memory',
+        'workspace_memory_remember',
+        'workspace_memory_remember_project_scope',
+        'workspace_memory_remember_user_scope',
+        'workspace_memory_forget',
+        'workspace_memory_forget_scope',
+        'workspace_memory_dream',
+      ]);
+    });
+
     it('advertises the effective session restore timeout', async () => {
       const defaultResponse = await request(
         createServeApp(baseOpts, undefined, { bridge: fakeBridge() }),
@@ -3986,6 +4133,31 @@ describe('createServeApp', () => {
       expect(unsupported.body.features).not.toContain('session_generation');
     });
 
+    it('advertises current-session scheduling only with managed task sessions', async () => {
+      const unmanaged = await request(
+        createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          currentSessionSchedulingAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(unmanaged.body.features).not.toContain(
+        'scheduled_task_session_reuse',
+      );
+
+      const managed = await request(
+        createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          manageScheduledTaskSessions: true,
+          currentSessionSchedulingAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(managed.body.features).toContain('scheduled_task_session_reuse');
+    });
+
     it('advertises workspace generation only when the primary bridge supports it', async () => {
       const supportedBridge = fakeBridge();
       supportedBridge.generateWorkspaceContent = async function* () {};
@@ -4035,6 +4207,9 @@ describe('createServeApp', () => {
             sessionGenerationAvailable: true,
             workspaceGenerationAvailable: true,
             acpHttpEnabled: true,
+            // Mirror the server.ts probe so the expectation matches on both
+            // GUI and headless hosts.
+            nativeDirectoryPickerAvailable: isNativeDirectoryPickerAvailable(),
           }),
         );
         expect(res.body.modelServices).toEqual([]);
@@ -4046,6 +4221,30 @@ describe('createServeApp', () => {
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
       }
+    });
+
+    it('forwards the native directory picker probe result to capabilities', async () => {
+      // M5 witness (#9406): the envelope mirror above calls the same probe
+      // as the product path, so on a headless host both sides say "tag
+      // absent" even when server.ts stops wiring the flag. Inject the probe
+      // result instead so the wiring is assertable on every host.
+      const enabled = await request(
+        createServeApp(baseOpts, undefined, {
+          nativeDirectoryPickerAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(enabled.body.features).toContain('native_directory_picker');
+
+      const disabled = await request(
+        createServeApp(baseOpts, undefined, {
+          nativeDirectoryPickerAvailable: false,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(disabled.body.features).not.toContain('native_directory_picker');
     });
 
     it('omits artifact persistence when the durable sink is unavailable', async () => {
@@ -7551,30 +7750,231 @@ describe('createServeApp', () => {
       expect(res.body.error).toBe('`ref` must be a string');
     });
 
-    it('rejects unsupported local extension installs before queuing', async () => {
+    it('queues extension installs from daemon-local paths', async () => {
       const localExtensionDir = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'qwen-local-extension-'),
       );
-      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
-      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
-      const app = createServeApp(
-        { ...tokenOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
+      let installMetadata: ExtensionInstallMetadata | undefined;
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall(options) {
+          installMetadata = options.installMetadata;
+          return testExtension('local-extension');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
 
-      const res = await request(app)
-        .post('/workspace/extensions/install')
-        .set('Host', `127.0.0.1:${tokenOpts.port}`)
-        .set('Authorization', 'Bearer secret')
-        .set('X-Qwen-Client-Id', 'client-1')
-        .send({ source: localExtensionDir, consent: true });
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: localExtensionDir, consent: true });
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toBe(
-        'Only GitHub, Git, and npm extension installs are supported over the daemon endpoint.',
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'installed',
+            source: localExtensionDir,
+            name: 'local-extension',
+          });
+        });
+        expect(installMetadata).toMatchObject({
+          source: localExtensionDir,
+          type: 'local',
+        });
+      } finally {
+        restore();
+        await fsp.rm(localExtensionDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects relative local extension paths before queuing', async () => {
+      const restore = mockExtensionManagerMethods();
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: '.', consent: true });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(
+          'Local extension sources must be absolute daemon-host paths; relative paths are not supported over the daemon endpoint.',
+        );
+        expect(bridge.extensionEvents).toEqual([]);
+      } finally {
+        restore();
+      }
+    });
+
+    it('rejects update options for daemon-local extension paths', async () => {
+      const localExtensionDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-local-extension-options-'),
       );
-      expect(bridge.extensionEvents).toEqual([]);
+      const restore = mockExtensionManagerMethods();
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({
+            source: localExtensionDir,
+            consent: true,
+            autoUpdate: true,
+          });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(
+          '`ref` and `autoUpdate` are not applicable for local extensions.',
+        );
+        expect(bridge.extensionEvents).toEqual([]);
+      } finally {
+        restore();
+        await fsp.rm(localExtensionDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects refs for daemon-local extension paths', async () => {
+      const localExtensionDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-local-extension-ref-'),
+      );
+      const restore = mockExtensionManagerMethods();
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: localExtensionDir, consent: true, ref: 'v1' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(
+          '`ref` and `autoUpdate` are not applicable for local extensions.',
+        );
+        expect(bridge.extensionEvents).toEqual([]);
+      } finally {
+        restore();
+        await fsp.rm(localExtensionDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects unsupported archive URL extension installs', async () => {
+      let prepareCalled = false;
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall() {
+          prepareCalled = true;
+          return testExtension('archive-extension');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({
+            source: 'https://example.com/extension.zip',
+            consent: true,
+          });
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'failed',
+            error:
+              'Only GitHub, Git, npm, and absolute local path extension installs are supported over the daemon endpoint.',
+          });
+        });
+        expect(prepareCalled).toBe(false);
+      } finally {
+        restore();
+      }
+    });
+
+    it('does not let an existing local path shadow owner/repo sources', async () => {
+      const relativeSource = 'qwen-local-source-shadow/extension';
+      const localSource = path.resolve(relativeSource);
+      await fsp.mkdir(localSource, { recursive: true });
+      let prepareCalled = false;
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall() {
+          prepareCalled = true;
+          return testExtension('shadowed-extension');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: relativeSource, consent: true });
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'failed',
+            error:
+              'Local extension sources must be absolute daemon-host paths; relative paths are not supported over the daemon endpoint.',
+          });
+        });
+        expect(prepareCalled).toBe(false);
+      } finally {
+        restore();
+        await fsp.rm(path.dirname(localSource), {
+          recursive: true,
+          force: true,
+        });
+      }
     });
 
     it('rejects missing Windows local extension sources before queuing', async () => {
@@ -7783,6 +8183,7 @@ describe('createServeApp', () => {
               persistence: expected,
             },
           });
+          expect(captured?.installMetadata).not.toHaveProperty('networkPolicy');
           await vi.waitFor(() =>
             expect(bridge.extensionEvents.at(-1)).toMatchObject({
               status: 'installed',
@@ -8898,6 +9299,7 @@ describe('createServeApp', () => {
         durationMs: 1200,
         promptCount: 2,
         models: {},
+        sources: [],
         tools: {
           totalCalls: 0,
           totalSuccess: 0,
@@ -8993,6 +9395,7 @@ describe('createServeApp', () => {
       expect(commandsRes.status).toBe(200);
       expect(commandsRes.body).toEqual(commands);
       expect(statsRes.status).toBe(200);
+      expect(statsRes.headers['cache-control']).toBe('no-store');
       expect(statsRes.body).toEqual(stats);
       expect(tasksRes.status).toBe(200);
       expect(tasksRes.body).toEqual(tasks);
@@ -12997,6 +13400,8 @@ describe('createServeApp', () => {
           const calls =
             action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
           expect(calls).toHaveLength(1);
+          expect(calls[0]).not.toHaveProperty('sourceType');
+          expect(calls[0]).not.toHaveProperty('sourceId');
         } finally {
           readCreationMetadata.mockRestore();
         }
@@ -13037,6 +13442,8 @@ describe('createServeApp', () => {
           const calls =
             action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
           expect(calls).toHaveLength(1);
+          expect(calls[0]).not.toHaveProperty('sourceType');
+          expect(calls[0]).not.toHaveProperty('sourceId');
         } finally {
           findSessionId.mockRestore();
           readCreationMetadata.mockRestore();
@@ -13617,32 +14024,36 @@ describe('createServeApp', () => {
       });
     });
 
-    it('503s fresh session work while restore cleanup is quarantined', async () => {
-      const bridge = fakeBridge({
-        resumeImpl: async () => {
-          throw new BridgeChannelQuarantinedError(
-            'restore_settlement_overdue',
-            90,
-          );
-        },
-      });
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      const res = await request(app)
-        .post('/session/persisted-quarantined/resume')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({});
+    it('503s fresh session work for every channel quarantine reason', async () => {
+      for (const reason of [
+        'restore_cleanup_failed',
+        'restore_settlement_overdue',
+        'new_session_cleanup_failed',
+        'new_session_settlement_overdue',
+      ] as const) {
+        const bridge = fakeBridge({
+          resumeImpl: async () => {
+            throw new BridgeChannelQuarantinedError(reason, 90);
+          },
+        });
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session/persisted-quarantined/resume')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
 
-      expect(res.status).toBe(503);
-      // Quarantine lasts until the channel drains — strictly longer than the
-      // fence — and a fresh-id caller never sees the 409 that would tell it so.
-      expect(res.headers['retry-after']).toBe('90');
-      expect(res.body).toMatchObject({
-        code: 'acp_channel_unavailable',
-        errorKind: 'acp_channel_unavailable',
-        retryable: true,
-        reason: 'restore_settlement_overdue',
-        retryAfterSeconds: 90,
-      });
+        expect(res.status).toBe(503);
+        // Fresh-id callers never see the same-id 409, so the 503 must carry the
+        // operation-budget-scale retry hint itself.
+        expect(res.headers['retry-after']).toBe('90');
+        expect(res.body).toMatchObject({
+          code: 'acp_channel_unavailable',
+          errorKind: 'acp_channel_unavailable',
+          retryable: true,
+          reason,
+          retryAfterSeconds: 90,
+        });
+      }
     });
 
     it('400 workspace_mismatch before touching the bridge for non-primary cwd', async () => {
@@ -13937,6 +14348,157 @@ describe('createServeApp', () => {
         limit: 20,
       });
     });
+
+    it('forwards resume-time source metadata to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-channel/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        });
+
+      expect(res.status).toBe(200);
+      expect(bridge.resumeCalls[0]).toMatchObject({
+        sessionId: 'persisted-channel',
+        workspaceCwd: WS_BOUND,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+    });
+
+    it('forwards load-time source metadata to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-channel/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        });
+
+      expect(res.status).toBe(200);
+      expect(bridge.loadCalls[0]).toMatchObject({
+        sessionId: 'persisted-channel',
+        workspaceCwd: WS_BOUND,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+    });
+
+    it('does not let restore-time source metadata replace persisted attribution', async () => {
+      const bridge = fakeBridge();
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadata')
+        .mockResolvedValue({ sourceType: 'channel', sourceId: 'feishu-main' });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      try {
+        const res = await request(app)
+          .post('/session/persisted-channel/resume')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
+          });
+
+        expect(res.status).toBe(200);
+        expect(bridge.resumeCalls[0]).toMatchObject({
+          sessionId: 'persisted-channel',
+          workspaceCwd: WS_BOUND,
+          sourceType: 'channel',
+          sourceId: 'feishu-main',
+        });
+      } finally {
+        readCreationMetadata.mockRestore();
+      }
+    });
+
+    it.each(['load', 'resume'] as const)(
+      'rejects reserved standalone source metadata on %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-channel/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sourceType: 'standalone' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'rejects sourceId without sourceType on %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-channel/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sourceId: 'dingtalk-main' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_session_source');
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'rejects daemon-owned live source metadata on %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-channel/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            sourceType: 'default',
+            sourceId: 'realtime_voice:p1:h1:a1:forged',
+          });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      },
+    );
 
     // The restore handler's `!res.writable` cleanup branch (kill on
     // !attached, detach on attached) is line-for-line identical to
@@ -15498,6 +16060,411 @@ describe('createServeApp', () => {
       expect(merged?.prs).toEqual([
         { number: 9517, url: 'https://github.com/o/r/pull/9517?v=2' },
       ]);
+    });
+
+    it('prefers the sidecar state over the live bind-time state on merge', async () => {
+      // The refresh timer rewrites `state` in the sidecar while the live
+      // entry keeps the bind-time snapshot — otherwise a live session's PR
+      // would never show as merged until daemon restart.
+      const id = '550e8400-e29b-41d4-a716-44665544a005';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'merged',
+      });
+      // The TTL cache would otherwise keep serving a scan taken before this
+      // test's sidecar write.
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('reads the PR sidecar for live-only sessions so refreshed state wins', async () => {
+      // The bind route persists the sidecar before the session's first
+      // flush. Until then the row is live-only, and its bind-time state
+      // must not shadow the sidecar's refreshed state.
+      const id = '550e8400-e29b-41d4-a716-44665544b001';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'merged',
+      });
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const live = result.sessions.find((s) => s.sessionId === id);
+      expect(live?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('reads the PR sidecar for live-only sessions on the organized path', async () => {
+      const id = '550e8400-e29b-41d4-a716-44665544b002';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'closed',
+      });
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        view: 'organized',
+        group: 'all',
+      });
+
+      const live = result.sessions.find((s) => s.sessionId === id);
+      expect(live?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'closed',
+        },
+      ]);
+    });
+
+    it('reads the PR sidecar for live-only sessions on the metadata path', async () => {
+      const id = '550e8400-e29b-41d4-a716-44665544b003';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'merged',
+      });
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            sourceType: 'scheduled_task',
+            sourceId: 'task-live',
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND, {
+        sourceType: 'scheduled_task',
+        sourceId: 'task-live',
+      });
+
+      const live = result.sessions.find((s) => s.sessionId === id);
+      expect(live?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('reads the PR sidecar for live-only sessions on the live-only fast path', async () => {
+      // Secondary workspaces without persisted transcripts take the
+      // live-only fast path; it must render the sidecar's refreshed state
+      // exactly like the persisted paths.
+      const id = '550e8400-e29b-41d4-a716-44665544b004';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'merged',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listLiveWorkspaceSessionsForResponse(
+        bridge,
+        WS_BOUND,
+      );
+
+      const live = result.sessions.find((s) => s.sessionId === id);
+      expect(live?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('reads the PR sidecar for a live-only session whose bridge entry has no prs', async () => {
+      // Bridge entries are re-created without `prs` on daemon restart,
+      // close/reload, and archive/restore; only metadata updates re-seed
+      // them. The live-only fast path must still read the persisted sidecar
+      // for such rows — like the sibling live-only paths — or the badge
+      // vanishes on an unflushed workspace until a re-bind.
+      const id = '550e8400-e29b-41d4-a716-44665544b008';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'merged',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+
+      const result = await listLiveWorkspaceSessionsForResponse(
+        bridge,
+        WS_BOUND,
+      );
+
+      const live = result.sessions.find((s) => s.sessionId === id);
+      expect(live?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+    });
+
+    it('degrades a live-only row to bind-time prs when its sidecar is unreadable', async () => {
+      // readSessionPrs rethrows non-ENOENT I/O errors (EISDIR here); the
+      // live-only enrichment must swallow them and render the bridge's
+      // bind-time prs instead of failing the whole listing request.
+      const id = '550e8400-e29b-41d4-a716-44665544b009';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { recursive: true, force: true });
+      await fsp.mkdir(sidecarPath, { recursive: true });
+      try {
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId: id,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-05-17T12:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+              prs: [
+                {
+                  number: 9517,
+                  url: 'https://github.com/o/r/pull/9517',
+                  state: 'open' as const,
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = await listLiveWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+        );
+
+        const live = result.sessions.find((s) => s.sessionId === id);
+        expect(live?.prs).toEqual([
+          {
+            number: 9517,
+            url: 'https://github.com/o/r/pull/9517',
+            state: 'open',
+          },
+        ]);
+      } finally {
+        await fsp.rm(sidecarPath, { recursive: true, force: true });
+      }
+    });
+
+    it('reads the live-only PR sidecar from an explicit runtime base dir', async () => {
+      // The route passes `{ runtimeBaseDir: runtime.sessionRuntimeBaseDir }`;
+      // for a managed runtime with a distinct pinned base dir the read must
+      // honor it instead of the ambient default.
+      const id = '550e8400-e29b-41d4-a716-44665544b007';
+      const altBaseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-alt-runtime-'),
+      );
+      try {
+        const sidecarPath = Storage.runWithResolvedRuntimeBaseDir(
+          altBaseDir,
+          () =>
+            new SessionService(WS_BOUND).getPrSessionPathForArchiveState(
+              id,
+              'active',
+            ),
+        );
+        await fsp.rm(sidecarPath, { force: true });
+        await upsertSessionPr(sidecarPath, {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        });
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId: id,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-05-17T12:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+              prs: [
+                {
+                  number: 9517,
+                  url: 'https://github.com/o/r/pull/9517',
+                  state: 'open' as const,
+                },
+              ],
+            },
+          ],
+        });
+
+        const result = await listLiveWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          undefined,
+          { runtimeBaseDir: altBaseDir },
+        );
+
+        const live = result.sessions.find((s) => s.sessionId === id);
+        expect(live?.prs).toEqual([
+          {
+            number: 9517,
+            url: 'https://github.com/o/r/pull/9517',
+            state: 'merged',
+          },
+        ]);
+      } finally {
+        await fsp.rm(altBaseDir, { recursive: true, force: true });
+      }
     });
 
     it('survives PR sidecars on the organized listing path', async () => {
@@ -17943,6 +18910,164 @@ describe('createServeApp', () => {
       expect(bridge.listCalls).toHaveLength(0);
     });
 
+    describe('standalone conversation filter', () => {
+      const standaloneId = (n: number) =>
+        `650e8400-e29b-41d4-a716-44665544${String(n).padStart(4, '0')}`;
+
+      it('filters explicit and legacy top-level rows before pagination', async () => {
+        const rows = [
+          { id: standaloneId(1), sourceType: 'standalone' },
+          { id: standaloneId(2) },
+          { id: standaloneId(3), sourceType: 'default' },
+          {
+            id: standaloneId(4),
+            sourceType: 'default',
+            sourceId: 'realtime_voice:call-1',
+          },
+          { id: standaloneId(5), sourceType: 'scheduled_task' },
+          {
+            id: standaloneId(6),
+            sourceType: 'standalone',
+            parentSessionId: standaloneId(1),
+          },
+        ];
+        for (const [index, row] of rows.entries()) {
+          const timestamp = new Date(
+            Date.UTC(2026, 4, 17, 12, index, 0),
+          ).toISOString();
+          await writeStoredSession({
+            sessionId: row.id,
+            cwd: WS_BOUND,
+            timestamp,
+            prompt: `row ${index}`,
+            mtime: new Date(timestamp),
+            ...(row.sourceType ? { sourceType: row.sourceType } : {}),
+            ...(row.sourceId ? { sourceId: row.sourceId } : {}),
+            ...(row.parentSessionId
+              ? { parentSessionId: row.parentSessionId }
+              : {}),
+          });
+        }
+
+        const page1 = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { conversationKind: 'standalone-top-level', size: 2 },
+        );
+        const page2 = await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          {
+            conversationKind: 'standalone-top-level',
+            size: 2,
+            cursor: page1.nextCursor,
+          },
+        );
+
+        expect(page1.sessions).toHaveLength(2);
+        expect(page2.nextCursor).toBeUndefined();
+        expect(
+          new Set(
+            [...page1.sessions, ...page2.sessions].map(
+              (session) => session.sessionId,
+            ),
+          ),
+        ).toEqual(new Set([standaloneId(1), standaloneId(2), standaloneId(3)]));
+      });
+
+      it('excludes case-conflicting UUIDs before pagination and live merge', async () => {
+        const ambiguousId = standaloneId(10);
+        const uniqueId = standaloneId(11);
+        const makeItem = (id: string, minute: number): SessionListItem => ({
+          sessionId: id,
+          cwd: WS_BOUND,
+          startTime: new Date(Date.UTC(2026, 4, 17, 12, minute)).toISOString(),
+          mtime: Date.UTC(2026, 4, 17, 12, minute),
+          prompt: id,
+          filePath: `/transcripts/${id}.jsonl`,
+          sourceType: 'standalone',
+        });
+        const listSessionsSpy = vi
+          .spyOn(SessionService.prototype, 'listSessions')
+          .mockResolvedValue({
+            items: [
+              makeItem(ambiguousId.toUpperCase(), 2),
+              makeItem(ambiguousId, 1),
+              makeItem(uniqueId, 0),
+            ],
+            nextCursor: undefined,
+            hasMore: false,
+          });
+
+        try {
+          const result = await listWorkspaceSessionsForResponse(
+            fakeBridge({
+              listImpl: () => [
+                {
+                  sessionId: ambiguousId,
+                  workspaceCwd: WS_BOUND,
+                  createdAt: '2026-05-17T12:03:00.000Z',
+                  sourceType: 'standalone',
+                  clientCount: 1,
+                  hasActivePrompt: false,
+                },
+              ],
+            }),
+            WS_BOUND,
+            { conversationKind: 'standalone-top-level', size: 1 },
+          );
+
+          expect(result.sessions.map((session) => session.sessionId)).toEqual([
+            uniqueId,
+          ]);
+          expect(result.nextCursor).toBeUndefined();
+        } finally {
+          listSessionsSpy.mockRestore();
+        }
+      });
+
+      it('renders sidecar prs for a live-only standalone row under its canonical id', async () => {
+        // A standalone session can enter the bridge under a non-canonical
+        // id spelling while its PR sidecar is stored under the canonical
+        // id; the live-only metadata row must be keyed canonically AND
+        // read the sidecar under the canonical id.
+        const canonicalId = standaloneId(12);
+        const service = new SessionService(WS_BOUND);
+        const sidecarPath = service.getPrSessionPathForArchiveState(
+          canonicalId,
+          'active',
+        );
+        await fsp.rm(sidecarPath, { force: true });
+        await upsertSessionPr(sidecarPath, {
+          number: 9729,
+          url: 'https://github.com/o/r/pull/9729',
+        });
+
+        const result = await listWorkspaceSessionsForResponse(
+          fakeBridge({
+            listImpl: () => [
+              {
+                sessionId: canonicalId.toUpperCase(),
+                workspaceCwd: WS_BOUND,
+                createdAt: '2026-05-17T12:00:00.000Z',
+                sourceType: 'standalone',
+                clientCount: 1,
+                hasActivePrompt: false,
+              },
+            ],
+          }),
+          WS_BOUND,
+          { conversationKind: 'standalone-top-level', size: 10 },
+        );
+
+        const row = result.sessions.find(
+          (session) => session.sessionId === canonicalId,
+        );
+        expect(row).toBeDefined();
+        expect(row?.prs?.map((pr) => pr.number)).toEqual([9729]);
+      });
+    });
+
     describe('parentSessionId filter', () => {
       const PARENT = '00000000-0000-4000-8000-0000000000aa';
       const OTHER_PARENT = '00000000-0000-4000-8000-0000000000bb';
@@ -18512,6 +19637,64 @@ describe('createServeApp', () => {
             sessionId: '550e8400-e29b-41d4-a716-446655440101',
             sourceType: 'scheduled_task',
             sourceId: 'task-123',
+          }),
+        ]);
+      });
+
+      it('filters a restored legacy session by live source metadata', async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440301';
+        await writeStoredSession({
+          sessionId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'legacy channel session',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+        });
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-05-17T12:00:00.000Z',
+              updatedAt: '2026-05-17T12:03:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+              sourceType: 'channel',
+              sourceId: 'dingtalk-main',
+            },
+          ],
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+
+        const filtered = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?sourceType=channel&sourceId=dingtalk-main`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(filtered.status).toBe(200);
+        expect(filtered.body.sessions).toEqual([
+          expect.objectContaining({
+            sessionId,
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
+          }),
+        ]);
+
+        const organized = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=all&sourceType=channel&sourceId=dingtalk-main`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(organized.status).toBe(200);
+        expect(organized.body.sessions).toEqual([
+          expect.objectContaining({
+            sessionId,
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
           }),
         ]);
       });
@@ -22948,7 +24131,7 @@ describe('createServeApp', () => {
       expect(badBody.body.code).toBe('invalid_enabled_flag');
     });
 
-    it('returns the canonical name and deferred activation without a child', async () => {
+    it('trims and returns the requested name with deferred activation without a child', async () => {
       const bridge = fakeBridge({
         workspaceSkillsImpl: async () => ({
           v: 1,
@@ -22968,12 +24151,12 @@ describe('createServeApp', () => {
         primaryWorkspaceTrusted: true,
       });
       const res = await auth(
-        request(app).post('/workspace/skills/ReViEw/enable'),
+        request(app).post('/workspace/skills/%20ReViEw%20/enable'),
       ).send({ enabled: false });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
-        skillName: 'review',
+        skillName: 'ReViEw',
         enabled: false,
         changed: true,
         activation: 'deferred',
@@ -22982,14 +24165,17 @@ describe('createServeApp', () => {
       });
       expect(persistDisabledSkills).toHaveBeenCalledWith(
         WS_BOUND,
-        'review',
+        'ReViEw',
         false,
         undefined,
       );
     });
 
-    it('returns 404 for an unknown skill', async () => {
-      const persistDisabledSkills = vi.fn();
+    it('persists an unknown Skill name without catalog validation', async () => {
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['missing'],
+      });
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge({
           workspaceSkillsImpl: async () => ({
@@ -22999,15 +24185,25 @@ describe('createServeApp', () => {
             skills: [reviewSkill],
           }),
         }),
+        boundWorkspace: WS_BOUND,
         persistDisabledSkills,
         primaryWorkspaceTrusted: true,
       });
       const res = await auth(
         request(app).post('/workspace/skills/missing/enable'),
       ).send({ enabled: false });
-      expect(res.status).toBe(404);
-      expect(res.body.code).toBe('skill_not_found');
-      expect(persistDisabledSkills).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        skillName: 'missing',
+        enabled: false,
+        changed: true,
+      });
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        WS_BOUND,
+        'missing',
+        false,
+        undefined,
+      );
     });
 
     it('rejects an unknown workspace client id before persistence', async () => {
@@ -23027,8 +24223,11 @@ describe('createServeApp', () => {
       expect(persistDisabledSkills).not.toHaveBeenCalled();
     });
 
-    it('returns 409 without persisting a non-user-invocable skill', async () => {
-      const persistDisabledSkills = vi.fn();
+    it('persists a non-user-invocable Skill name without catalog validation', async () => {
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['review'],
+      });
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge({
           workspaceSkillsImpl: async () => ({
@@ -23038,22 +24237,32 @@ describe('createServeApp', () => {
             skills: [{ ...reviewSkill, userInvocable: false }],
           }),
         }),
+        boundWorkspace: WS_BOUND,
         persistDisabledSkills,
         primaryWorkspaceTrusted: true,
       });
       const res = await auth(
         request(app).post('/workspace/skills/review/enable'),
       ).send({ enabled: false });
-      expect(res.status).toBe(409);
+      expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
-        code: 'skill_not_toggleable',
-        reason: 'not_user_invocable',
+        skillName: 'review',
+        enabled: false,
+        changed: true,
       });
-      expect(persistDisabledSkills).not.toHaveBeenCalled();
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        WS_BOUND,
+        'review',
+        false,
+        undefined,
+      );
     });
 
-    it('returns a dedicated code for an inactive extension skill', async () => {
-      const persistDisabledSkills = vi.fn();
+    it('persists an inactive Extension Skill name without catalog validation', async () => {
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: false,
+        disabled: [],
+      });
       const app = createServeApp(tokenOpts, undefined, {
         bridge: fakeBridge({
           workspaceSkillsImpl: async () => ({
@@ -23065,6 +24274,7 @@ describe('createServeApp', () => {
             ],
           }),
         }),
+        boundWorkspace: WS_BOUND,
         persistDisabledSkills,
         primaryWorkspaceTrusted: true,
       });
@@ -23072,40 +24282,18 @@ describe('createServeApp', () => {
         request(app).post('/workspace/skills/review/enable'),
       ).send({ enabled: true });
 
-      expect(res.status).toBe(409);
+      expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
-        code: 'skill_inactive_extension',
-        reason: 'inactive_extension',
+        skillName: 'review',
+        enabled: true,
+        changed: false,
       });
-      expect(persistDisabledSkills).not.toHaveBeenCalled();
-    });
-
-    it('returns the locked scope from persistence validation', async () => {
-      const app = createServeApp(tokenOpts, undefined, {
-        bridge: fakeBridge({
-          workspaceSkillsImpl: async () => ({
-            v: 1,
-            workspaceCwd: WS_BOUND,
-            initialized: true,
-            skills: [reviewSkill],
-          }),
-        }),
-        persistDisabledSkills: vi
-          .fn()
-          .mockRejectedValue(
-            new WorkspaceSkillNotToggleableError('review', 'locked', 'user'),
-          ),
-        primaryWorkspaceTrusted: true,
-      });
-      const res = await auth(
-        request(app).post('/workspace/skills/review/enable'),
-      ).send({ enabled: true });
-      expect(res.status).toBe(409);
-      expect(res.body).toMatchObject({
-        code: 'skill_not_toggleable',
-        reason: 'locked',
-        lockedScope: 'user',
-      });
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        WS_BOUND,
+        'review',
+        true,
+        undefined,
+      );
     });
 
     it('rejects writes to an untrusted primary workspace', async () => {
@@ -25169,6 +26357,7 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({
         archived: [sid],
         alreadyArchived: [],
+        resolvedConflicts: [],
         notFound: [],
         errors: [],
       });
@@ -25179,6 +26368,51 @@ describe('createServeApp', () => {
       await expect(
         fsp.access(sessionFilePath(sid, 'archived')),
       ).resolves.toBeUndefined();
+    });
+
+    it('requires an explicit boolean to repair active/archive conflicts', async () => {
+      const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeea';
+      await writeSession(sid);
+      await writeSession(sid, 'archived');
+      const app = createArchiveApp();
+
+      const invalid = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], resolveConflicts: 'yes' });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_request');
+
+      const archived = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], resolveConflicts: true });
+      expect(archived.status).toBe(200);
+      expect(archived.body).toMatchObject({
+        archived: [sid],
+        resolvedConflicts: [sid],
+        errors: [],
+      });
+      await expect(fsp.access(sessionFilePath(sid))).rejects.toThrow();
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).resolves.toBeUndefined();
+
+      await writeSession(sid);
+      const unarchived = await request(app)
+        .post('/sessions/unarchive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], resolveConflicts: true });
+      expect(unarchived.status).toBe(200);
+      expect(unarchived.body).toMatchObject({
+        unarchived: [sid],
+        resolvedConflicts: [sid],
+        errors: [],
+      });
+      await expect(fsp.access(sessionFilePath(sid))).resolves.toBeUndefined();
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).rejects.toThrow();
     });
 
     it('invalidates active and archived catalogs across archive, unarchive, and delete', async () => {
@@ -25447,6 +26681,7 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({
         unarchived: [sid],
         alreadyActive: [],
+        resolvedConflicts: [],
         notFound: [],
         errors: [],
       });
@@ -26080,6 +27315,27 @@ describe('createServeApp', () => {
       expect(nonHttp.status).toBe(400);
       expect(nonHttp.body.code).toBe('invalid_metadata');
       expect(nonHttp.body.field).toBe('pr');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+    });
+
+    it('400 message names the state constraint for an invalid pr state', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({
+        pr: {
+          number: 1,
+          url: 'https://github.com/o/r/pull/1',
+          state: 'draft',
+        },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('pr');
+      expect(res.body.error).toContain('`state`');
       expect(bridge.updateMetadataCalls).toHaveLength(0);
     });
 
@@ -33678,6 +34934,7 @@ describe('Live conversation runtime lifecycle', () => {
       inode: number;
       inodeVerifiable: boolean;
     }> = {},
+    serveOverrides: Partial<ServeOptions> = {},
   ) {
     const primaryBridge = fakeBridge();
     const registry = createWorkspaceRegistry([
@@ -33688,9 +34945,18 @@ describe('Live conversation runtime lifecycle', () => {
         bridge: primaryBridge,
       }),
     ]);
+    // The Live catalog routes prove an exact root with
+    // `path.resolve(selector) === selector`, which only holds in the host's
+    // native path shape — build it the way the WS_BOUND fixtures above do,
+    // so it round-trips through `path.resolve` on every platform.
+    const liveConversationsRoot = path.resolve(
+      path.sep,
+      'work',
+      'live-conversations',
+    );
     const root = {
-      configuredRoot: '/work/live-conversations',
-      canonicalRoot: '/work/live-conversations',
+      configuredRoot: liveConversationsRoot,
+      canonicalRoot: liveConversationsRoot,
       device: 1,
       inode: 2,
       inodeVerifiable: true,
@@ -33704,6 +34970,39 @@ describe('Live conversation runtime lifecycle', () => {
         async (sessionId: string) =>
           `${root.canonicalRoot}/conversation-${sessionId}`,
       ),
+      prepareStandaloneDirectory: vi.fn(async (sessionId: string) => ({
+        created: true,
+        identity: {
+          root,
+          storageSessionId: sessionId,
+          name: `conversation-${sessionId}`,
+          canonicalPath: `${root.canonicalRoot}/conversation-${sessionId}`,
+          device: 1,
+          inode: 3,
+        },
+      })),
+      inspectStandaloneDirectory: vi.fn(async (sessionId: string) => ({
+        status: 'ready' as const,
+        identity: {
+          root,
+          storageSessionId: sessionId,
+          name: `conversation-${sessionId}`,
+          canonicalPath: `${root.canonicalRoot}/conversation-${sessionId}`,
+          device: 1,
+          inode: 3,
+        },
+      })),
+      ensureStandaloneDirectory: vi.fn(async (sessionId: string) => ({
+        status: 'recreated' as const,
+        identity: {
+          root,
+          storageSessionId: sessionId,
+          name: `conversation-${sessionId}`,
+          canonicalPath: `${root.canonicalRoot}/conversation-${sessionId}`,
+          device: 1,
+          inode: 3,
+        },
+      })),
     } as unknown as ConversationWorkspace;
     const liveBridge = fakeBridge(liveBridgeOptions);
     const liveRuntime: WorkspaceRuntime = {
@@ -33737,7 +35036,7 @@ describe('Live conversation runtime lifecycle', () => {
       })),
       disposeRuntime: vi.fn(async () => undefined),
     };
-    const app = createServeApp(baseOpts, undefined, {
+    const app = createServeApp({ ...baseOpts, ...serveOverrides }, undefined, {
       bridge: primaryBridge,
       workspaceRegistry: registry,
       createWorkspaceRuntime,
@@ -33779,6 +35078,36 @@ describe('Live conversation runtime lifecycle', () => {
       },
     };
   }
+
+  it('mounts and advertises standalone sessions only with complete runtime dependencies', async () => {
+    const partial = createServeApp(baseOpts, undefined, {
+      bridge: fakeBridge(),
+    });
+    const partialRoute = await request(partial)
+      .get('/standalone/sessions?cwd=/tmp')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    const partialCapabilities = await request(partial)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    expect(partialRoute.status).toBe(404);
+    expect(partialCapabilities.body.features).not.toContain(
+      'standalone_sessions_v1',
+    );
+
+    const complete = setupLiveRuntime();
+    const completeRoute = await supertest(complete.app)
+      .get('/standalone/sessions?cwd=/tmp')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    const completeCapabilities = await supertest(complete.app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    expect(completeRoute.status).toBe(400);
+    expect(completeCapabilities.body.features).toContain(
+      'standalone_sessions_v1',
+    );
+  });
 
   it('blocks REST close and archive for active Live sessions until the call stops', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
@@ -34134,6 +35463,20 @@ describe('Live conversation runtime lifecycle', () => {
     const getLocation = vi
       .spyOn(SessionService.prototype, 'getSessionLocation')
       .mockResolvedValue('active');
+    const getMaintainableLocation = vi
+      .spyOn(SessionService.prototype, 'getMaintainableSessionLocation')
+      .mockImplementation(async function (candidateId) {
+        if (candidateId === 'ordinary-session') {
+          return this.getProjectRoot() === '/work/live-primary'
+            ? 'active'
+            : undefined;
+        }
+        return this.getProjectRoot() === setup.root.canonicalRoot &&
+          candidateId !== 'not-live' &&
+          candidateId !== 'missing-live-session'
+          ? 'active'
+          : undefined;
+      });
     const sessionExists = vi
       .spyOn(SessionService.prototype, 'sessionExistsInAnyState')
       .mockImplementation(async function (candidateId) {
@@ -34244,6 +35587,7 @@ describe('Live conversation runtime lifecycle', () => {
       expect(updateOrganization).toHaveBeenCalledOnce();
     } finally {
       getLocation.mockRestore();
+      getMaintainableLocation.mockRestore();
       sessionExists.mockRestore();
       readMetadata.mockRestore();
       readMetadataIfReadable.mockRestore();
@@ -34502,25 +35846,398 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
-  it('reads the authoritative persisted spelling for internal restore while keeping the private directory canonical, and rejects case conflicts', async () => {
+  it('does not apply caller-supplied restore source metadata on the internal Live runtime', async () => {
+    const sessionId = 'legacy-live-channel';
     const setup = setupLiveRuntime();
     setup.registry.add(setup.liveRuntime);
-    const canonicalSessionId = '550e8400-e29b-41d4-a716-446655440000';
-    const storageSessionId = canonicalSessionId.toUpperCase();
     const findSessionId = vi
       .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-      .mockImplementation(async (sessionId) =>
-        sessionId === canonicalSessionId ? storageSessionId : sessionId,
-      );
+      .mockResolvedValue(sessionId);
     const getLocation = vi
       .spyOn(SessionService.prototype, 'getSessionLocation')
       .mockResolvedValue('active');
     const readCreationMetadata = vi
       .spyOn(SessionService.prototype, 'readCreationMetadata')
-      .mockResolvedValue({
-        sourceType: 'default',
-        sourceId: `realtime_voice:p1:h1:a1:${canonicalSessionId}`,
+      .mockResolvedValue({});
+    const readCreationMetadataIfReadable = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockImplementation(async (id, _location) => readCreationMetadata(id));
+    try {
+      const response = await request(setup.app)
+        .post(`/session/${sessionId}/resume`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          cwd: setup.root.canonicalRoot,
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        });
+
+      expect(response.status).toBe(200);
+      expect(setup.liveBridge.resumeCalls).toContainEqual(
+        expect.objectContaining({
+          sessionId,
+          workspaceCwd: setup.root.canonicalRoot,
+        }),
+      );
+      expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty(
+        'sourceType',
+      );
+      expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty('sourceId');
+    } finally {
+      readCreationMetadataIfReadable.mockRestore();
+      readCreationMetadata.mockRestore();
+      getLocation.mockRestore();
+      findSessionId.mockRestore();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+    }
+  });
+
+  it('adopts a UUID legacy Conversations restore through the standalone service', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440010';
+    let restored = false;
+    const setup = setupLiveRuntime({
+      loadImpl: async (req) => {
+        restored = true;
+        return {
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          currentCwd: req.workspaceCwd,
+          attached: false,
+          clientId: req.clientId ?? 'client-legacy-adoption',
+          sourceType: req.sourceType,
+          state: {},
+          hasActivePrompt: false,
+        };
+      },
+      summaryImpl: (id) => {
+        if (!restored) throw new SessionNotFoundError(id);
+        return {
+          sessionId: id,
+          workspaceCwd: setup.root.canonicalRoot,
+          createdAt: '2026-08-24T00:00:00.000Z',
+          sourceType: 'standalone',
+          clientCount: 0,
+          hasActivePrompt: false,
+        };
+      },
+    });
+    setup.registry.add(setup.liveRuntime);
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValue(sessionId);
+    const getLocation = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockResolvedValue('active');
+    const readCreationMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockResolvedValue({ sourceType: 'default' });
+    try {
+      const response = await request(setup.app)
+        .post(`/session/${sessionId}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        sessionId,
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: `${setup.root.canonicalRoot}/conversation-${sessionId}`,
       });
+      expect(setup.liveBridge.loadCalls).toContainEqual(
+        expect.objectContaining({
+          sessionId,
+          sourceType: 'standalone',
+          historyReplay: 'response',
+        }),
+      );
+      expect(setup.liveBridge.changeSessionCwdCalls).toContainEqual({
+        sessionId,
+        path: `${setup.root.canonicalRoot}/conversation-${sessionId}`,
+      });
+      expect(
+        setup.conversationWorkspace.materializeConversationDirectory,
+      ).not.toHaveBeenCalled();
+
+      const branchSession = vi.fn();
+      const createSideTaskSession = vi.fn();
+      setup.liveBridge.branchSession = branchSession;
+      setup.liveBridge.createSideTaskSession = createSideTaskSession;
+      const genericActions = [
+        {
+          route: 'branch',
+          body: { name: 'branch' },
+          callCount: () => branchSession.mock.calls.length,
+        },
+        {
+          route: 'side-task',
+          body: { name: 'side task' },
+          callCount: () => createSideTaskSession.mock.calls.length,
+        },
+        {
+          route: 'cd',
+          body: { path: setup.root.canonicalRoot },
+          callCount: () => setup.liveBridge.changeSessionCwdCalls.length,
+        },
+      ] as const;
+      for (const action of genericActions) {
+        const callsBefore = action.callCount();
+        const rejected = await request(setup.app)
+          .post(`/session/${sessionId}/${action.route}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send(action.body);
+        expect(rejected.status).toBe(400);
+        expect(rejected.body.code).toBe('unsupported_action');
+        expect(action.callCount()).toBe(callsBefore);
+      }
+
+      setup.conversationWorkspace.inspectStandaloneDirectory.mockResolvedValue({
+        status: 'missing',
+      });
+      const fork = await request(setup.app)
+        .post(`/session/${sessionId}/fork`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ directive: 'review the current code' });
+      expect(fork.status).toBe(409);
+      expect(fork.body.code).toBe('working_directory_missing');
+      expect(fork.body.retryable).toBe(true);
+      expect(setup.liveBridge.forkCalls).toHaveLength(0);
+
+      const syncLanguage = await request(setup.app)
+        .post(`/session/${sessionId}/language`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'zh', syncOutputLanguage: true });
+      expect(syncLanguage.status).toBe(409);
+      expect(syncLanguage.body.code).toBe('working_directory_missing');
+      expect(syncLanguage.body.retryable).toBe(true);
+      expect(setup.liveBridge.setLanguageCalls).toHaveLength(0);
+
+      const userLanguageOnly = await request(setup.app)
+        .post(`/session/${sessionId}/language`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ language: 'zh' });
+      expect(userLanguageOnly.status).toBe(200);
+      expect(setup.liveBridge.setLanguageCalls).toHaveLength(1);
+      expect(setup.liveBridge.setLanguageCalls[0]).toMatchObject({
+        sessionId,
+        params: { language: 'zh', syncOutputLanguage: false },
+      });
+
+      const activity = setup.app.locals['conversationRuntimeActivity'] as {
+        sealAndWait(): Promise<void>;
+      };
+      await activity.sealAndWait();
+      const virtualSessionId = createVirtualSubagentSessionId(
+        sessionId,
+        'agent-1',
+      );
+      const blocked = await Promise.all([
+        request(setup.app)
+          .get(`/session/${sessionId}/status`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .get(`/session/${sessionId}/mid-turn-messages`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .get(`/session/${sessionId}/pending-prompts`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .get(`/session/${sessionId}/turns/current`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .post(`/session/${sessionId}/permission/request-1`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ outcome: { outcome: 'cancelled' } }),
+        request(setup.app)
+          .get(`/session/${sessionId}/events`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .post(`/session/${virtualSessionId}/load`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({}),
+        request(setup.app)
+          .get(`/session/${sessionId}/subagents/agent-1`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .post(`/session/${sessionId}/subagents/agent-1/cancel`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({}),
+        request(setup.app)
+          .get(`/session/${virtualSessionId}/context`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .get(`/session/${virtualSessionId}/supported-commands`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`),
+        request(setup.app)
+          .post(`/session/${virtualSessionId}/heartbeat`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({}),
+        request(setup.app)
+          .post(`/session/${virtualSessionId}/detach`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({}),
+      ]);
+      for (const response of blocked) {
+        expect(response.status).toBe(503);
+        expect(response.body.code).toBe('daemon_draining');
+      }
+    } finally {
+      readCreationMetadata.mockRestore();
+      getLocation.mockRestore();
+      findSessionId.mockRestore();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+    }
+  });
+
+  it.each([
+    {
+      operation: 'continuation',
+      route: 'continue',
+      body: {},
+      expectedStatus: 200,
+      expectedBody: {
+        accepted: true,
+        interruption: 'none',
+      },
+    },
+    {
+      operation: 'fork',
+      route: 'fork',
+      body: { directive: 'review the current code' },
+      expectedStatus: 202,
+      expectedBody: {
+        sessionId: '550e8400-e29b-41d4-a716-446655440012',
+        description: 'review the current code',
+        launched: true,
+      },
+    },
+  ])(
+    'keeps a sent standalone $operation response when the runtime changes afterward',
+    async ({ route, body, expectedStatus, expectedBody }) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440012';
+      let restored = false;
+      const setupRef: { current?: ReturnType<typeof setupLiveRuntime> } = {};
+      const beginReplacement = () => {
+        const current = setupRef.current!;
+        const entry = current.registry.getManagedEntryByWorkspaceId(
+          current.liveRuntime.workspaceId,
+        );
+        expect(entry).toBeDefined();
+        expect(current.registry.beginReplacement(entry!, 'policy-2')).toBe(
+          true,
+        );
+      };
+      const setup = setupLiveRuntime(
+        {
+          loadImpl: async (req) => {
+            restored = true;
+            return {
+              sessionId: req.sessionId,
+              workspaceCwd: req.workspaceCwd,
+              currentCwd: req.workspaceCwd,
+              attached: false,
+              clientId: req.clientId ?? 'client-continue-race',
+              sourceType: req.sourceType,
+              state: {},
+              hasActivePrompt: false,
+            };
+          },
+          summaryImpl: (id) => {
+            if (!restored) throw new SessionNotFoundError(id);
+            const current = setupRef.current!;
+            return {
+              sessionId: id,
+              workspaceCwd: current.root.canonicalRoot,
+              currentCwd: `${current.root.canonicalRoot}/conversation-${id}`,
+              createdAt: '2026-08-24T00:00:00.000Z',
+              sourceType: 'standalone',
+              clientCount: 0,
+              hasActivePrompt: false,
+            };
+          },
+          continueSessionImpl: async () => {
+            beginReplacement();
+            return { accepted: true, interruption: 'none' as const };
+          },
+          launchSessionForkAgentImpl: async (id, directive) => {
+            beginReplacement();
+            return { sessionId: id, description: directive, launched: true };
+          },
+        },
+        {},
+        { token: 'secret' },
+      );
+      setupRef.current = setup;
+      setup.registry.add(setup.liveRuntime);
+      const findSessionId = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockResolvedValue(sessionId);
+      const getLocation = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockResolvedValue('active');
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+        .mockResolvedValue({ sourceType: 'default' });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const load = await request(setup.app)
+          .post(`/session/${sessionId}/load`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ cwd: setup.root.canonicalRoot });
+        expect(load.status).toBe(200);
+
+        const response = await request(setup.app)
+          .post(`/session/${sessionId}/${route}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send(body);
+        expect(response.status).toBe(expectedStatus);
+        expect(response.body).toEqual(expectedBody);
+        expect(stderr).not.toHaveBeenCalledWith(
+          expect.stringContaining('unhandled error'),
+        );
+      } finally {
+        stderr.mockRestore();
+        readCreationMetadata.mockRestore();
+        getLocation.mockRestore();
+        findSessionId.mockRestore();
+        await (
+          setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+        )();
+      }
+    },
+  );
+
+  it('reads the authoritative persisted spelling for internal restore while keeping the private directory canonical, and rejects case conflicts', async () => {
+    const setup = setupLiveRuntime();
+    setup.registry.add(setup.liveRuntime);
+    const canonicalSessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const exactConflictSessionId = '550e8400-e29b-41d4-a716-446655440001';
+    const storageSessionId = canonicalSessionId.toUpperCase();
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockImplementation(async (sessionId) => {
+        if (sessionId === exactConflictSessionId) {
+          throw new SessionIdCaseConflictError(sessionId, sessionId);
+        }
+        return sessionId === canonicalSessionId ? storageSessionId : sessionId;
+      });
+    const getLocation = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockImplementation(async (sessionId) =>
+        sessionId === exactConflictSessionId ? 'conflict' : 'active',
+      );
+    const readCreationMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockImplementation(async (sessionId) => ({
+        sourceType: 'default',
+        sourceId: `realtime_voice:p1:h1:a1:${sessionId}`,
+      }));
     const readCreationMetadataIfReadable = vi
       .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
       .mockImplementation(async (sessionId) => readCreationMetadata(sessionId));
@@ -34548,6 +36265,15 @@ describe('Live conversation runtime lifecycle', () => {
       expect(readCreationMetadataIfReadable).toHaveBeenCalledWith(
         storageSessionId,
         'active',
+      );
+
+      const exactConflict = await request(setup.app)
+        .post(`/session/${exactConflictSessionId}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+      expect(exactConflict.status).toBe(200);
+      expect(setup.liveBridge.loadCalls).toContainEqual(
+        expect.objectContaining({ sessionId: exactConflictSessionId }),
       );
 
       findSessionId.mockRejectedValueOnce(

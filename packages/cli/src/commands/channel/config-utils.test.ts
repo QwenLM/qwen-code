@@ -384,6 +384,68 @@ describe('parseChannelConfig', () => {
     expect(result.sessionScope).toBe('user');
   });
 
+  it('parses owner-scoped named sessions only for user scope', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      sessionScope: 'user',
+      multiSession: true,
+    });
+    expect(result.multiSession).toBe(true);
+
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        sessionScope: 'chat_thread',
+        multiSession: true,
+      }),
+    ).rejects.toThrow(
+      'requires sessionScope "user" when multiSession is enabled',
+    );
+  });
+
+  it('rejects malformed or unsupported multiSession combinations', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        multiSession: 'true',
+      }),
+    ).rejects.toThrow('field "multiSession" must be a boolean');
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        multiSession: true,
+        groupHistoryLimit: 1,
+      }),
+    ).rejects.toThrow(
+      'cannot use groupHistoryLimit when multiSession is enabled',
+    );
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        multiSession: true,
+        groups: { group1: { groupHistoryLimit: 1 } },
+      }),
+    ).rejects.toThrow(
+      'group "group1" cannot use groupHistoryLimit when multiSession is enabled',
+    );
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        multiSession: true,
+        webhooks: {
+          sources: {
+            ci: {
+              secret: 'secret',
+              targets: {
+                default: { chatId: 'chat', senderId: 'sender' },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow('cannot use webhooks when multiSession is enabled');
+  });
+
   it('rejects an unknown approvalMode', async () => {
     await expect(
       parseChannelConfig('bot', {

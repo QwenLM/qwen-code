@@ -10,6 +10,7 @@
 //!  take >4s when reading each property individually).
 
 use windows::core::{Interface, BSTR};
+use windows::Win32::Foundation::S_OK;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
@@ -899,7 +900,30 @@ unsafe fn walk_cached_bounded(
                 }
             }
         }
+        // UIA documents a null child-array pointer as the successful result
+        // for a cached leaf. windows-rs projects that S_OK + null interface as
+        // Error::empty() (whose code remains S_OK), so it means "no children"
+        // here rather than a partial capture. Preserve every failing HRESULT
+        // as an incomplete walk.
+        Err(error) if is_empty_cached_leaf(&error) => {}
         Err(_) => status.incomplete("uia_children_read_failed"),
+    }
+}
+
+fn is_empty_cached_leaf(error: &windows::core::Error) -> bool {
+    error.code() == S_OK
+}
+
+#[cfg(test)]
+mod cached_children_tests {
+    use super::*;
+
+    #[test]
+    fn null_cached_children_are_an_empty_leaf() {
+        assert!(is_empty_cached_leaf(&windows::core::Error::empty()));
+        assert!(!is_empty_cached_leaf(&windows::core::Error::from_hresult(
+            windows::core::HRESULT(0x80004005_u32 as i32),
+        )));
     }
 }
 

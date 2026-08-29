@@ -8,12 +8,13 @@ import { realpath, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'shell-quote';
 import {
-  GitWorktreeService,
   getShellConfiguration,
+  GitWorktreeService,
   isWithinRoot,
   realpathNearestExistingAsync,
   splitCommands,
 } from '@qwen-code/qwen-code-core';
+import type { ShellType } from '@qwen-code/qwen-code-core';
 import {
   EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS,
   SHELL_EXECUTING_TOOL_NAMES as SHELL_EXECUTING_TOOLS,
@@ -137,6 +138,39 @@ const GIT_NUMBERED_CONFIG_ENV_PATTERN = /^GIT_CONFIG_(KEY|VALUE)_\d+$/;
 const SHELL_WRAPPER_PROGRAMS = new Set(['bash', 'dash', 'ksh', 'sh', 'zsh']);
 const SHELL_WRAPPER_VALUE_FLAGS = new Set(['-o', '-O']);
 
+// Windows shells whose own grammar parses whatever follows them — caret and
+// `%…%`/`!…!` rewriting (cmd.exe), backticks, here-strings, `-EncodedCommand`
+// (PowerShell) — none of which this guard's POSIX text model can read before
+// execution. An invocation of one carries a payload the analysis cannot
+// resolve, so it fails closed on every Windows lane — including Git Bash
+// sessions, where cmd.exe and PowerShell remain reachable programs; nested
+// spellings (`bash -c 'cmd /c …'`) reach the same rule through the payload
+// recursion. On POSIX hosts cmd.exe and Windows PowerShell do not exist and
+// `pwsh` is an ordinary interpreter the guard does not model — the same
+// stance as python or node — so the rule stays off there.
+const WINDOWS_SHELL_PROGRAMS = new Set(['cmd', 'powershell', 'pwsh']);
+
+// PowerShell relocates the session through its own cmdlets; `cd`/`chdir`/
+// `pushd`/`popd` are among their aliases and dispatch through the ordinary
+// chdir arm. `-Path`/`-LiteralPath` name the operand explicitly.
+const POWERSHELL_LOCATION_PROGRAMS = new Set([
+  'set-location',
+  'sl',
+  'push-location',
+  'pop-location',
+]);
+
+// PowerShell mutates the process environment through spellings no POSIX
+// assignment scan reads: `$env:NAME = value` / `${env:NAME} = value`
+// (leadingEnvAssignmentKey requires a bare `NAME=`) and the static
+// `[Environment]::SetEnvironmentVariable` API. A later git child inherits
+// the mutation, so the whole command fails closed — but a READ
+// (`echo $env:PATH`) carries no `=` and stays resolvable.
+const POWERSHELL_ENV_MUTATION_PATTERNS = [
+  /^\$\{?env:[A-Za-z_][A-Za-z0-9_]*\}?\s*\+?=(?!=)/i,
+  /^\[Environment\]::SetEnvironmentVariable\s*\(/i,
+];
+
 // `-c` bundled inside short flags (`bash -lc 'cmd'`) still consumes the next
 // argv entry as the payload. `-o`/`-O` take values, so either one earlier in
 // the bundle consumes the rest of it and `-c` is not present.
@@ -206,6 +240,17 @@ const TIMEOUT_VALUE_FLAGS = new Set(['-k', '-s', '--kill-after', '--signal']);
 // is checked while `bait` is still the original directory.
 const PATH_RELINKING_PROGRAMS = new Set(['cp', 'ln', 'mv']);
 
+// The cmd.exe spellings of the same capability (`mklink` also covers
+// junctions/hardlinks, which point a name at another volume entirely).
+const WIN32_PATH_RELINKING_PROGRAMS = new Set([
+  ...PATH_RELINKING_PROGRAMS,
+  'copy',
+  'mklink',
+  'move',
+  'robocopy',
+  'xcopy',
+]);
+
 // Archive extractors do not name the paths they write: the archive decides.
 // Everything under their extraction directory is therefore suspect, which is
 // the directory itself rather than any operand.
@@ -242,6 +287,10 @@ const DYNAMIC_RELOCATION_DENIAL =
   'Daemon shell guard denied a mutating Git command with a dynamic repository location.';
 const UNPARSEABLE_COMMAND_DENIAL =
   'Daemon shell guard denied a shell command that could not be parsed before execution.';
+const CMD_REWRITE_SYNTAX_DENIAL =
+  'Daemon shell guard denied a shell command containing cmd.exe rewrite syntax it cannot evaluate before execution.';
+const WINDOWS_UNMODELLED_SYNTAX_DENIAL =
+  'Daemon shell guard denied a shell command containing Windows shell syntax it cannot evaluate before execution.';
 const UNRESOLVED_TARGET_DENIAL_PREFIX =
   'Daemon shell guard denied a mutating Git command with an unresolvable repository location: ';
 const OUTSIDE_TARGET_DENIAL_PREFIX =
@@ -252,8 +301,6 @@ const UNRECOGNIZED_PROGRAM_DENIAL =
   'Daemon shell guard denied a shell command that may run a relocated Git command through an unrecognized program.';
 const SHADOW_REMOVAL_DENIAL =
   'Daemon shell guard denied a shell command that removes a tracked shell definition in a way it cannot model.';
-const UNMODELABLE_ESCAPE_DENIAL =
-  'Daemon shell guard denied a shell command containing a shell escape (a backslash before a quote or a cmd.exe caret) that it could not model safely before execution.';
 const PROMPTLESS_PROVIDER_DENIAL =
   'Managed external tool guard cannot consult an external provider without an active prompt binding.';
 
@@ -406,198 +453,234 @@ interface TokenizedSegment {
   readonly endDepth: number;
 }
 
-// The tokenizer distinguishes a genuinely unparseable segment from one the
-// guard refuses because a shell escape (a backslash before a quote, a cmd.exe
-// caret) would make the parse diverge from what the executing shell sees.
-// The two carry different denial reasons so a caller can tell them apart.
-type TokenizeOutcome =
-  | { kind: 'ok'; segment: TokenizedSegment }
-  | { kind: 'unmaskable' }
-  | null;
+// On Windows a backslash is a path separator, not a shell escape, when the
+// session executes through cmd.exe or PowerShell — the shell
+// getShellConfiguration() selects from the environment — so
+// `git -C C:\repo\sub` must reach the analysis with its separators intact.
+// POSIX tokenisation would consume each unquoted `\x` as an escape for `x`,
+// mangling the path into a relative word. Escape the backslash itself and
+// let the following character keep its ordinary role — whitespace still
+// separates words and operators still delimit, exactly as cmd.exe splits the
+// executed argv. Escaping the following character along with the backslash
+// would glue the next word into the path (`C:\repo\ status` as one token),
+// letting a `-C`/`--git-dir`/`-c` placed after a trailing separator hide
+// inside the first relocation's value. Inside double quotes every backslash
+// is doubled instead: the POSIX tokenizer keeps backslashes literal there
+// except before another backslash or a quote — exactly the two characters
+// that are NOT escapes for cmd.exe and PowerShell — and a `"` closes the
+// region unconditionally on those lanes. Consuming `\"` as a POSIX escape
+// pair leaves the region open for the splitter and hides every separator
+// after it; single-quoted bodies already keep backslashes literal under
+// POSIX rules, so they are left alone. A `$'…'` body starts with `$`,
+// marking its token dynamic either way. Git Bash sessions execute
+// through bash, whose backslash escapes the POSIX tokeniser already models,
+// so the rewrite stays off there — applying it would split words the
+// executed argv keeps glued.
+const WINDOWS_CMD_BOUNDARY_CHARS = new Set([
+  ' ',
+  '\t',
+  ';',
+  '|',
+  '&',
+  '<',
+  '>',
+  '(',
+  ')',
+]);
 
-// On Windows the daemon normally runs shell commands through cmd.exe or
-// PowerShell, where a backslash is a literal path separator rather than a
-// POSIX escape. shell-quote models POSIX sh, so an unquoted `C:\Users\repo`
-// would arrive stripped to `C:Usersrepo` and every Windows path the guard
-// resolves becomes relative garbage: legitimate commands get denied on an
-// unresolvable target while relocated ones slip through via the nearest
-// existing ancestor. Mask each backslash behind a control-character
-// placeholder for the parse and restore it in the tokens afterwards.
-//
-// The divergence masking corrects lives in *which shell executes the
-// command*, not in the OS platform: under Git Bash (an MSYSTEM/MINGW or a
-// msys/cygwin TERM) the shell is bash, a backslash *is* a POSIX escape, and
-// the un-masked parse already matches the executing shell — so masking is
-// skipped there, mirroring how core tools/shell.ts gates the same decision on
-// the detected shell. Only cmd.exe/PowerShell get the literal-separator
-// reading.
-const WIN32_BACKSLASH_PLACEHOLDER = '\u0001';
-
-// How the command text is parsed at this nesting level. Backslash masking and
-// cmd.exe caret removal only apply on the native Windows parse lanes; a
-// payload that runs under a POSIX interpreter (`sh -c`, `bash -c`, `env -S`,
-// …) must NOT be masked, because there a backslash is an escape rather than a
-// path separator — masking it would make the guard re-read the payload with
-// the outer lane's rules and misjudge a `./\.\./\.\.` traversal that the raw
-// POSIX parse already resolves correctly.
-type ShellSemantics = 'posix' | 'cmd' | 'powershell';
-
-// The daemon's own shell lane, computed once at the top of an evaluation and
-// carried into nested payloads (not re-derived from the daemon shell on every
-// recursion, so a POSIX payload the daemon happened to reach through a
-// cmd.exe lane keeps its POSIX reading): a backslash is a POSIX escape on
-// Unix shells and Git Bash, a literal path separator on cmd.exe and
-// PowerShell.
-function detectShellSemantics(): ShellSemantics {
-  const config = getShellConfiguration();
-  if (config.shell === 'bash') return 'posix';
-  return config.shell === 'cmd' ? 'cmd' : 'powershell';
-}
-
-// On the cmd.exe lane `^` is the escape character: outside double quotes it
-// strips itself and leaves the next character literal; inside quotes it is an
-// ordinary character. A path such as `..^\..^\outside\repo` therefore reaches
-// git (and the daemon's containment check) as `..\..\...` once cmd.exe eats the
-// unquoted carets, but the POSIX model shell-quote applies treats the caret as
-// an ordinary character — the guard would validate a literal `..^` directory
-// that never exists and let a `..\..\` traversal be judged in-boundary.
-// Collapse the carets the way cmd.exe would, before the parse, so the guard
-// reads the path git will actually receive. A caret with no character after it
-// is a cmd.exe line continuation, and an unmatched quote is a form whose caret
-// handling the guard cannot model, so both fail closed rather than guess.
-function normalizeWin32CaretEscapes(segment: string): string | null {
-  let normalized = '';
-  let inQuotes = false;
-  let index = 0;
-  while (index < segment.length) {
-    const char = segment[index]!;
-    if (char === '"') {
-      inQuotes = !inQuotes;
-      normalized += char;
-      index++;
+export function preserveWindowsPathSeparators(
+  segment: string,
+  platform: string = process.platform,
+  shell: ShellType = getShellConfiguration().shell,
+): string {
+  if (platform !== 'win32' || shell === 'bash') return segment;
+  let single = false;
+  let double = false;
+  let out = '';
+  for (let index = 0; index < segment.length; index++) {
+    const character = segment[index]!;
+    if (single) {
+      if (character === "'") single = false;
+      out += character;
       continue;
     }
-    if (char === '^' && !inQuotes) {
-      if (index + 1 >= segment.length) return null;
-      // `^X` outside quotes collapses to a literal `X`; a `^` before another
-      // `^` (an escaped caret) is a literal `^`, which consuming the next
-      // caret as the escaped character reproduces.
-      normalized += segment[index + 1]!;
-      index += 2;
+    if (double) {
+      if (character === '"') {
+        double = false;
+      } else if (character === '\\') {
+        out += '\\\\';
+        continue;
+      }
+      out += character;
       continue;
     }
-    normalized += char;
-    index++;
+    if (character === "'") {
+      single = true;
+      out += character;
+      continue;
+    }
+    if (character === '"') {
+      double = true;
+      out += character;
+      continue;
+    }
+    if (character === '\\') {
+      const next = segment[index + 1];
+      out +=
+        next !== undefined && WINDOWS_CMD_BOUNDARY_CHARS.has(next)
+          ? '"\\\\"'
+          : '\\\\';
+      continue;
+    }
+    out += character;
   }
-  return inQuotes ? null : normalized;
+  return out;
 }
 
-function restoreWindowsBackslashes(
-  entry: ReturnType<typeof parse>[number],
-): ReturnType<typeof parse>[number] {
-  const restored = (value: string): string =>
-    value.split(WIN32_BACKSLASH_PLACEHOLDER).join('\\');
-  if (typeof entry === 'string') return restored(entry);
-  if (
-    entry !== null &&
-    typeof entry === 'object' &&
-    'pattern' in entry &&
-    typeof entry.pattern === 'string'
-  ) {
-    return { ...entry, pattern: restored(entry.pattern) };
-  }
-  return entry;
-}
-
-// Masking is only safe when it cannot change the parse the way a backslash
-// ordinarily would: the placeholder is not an escape, so a `\"` that POSIX
-// keeps open would close the quoted section early (changing where a quoted
-// `-C` value ends relative to git's own MSVC argv rules), and a `\#` that
-// POSIX turns into a literal `#` instead becomes a comment that hides every
-// relocation after it. Either way the guard and the executing shell read the
-// command differently and a containment decision is unknowable — fail closed.
-function hasUnmaskableBackslash(segment: string): boolean {
-  // Only a `\"` (backslash before a quote) makes masking change the parse,
-  // and only when the segment also carries a path separator elsewhere.
-  // A segment whose every backslash sits immediately before a quote (a
-  // `git commit -m "say \"hi\""` message) hides no relocation behind the
-  // mask — the raw POSIX parse already yields the executing shell's argv, so
-  // it may safely proceed unmasked. A backslash before any other character is
-  // a cmd.exe path separator, and masking one is precisely the divergence the
-  // guard cannot decide and must fail closed on.
-  return /\\"/.test(segment) && /\\[^"]/.test(segment);
-}
-
-// Masking is also unsafe when the masked parse changes the token structure
-// (a comment appears, an operator sequence shifts, the token count differs)
-// relative to the raw POSIX parse: that is exactly the set of inputs whose
-// semantics come apart under the placeholder. When they disagree, fail closed
-// instead of trusting a parse that diverges from what the executing shell
-// sees.
-function parseStructure(entries: ReturnType<typeof parse>): string {
-  return entries
-    .map((entry) => {
-      if (typeof entry === 'string') return 's';
-      if (entry === null || typeof entry !== 'object') return '?';
-      if ('comment' in entry) return 'c';
-      if ('op' in entry) return 'o';
-      if ('pattern' in entry) return 'g';
-      return '?';
-    })
-    .join('');
-}
-
-function structureDiffers(
-  masked: ReturnType<typeof parse>,
-  raw: ReturnType<typeof parse> | null,
+// cmd.exe rewrites the command line before executing it: outside double
+// quotes a caret escapes the next character (`^-C` executes as `-C`, and
+// `^"` becomes a literal quote that desyncs any quote tracking), and
+// `%…%`/`!…!` pairs expand variables at execution time — the pair forms
+// inside double quotes too. The POSIX tokeniser reads all three as literal
+// text, so the executed argv can carry a relocation the analysis never saw
+// (`git ^-C <outside> reset --hard` analyses as cwd-local but executes
+// relocated). Any command containing such syntax is denied rather than
+// guessed at. A caret inside double quotes is literal in cmd.exe as
+// it is for the tokeniser, and a lone `%` or `!` names no expansion, so
+// those stay resolvable. PowerShell keeps carets literal and does not
+// expand `%…%`/`!…!`; bash sessions execute through a shell the POSIX
+// tokeniser already models — both are exempt.
+export function containsCmdRewriteSyntax(
+  segment: string,
+  platform: string = process.platform,
+  shell: ShellType = getShellConfiguration().shell,
 ): boolean {
-  // If the raw parse fails while the masked one succeeds, the two reads of
-  // the same text do not agree either; the pre-mask arm would have failed
-  // closed here, so fall back to that.
-  return raw === null || parseStructure(masked) !== parseStructure(raw);
+  if (platform !== 'win32' || shell !== 'cmd') return false;
+  let doubleQuoted = false;
+  let percents = 0;
+  let bangs = 0;
+  for (const character of segment) {
+    if (character === '"') {
+      doubleQuoted = !doubleQuoted;
+      continue;
+    }
+    if (character === '^' && !doubleQuoted) return true;
+    if (character === '%') percents++;
+    else if (character === '!') bangs++;
+  }
+  return percents >= 2 || bangs >= 2;
+}
+
+// Syntax whose meaning in the executing Windows shell diverges from the
+// POSIX text model every analysis stage reads, so the command is denied
+// rather than parsed through a model known to misread it. The scan tracks
+// only the quote states the model and the lane agree on.
+//
+// Both lanes: a lone `&` (cmd.exe runs the next command in the SAME shell
+// where the model subshells it; PowerShell reads it as the call operator,
+// which desyncs the segment split) and `( … )` (cmd.exe grouping persists
+// `cd` changes the model scopes away; PowerShell subexpressions — including
+// `$( … )` and `@( … )` — are not the model's command substitution).
+//
+// cmd.exe only: `#` is an ordinary argv character the model truncates as a
+// comment; `;` separates arguments, never commands, but the model splits
+// commands on it; single quotes are not quotes, so the model would strip
+// them and resolve a different filesystem name than the executed argv
+// carries; and a line that both begins and ends with a double quote is
+// re-stripped by `cmd /d /s /c` before execution whenever an inner quote
+// remains. PowerShell only: `--%` hands the rest of the line to the native
+// command verbatim with `%VAR%` expansion, and `''` inside a single-quoted
+// body spells one literal quote where the model joins the two parts.
+// `&&`, `||`, `|` and paired `%`/`!`/caret forms stay out: the lanes the
+// model reads them on agree with it (the cmd.exe rewrite gate owns the
+// paired forms, and PowerShell pipelines are scoped where segments are).
+export function containsUnmodelledWindowsSyntax(
+  command: string,
+  platform: string = process.platform,
+  shell: ShellType = getShellConfiguration().shell,
+): boolean {
+  if (platform !== 'win32' || shell === 'bash') return false;
+  const trimmed = command.trim();
+  if (
+    shell === 'cmd' &&
+    trimmed.length > 1 &&
+    trimmed.startsWith('"') &&
+    trimmed.endsWith('"') &&
+    trimmed.slice(1, -1).includes('"')
+  ) {
+    return true;
+  }
+  let single = false;
+  let double = false;
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    if (single) {
+      if (character === "'") {
+        if (shell === 'powershell' && command[index + 1] === "'") return true;
+        single = false;
+      }
+      continue;
+    }
+    if (double) {
+      if (character === '"') double = false;
+      continue;
+    }
+    if (character === "'") {
+      if (shell === 'cmd') return true;
+      single = true;
+      continue;
+    }
+    if (character === '"') {
+      double = true;
+      continue;
+    }
+    if (character === '(' || character === ')') return true;
+    if (character === '&') {
+      if (command[index + 1] === '&') {
+        index++;
+        continue;
+      }
+      // `2>&1` / `>&2` / `&>file` — a `&` adjacent to a redirection operator
+      // is file-descriptor plumbing, not a command separator, with the same
+      // meaning in cmd.exe, PowerShell and bash. The same exceptions
+      // readTopLevelSeparators and core splitCommands already make.
+      if (command[index + 1] === '>') {
+        index += command[index + 2] === '>' ? 2 : 1;
+        continue;
+      }
+      const previous = command[index - 1];
+      if (previous === '>' || previous === '<') continue;
+      return true;
+    }
+    if (shell === 'cmd' && (character === '#' || character === ';')) {
+      return true;
+    }
+    if (shell === 'powershell' && command.startsWith('--%', index)) {
+      return true;
+    }
+    if (
+      shell === 'powershell' &&
+      POWERSHELL_ENV_MUTATION_PATTERNS.some((pattern) =>
+        pattern.test(command.slice(index)),
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function tokenizeSegment(
   segment: string,
   startDepth: number,
-  shellSemantics: ShellSemantics,
-): TokenizeOutcome {
-  const masking = shellSemantics !== 'posix';
-  let workSegment = segment;
-  if (shellSemantics === 'cmd') {
-    const normalized = normalizeWin32CaretEscapes(segment);
-    if (normalized === null) return { kind: 'unmaskable' };
-    workSegment = normalized;
-  }
-  if (masking && workSegment.includes(WIN32_BACKSLASH_PLACEHOLDER)) {
-    // A literal placeholder in the input cannot be masked without corrupting
-    // the restore step, and parsing it raw reintroduces the escape-eating bug
-    // in a form that can flip an outside relocation into an in-boundary one.
-    return { kind: 'unmaskable' };
-  }
-  if (masking && hasUnmaskableBackslash(workSegment)) {
-    return { kind: 'unmaskable' };
-  }
-  const masked = masking
-    ? workSegment.replaceAll('\\', WIN32_BACKSLASH_PLACEHOLDER)
-    : null;
+): TokenizedSegment | null {
   let parsed: ReturnType<typeof parse>;
-  let raw: ReturnType<typeof parse> | null = null;
   try {
-    parsed = parse(masked ?? workSegment, (key) => `$${key}`);
+    // The caller already normalized the whole command text once; re-running
+    // the Windows pre-pass per segment is what let the stages disagree.
+    parsed = parse(segment, (key) => `$${key}`);
   } catch {
     return null;
-  }
-  if (masked !== null) {
-    try {
-      raw = parse(workSegment, (key) => `$${key}`);
-    } catch {
-      raw = null;
-    }
-    if (structureDiffers(parsed, raw)) {
-      return null;
-    }
-    parsed = parsed.map(restoreWindowsBackslashes);
   }
   let depth = startDepth;
   const runs: GuardRun[] = [{ tokens: [], depth }];
@@ -688,13 +771,7 @@ function tokenizeSegment(
     }
     runs.push({ tokens: [], depth });
   }
-  return {
-    kind: 'ok',
-    segment: {
-      runs: runs.filter((run) => run.tokens.length > 0),
-      endDepth: depth,
-    },
-  };
+  return { runs: runs.filter((run) => run.tokens.length > 0), endDepth: depth };
 }
 
 /**
@@ -778,9 +855,9 @@ const GIT_WORD_PATTERN = /\bgit\b/i;
 // A `cd`/`pushd` inside such a payload relocates the git that follows it just
 // as effectively as a `-C` flag (`su -c 'cd <outside> && git reset --hard'`).
 const TEXT_RELOCATION_MARKER_WITHOUT_C_PATTERN =
-  /(^|\s)(--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
+  /(^|\s)(--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|chdir|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
 const TEXT_RELOCATION_MARKER_PATTERN =
-  /(^|\s)(-C|--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
+  /(^|\s)(-C|--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|chdir|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
 
 // Assignments that decide WHICH git binary the run executes. The guard
 // classifies the program word `git` and then reasons about paths; if the
@@ -788,8 +865,16 @@ const TEXT_RELOCATION_MARKER_PATTERN =
 const GIT_PROGRAM_ENV_KEYS = new Set(['GIT_EXEC_PATH', 'PATH']);
 
 function recordEnvAssignment(token: GuardToken, state: PrefixState): void {
-  const key = leadingEnvAssignmentKey(token.text);
-  if (key === null) return;
+  const rawKey = leadingEnvAssignmentKey(token.text);
+  if (rawKey === null) return;
+  // Environment variable names are case-insensitive to cmd.exe and
+  // PowerShell — `git_dir` and `GIT_DIR` are one variable, and git reads
+  // the uppercase spelling — so fold before matching. POSIX lanes keep
+  // case: there `git_dir` names no variable git reads.
+  const key =
+    process.platform === 'win32' && getShellConfiguration().shell !== 'bash'
+      ? rawKey.toUpperCase()
+      : rawKey;
   if (
     GIT_PROGRAM_ENV_KEYS.has(key) ||
     GIT_UNRESOLVABLE_ENV_KEYS.has(key) ||
@@ -1116,10 +1201,6 @@ type RunAnalysis =
       payload: string;
       state: PrefixState;
       propagatesCwd: boolean;
-      // True when the payload is interpreted by a POSIX shell (`sh -c`,
-      // `bash -c`, `env -S`), so its text must not be Windows-backslash
-      // masked; `eval` runs in this shell and leaves it false.
-      posixPayload: boolean;
       // Only bash imports functions marked with `export -f`; dash/sh/zsh/ksh
       // resolve the external program instead.
       importsExportedFunctions?: boolean;
@@ -1181,15 +1262,51 @@ const EXPORT_BUILTINS = new Set([
 // directory the shell actually enters.
 const CHDIR_OPTION_PATTERN = /^-[LPe@qs]+$/;
 
+// cmd.exe accepts CD/CHDIR/PUSHD with no delimiter before the operand —
+// `cd..`, `cd\dir`, `cd/d X` — and PowerShell resolves the same
+// delimiter-less `cd..`/`cd\` spellings. The POSIX word split reads those
+// as one foreign program word (`cd..`), or splits them on the backslash and
+// reports the operand as the program word (`cd\dir` → `dir`), so the move
+// the shell really makes is never tracked. Split the operand back off at
+// the program-word position before the dispatch looks at it.
+const FUSED_CHDIR_PATTERN = /^(cd|chdir|pushd|popd)([./\\].*)$/i;
+
+function splitFusedWindowsChdirs(run: GuardToken[]): GuardToken[] {
+  for (let index = 0; index < run.length; index++) {
+    const token = run[index]!;
+    if (token.redirect || token.ambiguousFd) continue;
+    if (leadingEnvAssignmentKey(token.text) !== null) continue;
+    if (LEADING_SHELL_KEYWORDS.has(token.text)) continue;
+    const match = token.dynamic ? null : FUSED_CHDIR_PATTERN.exec(token.text);
+    if (match === null) return run;
+    const replacement = run.slice();
+    replacement.splice(
+      index,
+      1,
+      { text: match[1]!, dynamic: false },
+      { text: match[2]!, dynamic: false },
+    );
+    return replacement;
+  }
+  return run;
+}
+
 function findChdirTarget(
   run: GuardToken[],
   start: number,
   variant: 'cd' | 'popd' | 'pushd',
+  windows = false,
 ): GuardToken | undefined {
   let index = start;
   while (index < run.length) {
     const token = run[index]!;
     if (token.text === '--') return run[index + 1];
+    // cmd.exe `cd /D <dir>` also switches the drive; `/D` is an option, not
+    // the directory.
+    if (windows && /^\/[dD]$/.test(token.text)) {
+      index++;
+      continue;
+    }
     if (variant === 'cd' && CHDIR_OPTION_PATTERN.test(token.text)) {
       index++;
       continue;
@@ -1319,7 +1436,13 @@ function readDefinition(
   return { name, body: joinArgvTexts(bodyTokens) };
 }
 
-function analyzeRun(run: GuardToken[]): RunAnalysis {
+function analyzeRun(
+  run: GuardToken[],
+  platform: string = process.platform,
+): RunAnalysis {
+  if (platform === 'win32' && getShellConfiguration().shell !== 'bash') {
+    run = splitFusedWindowsChdirs(run);
+  }
   const state: PrefixState = { relocations: [], unresolved: false };
   let index = 0;
   let assignments = 0;
@@ -1350,6 +1473,52 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
       for (const operand of operands) recordEnvAssignment(operand, state);
       return { kind: 'export', state, operands };
     }
+    if (
+      platform === 'win32' &&
+      getShellConfiguration().shell !== 'bash' &&
+      (program === 'path' || program === 'doskey')
+    ) {
+      // cmd.exe builtins that change how every later chained command
+      // resolves: `path` rewrites the executable search path (so which
+      // `git` runs is no longer provable) and `doskey` installs macros.
+      state.unresolved = true;
+      return { kind: 'export', state, operands: [] };
+    }
+    if (
+      platform === 'win32' &&
+      getShellConfiguration().shell !== 'bash' &&
+      (program === 'set' || program === 'setx')
+    ) {
+      const operands = run.slice(index + 1);
+      if (
+        program === 'setx' ||
+        getShellConfiguration().shell === 'powershell'
+      ) {
+        // setx writes the registry for FUTURE sessions, and PowerShell's
+        // `set` is the Set-Variable alias: neither touches the process
+        // environment the later `&&`-chained children execute under.
+        // Recording a relocation would fabricate state the executed chain
+        // never sees — and a phantom git-dir relocation switches off the
+        // repository-discovery check real git falls back to — so these can
+        // only ever add denials.
+        state.unresolved = true;
+        return { kind: 'export', state, operands: [] };
+      }
+      // cmd.exe `set VAR=value` mutates the environment every later
+      // `&&`-chained command executes under, so it carries the same
+      // semantics as a POSIX `export VAR=value`; route the assignment
+      // through that machinery. Anything that is not a plain assignment
+      // (bare `set`, `/p`/`/a`, dynamic operands) is undecidable and fails
+      // closed.
+      for (const operand of operands) {
+        if (operand.dynamic || leadingEnvAssignmentKey(operand.text) === null) {
+          state.unresolved = true;
+          return { kind: 'export', state, operands: [] };
+        }
+        recordEnvAssignment(operand, state);
+      }
+      return { kind: 'export', state, operands };
+    }
     if (program === 'set') {
       if (requestsAllExport(run, index + 1)) {
         return { kind: 'all-export', state };
@@ -1367,9 +1536,6 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
           payload: scan.payload,
           state,
           propagatesCwd: false,
-          // `env -S` splits its string and execs it under POSIX quoting, so
-          // its text is read with POSIX escapes, not Windows masking.
-          posixPayload: true,
         };
       }
       index = scan.next;
@@ -1399,10 +1565,12 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
         // `eval` runs in the current shell, so a `cd` inside the payload
         // relocates subsequent commands in this run's scope.
         propagatesCwd: true,
-        // `eval` re-parses in this very shell, so it keeps this level's
-        // semantics rather than forcing a POSIX reading.
-        posixPayload: false,
       };
+    }
+    if (platform === 'win32' && WINDOWS_SHELL_PROGRAMS.has(program)) {
+      // The payload belongs to a grammar this analysis does not model; the
+      // undecidable arm fails closed on the documented reason.
+      return { kind: 'undecidable' };
     }
     if (SHELL_WRAPPER_PROGRAMS.has(program)) {
       const scan = consumeShellWrapper(run, index);
@@ -1415,9 +1583,6 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
         payload: scan.payload,
         state,
         propagatesCwd: false,
-        // The `-c` payload is interpreted by the POSIX shell named above, so
-        // it must not be read with the daemon's Windows masking.
-        posixPayload: true,
         // Only bash imports `export -f` functions, and only when it inherits
         // the environment carrying them — `env -i bash -c` wipes them first.
         importsExportedFunctions:
@@ -1431,16 +1596,39 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
     if (program === 'git') {
       return { kind: 'git', tokens: run.slice(index), state };
     }
-    if (program === 'cd' || program === 'pushd' || program === 'popd') {
+    if (
+      program === 'cd' ||
+      program === 'pushd' ||
+      program === 'popd' ||
+      (platform === 'win32' && program === 'chdir') ||
+      (platform === 'win32' &&
+        getShellConfiguration().shell === 'powershell' &&
+        POWERSHELL_LOCATION_PROGRAMS.has(program))
+    ) {
+      const variant: 'cd' | 'popd' | 'pushd' =
+        program === 'chdir' || program === 'set-location' || program === 'sl'
+          ? 'cd'
+          : program === 'push-location' || program === 'pushd'
+            ? 'pushd'
+            : program === 'pop-location' || program === 'popd'
+              ? 'popd'
+              : 'cd';
+      const rest = run.slice(index + 1);
+      // `Set-Location -Path X` names the directory through a flag; take the
+      // flag's value instead of failing the run on the flag itself.
+      const namedIndex = rest.findIndex(
+        (token) => token.text === '-Path' || token.text === '-LiteralPath',
+      );
       return {
         kind: 'cd',
-        variant: program,
-        target: findChdirTarget(run, index + 1, program),
+        variant,
+        target:
+          namedIndex >= 0
+            ? rest[namedIndex + 1]
+            : findChdirTarget(rest, 0, variant, platform === 'win32'),
         // `cd -P` resolves each component through its symlinks before
         // applying `..`, which a lexical resolve cannot reproduce.
-        physical: run
-          .slice(index + 1)
-          .some((token) => /^-[A-Za-z]*P/.test(token.text)),
+        physical: rest.some((token) => /^-[A-Za-z]*P/.test(token.text)),
       };
     }
     return { kind: 'other', state, assignmentsOnly: false };
@@ -1654,24 +1842,15 @@ async function resolvePhysicalPath(
   base: string,
   target: string,
 ): Promise<string> {
-  // Strip the root from an absolute target before splitting: on Windows the
-  // split keeps a bare `C:` first segment, and joining it onto `C:\` again
-  // yields `C:\C:\…`, silently relocating every later resolution onto a
-  // nonexistent doubling of the path. Slicing the root off leaves the same
-  // segments a POSIX absolute path produces after its empty leading segment
-  // is skipped, and drops the `\\server\share` prefix of a UNC path whole.
-  let current: string;
-  let remainder: string;
-  if (path.isAbsolute(target)) {
-    const root = path.parse(target).root;
-    current = root;
-    remainder = target.slice(root.length);
-  } else {
-    current = base;
-    remainder = target;
-  }
+  // Splitting an absolute Windows path includes the drive as a segment
+  // (`C:`), which `path.join` would glue back onto the root as `C:\C:`;
+  // walk only the part past the root instead.
+  const parsed = path.parse(target);
+  const absolute = path.isAbsolute(target);
+  let current = absolute ? parsed.root : base;
+  const walkable = absolute ? target.slice(parsed.root.length) : target;
   const separators = path.sep === '\\' ? /[\\/]+/ : /\/+/;
-  for (const segment of remainder.split(separators)) {
+  for (const segment of walkable.split(separators)) {
     if (segment === '' || segment === '.') continue;
     if (segment === '..') {
       current = path.dirname(await realpathNearestExistingAsync(current));
@@ -2053,11 +2232,6 @@ interface RelinkState {
 
 interface EvaluationScope {
   readonly relink: RelinkState;
-  // The parse semantics this level is read under: 'posix' for a payload that
-  // runs under a POSIX interpreter, otherwise the daemon's own lane. Carried
-  // so a nested payload does not recompute it from the daemon shell and
-  // wrongly re-apply Windows backslash masking.
-  readonly shellSemantics?: ShellSemantics;
   // Shell variables the nested command can see: `eval` and subshells inherit
   // them, a `sh -c` subprocess does not.
   readonly locals?: Map<string, GuardToken>;
@@ -2206,9 +2380,6 @@ async function evaluateCommandWithCwd(
   scope: EvaluationScope = { relink: { targets: [], gitDir: false } },
 ): Promise<CommandEvaluation> {
   let trackedCwd = startCwd;
-  // Computed once at this level and carried into nested payloads so a POSIX
-  // interpreter (sh/bash/env -S) does not re-derive the daemon's own lane.
-  const shellSemantics = scope.shellSemantics ?? detectShellSemantics();
   // Assignments this command exported into the environment of everything that
   // runs after them, and whether `set -a` made plain assignments exported.
   const exported: PrefixState = { relocations: [], unresolved: false };
@@ -2324,7 +2495,6 @@ async function evaluateCommandWithCwd(
       depth + 1,
       {
         relink: scope.relink,
-        shellSemantics,
         locals: shellLocals,
         exportedNames,
         allExport,
@@ -2346,22 +2516,61 @@ async function evaluateCommandWithCwd(
     return undefined;
   };
 
-  const segments = splitCommands(stripHeredocBodies(command));
-  const separators = readTopLevelSeparators(stripHeredocBodies(command));
+  // A cmd rewrite pair can straddle a command separator (`%A && git -C %B`
+  // pairs across the `&&`), so the whole text is checked before splitting.
+  const platformNow = process.platform;
+  const shellNow = getShellConfiguration().shell;
+  const windowsNative = platformNow === 'win32' && shellNow !== 'bash';
+  // Heredocs are a POSIX shell construct: on the Windows lanes the marker
+  // line's body lines are separate commands, so stripping them would hide
+  // commands the executed text really runs.
+  const strippedCommand = windowsNative ? command : stripHeredocBodies(command);
+  if (containsCmdRewriteSyntax(strippedCommand, platformNow, shellNow)) {
+    return {
+      denial: { allowed: false, reason: CMD_REWRITE_SYNTAX_DENIAL },
+      cwdAfter: trackedCwd,
+    };
+  }
+  if (containsUnmodelledWindowsSyntax(strippedCommand, platformNow, shellNow)) {
+    return {
+      denial: { allowed: false, reason: WINDOWS_UNMODELLED_SYNTAX_DENIAL },
+      cwdAfter: trackedCwd,
+    };
+  }
+  // The Windows separator pre-pass must normalize the WHOLE text once,
+  // before any stage reads it: splitCommands and readTopLevelSeparators scan
+  // it too, and a rewrite applied per stage lets the stages disagree about
+  // where one command ends (`cd <out>\&& git reset --hard`). A nested
+  // payload re-normalizes an already-normalized body; that is harmless —
+  // the `"\\"` form is a fixed point and Windows path resolution collapses
+  // duplicated separators.
+  const normalizedCommand = preserveWindowsPathSeparators(
+    strippedCommand,
+    platformNow,
+    shellNow,
+  );
+  const segments = splitCommands(normalizedCommand);
+  const separators = readTopLevelSeparators(normalizedCommand);
   // On any disagreement with `splitCommands`, treat every segment of a piped
   // command as a pipeline component rather than guessing.
   const separatorsMatch = separators.length === segments.length - 1;
   const isPipeComponent = (index: number): boolean =>
-    separatorsMatch
-      ? // Both sides of a pipe run in subshells; for `&` only the segment it
-        // follows (the backgrounded one) does — the next segment is
-        // foreground.
-        separators[index - 1] === '|' ||
-        separators[index] === '|' ||
-        separators[index] === '&'
-      : // Structural disagreement with `splitCommands`: scope every segment
-        // rather than guess which ones ran in a subshell.
-        separators.some((separator) => separator === '|' || separator === '&');
+    // A PowerShell pipeline runs every stage in the one session — a `cd` on
+    // either side outlives the pipe — so no segment is scoped there.
+    windowsNative && shellNow === 'powershell'
+      ? false
+      : separatorsMatch
+        ? // Both sides of a pipe run in subshells; for `&` only the segment
+          // it follows (the backgrounded one) does — the next segment is
+          // foreground.
+          separators[index - 1] === '|' ||
+          separators[index] === '|' ||
+          separators[index] === '&'
+        : // Structural disagreement with `splitCommands`: scope every segment
+          // rather than guess which ones ran in a subshell.
+          separators.some(
+            (separator) => separator === '|' || separator === '&',
+          );
   for (const [segmentIndex, segment] of segments.entries()) {
     const pipeComponent = isPipeComponent(segmentIndex);
     const cwdBeforeSegment = trackedCwd;
@@ -2387,29 +2596,25 @@ async function evaluateCommandWithCwd(
     const allExportBefore = allExport;
     const substitutions = extractCommandSubstitutions(segment);
     const tokenized =
-      substitutions === null
-        ? null
-        : tokenizeSegment(segment, subshellDepth, shellSemantics);
-    if (tokenized === null) {
+      substitutions === null ? null : tokenizeSegment(segment, subshellDepth);
+    const runs = tokenized?.runs ?? null;
+    if (runs === null) {
       return {
         denial: { allowed: false, reason: UNPARSEABLE_COMMAND_DENIAL },
         cwdAfter: trackedCwd,
       };
     }
-    if (tokenized.kind === 'unmaskable') {
-      return {
-        denial: { allowed: false, reason: UNMODELABLE_ESCAPE_DENIAL },
-        cwdAfter: trackedCwd,
-      };
-    }
-    const runs = tokenized.segment.runs;
     // `name() { … }` — shell-quote reports the parentheses as operators, so
     // the header is recognised on the raw segment. The body runs wherever the
     // name is later used, which is what the recorded shape stands in for.
-    const functionHeader =
-      /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)/.exec(segment) ??
-      // The `function NAME` keyword form, with the `()` optional.
-      /^\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\b/.exec(segment);
+    // `alias`/function definitions are bash semantics; on the Windows lanes
+    // the same text defines nothing, so recording a shadow there would make
+    // the replay hide the real program the shell executes.
+    const functionHeader = windowsNative
+      ? null
+      : (/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)/.exec(segment) ??
+        // The `function NAME` keyword form, with the `()` optional.
+        /^\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\b/.exec(segment));
     if (functionHeader) {
       insideDefinition = functionHeader[1]!;
       // Start the body at the first `{`; the header before it is not code.
@@ -2451,7 +2656,6 @@ async function evaluateCommandWithCwd(
         // so it gets copies and nothing is merged back.
         {
           relink: scope.relink,
-          shellSemantics,
           locals: new Map(shellLocals),
           exportedNames: new Set(exportedNames),
           allExport,
@@ -2592,7 +2796,7 @@ async function evaluateCommandWithCwd(
         if (denial) return { denial, cwdAfter: trackedCwd };
         continue;
       }
-      const analysis = analyzeRun(run);
+      const analysis = analyzeRun(run, platformNow);
       switch (analysis.kind) {
         case 'cd': {
           const target =
@@ -2654,11 +2858,6 @@ async function evaluateCommandWithCwd(
             depth + 1,
             {
               relink: scope.relink,
-              // A `sh -c`/`env -S` payload runs under a POSIX interpreter, so
-              // its text must not be read with the daemon's Windows masking;
-              // `eval` inherits this shell's semantics. Carried, not
-              // re-derived, so the lane survives the recursion.
-              shellSemantics: analysis.posixPayload ? 'posix' : shellSemantics,
               // `eval` runs in this very shell, so it sees these variables
               // and the export attributes; a `sh -c` subprocess inherits only
               // exported ones.
@@ -2873,7 +3072,9 @@ async function evaluateCommandWithCwd(
           break;
         case 'other': {
           // `alias name=body …` / `name() { body }` — record, don't execute.
-          const aliasDefinitions = readAliasDefinitions(run);
+          const aliasDefinitions = windowsNative
+            ? []
+            : readAliasDefinitions(run);
           if (aliasDefinitions.length > 0) {
             for (const definition of aliasDefinitions) {
               definedBodies.set(definition.name, {
@@ -2883,7 +3084,7 @@ async function evaluateCommandWithCwd(
             }
             break;
           }
-          const definition = readDefinition(run);
+          const definition = windowsNative ? undefined : readDefinition(run);
           if (definition) {
             definedBodies.set(definition.name, {
               body: definition.body,
@@ -2892,7 +3093,9 @@ async function evaluateCommandWithCwd(
             break;
           }
           const programToken = readProgramWord(run);
-          const definitionName = readFunctionName(run);
+          const definitionName = windowsNative
+            ? undefined
+            : readFunctionName(run);
           if (definitionName) {
             if (run.some((token) => GIT_WORD_PATTERN.test(token.text))) {
               gitShapedNames.add(definitionName);
@@ -2929,16 +3132,31 @@ async function evaluateCommandWithCwd(
             // symlink race rather than denying every `tar && git commit`.
             if (trackedCwd !== undefined) relinkedTargets.push(trackedCwd);
           }
-          if (
-            run.some((t) => PATH_RELINKING_PROGRAMS.has(executableBaseName(t)))
-          ) {
-            // Wrappers and leading assignments (`env ln …`, `X=1 ln …`) keep
-            // the relinking program out of run[0], so scan the whole run.
-            for (const operand of run) {
+          const relinkPrograms =
+            platformNow === 'win32'
+              ? WIN32_PATH_RELINKING_PROGRAMS
+              : PATH_RELINKING_PROGRAMS;
+          // Wrappers and leading assignments (`env ln …`, `X=1 ln …`) keep
+          // the relinking program out of run[0], so find it in the whole
+          // run — but skip ONLY that token: a relink destination may itself
+          // be named like a relink program (`mv <outside> copy`), and the
+          // destination is exactly the path a later containment proof
+          // checks.
+          const relinkProgramIndex = run.findIndex(
+            (t) =>
+              !t.redirect &&
+              !t.ambiguousFd &&
+              relinkPrograms.has(executableBaseName(t)),
+          );
+          if (relinkProgramIndex >= 0) {
+            for (const [operandIndex, operand] of run.entries()) {
+              if (operandIndex === relinkProgramIndex) continue;
+              if (operand.redirect || operand.ambiguousFd) continue;
               if (operand.text.startsWith('-')) continue;
-              if (PATH_RELINKING_PROGRAMS.has(executableBaseName(operand))) {
-                continue;
-              }
+              // `/E`, `/MIR` — Windows program switches are never paths on
+              // the windows-native lanes. The Git-Bash lane keeps `/…`
+              // operands: there they are POSIX paths.
+              if (windowsNative && operand.text.startsWith('/')) continue;
               if (operand.dynamic || trackedCwd === undefined) {
                 scope.relink.gitDir = true;
                 continue;
@@ -2999,11 +3217,11 @@ async function evaluateCommandWithCwd(
     // The tokenizer's closing depth is authoritative for what this segment
     // did with parentheses: `(cd <outside>)` opens and closes within it, so
     // the subshell's cwd must not survive into the next segment.
-    while (tokenized.segment.endDepth < subshellDepth) {
+    while (tokenized!.endDepth < subshellDepth) {
       restoreShellState(subshellCwds.pop());
       subshellDepth--;
     }
-    while (tokenized.segment.endDepth > subshellDepth) {
+    while (tokenized!.endDepth > subshellDepth) {
       subshellCwds.push(snapshotShellState());
       subshellDepth++;
     }

@@ -11,7 +11,7 @@ import type {
 import {
   useConnection,
   useTranscriptStore,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 
 // Cap transcript re-renders at ~20fps. During streaming every network chunk
 // notifies the store; each render then runs the O(transcript) normalization
@@ -36,7 +36,26 @@ interface AnimationFrameTranscriptSnapshot {
   blockChangeSummary?: DaemonTranscriptBlockChangeSummary;
 }
 
-export function useAnimationFrameTranscriptSnapshot(): AnimationFrameTranscriptSnapshot {
+interface AnimationFrameTranscriptSnapshotOptions {
+  structuralOnly?: boolean;
+}
+
+function isSameTranscriptStructure(
+  previous: DaemonTranscriptBlockChangeSummary | undefined,
+  next: DaemonTranscriptBlockChangeSummary | undefined,
+): boolean {
+  return (
+    previous !== undefined &&
+    next !== undefined &&
+    previous.source === next.source &&
+    previous.tailAppendBarrierRevision === next.tailAppendBarrierRevision
+  );
+}
+
+export function useAnimationFrameTranscriptSnapshot(
+  options: AnimationFrameTranscriptSnapshotOptions = {},
+): AnimationFrameTranscriptSnapshot {
+  const structuralOnly = options.structuralOnly === true;
   const store = useTranscriptStore();
   const { sessionId } = useConnection();
   const subscribe = useCallback(
@@ -64,7 +83,14 @@ export function useAnimationFrameTranscriptSnapshot(): AnimationFrameTranscriptS
         }
       };
       document.addEventListener('beforeinput', recordInput, true);
+      let previousSummary = store.getBlockChangeSummary?.();
       const unsubscribe = store.subscribe(() => {
+        const nextSummary = store.getBlockChangeSummary?.();
+        const tailOnly =
+          structuralOnly &&
+          isSameTranscriptStructure(previousSummary, nextSummary);
+        previousSummary = nextSummary;
+        if (tailOnly) return;
         if (frame !== null) return;
         pendingSinceTs = performance.now();
         frame = window.requestAnimationFrame(dispatchWhenDue);
@@ -77,7 +103,7 @@ export function useAnimationFrameTranscriptSnapshot(): AnimationFrameTranscriptS
         }
       };
     },
-    [store],
+    [store, structuralOnly],
   );
   const getSnapshot = useMemo(() => {
     let cached:
@@ -90,12 +116,19 @@ export function useAnimationFrameTranscriptSnapshot(): AnimationFrameTranscriptS
     return () => {
       const state = store.getSnapshot();
       const blockChangeSummary = store.getBlockChangeSummary?.();
-      if (
-        !cached ||
-        cached.blocks !== state.blocks ||
-        cached.blockIndexById !== state.blockIndexById ||
-        cached.blockChangeSummary !== blockChangeSummary
-      ) {
+      const canCompareStructure =
+        structuralOnly &&
+        cached?.blockChangeSummary !== undefined &&
+        blockChangeSummary !== undefined;
+      const changed = canCompareStructure
+        ? !isSameTranscriptStructure(
+            cached?.blockChangeSummary,
+            blockChangeSummary,
+          ) || cached?.blockIndexById !== state.blockIndexById
+        : cached?.blocks !== state.blocks ||
+          cached?.blockIndexById !== state.blockIndexById ||
+          cached?.blockChangeSummary !== blockChangeSummary;
+      if (!cached || changed) {
         cached = {
           blocks: state.blocks,
           blockIndexById: state.blockIndexById,
@@ -104,7 +137,7 @@ export function useAnimationFrameTranscriptSnapshot(): AnimationFrameTranscriptS
       }
       return cached;
     };
-  }, [store]);
+  }, [store, structuralOnly]);
   const live = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   // Defer transcript re-renders so urgent updates — composer keystrokes,
   // button presses — are never queued behind a streaming frame. The deferred

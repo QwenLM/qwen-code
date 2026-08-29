@@ -7,8 +7,11 @@
 import type { Content } from '@google/genai';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { Config } from '../config/config.js';
-import type { PermissionManager } from '../permissions/permission-manager.js';
+import { deriveConfig, type Config } from '../config/config.js';
+import type {
+  PermissionManager,
+  ToolRegistrationStatus,
+} from '../permissions/permission-manager.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
@@ -49,8 +52,10 @@ type SkillScopedPermissionManager = Pick<
   PermissionManager,
   | 'evaluate'
   | 'findMatchingDenyRule'
+  | 'getToolRegistrationStatus'
   | 'hasMatchingAskRule'
   | 'hasRelevantRules'
+  | 'isToolDisabledByCoreToolsAllowList'
   | 'isToolEnabled'
 >;
 
@@ -254,12 +259,29 @@ export function createSkillScopedAgentConfig(
       if (basePm) return basePm.isToolEnabled(toolName);
       return true;
     },
+    async getToolRegistrationStatus(
+      toolName: string,
+    ): Promise<ToolRegistrationStatus> {
+      if (isScopedTool(toolName)) return 'registered';
+      if (basePm) {
+        return typeof basePm.getToolRegistrationStatus === 'function'
+          ? basePm.getToolRegistrationStatus(toolName)
+          : Promise.resolve('registered' as ToolRegistrationStatus);
+      }
+      return 'registered';
+    },
+    isToolDisabledByCoreToolsAllowList(toolName: string): boolean {
+      return (
+        (typeof basePm?.isToolDisabledByCoreToolsAllowList === 'function' &&
+          basePm.isToolDisabledByCoreToolsAllowList(toolName)) ||
+        false
+      );
+    },
   };
 
-  const scopedConfig = Object.create(config) as Config;
-  scopedConfig.getPermissionManager = () =>
-    scopedPm as unknown as PermissionManager;
-  return scopedConfig;
+  return deriveConfig(config, {
+    getPermissionManager: () => scopedPm as unknown as PermissionManager,
+  });
 }
 
 // Exported for tests so the `auto-skill-` prefix instruction stays asserted
