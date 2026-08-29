@@ -848,16 +848,27 @@ describe('autofix-status-heartbeat loop', () => {
     });
     const child = startLoop(env);
     try {
-      // Several tick intervals at the 1s test interval.
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      // Gate on the skip line itself, not a fixed sleep: the loop sleeps
+      // a full interval BEFORE its first tick, so on a loaded runner the
+      // tick's forks land after any small fixed budget, and the sleep
+      // raced startup — a red lane with no product defect. Content, not
+      // existence: `exec >> heartbeat.log` creates the file before any
+      // line is written.
+      const ok = await waitFor(
+        () =>
+          existsSync(join(workdir, 'heartbeat.log')) &&
+          readFileSync(join(workdir, 'heartbeat.log'), 'utf8').includes(
+            'gh config mint failed; skipping this tick',
+          ),
+        8000,
+      );
+      assert.ok(ok, 'a failed mint must log a skipped tick');
       assert.equal(
         readCalls(gh.records).length,
         0,
         'a failed mint must skip the gh call entirely',
       );
       assert.ok(child.exitCode === null, 'a failed mint must not end the loop');
-      const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
-      assert.match(logText, /gh config mint failed; skipping this tick/);
     } finally {
       killGroup(child);
     }
