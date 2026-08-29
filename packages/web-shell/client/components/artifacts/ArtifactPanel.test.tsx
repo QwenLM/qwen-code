@@ -85,6 +85,12 @@ vi.mock(
   }),
 );
 
+vi.mock('../terminal/TerminalPanel', () => ({
+  TerminalPanel: ({ terminalId }: { terminalId: string }) => (
+    <div data-testid="terminal-panel" data-terminal-id={terminalId} />
+  ),
+}));
+
 const { ArtifactPanel } = await import('./ArtifactPanel');
 const { useArtifactWorkspaceTarget } = await import(
   './useArtifactWorkspaceTarget'
@@ -361,6 +367,49 @@ afterEach(() => {
       },
     ],
   };
+});
+
+describe('ArtifactPanel terminal tabs', () => {
+  const renderPanel = (activeTabId: string) => (
+    <I18nProvider language="en">
+      <ArtifactPanel
+        artifacts={[]}
+        tabs={[
+          { id: 'terminal-one', kind: 'terminal', title: 'Terminal' },
+          { id: 'terminal-two', kind: 'terminal', title: 'Terminal (2)' },
+        ]}
+        activeTabId={activeTabId}
+        reviewChanges={[]}
+        selectedReviewPath={null}
+        onSelectTab={() => {}}
+        onCloseTab={() => {}}
+        onOpenFilePreview={() => {}}
+        onClose={() => {}}
+      />
+    </I18nProvider>
+  );
+
+  it('keeps terminal instances mounted while switching tabs', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(renderPanel('terminal-one')));
+    const first = container.querySelector('[data-terminal-id="terminal-one"]');
+    expect(
+      container.querySelectorAll('[data-testid="terminal-panel"]'),
+    ).toHaveLength(2);
+
+    act(() => root.render(renderPanel('terminal-two')));
+
+    expect(container.querySelector('[data-terminal-id="terminal-one"]')).toBe(
+      first,
+    );
+    expect(
+      container.querySelectorAll('[data-testid="terminal-panel"]'),
+    ).toHaveLength(2);
+  });
 });
 
 describe('artifact workspace authority', () => {
@@ -1438,6 +1487,52 @@ describe('ArtifactPanel scheduled-task ownership', () => {
 });
 
 describe('ArtifactPanel add menu', () => {
+  it('opens terminals without forwarding UI events as terminal ids', () => {
+    const onOpenTerminal = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderPanel = (withTab: boolean) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={
+            withTab
+              ? [{ id: 'terminal-one', kind: 'terminal', title: 'Terminal' }]
+              : []
+          }
+          activeTabId={withTab ? 'terminal-one' : null}
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          onOpenTerminal={onOpenTerminal}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+
+    act(() => root.render(renderPanel(false)));
+    const emptyAction = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Terminal'));
+    act(() => emptyAction?.click());
+    expect(onOpenTerminal).toHaveBeenLastCalledWith();
+
+    act(() => root.render(renderPanel(true)));
+    openAddMenu(container);
+    const menuAction = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Terminal');
+    act(() => menuAction?.click());
+    expect(onOpenTerminal).toHaveBeenLastCalledWith();
+    expect(onOpenTerminal).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the disabled review action on the empty page and hides the add button', () => {
     const onClose = vi.fn();
     const container = document.createElement('div');
@@ -1801,6 +1896,61 @@ describe('ArtifactPanel add menu', () => {
 });
 
 describe('ArtifactPanel review downloads', () => {
+  it('renders a saved unified patch without full file bodies', () => {
+    const fileDiff =
+      '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new';
+    const changes = [
+      {
+        path: 'src/app.ts',
+        status: 'modified' as const,
+        toolCallId: 'tool-app',
+        isArtifact: false,
+        diffs: [{ oldText: '', newText: '', fileDiff }],
+      },
+    ];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="review"
+            reviewChanges={changes}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="src/app.ts"]')
+        ?.click();
+    });
+
+    expect(container.textContent).toContain('old');
+    expect(container.textContent).toContain('new');
+    expect(container.textContent).not.toContain('No diff available.');
+  });
+
   it('shows the requested actions and reports download failures through toast', async () => {
     const changes = ['report.html', 'notes.md', 'image.png'].map((path) => ({
       path,

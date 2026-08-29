@@ -10,6 +10,7 @@ import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { ToolErrorType } from './tool-error.js';
 import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
+import type { BroadcastResult } from '../agents/team/TeamManager.js';
 
 const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
@@ -17,7 +18,7 @@ const PLAN_MODE = 'plan' as ApprovalMode;
 function makeTeamConfig(opts?: {
   teamManager?: {
     sendMessage: (...args: unknown[]) => Promise<void>;
-    broadcast: (...args: unknown[]) => Promise<void>;
+    broadcast: (...args: unknown[]) => Promise<BroadcastResult>;
   } | null;
   approvalMode?: ApprovalMode;
 }) {
@@ -69,7 +70,9 @@ describe('SendMessageTool — team mode', () => {
   });
 
   it('broadcasts with "*"', async () => {
-    const broadcast = vi.fn().mockResolvedValue(undefined);
+    const broadcast = vi
+      .fn()
+      .mockResolvedValue({ total: 2, failedRecipients: [] });
     const tool = new SendMessageTool(
       makeTeamConfig({
         teamManager: {

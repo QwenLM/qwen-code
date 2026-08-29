@@ -619,13 +619,49 @@ describe('agent-prompt (command boundary)', () => {
       // The verdict branch: Exclusion Criteria yes, finding format no.
       expect(briefText).toContain('What is NOT a finding');
       expect(briefText).not.toContain('**Anchor:**');
-      // The witness rule: a confirmed Critical returns its executed evidence
+      // The witness rule: a confirmed finding returns its executed evidence
       // or the one-line reason, and the sweep is a named witness form. These
-      // demands are what the orchestrator's low-confidence demotion sorts on,
-      // so a brief that drops them silently demotes every trace-only Critical.
-      expect(briefText).toContain('A confirmed Critical returns its witness.');
+      // demands are what the machine demotion (`holdUnwitnessedFindings`)
+      // sorts on, so a brief that drops them silently demotes every
+      // trace-only Critical — and, since the rule grew to the other postable
+      // severity, every trace-only Suggestion with it.
+      expect(briefText).toContain(
+        'A confirmed Critical returns its witness — and so does every confirmed Suggestion.',
+      );
       expect(briefText).toContain('witness: not run —');
       expect(briefText).toContain('sweep the real population');
+      // The two decision axes (#10291) ride the same witness: the brief
+      // defines both values of each, ties the routing consequence to the
+      // ONE combination the floor defers, and tells the verifier to omit
+      // rather than guess — a guess on either axis completes the pair and
+      // takes a blocker off the pull request.
+      expect(briefText).toContain(
+        'A confirmed Critical also returns its two decision axes',
+      );
+      for (const value of [
+        'direction: certifies-falsely',
+        'direction: fails-closed',
+        'baseline: regression',
+        'baseline: new-surface',
+      ]) {
+        expect(briefText).toContain(value);
+      }
+      expect(briefText).toContain(
+        'only a Critical that is both fails-closed and new-surface is recorded as a deferral',
+      );
+      expect(briefText).toContain('OMIT that line rather than guess');
+      // The incidental channel and the run-pairing capabilities the brief
+      // gained with it: dropping any of these silently reverts the verifier
+      // to a reader.
+      expect(briefText).toContain('### Incidental findings');
+      expect(briefText).toContain('review ab-drive');
+      expect(briefText).toContain('revert-hunk');
+      // The revert-hunk paragraph must distinguish a genuine coupling
+      // refusal (carries `conflict`) from a harness/invocation failure
+      // (carries `harnessFailure`): dropping this tells the verifier to
+      // quote a mistyped --tree as a fact about the diff.
+      expect(briefText).toContain('carries `conflict`');
+      expect(briefText).toContain('`harnessFailure: true`');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2772,6 +2808,38 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // no guard at all — a rename, a comment, a docs line.
     expect(brief).toContain(
       'or "N/A" when the fix adds no guard, branch or behaviour a test can pin',
+    );
+  });
+
+  it('welds the fix-constraint format into the launched finder briefs', () => {
+    // The premise half of #10153, pinned where it reaches the agents. Four
+    // clauses have to survive together: the format has to ASK for the fact,
+    // the omission has to stay an omission (a finder copying the Fix witness
+    // habit would write `N/A` and lengthen every comment), the evidence bar
+    // has to stay at witness grade (a wrong constraint is misdirection the
+    // fixer follows, so prose with no source is forbidden outright), and the
+    // field must not become a bar on reporting.
+    const brief = buildRoleBrief(PLAN, '1a');
+    expect(brief).toContain(
+      '**Fix constraint:** <an existing fact the fix must not violate, with its source',
+    );
+    expect(brief).toContain(
+      'OMIT THIS LINE when you observed none; never write "N/A"',
+    );
+    expect(brief).toContain(
+      'quote the constant or give the `file:line`, or omit the line',
+    );
+    expect(brief).toContain(
+      'is forbidden in this field exactly as "this looks risky" is forbidden in the failure scenario',
+    );
+    expect(brief).toContain(
+      'Like Fix witness, this field never gates reporting',
+    );
+    // And the two fields stay two: the constraint paragraph opens by parting
+    // claim from premise, so a rewrite that folds one into the other — "put
+    // the limit in the Fix witness" — reds here rather than shipping green.
+    expect(brief).toContain(
+      "Fix witness pins the fix's *claim*: does it do what it says. Nothing pins the fix's *premises*",
     );
   });
 

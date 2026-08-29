@@ -56,13 +56,19 @@ function extensionSkill(name: string): SkillConfig {
 }
 
 describe('extension skill activity helpers', () => {
-  it('matches skills from inactive extensions by name and displayName', () => {
+  it('matches skills from inactive extensions only by canonical name', () => {
     const refs = inactiveExtensionSkillRefs(
       configWithExtensions([
         extension({
           name: 'canonical-ext',
-          displayName: 'Display Ext',
+          displayName: 'Shared Display',
           isActive: false,
+          skills: [extensionSkill('audit')],
+        }),
+        extension({
+          name: 'active-ext',
+          displayName: 'Shared Display',
+          isActive: true,
           skills: [extensionSkill('audit')],
         }),
       ]),
@@ -71,8 +77,11 @@ describe('extension skill activity helpers', () => {
     expect(
       isInactiveExtensionSkill(skill('audit', 'canonical-ext'), refs),
     ).toBe(true);
-    expect(isInactiveExtensionSkill(skill('audit', 'Display Ext'), refs)).toBe(
-      true,
+    expect(
+      isInactiveExtensionSkill(skill('audit', 'Shared Display'), refs),
+    ).toBe(false);
+    expect(isInactiveExtensionSkill(skill('audit', 'active-ext'), refs)).toBe(
+      false,
     );
   });
 

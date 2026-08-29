@@ -336,6 +336,11 @@ async function startSingle(
       process.cwd(),
       { resolveEnvVars: 'available' },
     );
+    if (config.multiSession) {
+      throw new Error(
+        'multiSession is available only for daemon-managed Channels started by qwen serve.',
+      );
+    }
   } catch (err) {
     writeStderrLine(
       `Error: ${err instanceof Error ? err.message : String(err)}`,
@@ -456,6 +461,11 @@ async function startAll(
       channelsConfig,
       Object.keys(channelsConfig),
     );
+    if (parsed.some(({ config }) => config.multiSession)) {
+      throw new Error(
+        'multiSession is available only for daemon-managed Channels started by qwen serve.',
+      );
+    }
   } catch (err) {
     writeStderrLine(err instanceof Error ? err.message : String(err));
     process.exit(1);

@@ -67,6 +67,17 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted).toContain('truncated from');
   });
 
+  it('should preserve the unchanged flag through compaction', () => {
+    const display = {
+      type: 'todo_list' as const,
+      todos: [{ id: '1', content: 'Task', status: 'pending' as const }],
+      changes: { created: [], completed: [] },
+      unchanged: true,
+    };
+    const compacted = compactToolResultDisplayForHistory(display);
+    expect((compacted as TodoResultDisplay).unchanged).toBe(true);
+  });
+
   it('uses saved session wording when compacting recording strings', () => {
     const value = `start-${'x'.repeat(
       MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
@@ -373,11 +384,15 @@ describe('toolResultDisplayCompaction', () => {
           failureScenario: `scenario-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
           outcome: 'skipped',
           outcomeNote: `note-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          direction: 'fails-closed',
+          baseline: 'new-surface',
         },
       ],
     };
 
     const compacted = compactToolResultDisplayForHistory(display);
+    expect(compacted.findings[0].direction).toBe('fails-closed');
+    expect(compacted.findings[0].baseline).toBe('new-surface');
 
     expect(compacted.findings[0].summary).toContain('truncated from');
     expect(compacted.findings[0].failureScenario).toContain('truncated from');

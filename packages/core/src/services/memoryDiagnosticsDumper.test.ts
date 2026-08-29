@@ -46,7 +46,7 @@ function createMockConfig(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     getSessionId: vi.fn().mockReturnValue('test-session-id-12345678'),
     getCliVersion: vi.fn().mockReturnValue('0.17.0'),
-    getGeminiClient: vi.fn().mockReturnValue({
+    getLlmClient: vi.fn().mockReturnValue({
       getChat: () => ({
         getHistoryLength: () => 500,
       }),
@@ -232,9 +232,9 @@ describe('MemoryDiagnosticsDumper', () => {
     expect(results[3]).toBeUndefined();
   });
 
-  it('handles missing geminiClient gracefully', async () => {
+  it('handles missing llmClient gracefully', async () => {
     const config = createMockConfig({
-      getGeminiClient: vi.fn().mockReturnValue(null),
+      getLlmClient: vi.fn().mockReturnValue(null),
     });
     const dumper = new MemoryDiagnosticsDumper(config);
 
