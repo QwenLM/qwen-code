@@ -634,6 +634,7 @@ export interface AgentResultDisplay {
   subagentColor?: string;
   taskDescription: string;
   taskPrompt: string;
+  executionMode?: 'foreground' | 'background';
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
@@ -862,6 +863,10 @@ export interface ReportedFinding {
   failureScenario: string;
   /** Free-form kebab-case tag (`correctness`, `security`, …). */
   category?: string;
+  /** Which way a Critical fails — see `FINDING_DIRECTIONS`. */
+  direction?: 'certifies-falsely' | 'fails-closed';
+  /** What a Critical is measured against — see `FINDING_BASELINES`. */
+  baseline?: 'regression' | 'new-surface';
   /** Set only on a re-report after fixes were applied. */
   outcome?: 'fixed' | 'skipped' | 'no_change_needed';
   /** The fixer's reason — mainly for `skipped`. */
@@ -890,6 +895,7 @@ export interface TodoResultDisplay {
     status: 'pending' | 'in_progress' | 'completed';
     blockedBy?: string[];
   }>;
+  unchanged?: boolean;
 }
 
 export interface PlanResultDisplay {
