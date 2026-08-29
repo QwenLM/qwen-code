@@ -288,7 +288,7 @@ export const AgentChatContent = ({
       if (vpItem.kind === 'spinner') {
         return (
           <Box marginX={2} marginTop={1}>
-            <GeminiRespondingSpinner />
+            <RespondingSpinner />
           </Box>
         );
       }

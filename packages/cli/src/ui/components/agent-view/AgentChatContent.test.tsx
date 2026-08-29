@@ -75,8 +75,8 @@ vi.mock('./AgentHeader.js', () => ({
   AgentHeader: () => <Text>AGENT_HEADER</Text>,
 }));
 
-vi.mock('../GeminiRespondingSpinner.js', () => ({
-  GeminiRespondingSpinner: () => <Text>SPINNER</Text>,
+vi.mock('../RespondingSpinner.js', () => ({
+  RespondingSpinner: () => <Text>SPINNER</Text>,
 }));
 
 const textSelectionControllerSpy = vi.hoisted(() => vi.fn());
