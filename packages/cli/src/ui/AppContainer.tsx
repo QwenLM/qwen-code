@@ -3654,6 +3654,11 @@ export const AppContainer = (props: AppContainerProps) => {
   // (agents launching / finishing / focus), so `controlsHeight` — and thus
   // `availableTerminalHeight` — never goes stale below the composer. See
   // getLiveAgentPanelLayoutKey for the full rationale (#5798).
+  // We must re-measure whenever a dialog changes or grows (#8124).
+  const dialogLayoutKey = dialogsVisible
+    ? `${isMcpApprovalDialogOpen ? `mcp:${mcpApprovalRemaining}:${currentMcpApproval?.name ?? ''}` : ''}|${shellConfirmationRequest?.commands.join(',') ?? ''}|${confirmationRequest?.prompt ?? ''}|${providerUpdateRequest?.entries.length ?? ''}`
+    : 'hidden';
+
   const liveAgentPanelLayoutKey = getLiveAgentPanelLayoutKey(
     bgTaskEntries,
     bgLivePanelFocused,
@@ -3681,6 +3686,7 @@ export const AppContainer = (props: AppContainerProps) => {
     dialogsVisible,
     stickyTodosLayoutKey,
     liveAgentPanelLayoutKey,
+    dialogLayoutKey,
     // Composer and update notification height also shift with these; without
     // them the footer isn't re-measured during a streaming turn and the VP
     // viewport bottom clips.
