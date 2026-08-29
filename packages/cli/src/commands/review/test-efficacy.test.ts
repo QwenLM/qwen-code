@@ -618,6 +618,14 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       execFileSync('git', ['config', '--unset', 'filter.evil.smudge'], {
         cwd: dir,
       });
+      // Reach that global file through a repo-local include too. Following
+      // includes is necessary to catch a local included filter, but judging
+      // the include directive itself would refuse this legitimate origin.
+      execFileSync(
+        'git',
+        ['config', 'include.path', join(isolation.home, '.gitconfig')],
+        { cwd: dir },
+      );
       execFileSync(
         'git',
         ['config', '--global', 'filter.lfs.clean', 'git-lfs clean -- %f'],
@@ -642,6 +650,39 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       expect(afterDetail).not.toContain('content filter');
       // The local `evil` filter is gone, so nothing selected by the committed
       // attributes line remains to execute either.
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(canaryDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a repo-local content filter hidden behind include.path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-filter-include-'));
+    const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-canary-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=included\n');
+      asCheckout(dir);
+      const canary = join(canaryDir, 'PWNED-included-smudge');
+      const included = join(dir, '.git', 'review-filter.inc');
+      writeFileSync(
+        included,
+        `[filter "included"]\n\tsmudge = touch ${canary}\n`,
+      );
+      execFileSync('git', ['config', 'include.path', included], { cwd: dir });
+      writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.included.smudge');
       expect(existsSync(canary)).toBe(false);
     } finally {
       isolation.dispose();

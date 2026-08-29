@@ -129,6 +129,53 @@ describe('runScratchTree', () => {
     expect(run().available).toBe(true);
   });
 
+  it('refuses a content filter reached through a repo-local include', () => {
+    const common = git(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    const included = join(common, 'review-filter.inc');
+    const attributes = git(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-path',
+      'info/attributes',
+    );
+    const pwned = join(repo, 'PWNED-included-smudge');
+    writeFileSync(included, `[filter "included"]\n\tsmudge = touch ${pwned}\n`);
+    git(worktree, 'config', 'include.path', included);
+    writeFileSync(attributes, '*.ts filter=included\n');
+    writeFileSync(join(worktree, 'a.ts'), 'dirty\n');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.included.smudge');
+    expect(existsSync(pwned)).toBe(false);
+    expect(
+      existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+    ).toBe(false);
+  });
+
+  it('allows a repo-local include whose filter is defined by global config', () => {
+    const globalConfig = join(gitIsolation.home, '.gitconfig');
+    git(worktree, 'config', '--global', 'filter.included.smudge', 'cat');
+    git(worktree, 'config', 'include.path', globalConfig);
+    const attributes = git(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-path',
+      'info/attributes',
+    );
+    writeFileSync(attributes, '*.ts filter=included\n');
+
+    expect(run().available).toBe(true);
+  });
+
   it("screens ANOTHER worktree's per-worktree config, not just this one's", () => {
     // The screen runs against the review worktree, but the checkout it
     // authorises runs in the SCRATCH tree — whose own

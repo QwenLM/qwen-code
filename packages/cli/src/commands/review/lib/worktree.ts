@@ -35,7 +35,15 @@ import {
   type Stats,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -600,20 +608,21 @@ export const RESIDUE_PATH_CAP = 12;
  * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
  * wipe the common dir, so a filter planted while reviewing one PR fires on
  * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The two local config
- * files are checked with `--file` rather than merged config because filters
- * in the user's global config (git-lfs is the common one) are the user's own
- * contract, exactly like any git command they run — while a probe's planting
- * surface is the repo-local files. The state cannot be told apart from a
- * filter the user set deliberately, and cannot be safely wiped, so a hit is a
- * refusal upstream, not a cleanup here.
+ * planted by reviewing a malicious PR, measured live. The local config graph
+ * is entered with `--file`, expanded with `--includes`, and each hit is judged
+ * by `--show-origin`. That distinction matters: an include can hide a filter
+ * in another repo-local file, but it can also point at the user's global
+ * config (git-lfs is the common one), which remains the user's own contract
+ * exactly like any git command they run. The state cannot be told apart from
+ * a filter the user set deliberately, and cannot be safely wiped, so a
+ * repo-local hit is a refusal upstream, not a cleanup here.
  */
 export interface LocalFilterScreen {
   /** The repo-local `filter.<name>` command keys found, when any are defined. */
   keys: string[];
   /**
-   * The first candidate file the screen could not read to completion, when one
-   * stopped it — otherwise null.
+   * The first candidate or reported origin file the screen could not read to
+   * completion, when one stopped it — otherwise null.
    *
    * Exit 1 is git's ordinary "no key matched" and is not a failure. Anything
    * else is: a spawn error, or the `maxBuffer` kill an attacker reaches by
@@ -624,6 +633,14 @@ export interface LocalFilterScreen {
    * screen stopped, and an unbounded join is its own denial-of-service.
    */
   unreadable: string | null;
+}
+
+function isWithinDirectory(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return (
+    rel === '' ||
+    (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`))
+  );
 }
 
 export function localFilterCommands(worktree: string): LocalFilterScreen {
@@ -639,9 +656,19 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
   }
   const [commonDir, gitDir] = files.stdout.trim().split('\n');
   const common = resolve(worktree, commonDir);
+  const worktreeGitDir = resolve(worktree, gitDir);
+  let localRoots: string[];
+  try {
+    localRoots = [realpathSync(common), realpathSync(worktreeGitDir)];
+  } catch {
+    // `rev-parse` named these directories but one disappeared before its
+    // origins could be canonicalised. A lexical prefix is not a safe fallback
+    // for deciding whether an included command is local.
+    return { keys: [], unreadable: join(common, 'config') };
+  }
   const candidates = [
     join(common, 'config'),
-    join(resolve(worktree, gitDir), 'config.worktree'),
+    join(worktreeGitDir, 'config.worktree'),
   ];
   // Every OTHER worktree's per-worktree config too. This screen runs against
   // the review worktree, but the checkout it authorises runs in the SCRATCH
@@ -683,6 +710,9 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
       'git',
       [
         'config',
+        '--null',
+        '--show-origin',
+        '--includes',
         '--file',
         file,
         '--get-regexp',
@@ -711,8 +741,47 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
       continue;
     }
     if (r.status === 1 || typeof r.stdout !== 'string') continue;
-    for (const line of r.stdout.split('\n')) {
-      const key = line.split(/\s+/)[0];
+    // With `--null --show-origin`, git emits pairs of
+    // `<origin>\0<key>\n<value>\0`. The value may itself contain newlines, so
+    // only the first newline in the second field separates the key from it.
+    const fields = r.stdout.split('\0');
+    if (fields.at(-1) === '') fields.pop();
+    if (fields.length % 2 !== 0) {
+      unreadable ??= file;
+      continue;
+    }
+    for (let i = 0; i < fields.length; i += 2) {
+      const origin = fields[i] ?? '';
+      const keyAndValue = fields[i + 1] ?? '';
+      const valueSeparator = keyAndValue.indexOf('\n');
+      if (!origin.startsWith('file:') || valueSeparator < 0) {
+        unreadable ??= file;
+        continue;
+      }
+      const reportedPath = origin.slice('file:'.length);
+      if (!reportedPath) {
+        unreadable ??= file;
+        continue;
+      }
+      const originPath = isAbsolute(reportedPath)
+        ? reportedPath
+        : resolve(worktree, reportedPath);
+      let canonicalOrigin: string;
+      try {
+        canonicalOrigin = realpathSync(originPath);
+      } catch {
+        // Git read the origin, but it may have been swapped or removed before
+        // this judgement. Skipping it would turn an unresolved command into a
+        // clean screen, so use the caller's existing fail-closed path.
+        unreadable ??= originPath;
+        continue;
+      }
+      if (
+        !localRoots.some((root) => isWithinDirectory(root, canonicalOrigin))
+      ) {
+        continue;
+      }
+      const key = keyAndValue.slice(0, valueSeparator);
       if (key && !found.includes(key)) found.push(key);
     }
   }
