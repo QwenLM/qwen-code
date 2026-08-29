@@ -6227,9 +6227,6 @@ const ZH: Messages = {
   'settings.label.general.language': '语言：界面',
   'settings.description.general.language':
     '用户界面的语言。使用 auto 可根据系统设置自动检测；也可以在 ~/.qwen/locales/ 中放置 JS 语言文件来使用自定义语言代码。',
-  'settings.label.general.dynamicCommandTranslation': '语言：动态命令翻译',
-  'settings.description.general.dynamicCommandTranslation':
-    '为动态 slash command 描述启用 AI 翻译。关闭后动态命令使用原始描述，也不会触发翻译模型调用。',
   'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
   'settings.description.general.preventSystemSleep':
     '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',
