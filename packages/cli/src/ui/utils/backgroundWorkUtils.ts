@@ -74,7 +74,8 @@ export interface BlockingBackgroundWork {
  * Enumerates the entries that make `hasBlockingBackgroundWork()` true,
  * mirroring its per-registry predicate exactly (background agents:
  * `isBackgrounded` + `running`; monitors: `running`; shells: `running`;
- * workflow runs: `starting`, `running`, or `pausing`). Returns `undefined`
+ * workflow runs: `running` or `pausing`, plus the reserved-but-
+ * unregistered runs `hasRunningEntries()` counts via `starting`). Returns `undefined`
  * when nothing is enumerated — e.g. an entry settled between the gate check
  * and this call — so callers fall back to their base message instead of
  * rendering an empty list.
@@ -87,7 +88,7 @@ export function describeBlockingBackgroundWork(
     startTime: number;
     id: string;
     label: string;
-    status: TaskStatus | WorkflowStatus;
+    status: TaskStatus | WorkflowStatus | 'starting';
     isWorkflowRun: boolean;
     isStarting?: boolean;
   }> = [];
@@ -131,12 +132,19 @@ export function describeBlockingBackgroundWork(
       isWorkflowRun: true,
     });
   }
+  // `hasRunningEntries()` also counts runs reserved by `reserveStart` and
+  // not yet registered (journal replay on retry, saved-workflow background
+  // start). `list()` never contains them, so the gate was true with nothing
+  // to name: during the starting window /clear, /branch and /resume were
+  // refused with the bare base message and no blocker. A reservation has
+  // no registered startTime and no meta yet, so it sorts as the newest
+  // entry and renders without a duration.
   for (const runId of config.getWorkflowRunRegistry().listStartingRunIds()) {
     entries.push({
       startTime: now,
       id: runId,
       label: runId,
-      status: 'running',
+      status: 'starting',
       isWorkflowRun: true,
       isStarting: true,
     });
@@ -151,7 +159,9 @@ export function describeBlockingBackgroundWork(
       stripUnsafeCharacters(entry.label).replace(/[\r\n]+/g, ' '),
       MAX_BLOCKING_LABEL_WIDTH,
     );
-    if (entry.isStarting) return `  [${entry.id}] ${label} (starting)`;
+    // The label of a reservation is its run id, which the bracket already
+    // carries; printing it twice reads as a duplicated row.
+    if (entry.isStarting) return `  [${entry.id}] (starting)`;
     return `  [${entry.id}] ${label} (${entry.status} ${formatDuration(
       now - entry.startTime,
       { hideTrailingZeros: true },

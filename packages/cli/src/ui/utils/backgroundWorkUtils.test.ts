@@ -292,9 +292,51 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
       createEnumeratingMockConfig({ startingWorkflows: ['wf_starting'] }),
     );
 
-    expect(summary?.lines).toEqual(['  [wf_starting] wf_starting (starting)']);
+    expect(summary?.lines).toEqual(['  [wf_starting] (starting)']);
     expect(summary?.hasTaskEntries).toBe(false);
     expect(summary?.hasWorkflowRuns).toBe(true);
+  });
+
+  it('renders a starting run without a fabricated duration', () => {
+    const summary = describeBlockingBackgroundWork(
+      createEnumeratingMockConfig({ startingWorkflows: ['wf_a', 'wf_b'] }),
+    );
+    expect(summary?.lines).toHaveLength(2);
+    for (const line of summary!.lines) {
+      // A reservation has no registered startTime; printing one would
+      // report a duration the run has not run for.
+      expect(line).not.toMatch(/\d+s\)/);
+      expect(line).toMatch(/\(starting\)$/);
+    }
+  });
+
+  it('lists a starting run alongside a registered one, newest last', () => {
+    const summary = describeBlockingBackgroundWork(
+      createEnumeratingMockConfig({
+        workflows: [
+          {
+            runId: 'wf_running',
+            status: 'running',
+            meta: { name: 'build' },
+            startTime: 1_000,
+          },
+        ],
+        startingWorkflows: ['wf_starting'],
+      }),
+    );
+    expect(summary?.lines).toHaveLength(2);
+    expect(summary!.lines[0]).toContain('[wf_running]');
+    expect(summary!.lines[1]).toBe('  [wf_starting] (starting)');
+  });
+
+  it('points /clear at /workflows when only a starting run blocks', () => {
+    const message = buildBackgroundWorkBlockedMessage(
+      createEnumeratingMockConfig({ startingWorkflows: ['wf_starting'] }),
+      'Cannot clear.',
+    );
+    expect(message).toContain('Cannot clear.');
+    expect(message).toContain('  [wf_starting] (starting)');
+    expect(message).toContain('Use /workflows to inspect them, then retry.');
   });
 
   it('sorts lines by start time', () => {

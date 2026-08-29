@@ -761,7 +761,7 @@ export class WorkflowRunRegistry {
   releaseHandle(runId: string, handle: WorkflowRunHandle): void {
     if (this.handles.get(runId) !== handle) return;
     this.handles.delete(runId);
-    if (this.evictTerminal()) this.emitStatusChange();
+    this.evictTerminal();
   }
 
   bridgeApprovalEvents(
@@ -1527,13 +1527,13 @@ export class WorkflowRunRegistry {
    * Active entries are always retained. Oldest terminal entries
    * (by `endTime`) are evicted first.
    */
-  private evictTerminal(): boolean {
+  private evictTerminal(): void {
     const terminal = this.list().filter(
       (entry) =>
         isTerminalWorkflowStatus(entry.status) &&
         !this.handles.has(entry.runId),
     );
-    if (terminal.length <= MAX_RETAINED_TERMINAL_WORKFLOWS) return false;
+    if (terminal.length <= MAX_RETAINED_TERMINAL_WORKFLOWS) return;
     terminal.sort((a, b) => (a.endTime ?? 0) - (b.endTime ?? 0));
     const toEvict = terminal.slice(
       0,
@@ -1542,7 +1542,18 @@ export class WorkflowRunRegistry {
     for (const e of toEvict) {
       this.entries.delete(e.runId);
     }
-    return true;
+    // Eviction is a row-removing mutation like every other one, and the
+    // consumers that render these rows (tasks dialog, `/workflows`
+    // roster) re-read the registry only when a status change is
+    // emitted. Two paths reach here without a usable emission:
+    // `releaseHandle` emits nothing of its own, and complete / fail /
+    // cancel / abortAll emit BEFORE sweeping, so a synchronous consumer
+    // reads the pre-eviction list. Either way the roster kept showing
+    // an evicted row until some unrelated status change fired. Emit
+    // once here, after the sweep, so every eviction converges on its
+    // own — and so a future eviction site inherits the guarantee
+    // instead of having to remember it.
+    this.emitStatusChange();
   }
 
   private emitStatusChange(entry?: WorkflowTask): void {
