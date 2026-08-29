@@ -35,7 +35,7 @@ import type { TeamContext } from '../agents/team/types.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
-import { GeminiClient } from '../core/client.js';
+import { LlmClient } from '../core/client.js';
 import { resolveInteractionMode } from '../core/prompts.js';
 import type { OutputStyleDefinition } from '../core/output-styles.js';
 import {
@@ -80,7 +80,7 @@ import {
   getMCPServerStatus,
   type SendSdkMcpMessage,
 } from '../tools/mcp-client.js';
-import { setGeminiMdFilename } from '../utils/memory-constants.js';
+import { setMemoryFilename } from '../utils/memory-constants.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
@@ -115,10 +115,7 @@ import {
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
-import {
-  parseRule,
-  toolMatchesRuleToolName,
-} from '../permissions/rule-parser.js';
+import { parseRule } from '../permissions/rule-parser.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -213,6 +210,7 @@ import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import {
   registerSessionModel,
   registerSessionProjectDir,
+  sessionIdContext,
   unregisterSessionModel,
   unregisterSessionProjectDir,
 } from '../utils/sessionIdContext.js';
@@ -1055,13 +1053,26 @@ export interface ConfigParameters {
    */
   visibleTools?: string[];
   /**
+   * Eager-by-default built-in tool names whose schemas remain eligible for
+   * the initial model request. Unlisted non-exempt tools are demoted to
+   * deferred but stay registered and loadable via `tool_search`. Tools
+   * already deferred by default stay deferred even when listed; use
+   * `visibleTools` to surface one at startup (#9827).
+   *
+   * `undefined` means no restriction; an explicitly empty array is an
+   * active allowlist naming nothing, which defers every non-exempt tool.
+   *
+   * Deliberately separate from `permissions.allow`, which is pure
+   * auto-approval and never affects registration (#10075).
+   */
+  eagerTools?: string[];
+  /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
-   * schema size of every deferred tool — bundled built-ins and MCP alike
-   * — fits within the budget, they are all revealed upfront instead of
-   * loaded on demand via `tool_search`, keeping the declaration list
-   * stable for the whole session (prefix-cache friendly). `0` disables
-   * preloading. Sourced from `settings.tools.toolSearch.threshold`.
+   * schema size of every eligible deferred tool — bundled built-ins and MCP
+   * alike — fits within the budget, they are revealed upfront instead of
+   * loaded on demand via `tool_search`. Tools demoted by `tools.eager` are
+   * excluded from this preload. `0` disables preloading.
    */
   toolSearchThreshold?: number;
   /** Merged permission rules from all sources (settings + CLI args). */
@@ -1069,21 +1080,6 @@ export interface ConfigParameters {
     allow?: string[];
     ask?: string[];
     deny?: string[];
-    /**
-     * The subset of `allow` that comes from `settings.permissions.allow`
-     * (never `--allowed-tools`, the SDK `allowedTools` param, or the
-     * legacy `tools.allowed` key). When it contains at least one valid
-     * rule, the registry-level allowlist activates: built-in tools not
-     * covered by any allow or ask rule are excluded from registration, so
-     * their schemas are never sent to the model (MCP tools, the
-     * `--json-schema` `structured_output` contract, the plan-mode
-     * lifecycle tools, and the `computer_use__*` family are exempt)
-     * (#9827). Only this subset can ACTIVATE the allowlist; while it is
-     * active, `--allowed-tools` / SDK `allowedTools` rules are merged
-     * into the effective allow set and still count toward coverage,
-     * keeping covered built-ins registered.
-     */
-    registryAllowList?: string[];
     /** Settings consumed by the AUTO approval mode classifier. */
     autoMode?: AutoModeSettings;
   };
@@ -1108,6 +1104,8 @@ export interface ConfigParameters {
   };
   lspClient?: LspClient;
   userMemory?: string;
+  memoryFileCount?: number;
+  /** @deprecated Use `memoryFileCount`; retained until a future major release. */
   geminiMdFileCount?: number;
   approvalMode?: ApprovalMode;
   contextFileName?: string | string[];
@@ -1622,9 +1620,11 @@ export interface ConfigInitializeOptions {
    */
   sendSdkMcpMessage?: SendSdkMcpMessage;
   /**
-   * Skip Gemini client chat initialization. Useful for bootstrap paths that
+   * Skip LLM client chat initialization. Useful for bootstrap paths that
    * need config services (hooks, tools, MCP) before a real session exists.
    */
+  skipLlmInitialization?: boolean;
+  /** @deprecated Use `skipLlmInitialization`; retained until a future major release. */
   skipGeminiInitialization?: boolean;
   /**
    * skip MCP
@@ -1857,12 +1857,238 @@ export type DerivedConfigOverrides = Partial<
   >
 >;
 
+export interface DerivedApprovalModeConfigHooks {
+  acquireAutoApprovalOverride(): boolean;
+  releaseAutoApprovalOverride(): void;
+}
+
+export interface DerivedApprovalModeConfigOptions {
+  hooks?: DerivedApprovalModeConfigHooks;
+}
+
+export interface DerivedApprovalModeConfigHandle {
+  config: Config;
+  cleanup: () => void;
+}
+
+export interface DerivedAgentConfigOptions {
+  customIgnoreFiles?: string[];
+  getPlanFilePath?: Config['getPlanFilePath'];
+}
+
+export interface DerivedAgentConfigHandle {
+  config: Config;
+  fileService: FileDiscoveryService;
+  workspaceContext: WorkspaceContext;
+}
+
+export interface DerivedWorktreeConfigOptions {
+  customIgnoreFiles?: string[];
+}
+
+/**
+ * Derives a Config with child-local approval state while preserving the
+ * canonical PermissionManager's AUTO strip/restore lifecycle.
+ */
+export function deriveApprovalModeConfig(
+  base: Config,
+  mode: ApprovalMode,
+  options: DerivedApprovalModeConfigOptions = {},
+): DerivedApprovalModeConfigHandle {
+  const baseApprovalMode = base.getApprovalMode();
+  const initialMode = getTrustedDerivedApprovalMode(base, mode);
+  let autoOverrideAcquired = false;
+  const acquireAutoOverride = () => {
+    if (autoOverrideAcquired || base.getApprovalMode() === ApprovalMode.AUTO) {
+      return;
+    }
+    if (options.hooks) {
+      autoOverrideAcquired = options.hooks.acquireAutoApprovalOverride();
+      return;
+    }
+    base.getPermissionManager?.()?.stripDangerousRulesForAutoMode();
+    autoOverrideAcquired = true;
+  };
+  const releaseAutoOverride = () => {
+    if (!autoOverrideAcquired) return;
+    if (options.hooks) {
+      options.hooks.releaseAutoApprovalOverride();
+    } else if (base.getApprovalMode() !== ApprovalMode.AUTO) {
+      base.getPermissionManager?.()?.restoreDangerousRules();
+    }
+    autoOverrideAcquired = false;
+  };
+
+  const derived = deriveConfig(base, {
+    getApprovalMode: Config.prototype.getApprovalMode,
+  });
+  const state = derived as unknown as {
+    approvalMode: ApprovalMode;
+    prePlanMode?: ApprovalMode;
+    approvalModeRevision: number;
+    manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState;
+    autoModeDenialState: AutoModeDenialState;
+    permissionManager: PermissionManager | null;
+  };
+  state.approvalMode = initialMode;
+  state.prePlanMode =
+    initialMode === ApprovalMode.PLAN
+      ? baseApprovalMode === ApprovalMode.PLAN
+        ? base.getPrePlanMode()
+        : baseApprovalMode
+      : undefined;
+  state.approvalModeRevision = 0;
+  state.manualPlanExitNoticeEventState = {
+    ...((
+      base as unknown as {
+        manualPlanExitNoticeEventState?: ManualPlanExitNoticeEventState;
+      }
+    ).manualPlanExitNoticeEventState ?? { version: 0, kind: 'clear' }),
+  };
+  state.autoModeDenialState = createDenialState();
+
+  Object.defineProperty(derived, 'setApprovalMode', {
+    value: (
+      nextMode: ApprovalMode,
+      setOptions?: Parameters<Config['setApprovalMode']>[1],
+    ): void => {
+      const beforeMode = derived.getApprovalMode();
+      const hadOwnPermissionManager = Object.hasOwn(
+        derived,
+        'permissionManager',
+      );
+      const ownPermissionManager = state.permissionManager;
+      state.permissionManager = null;
+      try {
+        Config.prototype.setApprovalMode.call(derived, nextMode, setOptions);
+      } finally {
+        if (hadOwnPermissionManager) {
+          state.permissionManager = ownPermissionManager;
+        } else {
+          delete (state as Partial<typeof state>).permissionManager;
+        }
+      }
+
+      const afterMode = derived.getApprovalMode();
+      if (beforeMode !== ApprovalMode.AUTO && afterMode === ApprovalMode.AUTO) {
+        acquireAutoOverride();
+      } else if (
+        beforeMode === ApprovalMode.AUTO &&
+        afterMode !== ApprovalMode.AUTO
+      ) {
+        releaseAutoOverride();
+      }
+    },
+    writable: true,
+    configurable: true,
+    enumerable: true,
+  });
+
+  if (
+    initialMode === ApprovalMode.AUTO &&
+    base.getApprovalMode() !== ApprovalMode.AUTO
+  ) {
+    acquireAutoOverride();
+  }
+
+  return { config: derived, cleanup: releaseAutoOverride };
+}
+
+/**
+ * Derives the workspace and optional approval-mode state for one agent.
+ */
+export function deriveAgentConfig(
+  base: Config,
+  workingDirectory: string,
+  options: DerivedAgentConfigOptions = {},
+): DerivedAgentConfigHandle {
+  const fileService = new FileDiscoveryService(
+    workingDirectory,
+    options.customIgnoreFiles,
+  );
+  const workspaceContext = new WorkspaceContext(workingDirectory);
+  const derived = deriveConfig(base, {
+    getTargetDir: () => workingDirectory,
+    getCwd: () => workingDirectory,
+    getWorkingDir: () => workingDirectory,
+    getProjectRoot: () => workingDirectory,
+    getPlanFilePath: options.getPlanFilePath,
+    getFileService: () => fileService,
+    getWorkspaceContext: () => workspaceContext,
+  });
+  const workspaceState = derived as unknown as {
+    targetDir: string;
+    cwd: string;
+    fileDiscoveryService: FileDiscoveryService;
+    workspaceContext: WorkspaceContext;
+  };
+  workspaceState.targetDir = workingDirectory;
+  workspaceState.cwd = workingDirectory;
+  workspaceState.fileDiscoveryService = fileService;
+  workspaceState.workspaceContext = workspaceContext;
+  return {
+    config: derived,
+    fileService,
+    workspaceContext,
+  };
+}
+
+function getTrustedDerivedApprovalMode(
+  base: Config,
+  requestedMode: ApprovalMode,
+): ApprovalMode {
+  if (
+    !base.isTrustedFolder() &&
+    requestedMode !== ApprovalMode.DEFAULT &&
+    requestedMode !== ApprovalMode.PLAN
+  ) {
+    return ApprovalMode.DEFAULT;
+  }
+  return requestedMode;
+}
+
+/**
+ * Derives a Config whose workspace-bound state resolves to one worktree.
+ * Public getter overrides and Config's private field reads are rebound as a
+ * single operation so callers cannot accidentally mix parent and child paths.
+ */
+export function deriveWorktreeConfig(
+  base: Config,
+  worktreePath: string,
+  options: DerivedWorktreeConfigOptions = {},
+): Config {
+  const fileService = new FileDiscoveryService(
+    worktreePath,
+    options.customIgnoreFiles,
+  );
+  const workspaceContext = new WorkspaceContext(worktreePath);
+  const derived = deriveConfig(base, {
+    getTargetDir: () => worktreePath,
+    getCwd: () => worktreePath,
+    getWorkingDir: () => worktreePath,
+    getProjectRoot: () => worktreePath,
+    getFileService: () => fileService,
+    getWorkspaceContext: () => workspaceContext,
+  });
+  const workspaceState = derived as unknown as {
+    targetDir: string;
+    cwd: string;
+    fileDiscoveryService: FileDiscoveryService;
+    workspaceContext: WorkspaceContext;
+  };
+  workspaceState.targetDir = worktreePath;
+  workspaceState.cwd = worktreePath;
+  workspaceState.fileDiscoveryService = fileService;
+  workspaceState.workspaceContext = workspaceContext;
+  return derived;
+}
+
 /**
  * Creates a Config overlay while keeping prototype delegation inside one
  * reviewable boundary. Callers supply only public getter overrides; Config's
  * child-local and prohibited runtime state remains enforced by its accessors.
- * Approval-mode override wrappers that call Config prototype mutators must keep
- * owning their strip/restore lifecycle before migrating to this factory.
+ * Named profiles layer any private-state rebinding and cleanup contract above
+ * this generic factory.
  */
 export function deriveConfig(
   base: Config,
@@ -1919,7 +2145,7 @@ export class Config {
    * headless) reads it via {@link consumePendingStartupWorktreeNotice} on
    * the model's first prompt and skips Phase C's `restoreWorktreeContext`
    * for that turn — startup wins over the resumed-session sidecar. ACP is
-   * gated out earlier in `gemini.tsx` (mutex with `--worktree`) so it
+   * gated out earlier in `llm.tsx` (mutex with `--worktree`) so it
    * never reaches this slot.
    *
    * @invariant At most one consumer per process. If a future entry path
@@ -1951,10 +2177,8 @@ export class Config {
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
   private readonly workflowRunRegistry = new WorkflowRunRegistry();
-  // Field initializer runs once on the parent Config; child Configs
-  // built via Object.create(parent) intentionally do NOT pick this up
-  // — see getFileReadCache() for the per-instance lazy initialization
-  // that keeps subagent caches isolated from the parent's.
+  // Derived Configs do not run field initializers. getFileReadCache()
+  // lazily installs an own cache to keep child state isolated.
   private fileReadCache: FileReadCache = new FileReadCache();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
@@ -2016,11 +2240,11 @@ export class Config {
   // self-consistent.
   private disabledTools: ReadonlySet<string>;
   private readonly visibleTools: ReadonlySet<string>;
+  private readonly eagerTools: readonly string[] | undefined;
   private readonly toolSearchThreshold: number;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
-  private readonly permissionsRegistryAllowList: string[];
   private readonly permissionsAutoMode: AutoModeSettings;
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
@@ -2067,7 +2291,7 @@ export class Config {
   private userMemory: string;
   /**
    * The cross-session-stable prefix of the main-session system prompt —
-   * the stable → context layers `GeminiClient.getMainSessionSystemInstruction()`
+   * the stable → context layers `LlmClient.getMainSessionSystemInstruction()`
    * assembles before the volatile tails (git status, auto-memory). Recorded
    * so the Anthropic converter can place an early cache breakpoint on the
    * stable prefix; consumers match it via `startsWith` and fail open to the
@@ -2084,7 +2308,7 @@ export class Config {
    */
   private autoMemoryPrompt = '';
   private sdkMode: boolean;
-  private geminiMdFileCount: number;
+  private memoryFileCount: number;
   private loadedContextFilePaths: string[] = [];
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
   private readonly contextRuleExcludes: string[];
@@ -2110,7 +2334,7 @@ export class Config {
   private activeTodoReminders = new Map<string, string>();
   private activeTodoWorkChainOwners = new Map<string, string>();
   private activeTodoReminderTurns = new Map<string, number>();
-  private geminiClient!: GeminiClient;
+  private llmClient!: LlmClient;
   private baseLlmClient!: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
   private readonly fileFiltering: {
@@ -2144,8 +2368,8 @@ export class Config {
   private readonly chatRecordingFailureListeners =
     new Set<ChatRecordingFailureListener>();
   private fileCheckpointingEnabled: boolean;
-  // Object (not primitive) so sub-agents via Object.create(parentConfig)
-  // share the same budget instance through prototype lookup.
+  // Object state is intentionally shared by derived Configs through prototype
+  // lookup so every agent contributes to the same session budget.
   private readonly toolResultBudget = { bytesWritten: 0 };
   private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
@@ -2176,7 +2400,7 @@ export class Config {
   /**
    * startChat orphan-repair preserve. Defaults to `restoreAskUserQuestion`.
    * A load/resume that will not re-hang (no client, fork) turns this off so
-   * Gemini history is repaired in lockstep with replay finalization.
+   * LLM history is repaired in lockstep with replay finalization.
    */
   private preserveRestorableAskUserQuestion = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
@@ -2316,7 +2540,11 @@ export class Config {
     this.sessionData = params.sessionData;
     this.sessionRestoreProjectionSource = params.sessionRestoreProjectionSource;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
-    setDebugLogSession(this);
+    // Daemon Configs use sessionIdContext and must not replace the
+    // single-session CLI fallback with whichever session was created last.
+    if (sessionIdContext.getStore() === undefined) {
+      setDebugLogSession(this);
+    }
     this.debugLogger = createDebugLogger();
     this.embeddingModel = params.embeddingModel ?? DEFAULT_QWEN_EMBEDDING_MODEL;
     this.fileSystemService = new StandardFileSystemService();
@@ -2359,13 +2587,22 @@ export class Config {
         (name): name is string => typeof name === 'string',
       ),
     );
+    // An explicitly empty array is preserved as an ACTIVE-but-empty
+    // allowlist (defer everything); only `undefined` means "no
+    // restriction". `tools.core` differs: its empty list is treated as unset.
+    this.eagerTools =
+      params.eagerTools === undefined
+        ? undefined
+        : Object.freeze(
+            params.eagerTools.filter(
+              (name): name is string => typeof name === 'string',
+            ),
+          );
     this.toolSearchThreshold =
       params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
-    this.permissionsRegistryAllowList =
-      params.permissions?.registryAllowList || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
     this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
@@ -2387,7 +2624,8 @@ export class Config {
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
-    this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
+    this.memoryFileCount =
+      params.memoryFileCount ?? params.geminiMdFileCount ?? 0;
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.AUTO;
     this.accessibility = params.accessibility ?? {};
@@ -2616,7 +2854,7 @@ export class Config {
     });
     this.worktreeSettings = params.worktree ?? {};
     if (params.contextFileName) {
-      setGeminiMdFilename(params.contextFileName);
+      setMemoryFilename(params.contextFileName);
     }
 
     // Create ModelsConfig for centralized model management
@@ -2708,7 +2946,7 @@ export class Config {
       // before initialize() awaits (and surfaces) the stored promise.
       this.proxyDispatcherReady.catch(() => {});
     }
-    this.geminiClient = new GeminiClient(this);
+    this.llmClient = new LlmClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
@@ -2821,7 +3059,7 @@ export class Config {
     }
     const activation = (async () => {
       this.getFileService();
-      await this.geminiClient.initialize();
+      await this.llmClient.initialize();
       await this.toolRegistry.warmAll({ strict: true });
       logStartSession(this, new StartSessionEvent(this));
       this.provisionalWorkspaceActivated = true;
@@ -3261,11 +3499,14 @@ export class Config {
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
     );
 
-    if (!options?.skipGeminiInitialization && !this.provisionalWorkspace) {
-      await this.geminiClient.initialize();
-      this.debugLogger.info('Gemini client initialized');
+    if (
+      !(options?.skipLlmInitialization ?? options?.skipGeminiInitialization) &&
+      !this.provisionalWorkspace
+    ) {
+      await this.llmClient.initialize();
+      this.debugLogger.info('LLM client initialized');
     } else {
-      this.debugLogger.info('Gemini client initialization skipped');
+      this.debugLogger.info('LLM client initialization skipped');
     }
 
     // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
@@ -3475,6 +3716,8 @@ export class Config {
       this.startPendingGoalRestore();
     } catch (error) {
       let failure: unknown = error;
+      const ownedLease = lease ?? this.pendingSessionWriterLease;
+      let releaseFailureAlreadyReported = false;
       if (
         !(failure instanceof SessionWriterError) &&
         failure &&
@@ -3484,11 +3727,11 @@ export class Config {
         failure = new SessionWriterUnavailableError({ cause: failure });
       }
       try {
-        const ownedLease = lease ?? this.pendingSessionWriterLease;
         await this.startPendingSessionWriterRelease(ownedLease);
         if (
           this.pendingSessionWriterLease === ownedLease &&
-          (ownedLease?.isReleased ?? true)
+          (ownedLease?.isReleased ?? true) &&
+          !ownedLease?.isReleaseDurabilityPending
         ) {
           this.pendingSessionWriterLease = undefined;
         }
@@ -3502,16 +3745,29 @@ export class Config {
       } catch (releaseError) {
         if (
           releaseError instanceof SessionWriterLostError ||
-          (lease ?? this.pendingSessionWriterLease)?.isReleased
+          (ownedLease?.isReleased && !ownedLease.isReleaseDurabilityPending)
         ) {
           this.pendingSessionWriterLease = undefined;
-        } else if (!containsErrorByIdentity(failure, releaseError)) {
-          failure = new SessionWriterUnavailableError({
-            cause: new AggregateError(
-              [failure, releaseError],
-              'Session writer lease release failed during activation cleanup',
-            ),
-          });
+        } else {
+          releaseFailureAlreadyReported = containsErrorByIdentity(
+            failure,
+            releaseError,
+          );
+          if (!releaseFailureAlreadyReported) {
+            failure = new SessionWriterUnavailableError({
+              cause: new AggregateError(
+                [failure, releaseError],
+                'Session writer lease release failed during activation cleanup',
+              ),
+            });
+          }
+        }
+      } finally {
+        if (
+          !releaseFailureAlreadyReported &&
+          this.pendingSessionWriterRelease?.lease === ownedLease
+        ) {
+          this.pendingSessionWriterRelease = undefined;
         }
       }
       // The writer never became available, so the deferred restore can never
@@ -3572,18 +3828,18 @@ export class Config {
       .discoverAllMcpToolsIncremental(this)
       .then(async () => {
         // After background discovery completes, push the newly-registered
-        // MCP tools into the active GeminiChat so the next model request
+        // MCP tools into the active LlmChat so the next model request
         // sees both the updated declarations and added-tool reminder deltas.
         // Interactive mode also calls setTools() via AppContainer's
         // batch-flush effect — this trailing call is idempotent there, but
         // it's the ONLY path that updates `chat.tools` for non-interactive
         // runs (no AppContainer).
         // Without this, `chat.tools` would be frozen at the built-in-only
-        // snapshot taken inside `geminiClient.initialize()` → `startChat()`,
+        // snapshot taken inside `llmClient.initialize()` → `startChat()`,
         // and `runNonInteractive` / stream-json / ACP would silently lose
         // progressive MCP tools — a regression vs the legacy synchronous path.
         try {
-          await this.geminiClient?.setTools();
+          await this.llmClient?.setTools();
         } catch (err) {
           this.debugLogger.error(
             `setTools() after background MCP discovery failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -3668,7 +3924,7 @@ export class Config {
     if (this.isSafeMode()) {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
-      this.setGeminiMdFileCount(0);
+      this.setMemoryFileCount(0);
       this.setContextFilePaths([]);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
         [],
@@ -3825,7 +4081,7 @@ export class Config {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
     }
-    this.setGeminiMdFileCount(fileCount);
+    this.setMemoryFileCount(fileCount);
     this.setContextFilePaths(contextFilePaths);
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
       conditionalRules,
@@ -4221,7 +4477,11 @@ export class Config {
     this.getOwnActiveTodoReminders().clear();
     this.getOwnActiveTodoWorkChainOwners().clear();
     this.getOwnActiveTodoReminderTurns().clear();
-    setDebugLogSession(this);
+    // ACP session rotation runs inside sessionIdContext; only the
+    // single-session CLI owns the process-wide fallback.
+    if (sessionIdContext.getStore() === undefined) {
+      setDebugLogSession(this);
+    }
     this.debugLogger = createDebugLogger();
     // Pin the outgoing recorder to the session it wrote so late writes (a
     // turn settling after this rotation) keep targeting that session's
@@ -4237,9 +4497,8 @@ export class Config {
     // /clear or session resume would let a follow-up Read return the
     // placeholder despite the new session never having received the
     // file contents. Use the getter so the lazy own-property
-    // initialization in getFileReadCache() applies even for Configs
-    // constructed via Object.create — those should clear their own
-    // cache, not the parent's.
+    // initialization in getFileReadCache() applies even for derived Configs;
+    // each derived Config should clear its own cache, not the parent's.
     this.getFileReadCache().clear();
     this.toolResultBudget.bytesWritten = 0;
     this.getMemoryPressureMonitor()?.resetForNewSession();
@@ -4635,7 +4894,7 @@ export class Config {
   /**
    * Identity of the currently active model route for consumers that cache
    * route-specific state and must invalidate it when a model/auth/endpoint
-   * switch swaps the content generator — e.g. GeminiChat's API-reported
+   * switch swaps the content generator — e.g. LlmChat's API-reported
    * token counts (#9454). Same identity ⇒ same serialization target.
    */
   getModelRouteIdentity(
@@ -5522,7 +5781,7 @@ export class Config {
   /**
    * Stashes a one-shot context message that the next user prompt will
    * inject into the model (see {@link pendingStartupWorktreeNotice}). Called
-   * from `gemini.tsx` right after `loadCliConfig` when `--worktree` produced
+   * from `llm.tsx` right after `loadCliConfig` when `--worktree` produced
    * a valid worktree. Pass `null` to clear (rarely needed).
    */
   setPendingStartupWorktreeNotice(notice: string | null): void {
@@ -5760,7 +6019,7 @@ export class Config {
 
   /**
    * Swaps the active output style. Callers that change it mid-session must
-   * follow up with `GeminiClient.refreshSystemInstruction()`, since the style
+   * follow up with `LlmClient.refreshSystemInstruction()`, since the style
    * lives in the stable layer of an already-bound system instruction.
    */
   setOutputStyle(style: OutputStyleDefinition | undefined): void {
@@ -5807,14 +6066,16 @@ export class Config {
   }
 
   /**
-   * Returns the allow rules that come from `settings.permissions.allow`
-   * only — never `--allowed-tools` / the SDK `allowedTools` param (merged
-   * into `getPermissionsAllow()` above) nor the legacy `tools.allowed`
-   * key. Consumed by `PermissionManager` to decide whether the
-   * registry-level allowlist is active (#9827).
+   * Returns the `settings.tools.eager` allowlist: eager-by-default tool names
+   * whose schemas remain eligible for the initial model request.
+   *
+   * `undefined` means "not configured — no restriction". An empty array is
+   * an active allowlist that names nothing, which defers every
+   * non-exempt tool. Consumed by
+   * `PermissionManager.getToolRegistrationStatus` (#9827).
    */
-  getRegistryAllowList(): string[] {
-    return this.permissionsRegistryAllowList;
+  getEagerTools(): readonly string[] | undefined {
+    return this.eagerTools;
   }
 
   /**
@@ -6525,12 +6786,22 @@ export class Config {
     this.userMemory = newUserMemory;
   }
 
-  getGeminiMdFileCount(): number {
-    return this.geminiMdFileCount;
+  getMemoryFileCount(): number {
+    return this.memoryFileCount;
   }
 
+  setMemoryFileCount(count: number): void {
+    this.memoryFileCount = count;
+  }
+
+  /** @deprecated Use `getMemoryFileCount`; retained until a future major release. */
+  getGeminiMdFileCount(): number {
+    return this.getMemoryFileCount();
+  }
+
+  /** @deprecated Use `setMemoryFileCount`; retained until a future major release. */
   setGeminiMdFileCount(count: number): void {
-    this.geminiMdFileCount = count;
+    this.setMemoryFileCount(count);
   }
 
   /** Display paths of the currently loaded context (memory) files. */
@@ -6739,7 +7010,12 @@ export class Config {
       fromApprovedPlanExit?: boolean;
     },
   ): void {
-    if (isDerivedConfig(this)) {
+    // Specialized execution overlays install an own method that owns
+    // child-local approval state; a bare derived Config must stay immutable.
+    if (
+      isDerivedConfig(this) &&
+      !Object.prototype.hasOwnProperty.call(this, 'setApprovalMode')
+    ) {
       throw new Error('Derived Configs cannot change approval mode');
     }
     if (
@@ -6847,6 +7123,41 @@ export class Config {
     return this.plansDir;
   }
 
+  /**
+   * The plans-directory state (`plansDirectoryConfigured` / `plansDir`) is
+   * installed by the canonical Config constructor and inherited by derived
+   * Configs through the prototype chain. Derived agent/worktree profiles
+   * rebind `targetDir` to their own workspace, but the plan file stays in
+   * the owning base's plans directory — so the containment check must
+   * compare against the plans owner's project root, not the derived
+   * workspace. A teammate whose cwd differs from the parent project root
+   * would otherwise fail the assertion, and `savePlanBestEffort` would
+   * swallow the throw into a debug warning, silently dropping the plan.
+   */
+  private getPlansAnchorTargetDir(): string {
+    // The canonical Config owns `plansDirectoryConfigured`; a derived
+    // Config that owns it is its own anchor. Otherwise walk the prototype
+    // chain to the plans-owning base.
+    if (
+      Object.prototype.hasOwnProperty.call(this, 'plansDirectoryConfigured')
+    ) {
+      return this.targetDir;
+    }
+    let current: object | null = Object.getPrototypeOf(this);
+    while (current !== null && current !== Config.prototype) {
+      if (
+        Object.prototype.hasOwnProperty.call(
+          current,
+          'plansDirectoryConfigured',
+        )
+      ) {
+        return (current as Config).targetDir;
+      }
+      current = Object.getPrototypeOf(current);
+    }
+    return this.targetDir;
+  }
+
   private assertPlansDirWithinTargetDir(): void {
     if (!this.plansDirectoryConfigured) {
       return;
@@ -6854,7 +7165,7 @@ export class Config {
 
     Storage.assertPathWithinDirectory(
       this.plansDir,
-      this.targetDir,
+      this.getPlansAnchorTargetDir(),
       `plansDirectory must resolve within the project root.`,
     );
   }
@@ -6866,7 +7177,7 @@ export class Config {
 
     Storage.assertPathWithinDirectory(
       filePath,
-      this.targetDir,
+      this.getPlansAnchorTargetDir(),
       `plansDirectory must resolve within the project root.`,
     );
   }
@@ -7085,8 +7396,13 @@ export class Config {
     return this.gitCoAuthor;
   }
 
-  getGeminiClient(): GeminiClient {
-    return this.geminiClient;
+  getLlmClient(): LlmClient {
+    return this.llmClient;
+  }
+
+  /** @deprecated Use `getLlmClient`; retained until a future major release. */
+  getGeminiClient(): LlmClient {
+    return this.getLlmClient();
   }
 
   private getOwnActiveTodoReminders(): Map<string, string> {
@@ -7206,11 +7522,9 @@ export class Config {
   }
 
   /**
-   * Session-scoped memory pressure monitor. Child Configs created with
-   * `Object.create(parent)` inherit the parent's monitor through the prototype
-   * chain until this getter installs an own monitor backed by the inherited
-   * pressure config snapshot. This mirrors getFileReadCache()'s isolation
-   * contract while keeping type-safe direct field assignment inside the class.
+   * Session-scoped memory pressure monitor. Derived Configs inherit the
+   * parent's monitor until this getter installs an own monitor backed by the
+   * inherited pressure config snapshot. This mirrors getFileReadCache().
    */
   getMemoryPressureMonitor(): MemoryPressureMonitor | undefined {
     if (!Object.prototype.hasOwnProperty.call(this, 'memoryPressureMonitor')) {
@@ -7260,73 +7574,20 @@ export class Config {
   /**
    * Whether the built-in `list_directory` tool is enabled. Opt-in: the tool
    * is disabled by default and turns on through the
-   * `tools.listDirectory.enabled` setting, by being explicitly listed in the
-   * `coreTools` allowlist, or by being covered by an allow OR ask rule while
-   * the `permissions.allow` registry allowlist is active (#9827). Coverage
-   * scans the merged allow set (`getPermissionsAllow()` — settings +
-   * `--allowed-tools` + SDK `allowedTools` + legacy `tools.allowed`) so it
-   * counts exactly what `PermissionManager.isToolEnabled()` counts, while
-   * activation still comes only from `settings.permissions.allow` rules
-   * (`getRegistryAllowList()`), ignoring empty/whitespace-only entries the
-   * same way `PermissionManager.initialize`'s `parseRules` does (and
-   * skipping non-string entries, which settings load never type-validates).
-   * Entries are
-   * normalised with `parseRule` — the same parser `PermissionManager` uses —
-   * so alias forms (`ListFiles`) and specifier forms (`list_directory(/src)`)
-   * match; the check honours meta-categories (`Read`) via
-   * `toolMatchesRuleToolName`, matching the coverage semantics of the
-   * registry gate itself (`isCoveredByAllowOrAskRule`, which counts ask
-   * rules too).
+   * `tools.listDirectory.enabled` setting or by being explicitly listed in
+   * the `coreTools` allowlist.
+   *
+   * Permission rules deliberately do NOT enable it. `permissions.allow` is
+   * pure auto-approval and does not decide what gets registered (#10075),
+   * and `tools.eager` only demotes unlisted tools to deferred — it never
+   * promotes a disabled tool into existence.
    */
   isLsToolEnabled(): boolean {
     if (this.lsToolEnabled) return true;
-    if (
+    return (
       this.getCoreTools()?.some(
         (name) => parseRule(name).toolName === ToolNames.LS,
-      ) ??
-      false
-    ) {
-      return true;
-    }
-    // `permissions.allow` registry allowlist (#9827): without these branches
-    // an allowlisted tool passes `PermissionManager.isToolEnabled()` but the
-    // registry never registers it, so it silently vanishes from `/tools` and
-    // the model request while calls to it fail with TOOL_NOT_REGISTERED.
-    const coveredByPermissionRule = (raw: string): boolean => {
-      // Mirror the `parseRules` guard: settings load performs no
-      // element-type validation (the schema declares only `type: 'array'`),
-      // so a stray non-string/empty entry must be skipped here, never
-      // crash registry construction (#9827).
-      if (typeof raw !== 'string' || raw.trim() === '') return false;
-      const rule = parseRule(raw);
-      return (
-        !rule.invalid && toolMatchesRuleToolName(rule.toolName, ToolNames.LS)
-      );
-    };
-    // Activation comes only from settings `permissions.allow` rules and
-    // requires at least one non-empty valid entry — exactly how
-    // `PermissionManager.initialize` computes it (`parseRules` filters empty
-    // entries before parsing, and `parseRule('')` carries no `invalid` flag),
-    // so a degenerate `[""]` leaves the allowlist inactive in both places.
-    // The `typeof` guard mirrors that filter for non-string entries too:
-    // `PermissionManager.initialize` tolerates them in the same settings
-    // file, so this gate must not become a new startup crash (#9827).
-    const allowListActive = this.getRegistryAllowList().some(
-      (raw) =>
-        typeof raw === 'string' && raw.trim() !== '' && !parseRule(raw).invalid,
-    );
-    if (!allowListActive) return false;
-    // Coverage mirrors `PermissionManager.isToolEnabled`: the merged allow
-    // set and ask rules both count while the allowlist is active, so a tool
-    // the permission system reports as enabled is genuinely offered to
-    // `registerLazy` (#9827). Ask-only coverage counts for exactly the same
-    // reason it counts in `PermissionManager.isCoveredByAllowOrAskRule` —
-    // otherwise the ask rule could never fire and arriving calls would fail
-    // TOOL_NOT_REGISTERED. Gating both on the allowlist actually being
-    // active keeps the default opt-in behaviour when it is not.
-    return (
-      this.getPermissionsAllow().some(coveredByPermissionRule) ||
-      this.getPermissionsAsk().some(coveredByPermissionRule)
+      ) ?? false
     );
   }
 
@@ -7584,7 +7845,7 @@ export class Config {
     return this.preserveRestorableAskUserQuestion;
   }
 
-  /** Load/resume declined the re-hang: repair Gemini history like flag-off. */
+  /** Load/resume declined the re-hang: repair LLM history like flag-off. */
   suppressRestorableAskUserQuestionPreservation(): void {
     this.preserveRestorableAskUserQuestion = false;
   }
@@ -8424,7 +8685,8 @@ export class Config {
   hasSessionWriteOwnership(): boolean {
     if (isDerivedConfig(this)) return false;
     return (
-      this.pendingSessionWriterLease !== undefined ||
+      (this.pendingSessionWriterLease !== undefined &&
+        !this.pendingSessionWriterLease.isReleased) ||
       this.chatRecordingService?.hasWriteOwnership() === true
     );
   }
@@ -8461,8 +8723,15 @@ export class Config {
       handoff: this.sessionWriterHandoffRequested,
     });
     this.startPendingSessionWriterRelease();
-    this.sessionWriterClosePromise ??= this.closeSessionWriterOnce();
-    return this.sessionWriterClosePromise;
+    if (this.sessionWriterClosePromise) return this.sessionWriterClosePromise;
+    const pending = this.closeSessionWriterOnce();
+    this.sessionWriterClosePromise = pending;
+    void pending.catch(() => {
+      if (this.sessionWriterClosePromise === pending) {
+        this.sessionWriterClosePromise = undefined;
+      }
+    });
+    return pending;
   }
 
   private async closeSessionWriterOnce(): Promise<void> {
@@ -8490,18 +8759,23 @@ export class Config {
         await this.startPendingSessionWriterRelease(pendingLease);
         if (
           this.pendingSessionWriterLease === pendingLease &&
-          pendingLease.isReleased
+          pendingLease.isReleased &&
+          !pendingLease.isReleaseDurabilityPending
         ) {
           this.pendingSessionWriterLease = undefined;
         }
       } catch (error) {
         if (
           error instanceof SessionWriterLostError ||
-          pendingLease.isReleased
+          (pendingLease.isReleased && !pendingLease.isReleaseDurabilityPending)
         ) {
           this.pendingSessionWriterLease = undefined;
         }
         failures.push(error);
+      } finally {
+        if (this.pendingSessionWriterRelease?.lease === pendingLease) {
+          this.pendingSessionWriterRelease = undefined;
+        }
       }
     }
     if (failures.length === 1) {
@@ -8640,22 +8914,13 @@ export class Config {
    * subagent (which gets its own Config) does not inherit the parent's
    * recorded reads via the prototype chain.
    *
-   * The wrinkle: every subagent / scoped-agent / fork path in this
-   * codebase constructs its Config via `Object.create(parent)`. That
-   * does **not** run instance field initializers, so the parent's
-   * `fileReadCache` field is reachable on the child only by prototype
-   * lookup — i.e. child and parent end up sharing the same cache. The
-   * own-property check below detects "this instance was made by
-   * Object.create" and lazily attaches a fresh cache, ensuring
-   * isolation without requiring every Object.create site to remember
-   * to override the field.
+   * Derived Configs do not run instance field initializers, so the parent's
+   * `fileReadCache` is initially reachable through the prototype chain. The
+   * own-property check below lazily installs a fresh cache for each child.
    */
   getFileReadCache(): FileReadCache {
     if (!Object.prototype.hasOwnProperty.call(this, 'fileReadCache')) {
-      // The own-property write needs to bypass `private`'s structural
-      // check — the field is conceptually still private to the class,
-      // we just need TS to let us install an own copy on a child
-      // instance produced by `Object.create(parent)`.
+      // Install child-local state while keeping the field private to Config.
       (this as unknown as { fileReadCache: FileReadCache }).fileReadCache =
         new FileReadCache();
     }
@@ -8748,7 +9013,7 @@ export class Config {
    * client's `drainSkillAndCommandReminders` consumes these to mark them as
    * announced and avoid a duplicate announcement in the same turn's tail
    * reminder. Keys use the `"skill:<name>"` format matching
-   * `GeminiClient.skillEntryKey`.
+   * `LlmClient.skillEntryKey`.
    */
   addInlineAnnouncedSkillKeys(keys: Iterable<string>): void {
     for (const k of keys) {
@@ -8800,10 +9065,14 @@ export class Config {
     }
     let status: ToolRegistrationStatus = 'registered';
     try {
-      status = this.permissionManager
-        ? await this.permissionManager.getToolRegistrationStatus(
-            ToolNames.IMAGE_GEN,
-          )
+      // Resolve through the getter, not the `permissionManager` field: on a
+      // Config derived via Object.create (scoped agent shims installed with
+      // deriveConfig), the field resolves through the prototype chain to the
+      // base manager and would silently bypass the scoped override's
+      // registration decisions (#10075).
+      const permissionManager = this.getPermissionManager();
+      status = permissionManager
+        ? await permissionManager.getToolRegistrationStatus(ToolNames.IMAGE_GEN)
         : 'registered';
     } catch (error) {
       this.debugLogger.warn(
@@ -8842,15 +9111,24 @@ export class Config {
       factory: ToolFactory,
     ): Promise<void> => {
       // PermissionManager handles the coreTools allowlist, deny rules, and
-      // the `permissions.allow` registry allowlist in a single check. A tool
-      // the active allowlist does not cover comes back `deferred`, not
-      // `disabled`: it is still registered — listed in `/tools` and loadable
-      // via ToolSearch — but its schema stays out of the eager model request
-      // (#9827) without the tool silently disappearing (#10075).
+      // the `tools.eager` allowlist in a single check. A tool the active
+      // eager allowlist omits comes back `deferred`, not `disabled`: it is
+      // still registered — listed in `/tools` and loadable via ToolSearch —
+      // but its schema stays out of the eager model request (#9827) without
+      // the tool silently disappearing (#10075).
       let status: ToolRegistrationStatus = 'registered';
       try {
-        status = this.permissionManager
-          ? await this.permissionManager.getToolRegistrationStatus(toolName)
+        // Resolve through the getter, not the `permissionManager` field: on
+        // a Config derived via Object.create (e.g. the skill-review and
+        // managed-memory agent shims installed with deriveConfig), the field
+        // resolves through the prototype chain to the base manager and
+        // would silently bypass the scoped override — demoting the shim's
+        // promised tools under an active `tools.eager` allowlist and letting
+        // prepareTools strip them from the forked agent's explicit tool list
+        // (#10075).
+        const permissionManager = this.getPermissionManager();
+        status = permissionManager
+          ? await permissionManager.getToolRegistrationStatus(toolName)
           : 'registered'; // Should never reach here after initialize(), but safe default.
       } catch (error) {
         this.debugLogger.warn(
@@ -8877,10 +9155,8 @@ export class Config {
     // in sync between them.
     //
     // Skipped when building a subagent-context registry. `this.jsonSchema`
-    // propagates to subagent overrides via prototype delegation
-    // (`Object.create(base)` in `createApprovalModeOverride` /
-    // `buildSubagentContextOverride`), but only `runNonInteractive`'s main
-    // and drain loops detect a successful structured_output call as
+    // propagates through Config derivation, but only `runNonInteractive`'s
+    // main and drain loops detect a successful structured_output call as
     // terminal. A subagent that called the tool would receive the
     // "Session will end now" llmContent, then keep running because its
     // own loop has no termination handler — wasted tokens with no
@@ -9176,9 +9452,9 @@ export class Config {
     // The ACP session's own registry is built before its constructor wires the
     // spawner, so that one is registered by the Session itself. Every registry
     // built afterwards reaches the spawner from here: sub-agent and override
-    // configs are `Object.create(base)`, and `copyDiscoveredToolsFrom` carries
-    // discovered tools only, so without this a daemon sub-agent would silently
-    // lose the tool.
+    // configs derive from the base Config, and `copyDiscoveredToolsFrom`
+    // carries discovered tools only, so without this a daemon sub-agent would
+    // silently lose the tool.
     if (this.getSubSessionSpawner()) {
       await registerLazy(ToolNames.CREATE_SUB_SESSION, async () => {
         const { CreateSubSessionTool } = await import(

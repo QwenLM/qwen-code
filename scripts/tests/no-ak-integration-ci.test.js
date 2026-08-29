@@ -10,7 +10,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -157,7 +159,15 @@ describe('no-AK integration CI wiring', () => {
     );
   });
 
-  it('runs the no-AK integration script in the required Linux gate only', () => {
+  it('runs the no-AK integration script as its own check on PRs and the merge queue', () => {
+    // The gate ran as a step inside the Ubuntu `test` job from #8313 until
+    // it moved out: a step is invisible to anything that reads check names,
+    // and the PR review bot ruled from the (merge_group-only, hence skipped
+    // on every PR) `Integration Tests (CLI, No Sandbox)` check that a changed
+    // integration test "never ran" while this gate had executed it and
+    // passed inside `test` (#9895 round 15). A check of its own carries the
+    // fact in its name. The env isolation and the two-event condition are
+    // the gate's contract and must survive the move unchanged.
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
@@ -165,27 +175,66 @@ describe('no-AK integration CI wiring', () => {
     const ubuntuJob = getWorkflowJob(workflow, 'test');
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
+    const gateJob = getWorkflowJob(workflow, 'integration_no_ak');
     const permissionsIndex = workflow.indexOf('\npermissions:');
     expect(permissionsIndex).toBeGreaterThan(0);
     const workflowTriggers = workflow.slice(0, permissionsIndex);
-    const gateStepMarker =
-      "      - name: 'Run required no-AK integration gate'";
-    const gateStepStart = ubuntuJob.indexOf(gateStepMarker);
-    expect(gateStepStart).toBeGreaterThanOrEqual(0);
-    const nextStepIndex = ubuntuJob.indexOf(
-      '\n      - name:',
-      gateStepStart + gateStepMarker.length,
-    );
-    expect(nextStepIndex).toBeGreaterThan(0);
-    const gateStep = ubuntuJob.slice(gateStepStart, nextStepIndex);
-
-    expect(workflow).not.toContain('  integration_no_ak:');
-    expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
     expect(workflowTriggers).toContain('\n  pull_request:\n');
     expect(workflowTriggers).toContain('\n  merge_group:\n');
 
-    expect(gateStep).toContain(
+    expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
+    for (const [name, job] of Object.entries({
+      test: ubuntuJob,
+      test_macos: macosJob,
+      test_windows: windowsJob,
+    })) {
+      expect(job, `${name} must not run the no-AK script`).not.toContain(
+        NO_AK_SCRIPT,
+      );
+    }
+
+    expect(gateJob).toContain(
+      "    name: 'Integration Tests (no-AK, No Sandbox)'",
+    );
+    expect(gateJob).toContain("    needs: 'classify_pr'");
+    // Same runner routing as the Ubuntu gate, never a hard-coded pool.
+    expect(gateJob).toContain('needs.classify_pr.outputs.ubuntu_runner');
+    const jobIf = gateJob
+      .split('\n')
+      .find((line) => line.startsWith('    if:'));
+    expect(jobIf).toContain("needs.classify_pr.outputs.skip_ci != 'true'");
+    expect(jobIf).toContain(
       "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
+    );
+    // PR head ref on pull_request, queue head on merge_group — the same
+    // shape the Ubuntu gate uses, so this check tests the pushed tree, not
+    // the lagging merge ref.
+    expect(getWorkflowStep(gateJob, 'Checkout')).toContain(
+      "format('refs/pull/{0}/head', github.event.pull_request.number)",
+    );
+    // The profile gate is classified in this job: depending on `test` for
+    // its ci_profile output would queue the check behind the hour-long unit
+    // run. Pin the wrapper so the two classifiers cannot drift.
+    const classify = getWorkflowStep(gateJob, 'Classify CI profile');
+    expect(classify).toContain(
+      '.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
+    );
+    expect(classify).toContain("id: 'ci_profile'");
+    for (const stepName of [
+      'Setup Node.js (hosted)',
+      'Use pre-installed Node.js (self-hosted)',
+      'Install Dependencies',
+      'Run required no-AK integration gate',
+    ]) {
+      expect(
+        getWorkflowStep(gateJob, stepName),
+        `${stepName} must honour the CI profile`,
+      ).toContain("steps.ci_profile.outputs.ci_profile == 'full'");
+    }
+
+    const gateStep = getWorkflowStep(
+      gateJob,
+      'Run required no-AK integration gate',
     );
     const integrationTypecheckCommand = `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`;
     expect(gateStep).toContain(integrationTypecheckCommand);
@@ -233,12 +282,11 @@ describe('no-AK integration CI wiring', () => {
     ]) {
       expect(gateStep).toContain(`\n          ${key}: ''`);
     }
-    expect(ubuntuJob).not.toContain('secrets.OPENAI_API_KEY');
-    expect(ubuntuJob).not.toContain('secrets.OPENAI_BASE_URL');
-    expect(ubuntuJob).not.toContain('secrets.OPENAI_MODEL');
-
-    expect(macosJob).not.toContain(NO_AK_SCRIPT);
-    expect(windowsJob).not.toContain(NO_AK_SCRIPT);
+    for (const job of [ubuntuJob, gateJob]) {
+      expect(job).not.toContain('secrets.OPENAI_API_KEY');
+      expect(job).not.toContain('secrets.OPENAI_BASE_URL');
+      expect(job).not.toContain('secrets.OPENAI_MODEL');
+    }
   });
 
   it('checks out the immutable PR head ref instead of the lagging merge ref', () => {
@@ -251,11 +299,12 @@ describe('no-AK integration CI wiring', () => {
     const macosJob = getWorkflowJob(workflow, 'test_macos');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
     const integrationJob = getWorkflowJob(workflow, 'integration_cli');
+    const noAkJob = getWorkflowJob(workflow, 'integration_no_ak');
 
     // On PRs every gate checks out refs/pull/N/head, which is published the
     // instant the branch is pushed, instead of the merge ref that GitHub
     // rebuilds asynchronously and can serve stale for minutes.
-    for (const job of [ubuntuJob, macosJob, windowsJob]) {
+    for (const job of [ubuntuJob, macosJob, windowsJob, noAkJob]) {
       expect(job).toContain(
         "format('refs/pull/{0}/head', github.event.pull_request.number)",
       );
@@ -304,6 +353,7 @@ describe('no-AK integration CI wiring', () => {
       web_shell_e2e_smoke: getWorkflowStep(webShellJob, GUARD_STEP),
       test_windows: getWorkflowStep(windowsJob, GUARD_STEP),
       integration_cli: getWorkflowStep(integrationJob, GUARD_STEP),
+      integration_no_ak: getWorkflowStep(noAkJob, GUARD_STEP),
     };
     for (const [jobName, call] of Object.entries(guardCalls)) {
       expect(call, `${jobName} guard must use the shared action`).toContain(
@@ -322,6 +372,9 @@ describe('no-AK integration CI wiring', () => {
     expect(guardCalls.integration_cli).toContain(
       "expected_sha: '${{ github.event.merge_group.head_sha }}'",
     );
+    expect(guardCalls.integration_no_ak).toContain(
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
+    );
 
     // The run conditions are part of the guard's contract: scoping a guard to
     // the wrong runner class or dropping an event would silently disable it.
@@ -337,6 +390,8 @@ describe('no-AK integration CI wiring', () => {
       "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}\"",
     );
     expect(guardCalls.integration_cli).not.toContain('if:');
+    // integration_no_ak likewise gates skip_ci and both events at job level.
+    expect(guardCalls.integration_no_ak).not.toContain('if:');
   });
 
   it('pins the Windows gate kill-switch routing, tuning, and Node split', () => {
@@ -381,6 +436,40 @@ describe('no-AK integration CI wiring', () => {
     expect(configure).toContain(
       "uses: './.github/actions/configure-windows-runner'",
     );
+    const redirectTemp = getWorkflowStep(
+      windowsJob,
+      'Point temp at a short-alias-free directory',
+    );
+    expect(redirectTemp).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}\"",
+    );
+    // Pin the run block as one contiguous chunk so ordering is part of the
+    // contract: under PowerShell 5.1 an undefined $temp expands to empty, so
+    // if the assignment moves below the Out-File lines the step still writes
+    // TEMP=/TMP= to GITHUB_ENV and exits green. The shell pin matters for the
+    // same reason: Out-File's default is UTF-16LE on PowerShell 5.1, so the
+    // -Encoding utf8 spelling only carries its meaning there.
+    expect(redirectTemp).toContain(
+      [
+        "$temp = Join-Path $env:RUNNER_WORKSPACE 'qwen-code-temp'",
+        'New-Item -ItemType Directory -Force -Path $temp | Out-Null',
+        '"TEMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append',
+        '"TMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append',
+      ]
+        .map((line) => `          ${line}`)
+        .join('\n'),
+    );
+    expect(redirectTemp).toContain("shell: 'powershell'");
+    const verifyTemp = getWorkflowStep(
+      windowsJob,
+      'Verify temp paths carry no short alias',
+    );
+    expect(verifyTemp).toContain(
+      'if: "${{ needs.classify_pr.outputs.skip_ci != \'true\' }}"',
+    );
+    expect(verifyTemp).toContain('fs.realpathSync(value)');
+    // The guard's decisions are asserted by executing it, below; pinning the
+    // JS text here only fixes its spelling in place.
     const configureAction = readFileSync(
       path.join(ROOT, CONFIGURE_ACTION_PATH),
       'utf8',
@@ -406,6 +495,17 @@ describe('no-AK integration CI wiring', () => {
     const configureUseIndex = windowsJob.indexOf(
       "uses: './.github/actions/configure-windows-runner'",
     );
+    const redirectTempIndex = windowsJob.indexOf(
+      "name: 'Point temp at a short-alias-free directory'",
+    );
+    const hostedNodeIndex = windowsJob.indexOf('actions/setup-node@');
+    const selfHostedNodeIndex = windowsJob.indexOf(
+      "uses: './.github/actions/self-hosted-node'",
+    );
+    const verifyTempIndex = windowsJob.indexOf(
+      "name: 'Verify temp paths carry no short alias'",
+    );
+    const installIndex = windowsJob.indexOf("name: 'Install dependencies'");
     const guardUseIndex = windowsJob.indexOf(
       "uses: './.github/actions/verify-checkout-head'",
     );
@@ -413,6 +513,15 @@ describe('no-AK integration CI wiring', () => {
     expect(autocrlfIndex).toBeGreaterThanOrEqual(0);
     expect(autocrlfIndex).toBeLessThan(windowsCheckoutIndex);
     expect(configureUseIndex).toBeGreaterThan(windowsCheckoutIndex);
+    expect(redirectTempIndex).toBeGreaterThan(configureUseIndex);
+    expect(redirectTempIndex).toBeLessThan(hostedNodeIndex);
+    expect(redirectTempIndex).toBeLessThan(selfHostedNodeIndex);
+    expect(redirectTempIndex).toBeLessThan(
+      windowsJob.indexOf("name: 'Run tests and generate reports'"),
+    );
+    expect(verifyTempIndex).toBeGreaterThan(hostedNodeIndex);
+    expect(verifyTempIndex).toBeGreaterThan(selfHostedNodeIndex);
+    expect(verifyTempIndex).toBeLessThan(installIndex);
     expect(guardUseIndex).toBeGreaterThan(windowsCheckoutIndex);
     expect(configureUseIndex).toBeLessThan(guardUseIndex);
     for (const line of [
@@ -562,6 +671,10 @@ describe('no-AK integration CI wiring', () => {
         getWorkflowJob(workflow, 'integration_cli'),
         'Use pre-installed Node.js (self-hosted)',
       ),
+      integration_no_ak: getWorkflowStep(
+        getWorkflowJob(workflow, 'integration_no_ak'),
+        'Use pre-installed Node.js (self-hosted)',
+      ),
     };
     for (const [jobName, call] of Object.entries(nodeCalls)) {
       expect(call, `${jobName} must use the shared Node preflight`).toContain(
@@ -576,6 +689,9 @@ describe('no-AK integration CI wiring', () => {
         'if: "${{ runner.environment == \'self-hosted\' }}"',
       );
     }
+    expect(nodeCalls.integration_no_ak).toContain(
+      "if: \"${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}\"",
+    );
   });
 
   it('keeps the lightweight coverage comment job on the hosted runner', () => {
@@ -599,5 +715,89 @@ describe('no-AK integration CI wiring', () => {
     expect(webShellJob).toContain('ubuntu_runner');
     expect(webShellJob).toContain("run: 'npx playwright install chromium'");
     expect(webShellJob).toContain('--with-deps chromium');
+  });
+});
+
+// The 8.3 alias this guard exists for (`C:\Users\RUNNER~1` realpathing to
+// `C:\Users\runneradmin`) cannot be reproduced off Windows, but every
+// decision the guard makes is a comparison between an env value and its
+// realpath — and a symlink reproduces each of those on any platform. Run the
+// real script rather than pinning its text: the case-insensitive comparison
+// below is the whole point of the step, and a substring pin cannot tell a
+// working comparison from a reverted one.
+describe('Windows temp short-alias guard', () => {
+  const workflow = readFileSync(
+    path.join(ROOT, '.github/workflows/ci.yml'),
+    'utf8',
+  );
+  const step = getWorkflowStep(
+    getWorkflowJob(workflow, 'test_windows'),
+    'Verify temp paths carry no short alias',
+  );
+  // The script is single-quoted throughout precisely so this stays a
+  // delimiter-safe extraction.
+  const match = /node -e "([^"]+)"/.exec(step);
+  const script = match?.[1];
+
+  // Invoked exactly as the workflow does: `node -e <script>`, no extra argv.
+  const runGuard = (env) =>
+    execFileSync(
+      process.execPath,
+      ['-e', script],
+      // Only TEMP/TMP may reach the guard: inheriting the ambient
+      // environment would let the host's own temp decide the verdict.
+      // stdio 'pipe' captures stderr too, so a failure's message reaches
+      // the assertion instead of the test runner's console.
+      { env, encoding: 'utf8', stdio: 'pipe' },
+    );
+
+  it('extracts a runnable script from the workflow', () => {
+    expect(script).toBeTruthy();
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'accepts, warns, or fails on the three ways an env path can meet its realpath',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'temp-guard-')),
+      );
+      try {
+        const canonical = path.join(base, 'runneradmin');
+        mkdirSync(canonical);
+
+        // 1. Alias-free: the env value already IS its realpath.
+        expect(() =>
+          runGuard({ TEMP: canonical, TMP: canonical }),
+        ).not.toThrow();
+
+        // 2. Casing-only difference — the regression this guard had to stop
+        // producing. On Windows realpath returns the on-disk casing, so this
+        // is one directory under one spelling: warn, do not fail the lane.
+        const casing = path.join(base, 'RUNNERADMIN');
+        symlinkSync(canonical, casing);
+        let stdout = '';
+        expect(() => {
+          stdout = runGuard({ TEMP: casing, TMP: casing });
+        }).not.toThrow();
+        expect(stdout).toContain('::warning::');
+        expect(stdout).toContain('only by casing');
+
+        // 3. A genuine second spelling, as the 8.3 alias produces: fail.
+        const alias = path.join(base, 'RUNNER~1');
+        symlinkSync(canonical, alias);
+        expect(() => runGuard({ TEMP: alias, TMP: alias })).toThrow(
+          /carries a short alias/,
+        );
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('fails loudly when temp is unset instead of throwing on undefined', () => {
+    // configure-windows-runner and the hosted redirect both set TEMP and TMP,
+    // so an unset value means one of them stopped running — a clear message
+    // beats realpathSync(undefined)'s TypeError.
+    expect(() => runGuard({})).toThrow(/TEMP is not set/);
   });
 });

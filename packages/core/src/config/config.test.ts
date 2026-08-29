@@ -15,7 +15,9 @@ import {
   APPROVAL_MODES,
   APPROVAL_MODE_INFO,
   MCPServerConfig,
+  deriveAgentConfig,
   deriveConfig,
+  deriveWorktreeConfig,
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
@@ -25,7 +27,7 @@ import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionServic
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../utils/memory-constants.js';
+import { setMemoryFilename as mockSetMemoryFilename } from '../utils/memory-constants.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
@@ -52,10 +54,18 @@ import {
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
-import { GeminiClient } from '../core/client.js';
+import { LlmClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { getSessionProjectDir } from '../utils/sessionIdContext.js';
+import {
+  getSessionProjectDir,
+  sessionIdContext,
+} from '../utils/sessionIdContext.js';
+import {
+  createDebugLogger,
+  resetDebugLoggingState,
+  setDebugLogSession,
+} from '../utils/debugLogger.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -88,6 +98,7 @@ import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { HookSystem } from '../hooks/index.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
@@ -214,6 +225,9 @@ vi.mock('../memory/team-memory-sync.js', () => ({
     .fn()
     .mockResolvedValue({ committed: false, pulled: false, pushed: false }),
 }));
+vi.mock('../agents/forkedAgent.js', () => ({
+  runForkedAgent: vi.fn(),
+}));
 vi.mock('../skills/skill-curator.js', () => ({
   maybeRunAutoSkillCurator: vi.fn().mockResolvedValue({ status: 'not_due' }),
 }));
@@ -290,15 +304,15 @@ vi.mock('../tools/read-many-files', () => ({
   ReadManyFilesTool: createToolMock('read_many_files'),
 }));
 vi.mock('../utils/memory-constants.js', () => ({
-  setGeminiMdFilename: vi.fn(),
-  getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
-  getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
+  setMemoryFilename: vi.fn(),
+  getCurrentMemoryFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
+  getAllMemoryFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
 }));
 vi.mock('../tools/memory-config', () => ({
-  setGeminiMdFilename: vi.fn(),
-  getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'),
-  getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
+  setMemoryFilename: vi.fn(),
+  getCurrentMemoryFilename: vi.fn(() => 'QWEN.md'),
+  getAllMemoryFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
   AGENT_CONTEXT_FILENAME: 'AGENTS.md',
   MEMORY_SECTION_HEADER: '## Qwen Added Memories',
@@ -307,7 +321,7 @@ vi.mock('../tools/memory-config', () => ({
 vi.mock('../core/contentGenerator.js');
 
 vi.mock('../core/client.js', () => ({
-  GeminiClient: vi.fn().mockImplementation(() => ({
+  LlmClient: vi.fn().mockImplementation(() => ({
     initialize: vi.fn().mockResolvedValue(undefined),
     isInitialized: vi.fn().mockReturnValue(true),
     setTools: vi.fn(),
@@ -573,7 +587,7 @@ describe('Server Config (config.ts)', () => {
       const config = new Config({ ...baseParams, sessionId });
       expect(getSessionProjectDir(sessionId)).toBeUndefined();
       await config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipHooks: true,
         skipMcpDiscovery: true,
         skipSkillManager: true,
@@ -584,6 +598,86 @@ describe('Server Config (config.ts)', () => {
       // In daemon mode this is what stops the map growing per session.
       expect(getSessionProjectDir(sessionId)).toBeUndefined();
     });
+
+    it('accepts the deprecated Gemini initialization option', async () => {
+      const config = new Config(baseParams);
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+
+      expect(config.getGeminiClient()).toBe(config.getLlmClient());
+      await config.shutdown();
+    });
+  });
+
+  it('does not replace the global debug fallback during daemon Config creation or rotation', async () => {
+    const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+    const previousSessionIdEnv = process.env['QWEN_CODE_SESSION_ID'];
+    const bootstrapSessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const daemonSessionId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const rotatedSessionId = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const mkdirSpy = vi
+      .spyOn(fs.promises, 'mkdir')
+      .mockResolvedValue(undefined);
+    const appendFileSpy = vi
+      .spyOn(fs.promises, 'appendFile')
+      .mockResolvedValue(undefined);
+    const unlinkSpy = vi
+      .spyOn(fs.promises, 'unlink')
+      .mockResolvedValue(undefined);
+    const symlinkSpy = vi
+      .spyOn(fs.promises, 'symlink')
+      .mockResolvedValue(undefined);
+
+    try {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+      resetDebugLoggingState();
+      new Config({ ...baseParams, sessionId: bootstrapSessionId });
+      const daemonConfig = sessionIdContext.run(
+        daemonSessionId,
+        () => new Config({ ...baseParams, sessionId: daemonSessionId }),
+      );
+      sessionIdContext.run(daemonSessionId, () => {
+        daemonConfig.startNewSession(rotatedSessionId);
+      });
+
+      process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+      createDebugLogger('DAEMON_FALLBACK').info('process-scoped message');
+
+      await vi.waitFor(() =>
+        expect(appendFileSpy).toHaveBeenCalledWith(
+          Storage.getDebugLogPath(bootstrapSessionId),
+          expect.stringContaining('[DAEMON_FALLBACK] process-scoped message'),
+          'utf8',
+        ),
+      );
+      expect(appendFileSpy).not.toHaveBeenCalledWith(
+        Storage.getDebugLogPath(rotatedSessionId),
+        expect.stringContaining('[DAEMON_FALLBACK] process-scoped message'),
+        'utf8',
+      );
+    } finally {
+      mkdirSpy.mockRestore();
+      appendFileSpy.mockRestore();
+      unlinkSpy.mockRestore();
+      symlinkSpy.mockRestore();
+      resetDebugLoggingState();
+      setDebugLogSession(null);
+      if (previousDebugLogFileEnv === undefined) {
+        delete process.env['QWEN_DEBUG_LOG_FILE'];
+      } else {
+        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+      }
+      if (previousSessionIdEnv === undefined) {
+        delete process.env['QWEN_CODE_SESSION_ID'];
+      } else {
+        process.env['QWEN_CODE_SESSION_ID'] = previousSessionIdEnv;
+      }
+    }
   });
 
   describe('shell execution config', () => {
@@ -605,6 +699,28 @@ describe('Server Config (config.ts)', () => {
 
       config.setShellExecutionConfig({ terminalWidth: 120 });
       expect(config.getShellExecutionConfig().pager).toBe('less');
+    });
+  });
+
+  describe('memory file count compatibility', () => {
+    it('keeps the legacy parameter and accessors until a future major release', () => {
+      const config = new Config({ ...baseParams, geminiMdFileCount: 2 });
+
+      expect(config.getMemoryFileCount()).toBe(2);
+      expect(config.getGeminiMdFileCount()).toBe(2);
+
+      config.setGeminiMdFileCount(3);
+      expect(config.getMemoryFileCount()).toBe(3);
+    });
+
+    it('prefers the renamed parameter when both names are present', () => {
+      const config = new Config({
+        ...baseParams,
+        geminiMdFileCount: 2,
+        memoryFileCount: 4,
+      });
+
+      expect(config.getMemoryFileCount()).toBe(4);
     });
   });
 
@@ -1669,6 +1785,73 @@ describe('Server Config (config.ts)', () => {
       expect(Object.hasOwn(child, 'getCwd')).toBe(false);
     });
 
+    it('rebinds worktree getters and private field reads together', () => {
+      const parent = new Config({
+        ...baseParams,
+        fileFiltering: { customIgnoreFiles: ['.cursorignore'] },
+      });
+      const child = deriveWorktreeConfig(parent, '/tmp/worktree', {
+        customIgnoreFiles: ['.cursorignore'],
+      });
+
+      expect(child.getTargetDir()).toBe('/tmp/worktree');
+      expect(child.getCwd()).toBe('/tmp/worktree');
+      expect(child.getWorkingDir()).toBe('/tmp/worktree');
+      expect(child.getProjectRoot()).toBe('/tmp/worktree');
+      expect([...child.getWorkspaceContext().getDirectories()]).toEqual([
+        '/tmp/worktree',
+      ]);
+      expect(child.getFileService()).not.toBe(parent.getFileService());
+      expect(child.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+        '.qwenignore, .cursorignore',
+      );
+      const workspaceState = child as unknown as Record<string, unknown>;
+      expect(workspaceState['targetDir']).toBe('/tmp/worktree');
+      expect(workspaceState['cwd']).toBe('/tmp/worktree');
+      expect(Object.hasOwn(child, 'workspaceContext')).toBe(true);
+      expect(Object.hasOwn(child, 'fileDiscoveryService')).toBe(true);
+      expect(parent.getTargetDir()).toBe(TARGET_DIR);
+      expect(parent.getWorkingDir()).toBe('/tmp');
+    });
+
+    it('rebinds agent workspace getters and private field reads together', () => {
+      const parent = new Config({
+        ...baseParams,
+        fileFiltering: { customIgnoreFiles: ['.cursorignore'] },
+      });
+      const agentPlanPath = path.join('/tmp/plans', 'session-agent-1.md');
+      const {
+        config: child,
+        fileService,
+        workspaceContext,
+      } = deriveAgentConfig(parent, '/tmp/agent-workspace', {
+        customIgnoreFiles: ['.cursorignore'],
+        getPlanFilePath: () => agentPlanPath,
+      });
+
+      expect(child.getTargetDir()).toBe('/tmp/agent-workspace');
+      expect(child.getCwd()).toBe('/tmp/agent-workspace');
+      expect(child.getWorkingDir()).toBe('/tmp/agent-workspace');
+      expect(child.getProjectRoot()).toBe('/tmp/agent-workspace');
+      expect(child.getPlanFilePath()).toBe(agentPlanPath);
+      expect(child.getWorkspaceContext()).toBe(workspaceContext);
+      expect([...child.getWorkspaceContext().getDirectories()]).toEqual([
+        '/tmp/agent-workspace',
+      ]);
+      expect(child.getFileService()).toBe(fileService);
+      expect(child.getFileService()).not.toBe(parent.getFileService());
+      expect(child.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+        '.qwenignore, .cursorignore',
+      );
+      const workspaceState = child as unknown as Record<string, unknown>;
+      expect(workspaceState['targetDir']).toBe('/tmp/agent-workspace');
+      expect(workspaceState['cwd']).toBe('/tmp/agent-workspace');
+      expect(Object.hasOwn(child, 'workspaceContext')).toBe(true);
+      expect(Object.hasOwn(child, 'fileDiscoveryService')).toBe(true);
+      expect(parent.getTargetDir()).toBe(TARGET_DIR);
+      expect(parent.getWorkingDir()).toBe('/tmp');
+    });
+
     it('prohibits inherited session-writer lifecycle access', async () => {
       const parent = new Config(baseParams);
       const beginClose = vi.fn();
@@ -2311,7 +2494,7 @@ describe('Server Config (config.ts)', () => {
   describe('MemoryPressureMonitor isolation', () => {
     it('returns a distinct monitor for child Configs created via deriveConfig', async () => {
       const parent = new Config(baseParams);
-      await parent.initialize({ skipGeminiInitialization: true });
+      await parent.initialize({ skipLlmInitialization: true });
       const child = deriveConfig(parent);
 
       const parentMonitor = parent.getMemoryPressureMonitor();
@@ -2325,7 +2508,7 @@ describe('Server Config (config.ts)', () => {
 
     it('resets monitor cleanup state when starting a new session', async () => {
       const config = new Config(baseParams);
-      await config.initialize({ skipGeminiInitialization: true });
+      await config.initialize({ skipLlmInitialization: true });
       const monitor = config.getMemoryPressureMonitor();
       expect(monitor).toBeDefined();
       const resetSpy = vi.spyOn(monitor!, 'resetForNewSession');
@@ -2387,7 +2570,7 @@ describe('Server Config (config.ts)', () => {
       process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
 
       const config = new Config(baseParams);
-      await config.initialize({ skipGeminiInitialization: true });
+      await config.initialize({ skipLlmInitialization: true });
       mockMemoryRatio(0.35);
 
       expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
@@ -2402,7 +2585,7 @@ describe('Server Config (config.ts)', () => {
       process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
 
       const config = new Config(baseParams);
-      await config.initialize({ skipGeminiInitialization: true });
+      await config.initialize({ skipLlmInitialization: true });
       mockMemoryRatio(0.35);
 
       expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
@@ -2418,7 +2601,7 @@ describe('Server Config (config.ts)', () => {
       process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.7';
 
       const config = new Config(baseParams);
-      await config.initialize({ skipGeminiInitialization: true });
+      await config.initialize({ skipLlmInitialization: true });
 
       expect(config.getMemoryPressureMonitor()).toBeDefined();
       expect(stderrSpy).toHaveBeenCalledWith(
@@ -2435,7 +2618,7 @@ describe('Server Config (config.ts)', () => {
         process.env['QWEN_MEMORY_PRESSURE_SOFT'] = value;
 
         const config = new Config(baseParams);
-        await config.initialize({ skipGeminiInitialization: true });
+        await config.initialize({ skipLlmInitialization: true });
         mockMemoryRatio(0.35);
 
         expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
@@ -2467,7 +2650,7 @@ describe('Server Config (config.ts)', () => {
       });
 
       const config = new Config(baseParams);
-      await config.initialize({ skipGeminiInitialization: true });
+      await config.initialize({ skipLlmInitialization: true });
       mockMemoryRatio(0.85);
 
       config.getMemoryPressureMonitor()?.performCheck();
@@ -2484,7 +2667,7 @@ describe('Server Config (config.ts)', () => {
       process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
       process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
       const parent = new Config(baseParams);
-      await parent.initialize({ skipGeminiInitialization: true });
+      await parent.initialize({ skipLlmInitialization: true });
 
       process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.9';
       process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.95';
@@ -2523,7 +2706,7 @@ describe('Server Config (config.ts)', () => {
       const sessionId = 'same-session-id';
       const config = new Config({ ...baseParams, sessionId });
       await config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipHooks: true,
         skipMcpDiscovery: true,
         skipSkillManager: true,
@@ -2555,7 +2738,7 @@ describe('Server Config (config.ts)', () => {
     it('pins the outgoing chat recorder to the outgoing session id', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       await config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipHooks: true,
         skipMcpDiscovery: true,
         skipSkillManager: true,
@@ -2575,7 +2758,7 @@ describe('Server Config (config.ts)', () => {
     it('ends the outgoing session before starting a replacement without continuation', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipHooks: true,
         skipMcpDiscovery: true,
         skipSkillManager: true,
@@ -2605,7 +2788,7 @@ describe('Server Config (config.ts)', () => {
     it('carries the outgoing session id when resuming a different persisted session', async () => {
       const config = new Config({ ...baseParams });
       await config.initialize({
-        skipGeminiInitialization: true,
+        skipLlmInitialization: true,
         skipHooks: true,
         skipMcpDiscovery: true,
         skipSkillManager: true,
@@ -3704,6 +3887,49 @@ describe('Server Config (config.ts)', () => {
       acquire.mockRestore();
     });
 
+    it('retries pending lease durability without reporting stale ownership', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const cleanupFailure = new SessionWriterUnavailableError();
+      let released = false;
+      let durabilityPending = false;
+      const release = vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          released = true;
+          durabilityPending = true;
+          throw cleanupFailure;
+        })
+        .mockImplementationOnce(async () => {
+          durabilityPending = false;
+        });
+      const lease = {
+        release,
+        get isReleased() {
+          return released;
+        },
+        get isReleaseDurabilityPending() {
+          return durabilityPending;
+        },
+      } as unknown as SessionWriterLease;
+      (
+        config as unknown as {
+          pendingSessionWriterLease: SessionWriterLease;
+        }
+      ).pendingSessionWriterLease = lease;
+
+      await expect(config.closeSessionWriter()).rejects.toBe(cleanupFailure);
+      expect(config.hasSessionWriteOwnership()).toBe(false);
+
+      await expect(config.closeSessionWriter()).resolves.toBeUndefined();
+      expect(release).toHaveBeenCalledTimes(2);
+      expect(config.hasSessionWriteOwnership()).toBe(false);
+    });
+
     it('preserves activation and lease release failures', async () => {
       const config = new Config({
         ...baseParams,
@@ -4321,8 +4547,9 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         provisionalWorkspace: true,
       });
-      const geminiClient = vi.mocked(GeminiClient).mock.results.at(-1)
-        ?.value as { initialize: Mock } | undefined;
+      const llmClient = vi.mocked(LlmClient).mock.results.at(-1)?.value as
+        | { initialize: Mock }
+        | undefined;
 
       await config.initialize();
 
@@ -4330,14 +4557,14 @@ describe('Server Config (config.ts)', () => {
       expect(loadServerHierarchicalMemory).not.toHaveBeenCalled();
       expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
       expect(ToolRegistry.prototype.warmAll).not.toHaveBeenCalled();
-      expect(geminiClient?.initialize).not.toHaveBeenCalled();
+      expect(llmClient?.initialize).not.toHaveBeenCalled();
 
       await Promise.all([
         config.activateProvisionalWorkspace(),
         config.activateProvisionalWorkspace(),
       ]);
 
-      expect(geminiClient?.initialize).toHaveBeenCalledOnce();
+      expect(llmClient?.initialize).toHaveBeenCalledOnce();
       expect(ToolRegistry.prototype.warmAll).toHaveBeenCalledOnce();
       expect(ToolRegistry.prototype.warmAll).toHaveBeenCalledWith({
         strict: true,
@@ -5315,7 +5542,7 @@ describe('Server Config (config.ts)', () => {
       );
       // Verify that contentGeneratorConfig is updated
       expect(config.getContentGeneratorConfig()).toEqual(mockContentConfig);
-      expect(GeminiClient).toHaveBeenCalledWith(config);
+      expect(LlmClient).toHaveBeenCalledWith(config);
     });
 
     it('preserves the user reasoning effort across an auth refresh that wipes it', async () => {
@@ -7702,19 +7929,19 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
-  it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {
+  it('Config constructor should call setMemoryFilename with contextFileName if provided', () => {
     const contextFileName = 'CUSTOM_AGENTS.md';
     const paramsWithContextFile: ConfigParameters = {
       ...baseParams,
       contextFileName,
     };
     new Config(paramsWithContextFile);
-    expect(mockSetGeminiMdFilename).toHaveBeenCalledWith(contextFileName);
+    expect(mockSetMemoryFilename).toHaveBeenCalledWith(contextFileName);
   });
 
-  it('Config constructor should not call setGeminiMdFilename if contextFileName is not provided', () => {
+  it('Config constructor should not call setMemoryFilename if contextFileName is not provided', () => {
     new Config(baseParams); // baseParams does not have contextFileName
-    expect(mockSetGeminiMdFilename).not.toHaveBeenCalled();
+    expect(mockSetMemoryFilename).not.toHaveBeenCalled();
   });
 
   it('should set default file filtering settings when not provided', () => {
@@ -8425,234 +8652,18 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
-    it.each([
-      { label: 'an alias', entry: 'ListFiles' },
-      { label: 'the canonical name', entry: ToolNames.LS },
-      { label: 'a path specifier', entry: `${ToolNames.LS}(/src)` },
-      { label: 'the Read meta-category', entry: 'Read' },
-    ])(
-      'registers list_directory when covered by permissions.allow via $label (#9827)',
-      async ({ entry }) => {
-        const settingsAllow = [entry];
-        const config = new Config({
-          ...baseParams,
-          coreTools: undefined,
-          permissions: {
-            allow: settingsAllow,
-            registryAllowList: settingsAllow,
-          },
-        });
-        await config.initialize();
-
-        const registerToolMock = (
-          (await vi.importMock('../tools/tool-registry')) as {
-            ToolRegistry: { prototype: { registerFactory: Mock } };
-          }
-        ).ToolRegistry.prototype.registerFactory;
-        expect(
-          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-        ).toContain(ToolNames.LS);
-      },
-    );
-
-    it('does not register list_directory when an active permissions.allow does not cover it (#9827)', async () => {
-      // `edit` does not cover list_directory (it is not the Read
-      // meta-category), so the opt-in gate must stay closed even though the
-      // allowlist is active.
-      const settingsAllow = [ToolNames.EDIT];
+    it('does not register list_directory just because a permission rule covers it (#10075)', async () => {
+      // Pins the reverted #9829 side effect: `permissions.allow` / `ask`
+      // used to opt this tool in at registration. They are pure
+      // auto-approval now, so the opt-in gate must stay closed and only
+      // `tools.listDirectory.enabled` or `coreTools` can open it.
       const config = new Config({
         ...baseParams,
         coreTools: undefined,
-        permissions: { allow: settingsAllow, registryAllowList: settingsAllow },
+        permissions: { allow: ['ListFiles'], ask: ['ListFiles'] },
       });
       await config.initialize();
 
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).not.toContain(ToolNames.LS);
-    });
-
-    it('registers list_directory when covered only by an ask rule under an active allowlist (#9827)', async () => {
-      // Probe scenario: allow:['edit'] activates the allowlist, and
-      // ask:['ListFiles'] is the ONLY coverage for list_directory.
-      // `PermissionManager.isToolEnabled('list_directory')` returns true
-      // (membership counts ask rules — see isCoveredByAllowOrAskRule), so
-      // the opt-in gate must offer the tool to registerLazy too; otherwise
-      // the schema is never sent, the ask rule can never fire, and arriving
-      // calls fail TOOL_NOT_REGISTERED.
-      const settingsAllow = [ToolNames.EDIT];
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: {
-          allow: settingsAllow,
-          registryAllowList: settingsAllow,
-          ask: ['ListFiles'],
-        },
-      });
-      await config.initialize();
-
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).toContain(ToolNames.LS);
-    });
-
-    it('does not register list_directory for an ask rule when the allowlist is inactive (#9827)', async () => {
-      // Ask coverage only gates registration while the registry allowlist
-      // is active; without it list_directory stays opt-in, so an ask rule
-      // alone must not change the default-disabled behaviour.
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: { ask: ['ListFiles'] },
-      });
-      await config.initialize();
-
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).not.toContain(ToolNames.LS);
-    });
-
-    it('registers list_directory when covered only by a merged (non-settings) allow rule under an active allowlist (#9827)', async () => {
-      // CLI-shaped wiring: settings `permissions.allow: ['Edit']` activates
-      // the allowlist, while `--allowed-tools ListFiles` (or the SDK
-      // `allowedTools` param) lands only in the merged allow set
-      // (`getPermissionsAllow()`), never in `getRegistryAllowList()`.
-      // `PermissionManager.isToolEnabled('list_directory')` returns true
-      // because it counts the merged set, so the opt-in gate must offer the
-      // tool to registerLazy too — otherwise it silently vanishes from
-      // `/tools` and the model request while arriving calls fail
-      // TOOL_NOT_REGISTERED.
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: {
-          allow: [ToolNames.EDIT, 'ListFiles'],
-          registryAllowList: [ToolNames.EDIT],
-        },
-      });
-      await config.initialize();
-
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).toContain(ToolNames.LS);
-    });
-
-    it('does not register list_directory when only the merged allow set covers it but no settings allow rule activates the allowlist (#9827)', async () => {
-      // `--allowed-tools ListFiles` alone reaches `getPermissionsAllow()`
-      // but not `getRegistryAllowList()`; only settings
-      // `permissions.allow` rules can ACTIVATE the allowlist, so without
-      // one the opt-in gate must stay closed and the default-disabled
-      // behaviour holds.
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: { allow: ['ListFiles'], registryAllowList: [] },
-      });
-      await config.initialize();
-
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).not.toContain(ToolNames.LS);
-    });
-
-    it('does not register list_directory when the settings allow list holds only empty entries (#9827)', async () => {
-      // `permissions.allow: ['']` is schema-valid but degenerate.
-      // `PermissionManager.initialize` computes activation through
-      // `parseRules`, which filters empty entries before parsing, so the
-      // allowlist stays inactive; the opt-in gate must agree — otherwise
-      // the ask branch would register list_directory while the permission
-      // system reports the allowlist inactive.
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: {
-          allow: [''],
-          registryAllowList: [''],
-          ask: ['ListFiles'],
-        },
-      });
-      await config.initialize();
-
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).not.toContain(ToolNames.LS);
-    });
-
-    it('does not crash when permissions arrays hold non-string entries (#9827)', async () => {
-      // Settings load performs no element-type validation (the schema
-      // declares only `type: 'array'`), and `PermissionManager.initialize`'s
-      // `parseRules` tolerates falsy entries like `[null]` in the same
-      // settings file. The opt-in gate scans the same arrays during
-      // `createToolRegistry`, so it must skip non-string entries the same
-      // way instead of throwing a `TypeError` and crashing startup.
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: {
-          allow: [null, ToolNames.EDIT] as unknown as string[],
-          registryAllowList: [null, ToolNames.EDIT] as unknown as string[],
-          ask: [undefined, 'ListFiles'] as unknown as string[],
-        },
-      });
-      await expect(config.initialize()).resolves.not.toThrow();
-      // The valid entries still take effect: the settings rule activates
-      // the allowlist and the ask rule (after the non-string entry is
-      // skipped) covers list_directory.
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).toContain(ToolNames.LS);
-    });
-
-    it('keeps the gate closed when the settings allow list holds only non-string entries (#9827)', async () => {
-      // `[null]` alone carries no valid rule: `parseRules` filters it out,
-      // so `PermissionManager.initialize` reports the allowlist inactive —
-      // the opt-in gate must agree (and must not throw on the entry).
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: {
-          allow: [null] as unknown as string[],
-          registryAllowList: [null] as unknown as string[],
-          ask: ['ListFiles'],
-        },
-      });
-      await expect(config.initialize()).resolves.not.toThrow();
       const registerToolMock = (
         (await vi.importMock('../tools/tool-registry')) as {
           ToolRegistry: { prototype: { registerFactory: Mock } };
@@ -8999,9 +9010,9 @@ describe('Server Config (config.ts)', () => {
       expect(wasGrepToolRegistered).toBe(false);
     });
 
-    // ── #9827 / #10075: permissions.allow keeps unlisted schemas out of the
-    // eager model request, but demotes (not removes) the unlisted tools ──
-    it('registers allowlisted tools eagerly and demotes unlisted tools to deferred (#9827, #10075)', async () => {
+    // ── #9827 / #10075: tools.eager keeps unlisted schemas out of the eager
+    // model request, but demotes (not removes) the unlisted tools ──
+    it('registers tools.eager entries eagerly and demotes the rest to deferred (#9827, #10075)', async () => {
       const settingsAllow = [
         'ReadFile',
         'WriteFile',
@@ -9016,9 +9027,10 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         useRipgrep: false,
         coreTools: undefined,
-        // Mirrors the CLI wiring: merged allow list + the settings-sourced
-        // subset that activates the registry allowlist.
-        permissions: { allow: settingsAllow, registryAllowList: settingsAllow },
+        // Mirrors the CLI wiring. `permissions.allow` is deliberately left
+        // unset: the eager/deferred split is driven solely by tools.eager
+        // (#10075).
+        eagerTools: settingsAllow,
       };
       const config = new Config(params);
       await config.initialize();
@@ -9073,6 +9085,51 @@ describe('Server Config (config.ts)', () => {
       // monitor stays registered eagerly: the "Shell" allow rule covers it
       // so the shell tool cannot be bypassed by switching to monitor.
       expect(registered).toContain(ToolNames.MONITOR);
+      // tools.eager never promotes a disabled tool into existence: LS is
+      // listed above, but its registration stays gated on isLsToolEnabled()
+      // (tools.listDirectory.enabled / coreTools), which is off here — so
+      // the eager path must neither register nor defer it.
+      expect(registered).not.toContain(ToolNames.LS);
+      expect(deferred).not.toContain(ToolNames.LS);
+    });
+
+    it('demotes an enabled LS to deferred when tools.eager omits it (#9827, #10075)', async () => {
+      // Companion to the test above: with LS enabled via
+      // tools.listDirectory.enabled but omitted from the eager list (and
+      // covered by no listed meta-category — only "Shell" is listed), the
+      // eager gate must demote LS to deferred via
+      // registerPermissionDeferredFactory, never promote it to an eager
+      // registration.
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        lsToolEnabled: true,
+        eagerTools: ['Shell'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const { registerFactory, registerPermissionDeferredFactory } = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: {
+            prototype: {
+              registerFactory: Mock;
+              registerPermissionDeferredFactory: Mock;
+            };
+          };
+        }
+      ).ToolRegistry.prototype;
+
+      const registered = (registerFactory as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+      const deferred = (
+        registerPermissionDeferredFactory as Mock
+      ).mock.calls.map((call) => call[0]) as string[];
+
+      expect(registered).not.toContain(ToolNames.LS);
+      expect(deferred).toContain(ToolNames.LS);
     });
 
     it('registers the full built-in set when no permissionsAllow is set (#9827 regression guard)', async () => {
@@ -9102,15 +9159,14 @@ describe('Server Config (config.ts)', () => {
       expect(registered).toContain(ToolNames.READ_FILE);
     });
 
-    it('permissions.allow keeps the --exclude-tools (deny) path working (#9827)', async () => {
+    it('tools.eager keeps the --exclude-tools (deny) path working (#9827)', async () => {
       const settingsAllow = ['ReadFile', 'Shell'];
       const params: ConfigParameters = {
         ...baseParams,
         useRipgrep: false,
         coreTools: undefined,
+        eagerTools: settingsAllow,
         permissions: {
-          allow: settingsAllow,
-          registryAllowList: settingsAllow,
           deny: ['Shell'],
         },
       };
@@ -9143,6 +9199,65 @@ describe('Server Config (config.ts)', () => {
       // An unlisted (not denied) tool is deferred, not dropped (#10075).
       expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
       expect(deferred).toContain(ToolNames.SEND_MESSAGE);
+    });
+
+    it('derived getPermissionManager overrides reach the registration gate (scoped agent shims, #10075)', async () => {
+      // The skill-review fork wraps the base Config with
+      // createSkillScopedAgentConfig, whose scoped PermissionManager promises
+      // 'registered' for its file tools. Under an active tools.eager
+      // allowlist that omits them, the BASE manager demotes the same tools
+      // to deferred. createToolRegistry must resolve the manager through
+      // getPermissionManager() — where the derived config's override lives —
+      // not the `permissionManager` field, which resolves through the
+      // Object.create prototype chain to the base manager. With the field,
+      // the rebuild below registers the file tools as permission-deferred
+      // and prepareTools' eager filter strips them from the forked agent's
+      // explicit tools list — the silent-disappearance class #10075 set out
+      // to eliminate.
+      const config = new Config({
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        eagerTools: [],
+      });
+      await config.initialize();
+
+      const { registerFactory, registerPermissionDeferredFactory } = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: {
+            prototype: {
+              registerFactory: Mock;
+              registerPermissionDeferredFactory: Mock;
+            };
+          };
+        }
+      ).ToolRegistry.prototype;
+      registerFactory.mockClear();
+      (registerPermissionDeferredFactory as Mock).mockClear();
+
+      // Mirrors runSkillReviewByAgent → createApprovalModeOverride →
+      // rebuildToolRegistryOnOverride on the scoped wrapper.
+      const scoped = createSkillScopedAgentConfig(config, TARGET_DIR);
+      await scoped.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const registered = (registerFactory as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+      const deferred = (
+        registerPermissionDeferredFactory as Mock
+      ).mock.calls.map((call) => call[0]) as string[];
+
+      // The scoped PM's 'registered' promise for its file tools must win
+      // over the base eager gate's 'deferred'.
+      expect(registered).toContain(ToolNames.READ_FILE);
+      expect(registered).toContain(ToolNames.WRITE_FILE);
+      expect(registered).toContain(ToolNames.EDIT);
+      expect(deferred).not.toContain(ToolNames.READ_FILE);
+      expect(deferred).not.toContain(ToolNames.WRITE_FILE);
+      expect(deferred).not.toContain(ToolNames.EDIT);
     });
 
     describe('with minified tool class names', () => {
@@ -10223,6 +10338,59 @@ describe('setApprovalMode with folder trust', () => {
       expect(fs.renameSync).toHaveBeenCalledWith(tmpPath, filePath);
       expect(config.loadPlan()).toBe('# My Plan');
       expect(fs.readFileSync).toHaveBeenCalledWith(filePath, 'utf-8');
+    });
+
+    it('saves a plan on a derived agent config whose cwd differs from the project root', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+      // A teammate's working directory outside the parent project root.
+      // The plan file still belongs to the parent's configured plans
+      // directory, so the containment assertions must anchor at the
+      // plans-owning base Config, not at the agent's workspace.
+      const { config: agentConfig } = deriveAgentConfig(
+        config,
+        '/elsewhere/agent-cwd',
+      );
+      const targetDir = path.resolve(baseParams.targetDir);
+      const plansDir = path.join(targetDir, 'project-plans');
+      const filePath = path.join(plansDir, 'test-session-123.md');
+      const tmpPath = `${filePath}.tmp`;
+      const storedFiles = new Map<string, string>();
+      (fs.writeFileSync as Mock).mockImplementation((pathToWrite, contents) => {
+        storedFiles.set(pathToWrite.toString(), contents.toString());
+      });
+      (fs.renameSync as Mock).mockImplementation((fromPath, toPath) => {
+        const contents = storedFiles.get(fromPath.toString());
+        if (contents === undefined) {
+          throw new Error(`missing temp file: ${fromPath.toString()}`);
+        }
+        storedFiles.set(toPath.toString(), contents);
+        storedFiles.delete(fromPath.toString());
+      });
+      (fs.readFileSync as Mock).mockImplementation((pathToRead) => {
+        const contents = storedFiles.get(pathToRead.toString());
+        if (contents === undefined) {
+          const enoent = new Error('ENOENT') as NodeJS.ErrnoException;
+          enoent.code = 'ENOENT';
+          throw enoent;
+        }
+        return contents;
+      });
+
+      expect(() => agentConfig.savePlan('# My Plan')).not.toThrow();
+
+      expect(fs.mkdirSync).toHaveBeenCalledWith(plansDir, { recursive: true });
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        tmpPath,
+        '# My Plan',
+        'utf-8',
+      );
+      expect(fs.renameSync).toHaveBeenCalledWith(tmpPath, filePath);
+      expect(agentConfig.loadPlan()).toBe('# My Plan');
+      expect(config.getTargetDir()).toBe(targetDir);
     });
 
     it('should fall back to copyFileSync when renameSync hits EXDEV', () => {

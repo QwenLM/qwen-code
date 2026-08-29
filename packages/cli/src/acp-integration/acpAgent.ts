@@ -19,7 +19,7 @@ import {
   createDebugLogger,
   generateSessionRecap,
   findProviderById,
-  getAllGeminiMdFilenames,
+  getAllMemoryFilenames,
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
   getDefaultBaseUrlForProtocol,
@@ -440,6 +440,7 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
+const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -2305,7 +2306,7 @@ async function resolvePreferredMemoryFile(
   dir: string,
   fallbackFilename: string,
 ): Promise<string> {
-  for (const filename of getAllGeminiMdFilenames()) {
+  for (const filename of getAllMemoryFilenames()) {
     const filePath = path.join(dir, filename);
     try {
       await fs.access(filePath);
@@ -2322,7 +2323,7 @@ async function resolveQwenMemoryPaths(params: {
   cwd: string;
   projectRoot: string;
 }): Promise<QwenMemoryPaths> {
-  const fallbackFilename = getAllGeminiMdFilenames()[0] ?? 'QWEN.md';
+  const fallbackFilename = getAllMemoryFilenames()[0] ?? 'QWEN.md';
   const userMemoryFile = await resolvePreferredMemoryFile(
     Storage.getGlobalQwenDir(),
     fallbackFilename,
@@ -2652,7 +2653,7 @@ export async function runAcpAgent(
   beginAcpBootstrapConfigProfiling();
   try {
     await config.initialize({
-      skipGeminiInitialization: true,
+      skipLlmInitialization: true,
       // Bootstrap skips MCP discovery — each session runs its own
       // pool-routed discovery, so bootstrap-level spawns would be
       // redundant subprocess leaks (W119).
@@ -2664,7 +2665,7 @@ export async function runAcpAgent(
   } finally {
     endAcpBootstrapConfigProfiling();
   }
-  // The ACP path exits gemini.tsx before its startup-warning printing runs,
+  // The ACP path exits llm.tsx before its startup-warning printing runs,
   // so config warnings (including initialize-time ones like the WebSearch
   // enablement notice) would otherwise vanish. stderr lands in the client's
   // logs without interfering with the ACP protocol on stdout.
@@ -3670,9 +3671,9 @@ class QwenAgent implements Agent {
         const registry = config.getToolRegistry();
         if (operation === 'discover') {
           await registry?.discoverToolsForServer(serverName);
-          const geminiClient = config.getGeminiClient?.();
-          if (geminiClient?.isInitialized?.()) {
-            await geminiClient.setTools?.();
+          const llmClient = config.getLlmClient?.();
+          if (llmClient?.isInitialized?.()) {
+            await llmClient.setTools?.();
           }
         } else if (operation === 'disable') {
           await registry?.disableMcpServer(serverName);
@@ -3737,55 +3738,57 @@ class QwenAgent implements Agent {
     settings: LoadedSettings,
   ): Promise<void> {
     if (this.workspaceMcpDiscoveryConfig) return;
-    const cwd = this.config.getTargetDir();
-    const config = await this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
-      loadCliConfig(
-        settings.merged,
-        {
-          ...this.argv,
-          sessionId: 'workspace-mcp-discovery',
-          resume: undefined,
-          continue: false,
-          chatRecording: false,
-        },
-        cwd,
-        undefined,
-        {
-          userHooks: settings.getUserHooks(),
-          projectHooks: settings.getProjectHooks(),
-        },
-        buildDisabledSkillNamesProvider(settings),
-      ),
-    );
-    config.setMcpTransportPool(this.mcpPool);
-    try {
-      await config.initialize({
-        skipGeminiInitialization: true,
-        skipFileCheckpointing: true,
-        skipHooks: true,
-        skipSkillManager: true,
-        skipMcpDiscovery: true,
-        lenientToolWarmup: true,
-      });
-      const manager = config.getToolRegistry()?.getMcpClientManager();
-      if (!manager) {
-        throw new Error('MCP client manager is unavailable');
-      }
-      await manager.discoverAllMcpToolsIncremental(config);
-      if (manager.getDiscoveryState() === MCPDiscoveryState.NOT_STARTED) {
-        throw new Error(
-          'MCP discovery did not start. The workspace may not be trusted.',
-        );
-      }
-      this.workspaceMcpDiscoveryConfig = config;
-    } catch (error) {
+    return sessionIdContext.run('workspace-mcp-discovery', async () => {
+      const cwd = this.config.getTargetDir();
+      const config = await this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
+        loadCliConfig(
+          settings.merged,
+          {
+            ...this.argv,
+            sessionId: 'workspace-mcp-discovery',
+            resume: undefined,
+            continue: false,
+            chatRecording: false,
+          },
+          cwd,
+          undefined,
+          {
+            userHooks: settings.getUserHooks(),
+            projectHooks: settings.getProjectHooks(),
+          },
+          buildDisabledSkillNamesProvider(settings),
+        ),
+      );
+      config.setMcpTransportPool(this.mcpPool);
       try {
-        await config.getToolRegistry()?.stop();
-      } catch {
-        // Preserve the initialization failure that made this config unusable.
+        await config.initialize({
+          skipLlmInitialization: true,
+          skipFileCheckpointing: true,
+          skipHooks: true,
+          skipSkillManager: true,
+          skipMcpDiscovery: true,
+          lenientToolWarmup: true,
+        });
+        const manager = config.getToolRegistry()?.getMcpClientManager();
+        if (!manager) {
+          throw new Error('MCP client manager is unavailable');
+        }
+        await manager.discoverAllMcpToolsIncremental(config);
+        if (manager.getDiscoveryState() === MCPDiscoveryState.NOT_STARTED) {
+          throw new Error(
+            'MCP discovery did not start. The workspace may not be trusted.',
+          );
+        }
+        this.workspaceMcpDiscoveryConfig = config;
+      } catch (error) {
+        try {
+          await config.getToolRegistry()?.stop();
+        } catch {
+          // Preserve the initialization failure that made this config unusable.
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   private initializeWorkspaceMcpDiscovery(): { accepted: boolean } {
@@ -3911,9 +3914,9 @@ class QwenAgent implements Agent {
           }
           await Promise.all(
             this.getLiveMcpConfigs(serverName).map(async (config) => {
-              const geminiClient = config.getGeminiClient?.();
-              if (geminiClient?.isInitialized?.()) {
-                await geminiClient.setTools?.();
+              const llmClient = config.getLlmClient?.();
+              if (llmClient?.isInitialized?.()) {
+                await llmClient.setTools?.();
               }
             }),
           );
@@ -5612,6 +5615,8 @@ class QwenAgent implements Agent {
           break;
         }
         case 'reasoning_effort': {
+          const generation = session.getConfig().getContentGeneratorConfig();
+          const thinkingMandatory = generation.thinkingMandatory === true;
           const modelReasoning = this.getModelReasoningConfiguration(
             session.getConfig(),
           );
@@ -5620,7 +5625,7 @@ class QwenAgent implements Agent {
               ? undefined
               : modelReasoning.efforts;
             const selected =
-              value === REASONING_EFFORT_NONE
+              value === REASONING_EFFORT_NONE && !thinkingMandatory
                 ? REASONING_EFFORT_NONE
                 : modelReasoning.toggleOnly
                   ? value === REASONING_EFFORT_DEFAULT
@@ -5629,7 +5634,7 @@ class QwenAgent implements Agent {
                   : effortValues?.find((effort) => effort === value);
             if (!selected) {
               const choices = [
-                REASONING_EFFORT_NONE,
+                ...(thinkingMandatory ? [] : [REASONING_EFFORT_NONE]),
                 ...(effortValues ?? [REASONING_EFFORT_DEFAULT]),
               ];
               throw RequestError.invalidParams(
@@ -5637,7 +5642,17 @@ class QwenAgent implements Agent {
                 `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
               );
             }
-            const generation = session.getConfig().getContentGeneratorConfig();
+            if (!modelReasoning.toggleOnly) {
+              for (const source of ['extra_body', 'samplingParams'] as const) {
+                const layer = generation[source];
+                if (!layer) continue;
+                const next = { ...layer };
+                delete next['enable_thinking'];
+                delete next['reasoning_effort'];
+                delete next['thinking_budget'];
+                generation[source] = next;
+              }
+            }
             if (selected === REASONING_EFFORT_NONE) {
               generation.reasoning = false;
             } else if (selected === REASONING_EFFORT_DEFAULT) {
@@ -6821,14 +6836,9 @@ class QwenAgent implements Agent {
       for (const extension of config.getExtensions()) {
         if (extension.isActive) continue;
         for (const skill of extension.skills ?? []) {
-          const extensionName = extension.displayName ?? extension.name;
+          const extensionName = extension.name;
           const key = `extension:${extensionName}:${skill.name}`;
-          if (
-            skillsByKey.has(`extension:${extension.name}:${skill.name}`) ||
-            skillsByKey.has(key)
-          ) {
-            continue;
-          }
+          if (skillsByKey.has(key)) continue;
           skillsByKey.set(
             key,
             mapSkillConfigToStatus(
@@ -6836,6 +6846,7 @@ class QwenAgent implements Agent {
                 ...skill,
                 level: 'extension',
                 extensionName,
+                extensionDisplayName: extension.displayName,
               },
               disablements,
               { disabled: true },
@@ -6909,7 +6920,14 @@ class QwenAgent implements Agent {
         const configOptions =
           model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
             ? undefined
-            : buildModelReasoningConfigPreview(model.id);
+            : buildModelReasoningConfigPreview(model.id, {
+                thinkingMandatory:
+                  config.getResolvedModelConfig?.(
+                    model.authType,
+                    model.id,
+                    model.registryBaseUrl ?? model.baseUrl,
+                  )?.generationConfig.thinkingMandatory === true,
+              });
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -7931,9 +7949,15 @@ class QwenAgent implements Agent {
         typeof sessionId === 'string' && sessionId.length > 0
           ? this.sessions.get(sessionId)
           : undefined;
-      if (session && this.isSessionScopedExtMethod(method)) {
-        return await this.runInSessionContext(session, () =>
-          this.extMethodInternal(method, normalizedParams),
+      if (
+        typeof sessionId === 'string' &&
+        sessionId.length > 0 &&
+        this.isSessionScopedExtMethod(method) &&
+        (session !== undefined || SESSION_ID_RE.test(sessionId))
+      ) {
+        return await sessionIdContext.run(
+          session?.getConfig().getSessionId() ?? sessionId,
+          () => this.extMethodInternal(method, normalizedParams),
         );
       }
 
@@ -7956,8 +7980,6 @@ class QwenAgent implements Agent {
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
-    const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
-
     switch (method) {
       case SERVE_STATUS_EXT_METHODS.channelPing: {
         const nonce = params['nonce'];
@@ -8582,6 +8604,14 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid contextMode');
         }
         const contextMode: WorkspaceRememberContextMode = rawContextMode;
+        const rawScope = params['scope'];
+        if (
+          rawScope !== undefined &&
+          rawScope !== 'project' &&
+          rawScope !== 'user'
+        ) {
+          throw RequestError.invalidParams(undefined, 'Invalid scope');
+        }
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -8601,6 +8631,7 @@ class QwenAgent implements Agent {
             projectRoot,
             content: content.trim(),
             contextMode,
+            ...(rawScope ? { scope: rawScope } : {}),
             abortSignal: childSignal,
           });
           if (result.filesTouched.length > 0) {
@@ -8673,6 +8704,14 @@ class QwenAgent implements Agent {
             'Query exceeds maximum size',
           );
         }
+        const rawScope = params['scope'];
+        if (
+          rawScope !== undefined &&
+          rawScope !== 'project' &&
+          rawScope !== 'user'
+        ) {
+          throw RequestError.invalidParams(undefined, 'Invalid scope');
+        }
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -8693,6 +8732,7 @@ class QwenAgent implements Agent {
             .forget(projectRoot, trimmedQuery, {
               config: hiddenConfig,
               abortSignal: childSignal,
+              ...(rawScope ? { scope: rawScope } : {}),
             });
           return {
             summary:
@@ -8976,9 +9016,9 @@ class QwenAgent implements Agent {
           });
           await Promise.all(
             this.getLiveMcpConfigs(serverName).map(async (liveConfig) => {
-              const geminiClient = liveConfig.getGeminiClient?.();
-              if (geminiClient?.isInitialized?.()) {
-                await geminiClient.setTools?.();
+              const llmClient = liveConfig.getLlmClient?.();
+              if (llmClient?.isInitialized?.()) {
+                await llmClient.setTools?.();
               }
             }),
           );
@@ -10214,7 +10254,7 @@ class QwenAgent implements Agent {
 
           try {
             await config
-              .getGeminiClient()
+              .getLlmClient()
               ?.addWorkingDirectoryChangedContext(
                 settledPreviousCwd,
                 canonicalPath,
@@ -10428,7 +10468,7 @@ class QwenAgent implements Agent {
                   );
                 }
                 await cfg.refreshHierarchicalMemory();
-                await cfg.getGeminiClient()?.refreshSystemInstruction();
+                await cfg.getLlmClient()?.refreshSystemInstruction();
               }),
             );
             const failedCount = results.filter(
@@ -10624,7 +10664,7 @@ class QwenAgent implements Agent {
         let hasHistory = false;
         try {
           hasHistory =
-            (config.getGeminiClient().getHistoryShallow() ?? []).length > 0;
+            (config.getLlmClient().getHistoryShallow() ?? []).length > 0;
         } catch (error) {
           debugLogger.debug('Failed to read history before /fork:', error);
         }
@@ -10665,7 +10705,7 @@ class QwenAgent implements Agent {
         }
 
         try {
-          config.getGeminiClient().addHistory({
+          config.getLlmClient().addHistory({
             role: 'user',
             parts: [
               {
@@ -10698,10 +10738,10 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
-        const geminiClient = config.getGeminiClient()!;
+        const llmClient = config.getLlmClient()!;
         const outputText =
           typeof params['output'] === 'string' ? params['output'] : '';
-        geminiClient.addHistory({
+        llmClient.addHistory({
           role: 'user',
           parts: [
             {
@@ -11162,8 +11202,7 @@ class QwenAgent implements Agent {
           );
         }
         await runRefresh(
-          async () =>
-            await config.getGeminiClient()?.refreshSystemInstruction(),
+          async () => await config.getLlmClient()?.refreshSystemInstruction(),
         );
         await runRefresh(
           async () => await session.sendAvailableCommandsUpdate(),
@@ -12078,7 +12117,7 @@ class QwenAgent implements Agent {
               );
             }
             try {
-              await config.getGeminiClient()?.refreshSystemInstruction();
+              await config.getLlmClient()?.refreshSystemInstruction();
             } catch (err) {
               debugLogger.warn(
                 `reload: refreshSystemInstruction failed for session ${id}: ${err}`,
@@ -12315,25 +12354,44 @@ class QwenAgent implements Agent {
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
   ): Promise<Config> {
+    // Transcript replay is the only recording-disabled Config and must remain
+    // id-less; it borrows the validated target session context from extMethod.
+    const preserveIdlessSession =
+      sessionId === undefined && chatRecording === false;
+    const inheritedSessionId = preserveIdlessSession
+      ? sessionIdContext.getStore()
+      : undefined;
+    // A generated id exists only to bind the debug-log context before Config
+    // construction; loadCliConfig must not treat it as caller-supplied (the
+    // occupancy check is for caller-chosen ids that may have a case-twin).
+    const sessionIdGenerated =
+      sessionId === undefined && !preserveIdlessSession;
+    const effectiveSessionId =
+      sessionId ?? (sessionIdGenerated ? randomUUID() : undefined);
+    const debugSessionId =
+      effectiveSessionId ?? inheritedSessionId ?? 'transcript-replay';
     try {
       this.assertManagedSessionAdmission();
-      return await this.runWithPinnedRuntimeBaseDir(settings, cwd, async () => {
-        await this.retryPendingConfigCleanup(
-          Storage.getRuntimeBaseDir(),
-          sessionId,
-        );
-        return this.newSessionConfigInRuntimeContext(
-          cwd,
-          mcpServers,
-          settings,
-          sessionSource,
-          sessionId,
-          resume,
-          initializeOptions,
-          chatRecording,
-          restoreOptions,
-        );
-      });
+      return await sessionIdContext.run(debugSessionId, () =>
+        this.runWithPinnedRuntimeBaseDir(settings, cwd, async () => {
+          await this.retryPendingConfigCleanup(
+            Storage.getRuntimeBaseDir(),
+            effectiveSessionId,
+          );
+          return this.newSessionConfigInRuntimeContext(
+            cwd,
+            mcpServers,
+            settings,
+            sessionSource,
+            effectiveSessionId,
+            resume,
+            initializeOptions,
+            chatRecording,
+            restoreOptions,
+            sessionIdGenerated,
+          );
+        }),
+      );
     } catch (error) {
       if (error instanceof SessionIdConflictError) {
         throw new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
@@ -12363,6 +12421,7 @@ class QwenAgent implements Agent {
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
+    sessionIdGenerated?: boolean,
   ): Promise<Config> {
     const provisionalWorkspace = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
@@ -12438,7 +12497,11 @@ class QwenAgent implements Agent {
     const sessionArg =
       resume === true
         ? { resume: sessionId, sessionId: undefined }
-        : { sessionId, resume: undefined };
+        : {
+            sessionId,
+            sessionIdGenerated: sessionIdGenerated === true || undefined,
+            resume: undefined,
+          };
     const argvForSession = {
       ...this.argv,
       ...(provisionalWorkspace ? { experimentalLsp: false } : {}),
@@ -12576,23 +12639,25 @@ class QwenAgent implements Agent {
       typeof config.setMcpBudgetEventCallback === 'function' &&
       wiredSessionId !== undefined
     ) {
-      const sid = wiredSessionId;
+      const acpSessionId = wiredSessionId;
       config.setMcpBudgetEventCallback((event) => {
-        // Fire-and-forget. `.catch` suppresses unhandled rejections
-        // and logs at debug level for operator visibility.
-        void this.connection
-          .extNotification('qwen/notify/session/mcp-budget-event', {
-            v: 1,
-            sessionId: sid,
-            ...event,
-          })
-          .catch((err: unknown) => {
-            debugLogger.debug(
-              `MCP budget extNotification dropped ` +
-                `(session=${sid}, kind=${event.kind}): ` +
-                `${err instanceof Error ? err.message : String(err)}`,
-            );
-          });
+        sessionIdContext.run(config.getSessionId(), () => {
+          // Fire-and-forget. `.catch` suppresses unhandled rejections
+          // and logs at debug level for operator visibility.
+          void this.connection
+            .extNotification('qwen/notify/session/mcp-budget-event', {
+              v: 1,
+              sessionId: acpSessionId,
+              ...event,
+            })
+            .catch((err: unknown) => {
+              debugLogger.debug(
+                `MCP budget extNotification dropped ` +
+                  `(session=${acpSessionId}, kind=${event.kind}): ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+              );
+            });
+        });
       });
     }
     try {
@@ -12699,11 +12764,11 @@ class QwenAgent implements Agent {
   ): Promise<Session> {
     this.assertManagedSessionAdmission();
     const sessionId = normalizeSessionIdForLookup(config.getSessionId());
-    const geminiClient = config.getGeminiClient();
-    const needsInitialize = !geminiClient.isInitialized();
+    const llmClient = config.getLlmClient();
+    const needsInitialize = !llmClient.isInitialized();
 
     if (needsInitialize && options.deferWorkspaceActivation !== true) {
-      await geminiClient.initialize();
+      await llmClient.initialize();
     }
     this.assertManagedSessionAdmission();
 
@@ -12971,12 +13036,67 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
-    const modelReasoning = this.getModelReasoningConfiguration(config);
+    const generation = config.getContentGeneratorConfig();
+    const modelReasoning = this.getModelReasoningConfiguration(
+      config,
+      currentModelId,
+    );
     const currentModelEffort = config.getReasoningEffort?.();
+    const reasoningOverride = config.getReasoningEffortOverride?.();
+    const reasoningOverrideValue = reasoningOverride
+      ? generation[reasoningOverride.source]?.[reasoningOverride.field]
+      : undefined;
+    const normalizedEffortOverride =
+      reasoningOverride?.field === 'reasoning_effort' &&
+      typeof reasoningOverrideValue === 'string'
+        ? reasoningOverrideValue === 'minimal'
+          ? 'low'
+          : REASONING_EFFORT_TIERS.find(
+              (effort) => effort === reasoningOverrideValue,
+            )
+        : undefined;
+    const normalizedBudgetOverride =
+      reasoningOverride?.field === 'thinking_budget' &&
+      typeof reasoningOverrideValue === 'number' &&
+      Number.isFinite(reasoningOverrideValue) &&
+      reasoningOverrideValue >= 0 &&
+      reasoningOverrideValue <= 262_144
+        ? reasoningOverrideValue <= 4_096
+          ? 'low'
+          : reasoningOverrideValue <= 16_384
+            ? 'medium'
+            : 'xhigh'
+        : undefined;
+    const normalizedOverrideEffort =
+      normalizedEffortOverride ?? normalizedBudgetOverride;
+    const overrideDisablesReasoning =
+      (reasoningOverride?.field === 'enable_thinking' &&
+        reasoningOverrideValue === false) ||
+      (reasoningOverride?.field === 'reasoning_effort' &&
+        reasoningOverrideValue === REASONING_EFFORT_NONE);
+    const mandatoryUsesDefaultEffort =
+      generation.thinkingMandatory === true &&
+      (overrideDisablesReasoning ||
+        (generation.reasoning === false &&
+          reasoningOverride?.field === 'reasoning_effort'));
+    const effectiveModelEffort =
+      modelReasoning && !modelReasoning.toggleOnly
+        ? mandatoryUsesDefaultEffort
+          ? modelReasoning.defaultEffort
+          : normalizedOverrideEffort
+            ? (modelReasoning.efforts.find(
+                (effort) => effort === normalizedOverrideEffort,
+              ) ?? modelReasoning.defaultEffort)
+            : currentModelEffort
+        : currentModelEffort;
+    const reasoningEnabled =
+      generation.reasoning !== false &&
+      (!reasoningOverride || !overrideDisablesReasoning);
     const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
       ? buildModelReasoningConfigOption(rawCurrentModelId, {
-          enabled: config.getContentGeneratorConfig().reasoning !== false,
-          effort: currentModelEffort,
+          enabled: reasoningEnabled,
+          effort: effectiveModelEffort,
+          thinkingMandatory: generation.thinkingMandatory === true,
         })
       : undefined) ?? {
       id: 'reasoning_effort',
@@ -13005,22 +13125,24 @@ class QwenAgent implements Agent {
 
   private getModelReasoningConfiguration(
     config: Config,
+    currentAcpModelId?: string,
   ): ModelReasoningConfiguration | undefined {
-    if (
-      config.getActiveRuntimeModelSnapshot?.() ||
-      config.getReasoningEffortOverride?.() ||
-      config.getContentGeneratorConfig().thinkingMandatory === true
-    ) {
+    if (config.getActiveRuntimeModelSnapshot?.()) {
+      return undefined;
+    }
+    const completeModelId =
+      currentAcpModelId ??
+      getCurrentAcpModelId(
+        this.buildSelectableModelOptions(config),
+        (config.getModel() || '').trim(),
+        config.getAuthType?.(),
+        config.getCurrentModelRegistryBaseUrl?.(),
+      );
+    if (completeModelId.startsWith(ACP_ROUTE_ID_PREFIX)) {
       return undefined;
     }
     const reasoning = getModelConfiguration(config.getModel())?.reasoning;
-    const currentEffort = config.getReasoningEffort?.();
-    return reasoning?.thinking &&
-      (reasoning.toggleOnly ||
-        !currentEffort ||
-        reasoning.efforts.includes(currentEffort))
-      ? reasoning
-      : undefined;
+    return reasoning?.thinking ? reasoning : undefined;
   }
 
   private buildSelectableModelOptions(config: Config) {
