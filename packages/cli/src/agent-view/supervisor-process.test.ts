@@ -19,9 +19,12 @@ import type {
   AgentViewWorkerFile,
 } from './protocol.js';
 import {
+  authorizeAgentViewWorkerSideband,
   createAgentViewSupervisorHandler,
   getAgentViewSupervisorSocketPath,
 } from './supervisor-process.js';
+import { callAgentViewSupervisor } from './supervisor-client.js';
+import { createAgentViewSupervisorServer } from './supervisor-server.js';
 import {
   clearAgentViewWorkerPids,
   getAgentViewSessionPaths,
@@ -438,6 +441,13 @@ describe('Agent View supervisor process helpers', () => {
         return host;
       },
     });
+    const socketPath = getAgentViewSupervisorSocketPath({ globalDir });
+    const server = createAgentViewSupervisorServer(handler, {
+      socketPath,
+      authorizeSideband: (op, params) =>
+        authorizeAgentViewWorkerSideband(op, params, { globalDir }),
+    });
+    await server.listen();
     const result = (await handler.dispatch?.({
       prompt: 'write tests',
       cwd: globalDir,
@@ -465,12 +475,14 @@ describe('Agent View supervisor process helpers', () => {
       (worker) => worker?.tokenDigest === undefined,
     );
 
-    await handler.workerEvent?.({
-      type: 'state',
-      sessionId: result.sessionId,
-      token,
-      sessionState: 'working',
-    });
+    await expect(
+      callAgentViewSupervisor(socketPath, 'workerEvent', {
+        type: 'state',
+        sessionId: result.sessionId,
+        token,
+        sessionState: 'working',
+      }),
+    ).resolves.toMatchObject({ accepted: true });
     await expect(
       readAgentViewSessionState(result.sessionId, { globalDir }),
     ).resolves.not.toHaveProperty('initialPromptPending');
@@ -484,6 +496,7 @@ describe('Agent View supervisor process helpers', () => {
     );
     expect(launches[1]?.argv).not.toContain('--prompt-interactive=write tests');
 
+    await server.close();
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 

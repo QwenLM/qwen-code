@@ -304,4 +304,14 @@ describe('agents command', () => {
 
     expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
   });
+
+  it('rejects an oversized background prompt before supervisor startup', async () => {
+    await expect(
+      handleAgentViewBackgroundPrompt('x'.repeat(16 * 1024 + 1)),
+    ).rejects.toThrow(
+      'Background agent prompts are limited to 16384 UTF-8 bytes.',
+    );
+
+    expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+  });
 });

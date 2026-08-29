@@ -35,7 +35,7 @@ interface DispatchOptions {
 // activity.json is re-read on every list() poll; keep the summary a
 // display-sized preview, matching the queued-prompt preview cap.
 const MAX_ACTIVITY_SUMMARY_CHARS = 500;
-const MAX_ARGV_PROMPT_BYTES = 16 * 1024;
+export const MAX_AGENT_VIEW_ARGV_PROMPT_BYTES = 16 * 1024;
 
 export async function dispatchAgentViewSession(
   prompt: string,
@@ -48,10 +48,10 @@ export async function dispatchAgentViewSession(
   const resolvedCwd = path.resolve(cwd);
   if (
     options.promptInArgv !== false &&
-    Buffer.byteLength(prompt, 'utf8') > MAX_ARGV_PROMPT_BYTES
+    Buffer.byteLength(prompt, 'utf8') > MAX_AGENT_VIEW_ARGV_PROMPT_BYTES
   ) {
     throw new Error(
-      `Agent View prompt is too large for argv (${MAX_ARGV_PROMPT_BYTES} UTF-8 bytes maximum).`,
+      `Agent View prompt is too large for argv (${MAX_AGENT_VIEW_ARGV_PROMPT_BYTES} UTF-8 bytes maximum).`,
     );
   }
   const state = {

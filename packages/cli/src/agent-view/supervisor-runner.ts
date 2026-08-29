@@ -22,9 +22,9 @@ import type {
   AgentViewSupervisorSubscription,
 } from './supervisor-client.js';
 import {
+  authorizeAgentViewWorkerSideband,
   createAgentViewSupervisorHandler,
   getAgentViewSupervisorSocketPath,
-  requireValidWorkerToken,
 } from './supervisor-process.js';
 import type { AgentViewSupervisorHibernationPolicy } from './supervisor-process.js';
 import { createAgentViewSupervisorServer } from './supervisor-server.js';
@@ -160,23 +160,12 @@ export async function runAgentViewSupervisor(
       });
     },
   });
-  const authorizeSideband: AgentViewSidebandAuthorizer = async (
-    _op,
-    params,
-  ) => {
-    const sessionId = params?.['sessionId'];
-    if (typeof sessionId !== 'string' || sessionId.length === 0) return false;
-    try {
-      await requireValidWorkerToken(
-        sessionId,
-        params,
-        options.globalDir ? { globalDir: options.globalDir } : {},
-      );
-      return true;
-    } catch {
-      return false;
-    }
-  };
+  const authorizeSideband: AgentViewSidebandAuthorizer = async (op, params) =>
+    authorizeAgentViewWorkerSideband(
+      op,
+      params,
+      options.globalDir ? { globalDir: options.globalDir } : {},
+    );
   const server = createAgentViewSupervisorServer(handler, {
     socketPath,
     authToken,

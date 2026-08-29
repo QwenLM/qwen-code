@@ -36,6 +36,7 @@ import {
   QWEN_CODE_DESKTOP_ENV,
   QWEN_CODE_SERVE_ENV,
 } from '../config/acp-channel-fallback.js';
+import { restoreInvocationScopedEnv } from '../config/invocation-env.js';
 
 const execAsync = promisify(exec);
 
@@ -381,7 +382,7 @@ export async function start_sandbox(
     process.stdin.pause();
     sandboxProcess = spawn(config.command, args, {
       stdio: 'inherit',
-      ...(childEnv ? { env: { ...process.env, ...childEnv } } : {}),
+      env: { ...restoreInvocationScopedEnv(process.env), ...childEnv },
     });
     return new Promise((resolve, reject) => {
       sandboxProcess?.on('error', reject);

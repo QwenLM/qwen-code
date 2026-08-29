@@ -15,6 +15,7 @@ import type {
   AgentViewWorkerFile,
 } from '../agent-view/protocol.js';
 import { ensureAgentViewSupervisor } from '../agent-view/supervisor-runner.js';
+import { MAX_AGENT_VIEW_ARGV_PROMPT_BYTES } from '../agent-view/supervisor-dispatch.js';
 import { requireAgentViewEnabled } from '../agent-view/feature.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { writeStdoutLine } from '../utils/stdioHelpers.js';
@@ -42,6 +43,15 @@ export async function handleAgentViewBackgroundPrompt(
   const normalizedPrompt = prompt.trim();
   if (!normalizedPrompt) {
     throw new FatalError('Cannot use --bg/--background without a prompt.', 1);
+  }
+  if (
+    Buffer.byteLength(normalizedPrompt, 'utf8') >
+    MAX_AGENT_VIEW_ARGV_PROMPT_BYTES
+  ) {
+    throw new FatalError(
+      `Background agent prompts are limited to ${MAX_AGENT_VIEW_ARGV_PROMPT_BYTES} UTF-8 bytes.`,
+      1,
+    );
   }
   const supervisor = await ensureAgentViewSupervisor();
   const result = await supervisor.dispatch(normalizedPrompt, process.cwd());

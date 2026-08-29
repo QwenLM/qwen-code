@@ -4606,6 +4606,33 @@ export async function requireValidWorkerToken(
   }
 }
 
+export async function authorizeAgentViewWorkerSideband(
+  op: 'workerEvent' | 'workerControl',
+  params: Record<string, unknown> | undefined,
+  options: { globalDir?: string },
+): Promise<boolean> {
+  const sessionId = params?.['sessionId'];
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return false;
+  try {
+    await requireValidWorkerToken(sessionId, params, options);
+    return true;
+  } catch {
+    if (
+      op !== 'workerEvent' ||
+      params?.['type'] !== 'state' ||
+      params['sessionState'] !== 'working'
+    ) {
+      return false;
+    }
+    const token = params['token'];
+    return (
+      typeof token === 'string' &&
+      token.length > 0 &&
+      hasRetiredInitialPromptTokenDigest(sessionId, token, options)
+    );
+  }
+}
+
 function tokenDigestMatches(token: string, expectedDigest: string): boolean {
   const actual = Buffer.from(digestAgentViewWorkerToken(token), 'hex');
   const expected = Buffer.from(expectedDigest, 'hex');

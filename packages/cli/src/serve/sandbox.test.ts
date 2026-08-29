@@ -33,6 +33,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 import { isContainerPathWithinWorkdir } from '../utils/sandbox-path.js';
+import { setInvocationScopedEnv } from '../config/invocation-env.js';
 import {
   BUILTIN_SEATBELT_PROFILES,
   getSandboxPassthroughEnvArgs,
@@ -245,6 +246,33 @@ describe('resolveSeatbeltProfileFile', () => {
       await expect(result).resolves.toBe(0);
     },
   );
+
+  it('restores invocation-scoped environment before a seatbelt re-exec', async () => {
+    const name = 'QWEN_TEST_SANDBOX_INVOCATION_ENV';
+    delete process.env[name];
+    setInvocationScopedEnv(name, 'temporary');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined);
+    vi.spyOn(fs, 'realpathSync').mockImplementation(
+      (filePath) => String(filePath) || '/tmp',
+    );
+    execSyncMock.mockReturnValue(Buffer.from('/tmp/cache\n'));
+
+    const child = new EventEmitter();
+    spawnMock.mockReturnValue(child);
+    const result = start_sandbox(
+      { command: 'sandbox-exec', image: '' },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js', '--insecure'],
+    );
+
+    expect(spawnMock.mock.calls[0]?.[2]?.env).not.toHaveProperty(name);
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+    delete process.env[name];
+  });
 });
 
 describe('getSandboxPassthroughEnvArgs', () => {
