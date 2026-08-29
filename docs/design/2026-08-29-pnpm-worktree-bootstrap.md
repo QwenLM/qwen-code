@@ -36,12 +36,15 @@ workspace links. The compatibility hook can be removed when the manifests
 adopt `workspace:` during the final cutover.
 
 New worktrees use `node scripts/setup-worktree.js`. The script invokes the
-pinned pnpm version through Corepack, prefers the shared local store, freezes
-the lockfile, and sets `QWEN_SKIP_PREPARE=1`. This keeps dependency install
-scripts enabled while skipping the repository's eager build, bundle, and
-Husky setup. Script execution does not implicitly install stale dependencies;
-the bootstrap command is the explicit installation boundary. Builds remain
-available on demand.
+pinned pnpm version through Corepack, freezes the lockfile, and first attempts
+an offline install from the shared local store. It retries with registry access
+only when that cache-only attempt is incomplete. This avoids waiting for pnpm
+to prefetch optional binaries for other platforms on the common warm-store
+path. The script sets `QWEN_SKIP_PREPARE=1`, keeping dependency install scripts
+enabled while skipping the repository's eager build, bundle, and Husky setup.
+Script execution does not implicitly install stale dependencies; the bootstrap
+command is the explicit installation boundary. Builds remain available on
+demand.
 
 ## Migration boundary
 

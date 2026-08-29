@@ -8,25 +8,46 @@ import { spawnSync } from 'node:child_process';
 import { constants as osConstants } from 'node:os';
 
 const corepack = process.platform === 'win32' ? 'corepack.cmd' : 'corepack';
-const args = ['pnpm', 'install', '--frozen-lockfile', '--prefer-offline'];
-const result = spawnSync(corepack, args, {
-  env: {
-    ...process.env,
-    QWEN_SKIP_PREPARE: '1',
-  },
-  shell: process.platform === 'win32',
-  stdio: 'inherit',
-});
+const env = {
+  ...process.env,
+  QWEN_SKIP_PREPARE: '1',
+};
 
-if (result.error) {
-  console.error(`worktree setup failed: ${result.error.message}`);
-  process.exit(1);
+function install(cacheMode) {
+  return spawnSync(
+    corepack,
+    ['pnpm', 'install', '--frozen-lockfile', cacheMode],
+    {
+      env,
+      shell: process.platform === 'win32',
+      stdio: 'inherit',
+    },
+  );
 }
 
-if (result.signal) {
-  console.error(`worktree setup killed by signal ${result.signal}`);
-  const signalNumber = osConstants.signals[result.signal];
-  process.exit(signalNumber ? 128 + signalNumber : 1);
+function exitWithResult(result) {
+  if (result.error) {
+    console.error(`worktree setup failed: ${result.error.message}`);
+    process.exit(1);
+  }
+
+  if (result.signal) {
+    console.error(`worktree setup killed by signal ${result.signal}`);
+    const signalNumber = osConstants.signals[result.signal];
+    process.exit(signalNumber ? 128 + signalNumber : 1);
+  }
+
+  process.exit(result.status ?? 1);
 }
 
-process.exit(result.status ?? 1);
+const cachedInstall = install('--offline');
+if (cachedInstall.status === 0) {
+  process.exit(0);
+}
+
+if (cachedInstall.error || cachedInstall.signal) {
+  exitWithResult(cachedInstall);
+}
+
+console.warn('Cached install unavailable; retrying with registry access.');
+exitWithResult(install('--prefer-offline'));

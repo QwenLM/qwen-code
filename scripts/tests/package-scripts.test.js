@@ -83,8 +83,50 @@ describe('package scripts', () => {
 
       expect(result.status).toBe(0);
       expect(readFileSync(logFile, 'utf8').trim()).toBe(
-        '1 pnpm install --frozen-lockfile --prefer-offline',
+        '1 pnpm install --frozen-lockfile --offline',
       );
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to registry access when the pnpm store is incomplete', () => {
+    const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-fallback-'));
+    const logFile = path.join(binDir, 'corepack.log');
+
+    try {
+      if (process.platform === 'win32') {
+        writeFileSync(
+          path.join(binDir, 'corepack.cmd'),
+          '@echo %QWEN_SKIP_PREPARE% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if "%4"=="--offline" exit /b 1\r\n',
+        );
+      } else {
+        writeFileSync(
+          path.join(binDir, 'corepack'),
+          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $*" >> "$WORKTREE_SETUP_LOG"\n[ "$4" != "--offline" ]\n',
+        );
+        chmodSync(path.join(binDir, 'corepack'), 0o755);
+      }
+
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/setup-worktree.js')],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            WORKTREE_SETUP_LOG: logFile,
+          },
+        },
+      );
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim().split('\n')).toEqual([
+        '1 pnpm install --frozen-lockfile --offline',
+        '1 pnpm install --frozen-lockfile --prefer-offline',
+      ]);
     } finally {
       rmSync(binDir, { recursive: true, force: true });
     }
