@@ -328,7 +328,9 @@ export function updateConnectionFromDaemonEvent(
       const workspaceCwd = getString(data, 'workspaceCwd');
       const branch = getString(data, 'branch');
       setConnection((current) =>
-        workspaceCwd && workspaceCwd !== current.workspaceCwd
+        (current.sessionContext !== undefined &&
+          current.sessionContext.kind !== 'workspace') ||
+        (workspaceCwd && workspaceCwd !== current.workspaceCwd)
           ? current
           : { ...current, gitBranch: branch },
       );
@@ -338,7 +340,9 @@ export function updateConnectionFromDaemonEvent(
       const data = getRecord(event.data);
       const workspaceCwd = getString(data, 'workspaceCwd');
       setConnection((current) =>
-        workspaceCwd && workspaceCwd !== current.workspaceCwd
+        (current.sessionContext !== undefined &&
+          current.sessionContext.kind !== 'workspace') ||
+        (workspaceCwd && workspaceCwd !== current.workspaceCwd)
           ? current
           : {
               ...current,

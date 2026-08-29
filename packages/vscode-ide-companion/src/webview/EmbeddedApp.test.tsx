@@ -425,7 +425,7 @@ describe('EmbeddedApp host wiring', () => {
     });
   });
 
-  it('opens permission diffs only from the authoritative file_diff preview', async () => {
+  it('opens permission diffs only from authoritative tool-call content', async () => {
     const props = await renderApp();
     const onTranscriptChange = callback<(blocks: unknown[]) => void>(
       props,
@@ -440,10 +440,16 @@ describe('EmbeddedApp host wiring', () => {
           requestId: 'req-write',
           title: 'Write new.ts',
           options: [],
-          preview: {
-            kind: 'file_diff',
-            path: '/workspace/new.ts',
-            newText: 'hello world',
+          preview: { kind: 'key_value', rows: [] },
+          toolCall: {
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/new.ts',
+                oldText: 'header\nconst value = 1;\nfooter',
+                newText: 'header\nconst value = 2;\nfooter',
+              },
+            ],
           },
         },
         {
@@ -470,8 +476,8 @@ describe('EmbeddedApp host wiring', () => {
       type: 'openDiff',
       data: {
         path: '/workspace/new.ts',
-        oldText: '',
-        newText: 'hello world',
+        oldText: 'header\nconst value = 1;\nfooter',
+        newText: 'header\nconst value = 2;\nfooter',
         source: 'web-shell',
       },
     });
