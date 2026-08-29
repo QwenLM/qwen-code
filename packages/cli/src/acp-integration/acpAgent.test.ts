@@ -1050,6 +1050,8 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   PROMPT_CANCEL_METHOD,
+  SESSION_INITIALIZATION_DEADLINE_META_KEY,
+  SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -2309,6 +2311,101 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.any(AbortSignal),
       'trusted model-only prompt',
     );
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('aborts trusted session initialization at the bridge deadline', async () => {
+    const innerConfig = await setupSessionMocks('deadline-session');
+    vi.mocked(innerConfig.initialize).mockImplementationOnce(
+      async (options) => {
+        const signal = options?.signal;
+        expect(signal).toBeInstanceOf(AbortSignal);
+        await new Promise<void>((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        });
+      },
+    );
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'expected-capability',
+    );
+
+    await expect(
+      agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: {
+          [SESSION_INITIALIZATION_DEADLINE_META_KEY]: Date.now() + 20,
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: -32603,
+      data: { errorKind: SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND },
+    });
+    expect(vi.mocked(Session)).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each([
+    ['non-positive', () => 0],
+    ['non-integer', () => Date.now() + 0.5],
+    ['non-safe', () => Number.MAX_SAFE_INTEGER + 1],
+    ['beyond the timer range', () => Date.now() + 2_147_483_648],
+  ])(
+    'rejects a %s trusted session initialization deadline before creating state',
+    async (_label, deadline) => {
+      await setupSessionMocks('invalid-deadline-session');
+      const { agent, agentPromise } = await bootInitializedAcpAgent(
+        makeSessionSettings(),
+        'expected-capability',
+      );
+
+      await expect(
+        agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: {
+            [SESSION_INITIALIZATION_DEADLINE_META_KEY]: deadline(),
+          },
+        }),
+      ).rejects.toMatchObject({
+        errorKind: 'invalid_session_initialization_deadline',
+      });
+      expect(vi.mocked(Session)).not.toHaveBeenCalled();
+
+      await expect(
+        agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+      ).resolves.toMatchObject({ sessionId: 'invalid-deadline-session' });
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('ignores a forged session initialization deadline from an untrusted parent', async () => {
+    await setupSessionMocks('untrusted-deadline-session');
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+    );
+
+    await expect(
+      agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: {
+          [SESSION_INITIALIZATION_DEADLINE_META_KEY]: Date.now() - 1,
+        },
+      }),
+    ).resolves.toMatchObject({ sessionId: 'untrusted-deadline-session' });
+
     mockConnectionState.resolve();
     await agentPromise;
   });

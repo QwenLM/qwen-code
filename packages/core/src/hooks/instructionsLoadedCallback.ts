@@ -19,6 +19,7 @@ export type InstructionsLoadedCallback = (
  */
 export function createInstructionsLoadedCallback(
   getHookSystem: () => HookSystem | undefined,
+  signal?: AbortSignal,
 ): InstructionsLoadedCallback {
   return async (notification: InstructionsLoadedNotification) => {
     const hookSystem = getHookSystem();
@@ -34,6 +35,7 @@ export function createInstructionsLoadedCallback(
         triggerFilePath: notification.triggerFilePath,
         parentFilePath: notification.parentFilePath,
       },
+      signal,
     );
   };
 }

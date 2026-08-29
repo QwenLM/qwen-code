@@ -21,6 +21,7 @@ import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { resolveInteractionMode } from '../core/prompts.js';
+import { InputFormat } from '../output/types.js';
 
 const debugLogger = createDebugLogger('ASK_USER_QUESTION');
 
@@ -173,12 +174,31 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
 
   /**
    * Whether a host is present that can put the questions in front of the
-   * user. ACP hosts (VSCode extension, Zed, stream-json clients) run in
-   * non-interactive mode but still collect answers through the
-   * confirmation channel.
+   * user *and* answer them. ACP hosts (VSCode extension, Zed, stream-json
+   * clients) run in non-interactive mode but still collect answers through
+   * the confirmation channel.
+   *
+   * The modality half is `resolveInteractionMode()`. The responder half is
+   * what that helper cannot know: a stream-json session only has something
+   * to answer a confirmation round once the SDK control system is up. In
+   * stream-json *direct* mode the first stdin frame is a plain user message,
+   * so `Session.handleFirstMessage()` leaves the control system off, no
+   * `PermissionController` is built and `onToolCallsUpdate` is never wired
+   * (`nonInteractiveCli.ts`, gated on `options.controlService`). Claiming a
+   * host there parks the call in `awaiting_approval` forever: the scheduler's
+   * non-interactive auto-deny carries `getInputFormat() !== STREAM_JSON` as a
+   * required conjunct, so it does not fire either.
    */
   private canCollectAnswers(): boolean {
-    return resolveInteractionMode(this._config) !== 'headless';
+    if (resolveInteractionMode(this._config) === 'headless') {
+      return false;
+    }
+    return (
+      this._config.isInteractive() ||
+      this._config.getExperimentalZedIntegration() ||
+      this._config.getInputFormat() !== InputFormat.STREAM_JSON ||
+      this._config.getSdkMode()
+    );
   }
 
   /**
