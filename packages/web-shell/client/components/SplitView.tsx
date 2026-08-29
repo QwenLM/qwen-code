@@ -38,6 +38,8 @@ import {
   workspaceLabelForCwd,
 } from '../utils/workspace';
 import { isEditableTarget } from '../utils/dom';
+import { AssistantTurnSettlementObserver } from '../assistantTurnSettlement';
+import type { WebShellAssistantTurnSettledEvent } from '../customization';
 import styles from './SplitView.module.css';
 
 const MAX_PANES = MAX_SPLIT_PANES;
@@ -53,6 +55,8 @@ export interface SplitViewProps {
    * each render would re-fire the reporting effect and loop.
    */
   onPanesChange?: (sessionIds: string[]) => void;
+  /** Report live assistant terminals from split panes. History replay is silent. */
+  onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
@@ -99,6 +103,7 @@ export interface SplitViewProps {
 export function SplitView({
   sessionIds,
   onPanesChange,
+  onAssistantTurnSettled,
   onExit,
   onError,
   onImageIngestionNotice,
@@ -484,6 +489,9 @@ export function SplitView({
                     suppressOwnUserEcho
                     restartEventStreamOnPrompt={restartSseOnPrompt}
                   >
+                    <AssistantTurnSettlementObserver
+                      onAssistantTurnSettled={onAssistantTurnSettled}
+                    />
                     <ChatPane
                       title={titleById.get(sessionId)}
                       workspaceCwd={paneWorkspaceCwd}

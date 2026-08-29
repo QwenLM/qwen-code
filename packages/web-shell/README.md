@@ -191,6 +191,9 @@ export function App() {
 
 该回调来自 daemon 的 prompt 终态，并在终态 transcript 已提交后触发。普通历史加载、
 分支回放和向前分页不会触发；断线期间遗漏、重连后补收的活动 prompt 终态可以触发。
+主聊天和 Split View 中的实时交互会话使用同一契约；仅打开 split pane 所产生的历史
+回放不会触发。如果主会话也显示在 pane 中，Web Shell 的共享分发器会避免同一终态在
+一个 Web Shell 实例内重复上报。
 `(sessionId, promptId)` 是跨挂载幂等键。单个 Provider 挂载期间重复终态会被抑制，
 宿主仍应使用该键做持久化幂等。
 

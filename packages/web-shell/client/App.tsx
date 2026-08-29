@@ -19,7 +19,6 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
-  useDaemonPromptSettled,
   useSettings,
   useProviders,
   useSessionNotices,
@@ -347,9 +346,12 @@ import {
   type WebShellBottomStatusItem,
   type WebShellPreparedSubmit,
   type WebShellSubmitSnapshot,
-  type WebShellAssistantMessageInfo,
   type WebShellAssistantTurnSettledEvent,
 } from './customization';
+import {
+  useAssistantTurnSettlementDispatcher,
+  useAssistantTurnSettlementProjection,
+} from './assistantTurnSettlement';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
@@ -702,30 +704,6 @@ function getLatestUserBlock(
   return undefined;
 }
 
-function getSettledAssistantMessage(
-  blocks: readonly DaemonTranscriptBlock[],
-  promptId: string,
-): WebShellAssistantMessageInfo | undefined {
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const block = blocks[index];
-    if (
-      block?.kind !== 'assistant' ||
-      block.promptId !== promptId ||
-      block.parentToolCallId !== undefined ||
-      block.text.trim().length === 0
-    ) {
-      continue;
-    }
-    return {
-      id: block.id,
-      content: block.text,
-      isStreaming: block.streaming ?? false,
-      timestamp: block.serverTimestamp ?? block.clientReceivedAt,
-    };
-  }
-  return undefined;
-}
-
 function matchesUserMessageIdentity(
   block: DaemonTranscriptBlock | undefined,
   identity: TranscriptUserMessageIdentity | undefined,
@@ -1066,7 +1044,8 @@ export interface WebShellProps {
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
   /**
    * Called after an authoritative daemon prompt terminal has been committed to
-   * the transcript. Ordinary history replay does not emit this callback.
+   * the transcript in the primary chat or an interactive split pane. Ordinary
+   * history replay does not emit this callback.
    */
   onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
@@ -2311,15 +2290,10 @@ export function App({
   const CustomComposerFooter = renderComposerFooter;
   const store = useTranscriptStore();
   const connection = useConnection();
-  useDaemonPromptSettled((event) => {
-    const callback = onAssistantTurnSettled;
-    if (!callback) return;
-    const message =
-      connection.sessionId === event.sessionId
-        ? getSettledAssistantMessage(store.getSnapshot().blocks, event.promptId)
-        : undefined;
-    callback({ ...event, ...(message ? { message } : {}) });
-  });
+  const dispatchAssistantTurnSettled = useAssistantTurnSettlementDispatcher(
+    onAssistantTurnSettled,
+  );
+  useAssistantTurnSettlementProjection(dispatchAssistantTurnSettled);
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot({
     structuralOnly: true,
   });
@@ -13117,6 +13091,7 @@ export function App({
                         // callback stable to avoid looping SplitView's reporting
                         // effect.
                         onPanesChange={handleSplitPanesChange}
+                        onAssistantTurnSettled={dispatchAssistantTurnSettled}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
                         // Back returns to the Session Overview (the hub the split

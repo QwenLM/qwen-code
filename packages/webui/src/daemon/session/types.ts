@@ -209,7 +209,10 @@ export interface DaemonPromptSettledEvent {
   stopReason?: string;
   /** Terminal SSE cursor when available; not a replacement for the idempotency key. */
   eventId?: number;
-  /** False when live-journal repair could not restore the complete turn. */
+  /**
+   * False when replay integrity is degraded or live-journal repair fails or is
+   * discarded before restoring the complete turn.
+   */
   transcriptComplete: boolean;
   error?: {
     message: string;

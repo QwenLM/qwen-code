@@ -1350,6 +1350,12 @@ vi.doMock('./components/SplitView', async () => {
       onExit?: () => void;
       sessionIds?: string[];
       onPanesChange?: (ids: string[]) => void;
+      onAssistantTurnSettled?: (event: {
+        sessionId: string;
+        promptId: string;
+        outcome: 'completed';
+        transcriptComplete: boolean;
+      }) => void;
       onPaneArtifactsChange?: (sessionId: string, artifacts: unknown[]) => void;
       onRightPanelOpen?: (request: unknown) => void;
       onOpenMonitor?: (
@@ -1447,6 +1453,21 @@ vi.doMock('./components/SplitView', async () => {
             onClick: () => props.onPanesChange?.([]),
           },
           'remove panes',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-report-settlement',
+            type: 'button',
+            onClick: () =>
+              props.onAssistantTurnSettled?.({
+                sessionId: 'session-1',
+                promptId: 'prompt-shared',
+                outcome: 'completed',
+                transcriptComplete: true,
+              }),
+          },
+          'settlement',
         ),
         React.createElement(
           'button',
@@ -12876,7 +12897,6 @@ describe('App session callbacks', () => {
       promptId: 'prompt-1',
       outcome: 'completed',
       stopReason: 'end_turn',
-      eventId: 10,
       transcriptComplete: true,
       message: {
         id: 'assistant-final',
@@ -12920,7 +12940,6 @@ describe('App session callbacks', () => {
       promptId: 'shared-prompt-id',
       outcome: 'completed',
       stopReason: 'end_turn',
-      eventId: 10,
       transcriptComplete: true,
     });
   });
@@ -13006,9 +13025,42 @@ describe('App session callbacks', () => {
       sessionId: 'session-1',
       promptId: 'prompt-failed-before-content',
       outcome: 'failed',
-      eventId: 12,
       transcriptComplete: true,
       error: { message: 'model unavailable', code: 'model_error' },
+    });
+  });
+
+  it('deduplicates a settlement observed by primary and split providers', async () => {
+    const onAssistantTurnSettled = vi.fn();
+    const { container } = renderApp({
+      onAssistantTurnSettled,
+      splitSessionIds: ['session-1'],
+    });
+    await flush();
+
+    act(() => {
+      testState.promptSettledListener?.({
+        sessionId: 'session-1',
+        promptId: 'prompt-shared',
+        outcome: 'completed',
+        eventId: 13,
+        transcriptComplete: true,
+      });
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-settlement"]',
+        )
+        ?.click();
+    });
+
+    expect(onAssistantTurnSettled).toHaveBeenCalledTimes(1);
+    expect(onAssistantTurnSettled).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      promptId: 'prompt-shared',
+      outcome: 'completed',
+      transcriptComplete: true,
     });
   });
 

@@ -62,6 +62,23 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   },
 }));
 
+vi.mock('../assistantTurnSettlement', () => ({
+  AssistantTurnSettlementObserver: (props: any) => (
+    <button
+      type="button"
+      data-testid="settlement-observer"
+      onClick={() =>
+        props.onAssistantTurnSettled?.({
+          sessionId: 's1',
+          promptId: 'prompt-s1',
+          outcome: 'completed',
+          transcriptComplete: true,
+        })
+      }
+    />
+  ),
+}));
+
 vi.mock('../hooks/useScopedSessions', () => ({
   useScopedSessions: (workspaceCwd: string | undefined) => {
     const [sessions, setSessions] = React.useState<any[]>(() =>
@@ -210,6 +227,27 @@ function openPicker(): void {
 }
 
 describe('SplitView', () => {
+  it('observes every live pane through the shared settlement dispatcher', () => {
+    const onAssistantTurnSettled = vi.fn();
+    render({ sessionIds: ['s1', 's3'], onAssistantTurnSettled });
+
+    const observers = container!.querySelectorAll(
+      '[data-testid="settlement-observer"]',
+    );
+    expect(observers).toHaveLength(2);
+
+    act(() => {
+      observers[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onAssistantTurnSettled).toHaveBeenCalledWith({
+      sessionId: 's1',
+      promptId: 'prompt-s1',
+      outcome: 'completed',
+      transcriptComplete: true,
+    });
+  });
+
   it('renders one pane per initial session, each under its own provider', () => {
     render({ sessionIds: ['s1', 's2'] });
     expect(panes()).toHaveLength(2);

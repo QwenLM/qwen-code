@@ -228,9 +228,10 @@ export interface WebShellAssistantTurnSettledEvent {
   outcome: WebShellAssistantTurnOutcome;
   /** Daemon terminal reason. Present for completed and cancelled turns. */
   stopReason?: string;
-  /** Terminal SSE cursor when available; not a replacement for the idempotency key. */
-  eventId?: number;
-  /** False when bounded live-journal repair could not restore the full turn. */
+  /**
+   * False when replay integrity is degraded or live-journal repair fails or is
+   * discarded before restoring the complete turn.
+   */
   transcriptComplete: boolean;
   /** Final visible assistant message when still available in the current transcript. */
   message?: WebShellAssistantMessageInfo;
