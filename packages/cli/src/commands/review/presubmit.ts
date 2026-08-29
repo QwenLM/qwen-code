@@ -10,9 +10,9 @@
 // downgrade decisions the LLM should apply when constructing the review
 // event. On an Aone target the command routes at the `a1` CLI instead and
 // emits the SAME report shape through the same shared writer: self-PR
-// detection (the gate's whoami account vs the MR author), head drift
-// (`sourceBranch` is the live head; no compare API, so `compare` stays
-// null), merge-gate classification, and the existing-comment dedup.
+// detection (the gate's whoami account vs the MR author), head drift (the
+// provider resolves AGit SHAs or a branch MR's exact head ref; no compare API,
+// so `compare` stays null), merge-gate classification, and comment dedup.
 
 import type { CommandModule } from 'yargs';
 import { writeFileSync, readFileSync } from 'node:fs';
@@ -1086,12 +1086,13 @@ function writePresubmitReport(input: {
 }
 
 /**
- * The Aone runner. The platform differences: identity and head come from
- * `mr view` (author username + `sourceBranch`), CI/gate state from
- * `mr status`, existing comments from `mr comment list` — and there is no
- * compare API, so a drifted head carries `compare: null` and the anchor-risk
- * ruling fails safe to at-risk (the skill restarts at the new head — under
- * AGit-Flow a moved head IS an amend that wants a re-review).
+ * The Aone runner. The platform differences: identity and head source come
+ * from `mr view`; a branch-based head SHA is resolved through the exact MR
+ * ref of a verified clone. CI/gate state comes from `mr status`, existing
+ * comments from `mr comment list` — and there is no compare API, so a drifted
+ * head carries `compare: null` and the anchor-risk ruling fails safe to
+ * at-risk (the skill restarts at the new head — under AGit-Flow a moved head
+ * IS an amend that wants a re-review).
  */
 async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
   const {

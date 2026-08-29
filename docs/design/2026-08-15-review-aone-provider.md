@@ -11,17 +11,17 @@ is the motivating target. This phase adds the Aone read path so a local review
 of an Aone CR works end to end (diff + worktree + issue evidence + agent
 findings), and `--comment` on an Aone target refuses cleanly.
 
-## Verified platform facts (re-confirmed 2026-08-15 against `maxcompute/odps_src`)
+## Verified platform facts (re-confirmed 2026-08-29 across both Aone MR flows)
 
-| Capability     | a1 CLI / git                                                                                                                                  | Notes                                                                                                                                                                                                      |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MR metadata    | `a1 repo mr view <global-id> --repo <g/p> -f json` → `mergeRequest{sourceBranch, targetBranch, title, description, detailUrl, author, state}` | `sourceBranch` is the head SHA (AGit-Flow); `targetBranch` is base; `detailUrl` = `https://code.alibaba-inc.com/<g>/<p>/codereview/<global-id>`; **no** additions/deletions/changedFiles (compute locally) |
-| Fetch ref      | `git fetch <remote> refs/merge-requests/<global-id>/head:<ref>`                                                                               | head SHA matches `sourceBranch`; merge-base vs `targetBranch` and `git diff` both computable (probe: MR 29295886 → 51 files, 2930+/114-)                                                                   |
-| id/iid         | `mr view`/`mr list` carry both `id` (global) and `iid`                                                                                        | refs/`mr view` key on the **global id**; Aone CR URL is `/codereview/<global-id>`                                                                                                                          |
-| Discussion     | `a1 repo mr comment list --mr <id> --repo <g/p> -f json` → array with `id, note, path, line, author, closed, outdated, isAiComment`           | **text is in `note`** (not `body`); `body` is empty                                                                                                                                                        |
-| Issue evidence | `a1 repo mr workitem list --mr <id>` → `[{id, subject, link, assigned_to}]`; `a1 project workitem get <id>` for body/comments                 | workitem id = the `#AONE_ID` in the commit title                                                                                                                                                           |
-| Diff listing   | `a1 repo mr diff <id>` (file list) / `<id> <file>` (per-file)                                                                                 | only needed in lightweight mode; the primary path diffs via git after fetching the ref                                                                                                                     |
-| CI status      | `a1 repo mr status <id>`                                                                                                                      | presubmit-equivalent (read-only)                                                                                                                                                                           |
+| Capability     | a1 CLI / git                                                                                                                                  | Notes                                                                                                                                                                                                 |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MR metadata    | `a1 repo mr view <global-id> --repo <g/p> -f json` → `mergeRequest{sourceBranch, targetBranch, title, description, detailUrl, author, state}` | `sourceBranch` is the full head SHA under AGit-Flow but a branch name under branch-based flow; there is no separate pre-merge head-SHA field. `targetBranch` is base; **no** diff stats are reported. |
+| Fetch ref      | `git fetch <remote> refs/merge-requests/<global-id>/head:<ref>`                                                                               | The exact MR ref is authoritative in both flows. A verified target clone can resolve it with `git ls-remote`; merge-base vs `targetBranch` and `git diff` are computable.                             |
+| id/iid         | `mr view`/`mr list` carry both `id` (global) and `iid`                                                                                        | refs/`mr view` key on the **global id**; Aone CR URL is `/codereview/<global-id>`                                                                                                                     |
+| Discussion     | `a1 repo mr comment list --mr <id> --repo <g/p> -f json` → array with `id, note, path, line, author, closed, outdated, isAiComment`           | **text is in `note`** (not `body`); `body` is empty                                                                                                                                                   |
+| Issue evidence | `a1 repo mr workitem list --mr <id>` → `[{id, subject, link, assigned_to}]`; `a1 project workitem get <id>` for body/comments                 | workitem id = the `#AONE_ID` in the commit title                                                                                                                                                      |
+| Diff listing   | `a1 repo mr diff <id>` (file list) / `<id> <file>` (per-file)                                                                                 | only needed in lightweight mode; the primary path diffs via git after fetching the ref                                                                                                                |
+| CI status      | `a1 repo mr status <id>`                                                                                                                      | presubmit-equivalent (read-only)                                                                                                                                                                      |
 
 ## Proposed scope (vertical slice — confirm before implementing)
 
@@ -34,7 +34,7 @@ findings), and `--comment` on an Aone target refuses cleanly.
    the repo coordinate is passed per call).
 2. `lib/platform/aone.ts` — implements `ReviewPlatformReader`:
    `resolveRepo` (parse the clone's origin URL → `gitlab.alibaba-inc.com/<g>/<p>`),
-   `getPrMeta` (mr view → sourceBranch/detailUrl), `getClosingIssues` (workitem
+   `getPrMeta` (mr view + verified MR-ref resolution → head SHA/detailUrl), `getClosingIssues` (workitem
    list), `getIssue` (workitem get), `fetchDiff` (git-based after fetching the
    ref; a1 per-file diff only for lightweight mode), `getCommentBody` (read
    `note` from comment list).
@@ -99,6 +99,12 @@ semantics (head-drift refusal, partial-post reporting, host binding).
   Aone branch. `a1 mr diff` is only the lightweight fallback.
 - **Global id is the review number.** Aone CR URLs carry the global id; the
   reader uses it for refs/`mr view`/comments/workitems.
+- **Head identity is flow-aware.** A full 40-hex `sourceBranch` is the
+  AGit-Flow head. Any other non-empty value is a branch label; its SHA is read
+  from the exact MR ref only after the cwd `origin` is proven to be the target
+  Aone repository. Clone-less reads report the SHA as unavailable, while
+  presubmit/comment-status and posting fail closed when a known branch cannot
+  be resolved.
 
 ## Files affected
 

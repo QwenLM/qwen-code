@@ -55,6 +55,10 @@ import {
 } from './aone.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
 
+const HEAD_SHA = '1111111111111111111111111111111111111111';
+const AMENDED_SHA = '2222222222222222222222222222222222222222';
+const STALE_SHA = '3333333333333333333333333333333333333333';
+
 describe('parseRemoteUrl hardening', () => {
   it('discards an explicit port instead of folding it into the path', () => {
     expect(
@@ -477,15 +481,16 @@ describe('aoneReader.getPrMeta — the live-head read behind meta.headSha', () =
   it('maps mr view onto PrMeta (head sha, web url)', () => {
     a1JsonMock.mockReturnValue({
       mergeRequest: {
-        sourceBranch: 'sha123',
+        sourceBranch: HEAD_SHA,
         detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
       },
     });
     expect(aoneReader.getPrMeta(7, 'g/p')).toEqual({
       number: 7,
-      headSha: 'sha123',
+      headSha: HEAD_SHA,
       webUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
     });
+    expect(gitMock).not.toHaveBeenCalled();
   });
 
   it('trims a padded sourceBranch — one normalization for every head read', () => {
@@ -495,9 +500,83 @@ describe('aoneReader.getPrMeta — the live-head read behind meta.headSha', () =
     // during review") on an MR that never moved — and as a submit-time
     // refusal at the pre-write gate (#9629 review).
     a1JsonMock.mockReturnValue({
-      mergeRequest: { sourceBranch: '  sha123\n', detailUrl: '' },
+      mergeRequest: { sourceBranch: `  ${HEAD_SHA}\n`, detailUrl: '' },
     });
-    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe('sha123');
+    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe(HEAD_SHA);
+  });
+
+  it('resolves a branch-based MR through the exact head ref of the matching clone', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'feature/fix-loop',
+        detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+      },
+    });
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote') {
+        return 'git@gitlab.alibaba-inc.com:g/p.git';
+      }
+      if (args[0] === 'ls-remote') {
+        return `${HEAD_SHA}\trefs/merge-requests/7/head`;
+      }
+      throw new Error(`unexpected git call: ${args.join(' ')}`);
+    });
+
+    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe(HEAD_SHA);
+    expect(gitMock).toHaveBeenNthCalledWith(1, 'remote', 'get-url', 'origin');
+    expect(gitMock).toHaveBeenNthCalledWith(
+      2,
+      'ls-remote',
+      '--exit-code',
+      '--refs',
+      'origin',
+      'refs/merge-requests/7/head',
+    );
+  });
+
+  it('reports a branch head as unavailable outside the target clone', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'feature/fix-loop',
+        detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+      },
+    });
+    gitMock.mockReturnValue('git@gitlab.alibaba-inc.com:other/p.git');
+
+    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe('');
+    expect(gitMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not collapse a nested-group origin when proving the target repo', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'feature/fix-loop',
+        detailUrl:
+          'https://code.alibaba-inc.com/team-a/nested/g/p/codereview/7',
+      },
+    });
+    gitMock.mockReturnValue('git@gitlab.alibaba-inc.com:team-b/nested/g/p.git');
+
+    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe('');
+    expect(gitMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    '',
+    `${HEAD_SHA}\trefs/merge-requests/8/head`,
+    `${HEAD_SHA}\trefs/merge-requests/7/head\n${HEAD_SHA}\trefs/merge-requests/7/head`,
+  ])('rejects malformed branch-head output %j', (output) => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'feature/fix-loop',
+        detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+      },
+    });
+    gitMock.mockImplementation((...args: string[]) =>
+      args[0] === 'remote' ? 'git@gitlab.alibaba-inc.com:g/p.git' : output,
+    );
+
+    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe('');
   });
 });
 
@@ -509,14 +588,14 @@ describe('aoneReader.getFetchMeta / fetchHeadRefSpec', () => {
   it('maps mr view onto FetchMeta (head sha, base branch, never cross-repo)', () => {
     a1JsonMock.mockReturnValue({
       mergeRequest: {
-        sourceBranch: 'sha123',
+        sourceBranch: HEAD_SHA,
         targetBranch: 'master',
         description: 'desc',
         detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
       },
     });
     const meta = aoneReader.getFetchMeta(7, 'g/p');
-    expect(meta.headRefOid).toBe('sha123');
+    expect(meta.headRefOid).toBe(HEAD_SHA);
     expect(meta.baseRefName).toBe('master');
     expect(meta.isCrossRepository).toBe(false);
     expect(meta.body).toBe('desc');
@@ -531,9 +610,42 @@ describe('aoneReader.getFetchMeta / fetchHeadRefSpec', () => {
     // untrimmed copy read a padded server value as a different head
     // (#9629 review).
     a1JsonMock.mockReturnValue({
-      mergeRequest: { sourceBranch: '  sha123\n', targetBranch: 'master' },
+      mergeRequest: {
+        sourceBranch: `  ${HEAD_SHA}\n`,
+        targetBranch: 'master',
+      },
     });
-    expect(aoneReader.getFetchMeta(7, 'g/p').headRefOid).toBe('sha123');
+    expect(aoneReader.getFetchMeta(7, 'g/p').headRefOid).toBe(HEAD_SHA);
+  });
+
+  it('uses the resolved MR ref SHA for branch-based fetch metadata', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'feature/fix-loop',
+        targetBranch: 'master',
+        detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+      },
+    });
+    gitMock
+      .mockReturnValueOnce('git@gitlab.alibaba-inc.com:g/p.git')
+      .mockReturnValueOnce(`${HEAD_SHA}\trefs/merge-requests/7/head`);
+
+    expect(aoneReader.getFetchMeta(7, 'g/p').headRefOid).toBe(HEAD_SHA);
+  });
+
+  it('leaves a branch-based fetch OID empty when no target clone is available', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'feature/fix-loop',
+        targetBranch: 'master',
+        detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+      },
+    });
+    gitMock.mockImplementation(() => {
+      throw new Error('not a git clone');
+    });
+
+    expect(aoneReader.getFetchMeta(7, 'g/p').headRefOid).toBe('');
   });
 
   it('uses the merge-requests refspec with the global id', () => {
@@ -565,7 +677,7 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
     a1JsonMock
       .mockReturnValueOnce({
         mergeRequest: {
-          sourceBranch: 'sha123',
+          sourceBranch: HEAD_SHA,
           targetBranch: 'master',
           title: 'a CR',
           description: 'the description',
@@ -642,7 +754,7 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
     // the default-only list would reintroduce the resolved-blind hole.
     a1JsonMock
       .mockReturnValueOnce({
-        mergeRequest: { sourceBranch: 'sha123', targetBranch: 'master' },
+        mergeRequest: { sourceBranch: HEAD_SHA, targetBranch: 'master' },
       })
       .mockReturnValueOnce([{ id: 1, note: 'open' }])
       .mockReturnValueOnce({
@@ -663,11 +775,33 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
     expect(ctx.state).toBe('opened');
     expect(ctx.baseRefName).toBe('master');
     // Under AGit-Flow sourceBranch IS the head SHA — both fields read it.
-    expect(ctx.headRefName).toBe('sha123');
-    expect(ctx.headRefOid).toBe('sha123');
+    expect(ctx.headRefName).toBe(HEAD_SHA);
+    expect(ctx.headRefOid).toBe(HEAD_SHA);
     expect(ctx.additions).toBeUndefined();
     expect(ctx.deletions).toBeUndefined();
     expect(ctx.changedFiles).toBeUndefined();
+  });
+
+  it('keeps a branch name separate from its resolved context head SHA', () => {
+    mockContext([], { sourceBranch: 'feature/fix-loop' });
+    gitMock
+      .mockReturnValueOnce('git@gitlab.alibaba-inc.com:g/p.git')
+      .mockReturnValueOnce(`${HEAD_SHA}\trefs/merge-requests/7/head`);
+
+    const ctx = aoneReader.getReviewContext(7, 'g/p');
+    expect(ctx.headRefName).toBe('feature/fix-loop');
+    expect(ctx.headRefOid).toBe(HEAD_SHA);
+    expect(gitMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('never relabels a branch name as the context head SHA without a target clone', () => {
+    mockContext([], { sourceBranch: 'feature/fix-loop' });
+    gitMock.mockReturnValue('git@gitlab.alibaba-inc.com:other/p.git');
+
+    const ctx = aoneReader.getReviewContext(7, 'g/p');
+    expect(ctx.headRefName).toBe('feature/fix-loop');
+    expect(ctx.headRefOid).toBe('');
+    expect(gitMock).toHaveBeenCalledTimes(1);
   });
 
   it('shapes the path-LESS comments as ledger carriers, chronologically', () => {
@@ -779,10 +913,10 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
     // diverge from the trimmed reads every other subcommand reports — a
     // consumer comparing the two would reproduce the phantom-drift bug the
     // aoneHeadSha consolidation closed (#9629 review).
-    mockContext([], { sourceBranch: '  sha123\n' });
+    mockContext([], { sourceBranch: `  ${HEAD_SHA}\n` });
     const ctx = aoneReader.getReviewContext(7, 'g/p');
-    expect(ctx.headRefOid).toBe('sha123');
-    expect(ctx.headRefName).toBe('sha123');
+    expect(ctx.headRefOid).toBe(HEAD_SHA);
+    expect(ctx.headRefName).toBe(`  ${HEAD_SHA}\n`.trim());
   });
 
   it('tags the exit-0 a1.error/v1 envelope from the comment listing', () => {
@@ -792,7 +926,7 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
     // envelope's actionable message instead of an untagged TypeError.
     a1JsonMock
       .mockReturnValueOnce({
-        mergeRequest: { sourceBranch: 'sha123', targetBranch: 'master' },
+        mergeRequest: { sourceBranch: HEAD_SHA, targetBranch: 'master' },
       })
       .mockReturnValueOnce({
         schemaVersion: 'a1.error/v1',
@@ -807,7 +941,7 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
   it('tags the unexpected-shape refusal when the envelope has no message', () => {
     a1JsonMock
       .mockReturnValueOnce({
-        mergeRequest: { sourceBranch: 'sha123', targetBranch: 'master' },
+        mergeRequest: { sourceBranch: HEAD_SHA, targetBranch: 'master' },
       })
       .mockReturnValueOnce({ schemaVersion: 'a1.error/v1' });
     expect(() => aoneReader.getReviewContext(7, 'g/p')).toThrow(
@@ -928,13 +1062,13 @@ describe("getMrAuthorAndHead (the presubmit gate's Aone seam)", () => {
   it('reads the author account and the live head from ONE mr view fetch', () => {
     a1JsonMock.mockReturnValue({
       mergeRequest: {
-        sourceBranch: 'sha123',
+        sourceBranch: HEAD_SHA,
         author: { username: 'wenshao' },
       },
     });
     expect(getMrAuthorAndHead(29295886, 'maxcompute/odps_src')).toEqual({
       author: 'wenshao',
-      headSha: 'sha123',
+      headSha: HEAD_SHA,
     });
     expect(a1JsonMock).toHaveBeenCalledTimes(1);
     expect(a1JsonMock).toHaveBeenCalledWith(
@@ -951,14 +1085,14 @@ describe("getMrAuthorAndHead (the presubmit gate's Aone seam)", () => {
     // The GitHub path's `author: null` parity: a readable MR with no author
     // must yield isSelfPr false, not a throw that kills the presubmit.
     a1JsonMock.mockReturnValue({
-      mergeRequest: { sourceBranch: 'sha123' },
+      mergeRequest: { sourceBranch: HEAD_SHA },
     });
     expect(getMrAuthorAndHead(7, 'g/p')).toEqual({
       author: '',
-      headSha: 'sha123',
+      headSha: HEAD_SHA,
     });
     a1JsonMock.mockReturnValue({
-      mergeRequest: { sourceBranch: 'sha123', author: {} },
+      mergeRequest: { sourceBranch: HEAD_SHA, author: {} },
     });
     expect(getMrAuthorAndHead(7, 'g/p').author).toBe('');
   });
@@ -968,11 +1102,11 @@ describe("getMrAuthorAndHead (the presubmit gate's Aone seam)", () => {
     // reach `.toLowerCase()` outside presubmit's fetch try/catch and die
     // with no report. Parity with the gate's account read (`typeof === 'string'`).
     a1JsonMock.mockReturnValue({
-      mergeRequest: { sourceBranch: 'sha123', author: { username: 42 } },
+      mergeRequest: { sourceBranch: HEAD_SHA, author: { username: 42 } },
     });
     expect(getMrAuthorAndHead(7, 'g/p').author).toBe('');
     a1JsonMock.mockReturnValue({
-      mergeRequest: { sourceBranch: 'sha123', author: { username: null } },
+      mergeRequest: { sourceBranch: HEAD_SHA, author: { username: null } },
     });
     expect(getMrAuthorAndHead(7, 'g/p').author).toBe('');
   });
@@ -984,16 +1118,49 @@ describe("getMrAuthorAndHead (the presubmit gate's Aone seam)", () => {
     // for). Absent values report '' — drift stays off, isSelfPr false.
     a1JsonMock.mockReturnValue({
       mergeRequest: {
-        sourceBranch: '  sha123\n',
+        sourceBranch: `  ${HEAD_SHA}\n`,
         author: { username: '  wenshao\n' },
       },
     });
     expect(getMrAuthorAndHead(7, 'g/p')).toEqual({
       author: 'wenshao',
-      headSha: 'sha123',
+      headSha: HEAD_SHA,
     });
     a1JsonMock.mockReturnValue({ mergeRequest: { author: {} } });
     expect(getMrAuthorAndHead(7, 'g/p').headSha).toBe('');
+  });
+
+  it('resolves a branch head before presubmit or comment-status consumes it', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'feature/fix-loop',
+        detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+        author: { username: 'wenshao' },
+      },
+    });
+    gitMock
+      .mockReturnValueOnce('git@gitlab.alibaba-inc.com:g/p.git')
+      .mockReturnValueOnce(`${HEAD_SHA}\trefs/merge-requests/7/head`);
+
+    expect(getMrAuthorAndHead(7, 'g/p')).toEqual({
+      author: 'wenshao',
+      headSha: HEAD_SHA,
+    });
+  });
+
+  it('fails closed when a known branch head cannot be resolved', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'feature/fix-loop',
+        detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+        author: { username: 'wenshao' },
+      },
+    });
+    gitMock.mockReturnValue('git@gitlab.alibaba-inc.com:other/p.git');
+
+    expect(() => getMrAuthorAndHead(7, 'g/p')).toThrow(
+      /cannot resolve the live head SHA for branch "feature\/fix-loop"/,
+    );
   });
 
   it('rejects a malformed owner/repo before any a1 call', () => {
@@ -1354,14 +1521,14 @@ describe('submitAoneReview (the a1 write path)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mrView('sha-head');
+    mrView(HEAD_SHA);
     a1JsonOnceMock.mockReturnValue({ id: 100 });
   });
 
   const req = (over: Record<string, unknown> = {}) => ({
     prNumber: 7,
     ownerRepo: 'g/p',
-    commitId: 'sha-head',
+    commitId: HEAD_SHA,
     event: 'COMMENT' as const,
     body: 'summary body',
     comments: [
@@ -1496,7 +1663,7 @@ describe('submitAoneReview (the a1 write path)', () => {
   it('refuses BEFORE writing when the head drifted', () => {
     let caught: unknown;
     try {
-      submitAoneReview(req({ commitId: 'stale-sha' }));
+      submitAoneReview(req({ commitId: STALE_SHA }));
     } catch (err) {
       caught = err;
     }
@@ -1510,6 +1677,66 @@ describe('submitAoneReview (the a1 write path)', () => {
     );
     expect(a1JsonOnceMock).not.toHaveBeenCalled();
     expect(a1OnceMock).not.toHaveBeenCalled();
+  });
+
+  it('posts against a stable resolved branch head', () => {
+    mrView('feature/fix-loop');
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote') {
+        return 'git@gitlab.alibaba-inc.com:g/p.git';
+      }
+      if (args[0] === 'ls-remote') {
+        return `${HEAD_SHA}\trefs/merge-requests/7/head`;
+      }
+      throw new Error(`unexpected git call: ${args.join(' ')}`);
+    });
+
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.headMovedDuringPost).toBe(false);
+  });
+
+  it('refuses a moved branch head before any write', () => {
+    mrView('feature/fix-loop');
+    gitMock.mockImplementation((...args: string[]) =>
+      args[0] === 'remote'
+        ? 'git@gitlab.alibaba-inc.com:g/p.git'
+        : `${AMENDED_SHA}\trefs/merge-requests/7/head`,
+    );
+
+    expect(() => submitAoneReview(req())).toThrow(/the MR head moved/);
+    expect(a1JsonOnceMock).not.toHaveBeenCalled();
+    expect(a1OnceMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a branch whose head cannot be resolved before any write', () => {
+    mrView('feature/fix-loop');
+    gitMock.mockReturnValue('git@gitlab.alibaba-inc.com:other/p.git');
+
+    expect(() => submitAoneReview(req())).toThrow(
+      /^refusing to post: cannot resolve the live head SHA/,
+    );
+    expect(a1JsonOnceMock).not.toHaveBeenCalled();
+    expect(a1OnceMock).not.toHaveBeenCalled();
+  });
+
+  it('detects a branch head that moves during the write batch', () => {
+    mrView('feature/fix-loop');
+    const heads = [HEAD_SHA, AMENDED_SHA];
+    gitMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'remote') {
+        return 'git@gitlab.alibaba-inc.com:g/p.git';
+      }
+      if (args[0] === 'ls-remote') {
+        const sha = heads.shift();
+        return `${sha}\trefs/merge-requests/7/head`;
+      }
+      throw new Error(`unexpected git call: ${args.join(' ')}`);
+    });
+
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.headMovedDuringPost).toBe(true);
   });
 
   it('an empty sourceBranch cannot gate — the post proceeds unanchored', () => {
@@ -1735,13 +1962,13 @@ describe('submitAoneReview (the a1 write path)', () => {
     a1JsonMock
       .mockReturnValueOnce({
         mergeRequest: {
-          sourceBranch: 'sha-head',
+          sourceBranch: HEAD_SHA,
           detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
         },
       })
       .mockReturnValueOnce({
         mergeRequest: {
-          sourceBranch: 'sha-amended',
+          sourceBranch: AMENDED_SHA,
           detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
         },
       });
@@ -1766,7 +1993,7 @@ describe('submitAoneReview (the a1 write path)', () => {
     a1JsonMock
       .mockReturnValueOnce({
         mergeRequest: {
-          sourceBranch: 'sha-head',
+          sourceBranch: HEAD_SHA,
           detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
         },
       })
@@ -1921,13 +2148,13 @@ describe('submitAoneReview (the a1 write path)', () => {
     a1JsonMock
       .mockReturnValueOnce({
         mergeRequest: {
-          sourceBranch: 'sha-head',
+          sourceBranch: HEAD_SHA,
           detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
         },
       })
       .mockReturnValueOnce({
         mergeRequest: {
-          sourceBranch: 'sha-amended',
+          sourceBranch: AMENDED_SHA,
           detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
         },
       });
@@ -1949,7 +2176,7 @@ describe('submitAoneReview (the a1 write path)', () => {
     a1JsonMock
       .mockReturnValueOnce({
         mergeRequest: {
-          sourceBranch: 'sha-head',
+          sourceBranch: HEAD_SHA,
           detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
         },
       })
@@ -2005,13 +2232,13 @@ describe('comment/status reads (the a1 backing for dedup)', () => {
   it('getMrAuthorAndHead reads author + sourceBranch off mr view', () => {
     a1JsonMock.mockReturnValue({
       mergeRequest: {
-        sourceBranch: 'head-sha',
+        sourceBranch: HEAD_SHA,
         author: { username: 'author-one' },
       },
     });
     expect(getMrAuthorAndHead(123, 'g/p')).toEqual({
       author: 'author-one',
-      headSha: 'head-sha',
+      headSha: HEAD_SHA,
     });
     expect(a1JsonMock).toHaveBeenCalledWith(
       'repo',

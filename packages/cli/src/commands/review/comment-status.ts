@@ -698,9 +698,9 @@ async function runCommentStatusAone(args: CommentStatusArgs): Promise<void> {
     // answer falling back to a fresh whoami.
     const gateAccount = ensureAoneAuthenticated();
 
-    // The same two-sample race detection as the GitHub path: `sourceBranch`
-    // IS the head under AGit-Flow, and an amend landing between the sample
-    // and the comment list pairs anchor facts with a stale drift comparison.
+    // The same two-sample race detection as the GitHub path: the provider
+    // resolves either AGit's source SHA or a branch MR's exact head ref, and
+    // a push between the sample and the comment list would stale the facts.
     const before = getMrAuthorAndHead(mrId, ownerRepo);
     const prAuthor = before.author;
     const liveHeadBefore = before.headSha;
