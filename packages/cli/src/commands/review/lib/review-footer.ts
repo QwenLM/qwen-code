@@ -444,7 +444,7 @@ export function stripReviewFooter(body: string): string {
 }
 
 /** The blockquote prefix a line can carry, at any nesting depth. */
-const QUOTE_PREFIX_RE = /^[ \t]{0,3}(?:>[ \t]*)+/;
+export const QUOTE_PREFIX_RE = /^[ \t]{0,3}(?:>[ \t]*)+/;
 
 /** Fence delimiter runs (``` or ~~~), openers and closers alike. */
 const FENCE_RUN_RE = /^[ \t]{0,3}(`{3,}|~{3,})/;

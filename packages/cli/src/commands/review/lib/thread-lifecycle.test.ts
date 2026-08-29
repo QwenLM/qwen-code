@@ -71,6 +71,24 @@ describe('carriedFindingOf — the id a comment body leads with', () => {
     });
   });
 
+  it('reads the id past leading head-slot tags — uniform with the ledger builder (#9940 review)', () => {
+    // The ledger builder reads drafts through `readClaim`'s head-slot
+    // tokeniser, which admits the axis and source tags BEFORE the id
+    // (#10291); the ^-anchored pre-gate here refused exactly that shape,
+    // so a tag-led carry rode the ledger while the matcher, the stamp
+    // and the contradiction gate saw none of it — the re-post opened a
+    // NEW thread under the id, a fixed ruling landed in unmatchedFixed,
+    // and the stamp spliced a double-id body (#9940 review, round 12).
+    expect(
+      carriedFindingOf('**[Critical]** [fails-closed] R1-2: the claim'),
+    ).toEqual({ id: 'R1-2', fixInduced: false });
+    expect(
+      carriedFindingOf(
+        '**[Critical]** [fails-closed] [new-surface] R3-4: (fix-induced) the hole',
+      ),
+    ).toEqual({ id: 'R3-4', fixInduced: true });
+  });
+
   it('reads the (fix-induced) marking beside the id', () => {
     expect(
       carriedFindingOf('**[Critical]** R1-2: (fix-induced) the new hole'),
@@ -414,6 +432,16 @@ describe('stampCarriedId — the write side of the readback', () => {
     ).toBe('**[Critical]** R1-2: (fix-induced) the new hole');
   });
 
+  it('leaves a tag-led carried body verbatim — no double-id re-mint (#9940 review)', () => {
+    // The already-carries early return reads through the same uniform
+    // readback: a tag-led carry the anchored pre-gate missed got a fresh
+    // id spliced before the tag, posting `R2-1: [fails-closed] R1-2: …`
+    // — two ids on one claim, neither matching the original thread
+    // (#9940 review, round 12).
+    const body = '**[Critical]** [fails-closed] R1-2: the claim';
+    expect(stampCarriedId(body, 'R2-1')).toBe(body);
+  });
+
   it('returns an unmarked body unchanged — nothing to stamp into', () => {
     expect(stampCarriedId('no marker here', 'R1-1')).toBe('no marker here');
   });
@@ -448,6 +476,30 @@ describe('stampCarriedId — the write side of the readback', () => {
     ).toBe('**[Suggestion]** R3-2: the claim\n```diff\n-old\n+new\n```');
   });
 
+  it('leaves a quoted fence-opening body un-stamped — the stamp must not break the quote (#9940 review)', () => {
+    // pr-context quotes every earlier comment containing code as
+    // `> ``` …`; the skip classifies the marker's projected first line
+    // through the blockquote prefix the pipeline's line model reads past,
+    // or the insertion lands before the `>`, CommonMark parses neither
+    // blockquote nor fence, and the finding posts as a garbled inline
+    // code span instead of the quoted block the pre-stamp gate validated
+    // (#9940 review, round 12).
+    for (const draft of [
+      '**[Critical]** > ```js\n> leaked()\n> ```\nthe claim',
+      '**[Suggestion]** > ```diff\n> -old\n> +new\n> ```\n\nthe pin moved',
+      '**[Critical]** > > ```js\n> > leaked()\n> > ```\nthe claim',
+    ]) {
+      expect(stampCarriedId(draft, 'R3-1')).toBe(draft);
+    }
+    // A quoted fence that opens on line 2 is untouched by a line-1 stamp.
+    expect(
+      stampCarriedId(
+        '**[Critical]** the claim\n> ```js\n> leaked()\n> ```',
+        'R3-2',
+      ),
+    ).toBe('**[Critical]** R3-2: the claim\n> ```js\n> leaked()\n> ```');
+  });
+
   it('leaves an HTML-block-opening body un-stamped — a stamp would break the opener (#9940 review)', () => {
     // The skip guards the marker's projected first line, and an
     // HTML-block opener (`<div>`, `</div>`, `<pre>`, …) is broken by the
@@ -469,6 +521,16 @@ describe('stampCarriedId — the write side of the readback', () => {
     expect(
       stampCarriedId('**[Critical]** the claim\n<div>\nfoo\n</div>', 'R5-4'),
     ).toBe('**[Critical]** R5-4: the claim\n<div>\nfoo\n</div>');
+  });
+
+  it('leaves a quoted HTML-block-opening body un-stamped (#9940 review)', () => {
+    // The quote-prefixed sibling of the opener skip above: `> <div>`
+    // demotes to inline raw HTML once the stamp lands before the `>` —
+    // the same structural flip the bare-opener arm prevents (#9940
+    // review, round 12).
+    expect(
+      stampCarriedId('**[Critical]** > <div>\n> foo\n\nthe claim', 'R5-3'),
+    ).toBe('**[Critical]** > <div>\n> foo\n\nthe claim');
   });
 
   it('stamps the bare-marker draft whose fence opens on line 2 (#9940 review)', () => {

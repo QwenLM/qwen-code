@@ -4408,6 +4408,39 @@ describe('the thread lifecycle', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 
+  it('refuses a Critical deferral whose tag-led title carries a fixed id (#9940 review)', () => {
+    // The closure mint reads deferral titles through the head-slot strip
+    // (#10291): a title leading with its axis tags still names the claim
+    // it re-posts. The gate's anchored raw-title read missed exactly that
+    // shape, so a payload ruling R1-1 fixed beside a tag-led re-post of
+    // R1-1 escaped the refusal and would post the fixed reply+resolve and
+    // the standing re-assertion in one pass (#9940 review, round 12).
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Critical]** R1-1: the guard drops a valid case',
+      },
+    ]);
+    const review = payload([], {
+      deferredSuggestions: [
+        {
+          file: 'src/foo.ts',
+          line: 12,
+          source: 'review',
+          severity: 'Critical',
+          title: '[fails-closed] R1-1: the guard drops a valid case',
+        },
+      ],
+      fixedFindings: [{ id: 'R1-1', by: 'the fix' }],
+    });
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
+      /state\.deferredSuggestions\[0\] re-posts R1-1/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
   it('the same Critical deferral posts without the fixed ruling — relocated and standing (#9940 review)', () => {
     // The flip half of the refusal cell: the deferral alone is a
     // standing re-post — relocated into the body Criticals, carried

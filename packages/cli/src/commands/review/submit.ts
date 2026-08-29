@@ -106,6 +106,7 @@ import {
   SUGGESTION_PREFIX,
   carriedClaimLine,
   countInlineFindings,
+  readClaimHead,
   severityOf,
 } from './lib/inline-counts.js';
 import { validateNewSideAnchors } from './lib/anchors.js';
@@ -762,7 +763,11 @@ function inconsistencies(
     // exactly the entries the relocation carries (#9940 review).
     toDeferredEntries(payload.state?.deferredSuggestions).forEach((e, i) => {
       if (e.severity !== 'Critical') return;
-      const id = LEDGER_ID_READBACK.exec(e.title)?.[1];
+      // Through the same head-slot strip the closure mint applies: a
+      // title leading with its axis tags still names the claim it
+      // re-posts (#10291); the anchored raw-title read missed exactly
+      // that shape (#9940 review, round 12).
+      const id = LEDGER_ID_READBACK.exec(readClaimHead(e.title).stripped)?.[1];
       if (id !== undefined && fixedIds.has(id)) {
         problems.push(contradiction(`state.deferredSuggestions[${i}]`, id));
       }

@@ -49,7 +49,7 @@
 // and has no review-thread graph to reply into or resolve.
 
 import { gh, ghWithInput } from './gh.js';
-import { LEDGER_ID_READBACK, readClaim } from './ledger.js';
+import { readClaim } from './ledger.js';
 import {
   CRITICAL_PREFIX,
   LEADING_INVISIBLE_RE,
@@ -62,7 +62,7 @@ import {
   ledgerClaimLine,
   type FixedFinding,
 } from '../compose-review.js';
-import { HTML_BLOCK_OPEN_RE } from './review-footer.js';
+import { HTML_BLOCK_OPEN_RE, QUOTE_PREFIX_RE } from './review-footer.js';
 
 /** One review thread, reduced to what the lifecycle decisions read. */
 export interface ReviewThread {
@@ -204,11 +204,16 @@ export function fetchReviewThreads(repo: string, pr: number): ReviewThread[] {
 }
 
 /**
- * The carried id a comment body leads with, when it leads with one — the
- * readback the ledger builder performs, with one extra leg: an
- * attribution-off post carries no severity marker, so the bare first line
- * is tried too. Everything past the marker is model text; only the
- * ^-anchored grammar position is trusted.
+ * The carried id a comment body's claim line carries, when it carries
+ * one — the SAME read the ledger builder performs, with one extra leg:
+ * an attribution-off post carries no severity marker, so the bare first
+ * line is tried too. The id is read through `readClaim`'s head-slot
+ * tokeniser — wherever the model placed it in the slot, axis and source
+ * tags ahead of it included (#10291) — because the builder carries that
+ * shape, and the matcher, the stamp and the contradiction gate must see
+ * the same id: an anchored pre-gate here refused a tag-led carry while
+ * the ledger still carried it, and the re-post opened a NEW thread the
+ * fixed ruling never reached (#9940 review, round 12).
  *
  * The marked leg reads through `ledgerClaimLine` — the SAME projection
  * the ledger builder applies, forged footer spans and comment-marker
@@ -239,7 +244,6 @@ export function carriedFindingOf(body: unknown): {
           .replace(LEADING_INVISIBLE_RE, '')
           .split(/\r\n?|\n/)[0]
   ).trim();
-  if (!LEDGER_ID_READBACK.test(line)) return null;
   const { id, fixInduced } = readClaim(line);
   return id === undefined ? null : { id, fixInduced };
 }
@@ -267,7 +271,8 @@ export function carriedFindingOf(body: unknown): {
  * Returns the body unchanged when there is nothing to stamp into (no
  * marker), nothing to stamp (an id already leads), or the stamp would
  * break what the gate validated — a body whose code fence or HTML-block
- * opener opens on the marker's projected first line (#9940 review).
+ * opener opens on the marker's projected first line, a blockquote
+ * prefix ahead of it included (#9940 review).
  */
 export function stampCarriedId(body: string, id: string): string {
   if (carriedFindingOf(body) !== null) return body;
@@ -286,7 +291,14 @@ export function stampCarriedId(body: string, id: string): string {
   // attribution off the unclosed flip swallows the appended invisible
   // marker as visible code). The test reads through leading
   // render-nothing residue — the pipeline admits it between marker and
-  // content — but residue swallows newlines, and only residue on the
+  // content — and through the blockquote prefix the line model reads
+  // past (`QUOTE_PREFIX_RE`, the same regex `scanLines` applies):
+  // pr-context quotes every earlier comment containing code as
+  // `> ``` …`, and an insertion before a quoted opener stops the
+  // posted first line LEADING the `>` — CommonMark parses neither
+  // blockquote nor the fence/block it wraps, the same flip the bare
+  // arm prevents (#9940 review, round 12). Residue swallows newlines,
+  // and only residue on the
   // SAME rendered line may keep the skip: a bare newline outside
   // comments pushes the construct to a later line the line-1 insertion
   // cannot flip, and skipping there loses the root's id with nothing
@@ -303,10 +315,11 @@ export function stampCarriedId(body: string, id: string): string {
   // documented safe degradation (#9940 review).
   const residue = LEADING_INVISIBLE_RE.exec(rest)?.[0] ?? '';
   const fromResidue = rest.slice(residue.length);
-  const opensFence = ENTRY_FENCE_DELIMITER_RE.test(fromResidue);
-  const opensHtmlBlock = HTML_BLOCK_OPEN_RE.test(
-    fromResidue.split(/\r\n?|\n/)[0].trimStart(),
-  );
+  const unquoted = fromResidue
+    .split(/\r\n?|\n/)[0]
+    .replace(QUOTE_PREFIX_RE, '');
+  const opensFence = ENTRY_FENCE_DELIMITER_RE.test(unquoted);
+  const opensHtmlBlock = HTML_BLOCK_OPEN_RE.test(unquoted.trimStart());
   if (
     (opensFence || opensHtmlBlock) &&
     !/\r\n?|\n/.test(residue.replace(/<!--[\s\S]*?(?:-->|$)/g, ''))
