@@ -3732,6 +3732,51 @@ describe('WebShellSidebar session source switch', () => {
     expect(container.textContent).toContain('Channel session');
   });
 
+  it('renders scheduled-task runs with a flat source icon', async () => {
+    const scheduledRun: DaemonSessionSummary = {
+      sessionId: 'scheduled-run',
+      displayName: 'Hourly review',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    };
+    active.sessions.push(scheduledRun);
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const title = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    ).find((candidate) => candidate.textContent === 'Hourly review');
+    const row = title?.closest('[role="button"]');
+    expect(row).toBeTruthy();
+    const sourceIcon = row?.querySelector(
+      '[data-web-shell-scheduled-task-session]',
+    );
+    expect(sourceIcon).toBeTruthy();
+    expect(sourceIcon?.getAttribute('title')).toBe('Scheduled Tasks');
+    expect(row?.textContent).not.toContain('🧵');
+    expect(row?.textContent).not.toContain('⏰');
+
+    active.sessions = [{ ...scheduledRun, hasActivePrompt: true }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    active.sessions = [{ ...scheduledRun, hasActivePrompt: false }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+
+    const completedRow = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    )
+      .find((candidate) => candidate.textContent === 'Hourly review')
+      ?.closest('[role="button"]');
+    expect(
+      completedRow?.querySelector('[data-web-shell-scheduled-task-session]'),
+    ).toBeTruthy();
+    expect(
+      completedRow?.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeTruthy();
+  });
+
   it('preserves channel completion state while the tasks source is active', async () => {
     const channelSession: DaemonSessionSummary = {
       sessionId: 'channel-session',

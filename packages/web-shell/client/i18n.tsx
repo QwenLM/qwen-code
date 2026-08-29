@@ -1216,6 +1216,17 @@ const EN: Messages = {
   'scheduledTasks.runKind.catchUp': 'late',
   'scheduledTasks.runKind.manual': 'manual',
   'scheduledTasks.runKind.withheld': 'skipped',
+  'scheduledTasks.runKind.sessionDispatchFailed':
+    'new session failed, nothing ran',
+  'scheduledTasks.runKind.sessionDispatchFallback':
+    'new session failed, ran in the task session',
+  'scheduledTasks.openRunSession': 'Open this run session',
+  'scheduledTasks.runContext.title': 'Scheduled task run',
+  'scheduledTasks.runContext.taskId': 'Task ID',
+  'scheduledTasks.runContext.schedule': 'Schedule',
+  'scheduledTasks.runContext.triggeredAt': 'Triggered',
+  'scheduledTasks.runContext.trigger.scheduled': 'Scheduled',
+  'scheduledTasks.runContext.trigger.manual': 'Run manually',
   'scheduledTasks.error.runFailed': 'Failed to record the run',
   'scheduledTasks.error.oneShotConsumedButFailed':
     'The task was deleted but the prompt could not be delivered — it never ran. Recreate it to try again.',
@@ -1225,13 +1236,13 @@ const EN: Messages = {
   'scheduledTasks.dur.h': 'h',
   'scheduledTasks.dur.m': 'm',
   'scheduledTasks.dur.s': 's',
-  'scheduledTasks.runMode': 'Run mode',
-  'scheduledTasks.runMode.shared': 'Shared session',
-  'scheduledTasks.runMode.isolated': 'Isolated (fresh session per run)',
-  'scheduledTasks.runMode.shared.hint':
-    'Runs accumulate in one session transcript.',
-  'scheduledTasks.runMode.isolated.hint':
-    'Each run gets a clean session context.',
+  'scheduledTasks.runIn': 'Run in',
+  'scheduledTasks.sessionMode.perRun': 'A new session every run',
+  'scheduledTasks.sessionMode.persistent': 'Persistent task session',
+  'scheduledTasks.sessionMode.perRun.hint':
+    'Each run gets a clean context and its own conversation.',
+  'scheduledTasks.sessionMode.persistent.hint':
+    'All runs continue in the same task conversation.',
   'scheduledTasks.condition': 'Precondition (optional)',
   'scheduledTasks.conditionPlaceholder':
     'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
@@ -4371,6 +4382,16 @@ const ZH: Messages = {
   'scheduledTasks.runKind.catchUp': '补跑',
   'scheduledTasks.runKind.manual': '手动',
   'scheduledTasks.runKind.withheld': '已跳过',
+  'scheduledTasks.runKind.sessionDispatchFailed': '新建会话失败，未运行',
+  'scheduledTasks.runKind.sessionDispatchFallback':
+    '新建会话失败，已在任务会话中运行',
+  'scheduledTasks.openRunSession': '打开本次运行会话',
+  'scheduledTasks.runContext.title': '定时任务运行',
+  'scheduledTasks.runContext.taskId': '任务 ID',
+  'scheduledTasks.runContext.schedule': '计划',
+  'scheduledTasks.runContext.triggeredAt': '触发于',
+  'scheduledTasks.runContext.trigger.scheduled': '定时触发',
+  'scheduledTasks.runContext.trigger.manual': '手动运行',
   'scheduledTasks.error.runFailed': '记录运行失败',
   'scheduledTasks.error.oneShotConsumedButFailed':
     '任务已删除,但提示词未能送达——它没有运行。请重新创建后重试。',
@@ -4380,11 +4401,13 @@ const ZH: Messages = {
   'scheduledTasks.dur.h': '小时',
   'scheduledTasks.dur.m': '分',
   'scheduledTasks.dur.s': '秒',
-  'scheduledTasks.runMode': '运行模式',
-  'scheduledTasks.runMode.shared': '共享会话',
-  'scheduledTasks.runMode.isolated': '隔离（每次运行新建会话）',
-  'scheduledTasks.runMode.shared.hint': '所有运行记录累积在同一个会话中。',
-  'scheduledTasks.runMode.isolated.hint': '每次运行获得独立的会话上下文。',
+  'scheduledTasks.runIn': '运行于',
+  'scheduledTasks.sessionMode.perRun': '每次新会话',
+  'scheduledTasks.sessionMode.persistent': '固定会话',
+  'scheduledTasks.sessionMode.perRun.hint':
+    '每次运行都创建独立会话，使用干净的上下文。',
+  'scheduledTasks.sessionMode.persistent.hint':
+    '所有运行都继续使用同一个任务会话。',
   'scheduledTasks.condition': '前置条件（可选）',
   'scheduledTasks.conditionPlaceholder':
     '例如：检查昨天以来 main 分支有没有新提交。如果没有，则本次不应执行。',
