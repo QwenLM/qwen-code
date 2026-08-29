@@ -431,17 +431,61 @@ const STRIP_TAIL_LIMIT = 8192;
  * The match runs on the displayed projection — a comment or entity inside
  * the marker phrase cannot hide a trailing forged footer (or forge one:
  * the cut maps back to the original bytes) — and the projection of a
- * marker-less tail returns the body byte-identical without the regex.
+ * marker-less tail returns the body byte-identical without the regex. Code
+ * content is blanked before the projection, for the reason `blankQuotedCode`
+ * states.
  */
 export function stripReviewFooter(body: string): string {
-  const tail = body.slice(-STRIP_TAIL_LIMIT);
+  const tail = blankQuotedCode(body).slice(-STRIP_TAIL_LIMIT);
   const proj = projectInvisibles(tail);
   if (!proj.text.includes(FOOTER_MARKER)) return body;
   const m = REVIEW_FOOTER_RE.exec(proj.text);
   if (m === null) return body;
   const keep = proj.starts[m.index];
-  return body.slice(0, body.length - tail.length) + tail.slice(0, keep);
+  return body.slice(0, body.length - tail.length + keep);
 }
+
+/**
+ * The body with fenced- and indented-code CONTENT blanked to same-length
+ * NULs: the structural scan `scanLines` gives the line-aware strips, in the
+ * one shape a trailing-anchored strip can use — blanking is
+ * length-preserving, so the projection's index map still points into the
+ * original bytes.
+ *
+ * Code content is a quotation. GitHub renders it literally, so it can
+ * neither BE attribution nor hide any: unblanked, a `<!--` with no `-->`
+ * quoted in a witness block (a review of an HTML marker quotes exactly
+ * that) projects as a comment running to the END of the input and takes the
+ * real trailing footer out of the projection with it — the strip then sees
+ * no footer, leaves the model's own, and the canonical one lands beside it
+ * as a second attribution line.
+ *
+ * Scanned from the body's START, not from the tail the strip matches on: a
+ * fence's state is only knowable from where it opened, and a tail cut
+ * inside one reads its code as ordinary text. The scan is one linear pass,
+ * so the tail bound the regex needs is untouched.
+ */
+function blankQuotedCode(body: string): string {
+  const kinds = scanLines(body).map(({ kind }) => kind);
+  if (!kinds.some((kind) => kind === 'fence' || kind === 'code')) return body;
+  const lines = body.split(LINE_ENDING_RE);
+  const endings = body.match(LINE_ENDING_RE) ?? [];
+  return lines
+    .map(
+      (line, i) =>
+        (kinds[i] === 'fence' || kinds[i] === 'code'
+          ? '\u0000'.repeat(line.length)
+          : line) + (endings[i] ?? ''),
+    )
+    .join('');
+}
+
+/**
+ * Every CommonMark line ending — `\n`, `\r\n`, and a bare `\r`. Shared by
+ * `scanLines` and `blankQuotedCode`: the blanking indexes into the scan's
+ * lines, so a second spelling would misalign the two.
+ */
+const LINE_ENDING_RE = /\r\n?|\n/g;
 
 /** The blockquote prefix a line can carry, at any nesting depth. */
 const QUOTE_PREFIX_RE = /^[ \t]{0,3}(?:>[ \t]*)+/;
@@ -526,7 +570,7 @@ function scanLines(body: string): ScannedLine[] {
   let fence: { char: string; len: number; depth: number } | null = null;
   let html: { endRe: RegExp | null } | null = null;
   const out: ScannedLine[] = [];
-  for (const line of body.split(/\r\n?|\n/)) {
+  for (const line of body.split(LINE_ENDING_RE)) {
     const quote = QUOTE_PREFIX_RE.exec(line);
     const depth = quote === null ? 0 : quote[0].split('>').length - 1;
     const content = quote === null ? line : line.slice(quote[0].length);

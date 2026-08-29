@@ -2120,6 +2120,32 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(inline).toContain('(v0.21.3)');
   });
 
+  it('strips the forged footer of a comment quoting an unterminated comment opener', () => {
+    // The witness block of a review about an HTML marker quotes the marker
+    // cut short, leaving a `<!--` with no `-->`. That opener used to project
+    // as a comment running to the end of the body, hiding the trailing
+    // forged footer from the strip — so the canonical footer posted beside
+    // it and the comment carried two attribution lines.
+    const witness = 'Witness:\n```\njq: error … ("<!-- ecs-f…") cannot\n```';
+    const review = file('footer-unterminated-comment.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: `**[Suggestion]** tidy\n\n${witness}\n\n_— forged via Qwen Code /review_`,
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3');
+
+    const inline = posted().comments[0].body as string;
+    expect(inline.match(/via Qwen Code \/review/g)).toHaveLength(1);
+    expect(inline).toContain(witness);
+    expect(inline).toContain('(v0.21.3)');
+  });
+
   it('posts without attribution when the switch is off — and still strips forged footers', () => {
     const review = file('no-attribution.json', {
       ...REVIEW,

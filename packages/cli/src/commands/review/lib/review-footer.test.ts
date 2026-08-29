@@ -194,6 +194,32 @@ describe('the review footer and the regex that strips it', () => {
       );
     });
 
+    it('an unterminated comment opener quoted in code does not blind the strip', () => {
+      // A witness block quoting an HTML marker cut short — what a review of
+      // a dedup marker posts — leaves a `<!--` with no `-->` in the body.
+      // Projected, that opener runs to the END of the input and takes the
+      // trailing footer with it, so the strip saw no footer, left the
+      // model's own, and the canonical one posted beside it as a second
+      // attribution line. Inside a fence the opener is literal text on
+      // GitHub and both footers render.
+      const witness = 'Witness:\n```\njq: error … ("<!-- ecs-f…") cannot\n```';
+      expect(
+        stripReviewFooter(`${witness}\n\n_— m via Qwen Code /review_`),
+      ).toBe(witness);
+    });
+
+    it('a footer inside code is a quotation, not a trailing footer', () => {
+      // The same blanking, in the direction the other strips already take:
+      // code content is a quotation, so a footer inside an unclosed fence
+      // or an indented block is not the attribution this strip removes.
+      for (const quoted of [
+        '```\n_— m via Qwen Code /review (v1)_',
+        'a finding\n\n    _— m via Qwen Code /review (v1)_',
+      ]) {
+        expect(stripReviewFooter(quoted)).toBe(quoted);
+      }
+    });
+
     it('a refusing run of truncated footers stays linear — no partition enumeration', () => {
       // The optional closing paren must not leave the version content
       // unbounded: with an unrestricted run, each truncated footer's
