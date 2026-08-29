@@ -483,6 +483,29 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('clears standalone state after detached workspace create', async () => {
+    const nextSession = createMockSession('workspace-b');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'standalone' },
+        standaloneSession: {
+          projectlessOutputDirectory: '/output/old',
+          workingDirectory: { state: 'ready' },
+        },
+      },
+      createDetachedSession: vi.fn(async () => nextSession),
+    });
+
+    await actions.createSession({ workspaceCwd: '/workspace' });
+
+    expect(getConnection()).toMatchObject({
+      sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      workspaceCwd: '/workspace',
+    });
+    expect(getConnection().standaloneSession).toBeUndefined();
+  });
+
   it('uses the standalone create path without a workspace fallback', async () => {
     const nextSession = createMockSession('standalone-b');
     Object.assign(nextSession, {
@@ -692,6 +715,18 @@ describe('createDaemonSessionActions', () => {
         status: 'connected',
         sessionContext: { kind: 'workspace', cwd: '/workspace' },
         workspaceCwd: '/workspace',
+        commands: [commandInfo('workspace-command')],
+        skills: ['workspace-skill'],
+        models: [{ id: 'workspace-model', label: 'Workspace model' }],
+        currentModel: 'workspace-model',
+        providers: {
+          v: 1,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          providers: [],
+        },
+        gitBranch: 'main',
+        gitStatus: {} as never,
       },
       createDetachedStandaloneSession: vi.fn(async () => {
         throw error;
@@ -714,6 +749,13 @@ describe('createDaemonSessionActions', () => {
         },
       },
     });
+    expect(getConnection().commands).toBeUndefined();
+    expect(getConnection().skills).toBeUndefined();
+    expect(getConnection().models).toBeUndefined();
+    expect(getConnection().currentModel).toBeUndefined();
+    expect(getConnection().providers).toBeUndefined();
+    expect(getConnection().gitBranch).toBeUndefined();
+    expect(getConnection().gitStatus).toBeUndefined();
   });
 
   it('does not replace an active workspace with detached standalone recovery', async () => {
@@ -1177,6 +1219,84 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection().models).toBeUndefined();
     expect(getConnection().currentModel).toBeUndefined();
     expect(getConnection().currentMode).toBeUndefined();
+    expect(getConnection().contextWindow).toBeUndefined();
+  });
+
+  it('drops workspace previews when switching to a Live target', () => {
+    const existingSession = createMockSession('workspace-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'workspace-a',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        workspaceCwd: '/workspace',
+        commands: [commandInfo('workspace-command')],
+        skills: ['workspace-skill'],
+        models: [{ id: 'workspace-model', label: 'Workspace model' }],
+        currentModel: 'workspace-model',
+        contextWindow: 32_000,
+        providers: {
+          v: 1,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          providers: [],
+        },
+        gitBranch: 'main',
+      },
+      session: existingSession,
+    });
+
+    void actions
+      .loadSession('live-b', { sessionContext: { kind: 'live' } })
+      .catch(() => undefined);
+
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'live-b',
+      sessionContext: { kind: 'live' },
+    });
+    expect(getConnection().workspaceCwd).toBeUndefined();
+    expect(getConnection().commands).toBeUndefined();
+    expect(getConnection().skills).toBeUndefined();
+    expect(getConnection().models).toBeUndefined();
+    expect(getConnection().currentModel).toBeUndefined();
+    expect(getConnection().contextWindow).toBeUndefined();
+    expect(getConnection().providers).toBeUndefined();
+    expect(getConnection().gitBranch).toBeUndefined();
+  });
+
+  it('drops Live previews when switching to a workspace target', () => {
+    const existingSession = createMockSession('live-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'live-a',
+        sessionContext: { kind: 'live' },
+        commands: [commandInfo('live-command')],
+        skills: ['live-skill'],
+        models: [{ id: 'live-model', label: 'Live model' }],
+        currentModel: 'live-model',
+        contextWindow: 32_000,
+      },
+      session: existingSession,
+    });
+
+    void actions
+      .loadSession('workspace-b', {
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      })
+      .catch(() => undefined);
+
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'workspace-b',
+      sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      workspaceCwd: '/workspace',
+    });
+    expect(getConnection().commands).toBeUndefined();
+    expect(getConnection().skills).toBeUndefined();
+    expect(getConnection().models).toBeUndefined();
+    expect(getConnection().currentModel).toBeUndefined();
     expect(getConnection().contextWindow).toBeUndefined();
   });
 

@@ -509,6 +509,7 @@ export function createDaemonSessionActions({
     }
     store.reset();
     setRestoreSessionId(undefined);
+    setRestoreSessionContext(undefined);
   }
 
   function startPendingSessionLoad(
@@ -546,6 +547,7 @@ export function createDaemonSessionActions({
                 if (sessionRef.current?.sessionId !== sessionId) {
                   manualSessionClearRef.current = true;
                   setRestoreSessionId(undefined);
+                  setRestoreSessionContext(undefined);
                   setConnection((current) => {
                     if (
                       current.status !== 'connecting' ||
@@ -1582,20 +1584,27 @@ export function createDaemonSessionActions({
           publishStandaloneRecovery &&
           error instanceof DaemonStandaloneCreationOutcomeUnknownError
         ) {
-          setConnection((current) => ({
-            ...current,
-            status: 'error',
-            sessionId: error.sessionId,
-            sessionContext: { kind: 'standalone' },
-            workspaceCwd: undefined,
-            standaloneSession: {
-              creationRecovery: error.recovery,
-              errorCode: getDaemonErrorCode(error.originalError),
-            },
-            error: error.message,
-            errorStatus: extractHttpStatus(error.originalError),
-            missingSession: false,
-          }));
+          setConnection((current) => {
+            const base = getConnectionAfterSessionClear(
+              current,
+              current.sessionId,
+              false,
+            );
+            return {
+              ...base,
+              status: 'error',
+              sessionId: error.sessionId,
+              sessionContext: { kind: 'standalone' },
+              workspaceCwd: undefined,
+              standaloneSession: {
+                creationRecovery: error.recovery,
+                errorCode: getDaemonErrorCode(error.originalError),
+              },
+              error: error.message,
+              errorStatus: extractHttpStatus(error.originalError),
+              missingSession: false,
+            };
+          });
         }
         throw dispatchActionError(
           addNotice,

@@ -805,6 +805,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   resolvedWorkspaceCwdRef.current = resolvedWorkspaceCwd;
   const resolvedSessionContextRef = useRef(resolvedSessionContext);
   resolvedSessionContextRef.current = resolvedSessionContext;
+  const sessionContextResolutionErrorRef = useRef(
+    sessionContextResolutionError,
+  );
+  sessionContextResolutionErrorRef.current = sessionContextResolutionError;
   const activeSessionContextRef = useRef(resolvedSessionContext);
   const activeWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
   if (resolvedWorkspaceCwd) {
@@ -1038,6 +1042,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const skipNextCleanupDetachSessionRef = useRef<
     DaemonSessionClient | undefined
   >(undefined);
+  const contextErrorPreservedSessionRef = useRef<
+    DaemonSessionClient | undefined
+  >(undefined);
+  const contextErrorPreservedProductContextRef = useRef<
+    DaemonProductSessionContext | undefined
+  >(undefined);
   const settledRestoredActivePromptSessionsRef = useRef<
     WeakSet<DaemonSessionClient>
   >(new WeakSet());
@@ -1170,10 +1180,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   useEffect(() => {
     if (!autoConnect) return undefined;
     if (sessionContextResolutionError) {
-      setConnection({
+      setConnectionSynchronous((current) => ({
+        ...current,
         status: 'error',
         error: sessionContextResolutionError,
-      });
+      }));
       return undefined;
     }
     if (sessionEffectContext) {
@@ -1334,11 +1345,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let productContextFailure = false;
       let hasCurrentSessionActivePrompt = () => false;
       if (
-        activeSessionContextRef.current?.kind === 'standalone' &&
         !restoreSessionId &&
         !reconnectSessionId &&
         !shouldCreateFreshSession &&
-        connectionRef.current.standaloneSession?.creationRecovery
+        (connectionRef.current.standaloneSession?.creationRecovery ||
+          (manualSessionClearRef.current &&
+            connectionRef.current.status === 'error'))
       ) {
         return;
       }
@@ -1405,16 +1417,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           let repairSuffix: LiveJournalRepairSuffix | undefined;
           if (!session) {
             const existingSession = sessionRef.current;
+            const reusingContextErrorSession =
+              existingSession !== undefined &&
+              existingSession === contextErrorPreservedSessionRef.current &&
+              restoreSessionId === existingSession.sessionId &&
+              sessionContextKey(sessionEffectContext) ===
+                sessionContextKey(
+                  contextErrorPreservedProductContextRef.current,
+                );
             if (
               existingSession &&
-              !restoreSessionId &&
-              !reconnectSessionId &&
-              !shouldCreateFreshSession
+              ((!restoreSessionId &&
+                !reconnectSessionId &&
+                !shouldCreateFreshSession) ||
+                reusingContextErrorSession)
             ) {
               session = existingSession;
               reconnectSessionId = existingSession.sessionId;
               lastSessionIdRef.current = existingSession.sessionId;
               attachedExistingSession = true;
+              if (reusingContextErrorSession) {
+                contextErrorPreservedSessionRef.current = undefined;
+                contextErrorPreservedProductContextRef.current = undefined;
+              }
             }
           }
           if (!session) {
@@ -1491,7 +1516,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ) {
               if (!workspaceScoped) {
                 setConnection((current) =>
-                  current.standaloneSession?.creationRecovery
+                  current.status === 'error'
                     ? current
                     : {
                         ...clearNonWorkspaceSessionState(current),
@@ -1947,14 +1972,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
 
           const activeSession = session;
+          const activeStandaloneState = getStandaloneConnectionState(
+            activeSession.session,
+          );
           const activeProductSessionContext =
-            activeSessionContextRef.current?.kind === 'standalone' ||
-            activeSessionContextRef.current?.kind === 'live'
-              ? activeSessionContextRef.current
-              : {
-                  kind: 'workspace' as const,
-                  cwd: activeSession.workspaceCwd,
-                };
+            activeStandaloneState !== undefined ||
+            activeSessionContextRef.current?.kind === 'standalone'
+              ? ({ kind: 'standalone' } as const)
+              : activeSessionContextRef.current?.kind === 'live'
+                ? activeSessionContextRef.current
+                : {
+                    kind: 'workspace' as const,
+                    cwd: activeSession.workspaceCwd,
+                  };
           const activeWorkspaceScoped =
             activeProductSessionContext.kind === 'workspace';
           runnerSession = activeSession;
@@ -1998,6 +2028,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             )
               ? pendingLoad
               : undefined;
+          activeSessionContextRef.current = activeProductSessionContext;
 
           // Feed replay snapshot (compacted history + live journal) into
           // the store before starting the SSE loop. The SSE stream begins
@@ -3560,6 +3591,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }));
         }
 
+        if (disposed || abort.signal.aborted) return;
         if (!autoReconnect) {
           sessionRef.current = undefined;
           setConnection((current) => ({
@@ -3604,7 +3636,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         session === undefined && sessionRef.current === undefined;
       const keepSessionForNextEffect =
         ownsCurrentSession &&
-        session === skipNextCleanupDetachSessionRef.current;
+        (session === skipNextCleanupDetachSessionRef.current ||
+          sessionContextResolutionErrorRef.current !== undefined);
+      if (
+        ownsCurrentSession &&
+        sessionContextResolutionErrorRef.current !== undefined
+      ) {
+        contextErrorPreservedSessionRef.current = session;
+        contextErrorPreservedProductContextRef.current =
+          activeSessionContextRef.current;
+      } else if (contextErrorPreservedSessionRef.current === session) {
+        contextErrorPreservedSessionRef.current = undefined;
+        contextErrorPreservedProductContextRef.current = undefined;
+      }
       const isUnmounting = !mountedRef.current;
       if (ownsCurrentSession || ownsEmptyState) {
         // A same-attachment effect restart must flush events already yielded by
@@ -4268,7 +4312,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     if (
       sessionId === currentSessionId &&
       sessionContextKey(targetSessionContext) ===
-        sessionContextKey(connectionRef.current.sessionContext)
+        sessionContextKey(connectionRef.current.sessionContext) &&
+      !connectionRef.current.standaloneSession?.creationRecovery
     ) {
       return;
     }
