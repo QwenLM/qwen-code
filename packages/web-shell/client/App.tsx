@@ -8384,9 +8384,10 @@ export function App({
   ]);
 
   const handleCycleMode = useCallback(() => {
-    const idx = isDaemonApprovalMode(currentMode)
-      ? MODES_CYCLE.indexOf(currentMode)
-      : -1;
+    // findIndex, not indexOf: narrowing currentMode to the tuple member type
+    // silently degrades when the SDK's declaration bundle leaves its
+    // permission-mode import dangling, and the build must survive both states.
+    const idx = MODES_CYCLE.findIndex((mode) => mode === currentMode);
     const next = MODES_CYCLE[(idx + 1) % MODES_CYCLE.length];
     handleSetMode(next);
   }, [currentMode, handleSetMode]);

@@ -37,20 +37,14 @@ import {
 } from './utils/copyTranscript.js';
 import { resolveFileLinkFromAnchor } from './utils/fileLinks.js';
 
+const SESSION_SWITCH_TIMEOUT_MS = 15_000;
+
 const COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
   'contextUsage',
   'model',
   'voice',
 ] as const satisfies readonly ComposerToolbarAction[];
-
-/**
- * Bound for a session switch to be confirmed by the embedded shell. When the
- * daemon is unreachable the shell renders its unavailable state instead of
- * mounting, so neither `onSessionIdChange` nor `onError` ever fires and the
- * switch overlay would lock the panel until a webview reload.
- */
-const SESSION_SWITCH_TIMEOUT_MS = 15_000;
 
 /** Host-only slash entries. Built per language so the menu is not half-English. */
 function buildVsCodeSlashCommands(t: ChromeStrings) {
@@ -322,9 +316,6 @@ export function EmbeddedApp() {
   const [sessionListError, setSessionListError] = useState<string>();
   const [switchingSessionId, setSwitchingSessionId] = useState<string>();
   const [creatingSession, setCreatingSession] = useState(false);
-  const switchTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(
-    undefined,
-  );
   const [editingMessage, setEditingMessage] = useState<EditingMessage>();
   const historyButtonRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<WebShellApi | null>(null);
@@ -350,29 +341,42 @@ export function EmbeddedApp() {
     setInsightReportPath(undefined);
   }, []);
 
-  const clearSwitchTimeout = useCallback(() => {
-    if (switchTimeoutRef.current !== undefined) {
-      clearTimeout(switchTimeoutRef.current);
-      switchTimeoutRef.current = undefined;
-    }
-  }, []);
-
-  const armSwitchTimeout = useCallback(() => {
-    clearSwitchTimeout();
-    switchTimeoutRef.current = setTimeout(() => {
-      switchTimeoutRef.current = undefined;
-      setSwitchingSessionId(undefined);
-      setHostNotice({ tone: 'error', text: t('session.switchFailed') });
-    }, SESSION_SWITCH_TIMEOUT_MS);
-  }, [clearSwitchTimeout, t]);
-
-  useEffect(() => clearSwitchTimeout, [clearSwitchTimeout]);
-
   const cancelMessageEditing = useCallback(() => {
     setEditingMessage(undefined);
     composerRef.current?.clear({ text: true, tags: true });
     composerRef.current?.focus?.();
   }, []);
+
+  // Stable identity: Web Shell re-runs its error-notification effect
+  // whenever this callback changes, so a fresh arrow every render would
+  // re-notify — and re-render — forever while a connection error persists.
+  const handleShellError = useCallback(
+    (error: Error) => {
+      clearInsight();
+      setEditingMessage(undefined);
+      setSwitchingSessionId(undefined);
+      setCreatingSession(false);
+      setHostNotice({
+        tone: 'error',
+        text: error.message || t('session.loadError'),
+      });
+    },
+    [clearInsight, t],
+  );
+
+  // A retriable connection failure can leave a session switch pending
+  // forever — neither settling into the exact session id nor erroring — and
+  // the blocking overlay would lock the panel until a reload. Bound it the
+  // way the pre-cutover host did.
+  useEffect(() => {
+    if (!switchingSessionId && !creatingSession) return;
+    const timer = setTimeout(() => {
+      setSwitchingSessionId(undefined);
+      setCreatingSession(false);
+      setHostNotice({ tone: 'error', text: t('session.switchTimeout') });
+    }, SESSION_SWITCH_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [switchingSessionId, creatingSession, t]);
 
   const loadSessionHistory = useCallback(
     async (cursor?: string) => {
@@ -840,7 +844,6 @@ export function EmbeddedApp() {
             setEditingMessage(undefined);
             composerRef.current?.clear({ text: true, tags: true });
             setSwitchingSessionId(session.sessionId);
-            armSwitchTimeout();
             setSessionTitle(session.displayName || t('session.past'));
             setRuntime((current) =>
               current && current.sessionId !== session.sessionId
@@ -1276,7 +1279,6 @@ export function EmbeddedApp() {
                 : current,
             );
             if (sessionId === switchingSessionId) {
-              clearSwitchTimeout();
               setSwitchingSessionId(undefined);
             }
           }}
@@ -1292,17 +1294,7 @@ export function EmbeddedApp() {
               }
             }
           }}
-          onError={(error) => {
-            clearInsight();
-            setEditingMessage(undefined);
-            clearSwitchTimeout();
-            setSwitchingSessionId(undefined);
-            setCreatingSession(false);
-            setHostNotice({
-              tone: 'error',
-              text: error.message || t('session.loadError'),
-            });
-          }}
+          onError={handleShellError}
           sidebar={false}
           compactThinking
           collapseCompletedTurns

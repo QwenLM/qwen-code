@@ -12,6 +12,10 @@ export interface QwenDaemonRuntime {
   token: string;
 }
 
+export interface QwenDaemonListenerHandle {
+  dispose(): void;
+}
+
 const STARTUP_TIMEOUT_MS = 30_000;
 const LISTENING_URL = /qwen serve listening on (http:\/\/[^\s]+)/;
 
@@ -21,8 +25,24 @@ export class QwenDaemonProcess {
   private startup: Promise<QwenDaemonRuntime> | null = null;
   /** Workspace the live daemon was bound to via `serve --workspace`. */
   private boundWorkspaceCwd: string | null = null;
-  /** Notified when a started daemon exits, so the host can tell the webview. */
-  onExit?: () => void;
+  /** Notified when the live daemon exits after a successful start. */
+  private exitListeners = new Set<() => void>();
+  /**
+   * Notified when the live daemon is replaced by a workspace switch, so
+   * hosts still bound to the old runtime can surface the failure instead of
+   * hanging against a dead port.
+   */
+  private supersededListeners = new Set<() => void>();
+
+  addExitListener(listener: () => void): QwenDaemonListenerHandle {
+    this.exitListeners.add(listener);
+    return { dispose: () => this.exitListeners.delete(listener) };
+  }
+
+  addSupersededListener(listener: () => void): QwenDaemonListenerHandle {
+    this.supersededListeners.add(listener);
+    return { dispose: () => this.supersededListeners.delete(listener) };
+  }
 
   start(
     cliEntryPath: string,
@@ -37,6 +57,7 @@ export class QwenDaemonProcess {
       this.boundWorkspaceCwd !== workspaceCwd
     ) {
       this.dispose();
+      for (const listener of [...this.supersededListeners]) listener();
     }
     if (
       this.runtime &&
@@ -82,10 +103,23 @@ export class QwenDaemonProcess {
 
       let settled = false;
       let output = '';
+      const onStdout = (chunk: Buffer) => {
+        output += chunk.toString();
+        const match = LISTENING_URL.exec(output);
+        if (match?.[1]) finish(undefined, match[1]);
+      };
+      const onStderr = (chunk: Buffer) => {
+        output += chunk.toString();
+      };
       const finish = (error?: Error, baseUrl?: string) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        // The daemon lives for the whole IDE session and logs continuously;
+        // once startup settles, the stdio handlers must stop retaining every
+        // byte it writes.
+        child.stdout?.removeListener('data', onStdout);
+        child.stderr?.removeListener('data', onStderr);
         // `dispose()` clears the shared fields, so an attempt that was already
         // replaced (a workspace switch kills the old child while it is still
         // starting) must not run it — that would tear down its successor.
@@ -116,14 +150,8 @@ export class QwenDaemonProcess {
         STARTUP_TIMEOUT_MS,
       );
 
-      child.stdout?.on('data', (chunk: Buffer) => {
-        output += chunk.toString();
-        const match = LISTENING_URL.exec(output);
-        if (match?.[1]) finish(undefined, match[1]);
-      });
-      child.stderr?.on('data', (chunk: Buffer) => {
-        output += chunk.toString();
-      });
+      child.stdout?.on('data', onStdout);
+      child.stderr?.on('data', onStderr);
       child.once('error', (error) => finish(error));
       child.once('exit', (code, signal) => {
         if (settled) {
@@ -138,7 +166,7 @@ export class QwenDaemonProcess {
             this.child = null;
             this.runtime = null;
             this.boundWorkspaceCwd = null;
-            this.onExit?.();
+            for (const listener of [...this.exitListeners]) listener();
           }
           return;
         }

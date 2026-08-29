@@ -39,33 +39,56 @@ const mocks = vi.hoisted(() => ({
     setState: vi.fn(),
   },
   embeddedProps: { current: null as CapturedProps | null },
+  connectionError: { current: undefined as string | undefined },
+  errorNotifications: { current: 0 },
 }));
 
-const daemonMocks = vi.hoisted(() => ({
+const sdkMocks = vi.hoisted(() => ({
   listWorkspaceSessionsPage: vi.fn(),
-}));
-
-vi.mock('@qwen-code/web-shell', () => ({
-  WebShellWithProviders: (props: CapturedProps) => {
-    mocks.embeddedProps.current = props;
-    return null;
-  },
-}));
-
-vi.mock('./hooks/useVSCode.js', () => ({
-  useVSCode: () => mocks.vscode,
 }));
 
 vi.mock('@qwen-code/sdk/daemon', () => ({
   DaemonClient: class {
     workspaceByCwd() {
       return {
-        listWorkspaceSessionsPage: daemonMocks.listWorkspaceSessionsPage,
-        updateSessionMetadata: async () => ({}),
-        deleteSessionsData: async () => undefined,
+        listWorkspaceSessionsPage: sdkMocks.listWorkspaceSessionsPage,
+        updateSessionMetadata: vi.fn(async () => ({})),
+        deleteSessionsData: vi.fn(async () => ({})),
       };
     }
+    getRewindSnapshots = vi.fn(async () => ({ snapshots: [] }));
+    rewindSession = vi.fn(async () => ({}));
   },
+}));
+
+vi.mock('@qwen-code/web-shell', async () => {
+  const { useEffect } = await import('react');
+  return {
+    WebShellWithProviders: (props: CapturedProps) => {
+      mocks.embeddedProps.current = props;
+      // Mirror App.tsx's error-notification effect: while a connection error
+      // persists it re-runs whenever the onError prop identity changes — an
+      // unstable callback turns that into an infinite render loop.
+      useEffect(() => {
+        const message = mocks.connectionError.current;
+        if (!message) return;
+        mocks.errorNotifications.current += 1;
+        if (mocks.errorNotifications.current > 3) {
+          // An unstable onError re-runs this effect on every render; fail
+          // fast instead of hanging on the infinite loop.
+          throw new Error('onError notified in a loop');
+        }
+        (props.onError as ((error: Error) => void) | undefined)?.(
+          new Error(message),
+        );
+      }, [props.onError]);
+      return null;
+    },
+  };
+});
+
+vi.mock('./hooks/useVSCode.js', () => ({
+  useVSCode: () => mocks.vscode,
 }));
 
 const mounted: RenderedApp[] = [];
@@ -112,7 +135,9 @@ beforeAll(async () => {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.embeddedProps.current = null;
-  daemonMocks.listWorkspaceSessionsPage.mockResolvedValue({ sessions: [] });
+  mocks.connectionError.current = undefined;
+  mocks.errorNotifications.current = 0;
+  sdkMocks.listWorkspaceSessionsPage.mockResolvedValue({ sessions: [] });
 });
 
 afterEach(() => {
@@ -461,6 +486,72 @@ describe('EmbeddedApp host wiring', () => {
       data: { title: 'My Title' },
     });
   });
+
+  it('notifies once when a connection error persists instead of looping', async () => {
+    mocks.connectionError.current = 'daemon connection lost';
+
+    // An unstable onError re-runs the mirrored notification effect on every
+    // render; the mock trips after three notifications instead of hanging
+    // on the infinite loop.
+    await renderApp();
+    const { container } = mounted[mounted.length - 1];
+
+    expect(mocks.errorNotifications.current).toBe(1);
+    const alerts = container.querySelectorAll('[role="alert"]');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].textContent).toContain('daemon connection lost');
+  });
+
+  it('releases the panel when a session switch times out', async () => {
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValueOnce({
+      sessions: [
+        {
+          sessionId: 'session-2',
+          workspaceCwd: '/workspace',
+          displayName: 'Other session',
+        },
+      ],
+      nextCursor: undefined,
+    });
+    vi.useFakeTimers();
+    try {
+      await renderApp();
+      const { container } = mounted[mounted.length - 1];
+
+      const historyButton = container.querySelector(
+        'button[aria-haspopup="dialog"]',
+      ) as HTMLButtonElement;
+      expect(historyButton).not.toBeNull();
+      await act(async () => {
+        historyButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+      });
+
+      const row = document.querySelector(
+        '[data-session-id="session-2"]',
+      ) as HTMLElement;
+      expect(row).not.toBeNull();
+      await act(async () => {
+        row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).toContain('Loading conversation…');
+
+      // A retriable connection failure that never settles must not lock the
+      // panel behind the overlay forever.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000);
+      });
+
+      expect(container.textContent).not.toContain('Loading conversation…');
+      expect(container.textContent).toContain(
+        'The conversation switch timed out. Try again.',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('session switch overlay', () => {
@@ -468,7 +559,7 @@ describe('session switch overlay', () => {
     container: HTMLElement;
     historyButton: HTMLButtonElement;
   }> {
-    daemonMocks.listWorkspaceSessionsPage.mockResolvedValueOnce({
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValueOnce({
       sessions: [
         {
           sessionId: 'session-2',
@@ -544,7 +635,7 @@ describe('session switch overlay', () => {
         await Promise.resolve();
       });
       expect(container.textContent).not.toContain(
-        'Switching conversations timed out.',
+        'The conversation switch timed out.',
       );
     } finally {
       vi.useRealTimers();
