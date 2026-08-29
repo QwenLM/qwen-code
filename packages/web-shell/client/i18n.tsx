@@ -1216,6 +1216,17 @@ const EN: Messages = {
   'scheduledTasks.runKind.catchUp': 'late',
   'scheduledTasks.runKind.manual': 'manual',
   'scheduledTasks.runKind.withheld': 'skipped',
+  'scheduledTasks.runKind.sessionDispatchFailed':
+    'new session failed, nothing ran',
+  'scheduledTasks.runKind.sessionDispatchFallback':
+    'new session failed, ran in the task session',
+  'scheduledTasks.openRunSession': 'Open this run session',
+  'scheduledTasks.runContext.title': 'Scheduled task run',
+  'scheduledTasks.runContext.taskId': 'Task ID',
+  'scheduledTasks.runContext.schedule': 'Schedule',
+  'scheduledTasks.runContext.triggeredAt': 'Triggered',
+  'scheduledTasks.runContext.trigger.scheduled': 'Scheduled',
+  'scheduledTasks.runContext.trigger.manual': 'Run manually',
   'scheduledTasks.error.runFailed': 'Failed to record the run',
   'scheduledTasks.error.oneShotConsumedButFailed':
     'The task was deleted but the prompt could not be delivered — it never ran. Recreate it to try again.',
@@ -1225,13 +1236,13 @@ const EN: Messages = {
   'scheduledTasks.dur.h': 'h',
   'scheduledTasks.dur.m': 'm',
   'scheduledTasks.dur.s': 's',
-  'scheduledTasks.runMode': 'Run mode',
-  'scheduledTasks.runMode.shared': 'Shared session',
-  'scheduledTasks.runMode.isolated': 'Isolated (fresh session per run)',
-  'scheduledTasks.runMode.shared.hint':
-    'Runs accumulate in one session transcript.',
-  'scheduledTasks.runMode.isolated.hint':
-    'Each run gets a clean session context.',
+  'scheduledTasks.runIn': 'Run in',
+  'scheduledTasks.sessionMode.perRun': 'A new session every run',
+  'scheduledTasks.sessionMode.persistent': 'Persistent task session',
+  'scheduledTasks.sessionMode.perRun.hint':
+    'Each run gets a clean context and its own conversation.',
+  'scheduledTasks.sessionMode.persistent.hint':
+    'All runs continue in the same task conversation.',
   'scheduledTasks.condition': 'Precondition (optional)',
   'scheduledTasks.conditionPlaceholder':
     'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
@@ -2750,15 +2761,16 @@ const EN: Messages = {
   'thinking.closeTranslation': 'Close',
   'thinking.inputTokens': (v) => `Input tokens: ${v?.count ?? '--'}`,
   'thinking.outputTokens': (v) => `Output tokens: ${v?.count ?? '--'}`,
-  'sessionsOverview.count': (v) => `${v?.count ?? 0} sessions`,
   'sessionsOverview.current': 'Current',
   'sessionsOverview.empty': 'No sessions yet',
   'sessionsOverview.loadFailed': 'Failed to load sessions',
   'sessionsOverview.loading': 'Loading sessions…',
-  'sessionsOverview.openElsewhere': 'Currently open in another window',
+  'sessionsOverview.noData': 'No data',
   'sessionsOverview.openInSplit': 'Open in split',
   'sessionsOverview.openInSplitHint':
     'Show the selected sessions side by side in this window',
+  'sessionsOverview.splitLimit': (v) =>
+    `Select at most ${v?.max ?? 6} sessions to open them together`,
   'sessionsOverview.openInTab': 'Open in new tab',
   'sessionsOverview.openInTabHint':
     'Open the selected sessions as a split view in a new browser tab',
@@ -2766,10 +2778,48 @@ const EN: Messages = {
     'Pop-up blocked. Allow pop-ups for this site to open sessions in new tabs.',
   'sessionsOverview.refresh': 'Refresh',
   'sessionsOverview.selectAll': 'Select all',
-  'sessionsOverview.splitCap': (v) =>
-    `Only the first ${v?.max ?? 6} selected sessions will open in the split.`,
+  'sessionsOverview.titleColumn': 'Title',
+  'sessionsOverview.sessionId': 'Session ID',
+  'sessionsOverview.actions': 'Actions',
+  'sessionsOverview.folder': 'Workspace',
+  'sessionsOverview.time': 'Time',
+  'sessionsOverview.worktree': 'Worktree',
+  'sessionsOverview.selectedRows': (v) =>
+    `${v?.count ?? 0} of ${v?.total ?? 0} row(s) selected.`,
+  'sessionsOverview.previousPage': 'Previous',
+  'sessionsOverview.nextPage': 'Next',
+  'sessionsOverview.pageInfo': (v) =>
+    `Page ${v?.page ?? 0} of ${v?.total ?? 0}`,
+  'sessionsOverview.rowsPerPage': 'Rows per page',
+  'sessionsOverview.workspaceFilter': 'Filter by workspace',
+  'sessionsOverview.allWorkspaces': 'All',
+  'sessionsOverview.searchPlaceholder': 'Search sessions…',
+  'sessionsOverview.confirmArchiveTitle': 'Archive session?',
+  'sessionsOverview.confirmArchive': (v) =>
+    `"${v?.name ?? ''}" will be moved to archived sessions.`,
+  'sessionsOverview.confirmArchiveBulkTitle': (v) =>
+    `Archive ${v?.count ?? 0} sessions?`,
+  'sessionsOverview.confirmArchiveBulk': (v) =>
+    `${v?.count ?? 0} selected sessions will be moved to archived sessions.`,
+  'sessionsOverview.confirmDeleteTitle': 'Delete session?',
+  'sessionsOverview.confirmDelete': (v) =>
+    `"${v?.name ?? ''}" and its conversation history will be permanently deleted. This cannot be undone.`,
+  'sessionsOverview.deleteFailed': 'Failed to delete session',
+  'sessionsOverview.archiveFailed': 'Failed to archive session',
+  'sessionsOverview.actionUnavailable':
+    'This action is unavailable for the selected session or workspace',
+  'sessionsOverview.bulkArchive': 'Archive',
+  'sessionsOverview.bulkArchiveHint': (v) =>
+    `Archive ${v?.count ?? 0} selected sessions`,
+  'sessionsOverview.bulkDelete': 'Delete',
+  'sessionsOverview.bulkDeleteHint': (v) =>
+    `Delete ${v?.count ?? 0} selected sessions`,
+  'sessionsOverview.confirmDeleteBulkTitle': (v) =>
+    `Delete ${v?.count ?? 0} sessions?`,
+  'sessionsOverview.confirmDeleteBulk': (v) =>
+    `${v?.count ?? 0} selected sessions and their conversation history will be permanently deleted. This cannot be undone.`,
   'sessionsOverview.selectSession': (v) => `Select ${v?.name ?? ''}`,
-  'sessionsOverview.status.idle': 'Idle',
+  'sessionsOverview.status.askUserQuestion': 'User input needed',
   'sessionsOverview.status.needsApproval': 'Needs approval',
   'sessionsOverview.status.running': 'Running',
   'sessionsOverview.title': 'Session Overview',
@@ -3104,6 +3154,10 @@ const EN: Messages = {
   'settings.localControl.maySleep': 'This Mac may sleep',
   'settings.localControl.urlRedacted':
     'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
+  'localControl.open': 'Mobile access',
+  'localControl.disabledHint':
+    'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
+  'localControl.openSettings': 'Open Settings',
   'settings.models.title': 'Models',
   'settings.models.add': '+ Add Model',
   'settings.models.setCurrent': 'Set current',
@@ -4340,6 +4394,16 @@ const ZH: Messages = {
   'scheduledTasks.runKind.catchUp': '补跑',
   'scheduledTasks.runKind.manual': '手动',
   'scheduledTasks.runKind.withheld': '已跳过',
+  'scheduledTasks.runKind.sessionDispatchFailed': '新建会话失败，未运行',
+  'scheduledTasks.runKind.sessionDispatchFallback':
+    '新建会话失败，已在任务会话中运行',
+  'scheduledTasks.openRunSession': '打开本次运行会话',
+  'scheduledTasks.runContext.title': '定时任务运行',
+  'scheduledTasks.runContext.taskId': '任务 ID',
+  'scheduledTasks.runContext.schedule': '计划',
+  'scheduledTasks.runContext.triggeredAt': '触发于',
+  'scheduledTasks.runContext.trigger.scheduled': '定时触发',
+  'scheduledTasks.runContext.trigger.manual': '手动运行',
   'scheduledTasks.error.runFailed': '记录运行失败',
   'scheduledTasks.error.oneShotConsumedButFailed':
     '任务已删除,但提示词未能送达——它没有运行。请重新创建后重试。',
@@ -4349,11 +4413,13 @@ const ZH: Messages = {
   'scheduledTasks.dur.h': '小时',
   'scheduledTasks.dur.m': '分',
   'scheduledTasks.dur.s': '秒',
-  'scheduledTasks.runMode': '运行模式',
-  'scheduledTasks.runMode.shared': '共享会话',
-  'scheduledTasks.runMode.isolated': '隔离（每次运行新建会话）',
-  'scheduledTasks.runMode.shared.hint': '所有运行记录累积在同一个会话中。',
-  'scheduledTasks.runMode.isolated.hint': '每次运行获得独立的会话上下文。',
+  'scheduledTasks.runIn': '运行于',
+  'scheduledTasks.sessionMode.perRun': '每次新会话',
+  'scheduledTasks.sessionMode.persistent': '固定会话',
+  'scheduledTasks.sessionMode.perRun.hint':
+    '每次运行都创建独立会话，使用干净的上下文。',
+  'scheduledTasks.sessionMode.persistent.hint':
+    '所有运行都继续使用同一个任务会话。',
   'scheduledTasks.condition': '前置条件（可选）',
   'scheduledTasks.conditionPlaceholder':
     '例如：检查昨天以来 main 分支有没有新提交。如果没有，则本次不应执行。',
@@ -5753,24 +5819,62 @@ const ZH: Messages = {
   'thinking.outputTokens': (v) => `生成 Token：${v?.count ?? '--'}`,
   'welcome.changeModel': '(/model 切换)',
   'welcome.defaultModel': '未知模型',
-  'sessionsOverview.count': (v) => `${v?.count ?? 0} 个会话`,
   'sessionsOverview.current': '当前',
   'sessionsOverview.empty': '暂无会话',
   'sessionsOverview.loadFailed': '加载会话失败',
   'sessionsOverview.loading': '正在加载会话…',
-  'sessionsOverview.openElsewhere': '已在其他窗口打开',
-  'sessionsOverview.openInSplit': '打开到分屏',
+  'sessionsOverview.noData': '暂无数据',
+  'sessionsOverview.openInSplit': '分屏打开',
   'sessionsOverview.openInSplitHint': '在本窗口内并排显示选中的会话',
-  'sessionsOverview.openInTab': '在新标签页打开',
+  'sessionsOverview.splitLimit': (v) =>
+    `最多选择 ${v?.max ?? 6} 个会话同时打开`,
+  'sessionsOverview.openInTab': '新标签页打开',
   'sessionsOverview.openInTabHint': '在新标签页中以分屏并排打开选中的会话',
   'sessionsOverview.popupBlocked':
     '弹出窗口被拦截。请允许本站弹窗，以便在新标签页中打开会话。',
   'sessionsOverview.refresh': '刷新',
   'sessionsOverview.selectAll': '全选',
-  'sessionsOverview.splitCap': (v) =>
-    `只有前 ${v?.max ?? 6} 个选中的会话会进入分屏。`,
+  'sessionsOverview.titleColumn': '标题',
+  'sessionsOverview.sessionId': '会话 ID',
+  'sessionsOverview.actions': '操作',
+  'sessionsOverview.folder': '工作区',
+  'sessionsOverview.time': '时间',
+  'sessionsOverview.worktree': 'Worktree',
+  'sessionsOverview.selectedRows': (v) =>
+    `${v?.count ?? 0} / ${v?.total ?? 0} 行已选`,
+  'sessionsOverview.previousPage': '上一页',
+  'sessionsOverview.nextPage': '下一页',
+  'sessionsOverview.pageInfo': (v) =>
+    `第 ${v?.page ?? 0} / ${v?.total ?? 0} 页`,
+  'sessionsOverview.rowsPerPage': '每页行数',
+  'sessionsOverview.workspaceFilter': '按工作区筛选',
+  'sessionsOverview.allWorkspaces': '全部',
+  'sessionsOverview.searchPlaceholder': '搜索会话…',
+  'sessionsOverview.confirmArchiveTitle': '归档会话？',
+  'sessionsOverview.confirmArchive': (v) =>
+    `“${v?.name ?? ''}” 将移至已归档会话。`,
+  'sessionsOverview.confirmArchiveBulkTitle': (v) =>
+    `归档 ${v?.count ?? 0} 个会话？`,
+  'sessionsOverview.confirmArchiveBulk': (v) =>
+    `选中的 ${v?.count ?? 0} 个会话将移至已归档会话。`,
+  'sessionsOverview.confirmDeleteTitle': '删除会话？',
+  'sessionsOverview.confirmDelete': (v) =>
+    `"${v?.name ?? ''}" 及其对话记录将被永久删除，此操作无法撤销。`,
+  'sessionsOverview.deleteFailed': '删除会话失败',
+  'sessionsOverview.archiveFailed': '归档会话失败',
+  'sessionsOverview.actionUnavailable': '所选会话或工作区不支持此操作',
+  'sessionsOverview.bulkArchive': '归档',
+  'sessionsOverview.bulkArchiveHint': (v) =>
+    `归档选中的 ${v?.count ?? 0} 个会话`,
+  'sessionsOverview.bulkDelete': '删除',
+  'sessionsOverview.bulkDeleteHint': (v) =>
+    `删除选中的 ${v?.count ?? 0} 个会话`,
+  'sessionsOverview.confirmDeleteBulkTitle': (v) =>
+    `删除 ${v?.count ?? 0} 个会话？`,
+  'sessionsOverview.confirmDeleteBulk': (v) =>
+    `选中的 ${v?.count ?? 0} 个会话及其对话记录将被永久删除，此操作无法撤销。`,
   'sessionsOverview.selectSession': (v) => `选择 ${v?.name ?? ''}`,
-  'sessionsOverview.status.idle': '空闲',
+  'sessionsOverview.status.askUserQuestion': '需要用户输入',
   'sessionsOverview.status.needsApproval': '待审批',
   'sessionsOverview.status.running': '运行中',
   'sessionsOverview.title': '会话总览',
@@ -6085,6 +6189,10 @@ const ZH: Messages = {
   'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
   'settings.localControl.urlRedacted':
     '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
+  'localControl.open': '手机访问',
+  'localControl.disabledHint':
+    '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
+  'localControl.openSettings': '打开设置',
   'settings.models.title': '模型',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',
@@ -6141,9 +6249,6 @@ const ZH: Messages = {
   'settings.label.general.language': '语言：界面',
   'settings.description.general.language':
     '用户界面的语言。使用 auto 可根据系统设置自动检测；也可以在 ~/.qwen/locales/ 中放置 JS 语言文件来使用自定义语言代码。',
-  'settings.label.general.dynamicCommandTranslation': '语言：动态命令翻译',
-  'settings.description.general.dynamicCommandTranslation':
-    '为动态 slash command 描述启用 AI 翻译。关闭后动态命令使用原始描述，也不会触发翻译模型调用。',
   'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
   'settings.description.general.preventSystemSleep':
     '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',

@@ -97,7 +97,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
     since: 'v1',
     modes: ['workspace', 'clean'],
   },
+  // Explicit remember targets and scoped forget (`scope` parameter). Old
+  // daemons silently ignore an unknown `scope`, so the SDK pre-flights the
+  // matching tag before sending one. The sibling no-op behavior change — a
+  // zero-write remember now fails `remember_no_update` instead of completing
+  // with 'No memory files updated.' — is deliberately untagged: it changes a
+  // task's terminal outcome, not the surface shape, and every client sees it
+  // as a typed `failed` task status that cannot be mistaken for success.
+  workspace_memory_remember_project_scope: { since: 'v1' },
+  workspace_memory_remember_user_scope: { since: 'v1' },
   workspace_memory_forget: { since: 'v1' },
+  workspace_memory_forget_scope: { since: 'v1' },
   workspace_memory_dream: { since: 'v1' },
   // Workspace agents CRUD (`GET/POST /workspace/agents` +
   // `GET/POST/DELETE /workspace/agents/:agentType`). Wraps

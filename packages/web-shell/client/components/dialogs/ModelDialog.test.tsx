@@ -12,7 +12,7 @@ if (!Element.prototype.scrollIntoView) {
 }
 
 // ModelDialog only reads `useConnection()`; models/current come in via props here.
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => ({}),
 }));
 

@@ -9,6 +9,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { Request, Response } from 'express';
 import { WORKTREE_SESSION_FILE } from '@qwen-code/qwen-code-core';
+import { isWithinRoot } from '../config/path-comparison.js';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
 import { parseCallerSuppliedSessionId } from '../config/session-id.js';
 import type { SendBridgeError } from './server/error-response.js';
@@ -363,8 +364,7 @@ export function resolveContainedCwd(
   try {
     const resolved = fs.realpathSync(path.resolve(rawCwd));
     const root = fs.realpathSync(workspaceCwd);
-    const rel = path.relative(root, resolved);
-    if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+    if (isWithinRoot(resolved, root)) {
       return resolved;
     }
   } catch {
@@ -397,8 +397,7 @@ export function resolveContainedCwdOrFail(
   try {
     const resolved = fs.realpathSync(path.resolve(rawCwd));
     const root = fs.realpathSync(workspaceCwd);
-    const rel = path.relative(root, resolved);
-    if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+    if (isWithinRoot(resolved, root)) {
       return resolved;
     }
   } catch {

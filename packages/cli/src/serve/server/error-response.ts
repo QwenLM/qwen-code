@@ -22,6 +22,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   BranchWhilePromptActiveError,
   BridgeChannelQuarantinedError,
+  BridgeTimeoutError,
   CancelSentinelCollisionError,
   CdWhilePromptActiveError,
   InvalidClientIdError,
@@ -209,6 +210,18 @@ export function sendBridgeError(
       retryable: true,
       sessionId: err.sessionId,
       action: err.action,
+      timeoutMs: err.timeoutMs,
+    });
+    return;
+  }
+  if (err instanceof BridgeTimeoutError && err.label === 'newSession') {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.set('Retry-After', String(restoreRetryAfterSeconds(err.timeoutMs)));
+    res.status(504).json({
+      error: err.message,
+      code: 'init_timeout',
+      errorKind: 'init_timeout',
+      retryable: true,
       timeoutMs: err.timeoutMs,
     });
     return;

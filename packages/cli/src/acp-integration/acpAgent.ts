@@ -228,7 +228,9 @@ import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js'
 import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
 import {
   getConversationDirectoryName,
+  hasVerifiableInode,
   isSameConversationPath,
+  isSameDirectoryIdentity,
 } from '../utils/conversation-directory-identity.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
@@ -399,6 +401,8 @@ import {
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
+  SESSION_INITIALIZATION_DEADLINE_META_KEY,
+  SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
   WORKTREE_MCP_DEFER_META_KEY,
@@ -441,6 +445,7 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
+const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -3199,6 +3204,26 @@ function isOwnerOnlyDirectory(stats: Stats): boolean {
   return (stats.mode & 0o077) === 0;
 }
 
+/**
+ * Deliberately local, NOT the module's `hasRootIdentity`: the wire
+ * expectation payload `{ device, inode }` carries no `inodeVerifiable`
+ * field, so verifiability must keep being derived from `inode !== 0` here
+ * (the parser admits only safe integers >= 0, so the two derivations
+ * coincide). The comparison itself must stay in lockstep with
+ * `hasRootIdentity` in utils/conversation-directory-identity.ts.
+ */
+function hasExpectedManagedDirectoryIdentity(
+  stats: Stats,
+  expected: { device: number; inode: number },
+): boolean {
+  const inodeVerifiable = hasVerifiableInode(stats.ino);
+  return (
+    stats.dev === expected.device &&
+    inodeVerifiable === (expected.inode !== 0) &&
+    (!inodeVerifiable || stats.ino === expected.inode)
+  );
+}
+
 function hasOnlyKeys(
   value: Record<string, unknown>,
   keys: readonly string[],
@@ -3316,10 +3341,8 @@ async function assertManagedConversationDirectoryIdentity(
     !isOwnerOnlyDirectory(rootBefore) ||
     !isOwnerOnlyDirectory(rootAfter) ||
     !isSameConversationPath(canonicalRoot, expectation.root.canonicalPath) ||
-    rootBefore.dev !== expectation.root.device ||
-    rootBefore.ino !== expectation.root.inode ||
-    rootAfter.dev !== expectation.root.device ||
-    rootAfter.ino !== expectation.root.inode
+    !hasExpectedManagedDirectoryIdentity(rootBefore, expectation.root) ||
+    !hasExpectedManagedDirectoryIdentity(rootAfter, expectation.root)
   ) {
     throw managedConversationDirectoryError(false);
   }
@@ -3340,10 +3363,8 @@ async function assertManagedConversationDirectoryIdentity(
     !isOwnerOnlyDirectory(childBefore) ||
     !isOwnerOnlyDirectory(childAfter) ||
     !isSameConversationPath(canonicalChild, expectation.child.canonicalPath) ||
-    childBefore.dev !== expectation.child.device ||
-    childBefore.ino !== expectation.child.inode ||
-    childAfter.dev !== expectation.child.device ||
-    childAfter.ino !== expectation.child.inode
+    !hasExpectedManagedDirectoryIdentity(childBefore, expectation.child) ||
+    !hasExpectedManagedDirectoryIdentity(childAfter, expectation.child)
   ) {
     throw managedConversationDirectoryError(false);
   }
@@ -3738,55 +3759,57 @@ class QwenAgent implements Agent {
     settings: LoadedSettings,
   ): Promise<void> {
     if (this.workspaceMcpDiscoveryConfig) return;
-    const cwd = this.config.getTargetDir();
-    const config = await this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
-      loadCliConfig(
-        settings.merged,
-        {
-          ...this.argv,
-          sessionId: 'workspace-mcp-discovery',
-          resume: undefined,
-          continue: false,
-          chatRecording: false,
-        },
-        cwd,
-        undefined,
-        {
-          userHooks: settings.getUserHooks(),
-          projectHooks: settings.getProjectHooks(),
-        },
-        buildDisabledSkillNamesProvider(settings),
-      ),
-    );
-    config.setMcpTransportPool(this.mcpPool);
-    try {
-      await config.initialize({
-        skipLlmInitialization: true,
-        skipFileCheckpointing: true,
-        skipHooks: true,
-        skipSkillManager: true,
-        skipMcpDiscovery: true,
-        lenientToolWarmup: true,
-      });
-      const manager = config.getToolRegistry()?.getMcpClientManager();
-      if (!manager) {
-        throw new Error('MCP client manager is unavailable');
-      }
-      await manager.discoverAllMcpToolsIncremental(config);
-      if (manager.getDiscoveryState() === MCPDiscoveryState.NOT_STARTED) {
-        throw new Error(
-          'MCP discovery did not start. The workspace may not be trusted.',
-        );
-      }
-      this.workspaceMcpDiscoveryConfig = config;
-    } catch (error) {
+    return sessionIdContext.run('workspace-mcp-discovery', async () => {
+      const cwd = this.config.getTargetDir();
+      const config = await this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
+        loadCliConfig(
+          settings.merged,
+          {
+            ...this.argv,
+            sessionId: 'workspace-mcp-discovery',
+            resume: undefined,
+            continue: false,
+            chatRecording: false,
+          },
+          cwd,
+          undefined,
+          {
+            userHooks: settings.getUserHooks(),
+            projectHooks: settings.getProjectHooks(),
+          },
+          buildDisabledSkillNamesProvider(settings),
+        ),
+      );
+      config.setMcpTransportPool(this.mcpPool);
       try {
-        await config.getToolRegistry()?.stop();
-      } catch {
-        // Preserve the initialization failure that made this config unusable.
+        await config.initialize({
+          skipLlmInitialization: true,
+          skipFileCheckpointing: true,
+          skipHooks: true,
+          skipSkillManager: true,
+          skipMcpDiscovery: true,
+          lenientToolWarmup: true,
+        });
+        const manager = config.getToolRegistry()?.getMcpClientManager();
+        if (!manager) {
+          throw new Error('MCP client manager is unavailable');
+        }
+        await manager.discoverAllMcpToolsIncremental(config);
+        if (manager.getDiscoveryState() === MCPDiscoveryState.NOT_STARTED) {
+          throw new Error(
+            'MCP discovery did not start. The workspace may not be trusted.',
+          );
+        }
+        this.workspaceMcpDiscoveryConfig = config;
+      } catch (error) {
+        try {
+          await config.getToolRegistry()?.stop();
+        } catch {
+          // Preserve the initialization failure that made this config unusable.
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   private initializeWorkspaceMcpDiscovery(): { accepted: boolean } {
@@ -4686,6 +4709,49 @@ class QwenAgent implements Agent {
     };
   }
 
+  private createSessionInitializationDeadline(raw: unknown):
+    | {
+        signal: AbortSignal;
+        dispose: () => void;
+      }
+    | undefined {
+    if (raw === undefined || !this.isTrustedManagedParent()) return undefined;
+    if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw <= 0) {
+      throw RequestError.invalidParams(
+        { errorKind: 'invalid_session_initialization_deadline' },
+        `\`_meta["${SESSION_INITIALIZATION_DEADLINE_META_KEY}"]\` must be a positive safe integer`,
+      );
+    }
+
+    const remainingMs = raw - Date.now();
+    if (remainingMs > 2_147_483_647) {
+      throw RequestError.invalidParams(
+        { errorKind: 'invalid_session_initialization_deadline' },
+        `\`_meta["${SESSION_INITIALIZATION_DEADLINE_META_KEY}"]\` exceeds the supported timer range`,
+      );
+    }
+
+    const controller = new AbortController();
+    const timeoutError = new RequestError(
+      ACP_ERROR_CODES.INTERNAL_ERROR,
+      'Session initialization deadline exceeded',
+      { errorKind: SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND },
+    );
+    let timer: NodeJS.Timeout | undefined;
+    if (remainingMs <= 0) {
+      controller.abort(timeoutError);
+    } else {
+      timer = setTimeout(() => controller.abort(timeoutError), remainingMs);
+      timer.unref();
+    }
+    return {
+      signal: controller.signal,
+      dispose: () => {
+        if (timer) clearTimeout(timer);
+      },
+    };
+  }
+
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
     const parsedSessionId = parseCallerSuppliedSessionId(
@@ -4703,7 +4769,14 @@ class QwenAgent implements Agent {
     const releaseStartingSessionId = requestedSessionId
       ? this.reserveStartingSessionId(requestedSessionId)
       : undefined;
+    let initializationDeadline:
+      | { signal: AbortSignal; dispose: () => void }
+      | undefined;
     try {
+      initializationDeadline = this.createSessionInitializationDeadline(
+        params._meta?.[SESSION_INITIALIZATION_DEADLINE_META_KEY],
+      );
+      initializationDeadline?.signal.throwIfAborted();
       const sessionSource = getSessionSource(params);
       const provisionalStandalone = isReservedStandaloneSessionSourceType(
         sessionSource?.sourceType,
@@ -4735,6 +4808,7 @@ class QwenAgent implements Agent {
             loadSettingsCached(cwd),
           );
           this.settings = settings;
+          const deferMcpDiscovery = shouldDeferMcpDiscovery(params);
           const config = await profiler.time('config_setup', () =>
             this.newSessionConfig(
               cwd,
@@ -4743,17 +4817,24 @@ class QwenAgent implements Agent {
               sessionSource,
               requestedSessionId,
               undefined,
-              shouldDeferMcpDiscovery(params)
-                ? { skipMcpDiscovery: true }
+              initializationDeadline || deferMcpDiscovery
+                ? {
+                    ...(initializationDeadline
+                      ? { signal: initializationDeadline.signal }
+                      : {}),
+                    ...(deferMcpDiscovery ? { skipMcpDiscovery: true } : {}),
+                  }
                 : undefined,
             ),
           );
           let session: Session;
           try {
+            initializationDeadline?.signal.throwIfAborted();
             if (!provisionalStandalone) {
               await profiler.time('auth', () =>
                 this.ensureAuthenticated(config),
               );
+              initializationDeadline?.signal.throwIfAborted();
               profiler.timeSync('file_system_setup', () =>
                 this.setupFileSystem(config),
               );
@@ -4761,6 +4842,9 @@ class QwenAgent implements Agent {
             session = await profiler.time('session_register', () =>
               this.createAndStoreSession(config, settings, undefined, {
                 deferWorkspaceActivation: provisionalStandalone,
+                ...(initializationDeadline
+                  ? { signal: initializationDeadline.signal }
+                  : {}),
               }),
             );
           } catch (error) {
@@ -4785,6 +4869,7 @@ class QwenAgent implements Agent {
         parentContext ? { parentContext } : {},
       );
     } finally {
+      initializationDeadline?.dispose();
       releaseStartingSessionId?.();
     }
   }
@@ -7947,9 +8032,15 @@ class QwenAgent implements Agent {
         typeof sessionId === 'string' && sessionId.length > 0
           ? this.sessions.get(sessionId)
           : undefined;
-      if (session && this.isSessionScopedExtMethod(method)) {
-        return await this.runInSessionContext(session, () =>
-          this.extMethodInternal(method, normalizedParams),
+      if (
+        typeof sessionId === 'string' &&
+        sessionId.length > 0 &&
+        this.isSessionScopedExtMethod(method) &&
+        (session !== undefined || SESSION_ID_RE.test(sessionId))
+      ) {
+        return await sessionIdContext.run(
+          session?.getConfig().getSessionId() ?? sessionId,
+          () => this.extMethodInternal(method, normalizedParams),
         );
       }
 
@@ -7972,7 +8063,6 @@ class QwenAgent implements Agent {
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
-    const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
     const UUID_V4_RE =
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -8600,6 +8690,14 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid contextMode');
         }
         const contextMode: WorkspaceRememberContextMode = rawContextMode;
+        const rawScope = params['scope'];
+        if (
+          rawScope !== undefined &&
+          rawScope !== 'project' &&
+          rawScope !== 'user'
+        ) {
+          throw RequestError.invalidParams(undefined, 'Invalid scope');
+        }
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -8619,6 +8717,7 @@ class QwenAgent implements Agent {
             projectRoot,
             content: content.trim(),
             contextMode,
+            ...(rawScope ? { scope: rawScope } : {}),
             abortSignal: childSignal,
           });
           if (result.filesTouched.length > 0) {
@@ -8691,6 +8790,14 @@ class QwenAgent implements Agent {
             'Query exceeds maximum size',
           );
         }
+        const rawScope = params['scope'];
+        if (
+          rawScope !== undefined &&
+          rawScope !== 'project' &&
+          rawScope !== 'user'
+        ) {
+          throw RequestError.invalidParams(undefined, 'Invalid scope');
+        }
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -8711,6 +8818,7 @@ class QwenAgent implements Agent {
             .forget(projectRoot, trimmedQuery, {
               config: hiddenConfig,
               abortSignal: childSignal,
+              ...(rawScope ? { scope: rawScope } : {}),
             });
           return {
             summary:
@@ -10006,16 +10114,16 @@ class QwenAgent implements Agent {
           if (
             !isOwnerOnlyDirectory(rootBefore) ||
             !isOwnerOnlyDirectory(rootAfter) ||
-            rootBefore.dev !== rootAfter.dev ||
-            rootBefore.ino !== rootAfter.ino ||
+            !isSameDirectoryIdentity(rootBefore, rootAfter) ||
             (conversationDirectoryExpectation !== undefined &&
               (!isSameConversationPath(
                 canonicalRoot,
                 conversationDirectoryExpectation.root.canonicalPath,
               ) ||
-                rootAfter.dev !==
-                  conversationDirectoryExpectation.root.device ||
-                rootAfter.ino !== conversationDirectoryExpectation.root.inode))
+                !hasExpectedManagedDirectoryIdentity(
+                  rootAfter,
+                  conversationDirectoryExpectation.root,
+                )))
           ) {
             if (conversationDirectoryExpectation !== undefined) {
               throw managedConversationDirectoryError(false);
@@ -10048,17 +10156,16 @@ class QwenAgent implements Agent {
           if (
             !isOwnerOnlyDirectory(targetBefore) ||
             !isOwnerOnlyDirectory(targetAfter) ||
-            targetBefore.dev !== targetAfter.dev ||
-            targetBefore.ino !== targetAfter.ino ||
+            !isSameDirectoryIdentity(targetBefore, targetAfter) ||
             (conversationDirectoryExpectation !== undefined &&
               (!isSameConversationPath(
                 canonicalPath,
                 conversationDirectoryExpectation.child.canonicalPath,
               ) ||
-                targetAfter.dev !==
-                  conversationDirectoryExpectation.child.device ||
-                targetAfter.ino !==
-                  conversationDirectoryExpectation.child.inode)) ||
+                !hasExpectedManagedDirectoryIdentity(
+                  targetAfter,
+                  conversationDirectoryExpectation.child,
+                ))) ||
             relativeTarget.length === 0 ||
             relativeTarget.startsWith('..') ||
             path.isAbsolute(relativeTarget) ||
@@ -10089,11 +10196,12 @@ class QwenAgent implements Agent {
           }
           if (
             !isOwnerOnlyDirectory(rootFinal) ||
-            rootFinal.dev !== rootAfter.dev ||
-            rootFinal.ino !== rootAfter.ino ||
+            !isSameDirectoryIdentity(rootFinal, rootAfter) ||
             (conversationDirectoryExpectation !== undefined &&
-              (rootFinal.dev !== conversationDirectoryExpectation.root.device ||
-                rootFinal.ino !== conversationDirectoryExpectation.root.inode))
+              !hasExpectedManagedDirectoryIdentity(
+                rootFinal,
+                conversationDirectoryExpectation.root,
+              ))
           ) {
             if (conversationDirectoryExpectation !== undefined) {
               throw managedConversationDirectoryError(false);
@@ -12355,25 +12463,44 @@ class QwenAgent implements Agent {
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
   ): Promise<Config> {
+    // Transcript replay is the only recording-disabled Config and must remain
+    // id-less; it borrows the validated target session context from extMethod.
+    const preserveIdlessSession =
+      sessionId === undefined && chatRecording === false;
+    const inheritedSessionId = preserveIdlessSession
+      ? sessionIdContext.getStore()
+      : undefined;
+    // A generated id exists only to bind the debug-log context before Config
+    // construction; loadCliConfig must not treat it as caller-supplied (the
+    // occupancy check is for caller-chosen ids that may have a case-twin).
+    const sessionIdGenerated =
+      sessionId === undefined && !preserveIdlessSession;
+    const effectiveSessionId =
+      sessionId ?? (sessionIdGenerated ? randomUUID() : undefined);
+    const debugSessionId =
+      effectiveSessionId ?? inheritedSessionId ?? 'transcript-replay';
     try {
       this.assertManagedSessionAdmission();
-      return await this.runWithPinnedRuntimeBaseDir(settings, cwd, async () => {
-        await this.retryPendingConfigCleanup(
-          Storage.getRuntimeBaseDir(),
-          sessionId,
-        );
-        return this.newSessionConfigInRuntimeContext(
-          cwd,
-          mcpServers,
-          settings,
-          sessionSource,
-          sessionId,
-          resume,
-          initializeOptions,
-          chatRecording,
-          restoreOptions,
-        );
-      });
+      return await sessionIdContext.run(debugSessionId, () =>
+        this.runWithPinnedRuntimeBaseDir(settings, cwd, async () => {
+          await this.retryPendingConfigCleanup(
+            Storage.getRuntimeBaseDir(),
+            effectiveSessionId,
+          );
+          return this.newSessionConfigInRuntimeContext(
+            cwd,
+            mcpServers,
+            settings,
+            sessionSource,
+            effectiveSessionId,
+            resume,
+            initializeOptions,
+            chatRecording,
+            restoreOptions,
+            sessionIdGenerated,
+          );
+        }),
+      );
     } catch (error) {
       if (error instanceof SessionIdConflictError) {
         throw new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
@@ -12403,6 +12530,7 @@ class QwenAgent implements Agent {
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
+    sessionIdGenerated?: boolean,
   ): Promise<Config> {
     const provisionalWorkspace = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
@@ -12478,7 +12606,11 @@ class QwenAgent implements Agent {
     const sessionArg =
       resume === true
         ? { resume: sessionId, sessionId: undefined }
-        : { sessionId, resume: undefined };
+        : {
+            sessionId,
+            sessionIdGenerated: sessionIdGenerated === true || undefined,
+            resume: undefined,
+          };
     const argvForSession = {
       ...this.argv,
       ...(provisionalWorkspace ? { experimentalLsp: false } : {}),
@@ -12616,23 +12748,25 @@ class QwenAgent implements Agent {
       typeof config.setMcpBudgetEventCallback === 'function' &&
       wiredSessionId !== undefined
     ) {
-      const sid = wiredSessionId;
+      const acpSessionId = wiredSessionId;
       config.setMcpBudgetEventCallback((event) => {
-        // Fire-and-forget. `.catch` suppresses unhandled rejections
-        // and logs at debug level for operator visibility.
-        void this.connection
-          .extNotification('qwen/notify/session/mcp-budget-event', {
-            v: 1,
-            sessionId: sid,
-            ...event,
-          })
-          .catch((err: unknown) => {
-            debugLogger.debug(
-              `MCP budget extNotification dropped ` +
-                `(session=${sid}, kind=${event.kind}): ` +
-                `${err instanceof Error ? err.message : String(err)}`,
-            );
-          });
+        sessionIdContext.run(config.getSessionId(), () => {
+          // Fire-and-forget. `.catch` suppresses unhandled rejections
+          // and logs at debug level for operator visibility.
+          void this.connection
+            .extNotification('qwen/notify/session/mcp-budget-event', {
+              v: 1,
+              sessionId: acpSessionId,
+              ...event,
+            })
+            .catch((err: unknown) => {
+              debugLogger.debug(
+                `MCP budget extNotification dropped ` +
+                  `(session=${acpSessionId}, kind=${event.kind}): ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+              );
+            });
+        });
       });
     }
     try {
@@ -12735,16 +12869,19 @@ class QwenAgent implements Agent {
       beforeSessionCreate?: () => void;
       primeSession?: (session: Session) => void;
       beforeStartPostReplayServices?: (session: Session) => Promise<void>;
+      signal?: AbortSignal;
     } = {},
   ): Promise<Session> {
+    options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission();
     const sessionId = normalizeSessionIdForLookup(config.getSessionId());
     const llmClient = config.getLlmClient();
     const needsInitialize = !llmClient.isInitialized();
 
     if (needsInitialize && options.deferWorkspaceActivation !== true) {
-      await llmClient.initialize();
+      await llmClient.initialize(undefined, options.signal);
     }
+    options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission();
 
     if (this.sessions.has(sessionId)) {
@@ -12756,6 +12893,7 @@ class QwenAgent implements Agent {
     }
 
     await options.prepareBeforeSessionCreate?.();
+    options.signal?.throwIfAborted();
     this.assertManagedSessionAdmission();
     if (this.sessions.has(sessionId)) {
       throw new RequestError(
@@ -12833,6 +12971,7 @@ class QwenAgent implements Agent {
       // the session is published: the permission check is async, and the tool
       // must be declared before the first prompt can be served.
       await registerCreateSubSessionTool(config);
+      options.signal?.throwIfAborted();
       options.primeSession?.(session);
       if (options.deferWorkspaceActivation !== true) {
         config.hydrateSessionRestoreFileHistory?.();
