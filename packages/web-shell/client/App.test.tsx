@@ -478,6 +478,7 @@ const {
       latestSettingsState: null as {
         settings: DaemonSettingDescriptor[];
       } | null,
+      latestSettingsInitialCategory: undefined as string | undefined,
       latestModelManagement: null as {
         busy?: boolean;
         onSelectModel?: (modelId: string) => void;
@@ -920,6 +921,7 @@ vi.mock('./components/messages/SettingsMessage', async () => {
       settingsState: {
         settings: DaemonSettingDescriptor[];
       };
+      initialCategory?: string;
       onSubDialog?: (key: string, scope: 'user' | 'workspace') => void;
       onLanguageChange?: (
         language: string,
@@ -936,6 +938,7 @@ vi.mock('./components/messages/SettingsMessage', async () => {
       };
     }) => {
       testState.latestSettingsState = props.settingsState;
+      testState.latestSettingsInitialCategory = props.initialCategory;
       testState.latestModelManagement = props.modelManagement ?? null;
       return React.createElement(
         'div',
@@ -991,6 +994,24 @@ vi.mock('./components/messages/SettingsMessage', async () => {
         ),
       );
     },
+  };
+});
+
+// Expose the Local Control popover's settings callback as a plain button so
+// tests can drive the pane-header deep link without opening a Radix popover.
+vi.mock('./components/LocalControlQrButton', async () => {
+  const React = await import('react');
+  return {
+    LocalControlQrButton: (props: { onOpenSettings: () => void }) =>
+      React.createElement(
+        'button',
+        {
+          type: 'button',
+          'aria-label': 'Mobile access',
+          onClick: props.onOpenSettings,
+        },
+        'mobile access',
+      ),
   };
 });
 
@@ -5243,6 +5264,7 @@ beforeEach(() => {
   testState.latestMonitorDetailsOnOpen = null;
   testState.settings = [];
   testState.latestSettingsState = null;
+  testState.latestSettingsInitialCategory = undefined;
   testState.latestModelManagement = null;
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
@@ -8377,6 +8399,54 @@ describe('App session callbacks', () => {
     expect(container.textContent).toContain('Token Usage');
   });
 
+  it('exposes the Local Control settings deep link to a custom chat header', async () => {
+    const renderChatHeader = vi.fn(
+      ({ onOpenLocalControlSettings }: ChatHeaderRenderInfo) => (
+        <button type="button" onClick={onOpenLocalControlSettings}>
+          Custom mobile access
+        </button>
+      ),
+    );
+    const { container } = renderApp({ renderChatHeader });
+    await flush();
+
+    expect(renderChatHeader).toHaveBeenCalledWith(
+      expect.objectContaining({
+        onOpenLocalControlSettings: expect.any(Function),
+      }),
+    );
+    await act(async () => {
+      Array.from(container.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Custom mobile access')!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+    expect(testState.latestSettingsInitialCategory).toBe('Daemon');
+  });
+
+  it('opens Settings deep-linked to Daemon from the main chat header QR entry', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-context-header"] [aria-label="Mobile access"]',
+    );
+    expect(entry).not.toBeNull();
+    await act(async () => {
+      entry!.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+    expect(testState.latestSettingsInitialCategory).toBe('Daemon');
+  });
+
   it('opens the token usage panel from the main chat header action', async () => {
     const statsFixture: DaemonSessionStatsStatus = {
       v: 1,
@@ -9840,6 +9910,7 @@ describe('App session callbacks', () => {
         'dynamic_workspace_registration',
         'persistent_workspace_registration',
         'workspace_display_name',
+        'native_directory_picker',
       ],
       workspaces: [
         {
@@ -9897,6 +9968,32 @@ describe('App session callbacks', () => {
     expect(
       container.querySelectorAll('[data-testid="add-workspace-dialog"]'),
     ).toHaveLength(1);
+  });
+
+  it('omits the directory picker on headless daemon hosts', async () => {
+    mockWorkspace.capabilities = {
+      features: ['dynamic_workspace_registration'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-add-workspace"]')
+        ?.click();
+    });
+    expect(
+      container.querySelectorAll('[data-testid="add-workspace-dialog"]'),
+    ).toHaveLength(1);
+    expect(testState.latestAddWorkspaceDialogProps?.onPick).toBeUndefined();
   });
 
   it('forwards a supported workspace display name through the shared mutation lane', async () => {
@@ -18456,10 +18553,65 @@ describe('App session callbacks', () => {
     });
     await flush();
 
+    // Built-in header actions still exist (Local Control QR entry), but the
+    // token usage action stays behind its chat-header opt-in.
+    const actions = container.querySelector(
+      '[data-testid="split-header-actions"]',
+    );
+    expect(actions).not.toBeNull();
     expect(
-      container.querySelector('[data-testid="split-has-header-actions"]')
-        ?.textContent,
-    ).toBe('no');
+      actions!.querySelector('[aria-label="Mobile access"]'),
+    ).not.toBeNull();
+    expect(
+      actions!.querySelector('[aria-label="Session token usage"]'),
+    ).toBeNull();
+  });
+
+  it('deep-links Settings to Daemon from the QR entry and clears the link on any panel close', async () => {
+    const { container, rerender } = renderApp({
+      sidebar: false,
+      splitSessionIds: ['s1'],
+    });
+    await flush();
+
+    // Click the pane-header QR entry's settings action: leaves split view,
+    // opens the Settings panel deep-linked to the Daemon category.
+    const qrEntry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="split-header-actions"] [aria-label="Mobile access"]',
+    );
+    expect(qrEntry).not.toBeNull();
+    await act(async () => {
+      qrEntry!.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+    expect(testState.latestSettingsInitialCategory).toBe('Daemon');
+
+    // Close the panel through a non-closePanel path: a gated tool call
+    // arriving auto-closes the panel so the approval overlay is visible.
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    await act(async () => {
+      testState.blocks = [];
+      rerender();
+      await Promise.resolve();
+    });
+
+    // A later ordinary Settings open must not inherit the stale deep link.
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+    expect(testState.latestSettingsInitialCategory).toBeUndefined();
   });
 
   it('does not reopen controlled split view when the same ids get a new array reference', async () => {
