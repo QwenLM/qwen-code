@@ -303,10 +303,13 @@ diff --git a/node_modules/ink/build/log-update.js b/node_modules/ink/build/log-u
 index cdb5fc4..3247e02 100644
 --- a/node_modules/ink/build/log-update.js
 +++ b/node_modules/ink/build/log-update.js
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,10 @@
  // Count visible lines in a string, ignoring the trailing empty element
  // that `split('\n')` produces when the string ends with '\n'.
  const visibleLineCount = (lines, str) => str.endsWith('\n') ? lines.length - 1 : lines.length;
++// Lazy cursor getters resolve against live Yoga layout. Each renderer prepares
++// one numeric snapshot per flush and invalidates unconsumed snapshots on state
++// resets so they cannot cross flush boundaries.
 +const snapshotCursorPosition = (position) => position ? { x: position.x, y: position.y } : undefined;
  const createStandard = (stream, { showCursor = false } = {}) => {
      let previousLineCount = 0;

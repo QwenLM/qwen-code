@@ -112,6 +112,28 @@ async function unmount(app: Instance): Promise<void> {
   mountedApps.delete(app);
 }
 
+function LazyCursorOwner() {
+  const ref = useRef<DOMElement | null>(null);
+  const { hasMeasured } = useBoxMetrics(ref);
+  useCursor().setCursorPosition(
+    getPhysicalCursorPosition(ref.current, {
+      hasMeasured,
+      showCursor: true,
+      cursorVisualRow: 0,
+      cursorVisualCol: 0,
+      scrollVisualRow: 0,
+      linesToRender: [''],
+      prefixWidth: 2,
+    }),
+  );
+  return (
+    <Box ref={ref} flexDirection="column">
+      <Text>border</Text>
+      <Text>input</Text>
+    </Box>
+  );
+}
+
 describe.each([false, true])(
   'Ink cursor rendering (incrementalRendering: %s)',
   (incrementalRendering) => {
@@ -298,32 +320,10 @@ describe.each([false, true])(
         return <Text>{multiline ? 'history-a\nhistory-b' : 'history'}</Text>;
       }
 
-      function CursorOwner() {
-        const ref = useRef<DOMElement | null>(null);
-        const { hasMeasured } = useBoxMetrics(ref);
-        useCursor().setCursorPosition(
-          getPhysicalCursorPosition(ref.current, {
-            hasMeasured,
-            showCursor: true,
-            cursorVisualRow: 0,
-            cursorVisualCol: 0,
-            scrollVisualRow: 0,
-            linesToRender: [''],
-            prefixWidth: 2,
-          }),
-        );
-        return (
-          <Box ref={ref} flexDirection="column">
-            <Text>border</Text>
-            <Text>input</Text>
-          </Box>
-        );
-      }
-
       const app = await mount(
         <Box flexDirection="column">
           <History />
-          <CursorOwner />
+          <LazyCursorOwner />
           <Text>{'footer-a\nfooter-b'}</Text>
         </Box>,
         capture.stdout,
@@ -500,32 +500,10 @@ describe.each([false, true])(
           return <Text>{multiline ? 'history-a\nhistory-b' : 'history'}</Text>;
         }
 
-        function CursorOwner() {
-          const ref = useRef<DOMElement | null>(null);
-          const { hasMeasured } = useBoxMetrics(ref);
-          useCursor().setCursorPosition(
-            getPhysicalCursorPosition(ref.current, {
-              hasMeasured,
-              showCursor: true,
-              cursorVisualRow: 0,
-              cursorVisualCol: 0,
-              scrollVisualRow: 0,
-              linesToRender: [''],
-              prefixWidth: 2,
-            }),
-          );
-          return (
-            <Box ref={ref} flexDirection="column">
-              <Text>border</Text>
-              <Text>input</Text>
-            </Box>
-          );
-        }
-
         const app = await mount(
           <Box flexDirection="column">
             <History />
-            <CursorOwner />
+            <LazyCursorOwner />
             <Text>footer</Text>
           </Box>,
           capture.stdout,
