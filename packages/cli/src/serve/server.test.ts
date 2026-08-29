@@ -11216,6 +11216,15 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
     });
 
+    it('rejects a different IPv4 loopback address than the daemon bind', async () => {
+      const opts = { ...baseOpts, hostname: '127.0.0.2' };
+      const app = createServeApp(opts);
+      const res = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.3:${opts.port}`);
+      expect(res.status).toBe(403);
+    });
+
     it.each([
       [80, 200],
       [443, 200],

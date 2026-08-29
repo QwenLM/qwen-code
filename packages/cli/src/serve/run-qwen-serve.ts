@@ -85,11 +85,7 @@ import {
   hostAssignsIpv6Loopback,
   isOwnInterfaceAddress,
 } from './local-bind-addresses.js';
-import {
-  formatHostForAuthority,
-  isLoopbackAddress,
-  isLoopbackBind,
-} from './loopback-binds.js';
+import { isLoopbackAddress, isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { installSelfOriginStripMiddleware } from './server/self-origin.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
