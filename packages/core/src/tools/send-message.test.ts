@@ -359,6 +359,7 @@ describe('SendMessageTool — background-task mode', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.error?.message).toBe('Task not found: nope');
     expect(result.llmContent).toContain('No background task found');
     expect(result.llmContent).not.toContain('use `to:');
     expect(result.returnDisplay).toContain('Task not found.');
@@ -388,6 +389,9 @@ describe('SendMessageTool — background-task mode', () => {
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.error?.message).toContain(
+      'use `to: "qa-reviewer"` instead of `task_id`',
+    );
     expect(result.llmContent).toContain('use `to: "qa-reviewer"`');
     expect(result.returnDisplay).toContain(
       'use "to" for teammate "qa-reviewer"',

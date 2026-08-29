@@ -241,7 +241,7 @@ class SendMessageInvocation extends BaseToolInvocation<
             ? `Task not found; use "to" for teammate "${teammate.name}".`
             : 'Task not found.',
           error: {
-            message: `Task not found: ${this.params.task_id}`,
+            message: `Task not found: ${this.params.task_id}${teammate ? `.${teammateHint}` : ''}`,
             type: ToolErrorType.SEND_MESSAGE_NOT_FOUND,
           },
         };
