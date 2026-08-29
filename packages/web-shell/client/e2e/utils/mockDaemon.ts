@@ -70,6 +70,7 @@ export interface WebShellDaemonScenario {
   sessionCatalogVersion: DaemonSessionCatalogVersion;
   events: DaemonEvent[];
   state: DaemonSessionState;
+  contextDelayMs?: number;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
@@ -376,6 +377,7 @@ export function createWebShellDaemonScenario(
     },
     events: overrides.events ?? [],
     state,
+    contextDelayMs: overrides.contextDelayMs,
     artifacts: overrides.artifacts ?? [],
     workspaceFiles: overrides.workspaceFiles ?? {},
     gitStatus: overrides.gitStatus,
@@ -523,6 +525,27 @@ export function thoughtTextEvent(
   );
 }
 
+export function toolCallEvent(
+  toolCallId: string,
+  toolName: string,
+  rawInput: Record<string, unknown>,
+  options: { id?: number; rawOutput?: Record<string, unknown> } = {},
+): DaemonEvent {
+  return sessionUpdateEvent(
+    {
+      sessionUpdate: 'tool_call',
+      toolCallId,
+      toolName,
+      title: toolName,
+      kind: 'other',
+      status: 'completed',
+      rawInput,
+      ...(options.rawOutput ? { rawOutput: options.rawOutput } : {}),
+    },
+    options.id,
+  );
+}
+
 export function turnCompleteEvent(
   promptId: string,
   options: { id?: number; sessionId?: string } = {},
@@ -605,7 +628,8 @@ function readRequestBody(raw: string | null): unknown {
 
 // Mirror production query modes: `group=pinned` is the pinned bucket;
 // `group=all` (and missing group) returns the full active list. The UI
-// excludes pinned rows from organized sections via `excludePinned`.
+// renders pinned rows in the Pinned section and keeps them inside their
+// named groups; unassigned pinned rows stay out of Ungrouped.
 function filterScenarioSessions(
   scenario: WebShellDaemonScenario,
   searchParams: URLSearchParams,
@@ -1547,6 +1571,11 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'context') {
+      if (scenario.contextDelayMs) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, scenario.contextDelayMs),
+        );
+      }
       await json(route, {
         v: 1,
         sessionId,
@@ -1581,13 +1610,30 @@ async function handleDaemonRoute(
         await badRequest(route, 'Invalid config-option request.');
         return;
       }
-      const configOptions = Array.isArray(scenario.state.configOptions)
-        ? scenario.state.configOptions.map((option) =>
-            isRecord(option) && option['id'] === configId
-              ? { ...option, currentValue: value }
-              : option,
-          )
+      const currentConfigOptions = Array.isArray(scenario.state.configOptions)
+        ? scenario.state.configOptions
         : [];
+      const reasoningOption = currentConfigOptions.find(
+        (option) => isRecord(option) && option['id'] === configId,
+      );
+      const allowedValues = isRecord(reasoningOption)
+        ? reasoningOption['options']
+        : undefined;
+      if (
+        !Array.isArray(allowedValues) ||
+        !allowedValues.some(
+          (option) =>
+            isRecord(option) && readStringField(option, 'value') === value,
+        )
+      ) {
+        await badRequest(route, 'Unsupported config-option value.');
+        return;
+      }
+      const configOptions = currentConfigOptions.map((option) =>
+        isRecord(option) && option['id'] === configId
+          ? { ...option, currentValue: value }
+          : option,
+      );
       scenario.state.configOptions = configOptions;
       await json(route, { configOptions });
       return;

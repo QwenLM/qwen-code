@@ -65,9 +65,7 @@ import {
   writeWorktreeSessionMarker,
 } from '../../services/gitWorktreeService.js';
 import { resolveExternalWorktreeDir } from '../../agents/worktree-pin.js';
-import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
-import { WorkspaceContext } from '../../utils/workspaceContext.js';
-import { getStartupContextLength } from '../../utils/environmentContext.js';
+import { getStartupContextLength } from '../../core/environmentContext.js';
 import {
   childLaunchDepth,
   getCurrentAgentId,
@@ -109,11 +107,12 @@ import {
 import { toModelVisibleSubagentResult } from '../../agents/subagent-result.js';
 import {
   ApprovalMode,
-  Config,
+  deriveApprovalModeConfig,
+  deriveWorktreeConfig,
   normalizeMaxSubagentDepth,
   validateMaxSessionTurns,
+  type Config,
 } from '../../config/config.js';
-import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
@@ -125,6 +124,7 @@ import {
   type AgentPersistedCliFlags,
 } from '../../agents/agent-transcript.js';
 import type {
+  AgentTask,
   BackgroundSlotReservation,
   ResidentBackgroundAgent,
 } from '../../agents/background-tasks.js';
@@ -283,7 +283,8 @@ const TEAM_AGENT_PLAN_REQUIRED_PROPERTY = {
   description:
     'When true, the named teammate starts in plan mode and must call ' +
     'exit_plan_mode to request leader approval before executing. Only valid ' +
-    'with a named teammate in an active team.',
+    'with a named teammate in an active team. Cannot be combined with ' +
+    'read_only.',
 };
 
 const TEAM_AGENT_READ_ONLY_PROPERTY = {
@@ -292,7 +293,7 @@ const TEAM_AGENT_READ_ONLY_PROPERTY = {
     'When true, the named teammate can only inspect the checkout and use ' +
     'team coordination tools. Shell, file writes, memory, schedules, and ' +
     'nested agents are blocked by an execution allowlist. Only valid with a ' +
-    'named teammate in an active team. Mutually exclusive with ' +
+    'named teammate in an active team. Cannot be combined with ' +
     'plan_mode_required.',
 };
 
@@ -383,6 +384,43 @@ export function resolveSubagentApprovalMode(
 }
 
 /**
+ * Walks a foreground launch's registry lineage (parentAgentId links) to the
+ * nearest BACKGROUNDED, still-running ancestor entry.
+ *
+ * Why: a nested foreground agent has no inline UI. Its scheduler's
+ * TOOL_WAITING_APPROVAL fires on the invocation's own emitter, which nothing
+ * bridges — the call would wait forever (the batch promise only resolves on
+ * completion or abort). When such an ancestor exists, the launch path bridges
+ * the nested emitter to that ancestor's Background-tasks entry, parking the
+ * approval exactly where the ancestor's own approvals go. No ancestor (a
+ * top-level foreground launch from the main session) → undefined → no bridge,
+ * and the existing inline confirmation path applies unchanged.
+ *
+ * Foreground entries stay registered while running and carry parentAgentId
+ * (register() in the launch path), so the chain is walkable mid-execution.
+ * The walk must reach the ancestor on ANY supported lineage depth
+ * (maxSubagentDepth is configurable up to MAX_SUBAGENT_DEPTH_LIMIT), so
+ * cycle protection comes from a visited set rather than a hop budget.
+ */
+export function findBackgroundedAncestorAgentId(
+  registry: { get(agentId: string): AgentTask | undefined },
+  startAgentId: string | null | undefined,
+): string | undefined {
+  const seen = new Set<string>();
+  let id = startAgentId ?? undefined;
+  while (id !== undefined && !seen.has(id)) {
+    seen.add(id);
+    const entry = registry.get(id);
+    if (!entry) return undefined;
+    if (entry.isBackgrounded) {
+      return entry.status === 'running' ? id : undefined;
+    }
+    id = entry.parentAgentId ?? undefined;
+  }
+  return undefined;
+}
+
+/**
  * Maps PermissionMode back to ApprovalMode.
  */
 function permissionModeToApprovalMode(mode: PermissionMode): ApprovalMode {
@@ -422,8 +460,8 @@ export const TOOL_REGISTRY_REBUILT: unique symbol = Symbol.for(
  *
  * Used by spawn sites that may be called with a wrapper-on-wrapper
  * argument (e.g. `subagent-manager.ts:buildSubagentContextOverride`
- * receiving `bgConfig = Object.create(agentConfig)` from the
- * background-agent path) to skip a redundant rebuild.
+ * receiving the stamped `createApprovalModeOverride` override passed
+ * directly from the background-agent path) to skip a redundant rebuild.
  */
 export function hasRebuiltToolRegistry(config: Config): boolean {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -447,6 +485,25 @@ export function hasRebuiltToolRegistry(config: Config): boolean {
 export async function rebuildToolRegistryOnOverride(
   override: Config,
   base: Config,
+  options?: {
+    /**
+     * Whether to stamp {@link TOOL_REGISTRY_REBUILT} on `override`.
+     *
+     * The marker means "a descendant may skip its own rebuild", and
+     * `hasRebuiltToolRegistry` reads it through the prototype chain — so a
+     * LONG-LIVED override that carries it hands that permission to every
+     * wrapper built on it later, not just to the spawn it was made for. That
+     * is right for a short-lived per-launch override and wrong for a config
+     * an agent keeps: a dir-scoped workflow dispatch rebinds only the dir
+     * getters, and its rebuild is the sole re-anchoring that moves the
+     * subagent's tools above the wrapper. Skipping it leaves them bound to
+     * the config below, so relative paths resolve against the parent's
+     * working directory instead of the provisioned worktree.
+     *
+     * Default true, which is what every caller before this option did.
+     */
+    markRebuilt?: boolean;
+  },
 ): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const ov = override as any;
@@ -456,7 +513,9 @@ export async function rebuildToolRegistryOnOverride(
   });
   agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
   ov.getToolRegistry = () => agentRegistry;
-  ov[TOOL_REGISTRY_REBUILT] = true;
+  if (options?.markRebuilt !== false) {
+    ov[TOOL_REGISTRY_REBUILT] = true;
+  }
 }
 
 /**
@@ -547,118 +606,47 @@ function capturePersistedCliFlags(
 }
 
 /**
- * Creates a Config override with a different approval mode.
- *
- * Uses prototype delegation (Object.create) to avoid mutating the parent
- * config, then delegates to {@link rebuildToolRegistryOnOverride} so the
- * override's tool registry has core tools bound to the override rather
- * than to the parent. Without that rebuild, the parent's cached tool
- * instances continue to resolve `this.config` to the parent, defeating
- * per-Config isolation of FileReadCache / approval mode for any code
- * path that goes through the bound tool.
- *
- * Returns `{ config, cleanup }`. Callers MUST invoke `cleanup` in a
- * `finally` block after the override is no longer in use, otherwise
- * the parent's PermissionManager may leak a strip across the sub-agent
- * boundary (see strip lifecycle below).
- *
- * Strip lifecycle for AUTO overrides:
- *   - parent not in AUTO, override starts in AUTO: this function strips
- *     the PARENT's PM (shared via prototype chain — the override cannot
- *     have its own PM without a much bigger refactor).
- *   - parent already in AUTO, override starts in AUTO: parent's
- *     `setApprovalMode` already stripped on its own entry, so this
- *     function does not strip again.
- *   - override enters/leaves AUTO later: `setApprovalMode` reuses Config's
- *     normal state transition, but suppresses AUTO strip/restore while the
- *     parent is already in AUTO because the parent owns that strip lifecycle.
- *     `cleanup` only restores if the child finishes still in AUTO while the
- *     parent is not in AUTO.
+ * Creates an agent approval profile, then rebuilds its tool registry so bound
+ * tools resolve the derived Config and its child-local state.
  */
 export async function createApprovalModeOverride(
   base: Config,
   mode: ApprovalMode,
   options: ApprovalModeOverrideOptions = {},
 ): Promise<ApprovalModeOverrideHandle> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const override = Object.create(base) as any;
-  const baseApprovalMode = base.getApprovalMode();
-  // These own properties intentionally mirror Config's TS-private field names.
-  // Config prototype methods read/write them at runtime on this override object.
-  override.approvalMode = mode;
-  override.manualPlanExitNoticeEventState = {
-    ...(override.manualPlanExitNoticeEventState ?? {
-      version: 0,
-      kind: 'clear',
-    }),
-  };
-  override.getApprovalMode = Config.prototype.getApprovalMode;
-  override.prePlanMode =
-    mode === ApprovalMode.PLAN
-      ? baseApprovalMode === ApprovalMode.PLAN
-        ? base.getPrePlanMode()
-        : baseApprovalMode
-      : undefined;
-  override.approvalModeRevision = 0;
-  override.autoModeDenialState = createDenialState();
-  override.setApprovalMode = (
-    nextMode: ApprovalMode,
-    setOptions?: Parameters<Config['setApprovalMode']>[1],
-  ): void => {
-    if (base.getApprovalMode() !== ApprovalMode.AUTO) {
-      Config.prototype.setApprovalMode.call(
-        override as Config,
-        nextMode,
-        setOptions,
-      );
-      return;
-    }
-
-    const hadOwnPermissionManager = Object.prototype.hasOwnProperty.call(
-      override,
-      'permissionManager',
-    );
-    const ownPermissionManager = override.permissionManager;
-    override.permissionManager = null;
-    try {
-      Config.prototype.setApprovalMode.call(
-        override as Config,
-        nextMode,
-        setOptions,
-      );
-    } finally {
-      if (hadOwnPermissionManager) {
-        override.permissionManager = ownPermissionManager;
-      } else {
-        delete override.permissionManager;
-      }
-    }
-  };
-  applyPersistedCliFlagOverrides(override as Config, options.persistedCliFlags);
-  await rebuildToolRegistryOnOverride(override as Config, base);
-
-  const cleanup = () => {
-    if (
-      (override as Config).getApprovalMode() === ApprovalMode.AUTO &&
-      base.getApprovalMode() !== ApprovalMode.AUTO
-    ) {
-      base.getPermissionManager?.()?.restoreDangerousRules();
-    }
-  };
-
-  if (mode === ApprovalMode.AUTO) {
-    const baseWasAuto = base.getApprovalMode() === ApprovalMode.AUTO;
-    if (!baseWasAuto) {
-      // This override is bringing AUTO into a non-AUTO parent. Strip
-      // dangerous allow rules so the sub-agent's classifier actually
-      // gates them. Cleanup handles restore if the child finishes in AUTO.
-      base.getPermissionManager?.()?.stripDangerousRulesForAutoMode();
-    }
-    // baseWasAuto: parent's setApprovalMode already stripped; cleanup
-    // will not restore while the parent remains in AUTO.
+  const { config: override, cleanup } = deriveApprovalModeConfig(base, mode);
+  try {
+    applyPersistedCliFlagOverrides(override, options.persistedCliFlags);
+    await rebuildToolRegistryOnOverride(override, base);
+    return { config: override, cleanup };
+  } catch (error) {
+    cleanup();
+    throw error;
   }
+}
 
-  return { config: override as Config, cleanup };
+/**
+ * Stamps a background agent's prompt-avoidance policy onto its per-launch /
+ * per-resume override config. Background agents have no inline UI, so their
+ * scheduler auto-denies calls that still need confirmation — unless the
+ * agent opts into permission bubbling (`shouldBubble`), in which case
+ * prompts surface in the parent session's Background-tasks UI instead.
+ *
+ * The stamp MUST land on the config the rebuilt tool registry's tools
+ * (including any nested AgentTool) are bound to — not on a wrapper above
+ * it. Nested launches branch their own configs off that config via
+ * Object.create, so the policy must sit where their prototype chains can
+ * reach it: stamped only on a wrapper, a nested scheduler resolved
+ * Config.prototype's `false`, believed it could prompt, and waited forever
+ * on a TOOL_WAITING_APPROVAL nobody could see or answer. Both callers pass
+ * a config freshly created by {@link createApprovalModeOverride}, so the
+ * stamp leaks nowhere.
+ */
+export function stampBackgroundPromptPolicy(
+  config: Config,
+  shouldBubble: boolean,
+): void {
+  config.getShouldAvoidPermissionPrompts = () => !shouldBubble;
 }
 
 /**
@@ -740,7 +728,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'boolean',
           default: true,
           description:
-            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches run in the foreground; an explicit run_in_background: true is rejected because the caller owns the worktree lifecycle and could remove it while a background agent is still running. Named teammates are always concurrent and report through team messaging: omit run_in_background when spawning one — an explicit false is rejected; for an inline blocking result, omit "name" and run a regular agent with run_in_background: false. A teammate pinned to a caller-owned worktree must be shut down before that worktree is removed.',
+            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches run in the foreground; explicit run_in_background: true is rejected, while a configured background default is rejected at the top level and downgraded to the foreground for nested launches because the caller owns the worktree lifecycle. A configured default comes from a subagent definition with background: true. Named teammates are always concurrent and report through team messaging: omit run_in_background when spawning one — an explicit false is rejected; for an inline blocking result, omit "name" and run a regular agent with run_in_background: false. A teammate pinned to a caller-owned worktree must be shut down before that worktree is removed.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -803,9 +791,9 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       this.updateDescriptionAndSchema();
     } finally {
       // Update the client with the new tools
-      const geminiClient = this.config.getGeminiClient();
-      if (geminiClient) {
-        await geminiClient.setTools();
+      const llmClient = this.config.getLlmClient();
+      if (llmClient) {
+        await llmClient.setTools();
       }
     }
   }
@@ -862,7 +850,7 @@ Usage notes:
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
-- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches default to foreground and cannot run in the background; named teammates may use one, but must be shut down before it is removed.
+- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches run in the foreground: an explicit \`run_in_background: true\` request is rejected, while a configured background default (\`background: true\` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches; named teammates may use one, but must be shut down before it is removed.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 ## When to fork
 
@@ -1636,14 +1624,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   private async createForkSubagent(
     agentConfig: Config,
     eventEmitter: AgentEventEmitter = this.eventEmitter,
+    subagentId?: string,
   ): Promise<{
     subagent: AgentHeadless;
     initialMessages?: Content[];
     taskPrompt: string;
     toolConfig: ToolConfig;
   }> {
-    const geminiClient = this.config.getGeminiClient();
-    const generationConfig = geminiClient?.getChat().getGenerationConfig();
+    const llmClient = this.config.getLlmClient();
+    const generationConfig = llmClient?.getChat().getGenerationConfig();
     const parentToolNames = generationConfig?.systemInstruction
       ? extractParentToolNames(generationConfig)
       : [];
@@ -1659,7 +1648,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           );
     const profilePromptHint = this.forkProfile?.promptHint;
     let rawHistory: Content[] = [];
-    if (geminiClient) {
+    if (llmClient) {
       // The `all` and numeric paths curate history differently on purpose.
       // `all` takes curated history directly. The numeric path reads
       // *uncurated* history so the startup context can be sliced off on its own
@@ -1670,13 +1659,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // reminder into the first turn and break bounded selection.
       if (forkTurns === 'all') {
         rawHistory = selectForkHistory(
-          geminiClient.getHistoryShallow?.(true) ??
-            geminiClient.getHistory(true),
+          llmClient.getHistoryShallow?.(true) ?? llmClient.getHistory(true),
           forkTurns,
         );
       } else {
         const comprehensiveHistory =
-          geminiClient.getHistoryShallow?.() ?? geminiClient.getHistory();
+          llmClient.getHistoryShallow?.() ?? llmClient.getHistory();
         const startupContext = comprehensiveHistory.slice(
           0,
           getStartupContextLength(comprehensiveHistory),
@@ -1692,8 +1680,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // startupContext above prepends it again, duplicating startup.
             // Uncurated history keeps the startup reminder as its own pure
             // entry, which selectForkHistory strips cleanly.
-            geminiClient.getHistoryForForkWindow?.() ??
-              geminiClient.getHistory(),
+            llmClient.getHistoryForForkWindow?.() ?? llmClient.getHistory(),
             forkTurns,
           ),
         ];
@@ -1815,6 +1802,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       { max_turns: FORK_DEFAULT_MAX_TURNS },
       toolConfig,
       eventEmitter,
+      undefined,
+      undefined,
+      this.params.description,
+      subagentId,
     );
 
     return { subagent, initialMessages, taskPrompt, toolConfig };
@@ -2579,17 +2570,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           } catch {
             // Listing is best-effort; the bare message is still actionable.
           }
-          return {
-            llmContent: notFoundMessage,
-            returnDisplay: {
-              type: 'task_execution' as const,
-              subagentName: effectiveSubagentType,
-              taskDescription: this.params.description,
-              taskPrompt: this.params.prompt,
-              status: 'failed' as const,
-              terminateReason: notFoundMessage,
-            },
-          };
+          return this.buildSpawnBlockedResult(notFoundMessage, notFoundMessage);
         }
         subagentConfig = loadedConfig;
       }
@@ -2600,34 +2581,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       if (model !== undefined && model !== subagentConfig.model) {
         subagentConfig = { ...subagentConfig, model };
       }
-      // Initialize the current display state
-      this.currentDisplay = {
-        type: 'task_execution' as const,
-        subagentName: subagentConfig.name,
-        taskDescription: this.params.description,
-        taskPrompt: this.params.prompt,
-        status: 'running' as const,
-        subagentColor: subagentConfig.color,
-      };
-      this.setupEventListeners(updateOutput);
-      if (updateOutput) {
-        updateOutput(this.currentDisplay);
-      }
-
       // Headless forks always use the background registry, even when
       // run_in_background is false. Forks are detached by definition, and a
       // short-lived non-interactive process must hold open until the inherited
       // work completes. Otherwise, an explicit tool parameter wins. An
       // agent-level background flag retains its existing meaning, and safe
       // ordinary one-shot launches default to background.
-      //
-      // This is the source of truth for the background-classification rule. Two
-      // UI classifiers replicate it from tool-call args (they cannot see
-      // subagentConfig.background) and must be kept in sync when it changes:
-      //   - packages/web-shell/client/adapters/toolClassification.ts
-      //     (isBackgroundSubAgentToolCall)
-      //   - packages/desktop/packages/shared/src/agent/tool-matching.ts
-      //     (detectBackgroundEvents)
       //
       // Background delegation is top-level-only in v1. A nested launcher would
       // be handed a completion contract it cannot honor — the success guidance
@@ -2639,6 +2598,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Implicit background requests downgrade to an awaited foreground run
       // instead of orphaning the child's results. The runtime spawn guard
       // above rejects an explicit run_in_background: true request.
+      //
+      // This decision is the source of truth for client classification. Its
+      // resolved value is projected onto the task display so clients do not
+      // have to replicate rules that depend on loaded subagent configuration.
+      // The desktop client (forked out of this repo with OpenWork and no
+      // longer vendored here) does not receive this projection and replicates
+      // the rule in its own copy — keep the fork informed if this rule
+      // changes. The web-shell fallback in toolClassification.ts covers every
+      // frame lacking executionMode (including blocked-spawn result frames and
+      // pre-feature recordings) and must stay frozen at the legacy rule.
       const backgroundRequested =
         isFork && !this.config.isInteractive()
           ? true
@@ -2647,10 +2616,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               (!isForkRequested &&
                 this.params.working_dir === undefined &&
                 // A `name` passed without an active team falls through to a regular
-                // one-shot agent above; keep it foreground so both UI classifiers
+                // one-shot agent above; keep it foreground so legacy UI fallbacks
                 // (which exclude `name`) stay consistent with core dispatch.
                 this.params.name === undefined)));
       const shouldRunInBackground = backgroundRequested && isTopLevelSession();
+
       if (this.params.working_dir !== undefined && shouldRunInBackground) {
         // A caller-owned worktree has no lifecycle coupling to a backgrounded
         // agent — the caller could reap the worktree while the detached agent
@@ -2659,11 +2629,33 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // background: a subagent config with `background: true`. Guarding on
         // the resolved shouldRunInBackground catches both and avoids
         // over-rejecting a nested call that downgrades to the foreground.
+        // Like the other spawn guards, this returns before any display
+        // update: a never-running launch must not emit a running frame whose
+        // authoritative executionMode ('background') contradicts the blocked
+        // result frame, which carries no executionMode and therefore falls
+        // back to the frozen legacy heuristic (background when the args carry
+        // explicit run_in_background: true — a named launch that falls through
+        // without an active team — otherwise foreground for a working_dir-bearing
+        // call).
         return this.buildSpawnBlockedResult(
           'Error: "working_dir" cannot be used with a background agent — the caller owns the worktree and could remove it while the detached agent is still running there. Run this agent in the foreground, or drop "working_dir".',
           'working_dir is incompatible with a background agent',
         );
       }
+
+      this.currentDisplay = {
+        type: 'task_execution' as const,
+        subagentName: subagentConfig.name,
+        taskDescription: this.params.description,
+        taskPrompt: this.params.prompt,
+        executionMode: shouldRunInBackground ? 'background' : 'foreground',
+        status: 'running' as const,
+        subagentColor: subagentConfig.color,
+      };
+      this.setupEventListeners(updateOutput);
+      updateOutput?.(this.currentDisplay);
+
+      const backgroundOwnerId = getCurrentAgentId();
       if (backgroundRequested && !shouldRunInBackground) {
         debugLogger.debug(
           `[AgentTool] Background request downgraded to a foreground run for a nested sub-agent (type=${subagentConfig.name}).`,
@@ -2697,8 +2689,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             }
           : undefined;
         const registry = this.config.getBackgroundTaskRegistry();
-        backgroundSlotReservation =
-          registry.tryReserveBackgroundSlot(subagentModelId);
+        backgroundSlotReservation = registry.tryReserveBackgroundSlot(
+          subagentModelId,
+          backgroundOwnerId,
+        );
         if (!backgroundSlotReservation) {
           const queuedCount = registry.getQueuedCount();
           const queueText =
@@ -2717,6 +2711,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           backgroundSlotReservation = await registry.waitForBackgroundSlot(
             signal,
             subagentModelId,
+            backgroundOwnerId,
           );
         }
         this.updateDisplay(
@@ -2747,6 +2742,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
         return {
           llmContent: reason,
+          // `error` marks the call failed in the scheduler (see
+          // buildSpawnBlockedResult): a launch that never ran must not
+          // count as a successful agent call. The failure path forwards
+          // only `error.message` to the model, so it carries the full
+          // provisioning reason.
+          error: { message: reason },
           returnDisplay: this.currentDisplay,
         };
       };
@@ -2895,7 +2896,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.config.isTrustedFolder(),
       );
       const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
-      // ALWAYS produce a child Config via Object.create, even when the
+      // ALWAYS produce a child Config via an overlay, even when the
       // approval mode is identical to the parent. Subagents must run
       // against an isolated FileReadCache so a parent's prior_read
       // entries cannot satisfy enforcement on a path the subagent's
@@ -2911,45 +2912,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // resolve `this.config` to the parent, reaching the parent's
       // FileReadCache rather than the subagent's. See
       // `createApprovalModeOverride` above for details.
+      const worktreeConfig = worktreeIsolation
+        ? deriveWorktreeConfig(this.config, worktreeIsolation.path, {
+            customIgnoreFiles:
+              this.config.getFileFilteringOptions().customIgnoreFiles,
+          })
+        : this.config;
       const { config: agentConfig, cleanup } = await createApprovalModeOverride(
-        this.config,
+        worktreeConfig,
         resolvedApprovalMode,
       );
       restoreParentPM = cleanup;
-
-      // ── Optional worktree isolation (Phase 2: rebind cwd) ─────────
-      // Rebind every "where am I?" surface on the agent's Config
-      // override to the worktree path so the subagent's tools cannot
-      // leak into the parent project tree.
-      //
-      // We override at two layers because Config getters mix direct
-      // field reads and getter calls. Shadowing only the methods would
-      // leave call sites like `this.targetDir` (e.g. inside
-      // `getProjectRoot`, `getFileService`) resolving via the
-      // prototype chain to the parent's `targetDir` — JS does not
-      // promote a getter assignment to a field shadow. Setting both
-      // `ov.targetDir` (own-property field) AND `ov.getTargetDir`
-      // (own-property method) covers both lookup paths.
-      if (worktreeIsolation) {
-        const wtPath = worktreeIsolation.path;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const ov = agentConfig as any;
-        ov.targetDir = wtPath;
-        ov.cwd = wtPath;
-        ov.getTargetDir = () => wtPath;
-        ov.getCwd = () => wtPath;
-        ov.getWorkingDir = () => wtPath;
-        ov.getProjectRoot = () => wtPath;
-        const wtFileService = new FileDiscoveryService(
-          wtPath,
-          this.config.getFileFilteringOptions().customIgnoreFiles,
-        );
-        ov.fileDiscoveryService = wtFileService;
-        ov.getFileService = () => wtFileService;
-        const wtWorkspace = new WorkspaceContext(wtPath);
-        ov.workspaceContext = wtWorkspace;
-        ov.getWorkspaceContext = () => wtWorkspace;
-      }
 
       // Date.now() alone collides when two parallel background agents of the
       // same type land in the same ms; the registry is keyed by agentId.
@@ -2970,15 +2943,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
           this.config.isInteractive(),
       );
-      // Background agents have no inline UI. Preserve the resolved approval
-      // mode while overriding only the prompt-avoidance policy used by their
-      // scheduler.
-      const subagentRuntimeConfig = shouldRunInBackground
-        ? (Object.create(agentConfig) as Config)
-        : agentConfig;
       if (shouldRunInBackground) {
-        subagentRuntimeConfig.getShouldAvoidPermissionPrompts = () =>
-          !shouldBubble;
+        stampBackgroundPromptPolicy(agentConfig, shouldBubble);
       }
 
       // Background agents need a dedicated emitter so their transcript never
@@ -3007,8 +2973,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       let subagentDispose: (() => Promise<void>) | undefined;
       if (isFork) {
         const fork = await this.createForkSubagent(
-          subagentRuntimeConfig as Config,
+          agentConfig,
           backgroundEventEmitter,
+          hookOpts.agentId,
         );
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
@@ -3017,9 +2984,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       } else {
         const result = await this.subagentManager.createAgentHeadless(
           subagentConfig,
-          subagentRuntimeConfig as Config,
+          agentConfig,
           {
             eventEmitter: backgroundEventEmitter ?? this.eventEmitter,
+            taskName: this.params.description,
+            subagentId: hookOpts.agentId,
             ...(shouldRunInBackground && subagentModelId
               ? { modelConfigOverrides: { model: subagentModelId } }
               : {}),
@@ -3162,7 +3131,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               metaPath,
               // Nested-agent lineage (mirrors the meta sidecar); register()
               // resolves the parent's display name from parentAgentId.
-              parentAgentId: getCurrentAgentId(),
+              parentAgentId: backgroundOwnerId,
               depth: launchDepth,
             },
             registerOptions,
@@ -3221,6 +3190,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           restoreParentPM();
           return {
             llmContent: `${errorMessage}${wtSuffix}`,
+            error: { message: `${errorMessage}${wtSuffix}` },
             returnDisplay: this.currentDisplay!,
           };
         }
@@ -3238,7 +3208,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Populated when a subagent (whose reasoning loop is wrapped in
           // runWithAgentContext below) launches a nested agent. Null at
           // top-level launches from the user session.
-          parentAgentId: getCurrentAgentId(),
+          parentAgentId: backgroundOwnerId,
           createdAt: new Date().toISOString(),
           status: 'running',
           isBackgrounded: true,
@@ -3992,6 +3962,33 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.eventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
       this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
 
+      // Nested foreground launches under a backgrounded ancestor (a fork or
+      // any background agent that spawns sub-agents) have no inline UI:
+      // their TOOL_WAITING_APPROVAL fires on this invocation's emitter,
+      // which nothing else bridges. Park those approvals on the ancestor's
+      // Background-tasks entry — the same place the ancestor's own approvals
+      // go — so the user can answer them from the dialog instead of the
+      // nested call hanging forever. Top-level foreground launches have no
+      // such ancestor and keep the inline confirmation path unchanged.
+      // Double answers (dialog + any inline path) are deduped by the
+      // runtime's per-call responded guard.
+      const approvalAncestorId = findBackgroundedAncestorAgentId(
+        registry,
+        getCurrentAgentId(),
+      );
+      // Gated like the sibling bridges: under an auto-denying ancestor
+      // this launch inherits prompt-avoidance through its config chain, so
+      // no TOOL_WAITING_APPROVAL can fire and the subscription would be
+      // dead.
+      const cleanupNestedApprovalBridge =
+        approvalAncestorId && !this.config.getShouldAvoidPermissionPrompts?.()
+          ? registry.bridgeApprovalEvents(
+              approvalAncestorId,
+              this.eventEmitter,
+              { nestedSource: true },
+            )
+          : undefined;
+
       try {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
           this.eventEmitter,
@@ -4109,6 +4106,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
         this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
         this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+        cleanupNestedApprovalBridge?.();
         signal?.removeEventListener('abort', onParentAbort);
         cleanupOwnedMonitorNotifications();
         // Release the JSONL writer's listeners and close the fd before
@@ -4211,6 +4209,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       return {
         llmContent: `Failed to run subagent: ${errorMessage}${wtSuffix}`,
+        error: {
+          message: `Failed to run subagent: ${errorMessage}${wtSuffix}`,
+        },
         returnDisplay: errorDisplay,
       };
     }

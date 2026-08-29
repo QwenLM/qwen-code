@@ -6,7 +6,7 @@
 
 import type { Content, FunctionCall, Part } from '@google/genai';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { getToolCallRepeatKey } from '../utils/tool-call-repeat-key.js';
+import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
 
 const DUPLICATE_ID_SUFFIX = '__qwen_dup_';
 const GENERATED_ID_PREFIX = 'call_qwen_';

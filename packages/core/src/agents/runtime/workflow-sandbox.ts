@@ -124,7 +124,7 @@ function findMetaBlockBounds(source: string): {
   // silently — the worst possible failure mode.
   if (depth !== 0) {
     throw new Error(
-      'stripExportMeta: unbalanced braces in export const meta declaration — ' +
+      'unbalanced braces in export const meta declaration — ' +
         'the workflow script cannot be safely stripped. Check the meta block syntax.',
     );
   }
@@ -155,25 +155,23 @@ export interface WorkflowMeta {
  * Implementation:
  *   1. `findMetaBlockBounds` (shared with `stripExportMeta`) locates the
  *      object-literal source range via the brace-walker.
- *   2. The literal source is evaluated as `(${metaSource})` inside a fresh
- *      vm context whose globalThis is a null-prototyped object — no
- *      bridge to the host realm, no access to host primitives like
- *      `process` / `require` / the workflow-sandbox bridge globals
- *      (`args` / `agent` / `phase` / `log` / etc.). The vm realm DOES
- *      provide its own intrinsics (`Object`, `Array`, `Math`, `Date`,
- *      `JSON`, …) which is fine: meta extraction is a one-shot at tool-
- *      invocation time, not replayed during resume, so non-determinism in
- *      the meta literal (a `Date.now()` call in `meta.name`) does not
- *      break the resume contract that the script body honors.
- *   3. The vm result is walked field-by-field and copied into a new
- *      host-realm plain object. No JSON round-trip is needed because every
- *      contract field is a primitive — strings and arrays of plain
- *      objects with string fields — so prototype identity on the
- *      intermediate values is irrelevant.
+ *   2. `parseWorkflowMetaLiteral` parses that range. Meta is a declaration —
+ *      every contract field is a string — so it is parsed, never executed.
+ *   3. `validateMeta` copies the contract fields into a fresh host object.
+ *
+ * Parsing rather than evaluating is what keeps this safe. The literal is
+ * model-authored source, so executing it means executing whatever the model
+ * wrote, and the ways that can go wrong are open-ended: a loop in a field
+ * value, a getter that only spins when the value is read, a proxy trap, a
+ * promise reaction that never settles, an allocation large enough to exhaust
+ * memory, a dynamic `import()` whose rejection lands on a later tick and takes
+ * the host process with it. Bounding each of those in turn is a moving target.
+ * A parser has no execution semantics, so none of them can be expressed —
+ * there is nothing to time out, sandbox, or isolate.
  *
  * Returns `{ stripped, meta: null }` when no meta declaration is present
  * (callers treat this as "no meta"). Throws when meta is present but
- * malformed: vm eval failure, missing required field, or wrong field type.
+ * malformed: not a pure literal, missing required field, or wrong field type.
  * Error messages for the missing-required-field cases match upstream
  * 2.1.168 verbatim so script authors see one consistent error text.
  */
@@ -188,86 +186,165 @@ export function extractAndStripMeta(source: string): {
   const stripped =
     source.slice(0, bounds.exportIdx) + source.slice(bounds.afterMeta);
 
-  // Null-prototyped globalThis: no host bridge (no `process` / `require`
-  // / `args` / workflow-sandbox bridge globals). The vm realm still
-  // provides its own intrinsics, but that's intentional — see the
-  // docstring above.
-  const metaContext = vm.createContext(Object.create(null));
   let raw: unknown;
   try {
-    raw = new vm.Script(`(${metaSource})`).runInContext(metaContext);
+    raw = parseWorkflowMetaLiteral(metaSource);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(
-      `extractAndStripMeta: failed to evaluate meta object literal: ${msg}`,
-    );
+    throw new Error(`invalid meta object literal: ${msg}`);
   }
-
-  // P4a R3 (wenshao): a Promise (e.g. `import('node:fs')`) used as a
-  // value in the meta literal would otherwise leave a dangling rejection
-  // behind — `runInContext` returns synchronously with the Promise scheduled
-  // to reject on the next tick, validateMeta drops the non-contract field
-  // silently, and the run completes successfully. Then Node's default
-  // `--unhandled-rejections=throw` terminates the host process, decoupled
-  // from the run that triggered it. Walk `raw`, neutralise any thenables
-  // with `.catch(() => {})` so the rejection is marked handled, and reject
-  // the meta literal up front.
-  rejectThenablesInMeta(raw);
 
   const meta = validateMeta(raw);
   return { stripped, meta };
 }
 
+/** Filename V8 attributes the compiled workflow body to, in errors and stacks. */
+const WORKFLOW_SCRIPT_FILENAME = 'workflow.js';
+
 /**
- * Recursively scan a vm-eval'd value, marking any thenable as handled
- * (so its rejection cannot terminate the host on the next tick) and
- * throwing an explicit "meta values must not be Promises" so the
- * malformed meta is reported clearly.
+ * Wrap a stripped script body in the async IIFE the vm actually executes.
  *
- * Recurses through plain objects and arrays — `phases[]` entries may
- * embed an `import()` below the top level.
+ * `'use strict'` shares its line with the arrow deliberately. The wrapper
+ * already shifts every body line number by one, and putting the directive on
+ * its own line would shift them by two — so the directive costs nothing in
+ * error legibility. Strict mode matters here because the body is
+ * model-authored: in sloppy mode an undeclared assignment silently creates a
+ * property on the sandbox global instead of throwing, which turns a typo into
+ * state that outlives the statement that made it.
  */
-function rejectThenablesInMeta(
-  value: unknown,
-  seen: WeakSet<object> = new WeakSet(),
-): void {
-  if (value === null || typeof value !== 'object') return;
-  // P4 Round 4 (wenshao): a cyclic meta literal built via spread of a
-  // self-referential object would otherwise overflow the call stack on
-  // this walk — the walker exists to reject Promises before they leave
-  // a dangling rejection, but the walk itself must terminate on any
-  // shape vm-eval can return. Track visited nodes in a WeakSet so cycles
-  // and shared subgraphs both early-return without re-walking.
-  if (seen.has(value as object)) return;
-  seen.add(value as object);
-  const maybeThen = (value as { then?: unknown }).then;
-  if (typeof maybeThen === 'function') {
-    // Mark handled so Node's unhandled-rejection trap does not later kill
-    // the process. `.catch` on a non-Promise thenable would synchronously
-    // throw if the implementation is non-standard, so swallow defensively.
-    try {
-      (value as Promise<unknown>).catch(() => {});
-    } catch {
-      /* non-standard thenable — already rejecting below */
-    }
-    throw new Error(
-      'extractAndStripMeta: meta values must not be Promises ' +
-        '(no async / dynamic import allowed in meta literal)',
-    );
-  }
-  if (Array.isArray(value)) {
-    for (const v of value) rejectThenablesInMeta(v, seen);
-    return;
-  }
-  for (const v of Object.values(value as Record<string, unknown>)) {
-    rejectThenablesInMeta(v, seen);
-  }
+function wrapWorkflowBody(strippedSource: string): string {
+  return `(async () => {'use strict';\n${strippedSource}\n})()`;
 }
 
 /**
- * Validate the vm-eval'd meta value and copy it into a fresh host-realm
- * plain object. Throws on shape violation with the upstream-aligned error
- * message text for the required-field cases.
+ * Parse `export const meta`, strip it, and compile the remaining body.
+ *
+ * Exported so the pre-launch gate in `WorkflowRunner.start` and the run itself
+ * compile through one function rather than two lookalikes. Throws exactly what
+ * either step would throw: `extractAndStripMeta`'s errors for a malformed meta
+ * literal, and V8's `SyntaxError` for a body that does not parse. The compile
+ * copy masks the meta declaration instead of deleting it so V8's source lines
+ * still match the author's original script.
+ */
+export function compileWorkflowScript(scriptSource: string): {
+  script: vm.Script;
+  meta: WorkflowMeta | null;
+} {
+  const { stripped, meta } = extractAndStripMeta(scriptSource);
+  const bounds = findMetaBlockBounds(scriptSource);
+  const compilable = bounds
+    ? scriptSource.slice(0, bounds.exportIdx) +
+      scriptSource
+        .slice(bounds.exportIdx, bounds.afterMeta)
+        .replace(/[^\r\n\u2028\u2029]/g, ' ') +
+      scriptSource.slice(bounds.afterMeta)
+    : stripped;
+  const script = new vm.Script(wrapWorkflowBody(compilable), {
+    filename: WORKFLOW_SCRIPT_FILENAME,
+  });
+  return { script, meta };
+}
+
+/**
+ * The error a cancelled run settles with. Named `AbortError` so every
+ * `isAbortError` check on the way up classifies it as a cancellation rather
+ * than a failure.
+ */
+function workflowCancelledError(): Error {
+  const error = new Error('Workflow run was aborted (cancelled).');
+  error.name = 'AbortError';
+  return error;
+}
+
+/** Longest source line rendered in a compile-failure message. */
+const COMPILE_ERROR_LINE_WIDTH = 80;
+
+/**
+ * Turn a compile failure into something a script author can act on.
+ *
+ * V8 already builds the useful part — the offending source line with a caret
+ * under the exact column — and puts it at the head of `error.stack`, ahead of
+ * the host frames. Reuse it rather than reconstructing a caret from column
+ * numbers, then fix the one thing it gets wrong for our purposes: the line
+ * number counts the IIFE wrapper, so `workflow.js:2` is the script's line 1.
+ *
+ * Falls back to the bare message when the stack carries no source frame.
+ */
+export function describeWorkflowCompileError(
+  error: unknown,
+  authorLineCount: number,
+): string {
+  const err = error instanceof Error ? error : new Error(String(error));
+  const stack = typeof err.stack === 'string' ? err.stack : '';
+  const frame: string[] = [];
+  for (const line of stack.split('\n')) {
+    if (frame.length >= 3 && /^\s+at\s/.test(line)) break;
+    frame.push(line);
+  }
+
+  const header = frame[0] ?? '';
+  const match = /^.*?:(\d+)$/.exec(header);
+  if (frame.length < 3 || !match) {
+    return err.message;
+  }
+
+  // Undo the wrapper's one-line offset. A later line is on the closing wrapper,
+  // so describe the author's incomplete ending instead of naming our token.
+  const bodyLine = Number(match[1]) - 1;
+  if (bodyLine < 1) return err.message;
+  if (bodyLine > authorLineCount) {
+    return (
+      'The script ends with unmatched or incomplete syntax. Check ' +
+      'parentheses, brackets, braces, quotes, and template literals near the end.'
+    );
+  }
+
+  const rendered = clampSourceFrame(frame[1] ?? '', frame[2] ?? '');
+  const tail = frame
+    .slice(3)
+    .filter((l) => l.trim().length > 0)
+    .join('\n');
+  return [`line ${bodyLine}`, rendered, tail].filter(Boolean).join('\n');
+}
+
+/**
+ * Keep a long source line readable without breaking caret alignment: slide a
+ * window over the line and shift the caret by the same amount.
+ */
+function clampSourceFrame(sourceLine: string, caretLine: string): string {
+  if (sourceLine.length <= COMPILE_ERROR_LINE_WIDTH) {
+    return `${sourceLine}\n${caretLine}`;
+  }
+  const caret = /\^+/.exec(caretLine);
+  if (!caret) return '';
+  const caretCol = caret.index;
+  const start = Math.max(
+    0,
+    Math.min(
+      caretCol - Math.floor(COMPILE_ERROR_LINE_WIDTH / 2),
+      sourceLine.length - COMPILE_ERROR_LINE_WIDTH,
+    ),
+  );
+  const prefix = start > 0 ? '…' : '';
+  const window = sourceLine.slice(start, start + COMPILE_ERROR_LINE_WIDTH);
+  const suffix =
+    start + COMPILE_ERROR_LINE_WIDTH < sourceLine.length ? '…' : '';
+  const visibleCaretStart = Math.max(caretCol, start);
+  const visibleCaretEnd = Math.min(
+    caretCol + caret[0].length,
+    start + COMPILE_ERROR_LINE_WIDTH,
+  );
+  const shiftedCaret =
+    ' '.repeat(prefix.length + visibleCaretStart - start) +
+    '^'.repeat(visibleCaretEnd - visibleCaretStart);
+  return `${prefix}${window}${suffix}\n${shiftedCaret}`;
+}
+
+/**
+ * Validate the parsed meta value and copy it into a fresh plain object — the
+ * parser returns null-prototype objects, and this is where the contract fields
+ * cross over into ordinary ones. Throws on shape violation with the
+ * upstream-aligned error message text for the required-field cases.
  *
  * Field rules:
  *   - `name`           required, non-empty string
@@ -364,6 +441,7 @@ function isRegexContext(source: string, i: number): boolean {
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
+import { parseWorkflowMetaLiteral } from './workflow-meta-literal.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 // Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
@@ -416,7 +494,7 @@ export interface WorkflowAgentOpts {
   /**
    * P-stall: per-call stall-watchdog timeout in milliseconds. The dispatch
    * is aborted + retried (up to 3 attempts) after this many ms of no
-   * subagent progress (with no tool in flight). Defaults to 60_000 (env
+   * subagent progress (with no tool in flight). Defaults to 180_000 (env
    * override `QWEN_CODE_WORKFLOW_STALL_SECONDS`). `0` disables the watchdog
    * for this call.
    */
@@ -1793,18 +1871,28 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       let watchdog: WallClockWatchdog | undefined;
       let stopWatchingState: (() => void) | undefined;
       let rearmWatchdogOnAbort: (() => void) | undefined;
+      let settleOnAbort: (() => void) | undefined;
+      let wallClockFired = false;
       process.on('unhandledRejection', adoptionEscapeHook);
       try {
         // P4: extract `export const meta = {...}` once before the body runs.
         // The stripped source is what the vm executes; the meta object is
         // surfaced via `getMeta()` after the run (or after a malformed-meta
         // throw, in which case the caller's catch block sees a clear error).
-        const { stripped, meta } = extractAndStripMeta(scriptSource);
+        //
+        // Compilation goes through the same exported helper the pre-launch
+        // gate calls. Sharing the function is the whole point: a gate that
+        // compiled the script even slightly differently from the run would
+        // wave through something that then fails after the run is registered,
+        // which is the failure the gate exists to prevent.
+        const { script, meta } = compileWorkflowScript(scriptSource);
         extractedMeta = meta;
-        const wrapped = `(async () => {\n${stripped}\n})()`;
-        const script = new vm.Script(wrapped, {
-          filename: 'workflow.js',
-        });
+        // A run cancelled before its script started must not start it: the
+        // registry pre-registers the run and shares this controller, so a
+        // user cancel can land before `run()` is entered.
+        if (opts.abortOnTimeout?.signal.aborted) {
+          throw workflowCancelledError();
+        }
         // 30s sync wall-clock cap inside vm — covers `while(true){}` style
         // synchronous loops only. Once the IIFE hits its first `await`,
         // `runInContext` returns and this timer is disarmed.
@@ -1823,7 +1911,10 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             // T40 (PR #4732 R4): abort linked controller BEFORE rejecting so
             // in-flight subagents see the cancellation and stop. Order
             // matters: rejecting first then aborting would race the
-            // caller's finally block.
+            // caller's finally block. The abort arm below must let this
+            // abort through untouched — a timeout is not a cancellation,
+            // and it has to be reported as the timeout it is.
+            wallClockFired = true;
             opts.abortOnTimeout?.abort();
             reject(
               new Error(
@@ -1860,25 +1951,48 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         if (opts.scheduler?.snapshot().state === 'paused' && !aborted()) {
           watchdog?.pause();
         }
-        // Cancellation must settle the run even when the script hangs in
-        // ungated code: `registry.cancel()` aborts this controller, but
-        // `abortPending()` emits no state transition, so a pause-suspended
-        // watchdog would never re-arm and the race below has no abort arm
-        // — the hung run would never reach its settlement `finally`
-        // (snapshot, telemetry, and handle release all skipped). Re-arm
-        // with the banked remainder on abort to restore the bound.
+        // Belt to the abort arm's braces below: `registry.cancel()` aborts
+        // this controller, but `abortPending()` emits no state transition,
+        // so a pause-suspended watchdog would otherwise stay suspended.
+        // Re-arm it with the banked remainder so the wall clock keeps
+        // bounding the run independently of the abort arm.
         rearmWatchdogOnAbort = (): void => watchdog?.resume();
         opts.abortOnTimeout?.signal.addEventListener(
           'abort',
           rearmWatchdogOnAbort,
           { once: true },
         );
-        return await Promise.race([result, timeoutPromise]);
+        // Cancellation settles the run now, not when the wall clock runs
+        // out. Without this arm a script that is not currently blocked on a
+        // dispatch — sitting in ungated `await`s, or simply hung — keeps the
+        // run open until the banked remainder of the clock expires, and the
+        // user watches a cancelled run refuse to end. The script's own
+        // promise is left to settle by itself: its dispatches see the
+        // aborted signal and reject, so its `finally` blocks still run, and
+        // `Promise.race` keeps a handler attached so that later rejection
+        // is never an unhandled one.
+        const abortPromise = new Promise<never>((_, reject) => {
+          const signal = opts.abortOnTimeout?.signal;
+          if (!signal) return;
+          settleOnAbort = (): void => {
+            // The watchdog aborts the controller itself on the way to
+            // rejecting with the timeout; that abort is not a cancellation.
+            if (!wallClockFired) reject(workflowCancelledError());
+          };
+          signal.addEventListener('abort', settleOnAbort, { once: true });
+        });
+        return await Promise.race([result, timeoutPromise, abortPromise]);
       } finally {
         if (rearmWatchdogOnAbort) {
           opts.abortOnTimeout?.signal.removeEventListener(
             'abort',
             rearmWatchdogOnAbort,
+          );
+        }
+        if (settleOnAbort) {
+          opts.abortOnTimeout?.signal.removeEventListener(
+            'abort',
+            settleOnAbort,
           );
         }
         stopWatchingState?.();

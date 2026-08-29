@@ -350,6 +350,37 @@ describe('ChannelEditorDialog', () => {
     ).toBe('checked');
   });
 
+  it('localizes named tasks and switches their session scope to user', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: [
+        ...DINGTALK.fields,
+        {
+          key: 'multiSession',
+          label: 'Named Sessions (descriptor)',
+          description: 'Descriptor description',
+          kind: 'boolean',
+        },
+      ],
+    };
+    await renderDialog({ descriptor });
+
+    expect(document.body.textContent).toContain('Named tasks');
+    expect(document.body.textContent).toContain(
+      'Keep a separate owner-scoped catalog of named tasks',
+    );
+    await chooseRadioOption('By chat or thread');
+    const toggle = fieldByLabel('Named tasks');
+    expect(toggle).not.toBeNull();
+    await act(async () => toggle!.click());
+
+    expect(
+      document
+        .querySelector('[role="radio"][value="user"]')
+        ?.getAttribute('data-state'),
+    ).toBe('checked');
+  });
+
   it('clears validation errors when switching workspaces', async () => {
     await renderDialog({ existingNames: ['duplicate'] });
 

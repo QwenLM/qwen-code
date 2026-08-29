@@ -12,6 +12,7 @@ import request from 'supertest';
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionService,
+  SessionTranscriptChangedError,
   Storage,
   createDebugLogger,
   readSessionPrs,
@@ -41,12 +42,13 @@ import {
 } from './workspace-registry.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
-import { LIVE_SESSION_SOURCE_PREFIX } from './conversations/session-source.js';
+import { LIVE_SESSION_SOURCE_PREFIX } from '../runtime/live-session-source.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
 import {
   serializeWorkspaceTranscriptResponseForTesting,
   workspaceTranscriptCursorExceedsLimitForTesting,
 } from './routes/session.js';
+import { SessionArchiveCoordinator } from './server/session-archive.js';
 
 const PRIMARY_CWD = path.resolve(path.sep, 'work', 'primary');
 const SECONDARY_CWD = path.resolve(path.sep, 'work', 'secondary');
@@ -55,7 +57,7 @@ const TEST_TOKEN = 'test-token';
 const TEST_AUTHORIZATION = `Bearer ${TEST_TOKEN}`;
 const LIVE_COLD_LOAD_ID = '550e8400-e29b-41d4-a716-446655440101';
 const LIVE_COLD_RESUME_ID = '550e8400-e29b-41d4-a716-446655440102';
-const LIVE_PROJECTLESS_TASK_ID = '550e8400-e29b-41d4-a716-446655440103';
+const LIVE_PROJECTLESS_TASK_ID = '750e8400-e29b-71d4-a716-446655440103';
 const LIVE_ACTIVE_LOAD_ID = '550e8400-e29b-41d4-a716-446655440104';
 const LIVE_ACTIVE_RESUME_ID = '550e8400-e29b-41d4-a716-446655440105';
 const LIVE_COLD_REJECTED_ID = '550e8400-e29b-41d4-a716-446655440106';
@@ -276,6 +278,59 @@ async function archiveStoredSession(
     path.join(chatsDir, `${sessionId}.jsonl`),
     path.join(archiveDir, `${sessionId}.jsonl`),
   );
+}
+
+async function writeLifecycleFixture(input: {
+  sessionId: string;
+  shape: 'empty' | 'damaged' | 'orphan';
+  state: 'active' | 'archived';
+}): Promise<{
+  activePath: string;
+  archivedPath: string;
+  contents: Buffer;
+}> {
+  const chatsDir = path.join(
+    new Storage(SECONDARY_CWD).getProjectDir(),
+    'chats',
+  );
+  const activePath = path.join(chatsDir, `${input.sessionId}.jsonl`);
+  const archivedPath = path.join(
+    chatsDir,
+    'archive',
+    `${input.sessionId}.jsonl`,
+  );
+  if (input.shape === 'orphan') {
+    await writeStoredSession({
+      sessionId: input.sessionId,
+      cwd: SECONDARY_CWD,
+      timestamp: '2026-07-08T00:00:00.000Z',
+      // Unique per session id: the qualified and unqualified rows share this
+      // fixture and, for the unarchive case, land in the same project one
+      // after the other. An identical prompt would derive an identical
+      // display name, tripping the (correct, separately tested) unarchive
+      // title-collision guard and appending an unrelated custom_title
+      // record that this test's byte-exact comparison doesn't expect.
+      prompt: `orphan lifecycle fixture ${input.sessionId}`,
+      mtime: new Date('2026-07-08T00:00:00.000Z'),
+      parentSessionId: '00000000-0000-4000-8000-000000000000',
+    });
+  } else {
+    await fsp.mkdir(chatsDir, { recursive: true });
+    await fsp.writeFile(
+      activePath,
+      input.shape === 'empty' ? '' : '{"uuid":"torn-head"',
+    );
+  }
+  if (input.state === 'archived') {
+    await archiveStoredSession(SECONDARY_CWD, input.sessionId);
+  }
+  return {
+    activePath,
+    archivedPath,
+    contents: await fsp.readFile(
+      input.state === 'active' ? activePath : archivedPath,
+    ),
+  };
 }
 
 async function withRuntimeDir<T>(fn: () => Promise<T>): Promise<T> {
@@ -2039,6 +2094,414 @@ describe('multi-workspace session dispatch', () => {
     );
   });
 
+  it('reads exact active/archive conflicts from the active copy in an internal workspace', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440111';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'archived internal copy',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+        sourceType: 'default',
+        sourceId: `${LIVE_SESSION_SOURCE_PREFIX}${sessionId}`,
+      });
+      await archiveStoredSession(SECONDARY_CWD, sessionId);
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:01:00.000Z',
+        prompt: 'active internal copy',
+        mtime: new Date('2026-07-08T00:01:00.000Z'),
+        sourceType: 'default',
+        sourceId: `${LIVE_SESSION_SOURCE_PREFIX}${sessionId}`,
+      });
+      const { app } = makeHarness({
+        secondaryProvenance: 'live-conversation',
+        secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+      });
+
+      const transcript = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/transcript`)
+        .set('Host', host());
+      const exported = await request(app)
+        .get(`/workspaces/secondary-id/session/${sessionId}/export?format=json`)
+        .set('Host', host());
+      const archive = await request(app)
+        .post('/workspaces/secondary-id/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] });
+
+      expect(transcript.status).toBe(200);
+      expect(JSON.stringify(transcript.body)).toContain('active internal copy');
+      expect(JSON.stringify(transcript.body)).not.toContain(
+        'archived internal copy',
+      );
+      expect(exported.status).toBe(200);
+      expect(exported.text).toContain('active internal copy');
+      expect(exported.text).not.toContain('archived internal copy');
+      expect(archive.status).toBe(200);
+      expect(archive.body).toMatchObject({
+        archived: [],
+        alreadyArchived: [],
+        resolvedConflicts: [],
+        notFound: [],
+        errors: [
+          {
+            sessionId,
+            error: `Session "${sessionId}" exists in both active and archived directories. Retry with resolveConflicts: true to keep one copy.`,
+          },
+        ],
+      });
+    });
+  });
+
+  it.each([
+    ['empty', 'delete', '201'],
+    ['empty', 'archive', '202'],
+    ['empty', 'unarchive', '203'],
+    ['damaged', 'delete', '204'],
+    ['damaged', 'archive', '205'],
+    ['damaged', 'unarchive', '206'],
+    ['orphan', 'delete', '207'],
+    ['orphan', 'archive', '208'],
+    ['orphan', 'unarchive', '209'],
+  ] as const)(
+    'maintains %s transcripts through %s in qualified and owner-routed batches',
+    async (shape, action, suffix) => {
+      await withRuntimeDir(async () => {
+        const state = action === 'unarchive' ? 'archived' : 'active';
+        const qualifiedId = `550e8400-e29b-41d4-a716-446655440${suffix}`;
+        const unqualifiedId = `550e8400-e29b-41d4-a716-446655441${suffix}`;
+        const qualifiedFixture = await writeLifecycleFixture({
+          sessionId: qualifiedId,
+          shape,
+          state,
+        });
+        const unqualifiedFixture = await writeLifecycleFixture({
+          sessionId: unqualifiedId,
+          shape,
+          state,
+        });
+        const { app } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+          secondarySummaries: [],
+        });
+
+        const qualified = await request(app)
+          .post(`/workspaces/secondary-id/sessions/${action}`)
+          .set('Host', host())
+          .send({ sessionIds: [qualifiedId] });
+        const unqualified = await request(app)
+          .post(`/sessions/${action}`)
+          .set('Host', host())
+          .send({ sessionIds: [unqualifiedId] });
+
+        expect(qualified.status).toBe(200);
+        expect(unqualified.status).toBe(200);
+        const successKey =
+          action === 'delete'
+            ? 'removed'
+            : action === 'archive'
+              ? 'archived'
+              : 'unarchived';
+        expect(qualified.body).toMatchObject({
+          [successKey]: [qualifiedId],
+          notFound: [],
+          errors: [],
+        });
+        expect(unqualified.body).toMatchObject({
+          [successKey]: [unqualifiedId],
+          notFound: [],
+          errors: [],
+        });
+
+        for (const [sessionId, fixture] of [
+          [qualifiedId, qualifiedFixture],
+          [unqualifiedId, unqualifiedFixture],
+        ] as const) {
+          if (action === 'delete') {
+            await expect(fsp.stat(fixture.activePath)).rejects.toMatchObject({
+              code: 'ENOENT',
+            });
+            await expect(fsp.stat(fixture.archivedPath)).rejects.toMatchObject({
+              code: 'ENOENT',
+            });
+            continue;
+          }
+          const targetPath =
+            action === 'archive' ? fixture.archivedPath : fixture.activePath;
+          const sourcePath =
+            action === 'archive' ? fixture.activePath : fixture.archivedPath;
+          await expect(fsp.readFile(targetPath)).resolves.toEqual(
+            fixture.contents,
+          );
+          await expect(fsp.stat(sourcePath)).rejects.toMatchObject({
+            code: 'ENOENT',
+          });
+          expect(path.basename(targetPath)).toBe(`${sessionId}.jsonl`);
+        }
+      });
+    },
+  );
+
+  it.each([
+    ['qualified', '/workspaces/secondary-id/sessions/archive'],
+    ['owner-routed', '/sessions/archive'],
+  ])(
+    'keeps non-regular lifecycle failures scoped to their %s batch item',
+    async (_kind, route) => {
+      await withRuntimeDir(async () => {
+        const healthyId = '550e8400-e29b-41d4-a716-446655440211';
+        const invalidId = '550e8400-e29b-41d4-a716-446655440212';
+        const healthy = await writeLifecycleFixture({
+          sessionId: healthyId,
+          shape: 'orphan',
+          state: 'active',
+        });
+        const invalidPath = path.join(
+          path.dirname(healthy.activePath),
+          `${invalidId}.jsonl`,
+        );
+        await fsp.mkdir(invalidPath);
+        const { app } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+          secondarySummaries: [],
+        });
+
+        const response = await request(app)
+          .post(route)
+          .set('Host', host())
+          .send({ sessionIds: [healthyId, invalidId] });
+
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          archived: [healthyId],
+          notFound: [],
+          errors: [
+            {
+              sessionId: invalidId,
+              error: 'Session operation failed.',
+            },
+          ],
+        });
+        await expect(fsp.stat(healthy.activePath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        await expect(fsp.readFile(healthy.archivedPath)).resolves.toEqual(
+          healthy.contents,
+        );
+        expect((await fsp.lstat(invalidPath)).isDirectory()).toBe(true);
+      });
+    },
+  );
+
+  it.each([
+    [
+      'filesystem',
+      'qualified',
+      '/workspaces/secondary-id/sessions/archive',
+      () => Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+    ],
+    [
+      'filesystem',
+      'owner-routed',
+      '/sessions/archive',
+      () => Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+    ],
+    [
+      'transcript-change',
+      'qualified',
+      '/workspaces/secondary-id/sessions/archive',
+      () => new SessionTranscriptChangedError(),
+    ],
+    [
+      'transcript-change',
+      'owner-routed',
+      '/sessions/archive',
+      () => new SessionTranscriptChangedError(),
+    ],
+  ])(
+    'keeps %s classifier failures scoped to their %s batch item',
+    async (_failureKind, _routeKind, route, createError) => {
+      await withRuntimeDir(async () => {
+        const healthyId = '550e8400-e29b-41d4-a716-446655440217';
+        const invalidId = '550e8400-e29b-41d4-a716-446655440218';
+        const healthy = await writeLifecycleFixture({
+          sessionId: healthyId,
+          shape: 'orphan',
+          state: 'active',
+        });
+        const invalid = await writeLifecycleFixture({
+          sessionId: invalidId,
+          shape: 'orphan',
+          state: 'active',
+        });
+        const originalClassifier =
+          SessionService.prototype.getMaintainableSessionLocation;
+        const classifier = vi
+          .spyOn(SessionService.prototype, 'getMaintainableSessionLocation')
+          .mockImplementation(async function (this: SessionService, sessionId) {
+            if (
+              this.getProjectRoot() === SECONDARY_CWD &&
+              sessionId === invalidId
+            ) {
+              throw createError();
+            }
+            return originalClassifier.call(this, sessionId);
+          });
+        const { app } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+          secondarySummaries: [],
+        });
+
+        const response = await (async () => {
+          try {
+            return await request(app)
+              .post(route)
+              .set('Host', host())
+              .send({ sessionIds: [healthyId, invalidId] });
+          } finally {
+            classifier.mockRestore();
+          }
+        })();
+
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          archived: [healthyId],
+          notFound: [],
+          errors: [
+            {
+              sessionId: invalidId,
+              error: 'Session operation failed.',
+            },
+          ],
+        });
+        await expect(fsp.stat(healthy.activePath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        await expect(fsp.readFile(healthy.archivedPath)).resolves.toEqual(
+          healthy.contents,
+        );
+        await expect(fsp.readFile(invalid.activePath)).resolves.toEqual(
+          invalid.contents,
+        );
+        await expect(fsp.stat(invalid.archivedPath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      });
+    },
+  );
+
+  it('does not fall back to primary for mixed foreign and local internal storage', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440215';
+      const fixture = await writeLifecycleFixture({
+        sessionId,
+        shape: 'orphan',
+        state: 'archived',
+      });
+      const foreignActive = `${JSON.stringify({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        uuid: 'foreign-u1',
+        parentUuid: null,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'foreign' }] },
+      })}\n`;
+      await fsp.writeFile(fixture.activePath, foreignActive);
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryProvenance: 'live-conversation',
+        secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+        secondarySummaries: [],
+      });
+
+      const response = await request(app)
+        .post('/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId], resolveConflicts: true });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        archived: [],
+        notFound: [],
+        errors: [
+          {
+            sessionId,
+            error: 'Session operation failed.',
+          },
+        ],
+      });
+      expect(primaryBridge.closeCalls).toEqual([]);
+      expect(secondaryBridge.closeCalls).toEqual([sessionId]);
+      await expect(fsp.readFile(fixture.activePath, 'utf8')).resolves.toBe(
+        foreignActive,
+      );
+      await expect(fsp.readFile(fixture.archivedPath)).resolves.toEqual(
+        fixture.contents,
+      );
+    });
+  });
+
+  it.each([
+    ['qualified', '/workspaces/secondary-id/sessions/archive'],
+    ['owner-routed', '/sessions/archive'],
+  ])(
+    'keeps indeterminate lifecycle ownership scoped to its %s batch item',
+    async (_kind, route) => {
+      await withRuntimeDir(async () => {
+        const healthyId = '550e8400-e29b-41d4-a716-446655440213';
+        const invalidId = '550e8400-e29b-41d4-a716-446655440214';
+        const healthy = await writeLifecycleFixture({
+          sessionId: healthyId,
+          shape: 'orphan',
+          state: 'active',
+        });
+        const invalidPath = path.join(
+          path.dirname(healthy.activePath),
+          `${invalidId}.jsonl`,
+        );
+        await fsp.writeFile(
+          invalidPath,
+          `{"sessionId":"${invalidId}","filler":"${'x'.repeat(2 * 1024 * 1024)}`,
+        );
+        const { app } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+          secondarySummaries: [],
+        });
+
+        const response = await request(app)
+          .post(route)
+          .set('Host', host())
+          .send({ sessionIds: [healthyId, invalidId] });
+
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          archived: [healthyId],
+          notFound: [],
+          errors: [
+            {
+              sessionId: invalidId,
+              error: 'Session operation failed.',
+            },
+          ],
+        });
+        await expect(fsp.stat(healthy.activePath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        await expect(fsp.readFile(healthy.archivedPath)).resolves.toEqual(
+          healthy.contents,
+        );
+        await expect(fsp.stat(invalidPath)).resolves.toBeDefined();
+      });
+    },
+  );
+
   it('keeps the private directory canonical when restoring a mixed-case transcript', async () => {
     const storageSessionId = LIVE_PROJECTLESS_TASK_ID.toUpperCase();
     await withStoredProjectlessLiveTasks(
@@ -2124,6 +2587,172 @@ describe('multi-workspace session dispatch', () => {
       await expect(
         new SessionService(SECONDARY_CWD).getSessionLocation(sessionId),
       ).resolves.toBe('active');
+    });
+  });
+
+  it('rejects an internal physical-only owner that collides with an ordinary live-only owner', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440111';
+      const fixture = await writeLifecycleFixture({
+        sessionId,
+        shape: 'damaged',
+        state: 'active',
+      });
+      const { app } = makeHarness({
+        primarySummaries: [makeSummary(sessionId, PRIMARY_CWD)],
+        secondarySummaries: [],
+        secondaryProvenance: 'live-conversation',
+        secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+      });
+
+      const response = await request(app)
+        .post('/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] });
+
+      expect(response.status).toBe(500);
+      expect(response.body).toMatchObject({
+        code: 'ambiguous_session_owner',
+        sessionId,
+      });
+      await expect(fsp.readFile(fixture.activePath)).resolves.toEqual(
+        fixture.contents,
+      );
+      await expect(fsp.stat(fixture.archivedPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+  });
+
+  it('rejects a cross-workspace lifecycle batch independently of id order', async () => {
+    await withRuntimeDir(async () => {
+      const ordinaryId = '550e8400-e29b-41d4-a716-446655440113';
+      const internalId = '550e8400-e29b-41d4-a716-446655440114';
+      const fixture = await writeLifecycleFixture({
+        sessionId: internalId,
+        shape: 'damaged',
+        state: 'active',
+      });
+      const { app } = makeHarness({
+        primarySummaries: [makeSummary(ordinaryId, PRIMARY_CWD)],
+        secondarySummaries: [],
+        secondaryProvenance: 'live-conversation',
+        secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+      });
+
+      for (const sessionIds of [
+        [ordinaryId, internalId],
+        [internalId, ordinaryId],
+      ]) {
+        const response = await request(app)
+          .post('/sessions/archive')
+          .set('Host', host())
+          .send({ sessionIds });
+
+        expect(response.status).toBe(409);
+        expect(response.body.code).toBe('session_workspace_conflict');
+      }
+      await expect(fsp.readFile(fixture.activePath)).resolves.toEqual(
+        fixture.contents,
+      );
+      await expect(fsp.stat(fixture.archivedPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+  });
+
+  it('rejects an internal physical-only owner when an ordinary persisted owner is transitioning', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440112';
+      await writeStoredSession({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'transitioning ordinary collision',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const fixture = await writeLifecycleFixture({
+        sessionId,
+        shape: 'damaged',
+        state: 'active',
+      });
+      const { app, registry } = makeHarness({
+        primarySummaries: [],
+        secondarySummaries: [],
+        secondaryProvenance: 'live-conversation',
+        secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+      });
+      expect(registry.beginReplacement(registry.primaryEntry, 'policy-2')).toBe(
+        true,
+      );
+
+      const response = await request(app)
+        .post('/sessions/archive')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] });
+
+      expect(response.status).toBe(503);
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+      await expect(fsp.readFile(fixture.activePath)).resolves.toEqual(
+        fixture.contents,
+      );
+      await expect(fsp.stat(fixture.archivedPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+  });
+
+  it('rejects an ordinary batch when the primary generation changes under the lifecycle lock', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440210';
+      await writeStoredSession({
+        sessionId,
+        cwd: PRIMARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'primary generation target',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const { app, registry, primaryBridge } = makeHarness({
+        primarySummaries: [],
+      });
+      const replacementBridge = makeBridge(PRIMARY_CWD, []);
+      const replacement = makeRuntime({
+        workspaceId: 'primary-id',
+        workspaceCwd: PRIMARY_CWD,
+        primary: true,
+        trusted: true,
+        bridge: replacementBridge,
+      });
+      const runExclusive = vi
+        .spyOn(SessionArchiveCoordinator.prototype, 'runExclusiveMany')
+        .mockImplementationOnce(async (_ids, run) => {
+          expect(
+            registry.beginReplacement(registry.primaryEntry, 'policy-2'),
+          ).toBe(true);
+          registry.activateReplacement(
+            registry.primaryEntry,
+            replacement,
+            'policy-2',
+          );
+          return run();
+        });
+
+      try {
+        const response = await request(app)
+          .post('/sessions/archive')
+          .set('Host', host())
+          .send({ sessionIds: [sessionId] });
+
+        expect(response.status).toBe(503);
+        expect(response.body.code).toBe('workspace_runtime_unavailable');
+        expect(primaryBridge.closeCalls).toEqual([]);
+        expect(replacementBridge.closeCalls).toEqual([]);
+        await expect(
+          new SessionService(PRIMARY_CWD).getSessionLocation(sessionId),
+        ).resolves.toBe('active');
+      } finally {
+        runExclusive.mockRestore();
+      }
     });
   });
 
@@ -4647,11 +5276,8 @@ describe('multi-workspace session dispatch', () => {
       const conflict = await request(trusted.app)
         .get(`/workspaces/secondary-id/session/${conflictId}/export`)
         .set('Host', host());
-      expect(conflict.status).toBe(409);
-      expect(conflict.body).toMatchObject({
-        code: 'session_conflict',
-        sessionId: conflictId,
-      });
+      expect(conflict.status).toBe(200);
+      expect(conflict.text).toContain('conflicting secondary');
 
       const invalidFormat = await request(trusted.app)
         .get(

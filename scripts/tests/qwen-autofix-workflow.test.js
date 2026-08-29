@@ -5,6 +5,7 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -17,6 +18,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
@@ -40,6 +42,8 @@ const reviewVerificationRunner = readFileSync(
 );
 const pushAndReportScriptPath = '.github/scripts/autofix-push-and-report.sh';
 const pushAndReportScript = readFileSync(pushAndReportScriptPath, 'utf8');
+const heartbeatScriptPath = '.github/scripts/autofix-status-heartbeat.sh';
+const heartbeatScript = readFileSync(heartbeatScriptPath, 'utf8');
 const upsertDeferredScript = readFileSync(
   '.github/scripts/upsert-deferred-issue.sh',
   'utf8',
@@ -209,6 +213,18 @@ const installAndBuildSteps =
 const nodeSetupSteps =
   workflow.match(/- name: 'Set up Node.js'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
   [];
+
+// The gate script's bite check reads NUL-separated diff lists through
+// `mapfile -d ''`, a bash >= 4.4 builtin: on a host whose `bash` is older
+// (macOS ships 3.2) every spawn of the real script or the extracted block
+// dies with `mapfile: command not found` before the semantics under test
+// can run. The gate only executes on Linux runners, so the defect cannot
+// exist in production; probe the host, not the platform — a Mac with a
+// newer bash fronting PATH keeps the coverage (same shape as
+// hasGnuRealpath in qwen-pr-review-workflow.test.js).
+const hasBashMapfile =
+  spawnSync('bash', ['-c', 'mapfile -d "" -t x <<< y'], { stdio: 'ignore' })
+    .status === 0;
 
 // GitHub Actions expressions return operand VALUES from &&/||, not
 // booleans: && yields the first falsy operand (else the last operand), ||
@@ -597,9 +613,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('echo "targets=[]" >> "${GITHUB_OUTPUT}"');
     expect(reviewScanJob).toContain('active checks in flight; skipping until');
     // Staleness bound must sit above legitimate check runtimes (a review-address
-    // job runs up to its 300-minute cap) so an active run is never aged out
+    // job runs up to its 345-minute cap) so an active run is never aged out
     // mid-flight.
-    expect(reviewScanJob).toContain('PENDING_STALE_MIN=330');
+    expect(reviewScanJob).toContain('PENDING_STALE_MIN=375');
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than the cutoff. Asserting `> $cut` too means a
     // flipped comparison (which would age out live checks → double-processing) is
@@ -3098,13 +3114,18 @@ describe('qwen-autofix workflow', () => {
     // invocations never burn an agent cycle on a no-action report.
     expect(reviewScanJob).toContain("COMMAND_FILTER='^\\s*@qwen-code /'");
     expect(reviewScanJob).toContain('test($cf) | not');
-    // Seven sites now: the four feedback/deferral exclusions, the
+    // Ten sites now: the four feedback/deferral exclusions, the
     // over-budget census (command comments are not feedback batches), the
-    // conflict handoff wake filter, and its scan-side mirror for the
+    // conflict handoff wake filter, its scan-side mirror for the
     // stale-base park gate (a /command comment is not a trusted-human
-    // response and must not unpark a conflict verdict in either).
+    // response and must not unpark a conflict verdict in either), and the
+    // convergence breaker's human-activity boundary in all three of its
+    // lockstepped sites — the scan gate, the prepare mirror, and the
+    // report step's stale-base guard (#10122) — since a /command comment
+    // is not a maintainer weighing in and must not hand the loop a fresh
+    // runway.
     expect(workflow.split('test("^\\\\s*@qwen-code /") | not').length - 1).toBe(
-      7,
+      10,
     );
   });
 
@@ -3129,12 +3150,14 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(12) green.
-    expect(workflowWithScripts.split('--paginate').length - 1).toBe(21);
+    expect(workflowWithScripts.split('--paginate').length - 1).toBe(25);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback + the cap-branch release-evidence events
     // fetch (R4-1) + the scan park gate's rv/rc fetches (the wake mirror
-    // needs the same human-feedback legs prepare reads) = twelve normalized
-    // fetch sites. The
+    // needs the same human-feedback legs prepare reads) + the report step's
+    // convergence-guard rv/rc/ic re-fetches (#10122: the guard re-derives
+    // the breaker's reading over FRESH fetches, so it owns three new
+    // normalized sites) = fifteen normalized fetch sites. The
     // blocked-takeover status lookup is deliberately NOT among them: like the
     // sibling STATUS_ID read, it consumes the page stream inline via
     // `--jq ... | .id` into `tail -1` and never lands in a WORKDIR json file,
@@ -3149,8 +3172,12 @@ describe('qwen-autofix workflow', () => {
     // fetch in resolve_and_reply_threads is the same class again — a GraphQL
     // paginate whose `--jq '…nodes[]'` stream is slurped straight into
     // THREADS_JSON — so it bumps the total pin above without joining the
-    // normalizer count below.
-    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(12);
+    // normalizer count below. The heartbeat's deep-link job lookup (af-150)
+    // is the same class once more: the run-attempt jobs listing is slurped
+    // by `jq -rs` into a shell variable to resolve ONE job id, never a
+    // WORKDIR file, so it bumps the total pin without joining the count
+    // below.
+    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(15);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
     // the PRIOR_HEADS consumer below iterates the result with .[], which
@@ -4178,7 +4205,7 @@ describe('qwen-autofix workflow', () => {
     // No rollup entries → dispatchable.
     expect(runMarkerCheck([])).toBe('pass');
 
-    // A stranded marker must NOT keep blocking through the 330-minute
+    // A stranded marker must NOT keep blocking through the 375-minute
     // HAS_PENDING_CHECKS gate after its TTL expired: replay the gate's jq
     // over fixture rollups.
     const pendingGate = reviewScanJob.match(
@@ -4228,7 +4255,7 @@ describe('qwen-autofix workflow', () => {
         checkRun('build', 'IN_PROGRESS', '2026-08-17T07:50:00Z'),
       ]),
     ).toBe('true');
-    // ...a check stuck past the 330-minute horizon is aged out...
+    // ...a check stuck past the 375-minute horizon is aged out...
     expect(
       runPendingGate([
         checkRun('build', 'IN_PROGRESS', '2026-08-17T01:00:00Z'),
@@ -4239,6 +4266,15 @@ describe('qwen-autofix workflow', () => {
     expect(
       runPendingGate([marker('PENDING', '2026-08-17T07:50:00Z', 'other-ci')]),
     ).toBe('true');
+
+    // The design record this gate cites (af-101) describes THIS horizon —
+    // derive the bound from the workflow so the pin tracks PENDING_STALE_MIN,
+    // then require the doc to agree. Naming the 345-minute job cap instead
+    // computes a 0-minute margin and invites squeezing the bound down to the
+    // cap, which ages a live review-address run out mid-flight.
+    const pendingStaleMin = reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1];
+    expect(pendingStaleMin).toBeTruthy();
+    expect(designDoc).toContain(`${pendingStaleMin}-minute horizon`);
 
     // Writer/reader identity: all three status writes and both readers bind
     // the SAME context variable — a mismatch on any site leaves the marker
@@ -7685,6 +7721,74 @@ exit 1
     expect(skill).toContain('Deferred non-Critical feedback');
   });
 
+  it('neutralizes both workflow-command syntaxes at every untrusted echo', () => {
+    // #9761: a review finding about workflow-command injection carried its
+    // payload strings (`::error::forged`, `##[add-matcher]`) verbatim as
+    // example text. Prepare echoed feedback.md raw, the runner parsed the
+    // MID-line `##[add-matcher]`, and the step failed before the agent ran —
+    // five consecutive crashes burned the takeover window in ~70 minutes.
+    // `##[` parses mid-line just like the line-start `::` syntax, so every
+    // site that puts reviewer- or agent-written content on step stdout must
+    // neutralize BOTH prefixes.
+    const bothSyntaxes = /sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g'/g;
+    // Crash site 1: prepare's feedback echo (reviewer bodies, verbatim).
+    expect(prepareBranchAndFeedbackStep).toMatch(
+      /echo '--- feedback\.md ---'[\s\S]*?cat "\$\{WORKDIR\}\/feedback\.md" \| sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g'/,
+    );
+    // The full census of the workflow's sites: prepare's feedback echo, the
+    // two dump loops, the repair merge-warning head, the issue-lane gate's
+    // two failure notes, and the upsert re-emit loop. An exact count so a
+    // dropped or weakened KNOWN site fails here instead of in a future
+    // round; a NEW echo site is NOT auto-detected — it must be added to
+    // this census deliberately, using the canonical two-expression sed
+    // (both single-syntax spellings are banned below).
+    expect(workflow.match(bothSyntaxes) ?? []).toHaveLength(7);
+    // The issue lane's gate echoes the agent's failure notes.
+    expect(issueAutofixJob).toMatch(
+      /sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/failure\.md"/,
+    );
+    // The PR lane's gate echoes failure/handoff/no-action from the sibling
+    // script: every echo neutralized, no raw cat of an agent-written file.
+    expect(reviewVerificationRunner).not.toMatch(
+      /cat "\$\{WORKDIR\}\/(failure|handoff|no-action)\.md"/,
+    );
+    expect(
+      reviewVerificationRunner.match(
+        /sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/(failure|handoff|no-action)\.md"/g,
+      ) ?? [],
+    ).toHaveLength(6);
+    // The deferred-findings upsert neutralizes its own stdout at the source
+    // (the API-error reason and the LOST dump).
+    expect(upsertDeferredScript.match(bothSyntaxes) ?? []).toHaveLength(2);
+    // The push-and-report script's re-emit loop uses the SAME canonical
+    // neutralizer (the family keeps one spelling, so a syntax change cannot
+    // drift across two implementations and re-create the half-guard that let
+    // #9761 through). Its workflow twin rides the workflow census above.
+    expect(pushAndReportScript.match(bothSyntaxes) ?? []).toHaveLength(1);
+    // No single-syntax neutralizer may survive anywhere in the family: the
+    // old `::`-only sed is exactly what #9761 slipped through, a `##[`-only
+    // sed is the mirror blind spot, and a bare bash `//::/;;` expansion is
+    // the third half-guard shape. Assert the PAIRING property instead of
+    // enumerating half-guard spellings — every occurrence of either
+    // substitution expression must belong to the canonical pair, so a
+    // half-copy in ANY spelling (`sed 's/::/;;/g'`, `sed -e 's/::/;;/g'`
+    // alone, or the `##[`-only mirrors) unbalances the count and fails here
+    // (the shape bans only caught the no-`-e` spellings; the canonical
+    // line itself begins with `sed -e`, so its natural half-copy contained
+    // none of the banned substrings).
+    for (const src of [
+      workflow,
+      reviewVerificationRunner,
+      upsertDeferredScript,
+      pushAndReportScript,
+    ]) {
+      const pairs = (src.match(bothSyntaxes) ?? []).length;
+      expect((src.match(/s\/::\/;;\/g/g) ?? []).length).toBe(pairs);
+      expect((src.match(/s\/##\\\[\/##［\/g/g) ?? []).length).toBe(pairs);
+      expect(src).not.toContain('//::/;;');
+    }
+  });
+
   it('turns a budget breach into a growth-audit round instead of a divergence stop', () => {
     // Critical-only only trims non-Criticals, so a Critical-driven diff keeps
     // growing anyway — but a budget breach no longer escalates to a
@@ -9874,10 +9978,49 @@ exit 1
       expect(step).toContain('sudo -n apt-get install');
       expect(step).not.toContain('sudo apt-get');
     }
-    // "Short jobs stay hosted" is an explicit design decision — only the
-    // three heavy jobs may route onto the persistent pool.
-    expect(routeJob).toContain("runs-on: 'ubuntu-latest'");
-    expect(reviewScanJob).toContain("runs-on: 'ubuntu-latest'");
+    // "Short jobs stay hosted" is the design rule — the carve-out is the
+    // scan lane: route and review-scan gate the WHOLE fan-out, and a
+    // hosted-runner backlog queued route past the cron period so the cron
+    // supersede rule starved every scan round (2026-08-25). They share the
+    // heavy jobs' exact expression, fork-trust clause and kill-switch
+    // included. The command jobs stay hosted.
+    expect(routeJob).toContain(ecsRunsOn);
+    expect(reviewScanJob).toContain(ecsRunsOn);
+    // af-148 carve-out premise: neither job checks code out, so the shared
+    // workspace needs no restore/wipe step. Pin it, so adding a checkout
+    // forces a deliberate update of the hygiene requirement.
+    expect(routeJob).not.toContain('actions/checkout');
+    expect(reviewScanJob).not.toContain('actions/checkout');
+    // The scan's per-run WORKDIR must not outlive the run on the pool:
+    // 0700 at creation and an always() cleanup step mirroring the heavy
+    // jobs' teardown. The value pins the autofix* prefix — the contract
+    // with the heavy jobs' age sweep, the only reclaim channel left after
+    // a hard runner kill.
+    expect(reviewScanJob).toContain(
+      "WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'",
+    );
+    // Pre-clean immediately before create: run_id is public and mkdir -p
+    // alone would accept a dir or symlink pre-planted on the shared /tmp.
+    expect(reviewScanJob).toContain(
+      'rm -rf "${WORKDIR}"\n          (umask 077; mkdir -p "${WORKDIR}")',
+    );
+    // The fleet file lives inside WORKDIR so the always() step and the age
+    // sweep reclaim it when the EXIT trap cannot (cancelled/killed run).
+    expect(reviewScanJob).toContain('FLEET_FILE="${WORKDIR}/fleet.tsv"');
+    expect(reviewScanJob).not.toContain('FLEET_FILE="$(mktemp)"');
+    // The EXIT trap is the in-step cleanup twin of the always() step; it
+    // must remove both the fleet file and the per-run dir.
+    expect(reviewScanJob).toContain(
+      'trap \'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"\' EXIT',
+    );
+    // Pin the cleanup step's command inside its own slice, not job-wide: a
+    // no-op cleanup with the right name and if: shipped green before.
+    const scanCleanupStep =
+      reviewScanJob.match(
+        /- name: 'Clean up scan workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/,
+      )?.[0] ?? '';
+    expect(scanCleanupStep).toContain("if: 'always()'");
+    expect(scanCleanupStep).toContain('rm -rf "${WORKDIR}"');
     for (const name of ['takeover-command', 'retry-command', 'takeover-ack']) {
       const job =
         workflow.match(
@@ -10148,6 +10291,13 @@ exit 1
       // world-readable window on the shared /tmp.
       expect(step).toContain('(umask 077; mkdir -p "${WORKDIR}")');
       expect(step).not.toContain('chmod 700');
+      // Consumer side of the scan lane's reclaim contract: after a hard
+      // runner kill neither its EXIT trap nor its always() step fires, so
+      // this sweep is the only channel left — the glob must keep matching
+      // the scan WORKDIR basename pinned in the carve-out test.
+      expect(step).toContain(
+        "find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true",
+      );
     }
     // Per-run/per-target teardown after the artifact upload: nothing else
     // removes these dirs on the persistent pool (PR numbers only increase).
@@ -10629,8 +10779,15 @@ exit 1
     expect(patBlockOf(publishPrStep)).toBeTruthy();
     expect(patBlockOf(pushAndReportStep)).toBe(patBlockOf(publishPrStep));
     expect(patBlockOf(prepareStep)).toBe(patBlockOf(publishPrStep));
-    // Each PAT step carries the trusted-PATH env wiring.
-    for (const step of [publishPrStep, pushAndReportStep, prepareStep]) {
+    // Each PAT step carries the trusted-PATH env wiring. post_status's
+    // covers the step's own externals AND seeds the heartbeat loop's pin:
+    // the loop re-pins its tick PATH from this capture (af-149).
+    for (const step of [
+      publishPrStep,
+      pushAndReportStep,
+      prepareStep,
+      postStatusCommentStep,
+    ]) {
       expect(step).toContain(
         "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
       );
@@ -10640,22 +10797,158 @@ exit 1
     // gh's own env channels are pinned/stripped BEFORE the first gh call in
     // each PAT step, so a $GITHUB_ENV-planted GH_HOST cannot reroute the
     // identity check and a planted GH_TOKEN cannot outrank the inline one.
-    for (const [step, firstGh] of [
-      [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
-      [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
-      [prepareStep, 'PR_LIVE="$(gh pr view'],
+    // The scan lane shares the persistent pool with those PAT steps
+    // (af-148), so route and review-scan carry the same reroute hardening
+    // in the same loop — one preamble shape, one edit site: a planted
+    // ~/.config/gh there would send the scan's CI_DEV_BOT_PAT or route's
+    // collaborator-permission lookups into a local socket.
+    for (const [step, firstGh, configMint] of [
+      [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', 'export'],
+      [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', 'export'],
+      [prepareStep, 'PR_LIVE="$(gh pr view', 'export'],
+      // The heartbeat's step: deep-link lookup, comment upsert, and the
+      // loop launch all carry the PAT; the first gh call is the deep link.
+      // Its config mint is the per-call hermetic_gh wrapper pinned below
+      // (R11-1), not a step-level export.
+      [postStatusCommentStep, 'JOB_ID="$(hermetic_gh api', 'wrapper'],
+      [routeStep, 'gh api "repos/${REPO}/collaborators', 'guarded'],
+      [reviewScanJob, 'gh pr view', 'guarded'],
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
       expect(step).toMatch(/unset GH_ENTERPRISE_TOKEN GH_TOKEN/);
       // GH_CONFIG_DIR is PINNED to a fresh throwaway (unsetting it falls
       // back to the attacker-writable ~/.config/gh with http_unix_socket).
-      expect(step).toContain(
-        'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
-      );
+      // route and review-scan additionally guard the mint itself: `export
+      // VAR="$(mktemp ...)"` reports export's status, not the
+      // substitution's, so a failing mktemp would sail through bash -e with
+      // an empty value — gh's unset fallback — unless the assignment is
+      // checked before export. The behavioural witness below turns red when
+      // the guard goes; the heavy jobs' older preambles predate the guard
+      // and are pinned in their current shape.
+      if (configMint === 'guarded') {
+        const guard =
+          'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then';
+        expect(step).toContain(guard);
+        expect(step).toMatch(/exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/);
+        expect(step.indexOf(guard)).toBeLessThan(step.indexOf(firstGh));
+      } else if (configMint === 'export') {
+        expect(step).toContain(
+          'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
+        );
+      }
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
     }
+    // post_status mints hermetically PER CALL (R11-1): RUNNER_TEMP is
+    // same-UID-writable, so a dir minted once and reused across the step's
+    // gh calls is plantable — a config.yml carrying http_unix_socket
+    // written into it between calls would capture the next call's
+    // Authorization header (the PAT; probe-verified on the loop's twin,
+    // whose 600s sleep made the window a certainty). Every gh call rides
+    // a wrapper that mints fail-CLOSED milliseconds before the call and
+    // removes the dir right after; a bare call in the step would reopen
+    // the channel, and a long-lived export would hand every call the same
+    // plantable dir.
+    expect(postStatusCommentStep).toContain('hermetic_gh() {');
+    expect(postStatusCommentStep).toContain(
+      'if ! cfg="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then',
+    );
+    expect(postStatusCommentStep).toContain('refusing gh calls with the PAT');
+    expect(postStatusCommentStep).toContain('GH_CONFIG_DIR="${cfg}" gh "$@"');
+    expect(postStatusCommentStep).toContain('rm -rf "${cfg}"');
+    expect(postStatusCommentStep).not.toMatch(/\n\s*export GH_CONFIG_DIR\n/);
+    // All four call sites (deep-link lookup, comment scan, PATCH, POST)
+    // ride the wrapper: every `gh api` in the step is a wrapped one.
+    expect((postStatusCommentStep.match(/gh api/g) ?? []).length).toBe(4);
+    expect((postStatusCommentStep.match(/hermetic_gh api/g) ?? []).length).toBe(
+      4,
+    );
+    // Witness (R11-1): run the step's opening block verbatim with a mktemp
+    // that fails (a shim first on the TRUSTED_PATH the block pins itself
+    // to) — the wrapper must REFUSE the call (nonzero rc, gh never runs,
+    // never a gh with the PAT against the shared config); the intact arm
+    // runs gh under a fresh dir under RUNNER_TEMP that is removed right
+    // after the call.
+    const ghcfgOpenBlock =
+      postStatusCommentStep
+        .slice(
+          postStatusCommentStep.indexOf('run: |-') + 'run: |-'.length,
+          postStatusCommentStep.indexOf("MARKER='<!-- autofix-status -->'"),
+        )
+        .replace(/^ {10}/gm, '') +
+      '\nif hermetic_gh probe; then\n' +
+      '  echo "HERMETIC_GH_RAN rc=0"\n' +
+      'else\n' +
+      '  echo "HERMETIC_GH_REFUSED rc=$?"\n' +
+      'fi\n';
+    const ghcfgTemp = mkdtempSync(join(tmpdir(), 'hb-ghcfg-temp-'));
+    const ghcfgShimDir = mkdtempSync(join(tmpdir(), 'hb-ghcfg-shim-'));
+    const ghcfgBinDir = mkdtempSync(join(tmpdir(), 'hb-ghcfg-bin-'));
+    try {
+      writeFileSync(
+        join(ghcfgShimDir, 'mktemp'),
+        '#!/usr/bin/env bash\nexit 1\n',
+      );
+      chmodSync(join(ghcfgShimDir, 'mktemp'), 0o755);
+      writeFileSync(
+        join(ghcfgBinDir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          "printf 'STUB_GH GH_CONFIG_DIR=%s EXISTS=%s\\n' \\",
+          '  "${GH_CONFIG_DIR:-}" \\',
+          '  "$([ -d "${GH_CONFIG_DIR:-/nonexistent}" ] && echo yes || echo no)"',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(ghcfgBinDir, 'gh'), 0o755);
+      // Failing mint: the wrapper refuses — gh never runs.
+      const mktempFailing = spawnSync('bash', ['-c', ghcfgOpenBlock], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          TRUSTED_PATH: `${ghcfgShimDir}:${ghcfgBinDir}:/usr/bin:/bin`,
+          RUNNER_TEMP: ghcfgTemp,
+        },
+      });
+      expect(mktempFailing.status).toBe(0);
+      expect(mktempFailing.stdout).toContain('HERMETIC_GH_REFUSED rc=1');
+      expect(mktempFailing.stdout).not.toContain('STUB_GH');
+      expect(mktempFailing.stderr).toContain(
+        '::error::autofix heartbeat: could not create hermetic gh config dir',
+      );
+      // Intact mint: gh runs under a fresh dir, removed right after.
+      const mktempIntact = spawnSync('bash', ['-c', ghcfgOpenBlock], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          TRUSTED_PATH: `${ghcfgBinDir}:/usr/bin:/bin`,
+          RUNNER_TEMP: ghcfgTemp,
+        },
+      });
+      expect(mktempIntact.status).toBe(0);
+      expect(mktempIntact.stdout).toContain('HERMETIC_GH_RAN rc=0');
+      const m = mktempIntact.stdout.match(
+        /STUB_GH GH_CONFIG_DIR=(\S+) EXISTS=(\S+)/,
+      );
+      expect(m).toBeTruthy();
+      expect(m[1].startsWith(ghcfgTemp)).toBe(true);
+      expect(m[2]).toBe('yes');
+      expect(existsSync(m[1])).toBe(false);
+    } finally {
+      rmSync(ghcfgTemp, { recursive: true, force: true });
+      rmSync(ghcfgShimDir, { recursive: true, force: true });
+      rmSync(ghcfgBinDir, { recursive: true, force: true });
+    }
+    // post_status pins PATH BEFORE its first external resolves (the
+    // mktemp minting the gh config dir): every command word after it —
+    // gh, jq, date, and the setsid/bash of the heartbeat launch —
+    // resolves under the stage-time capture, never the ambient PATH the
+    // job's own $GITHUB_PATH append keeps plantable (af-149).
+    expect(postStatusCommentStep).toContain('export PATH="${TRUSTED_PATH}"');
+    expect(
+      postStatusCommentStep.indexOf('export PATH="${TRUSTED_PATH}"'),
+    ).toBeLessThan(postStatusCommentStep.indexOf('mktemp'));
     // DRIFT ALARM, NOT A BOUNDARY. The guarantee that a planted channel
     // cannot reach the privileged work is the `env -i` clean child, pinned
     // separately below; no regex over source text can be that guarantee,
@@ -10735,7 +11028,7 @@ exit 1
     // runs its own build/test between them), with PATH pinned first.
     expect(
       workflow.match(
-        /echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| sha256sum -c - > \/dev\/null/g,
+        /\/usr\/bin\/echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| \/usr\/bin\/sha256sum -c - > \/dev\/null/g,
       ) ?? [],
     ).toHaveLength(2);
     expect(
@@ -10873,6 +11166,111 @@ exit 1
       }).stdout,
     ).not.toContain('xdg-evil');
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('aborts route and review-scan before any gh call when the gh config dir cannot be minted', () => {
+    // Behavioural witness for the guarded-mint pin above: without the guard,
+    // `export VAR="$(mktemp ...)"` reports export's status, not the
+    // substitution's, so a failing mktemp sails through bash -e with an
+    // empty GH_CONFIG_DIR and the step calls gh against the shared
+    // ~/.config/gh fallback — the reroute hole the preamble closes. Run each
+    // step under a mktemp that refuses ONLY the gh-config template (later
+    // plain mktemp calls must keep working so the unguarded mutant provably
+    // reaches gh) and a gh stub that records every call: the step must fail
+    // loud before the first record. Probed: restoring the unguarded export
+    // makes both cases record a gh call and drop the ::error abort.
+    const realMktemp = spawnSync('bash', ['-c', 'command -v mktemp'], {
+      encoding: 'utf8',
+    }).stdout.trim();
+    const cases = [
+      {
+        name: 'route',
+        // The managed-PR review lane reaches the collaborator-permission
+        // lookup (the first gh call) fastest.
+        block: routeStep.match(/run: \|-\n([\s\S]*)$/)?.[1],
+        env: {
+          EVENT_NAME: 'pull_request_review',
+          REPO: 'QwenLM/qwen-code',
+          PR_BASE_REF: 'main',
+          PR_HEAD_REPO: 'QwenLM/qwen-code',
+          PR_AUTHOR: 'qwen-code-dev-bot',
+          AUTOFIX_BOT: 'qwen-code-dev-bot',
+          REVIEW_BOT: 'qwen-code-ci-bot',
+          SENDER_LOGIN: 'qqqys',
+        },
+      },
+      {
+        name: 'review-scan',
+        // A forced PR reaches `gh pr view` through read_forced_pr_meta.
+        block: reviewScanJob.match(
+          /- name: 'Scan for PRs with new feedback'[\s\S]*?run: \|-\n([\s\S]*?)(?=\n {6}- name: ')/,
+        )?.[1],
+        env: {
+          EVENT_NAME: 'schedule',
+          FORCED_PR: '1234',
+          REPO: 'QwenLM/qwen-code',
+          GITHUB_TOKEN: 'pat',
+        },
+      },
+    ];
+    for (const { name, block, env } of cases) {
+      expect(block, name).toBeTruthy();
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-ghcfg-'));
+      try {
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        writeFileSync(
+          join(bin, 'mktemp'),
+          [
+            '#!/bin/bash',
+            'for a in "$@"; do',
+            '  case "$a" in *autofix-gh-config*) echo "mktemp: simulated failure: $a" >&2; exit 1 ;; esac',
+            'done',
+            `exec '${realMktemp}' "$@"`,
+            '',
+          ].join('\n'),
+        );
+        const callsFile = join(dir, 'gh-calls');
+        writeFileSync(
+          join(bin, 'gh'),
+          `#!/bin/bash\nprintf '%s\\n' "$*" >> '${callsFile}'\nexit 0\n`,
+        );
+        chmodSync(join(bin, 'mktemp'), 0o755);
+        chmodSync(join(bin, 'gh'), 0o755);
+        const proc = spawnSync(
+          'bash',
+          [
+            '-e',
+            '-o',
+            'pipefail',
+            '-c',
+            // The scan's forced-PR retry loop sleeps between attempts on the
+            // mutant path; keep the probe fast without touching the block.
+            `sleep() { :; }\n${block.replace(/^ {10}/gm, '')}`,
+          ],
+          {
+            env: {
+              PATH: `${bin}:${process.env.PATH}`,
+              RUNNER_TEMP: dir,
+              WORKDIR: join(dir, 'workdir'),
+              GITHUB_OUTPUT: join(dir, 'github-output'),
+              ...env,
+            },
+            encoding: 'utf8',
+          },
+        );
+        expect(proc.stdout, name).toContain(
+          '::error::could not create gh config dir',
+        );
+        expect(proc.status, name).not.toBe(0);
+        expect(
+          existsSync(callsFile),
+          `${name} called gh after a failed gh-config mktemp`,
+        ).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 
   it('runs both verification gates under a throwaway global git config', () => {
@@ -11394,6 +11792,142 @@ exit 1
     expect(reviewVerificationGateStep).not.toContain(
       'bash .github/scripts/run-autofix-review-verification.sh',
     );
+    // The gate launches through an env -i clean child with a SANCTIONED
+    // allowlist (R5-1): every variable the gate's own build/test checks need
+    // must be passed, and the step-pinned CI=true is one of them — without
+    // it the gate's checks run with inverted CI semantics and the 18
+    // deliberately-skipped TUI-input tests un-skip inside the gate (one flakes
+    // ~5s, reject_fix fires retryable on a fix the PR's own CI passes green).
+    // Pin the launch STRUCTURALLY — one verbatim adjacency chain from the
+    // LD_* prefix through the digest-verified script, every entry in order
+    // with its exact value — not as text tokens: shell edits that preserve
+    // token text (a commented-out entry, a dropped `\`, an =-less operand, a
+    // quote suffix, an entry smuggled behind a `bash --norc` value, the
+    // launch head moved into a comment) each broke the child's isolation
+    // while every token-level pin stayed green (R2-1). Anchoring the chain
+    // on the LD_* prefix pins the one channel env -i cannot block; the
+    // body-side unset and PATH export are pinned with it (R3-1, R2-2). By
+    // themselves they do NOT protect the pre-launch digest check, which
+    // runs in this step's own bash: startup-time channels — an LD_*
+    // library mapped before line 1, a BASH_FUNC function import, a
+    // path-variable redirection of the checked file — are closed by the
+    // step-level env pins and the absolute digest path below (R6-2, R6-3,
+    // R6-4). The shapes AROUND the chain
+    // are closed by pinning the run body's whole statement list with
+    // comments stripped: a prefix command word that demotes the whole chain
+    // to one command's argv (the gate never executes and a forged outcome
+    // survives), a command appended or inserted around the launch, a
+    // demotion of the pinned block into a never-run arm, a commented-out or
+    // relocated statement — each adds, drops, reorders, or renames a
+    // statement here (R4-2, R4-3, R4-4). Within the chain, separators allow
+    // only bash whitespace — space/tab after the continuation newline: JS
+    // `\s` also matches a blank line, which splits the chain into two
+    // commands (the orphaned env -i prints and exits 0 while the rest runs
+    // with the FULL step environment), and NBSP/U+2028, which glue into the
+    // next operand and rename it. Blank lines filter out of the statement
+    // list too, so only this pin closes the blank-line split; lines that
+    // carry NBSP/U+2028 instead fail the statement list's exact match,
+    // whose ASCII-only strip keeps them visible (R4-1, R6-1).
+    const gateLaunchTokens = [
+      'LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH=',
+      '/usr/bin/env -i',
+      'PATH="${TRUSTED_PATH}"',
+      'HOME="${HOME}"',
+      'RUNNER_TEMP="${RUNNER_TEMP}"',
+      'WORKDIR="${WORKDIR}"',
+      'BRANCH="${BRANCH}"',
+      'GITHUB_OUTPUT="${GITHUB_OUTPUT}"',
+      'CI="${CI:-true}"',
+      'KISS_AUDIT="${KISS_AUDIT:-false}"',
+      'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
+      'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+    ];
+    const gateLaunchPin = new RegExp(
+      gateLaunchTokens
+        .map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join(' \\\\\n[ \\t]*'),
+    );
+    // The digest check executes in the PARENT shell before the clean child
+    // exists. Its binaries are absolute paths and its inputs step-level
+    // pins, because ANY bare command word in the body — echo, export, or
+    // unset alike — is shadowed by $GITHUB_ENV-planted BASH_FUNC functions
+    // imported at bash startup (R6-4), and a shadowed in-shell pin arms a
+    // DEBUG trap that swaps the staged runner AFTER the digest passes and
+    // BEFORE the launch executes it (R8-1): the body carries no pin
+    // statement of its own, so the pinned list is exactly the digest line
+    // and the launch. The digest line is pinned whole and per step — a
+    // workflow-wide count accepts relocation out of the gates, and
+    // `|| true` accepts a digest mismatch under bash -e (R4-3, the
+    // resanitize sibling's doctrine).
+    const gateDigestCheck =
+      '/usr/bin/echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | /usr/bin/sha256sum -c - > /dev/null';
+    const gateBodyStatements = [
+      gateDigestCheck,
+      ...gateLaunchTokens.map((token, index) =>
+        index < gateLaunchTokens.length - 1 ? `${token} \\` : token,
+      ),
+    ];
+    // The review gate additionally kills the round heartbeat FIRST — it is
+    // the first step that runs branch code on the host, and the loop holds
+    // the bot PAT (af-149). Parent-shell statements under the same
+    // doctrine: ABSOLUTE-PATH-ONLY command words (this block runs in the
+    // gate's outer shell, where a BASH_FUNC_builtin%% plant shadows the
+    // `builtin` keyword itself — R10-1; `builtin kill` is sound only
+    // inside finalize's env -i clean child), step-level pin as the kill
+    // target, nothing executable read from disk — and the lifecycle
+    // confirmation's parse is SYNTAX-ONLY plus /usr/bin/cat for the same
+    // reason. The repair gate does not repeat it — the loop is already
+    // dead by then.
+    const heartbeatKillStatements = [
+      '/usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true',
+      // Lifecycle confirmation before any signal: the pid recorded at
+      // launch can be REUSED by the time a kill lands, and a blind kill
+      // would TERM an unrelated process, its group and session
+      // (probe-verified). A reused pid carries a different
+      // /proc/<pid>/stat start time and a dead pid has no stat, so a
+      // failed check kills nothing.
+      'HB_FIELDS=()',
+      'if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then',
+      'HB_STAT="$(/usr/bin/cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=\'\'',
+      'HB_REST="${HB_STAT##*) }"',
+      'HB_FIELDS=(${HB_REST})',
+      'fi',
+      'if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then',
+      '/usr/bin/kill -- -"${HB_PID}" 2> /dev/null || true',
+      '/usr/bin/kill "${HB_PID}" 2> /dev/null || true',
+      // The mid-tick cover: each tick's `timeout 60 gh` subtree runs in
+      // its OWN process group (coreutils timeout default) under the
+      // loop's setsid session, so the group+pid kills above miss a kill
+      // landing mid-tick and leave it holding the PAT for up to 60s.
+      '/usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true',
+      'fi',
+    ];
+    // Bash breaks words only on ASCII space/tab/newline: strip ASCII
+    // whitespace only, so a line carrying any other "whitespace" (NBSP,
+    // U+2000–U+200A, U+2028, ...) keeps it and fails the exact match.
+    // JS trim() stripped those too, classifying `\u00a0# x` as a comment
+    // while bash executed it — a smuggled statement invisible to
+    // every other pin here (R6-1).
+    const gateBodyStatementsOf = (stepText) =>
+      stepText
+        .slice(stepText.indexOf('run: |-') + 'run: |-'.length)
+        .split('\n')
+        .map((line) => line.replace(/^[ \t]+|[ \t]+$/g, ''))
+        .filter((line) => line !== '' && !line.startsWith('#'));
+    expect(gateBodyStatementsOf('run: |-\n  \u00a0# x')).toEqual(['\u00a0# x']);
+    for (const [step, bodyStatements] of [
+      [
+        reviewVerificationGateStep,
+        [...heartbeatKillStatements, ...gateBodyStatements],
+      ],
+      [repairVerificationGateStep, gateBodyStatements],
+    ]) {
+      expect(step).toMatch(gateLaunchPin);
+      expect(gateBodyStatementsOf(step)).toEqual(bodyStatements);
+      // Exactly one launch per step: a second, unpinned `bash --norc` (the
+      // pinned block demoted into a never-run arm) must fail here (R2-1).
+      expect((step.match(/bash --norc/g) ?? []).length).toBe(1);
+    }
     expect(
       reviewVerifyGate.indexOf(
         'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
@@ -12139,7 +12673,7 @@ exit 1
           workspaces: [
             'packages/*',
             'packages/channels/*',
-            '!packages/desktop',
+            '!packages/desktop-shell',
           ],
         }),
       );
@@ -12148,7 +12682,7 @@ exit 1
         'packages/brandnew', // a new top-level workspace the branch adds
         'packages/channels/base',
         'packages/channels/newchannel', // a new nested workspace the branch adds
-        'packages/desktop', // excluded by the ! glob
+        'packages/desktop-shell', // excluded by the ! glob
         'packages/cli/src/commands/examples/starter', // fixture, NOT a workspace
       ]) {
         mkdirSync(join(dir, pkg), { recursive: true });
@@ -12160,7 +12694,7 @@ exit 1
           'packages/cli/src/commands/examples/starter/src/index.ts', // -> packages/cli
           'packages/brandnew/src/z.ts', // -> packages/brandnew (branch-added)
           'packages/channels/newchannel/src/y.ts', // -> newchannel (branch-added nested)
-          'packages/desktop/src/d.ts', // excluded workspace -> dropped
+          'packages/desktop-shell/src/d.ts', // excluded workspace -> dropped
           'packages/sdk-python/foo.py', // no manifest -> dropped
           'README.md', // outside packages/ -> dropped
         ].join('\n') + '\n';
@@ -12176,7 +12710,7 @@ exit 1
       ]);
       expect(out).not.toContain('examples/starter'); // fixture never owns
       expect(out).not.toContain('sdk-python');
-      expect(out).not.toContain('packages/desktop'); // ! negation honoured
+      expect(out).not.toContain('packages/desktop-shell'); // ! negation honoured
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -13008,7 +13542,7 @@ exit 1
       // Delimited tokens, not substrings: match `NAME=value` up to the line
       // continuation, so a value swap or an extra entry is visible.
       const assignments = (
-        argList.match(/[A-Z_][A-Z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
+        argList.match(/[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
       ).map((m) => m.trim());
       const passed = assignments.map((m) => m.split('=')[0]);
       // Sorted multiset, not a Set: a symmetric duplicate entry is exactly
@@ -13098,9 +13632,11 @@ exit 1
       // the throwaway dir and falls back to the shared ~/.config/gh.
       expect(step).toMatch(/\n\s*export GH_CONFIG_DIR\n/);
       // R8-5: the captured output is re-emitted, so the child's warnings
-      // actually reach the log (deleting both loops was invisible).
+      // actually reach the log (deleting both loops was invisible). The
+      // re-emit neutralizes BOTH command syntaxes (`##[` parses mid-line
+      // too — #9761) with the family's canonical two-expression sed.
       expect(step).toMatch(
-        /while IFS= read -r _upsert_line; do[\s\S]*?== __upsert_trusted__\*[\s\S]*?printf '%s\\n' "\$\{_upsert_line#__upsert_trusted__\}"[\s\S]*?printf '%s\\n' "\$\{_upsert_line\/\/::\/;;\}"[\s\S]*?done <<< "\$\{UPSERT_OUT\}"/,
+        /while IFS= read -r _upsert_line; do[\s\S]*?== __upsert_trusted__\*[\s\S]*?printf '%s\\n' "\$\{_upsert_line#__upsert_trusted__\}"[\s\S]*?printf '%s\\n' "\$\{_upsert_line\}" \| sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g'[\s\S]*?done <<< "\$\{UPSERT_OUT\}"/,
       );
       // Ordering: the script executes INSIDE the clean child, after the
       // launch — a relocation outside it must fail here.
@@ -13108,10 +13644,12 @@ exit 1
       const launchIdx = argStart;
       expect(execIdx).toBeGreaterThan(launchIdx);
     }
-    // Four clean children: the two deferred-findings upserts plus the two
+    // Five clean children: the two deferred-findings upserts, the two
     // verification-gate launches (the gate runs after the agent step's
-    // branch code, so its bash must inherit nothing at all).
-    expect(workflowWithScripts.split('/usr/bin/env -i \\').length - 1).toBe(4);
+    // branch code, so its bash must inherit nothing at all), and the
+    // finalize step's PAT-touching body (R9-1: BASH_FUNC imports close
+    // only inside an env -i child).
+    expect(workflowWithScripts.split('/usr/bin/env -i \\').length - 1).toBe(5);
     // R5-6: the failure-path child is near-verbatim of run_deferred_upsert's
     // child — tie their shared security scaffold together so drift in one is
     // caught. Compare the allow-list + prelude (everything up to where the
@@ -13203,11 +13741,17 @@ exit 1
     expect(reviewAddressJob).toContain(
       'comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff',
     );
-    // R9-11: that dump prints agent-written files, so it neutralizes `::`
-    // like every other echo of them (a line-start `::error::` in the raw file
-    // would otherwise be a workflow command).
+    // R9-11: that dump prints agent-written files, so it neutralizes BOTH
+    // workflow-command syntaxes like every other echo of them — a line-start
+    // `::error::` AND `##[` even mid-line (a quoted `##[add-matcher]` in the
+    // raw file fails the step; measured on #9761, where the dump re-echoed
+    // the same feedback that already killed prepare).
     expect(reviewAddressJob).toMatch(
-      /=============== \$\{f\} ==============="\n(?:\s*#[^\n]*\n)*\s*sed 's\/::\/;;\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
+      /=============== \$\{f\} ==============="\n(?:\s*#[^\n]*\n)*\s*sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
+    );
+    // The issue-lane dump loop carries the same neutralization.
+    expect(showRunArtifactsStep).toMatch(
+      /sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
     );
     expect(reviewAddressJob).toContain(
       '"${WORKDIR}/deferred-findings.json" \\',
@@ -13277,9 +13821,10 @@ exit 1
       'mv "${WORKDIR}/deferred-findings.json" \\\n                  "${WORKDIR}/deferred-findings.unmerged.json"',
     );
     // R8-3: that branch discards THIS run's set, so it dumps it first —
-    // `::` neutralized, like every other echo of agent-written content.
+    // both command syntaxes neutralized, like every other echo of
+    // agent-written content (`##[` parses mid-line too — #9761).
     expect(repairStep).toMatch(
-      /could not merge carried deferrals[\s\S]*?head -c 4000 "\$\{WORKDIR\}\/deferred-findings\.json" \| sed 's\/::\/;;\/g'/,
+      /could not merge carried deferrals[\s\S]*?head -c 4000 "\$\{WORKDIR\}\/deferred-findings\.json" \| sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g'/,
     );
     expect(reviewAddressJob).toContain(
       'mv "${WORKDIR}/deferred-findings.json" \\\n                "${WORKDIR}/deferred-findings.carry.json"',
@@ -13720,17 +14265,22 @@ exit 1
     expect(builderFail.calls).not.toContain('-f title=');
     // R7-2: an abort is PERMANENT for these findings (watermark + the next
     // run's workspace reset), so every abort path says LOST and dumps the raw
-    // deferrals for manual recovery — with `::` neutralized, since the dump is
-    // agent-influenced and a raw `::` at line start is a workflow command.
+    // deferrals for manual recovery — with both workflow-command syntaxes
+    // neutralized, since the dump is agent-influenced. `::` parses at line
+    // start; the `##[` payload below is the #9761 vector and parses MID-line
+    // (the legacy syntax), so `::`-only neutralization is not enough.
     const lostDump = runUpsert({
       findings:
-        '[{"id":7,"reason":"r","path":5},{"id":8,"reason":"::error::forged"}]',
+        '[{"id":7,"reason":"r","path":5},{"id":8,"reason":"::error::forged"},' +
+        '{"id":9,"reason":"##[add-matcher]forged"}]',
     });
     expect(lostDump.out).toContain('are LOST');
     expect(lostDump.out).toContain('watermark-gated');
     expect(lostDump.out).toContain('"id":8');
     expect(lostDump.out).toContain(';;error;;forged');
     expect(lostDump.out).not.toContain('::error::forged');
+    expect(lostDump.out).toContain('##［add-matcher]forged');
+    expect(lostDump.out).not.toContain('##[add-matcher]');
     expect(lostDump.calls).toBe('');
     // R7-1: a review-body / issue-level finding is deferrable, anchored under
     // its own prefix so id spaces cannot collide across sources.
@@ -14118,420 +14668,427 @@ exit 1
     });
     expect(forgedErr.out).toContain(';;error;;forged');
     expect(forgedErr.out).not.toContain('::error::forged');
-  });
+  }, 30000);
 
-  it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {
-    // Ends at the FINAL assert: the conflict push-boundary refusal sits
-    // between it and the verified_head write and is not bite machinery.
-    const block = reviewVerificationRunner.match(
-      /(# Bite check:[\s\S]*?)\nassert_verification_tree\n/,
-    )?.[1];
-    expect(block).toBeTruthy();
-    const run = (
-      build,
-      { runnerExit, runnerScript, resolverLines, workdir, prelude = '' },
-    ) => {
-      const { dir, git } = validityFixture(build);
-      const tools = mkdtempSync(join(tmpdir(), 'autofix-validity-tools-'));
-      // Stub owning-package resolver and bite runner — the block treats the
-      // runner as an opaque command. A fixed exit code drives the semantic
-      // cases; a runnerScript drives the tree-state-proving cases.
-      writeFileSync(
-        join(tools, 'resolve-owning-packages.sh'),
-        `cat > /dev/null\nprintf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
-      );
-      writeFileSync(
-        join(tools, 'bite-runner'),
-        runnerScript ??
-          `#!/usr/bin/env bash\necho "bite-runner: $*" >&2\nexit ${runnerExit}\n`,
-      );
-      chmodSync(join(tools, 'bite-runner'), 0o755);
-      // WORKDIR fixtures: resolved-comments.txt + rc.json/rv.json make the
-      // round a DEFECT-CLAIM round (it resolves a Critical / CR finding).
-      for (const [name, content] of Object.entries(workdir ?? {})) {
-        writeFileSync(join(tools, name), content);
-      }
-      const res = spawnSync(
-        'bash',
-        [
-          '-c',
-          [
-            'set -eo pipefail',
-            'cd "$1"',
-            'BRANCH=feat',
-            'WORKDIR="$2"',
-            'RUNNER_TEMP="$2"',
-            'GATE_LOG="$2/gate.log"',
-            ': > "$GATE_LOG"',
-            'ROUND_RANGE="origin/feat...feat"',
-            freightHelper(),
-            prelude,
-            'BITE_RUNNER="$2/bite-runner"',
-            'reject_fix() { echo "REJECT:${1}"; exit 1; }',
-            block,
-            'echo SURVIVED',
-          ].join('\n'),
-          'bash',
-          dir,
-          tools,
-        ],
-        { encoding: 'utf8', env: isolatedGitEnv },
-      );
-      expect(res.error).toBeUndefined();
-      const status = git('status', '--porcelain');
-      const head = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
-      const advisoryPath = join(tools, 'gate-advisories.md');
-      const advisory = existsSync(advisoryPath)
-        ? readFileSync(advisoryPath, 'utf8')
-        : '';
-      const rejectionPath = join(tools, 'gate-rejection.md');
-      const rejection = existsSync(rejectionPath)
-        ? readFileSync(rejectionPath, 'utf8')
-        : '';
-      rmSync(dir, { recursive: true, force: true });
-      rmSync(tools, { recursive: true, force: true });
-      return {
-        out: `${res.stdout}\n${res.stderr}\n[spawn status=${res.status}]`,
-        status,
-        head,
-        advisory,
-        rejection,
-      };
-    };
-    const srcAndTest = {
-      base: ({ write }) => {
-        // The bite runner guard reads the workspace's test script and the
-        // self-import guard reads its name (absent from the test files).
-        write(
-          'packages/cli/package.json',
-          '{"name":"@fixture/cli","scripts":{"test":"vitest run"}}\n',
+  it.skipIf(!hasBashMapfile)(
+    'bite check: rejects a round whose changed tests pass on the pre-round tree',
+    () => {
+      // Ends at the FINAL assert: the conflict push-boundary refusal sits
+      // between it and the verified_head write and is not bite machinery.
+      const block = reviewVerificationRunner.match(
+        /(# Bite check:[\s\S]*?)\nassert_verification_tree\n/,
+      )?.[1];
+      expect(block).toBeTruthy();
+      const run = (
+        build,
+        { runnerExit, runnerScript, resolverLines, workdir, prelude = '' },
+      ) => {
+        const { dir, git } = validityFixture(build);
+        const tools = mkdtempSync(join(tmpdir(), 'autofix-validity-tools-'));
+        // Stub owning-package resolver and bite runner — the block treats the
+        // runner as an opaque command. A fixed exit code drives the semantic
+        // cases; a runnerScript drives the tree-state-proving cases.
+        writeFileSync(
+          join(tools, 'resolve-owning-packages.sh'),
+          `cat > /dev/null\nprintf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
         );
-        write('packages/cli/src/a.ts', 'a\n');
-        write('packages/cli/src/a.test.ts', 't\n');
-      },
-      pr: ({ write }) => write('packages/cli/src/a.ts', 'b\n'),
-      round: ({ write }) => {
-        write('packages/cli/src/a.ts', 'c\n');
-        write('packages/cli/src/a.test.ts', 't2\n');
-      },
-    };
-    // Artifacts that mark the round as resolving a Critical finding.
-    const criticalClaim = {
-      // rc: prefix + CRLF, exactly as SKILL tells the agent to write the
-      // handle and as the other consumers tolerate.
-      'resolved-comments.txt': 'rc:101\r\n',
-      'rc.json': JSON.stringify([
-        { id: 101, body: '**[Critical]** stale owner routes writes' },
-      ]),
-      'rv.json': JSON.stringify([]),
-    };
-    // Defect-claim round + all changed tests green on the pre-round tree =>
-    // the claimed defect does not reproduce => non-retryable rejection.
-    const rejected = run(srcAndTest, {
-      runnerExit: 0,
-      resolverLines: ['packages/cli'],
-      workdir: criticalClaim,
-    });
-    expect(rejected.out).toContain('REJECT:bite check');
-    // The SAME all-green result WITHOUT a defect claim (a refactor pinning
-    // existing behavior, an optional cleanup) is an advisory, not a
-    // rejection — and the tree still comes back clean on the branch.
-    const advisory = run(srcAndTest, {
-      runnerExit: 0,
-      resolverLines: ['packages/cli'],
-    });
-    expect(advisory.out).toContain('SURVIVED');
-    expect(advisory.out).not.toContain('REJECT:');
-    expect(advisory.advisory).toContain('pass on the pre-round tree');
-    expect(advisory.status).toBe('');
-    expect(advisory.head).toBe('feat');
-    // Enforcement needs a RESOLVED Critical: resolving only a Suggestion,
-    // or merely having an unresolved Critical present in rc.json, stays
-    // advisory-grade.
-    for (const workdir of [
-      {
-        'resolved-comments.txt': '303\n',
-        'rc.json': JSON.stringify([
-          { id: 303, body: '**[Suggestion]** rename this helper' },
-          { id: 101, body: '**[Critical]** stale owner routes writes' },
-        ]),
-        'rv.json': JSON.stringify([]),
-      },
-      {
-        'resolved-comments.txt': '999\n',
-        'rc.json': JSON.stringify([
-          { id: 101, body: '**[Critical]** stale owner routes writes' },
-        ]),
-        'rv.json': JSON.stringify([]),
-      },
-    ]) {
-      const soft = run(srcAndTest, {
-        runnerExit: 0,
-        resolverLines: ['packages/cli'],
-        workdir,
-      });
-      expect(soft.out).toContain('SURVIVED');
-      expect(soft.out).not.toContain('REJECT:');
-      expect(soft.advisory).toContain('pass on the pre-round tree');
-    }
-    // A reply resolved inside a Critical-rooted thread is a defect claim,
-    // matching how the feedback renderers classify replies.
-    expect(
-      run(srcAndTest, {
-        runnerExit: 0,
-        resolverLines: ['packages/cli'],
-        workdir: {
-          'resolved-comments.txt': '404\n',
-          'rc.json': JSON.stringify([
-            { id: 101, body: '**[Critical]** stale owner routes writes' },
-            { id: 404, body: 'fixed here', in_reply_to_id: 101 },
-          ]),
-          'rv.json': JSON.stringify([]),
-        },
-      }).out,
-    ).toContain('REJECT:bite check');
-    // A Critical anchored ON a test file is a test-side claim: all-green is
-    // its expected shape, so it demotes to the advisory arm...
-    const testSide = run(srcAndTest, {
-      runnerExit: 0,
-      resolverLines: ['packages/cli'],
-      workdir: {
-        'resolved-comments.txt': 'rc:101\n',
-        'rc.json': JSON.stringify([
-          {
-            id: 101,
-            path: 'packages/cli/src/a.test.ts',
-            body: '**[Critical]** this test asserts the wrong behavior',
-          },
-        ]),
-        'rv.json': JSON.stringify([]),
-      },
-    });
-    expect(testSide.out).toContain('SURVIVED');
-    expect(testSide.out).not.toContain('REJECT:');
-    expect(testSide.advisory).toContain('test-side defect claim');
-    // ...but only RESOLVED CRITICAL threads vote: a source-file Suggestion
-    // resolved alongside must not break the demotion.
-    expect(
-      run(srcAndTest, {
-        runnerExit: 0,
-        resolverLines: ['packages/cli'],
-        workdir: {
-          'resolved-comments.txt': '101\n303\n',
-          'rc.json': JSON.stringify([
-            {
-              id: 101,
-              path: 'packages/cli/src/a.test.ts',
-              body: '**[Critical]** this test asserts the wrong behavior',
-            },
-            {
-              id: 303,
-              path: 'packages/cli/src/a.ts',
-              body: '**[Suggestion]** rename this helper',
-            },
-          ]),
-          'rv.json': JSON.stringify([]),
-        },
-      }).out,
-    ).not.toContain('REJECT:');
-    // A Critical anchored on SOURCE keeps full enforcement even when a
-    // test-side Critical is resolved in the same round.
-    expect(
-      run(srcAndTest, {
-        runnerExit: 0,
-        resolverLines: ['packages/cli'],
-        workdir: {
-          'resolved-comments.txt': '101\n102\n',
-          'rc.json': JSON.stringify([
-            {
-              id: 101,
-              path: 'packages/cli/src/a.test.ts',
-              body: '**[Critical]** this test asserts the wrong behavior',
-            },
-            {
-              id: 102,
-              path: 'packages/cli/src/a.ts',
-              body: '**[Critical]** stale owner routes writes',
-            },
-          ]),
-          'rv.json': JSON.stringify([]),
-        },
-      }).out,
-    ).toContain('REJECT:bite check');
-    // TESTSIDE demotion honors the review-STATE arm too: a CR-attached
-    // comment on a test path demotes like a body-tagged Critical does.
-    const crTestSide = run(srcAndTest, {
-      runnerExit: 0,
-      resolverLines: ['packages/cli'],
-      workdir: {
-        'resolved-comments.txt': '505\n',
-        'rc.json': JSON.stringify([
-          {
-            id: 505,
-            path: 'packages/cli/src/a.test.ts',
-            body: 'this test asserts the wrong behavior',
-            pull_request_review_id: 9,
-          },
-        ]),
-        'rv.json': JSON.stringify([{ id: 9, state: 'CHANGES_REQUESTED' }]),
-      },
-    });
-    expect(crTestSide.out).not.toContain('REJECT:');
-    expect(crTestSide.advisory).toContain('test-side defect claim');
-    // Resolving a comment attached to a CHANGES_REQUESTED review enforces
-    // the same way a Critical tag does.
-    expect(
-      run(srcAndTest, {
-        runnerExit: 0,
-        resolverLines: ['packages/cli'],
-        workdir: {
-          'resolved-comments.txt': '202\n',
-          'rc.json': JSON.stringify([
-            { id: 202, body: 'null branch crashes', pull_request_review_id: 9 },
-          ]),
-          'rv.json': JSON.stringify([{ id: 9, state: 'CHANGES_REQUESTED' }]),
-        },
-      }).out,
-    ).toContain('REJECT:bite check');
-    // Any failure on the pre-round tree = the tests bite => round proceeds,
-    // and the verification tree is restored to the branch, clean.
-    const bit = run(srcAndTest, {
-      runnerExit: 1,
-      resolverLines: ['packages/cli'],
-      workdir: criticalClaim,
-    });
-    expect(bit.out).toContain('bite confirmed');
-    expect(bit.out).toContain('SURVIVED');
-    expect(bit.status).toBe('');
-    expect(bit.head).toBe('feat');
-    // Tree-state proof: the runner inspects the ACTUAL checkout instead of
-    // returning a fixed code. It fails (bites) only when it sees PRE-ROUND
-    // source ('b') alongside the ROUND's test ('t2') — passing proves the
-    // detach reverted the source AND the overlay delivered the round's test.
-    const treeProof = run(srcAndTest, {
-      runnerScript: [
-        '#!/usr/bin/env bash',
-        'grep -qx b packages/cli/src/a.ts || exit 0',
-        'grep -qx t2 packages/cli/src/a.test.ts || exit 0',
-        'exit 1',
-      ].join('\n'),
-      resolverLines: ['packages/cli'],
-      workdir: criticalClaim,
-    });
-    expect(treeProof.out).toContain('bite confirmed');
-    // Negative control: a runner that bites only on ROUND source ('c')
-    // never sees it on the detached tree — all-green, so the defect-claim
-    // round is rejected, proving the detach actually reverted the source.
-    const roundLeak = run(srcAndTest, {
-      runnerScript: [
-        '#!/usr/bin/env bash',
-        'grep -qx c packages/cli/src/a.ts && exit 1',
-        'exit 0',
-      ].join('\n'),
-      resolverLines: ['packages/cli'],
-      workdir: criticalClaim,
-    });
-    expect(roundLeak.out).toContain('REJECT:bite check');
-    // A cross-package round skips (dist confound), it never rejects.
-    const skipped = run(srcAndTest, {
-      runnerExit: 0,
-      resolverLines: ['packages/cli', 'packages/core'],
-      workdir: criticalClaim,
-    });
-    expect(skipped.out).toContain('bite check skipped');
-    expect(skipped.out).toContain('SURVIVED');
-    // A test-only round (no source change) is coverage addition, not a
-    // defect claim — no bite requirement.
-    const coverageOnly = run(
-      {
+        writeFileSync(
+          join(tools, 'bite-runner'),
+          runnerScript ??
+            `#!/usr/bin/env bash\necho "bite-runner: $*" >&2\nexit ${runnerExit}\n`,
+        );
+        chmodSync(join(tools, 'bite-runner'), 0o755);
+        // WORKDIR fixtures: resolved-comments.txt + rc.json/rv.json make the
+        // round a DEFECT-CLAIM round (it resolves a Critical / CR finding).
+        for (const [name, content] of Object.entries(workdir ?? {})) {
+          writeFileSync(join(tools, name), content);
+        }
+        const res = spawnSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -eo pipefail',
+              'cd "$1"',
+              'BRANCH=feat',
+              'WORKDIR="$2"',
+              'RUNNER_TEMP="$2"',
+              'GATE_LOG="$2/gate.log"',
+              ': > "$GATE_LOG"',
+              'ROUND_RANGE="origin/feat...feat"',
+              freightHelper(),
+              prelude,
+              'BITE_RUNNER="$2/bite-runner"',
+              'reject_fix() { echo "REJECT:${1}"; exit 1; }',
+              block,
+              'echo SURVIVED',
+            ].join('\n'),
+            'bash',
+            dir,
+            tools,
+          ],
+          { encoding: 'utf8', env: isolatedGitEnv },
+        );
+        expect(res.error).toBeUndefined();
+        const status = git('status', '--porcelain');
+        const head = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
+        const advisoryPath = join(tools, 'gate-advisories.md');
+        const advisory = existsSync(advisoryPath)
+          ? readFileSync(advisoryPath, 'utf8')
+          : '';
+        const rejectionPath = join(tools, 'gate-rejection.md');
+        const rejection = existsSync(rejectionPath)
+          ? readFileSync(rejectionPath, 'utf8')
+          : '';
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(tools, { recursive: true, force: true });
+        return {
+          out: `${res.stdout}\n${res.stderr}\n[spawn status=${res.status}]`,
+          status,
+          head,
+          advisory,
+          rejection,
+        };
+      };
+      const srcAndTest = {
         base: ({ write }) => {
-          write('packages/cli/src/a.ts', 'a\n');
-          write('packages/cli/src/a.test.ts', 't\n');
-        },
-        pr: () => {},
-        round: ({ write }) => write('packages/cli/src/a.test.ts', 't-more\n'),
-      },
-      {
-        runnerExit: 0,
-        resolverLines: ['packages/cli'],
-        workdir: criticalClaim,
-      },
-    );
-    expect(coverageOnly.out).toContain('SURVIVED');
-    expect(coverageOnly.out).not.toContain('REJECT:');
-    expect(coverageOnly.advisory).toContain('test-only changes');
-
-    // Restore-failure crash contract: when the tree cannot come back to
-    // the branch, the gate crashes VERDICT-LESS — rejection document
-    // written, exit 1, and reject_fix (which would advance the watermark)
-    // never runs.
-    const crash = run(srcAndTest, {
-      runnerScript: [
-        '#!/usr/bin/env bash',
-        'git update-ref -d refs/heads/feat',
-        'exit 0',
-      ].join('\n'),
-      resolverLines: ['packages/cli'],
-      workdir: criticalClaim,
-    });
-    expect(crash.out).toContain(
-      'could not restore the verification tree after the bite check',
-    );
-    expect(crash.out).toContain('[spawn status=1]');
-    expect(crash.out).not.toContain('REJECT:');
-    expect(crash.rejection).toContain('could not restore');
-
-    // Append order: a shrink advisory (truncating write) followed by the
-    // bite advisory (append) must leave BOTH in the report file.
-    const advisoryBlock2 = reviewVerificationRunner.match(
-      /(TEST_PATHSPEC=\(':\(glob\)[\s\S]*?advisory written for the report' \| tee -a "\$\{GATE_LOG\}"\nfi)/,
-    )?.[1];
-    expect(advisoryBlock2).toBeTruthy();
-    const combined = run(
-      {
-        base: ({ write }) => {
+          // The bite runner guard reads the workspace's test script and the
+          // self-import guard reads its name (absent from the test files).
           write(
             'packages/cli/package.json',
             '{"name":"@fixture/cli","scripts":{"test":"vitest run"}}\n',
           );
           write('packages/cli/src/a.ts', 'a\n');
           write('packages/cli/src/a.test.ts', 't\n');
-          write(
-            'packages/cli/src/big.test.ts',
-            `${Array.from({ length: 40 }, (_, i) => `b${i}`).join('\n')}\n`,
-          );
         },
         pr: ({ write }) => write('packages/cli/src/a.ts', 'b\n'),
-        round: ({ write, dir }) => {
+        round: ({ write }) => {
           write('packages/cli/src/a.ts', 'c\n');
           write('packages/cli/src/a.test.ts', 't2\n');
-          rmSync(join(dir, 'packages/cli/src/big.test.ts'));
         },
-      },
-      {
+      };
+      // Artifacts that mark the round as resolving a Critical finding.
+      const criticalClaim = {
+        // rc: prefix + CRLF, exactly as SKILL tells the agent to write the
+        // handle and as the other consumers tolerate.
+        'resolved-comments.txt': 'rc:101\r\n',
+        'rc.json': JSON.stringify([
+          { id: 101, body: '**[Critical]** stale owner routes writes' },
+        ]),
+        'rv.json': JSON.stringify([]),
+      };
+      // Defect-claim round + all changed tests green on the pre-round tree =>
+      // the claimed defect does not reproduce => non-retryable rejection.
+      const rejected = run(srcAndTest, {
         runnerExit: 0,
         resolverLines: ['packages/cli'],
-        prelude: advisoryBlock2,
-      },
-    );
-    expect(combined.advisory).toContain('test coverage shrank');
-    expect(combined.advisory).toContain('pass on the pre-round tree');
+        workdir: criticalClaim,
+      });
+      expect(rejected.out).toContain('REJECT:bite check');
+      // The SAME all-green result WITHOUT a defect claim (a refactor pinning
+      // existing behavior, an optional cleanup) is an advisory, not a
+      // rejection — and the tree still comes back clean on the branch.
+      const advisory = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+      });
+      expect(advisory.out).toContain('SURVIVED');
+      expect(advisory.out).not.toContain('REJECT:');
+      expect(advisory.advisory).toContain('pass on the pre-round tree');
+      expect(advisory.status).toBe('');
+      expect(advisory.head).toBe('feat');
+      // Enforcement needs a RESOLVED Critical: resolving only a Suggestion,
+      // or merely having an unresolved Critical present in rc.json, stays
+      // advisory-grade.
+      for (const workdir of [
+        {
+          'resolved-comments.txt': '303\n',
+          'rc.json': JSON.stringify([
+            { id: 303, body: '**[Suggestion]** rename this helper' },
+            { id: 101, body: '**[Critical]** stale owner routes writes' },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+        {
+          'resolved-comments.txt': '999\n',
+          'rc.json': JSON.stringify([
+            { id: 101, body: '**[Critical]** stale owner routes writes' },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      ]) {
+        const soft = run(srcAndTest, {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          workdir,
+        });
+        expect(soft.out).toContain('SURVIVED');
+        expect(soft.out).not.toContain('REJECT:');
+        expect(soft.advisory).toContain('pass on the pre-round tree');
+      }
+      // A reply resolved inside a Critical-rooted thread is a defect claim,
+      // matching how the feedback renderers classify replies.
+      expect(
+        run(srcAndTest, {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          workdir: {
+            'resolved-comments.txt': '404\n',
+            'rc.json': JSON.stringify([
+              { id: 101, body: '**[Critical]** stale owner routes writes' },
+              { id: 404, body: 'fixed here', in_reply_to_id: 101 },
+            ]),
+            'rv.json': JSON.stringify([]),
+          },
+        }).out,
+      ).toContain('REJECT:bite check');
+      // A Critical anchored ON a test file is a test-side claim: all-green is
+      // its expected shape, so it demotes to the advisory arm...
+      const testSide = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': 'rc:101\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      });
+      expect(testSide.out).toContain('SURVIVED');
+      expect(testSide.out).not.toContain('REJECT:');
+      expect(testSide.advisory).toContain('test-side defect claim');
+      // ...but only RESOLVED CRITICAL threads vote: a source-file Suggestion
+      // resolved alongside must not break the demotion.
+      expect(
+        run(srcAndTest, {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          workdir: {
+            'resolved-comments.txt': '101\n303\n',
+            'rc.json': JSON.stringify([
+              {
+                id: 101,
+                path: 'packages/cli/src/a.test.ts',
+                body: '**[Critical]** this test asserts the wrong behavior',
+              },
+              {
+                id: 303,
+                path: 'packages/cli/src/a.ts',
+                body: '**[Suggestion]** rename this helper',
+              },
+            ]),
+            'rv.json': JSON.stringify([]),
+          },
+        }).out,
+      ).not.toContain('REJECT:');
+      // A Critical anchored on SOURCE keeps full enforcement even when a
+      // test-side Critical is resolved in the same round.
+      expect(
+        run(srcAndTest, {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          workdir: {
+            'resolved-comments.txt': '101\n102\n',
+            'rc.json': JSON.stringify([
+              {
+                id: 101,
+                path: 'packages/cli/src/a.test.ts',
+                body: '**[Critical]** this test asserts the wrong behavior',
+              },
+              {
+                id: 102,
+                path: 'packages/cli/src/a.ts',
+                body: '**[Critical]** stale owner routes writes',
+              },
+            ]),
+            'rv.json': JSON.stringify([]),
+          },
+        }).out,
+      ).toContain('REJECT:bite check');
+      // TESTSIDE demotion honors the review-STATE arm too: a CR-attached
+      // comment on a test path demotes like a body-tagged Critical does.
+      const crTestSide = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '505\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 505,
+              path: 'packages/cli/src/a.test.ts',
+              body: 'this test asserts the wrong behavior',
+              pull_request_review_id: 9,
+            },
+          ]),
+          'rv.json': JSON.stringify([{ id: 9, state: 'CHANGES_REQUESTED' }]),
+        },
+      });
+      expect(crTestSide.out).not.toContain('REJECT:');
+      expect(crTestSide.advisory).toContain('test-side defect claim');
+      // Resolving a comment attached to a CHANGES_REQUESTED review enforces
+      // the same way a Critical tag does.
+      expect(
+        run(srcAndTest, {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          workdir: {
+            'resolved-comments.txt': '202\n',
+            'rc.json': JSON.stringify([
+              {
+                id: 202,
+                body: 'null branch crashes',
+                pull_request_review_id: 9,
+              },
+            ]),
+            'rv.json': JSON.stringify([{ id: 9, state: 'CHANGES_REQUESTED' }]),
+          },
+        }).out,
+      ).toContain('REJECT:bite check');
+      // Any failure on the pre-round tree = the tests bite => round proceeds,
+      // and the verification tree is restored to the branch, clean.
+      const bit = run(srcAndTest, {
+        runnerExit: 1,
+        resolverLines: ['packages/cli'],
+        workdir: criticalClaim,
+      });
+      expect(bit.out).toContain('bite confirmed');
+      expect(bit.out).toContain('SURVIVED');
+      expect(bit.status).toBe('');
+      expect(bit.head).toBe('feat');
+      // Tree-state proof: the runner inspects the ACTUAL checkout instead of
+      // returning a fixed code. It fails (bites) only when it sees PRE-ROUND
+      // source ('b') alongside the ROUND's test ('t2') — passing proves the
+      // detach reverted the source AND the overlay delivered the round's test.
+      const treeProof = run(srcAndTest, {
+        runnerScript: [
+          '#!/usr/bin/env bash',
+          'grep -qx b packages/cli/src/a.ts || exit 0',
+          'grep -qx t2 packages/cli/src/a.test.ts || exit 0',
+          'exit 1',
+        ].join('\n'),
+        resolverLines: ['packages/cli'],
+        workdir: criticalClaim,
+      });
+      expect(treeProof.out).toContain('bite confirmed');
+      // Negative control: a runner that bites only on ROUND source ('c')
+      // never sees it on the detached tree — all-green, so the defect-claim
+      // round is rejected, proving the detach actually reverted the source.
+      const roundLeak = run(srcAndTest, {
+        runnerScript: [
+          '#!/usr/bin/env bash',
+          'grep -qx c packages/cli/src/a.ts && exit 1',
+          'exit 0',
+        ].join('\n'),
+        resolverLines: ['packages/cli'],
+        workdir: criticalClaim,
+      });
+      expect(roundLeak.out).toContain('REJECT:bite check');
+      // A cross-package round skips (dist confound), it never rejects.
+      const skipped = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli', 'packages/core'],
+        workdir: criticalClaim,
+      });
+      expect(skipped.out).toContain('bite check skipped');
+      expect(skipped.out).toContain('SURVIVED');
+      // A test-only round (no source change) is coverage addition, not a
+      // defect claim — no bite requirement.
+      const coverageOnly = run(
+        {
+          base: ({ write }) => {
+            write('packages/cli/src/a.ts', 'a\n');
+            write('packages/cli/src/a.test.ts', 't\n');
+          },
+          pr: () => {},
+          round: ({ write }) => write('packages/cli/src/a.test.ts', 't-more\n'),
+        },
+        {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          workdir: criticalClaim,
+        },
+      );
+      expect(coverageOnly.out).toContain('SURVIVED');
+      expect(coverageOnly.out).not.toContain('REJECT:');
+      expect(coverageOnly.advisory).toContain('test-only changes');
 
-    // Contract pins: the rejection is non-retryable (a repair pass cannot
-    // make a nonexistent defect reproduce), and the report step embeds the
-    // gate-authored advisory file, which is also uploaded as an artifact.
-    expect(reviewVerificationRunner).toContain(
-      "reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'",
-    );
-    expect(pushAndReportStep).toContain('gate-advisories.md');
-    expect(reviewAddressJob).toContain(
-      'gate-advisories.md growth-audit.json agent-api-error',
-    );
-    const skill = readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
-    expect(skill).toContain('Verification is SOURCE-BLIND');
-    expect(skill).toContain('changed tests against the pre-round branch');
-    expect(skill).toContain("outside the PR's own");
-  });
+      // Restore-failure crash contract: when the tree cannot come back to
+      // the branch, the gate crashes VERDICT-LESS — rejection document
+      // written, exit 1, and reject_fix (which would advance the watermark)
+      // never runs.
+      const crash = run(srcAndTest, {
+        runnerScript: [
+          '#!/usr/bin/env bash',
+          'git update-ref -d refs/heads/feat',
+          'exit 0',
+        ].join('\n'),
+        resolverLines: ['packages/cli'],
+        workdir: criticalClaim,
+      });
+      expect(crash.out).toContain(
+        'could not restore the verification tree after the bite check',
+      );
+      expect(crash.out).toContain('[spawn status=1]');
+      expect(crash.out).not.toContain('REJECT:');
+      expect(crash.rejection).toContain('could not restore');
+
+      // Append order: a shrink advisory (truncating write) followed by the
+      // bite advisory (append) must leave BOTH in the report file.
+      const advisoryBlock2 = reviewVerificationRunner.match(
+        /(TEST_PATHSPEC=\(':\(glob\)[\s\S]*?advisory written for the report' \| tee -a "\$\{GATE_LOG\}"\nfi)/,
+      )?.[1];
+      expect(advisoryBlock2).toBeTruthy();
+      const combined = run(
+        {
+          base: ({ write }) => {
+            write(
+              'packages/cli/package.json',
+              '{"name":"@fixture/cli","scripts":{"test":"vitest run"}}\n',
+            );
+            write('packages/cli/src/a.ts', 'a\n');
+            write('packages/cli/src/a.test.ts', 't\n');
+            write(
+              'packages/cli/src/big.test.ts',
+              `${Array.from({ length: 40 }, (_, i) => `b${i}`).join('\n')}\n`,
+            );
+          },
+          pr: ({ write }) => write('packages/cli/src/a.ts', 'b\n'),
+          round: ({ write, dir }) => {
+            write('packages/cli/src/a.ts', 'c\n');
+            write('packages/cli/src/a.test.ts', 't2\n');
+            rmSync(join(dir, 'packages/cli/src/big.test.ts'));
+          },
+        },
+        {
+          runnerExit: 0,
+          resolverLines: ['packages/cli'],
+          prelude: advisoryBlock2,
+        },
+      );
+      expect(combined.advisory).toContain('test coverage shrank');
+      expect(combined.advisory).toContain('pass on the pre-round tree');
+
+      // Contract pins: the rejection is non-retryable (a repair pass cannot
+      // make a nonexistent defect reproduce), and the report step embeds the
+      // gate-authored advisory file, which is also uploaded as an artifact.
+      expect(reviewVerificationRunner).toContain(
+        "reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'",
+      );
+      expect(pushAndReportStep).toContain('gate-advisories.md');
+      expect(reviewAddressJob).toContain(
+        'gate-advisories.md growth-audit.json agent-api-error',
+      );
+      const skill = readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
+      expect(skill).toContain('Verification is SOURCE-BLIND');
+      expect(skill).toContain('changed tests against the pre-round branch');
+      expect(skill).toContain("outside the PR's own");
+    },
+  );
 
   it('still runs review verification reporting when the agent step fails', () => {
     expect(verificationGateSteps).toHaveLength(2);
@@ -14574,9 +15131,9 @@ exit 1
     expect(repairDeterministicRejectionStep).toContain(
       "steps.verify.outputs.retryable == 'true'",
     );
-    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 20');
+    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 70');
     expect(repairDeterministicRejectionStep).toContain(
-      "QWEN_TIMEOUT_MS: '1080000'",
+      "QWEN_TIMEOUT_MS: '3600000'",
     );
     const settingsJson = (step) =>
       step.match(/SETTINGS_JSON: \|-\n([\s\S]*?)\n {8}run: \|-/)?.[1] ?? '';
@@ -15450,21 +16007,22 @@ exit 1
       'fi\n          BODY="${BODY}\n\n          <details>\n          <summary>中文说明</summary>\n\n          ${ZH_BLOCK}\n\n          </details>"',
     );
     // The issue-lane run-log dump echoes agent-written files to step
-    // STDOUT, where a line-start `::` parses as a workflow command — it
-    // must neutralize like the PR-lane dump loop does, and carry the zh
-    // report: these loops are the only full-copy echo of it (the handoff
-    // comment carries a 3000-byte excerpt).
+    // STDOUT, where both workflow-command syntaxes parse (`::` at line
+    // start, `##[` even mid-line) — it must neutralize like the PR-lane
+    // dump loop does, and carry the zh report: these loops are the only
+    // full-copy echo of it (the handoff comment carries a 3000-byte
+    // excerpt).
     expect(showRunArtifactsStep).toContain(
       'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
     );
     expect(showRunArtifactsStep).toMatch(
-      /=============== \$\{f\} ==============="\n(?:[ ]*#[^\n]*\n)*[ ]*sed 's\/::\/;;\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
+      /=============== \$\{f\} ==============="\n(?:[ ]*#[^\n]*\n)*[ ]*sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
     );
     expect(issueAutofixReportStep).toContain(
       'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
     );
     expect(reviewAddressJob).toContain(
-      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do',
+      'for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do',
     );
     expect(reviewAddressReportStep).toContain(
       'for f in address-summary.md no-action.md failure.md failure.zh.md handoff.md; do',
@@ -15488,7 +16046,13 @@ exit 1
     expect(postStatusCommentStep).toContain(
       'actions/runs/${{ github.run_id }}',
     );
-    expect(postStatusCommentStep).toContain('Watch live progress');
+    // The working-comment text renders through the heartbeat script's 'body'
+    // subcommand — the initial post and every later tick use the SAME body,
+    // so they cannot drift (af-149). The strings themselves are pinned on
+    // the script below.
+    expect(postStatusCommentStep).toContain(
+      'bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" body',
+    );
     // Announced only for a round that will really run, and never on a dry run.
     expect(postStatusCommentStep).toContain(
       "steps.prepare.outputs.stale != 'true'",
@@ -15505,8 +16069,10 @@ exit 1
     expect(postStatusCommentStep).toContain('continuing.');
     expect(finalizeStatusCommentStep).toContain('set -uo pipefail');
     expect(finalizeStatusCommentStep).toContain('continuing.');
-    // Repository convention for anything posted verbatim as a PR comment.
-    expect(postStatusCommentStep).toContain('<summary>中文说明</summary>');
+    // Repository convention for anything posted verbatim as a PR comment —
+    // the bilingual wrapper lives in the heartbeat script now (same body on
+    // every tick).
+    expect(heartbeatScript).toContain('<summary>中文说明</summary>');
 
     // Runs on every ending (including a crashed agent) so no finished round
     // leaves a live-looking "working" line behind.
@@ -15563,7 +16129,7 @@ exit 1
     // additionally prove publication through the push step's output, since
     // an env plant can no-op that step with exit 0 (R3-1).
     expect(finalizeStatusCommentStep).toContain(
-      '[[ "${PUBLISHED}" == \'true\' && ( "${OUTCOME:-}" == \'fixed\' || "${OUTCOME:-}" == \'noop\' || "${OUTCOME:-}" == \'handoff\' || "${OUTCOME:-}" == \'dirty_handoff\' || "${OUTCOME:-}" == \'committed_handoff\' ) ]]',
+      '[[ "${PUBLISHED}" == "true" && ( "${OUTCOME:-}" == "fixed" || "${OUTCOME:-}" == "noop" || "${OUTCOME:-}" == "handoff" || "${OUTCOME:-}" == "dirty_handoff" || "${OUTCOME:-}" == "committed_handoff" ) ]]',
     );
     // R3-1 downstream half: an env plant can kill 'Push and report's shell
     // at execve (silent exit 0, gate body never ran) — the in-step sentinel
@@ -15576,12 +16142,1094 @@ exit 1
     );
     expect(finalizeStatusCommentStep).toContain('PUBLISHED=true');
     expect(finalizeStatusCommentStep).toMatch(
-      /if \[\[ "\$\{OUTCOME:-\}" == 'fixed' \|\| "\$\{OUTCOME:-\}" == 'noop' \]\] && \[\[ "\$\{PUSH_REPORTED:-\}" != 'true' \]\]; then\n\s*PUBLISHED=false/,
+      /if \[\[ "\$\{OUTCOME:-\}" == "fixed" \|\| "\$\{OUTCOME:-\}" == "noop" \]\] && \[\[ "\$\{PUSH_REPORTED:-\}" != "true" \]\]; then\n\s*PUBLISHED=false/,
     );
     expect(finalizeStatusCommentStep).toContain(
       'ended without publishing a report',
     );
   });
+
+  it('keeps the round status comment live with a heartbeat and a job deep link', () => {
+    // A round can run for hours while the announcement freezes at
+    // "working" — on the PR page a long round and a dead one look
+    // identical (#9739). The heartbeat re-PATCHes the same comment every
+    // ~10 min with elapsed time and last agent activity; the deep link
+    // lands the "Watch live progress" anchor on the leg's own log page.
+    // Full rationale → qwen-autofix.md#af-149, af-150.
+
+    // The comment body is owned by the script: the initial post and every
+    // tick render through the same 'body' subcommand, so pin the text
+    // there, not on one step.
+    expect(heartbeatScript).toContain('<!-- autofix-status -->');
+    expect(heartbeatScript).toContain('Watch live progress');
+    expect(heartbeatScript).toContain('查看实时进度');
+    expect(heartbeatScript).toContain('round %s/%s');
+    expect(heartbeatScript).toContain('agent active');
+    expect(heartbeatScript).toContain('agent starting');
+    // Loop self-discipline on the persistent pool: an orphan loop would
+    // edit the comment forever, so it must die on every teardown signal
+    // AND on its own age cap.
+    expect(heartbeatScript).toContain('heartbeat.pid');
+    expect(heartbeatScript).toContain('heartbeat-stop');
+    // The in-flight stamp finalize's drain waits on: written AROUND every
+    // gh call under a bounded `timeout 5` guard (a planted FIFO at the
+    // path must not stall the loop inside the tick) and removed after,
+    // so it never outlives its request.
+    expect(heartbeatScript).toContain('heartbeat-tick-inflight');
+    expect(heartbeatScript).toContain('date +%s > "$0"');
+    expect(heartbeatScript).toContain(
+      'rm -f "${HB_WORKDIR}/heartbeat-tick-inflight" 2> /dev/null || true',
+    );
+    expect(heartbeatScript).toContain('HB_MAX_AGE_SECONDS');
+    expect(heartbeatScript).toContain('HB_INTERVAL_SECONDS');
+    // The default age cap sits just past the 330-minute job envelope: a
+    // live round's loop dies at the gate or finalize well inside the job,
+    // so only a crash orphan reaches it — and the cap bounds how long that
+    // orphan holds the PAT in /proc/<pid>/environ. A 12h default would
+    // reopen the window this cap exists to shrink.
+    expect(heartbeatScript).toContain('HB_MAX_AGE_SECONDS:-20400');
+    expect(heartbeatScript).toContain('|| max_age=20400');
+    // Magnitude bounds (R16-2): shape alone admits a well-formed
+    // plant that defeats the pulse — a huge interval the loop never
+    // wakes from (the age cap that bounds an orphan's PAT window
+    // becomes unreachable), or a tiny age cap that kills it after
+    // the first sleep. Overrides outside the accepted range degrade
+    // to the defaults.
+    expect(heartbeatScript).toContain('(( interval <= 3600 )) || interval=600');
+    expect(heartbeatScript).toContain(
+      '(( max_age >= 19800 && max_age <= 21600 )) || max_age=20400',
+    );
+    // Every tick's gh call runs under the af-112 hermetic pins: GH_HOST
+    // pinned and planted tokens dropped at launch, and the config dir
+    // minted PER TICK inside the loop (R11-1) — RUNNER_TEMP is
+    // same-UID-writable, so a dir minted once at launch and reused across
+    // ticks is plantable (a config.yml with http_unix_socket written into
+    // it delivers every later tick's Authorization header — the PAT — to
+    // the planted socket). The mint therefore sits fail-closed, adjacent
+    // to the call inside the loop body, with removal right after.
+    expect(heartbeatScript).toContain('export GH_HOST=github.com');
+    expect(heartbeatScript).toContain('unset GH_ENTERPRISE_TOKEN GH_TOKEN');
+    expect(heartbeatScript).toContain(
+      'if ! gh_config_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/autofix-gh-config.XXXXXX")"; then',
+    );
+    expect(heartbeatScript).toContain(
+      'gh config mint failed; skipping this tick',
+    );
+    expect(heartbeatScript).toContain(
+      'GH_CONFIG_DIR="${gh_config_dir}" "${GH_PATCH[@]}" api --method PATCH',
+    );
+    expect(heartbeatScript).toContain('rm -rf "${gh_config_dir}"');
+    // The mint is INSIDE the loop body: a hoist back to launch time
+    // reopens the plantable window R11-1 closed.
+    expect(
+      heartbeatScript.indexOf('mktemp -d "${RUNNER_TEMP:-/tmp}'),
+    ).toBeGreaterThan(heartbeatScript.indexOf('while :; do'));
+    // Auth rides on the step-level GITHUB_TOKEN only: the pins drop any
+    // planted GH_TOKEN, so the fail-fast check must not admit it.
+    expect(heartbeatScript).toContain('GITHUB_TOKEN is required');
+    expect(heartbeatScript).not.toContain('${GITHUB_TOKEN:-}${GH_TOKEN:-}');
+    // The tick's externals (gh, timeout, sleep, date, cat) resolve by
+    // name while the loop holds the PAT, and the ambient PATH carries
+    // same-UID-writable dirs ahead of the system ones — so the loop
+    // re-pins PATH from the launcher's step-level TRUSTED_PATH capture
+    // and fails fast on a launch without it (af-149).
+    expect(heartbeatScript).toContain('export PATH="${TRUSTED_PATH}"');
+    // The capture is validated with the other launch inputs, so a launch
+    // without it fails fast before registering anything (pinned
+    // behaviorally by the script's own suite).
+    expect(heartbeatScript).toContain('HB_START_EPOCH TRUSTED_PATH');
+    // A failed PATCH skips one tick, never the pulse.
+    expect(heartbeatScript).toContain('PATCH failed; continuing');
+    // The loop must not hold the launching step's pipes or the step never
+    // completes.
+    expect(heartbeatScript).toContain('exec >> "${HB_WORKDIR}/heartbeat.log"');
+    expect(spawnSync('bash', ['-n', heartbeatScriptPath]).status).toBe(0);
+
+    // Staging: the working tree is PR-branch code by post_status, so the
+    // script travels as a trusted-base staged copy with a digest recorded
+    // in expression context (the af-111 doctrine). The script itself is NEW
+    // in this PR, so the trusted base (pre-merge main) lacks it: the cp and
+    // the digest echo carry the same guard the upsert capture below uses —
+    // `|| true` and record-only-if-present — because a bare cp exits this
+    // -e step (killing every pre-merge round) on any run whose workflow
+    // resolves from the PR's own ref, and an empty digest degrades the
+    // consumer instead (witnessed on the merge-base tree).
+    const stageStep =
+      reviewAddressJob.match(
+        /- name: 'Stage trusted schema gate and agent runner'[\s\S]*?(?=\n {6}- name: ')/,
+      )?.[0] ?? '';
+    expect(stageStep).toContain(
+      'cp .github/scripts/autofix-status-heartbeat.sh "${RUNNER_TEMP}/autofix-status-heartbeat.sh" 2> /dev/null || true',
+    );
+    expect(stageStep).toContain(
+      'if [[ -f "${RUNNER_TEMP}/autofix-status-heartbeat.sh" ]]; then\n' +
+        '            echo "heartbeat_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-status-heartbeat.sh" | cut -d\' \' -f1)" >> "${GITHUB_OUTPUT}"\n' +
+        '          fi',
+    );
+    // Absent-from-base must imply absent-on-disk (R6-1): this tolerant
+    // cp FAILS every pre-merge round, so a leftover planted in the
+    // host's persistent RUNNER_TEMP by an earlier run must not survive
+    // it to be digested below and executed as trusted content.
+    // Witness: run the stage step verbatim against a tree that lacks
+    // the script (the merge-base shape) with a planted leftover — no
+    // file may remain at the staged path and no digest may reach the
+    // consumers' expression context.
+    expect(stageStep).toContain(
+      'rm -rf "${RUNNER_TEMP}/autofix-status-heartbeat.sh"',
+    );
+    expect(
+      stageStep.indexOf('rm -rf "${RUNNER_TEMP}/autofix-status-heartbeat.sh"'),
+    ).toBeLessThan(
+      stageStep.indexOf('cp .github/scripts/autofix-status-heartbeat.sh'),
+    );
+    const stageProbeDir = mkdtempSync(join(tmpdir(), 'hb-stage-probe-'));
+    const stageRunnerTemp = mkdtempSync(join(tmpdir(), 'hb-stage-temp-'));
+    try {
+      const stageGithubOutput = join(stageProbeDir, 'github-output');
+      mkdirSync(join(stageProbeDir, '.github', 'scripts'), {
+        recursive: true,
+      });
+      for (const name of [
+        'check-settings-schema.sh',
+        'check-autofix-contracts.sh',
+        'resolve-owning-packages.sh',
+        'run-autofix-review-verification.sh',
+        'resanitize-git-config.sh',
+        'upsert-deferred-issue.sh',
+        'autofix-push-and-report.sh',
+      ]) {
+        writeFileSync(
+          join(stageProbeDir, '.github', 'scripts', name),
+          readFileSync(join('.github', 'scripts', name)),
+        );
+      }
+      mkdirSync(join(stageProbeDir, '.qwen', 'skills', 'autofix', 'scripts'), {
+        recursive: true,
+      });
+      writeFileSync(
+        join(stageProbeDir, '.qwen', 'skills', 'autofix', 'SKILL.md'),
+        readFileSync('.qwen/skills/autofix/SKILL.md'),
+      );
+      writeFileSync(
+        join(
+          stageProbeDir,
+          '.qwen',
+          'skills',
+          'autofix',
+          'scripts',
+          'run-agent.mjs',
+        ),
+        readFileSync('.qwen/skills/autofix/scripts/run-agent.mjs'),
+      );
+      // The planted leftover: attacker content a same-UID run left at
+      // the staged path on this persistent host. Both leftover shapes
+      // are plantable, and the directory one is what forces the -rf:
+      // rm -f exits non-zero on a directory, which under this step's
+      // ambient -eo pipefail aborts staging before the tolerant cp —
+      // and nothing else reclaims RUNNER_TEMP on this persistent pool,
+      // so every later round on the host dies at staging (R7-2).
+      const stageProbeScript = stageStep
+        .slice(stageStep.indexOf('run: |-') + 'run: |-'.length)
+        .replace(/^ {10}/gm, '');
+      const plantLeftover = (asDirectory) => {
+        if (asDirectory) {
+          mkdirSync(join(stageRunnerTemp, 'autofix-status-heartbeat.sh'));
+          writeFileSync(
+            join(stageRunnerTemp, 'autofix-status-heartbeat.sh', 'payload'),
+            'ATTACKER_CONTROLLED\n',
+          );
+        } else {
+          writeFileSync(
+            join(stageRunnerTemp, 'autofix-status-heartbeat.sh'),
+            '#!/usr/bin/env bash\necho ATTACKER_CONTROLLED "$@"\n',
+          );
+        }
+      };
+      for (const asDirectory of [false, true]) {
+        plantLeftover(asDirectory);
+        writeFileSync(stageGithubOutput, '');
+        const stageProbe = spawnSync('bash', ['-c', stageProbeScript], {
+          cwd: stageProbeDir,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            RUNNER_TEMP: stageRunnerTemp,
+            GITHUB_OUTPUT: stageGithubOutput,
+          },
+        });
+        expect(stageProbe.status).toBe(0);
+        expect(
+          existsSync(join(stageRunnerTemp, 'autofix-status-heartbeat.sh')),
+        ).toBe(false);
+        expect(readFileSync(stageGithubOutput, 'utf8')).not.toContain(
+          'heartbeat_sha256=',
+        );
+      }
+    } finally {
+      rmSync(stageProbeDir, { recursive: true, force: true });
+      rmSync(stageRunnerTemp, { recursive: true, force: true });
+    }
+    expect(postStatusCommentStep).toContain(
+      "HEARTBEAT_SHA256: '${{ steps.stage.outputs.heartbeat_sha256 }}'",
+    );
+    expect(postStatusCommentStep).toContain(
+      '/usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null',
+    );
+    // ...and the check must precede the FIRST use: a check moved below
+    // the invocation would verify nothing before the script runs (the
+    // af-111 doctrine this wiring cites).
+    expect(postStatusCommentStep.indexOf('sha256sum -c')).toBeLessThan(
+      postStatusCommentStep.indexOf('autofix-status-heartbeat.sh" body'),
+    );
+    // Consumer side of the same guard: an empty digest (script absent from
+    // the trusted base) degrades to the pre-PR inline body and skips the
+    // heartbeat, instead of digest-checking and running a staged copy that
+    // was never staged.
+    expect(postStatusCommentStep).toContain(
+      'if [[ -n "${HEARTBEAT_SHA256}" ]]; then',
+    );
+    expect(postStatusCommentStep).toContain(
+      '🔄 **AutoFix is working on this PR** — round %s/%s.',
+    );
+
+    // Deep link: attempt-scoped jobs listing, PR number enters jq as DATA
+    // (--arg, never interpolation), and any lookup failure keeps the run
+    // URL fallback — never worse than before.
+    expect(postStatusCommentStep).toContain(
+      'repos/${REPO}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs',
+    );
+    expect(postStatusCommentStep).toContain('--arg pr "${PR}"');
+    expect(postStatusCommentStep).toContain(
+      'startswith("review-address (\\($pr),")',
+    );
+    expect(postStatusCommentStep).toContain('JOB_URL="${RUN_URL}"');
+    expect(postStatusCommentStep).toContain(
+      'JOB_URL="${SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}/job/${JOB_ID}"',
+    );
+    // The deep link must actually REACH the consumers: the initial body
+    // and every loop tick both render HB_URL, and the JOB_ID gate + empty
+    // fallback are the "never worse than before" semantics.
+    expect(postStatusCommentStep.split('HB_URL="${JOB_URL}"').length - 1).toBe(
+      2,
+    );
+    expect(postStatusCommentStep).toContain('if [[ "${JOB_ID}" =~ ^[0-9]+$ ]]');
+    expect(postStatusCommentStep).toContain("JOB_ID=''");
+    // Behavioral oracle for the filter itself (substring pins cannot catch
+    // last→first or a collapsed slurp): extract it verbatim and run it
+    // through real jq against paginate-shaped fixtures, the same pattern
+    // the LAST_ENGAGE_ACK_TS test uses.
+    const jobIdProgram = postStatusCommentStep.match(
+      /jq -rs --arg pr "\$\{PR\}" \\\n\s*'([\s\S]*?)'\)" \|/,
+    )?.[1];
+    expect(jobIdProgram).toBeTruthy();
+    const runJobIdFilter = (pr, input) =>
+      execFileSync('jq', ['-rs', '--arg', 'pr', pr, jobIdProgram], {
+        encoding: 'utf8',
+        input,
+      }).trim();
+    // One matching job across two concatenated page documents, plus the
+    // comma guard: PR 12's prefix must NOT match PR 123's job name.
+    const twoPages =
+      JSON.stringify({
+        total_count: 2,
+        jobs: [{ name: 'route', id: 1 }],
+      }) +
+      JSON.stringify({
+        total_count: 2,
+        jobs: [{ name: 'review-address (123, feat/x, 123, 1, x)', id: 3 }],
+      });
+    expect(runJobIdFilter('123', twoPages)).toBe('3');
+    expect(runJobIdFilter('12', twoPages)).toBe('');
+    // Two matches pin the DELIBERATE `last` choice (a last→first mutation
+    // would deep-link the wrong leg through the numeric guard).
+    const twoMatches =
+      JSON.stringify({
+        jobs: [{ name: 'review-address (123, a, 1)', id: 10 }],
+      }) +
+      JSON.stringify({
+        jobs: [{ name: 'review-address (123, b, 1)', id: 20 }],
+      });
+    expect(runJobIdFilter('123', twoMatches)).toBe('20');
+    // Empty input yields empty output — the run-URL fallback gate.
+    expect(runJobIdFilter('123', '')).toBe('');
+
+    // Launch: detached (setsid + self-redirected output), gated on a
+    // comment that actually exists (the gate wraps the launch itself, not
+    // just the earlier PATCH-or-create) AND on a staged script (an empty
+    // digest means the trusted base lacks it), carrying the round identity
+    // and recording the pid for the killers in EXPRESSION CONTEXT.
+    expect(postStatusCommentStep).toContain(
+      'setsid bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" loop &',
+    );
+    // ...and the launch re-verifies the staged script immediately
+    // before starting (R8-1 adjacency): the single check above is
+    // separated from this SECOND execution by the two gh round-trips
+    // of the comment upsert — a multi-second swap window in the same
+    // attacker-writable RUNNER_TEMP — and this execution is the
+    // PAT-holding one. A mismatch fails the round closed; the explicit
+    // `|| exit 1` does not rely on the step's ambient shell options
+    // (the af-023 doctrine).
+    expect(postStatusCommentStep).toContain(
+      'if [[ -n "${STATUS_ID}" && -n "${HEARTBEAT_SHA256}" ]]; then\n' +
+        '            /usr/bin/echo "${HEARTBEAT_SHA256}  ${RUNNER_TEMP}/autofix-status-heartbeat.sh" | /usr/bin/sha256sum -c - > /dev/null || exit 1\n' +
+        '            HB_REPO=',
+    );
+    expect(
+      postStatusCommentStep.indexOf('sha256sum -c - > /dev/null || exit 1'),
+    ).toBeLessThan(
+      postStatusCommentStep.indexOf('autofix-status-heartbeat.sh" loop'),
+    );
+    // Witness (R6-2): run the launch block verbatim with the digest
+    // recorded from the ORIGINAL staged copy, then swap the file on
+    // disk before the block runs — the PAT-holding launch must not
+    // execute the swapped content. The harness sleeps past the
+    // detached launch's startup before asserting.
+    // The verbatim block hard-requires /usr/bin/sha256sum and setsid,
+    // which macOS does not ship (shasum instead of GNU coreutils,
+    // SIP-locked /usr/bin; setsid is util-linux-only), while the
+    // merge_group-gated macOS test lane still collects this suite (the
+    // vitest config excludes it only on win32). The production workflow
+    // is Linux-only, so gate the probe on capability, not platform
+    // (precedent: haveSessionKillTools in
+    // autofix-status-heartbeat.test.mjs); the string pins stay
+    // unconditional.
+    const launchWitnessSupported =
+      spawnSync('bash', [
+        '-c',
+        'command -v setsid >/dev/null 2>&1 && test -x /usr/bin/sha256sum',
+      ]).status === 0;
+    if (launchWitnessSupported) {
+      const launchProbeTemp = mkdtempSync(join(tmpdir(), 'hb-launch-temp-'));
+      const launchProbeWorkdir = mkdtempSync(join(tmpdir(), 'hb-launch-wd-'));
+      try {
+        const stagedScript = join(
+          launchProbeTemp,
+          'autofix-status-heartbeat.sh',
+        );
+        writeFileSync(stagedScript, heartbeatScript);
+        const stagedDigest = createHash('sha256')
+          .update(heartbeatScript)
+          .digest('hex');
+        const launchBlock =
+          'set -uo pipefail\n' +
+          postStatusCommentStep
+            .slice(
+              postStatusCommentStep.indexOf("HEARTBEAT_PID=''"),
+              postStatusCommentStep.indexOf(
+                '# Hand the id to the finalize step',
+              ),
+            )
+            .replace(/^ {10}/gm, '') +
+          '\nsleep 0.5';
+        const launchEnv = {
+          ...process.env,
+          RUNNER_TEMP: launchProbeTemp,
+          STATUS_ID: '12345',
+          HEARTBEAT_SHA256: stagedDigest,
+          REPO: 'octo/repo',
+          ROUND_DISPLAY: '7',
+          MAX_ROUNDS: '5',
+          JOB_URL: 'https://example.invalid/job/1',
+          WORKDIR: launchProbeWorkdir,
+          START_EPOCH: '1000',
+        };
+        delete launchEnv.GITHUB_TOKEN;
+        delete launchEnv.GH_TOKEN;
+        delete launchEnv.TRUSTED_PATH;
+        // Swapped: the staged content changes after the digest above was
+        // recorded and before this launch runs.
+        writeFileSync(
+          stagedScript,
+          '#!/usr/bin/env bash\necho ATTACKER_LOOP_RAN > "${HB_WORKDIR}/proof"\n',
+        );
+        const swapped = spawnSync('bash', ['-c', launchBlock], {
+          encoding: 'utf8',
+          env: launchEnv,
+        });
+        expect(swapped.status).toBe(1);
+        expect(existsSync(join(launchProbeWorkdir, 'proof'))).toBe(false);
+        // Unswapped: an intact staged copy still launches (no
+        // over-block). The launched script fails fast on a missing launch
+        // input; that fail-fast message is the evidence it ran.
+        writeFileSync(stagedScript, heartbeatScript);
+        const intact = spawnSync('bash', ['-c', launchBlock], {
+          encoding: 'utf8',
+          env: launchEnv,
+        });
+        expect(intact.status).toBe(0);
+        expect(intact.stderr).toContain(
+          'autofix-status-heartbeat: TRUSTED_PATH is required',
+        );
+      } finally {
+        rmSync(launchProbeTemp, { recursive: true, force: true });
+        rmSync(launchProbeWorkdir, { recursive: true, force: true });
+      }
+    }
+    expect(postStatusCommentStep).toContain('HB_COMMENT_ID="${STATUS_ID}"');
+    expect(postStatusCommentStep).toContain('HB_START_EPOCH="${START_EPOCH}"');
+    expect(postStatusCommentStep).toContain('HEARTBEAT_PID=$!');
+    expect(postStatusCommentStep).toContain(
+      'echo "heartbeat_pid=${HEARTBEAT_PID}" >> "${GITHUB_OUTPUT}"',
+    );
+    // The killers' lifecycle pin (af-149): a pid recorded at launch can
+    // be REUSED before a kill lands, so the launch also records the
+    // loop's /proc/<pid>/stat start time and every killer confirms it
+    // before signaling. Field 22 is index 19 after stripping the
+    // parenthesized comm — through the LAST ')', since comm can carry
+    // spaces.
+    expect(postStatusCommentStep).toContain("HEARTBEAT_START_TICKS=''");
+    expect(postStatusCommentStep).toContain(
+      'HB_STAT="$(/usr/bin/cat "/proc/${HEARTBEAT_PID}/stat" 2>/dev/null)" || HB_STAT=\'\'',
+    );
+    expect(postStatusCommentStep).toContain('HB_REST="${HB_STAT##*) }"');
+    expect(postStatusCommentStep).toContain('HB_FIELDS=(${HB_REST})');
+    expect(postStatusCommentStep).toContain(
+      'HEARTBEAT_START_TICKS="${HB_FIELDS[19]:-}"',
+    );
+    expect(postStatusCommentStep).toContain(
+      'echo "heartbeat_start_ticks=${HEARTBEAT_START_TICKS}" >> "${GITHUB_OUTPUT}"',
+    );
+    // Producer depth (R16-1): the ticks come out of a /proc parse in
+    // this PAT-holding shell; a non-numeric value must be dropped
+    // before it reaches $GITHUB_OUTPUT — the script's own NOW_EPOCH
+    // doctrine applied to the launch.
+    expect(postStatusCommentStep).toContain(
+      '[[ "${HEARTBEAT_START_TICKS}" =~ ^[0-9]+$ ]] || HEARTBEAT_START_TICKS=\'\'',
+    );
+    expect(
+      postStatusCommentStep.indexOf('^[0-9]+$ ]] || HEARTBEAT_START_TICKS'),
+    ).toBeLessThan(
+      postStatusCommentStep.indexOf('echo "heartbeat_start_ticks='),
+    );
+    // The capture reads the launched pid's stat — it must follow the
+    // launch, or it would pin a process that is not this loop.
+    expect(postStatusCommentStep.indexOf('HEARTBEAT_PID=$!')).toBeLessThan(
+      postStatusCommentStep.indexOf('/proc/${HEARTBEAT_PID}/stat'),
+    );
+
+    // Kill discipline (af-149): kill targets come from expression context
+    // — a pid read from a WORKDIR file would be an untrusted kill target,
+    // the sandbox mounts the host /tmp on the same path and runs as this
+    // same user. The verification gate kills FIRST — before the first step
+    // that runs branch code on the host — finalize and the always()
+    // cleanup kill again. NOBODY kills from heartbeat.pid: the resets do
+    // not kill at all (a cross-run pid could only come from that
+    // untrusted file; wiping the dir ends the loop at its own next
+    // self-check).
+    const killTarget = '${{ steps.post_status.outputs.heartbeat_pid }}';
+    const ticksTarget =
+      '${{ steps.post_status.outputs.heartbeat_start_ticks }}';
+    // Those expressions may appear ONLY in a step env: block — the
+    // runner sets an env value as data. Inside a run body the runner
+    // substitutes the value BEFORE the shell parses, so a forged
+    // step output (post_status' shell is pollutable) would arrive as
+    // shell syntax and execute in the consuming shell — finalize's
+    // PAT-bearing one among them (R16-1). Every killer therefore
+    // takes the STATUS_ID shape, and no run body may carry either
+    // expression.
+    const runBodyOf = (stepText) => stepText.slice(stepText.indexOf('run: |-'));
+    // The review lane's gate — extracted from reviewAddressJob itself, so
+    // a kill planted in the issue lane's same-named step cannot satisfy
+    // these pins.
+    const gateStep =
+      reviewAddressJob.match(
+        /- name: 'Verification gate'[\s\S]*?(?=\n[ ]{6}- name: ')/,
+      )?.[0] ?? '';
+    expect(gateStep).toContain('heartbeat-stop');
+    expect(gateStep).toContain(`HB_PID: '${killTarget}'`);
+    expect(gateStep).toContain(`HB_START_TICKS: '${ticksTarget}'`);
+    expect(runBodyOf(gateStep)).not.toContain(killTarget);
+    expect(runBodyOf(gateStep)).not.toContain(ticksTarget);
+    expect(gateStep).toContain('kill -- -"${HB_PID}"');
+    // Lifecycle confirmation: the pid recorded at launch can be REUSED
+    // by the time a kill lands, so each killer confirms the pid's
+    // /proc/<pid>/stat start time against the launch capture before
+    // signaling — a reused pid carries a different start time and a
+    // dead pid has no stat, so a failed check kills nothing.
+    expect(gateStep).toContain('HB_FIELDS=(${HB_REST})');
+    expect(gateStep).toContain(
+      'if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then',
+    );
+    // The confirmation must GATE the kills: a check that runs but cannot
+    // suppress them is decoration.
+    expect(
+      gateStep.indexOf('"${HB_FIELDS[19]}" == "${HB_START_TICKS}"'),
+    ).toBeLessThan(gateStep.indexOf('kill -- -"${HB_PID}"'));
+    // Finalize holds the PAT like the gate, so its kill block takes the
+    // same absolute-path/builtin form: bare names are PATH-resolved (the
+    // job's own $GITHUB_PATH append keeps ${RUNNER_TEMP}/qwen-bin ahead
+    // of /usr/bin here) and bare kill is shadowable by a $GITHUB_ENV
+    // BASH_FUNC plant (af-149).
+    expect(finalizeStatusCommentStep).toContain(
+      '/usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true',
+    );
+    expect(finalizeStatusCommentStep).toContain(`HB_PID: '${killTarget}'`);
+    expect(finalizeStatusCommentStep).toContain(
+      `HB_START_TICKS: '${ticksTarget}'`,
+    );
+    expect(runBodyOf(finalizeStatusCommentStep)).not.toContain(killTarget);
+    expect(runBodyOf(finalizeStatusCommentStep)).not.toContain(ticksTarget);
+    expect(finalizeStatusCommentStep).toContain(
+      'builtin kill -- -"${HB_PID}" 2>/dev/null || true',
+    );
+    expect(finalizeStatusCommentStep).toContain(
+      'if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS:-}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then',
+    );
+    expect(finalizeStatusCommentStep.indexOf('heartbeat-stop')).toBeLessThan(
+      finalizeStatusCommentStep.indexOf('--method PATCH'),
+    );
+    // Killing the client cannot cancel a PATCH the server already
+    // ACCEPTED (probe-reproduced: a stale WORKING committed after the
+    // terminal text and flipped the comment back to live-looking), so
+    // the former fixed 2s sleep cannot order the terminal text last:
+    // finalize DRAINS the in-flight stamp instead — it waits until
+    // heartbeat-tick-inflight is ABSENT or older than the 65s
+    // completion bound (the tick's 60s gh timeout plus margin), and
+    // only then PATCHes. The read is bounded in time AND bytes like
+    // the loop's pid-file read — a planted FIFO must not stall the
+    // step, and a symlink to an endless non-NUL target (/dev/urandom,
+    // a fed FIFO) must not fill the substitution buffer GB-scale and
+    // kill the clean child before the terminal PATCH (R17-3).
+    expect(finalizeStatusCommentStep).not.toContain('/usr/bin/sleep 2');
+    expect(finalizeStatusCommentStep).toContain(
+      'DRAIN_END=$(( $(date +%s) + 65 ))',
+    );
+    expect(finalizeStatusCommentStep).toContain(
+      'STAMP="$(timeout 5 head -c 64 -- "${WORKDIR}/heartbeat-tick-inflight" 2> /dev/null)" || STAMP=\'\'',
+    );
+    expect(finalizeStatusCommentStep).toContain(
+      '(( STAMP + 65 <= NOW_S )) && break',
+    );
+    expect(
+      finalizeStatusCommentStep.indexOf('heartbeat-tick-inflight'),
+    ).toBeLessThan(finalizeStatusCommentStep.indexOf('--method PATCH'));
+    // Finalize holds the PAT too, so it takes the gate steps'
+    // startup-channel pins at step level — BASH_ENV is sourced at process
+    // STARTUP before line 1 of the body (an in-body unset is one hop
+    // late), SHELLOPTS is the sibling option-import channel, and the LD_*
+    // family is mapped by ld.so at startup the same way (af-149, R8-3).
+    expect(finalizeStatusCommentStep).toContain("BASH_ENV: ''");
+    expect(finalizeStatusCommentStep).toContain("SHELLOPTS: ''");
+    expect(finalizeStatusCommentStep).toContain("LD_PRELOAD: ''");
+    expect(finalizeStatusCommentStep).toContain("LD_AUDIT: ''");
+    expect(finalizeStatusCommentStep).toContain("LD_LIBRARY_PATH: ''");
+    expect(finalizeStatusCommentStep).toContain(
+      "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
+    );
+    // HOME re-enters the clean child below: a $GITHUB_ENV-planted HOME
+    // repoints gh's config search at an attacker-writable dir (the
+    // af-112 http_unix_socket exfil), so it rides the stage-time capture
+    // like the gate children's (R8-3).
+    expect(finalizeStatusCommentStep).toContain(
+      "HOME: '${{ steps.stage.outputs.trusted_home }}'",
+    );
+    // R9-1: those step-level pins close the NAMED startup channels of
+    // the parent shell, but bash also imports BASH_FUNC_<name>%% env
+    // entries as functions at startup even under --norc, ahead of
+    // builtins and PATH, under attacker-chosen names no env: block can
+    // enumerate — probe-verified on this host for every command word
+    // the step's former inline body resolved (set, export, builtin, the
+    // bare gh; a planted gh received the token even with PATH re-pinned
+    // in the body). The step therefore runs its whole PAT-touching body
+    // through the gate's env -i clean-child form (R6-4), and the launch
+    // is pinned STRUCTURALLY — one verbatim adjacency chain, every
+    // allowlist entry in order — because token-level pins alone let a
+    // demoted or reordered launch through (R2-1).
+    const finalizeLaunchTokens = [
+      'LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH=',
+      '/usr/bin/env -i',
+      'PATH="${TRUSTED_PATH}"',
+      'HOME="${HOME}"',
+      'GITHUB_TOKEN="${GITHUB_TOKEN}"',
+      // R10-2: the child's gh call carries the PAT; GH_HOST pins the host
+      // and RUNNER_TEMP lets the child mint a hermetic GH_CONFIG_DIR
+      // (pinning HOME's path does not sanitize its contents), the upsert
+      // twin's shape.
+      'GH_HOST=github.com',
+      'RUNNER_TEMP="${RUNNER_TEMP}"',
+      'WORKDIR="${WORKDIR}"',
+      'HB_PID="${HB_PID}"',
+      'HB_START_TICKS="${HB_START_TICKS}"',
+      'STATUS_ID="${STATUS_ID}"',
+      'PUSH_REPORTED="${PUSH_REPORTED}"',
+      'OUTCOME="${OUTCOME}"',
+      'EFFECTIVE_ROUND="${EFFECTIVE_ROUND}"',
+      'ROUND="${ROUND}"',
+      'RUN_URL="${RUN_URL}"',
+      'REPO="${REPO}"',
+      'PR="${PR}"',
+      "bash --norc -c '",
+    ];
+    const finalizeLaunchPin = new RegExp(
+      finalizeLaunchTokens
+        .map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join(' \\\\\n[ \\t]*'),
+    );
+    expect(finalizeStatusCommentStep).toMatch(finalizeLaunchPin);
+    // The parent body is ONLY the launch: a statement before the LD_*
+    // prefix, or anything after the child's closing quote, would run in
+    // the PAT-bearing parent shell the clean child exists to avoid —
+    // pin both ends. PATH reaches the child through the allowlist,
+    // ahead of the bare gh inside (no in-shell export pin of its own).
+    const finalizeStatements = finalizeStatusCommentStep
+      .slice(finalizeStatusCommentStep.indexOf('run: |-') + 'run: |-'.length)
+      .split('\n')
+      .map((line) => line.replace(/^[ \t]+|[ \t]+$/g, ''))
+      .filter((line) => line !== '' && !line.startsWith('#'));
+    expect(finalizeStatements[0]).toBe(
+      'LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\',
+    );
+    expect(finalizeStatements[2]).toBe('PATH="${TRUSTED_PATH}" \\');
+    expect(finalizeStatements[finalizeStatements.length - 1]).toBe("'");
+    expect(
+      finalizeStatusCommentStep.indexOf('PATH="${TRUSTED_PATH}"'),
+    ).toBeLessThan(finalizeStatusCommentStep.indexOf('--method PATCH'));
+    // Exactly one child launch: a second, unpinned `bash --norc` (the
+    // pinned block demoted into a never-run arm) must fail here (R2-1).
+    expect((finalizeStatusCommentStep.match(/bash --norc/g) ?? []).length).toBe(
+      1,
+    );
+    // Behavioral witness (both arms flip): render the run body with the
+    // one expression resolved, then execute it in a step-like env. The
+    // poisoned arm plants BASH_FUNC imports named for every command word
+    // the pre-R9 inline body resolved — none may run: env -i drops the
+    // whole class, so reverting the body back into the parent shell runs
+    // the plants and fails here. BASH_ENV/SHELLOPTS/LD_* plants stay out
+    // of the probe env on purpose: those are closed by the step-level
+    // pins above, which a spawn cannot model.
+    // The run body carries NO heartbeat interpolation (pinned above):
+    // the probe executes it exactly as the runner would.
+    const finalizeRunBody = finalizeStatusCommentStep.slice(
+      finalizeStatusCommentStep.indexOf('run: |-') + 'run: |-'.length,
+    );
+    const finalizeProbeDir = mkdtempSync(
+      join(tmpdir(), 'autofix-finalize-r91-'),
+    );
+    const finalizeProbeOut = join(finalizeProbeDir, 'probe-out');
+    const finalizeProbeBin = join(finalizeProbeDir, 'bin');
+    mkdirSync(finalizeProbeBin);
+    writeFileSync(
+      join(finalizeProbeBin, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        `printf 'STUB_GH_RAN token=%s args=%s\\n' "\${GITHUB_TOKEN:-none}" "$*" >> "${finalizeProbeOut}"`,
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const finalizeProbeEnv = {
+      TRUSTED_PATH: `${finalizeProbeBin}:/usr/bin:/bin`,
+      HOME: finalizeProbeDir,
+      GITHUB_TOKEN: 'SECRET_PAT',
+      // The child mints its hermetic GH_CONFIG_DIR under RUNNER_TEMP
+      // (R10-2); the probe dir stands in for it.
+      RUNNER_TEMP: finalizeProbeDir,
+      WORKDIR: finalizeProbeDir,
+      STATUS_ID: '12345',
+      PUSH_REPORTED: 'true',
+      OUTCOME: 'fixed',
+      EFFECTIVE_ROUND: '3',
+      ROUND: '3',
+      RUN_URL: 'https://example.invalid/runs/1',
+      REPO: 'octo/repo',
+      PR: '77',
+    };
+    try {
+      // Clean arm: the child PATCHes through the stub gh with the
+      // step-level token and the finished-text body, and the stop
+      // marker lands in WORKDIR.
+      const clean = spawnSync(
+        'bash',
+        ['-e', '-o', 'pipefail', '-c', finalizeRunBody],
+        { encoding: 'utf8', env: finalizeProbeEnv },
+      );
+      expect(clean.status).toBe(0);
+      expect(clean.stdout).not.toContain('PLANTED');
+      const cleanOut = readFileSync(finalizeProbeOut, 'utf8');
+      expect(cleanOut).toContain('STUB_GH_RAN token=SECRET_PAT');
+      expect(cleanOut).toContain(
+        'api --method PATCH repos/octo/repo/issues/comments/12345',
+      );
+      expect(cleanOut).toContain('AutoFix round 4 finished');
+      expect(existsSync(join(finalizeProbeDir, 'heartbeat-stop'))).toBe(true);
+      // Poisoned arm: none of the planted functions may run, and the
+      // clean-child behavior must be unchanged.
+      rmSync(finalizeProbeOut, { force: true });
+      const poisoned = spawnSync(
+        'bash',
+        ['-e', '-o', 'pipefail', '-c', finalizeRunBody],
+        {
+          encoding: 'utf8',
+          env: {
+            ...finalizeProbeEnv,
+            'BASH_FUNC_set%%': '() { echo PLANTED_SET_RAN; }',
+            'BASH_FUNC_export%%': '() { echo PLANTED_EXPORT_RAN; }',
+            'BASH_FUNC_builtin%%': '() { echo PLANTED_BUILTIN_RAN; }',
+            'BASH_FUNC_touch%%': '() { echo PLANTED_TOUCH_RAN; }',
+            'BASH_FUNC_kill%%': '() { echo PLANTED_KILL_RAN; }',
+            'BASH_FUNC_gh%%': '() { echo PLANTED_GH_RAN; }',
+            'BASH_FUNC_true%%': '() { echo PLANTED_TRUE_RAN; }',
+          },
+        },
+      );
+      expect(poisoned.status).toBe(0);
+      expect(poisoned.stdout).not.toContain('PLANTED');
+      expect(poisoned.stderr).not.toContain('PLANTED');
+      expect(readFileSync(finalizeProbeOut, 'utf8')).toContain(
+        'STUB_GH_RAN token=SECRET_PAT',
+      );
+      // PATCH-only doctrine: an empty STATUS_ID exits before any gh
+      // call, poisoned arm or not.
+      rmSync(finalizeProbeOut, { force: true });
+      const noStatus = spawnSync(
+        'bash',
+        ['-e', '-o', 'pipefail', '-c', finalizeRunBody],
+        {
+          encoding: 'utf8',
+          env: { ...finalizeProbeEnv, STATUS_ID: '' },
+        },
+      );
+      expect(noStatus.status).toBe(0);
+      expect(noStatus.stdout).toContain('nothing to finalize');
+      expect(existsSync(finalizeProbeOut)).toBe(false);
+      // R16-1 witness: the kill targets ride step env and expand as
+      // DATA — a forged ticks output carrying command substitution
+      // must not execute anywhere in this body.
+      rmSync(finalizeProbeOut, { force: true });
+      const forgedProof = join(finalizeProbeDir, 'forged-proof');
+      const forged = spawnSync(
+        'bash',
+        ['-e', '-o', 'pipefail', '-c', finalizeRunBody],
+        {
+          encoding: 'utf8',
+          env: {
+            ...finalizeProbeEnv,
+            HB_PID: '999999',
+            HB_START_TICKS: `$(touch "${forgedProof}")`,
+          },
+        },
+      );
+      expect(forged.status).toBe(0);
+      expect(existsSync(forgedProof)).toBe(false);
+      expect(readFileSync(finalizeProbeOut, 'utf8')).toContain(
+        'STUB_GH_RAN token=SECRET_PAT',
+      );
+    } finally {
+      rmSync(finalizeProbeDir, { recursive: true, force: true });
+    }
+    // The lifecycle and drain witnesses below shell out to Linux-only
+    // facilities — procfs (the victim start-time read and the body's
+    // stat parse) and unprefixed coreutils `timeout` (the bounded
+    // stamp read) — while the merge_group/schedule/workflow_dispatch-
+    // gated macOS lane collects this suite (the vitest config
+    // excludes it only on win32). Gate on capability, not platform,
+    // mirroring launchWitnessSupported above; on a capable host the
+    // witnesses keep executing, and the string pins stay
+    // unconditional.
+    const lifecycleWitnessSupported =
+      spawnSync('bash', [
+        '-c',
+        'test -r /proc/self/stat && command -v timeout >/dev/null 2>&1',
+      ]).status === 0;
+    if (lifecycleWitnessSupported) {
+      // Lifecycle-confirmation witness (both arms): run the same child
+      // body against a live unrelated process standing in for a REUSED
+      // pid. A start-time MISMATCH must suppress every kill (the victim
+      // survives and the finalize PATCH still happens); the MATCHING
+      // start time admits the kill (the victim dies). Deleting the
+      // confirmation green-lights the blind kill again and fails the
+      // first arm — the exact defect the confirmation closes. The pid
+      // and start time travel to the body through the step env, the
+      // R16-1 shape pinned above.
+      // The victim's stdio must not hold spawnSync's pipe open, or the
+      // launch would block until the victim exits and the pid would be
+      // dead before the probe reads its stat.
+      const lifecycleVictim = spawnSync(
+        'bash',
+        ['-c', 'sleep 30 </dev/null >/dev/null 2>&1 & echo $!'],
+        { encoding: 'utf8' },
+      );
+      const victimPid = lifecycleVictim.stdout.trim();
+      expect(victimPid).toMatch(/^\d+$/);
+      const victimTicks = spawnSync(
+        'bash',
+        ['-c', `awk '{print $22}' /proc/${victimPid}/stat`],
+        { encoding: 'utf8' },
+      ).stdout.trim();
+      expect(victimTicks).toMatch(/^\d+$/);
+      const lifecycleProbeDir = mkdtempSync(
+        join(tmpdir(), 'autofix-finalize-lifecycle-'),
+      );
+      const lifecycleProbeBin = join(lifecycleProbeDir, 'bin');
+      mkdirSync(lifecycleProbeBin);
+      const lifecycleProbeOut = join(lifecycleProbeDir, 'probe-out');
+      writeFileSync(
+        join(lifecycleProbeBin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `printf 'STUB_GH_RAN args=%s\\n' "$*" >> "${lifecycleProbeOut}"`,
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const lifecycleProbeEnv = {
+        TRUSTED_PATH: `${lifecycleProbeBin}:/usr/bin:/bin`,
+        HOME: lifecycleProbeDir,
+        GITHUB_TOKEN: 'SECRET_PAT',
+        RUNNER_TEMP: lifecycleProbeDir,
+        WORKDIR: lifecycleProbeDir,
+        STATUS_ID: '12345',
+        PUSH_REPORTED: 'true',
+        OUTCOME: 'fixed',
+        EFFECTIVE_ROUND: '3',
+        ROUND: '3',
+        RUN_URL: 'https://example.invalid/runs/1',
+        REPO: 'octo/repo',
+        PR: '77',
+      };
+      const processIsAlive = (pid) => {
+        try {
+          process.kill(Number(pid), 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      try {
+        // Mismatch arm: the recorded start time is NOT the victim's (the
+        // pid was reused) — every kill must be suppressed.
+        const mismatch = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', finalizeRunBody],
+          {
+            encoding: 'utf8',
+            env: {
+              ...lifecycleProbeEnv,
+              HB_PID: victimPid,
+              HB_START_TICKS: '1',
+            },
+          },
+        );
+        expect(mismatch.status).toBe(0);
+        expect(processIsAlive(victimPid)).toBe(true);
+        expect(readFileSync(lifecycleProbeOut, 'utf8')).toContain(
+          'STUB_GH_RAN',
+        );
+        // Match arm: the recorded start time IS the victim's — the kill
+        // is admitted and lands.
+        rmSync(lifecycleProbeOut, { force: true });
+        const match = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', finalizeRunBody],
+          {
+            encoding: 'utf8',
+            env: {
+              ...lifecycleProbeEnv,
+              HB_PID: victimPid,
+              HB_START_TICKS: victimTicks,
+            },
+          },
+        );
+        expect(match.status).toBe(0);
+        expect(processIsAlive(victimPid)).toBe(false);
+      } finally {
+        try {
+          process.kill(Number(victimPid), 'SIGKILL');
+        } catch {
+          // already gone — the match arm killed it
+        }
+        rmSync(lifecycleProbeDir, { recursive: true, force: true });
+      }
+      // Drain witness: the terminal PATCH waits the in-flight stamp out.
+      // A near-fresh stamp (63–64s old) makes finalize wait its remaining
+      // bound; an already-aged stamp (70s old) proceeds at once; a planted
+      // FIFO at the stamp path cannot stall the step. A mutant that sleeps
+      // a FIXED span instead of draining fails the aged arm's upper bound
+      // or the fresh arm's lower bound, and deleting the bounded read
+      // hangs the FIFO arm.
+      const drainProbeDir = mkdtempSync(
+        join(tmpdir(), 'autofix-finalize-drain-'),
+      );
+      const drainProbeBin = join(drainProbeDir, 'bin');
+      mkdirSync(drainProbeBin);
+      const drainProbeOut = join(drainProbeDir, 'probe-out');
+      writeFileSync(
+        join(drainProbeBin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `printf 'STUB_GH_RAN\\n' >> "${drainProbeOut}"`,
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const drainProbeEnv = {
+        TRUSTED_PATH: `${drainProbeBin}:/usr/bin:/bin`,
+        HOME: drainProbeDir,
+        GITHUB_TOKEN: 'SECRET_PAT',
+        RUNNER_TEMP: drainProbeDir,
+        WORKDIR: drainProbeDir,
+        STATUS_ID: '12345',
+        PUSH_REPORTED: 'true',
+        OUTCOME: 'fixed',
+        EFFECTIVE_ROUND: '3',
+        ROUND: '3',
+        RUN_URL: 'https://example.invalid/runs/1',
+        REPO: 'octo/repo',
+        PR: '77',
+      };
+      const stampPath = join(drainProbeDir, 'heartbeat-tick-inflight');
+      // The stamp is planted from INSIDE the probe shell, immediately
+      // before the drain body runs, relative to the drain's own clock —
+      // the shape the real loop stamps in. A wall-clock plant from THIS
+      // process instead leaves the stamp's sub-second age unknown to
+      // the drain: whenever the plant lands late enough in its second,
+      // the first drain check already sees a stamp >= 65s old and
+      // legitimately breaks at once — the assertion red while the drain
+      // behaves exactly as designed (R15-2). Age the fresh stamp 63s,
+      // not 64: the break needs NOW_S >= stamp + 65, and a 63s-old
+      // stamp can satisfy that on no first check, so at least one
+      // `sleep 1` must pass and the lower bound holds deterministically.
+      const runDrainArm = (stampPlant) => {
+        rmSync(drainProbeOut, { force: true });
+        rmSync(stampPath, { force: true });
+        const startedAt = Date.now();
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', `${stampPlant}\n${finalizeRunBody}`],
+          {
+            encoding: 'utf8',
+            env: drainProbeEnv,
+          },
+        );
+        return { res, elapsedMs: Date.now() - startedAt };
+      };
+      try {
+        const fresh = runDrainArm(
+          'echo $(( $(date +%s) - 63 )) > "${WORKDIR}/heartbeat-tick-inflight"',
+        );
+        expect(fresh.res.status).toBe(0);
+        expect(readFileSync(drainProbeOut, 'utf8')).toContain('STUB_GH_RAN');
+        expect(fresh.elapsedMs).toBeGreaterThanOrEqual(800);
+        expect(fresh.elapsedMs).toBeLessThan(10000);
+        const aged = runDrainArm(
+          'echo $(( $(date +%s) - 70 )) > "${WORKDIR}/heartbeat-tick-inflight"',
+        );
+        expect(aged.res.status).toBe(0);
+        expect(readFileSync(drainProbeOut, 'utf8')).toContain('STUB_GH_RAN');
+        expect(aged.elapsedMs).toBeLessThan(4000);
+        const fifo = runDrainArm('mkfifo "${WORKDIR}/heartbeat-tick-inflight"');
+        expect(fifo.res.status).toBe(0);
+        expect(readFileSync(drainProbeOut, 'utf8')).toContain('STUB_GH_RAN');
+        expect(fifo.elapsedMs).toBeLessThan(15000);
+        // R17-3: an openable endless non-NUL target — a symlink to
+        // /dev/urandom — is the plant the FIFO arm cannot cover: the
+        // unbounded `cat` form streams it into the substitution buffer
+        // until the allocation fails and kills the clean child before
+        // the terminal PATCH. The vmem cap keeps a regressed unbounded
+        // read failing fast instead of allocating GB on the test host;
+        // the bounded `head -c 64` form passes under it (probe-verified).
+        const endless = runDrainArm(
+          'ulimit -v 200000; ln -s /dev/urandom "${WORKDIR}/heartbeat-tick-inflight"',
+        );
+        expect(endless.res.status).toBe(0);
+        expect(readFileSync(drainProbeOut, 'utf8')).toContain('STUB_GH_RAN');
+        expect(endless.elapsedMs).toBeLessThan(10000);
+      } finally {
+        rmSync(drainProbeDir, { recursive: true, force: true });
+      }
+    }
+    const cleanupStep =
+      reviewAddressJob.match(
+        /- name: 'Clean up autofix workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/,
+      )?.[0] ?? '';
+    expect(cleanupStep).toContain(`HB_PID: '${killTarget}'`);
+    expect(cleanupStep).toContain(`HB_START_TICKS: '${ticksTarget}'`);
+    expect(runBodyOf(cleanupStep)).not.toContain(killTarget);
+    expect(runBodyOf(cleanupStep)).not.toContain(ticksTarget);
+    expect(cleanupStep).toContain('HB_FIELDS=(${HB_REST})');
+    // R17-4: the stat read takes the absolute-path form too — cleanup
+    // runs in the step's OUTER shell, which inherits every $GITHUB_ENV
+    // plant earlier steps left, and a BASH_FUNC_cat%% import shadows
+    // the bare word at bash startup, forging the stat line (the
+    // matching start time sits in this step's own env) so the
+    // lifecycle check passes on a REUSED pid and the kill TERMs an
+    // unrelated process, its group and session.
+    expect(cleanupStep).toContain(
+      'HB_STAT="$(/usr/bin/cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=\'\'',
+    );
+    expect(cleanupStep).toContain(
+      'if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then',
+    );
+    // Same doctrine for the delivery: a planted kill or PATH-planted
+    // pkill no-ops it, leaving the loop holding the PAT alive to its
+    // age cap — the defended asset is kill-target trust and delivery,
+    // not the token cleanup carries.
+    expect(cleanupStep).toContain(
+      '/usr/bin/kill -- -"${HB_PID}" 2> /dev/null || true',
+    );
+    expect(cleanupStep.indexOf('/usr/bin/kill -- -"${HB_PID}"')).toBeLessThan(
+      cleanupStep.indexOf('rm -rf "${WORKDIR}"'),
+    );
+    // Same-round killers also carry the bare-pid fallback. Finalize holds
+    // the PAT inside its env -i clean child, where the builtin form is
+    // sound; the gate's kill runs in the OUTER shell (BASH_FUNC_builtin%%
+    // shadowable — R10-1), so it takes the absolute-path form, and
+    // cleanup takes it for the R17-4 reasons above.
+    expect(gateStep).toContain('/usr/bin/kill "${HB_PID}"');
+    expect(finalizeStatusCommentStep).toContain(
+      'builtin kill "${HB_PID}" 2>/dev/null || true',
+    );
+    expect(cleanupStep).toContain(
+      '/usr/bin/kill "${HB_PID}" 2> /dev/null || true',
+    );
+    // A kill landing MID-TICK must reach the tick too: each tick's
+    // `timeout 60 gh` subtree runs in its OWN process group (coreutils
+    // timeout default) inside the loop's setsid session, so the group+pid
+    // kills alone leave it alive holding the PAT for up to 60s (witnessed
+    // on the pool's host class). Every killer therefore also kills the
+    // session — the gate's copy rides its statement-list pin above in the
+    // absolute-path form of its shadowing doctrine — and it must land
+    // where the others do: before the terminal PATCH (finalize) and before
+    // the workdir wipe (cleanup).
+    expect(finalizeStatusCommentStep).toContain(
+      '/usr/bin/pkill -TERM -s "${HB_PID}" 2>/dev/null || true',
+    );
+    expect(cleanupStep).toContain(
+      '/usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true',
+    );
+    expect(
+      finalizeStatusCommentStep.indexOf('pkill -TERM -s "${HB_PID}"'),
+    ).toBeLessThan(finalizeStatusCommentStep.indexOf('--method PATCH'));
+    expect(
+      cleanupStep.indexOf('/usr/bin/pkill -TERM -s "${HB_PID}"'),
+    ).toBeLessThan(cleanupStep.indexOf('rm -rf "${WORKDIR}"'));
+    // Neither reset step carries a kill (a cross-run pid could only come
+    // from the untrusted file class; the comments may still explain why),
+    // and none of the kill sites EXECUTES the heartbeat script (the
+    // working-tree copy is fork code by the time any of them runs).
+    for (const step of resetAutofixWorkspaceSteps) {
+      expect(step).not.toContain('kill -- -');
+      expect(step).not.toContain('HB_PID');
+    }
+    for (const killer of [gateStep, finalizeStatusCommentStep, cleanupStep]) {
+      expect(killer).not.toContain('autofix-status-heartbeat.sh');
+    }
+
+    // The pulse is diagnosable after the fact: heartbeat.log rides the
+    // review lane's run-artifact echo list (and the whole-WORKDIR upload).
+    const reviewShowArtifactsStep =
+      reviewAddressJob.match(
+        /- name: 'Show run artifacts'[\s\S]*?(?=\n[ ]{6}- name: 'Upload run artifacts')/,
+      )?.[0] ?? '';
+    expect(reviewShowArtifactsStep).toContain('heartbeat.log');
+
+    // The behavioral suite below is the only real coverage for the script
+    // itself; pin its CI membership so deleting the HELPER_TESTS entry
+    // cannot silently disable it (precedent: resolve-sandbox-image).
+    expect(ciWorkflow).toContain(
+      '.github/scripts/autofix-status-heartbeat.test.mjs',
+    );
+  }, 30000);
 
   it('renders the whole managed fleet into the run summary', () => {
     // Diagnosing a stall used to mean listing bot PRs, regexing each one's eval
@@ -15626,7 +17274,10 @@ exit 1
 
     // Replay the real helper + render block over fixtures.
     const lines = scan.split('\n');
-    const hi = lines.findIndex((l) => l.trim() === 'FLEET_FILE="$(mktemp)"');
+    const hi = lines.findIndex(
+      (l) => l.trim() === 'FLEET_FILE="${WORKDIR}/fleet.tsv"',
+    );
+    expect(hi).toBeGreaterThan(-1);
     const hj = lines.findIndex((l, i) => i > hi && l.trim() === '}');
     const helper = lines.slice(hi, hj + 1).join('\n');
     expect(helper).toContain('fleet_row()');
@@ -15648,6 +17299,9 @@ exit 1
         [
           'set -uo pipefail',
           'SUMMARY_FILE="$(mktemp)"',
+          // The helper references the job-level WORKDIR (fleet file home);
+          // its EXIT trap then reclaims this replay dir.
+          'WORKDIR="$(mktemp -d)"',
           helper,
           'COUNT=1',
           "fleet_row 7329 'SELECTED' '1 review + 5 inline new (round 0/5)'",
@@ -15683,6 +17337,9 @@ exit 1
         [
           'set -uo pipefail',
           'SUMMARY_FILE="$(mktemp)"',
+          // The helper references the job-level WORKDIR (fleet file home);
+          // its EXIT trap then reclaims this replay dir.
+          'WORKDIR="$(mktemp -d)"',
           helper,
           'COUNT=0',
           render,
@@ -17296,8 +18953,9 @@ exit 1
       ].join('\n'),
     );
     chmodSync(join(bin, 'gh'), 0o755);
-    // 111 was implemented; 333's thread is already resolved; 999 matches
-    // nothing. 222 was DECLINED, so it is deliberately absent and must stay open.
+    // 111 was implemented (112 is a reply in the SAME thread); 333's thread
+    // is already resolved; 999 matches nothing. 222 was DECLINED, so it is
+    // deliberately absent and must stay open.
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
     const localHead = execFileSync('git', ['rev-parse', 'HEAD'], {
       encoding: 'utf8',
@@ -17311,7 +18969,10 @@ exit 1
         id: 'T_open_1',
         isResolved: false,
         comments: {
-          nodes: [{ databaseId: 111 }],
+          // 112 is a reply in this same thread: the feedback renderer lists
+          // a Critical root and its reply as two findings with their own
+          // rc: handles, so one thread can carry two selected ids (R2-1).
+          nodes: [{ databaseId: 111 }, { databaseId: 112 }],
           pageInfo: { hasNextPage: false },
         },
       },
@@ -17361,6 +19022,8 @@ exit 1
           VERIFIED_HEAD: localHead,
           LIVE_HEAD: localHead,
           PUSH_RACE_MERGED: 'false',
+          ROUND_PUSHED: 'true',
+          LIVE_HEAD_RETRY_DELAY: '0',
           ...env,
         },
         encoding: 'utf8',
@@ -17417,6 +19080,76 @@ exit 1
     expect(matching.resolved).not.toContain('resolve:T_done'); // already resolved
     expect(matching.out).toContain(
       'confirmed 1 selected review thread(s) resolved while the verified head remained live',
+    );
+
+    // #10106 root cause on #9729: the PR read model is eventually
+    // consistent, so a headRefOid read seconds after this round's OWN push
+    // routinely still returns the previous head — every pushed round
+    // declared drift on that one stale read and silently skipped. The
+    // initial equality check waits out propagation instead…
+    const lagThenConverge = runResolve({
+      LIVE_HEAD_SEQUENCE: `stale-pre-push-head,${localHead}`,
+    });
+    expect(lagThenConverge.status).toBe(0);
+    expect(lagThenConverge.resolved).toEqual(['resolve:T_open_1']);
+    expect(lagThenConverge.out).not.toContain(
+      'skipping review-thread resolution',
+    );
+    // …and a PUSHED round whose head never converges still skips, after
+    // exhausting the whole window rather than a single read…
+    const neverConverges = runResolve({ LIVE_HEAD: 'stale-pre-push-head' });
+    expect(neverConverges.status).toBe(0);
+    expect(neverConverges.resolved).toEqual([]);
+    expect(neverConverges.out).toContain('skipping review-thread resolution');
+    expect(readFileSync(headReadCount, 'utf8')).toBe('5');
+    // …but the window waits out THIS round's OWN push, so a round that
+    // pushed nothing decides on ONE read — a head moved by a contributor
+    // only ever moves further from VERIFIED_HEAD, never back to it.
+    const noopNeverConverges = runResolve({
+      LIVE_HEAD: 'stale-pre-push-head',
+      ROUND_PUSHED: 'false',
+    });
+    expect(noopNeverConverges.status).toBe(0);
+    expect(noopNeverConverges.resolved).toEqual([]);
+    expect(noopNeverConverges.out).toContain(
+      'skipping review-thread resolution',
+    );
+    expect(readFileSync(headReadCount, 'utf8')).toBe('1');
+    // And an empty selection needs no head proof at all: zero reads.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:abc\n');
+    const zeroIdsDrift = runResolve({
+      LIVE_HEAD: 'stale-pre-push-head',
+      ROUND_PUSHED: 'false',
+    });
+    expect(zeroIdsDrift.status).toBe(0);
+    expect(zeroIdsDrift.resolved).toEqual([]);
+    expect(readFileSync(headReadCount, 'utf8')).toBe('0');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // The retry delay is a test knob on a PAT-bearing step: anything but
+    // a single digit (a GITHUB_ENV plant stalling the step to the job
+    // timeout) must fall back to the default.
+    expect(block).toContain(
+      '[[ "${LIVE_HEAD_RETRY_DELAY:-}" =~ ^[0-9]$ ]] || LIVE_HEAD_RETRY_DELAY=5',
+    );
+    // The wait itself is the #10106 fix: with the sleep gone all five
+    // reads fire inside the propagation window, every one returns the
+    // stale head, and resolution silently skips every pushed round.
+    expect(block).toContain(
+      '[[ "${live_head_attempt}" == "${LIVE_HEAD_ATTEMPTS}" ]] || sleep "${LIVE_HEAD_RETRY_DELAY}"',
+    );
+    // The window's premise is THIS round's OWN push propagating: five
+    // attempts only after a push, one read otherwise, and no head proof
+    // at all on an empty selection.
+    expect(block).toContain(
+      '[[ "${ROUND_PUSHED:-}" == \'true\' ]] || LIVE_HEAD_ATTEMPTS=1',
+    );
+    expect(block).toContain('if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then');
+    // R3-1: CRs go through tr, not a sed \r escape — BSD sed on the
+    // macOS test lane does not interpret \r, so a sed-spelled strip
+    // drops every CRLF-terminated id there and the fixture above goes
+    // red (ci.yml records #9220, this defect class, shipped to main).
+    expect(block).toContain(
+      "RESOLVED_IDS=\"$(tr -d '\\r' < \"${WORKDIR}/resolved-comments.txt\" | sed 's/^rc://' | grep -E '^[0-9]+$' | sort -u || true)\"",
     );
 
     const movedBeforeMutation = runResolve({
@@ -17519,6 +19252,21 @@ exit 1
     expect(resolvedByOtherActor.status).toBe(0);
     expect(resolvedByOtherActor.resolved).toEqual([]);
     expect(resolvedByOtherActor.out).toContain('was resolved by another actor');
+
+    // R2-1: a Critical root and its reply carry two rc: handles for ONE
+    // thread. The loop resolves the thread on the first id; the second
+    // maps to the same thread and must read as same-thread dedupe — not
+    // as "another actor" resolving it between the fetch and the guard,
+    // which counted one thread as two in the note.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    const oneThreadTwoIds = runResolve();
+    expect(oneThreadTwoIds.status).toBe(0);
+    expect(oneThreadTwoIds.resolved).toEqual(['resolve:T_open_1']);
+    expect(oneThreadTwoIds.out).not.toContain('resolved by another actor');
+    expect(oneThreadTwoIds.out).toContain(
+      'confirmed 1 selected review thread(s) resolved',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
 
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
     const unknownThreadState = runResolve({
@@ -17718,6 +19466,213 @@ exit 1
         'confirmed 1 selected review thread(s) resolved',
       );
     }
+
+    // #10106: the ::warning:: lines above reach only the run log — on the
+    // PR, a guard refusing round after round reads exactly like resolution
+    // working (0/90 threads on #9729, silent for days). The block composes
+    // one host-authored RESOLUTION_NOTE naming the refusing guard and
+    // counting the threads left behind, and BOTH report arms (pushed and
+    // no-op) embed it in the round report.
+    expect(
+      pushAndReportScript.match(/echo "\$\{RESOLUTION_NOTE\}"/g) ?? [],
+    ).toHaveLength(2);
+    // R2-3 wiring: each arm tells the shared function whether THIS round
+    // pushed — the pushed arm retries out its own push's propagation lag,
+    // the no-op arm decides on one read.
+    expect(
+      pushAndReportScript.match(/ROUND_PUSHED='true'/g) ?? [],
+    ).toHaveLength(1);
+    expect(
+      pushAndReportScript.match(/ROUND_PUSHED='false'/g) ?? [],
+    ).toHaveLength(1);
+    const noteEnd = lines.findIndex((l) =>
+      l.includes('The mirror of the resolve above'),
+    );
+    expect(noteEnd).toBeGreaterThan(j);
+    const noteBlock = [
+      ...lines.slice(i, noteEnd),
+      'printf "NOTE<%s>" "${RESOLUTION_NOTE}"',
+    ].join('\n');
+    const runNote = (env = {}) => {
+      writeFileSync(resolvedLog, '');
+      writeFileSync(headReadCount, '0');
+      writeFileSync(threadStateFile, '');
+      const result = spawnSync(
+        'bash',
+        ['-c', `set -euo pipefail\n${noteBlock}`],
+        {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            WORKDIR: dir,
+            REPO: 'QwenLM/qwen-code',
+            PR: '7308',
+            RESOLVED_LOG: resolvedLog,
+            HEAD_READ_COUNT: headReadCount,
+            THREAD_STATE_FILE: threadStateFile,
+            THREADS_RAW_STUB: threadsRaw,
+            VERIFIED_HEAD: localHead,
+            LIVE_HEAD: localHead,
+            PUSH_RACE_MERGED: 'false',
+            ROUND_PUSHED: 'true',
+            LIVE_HEAD_RETRY_DELAY: '0',
+            ...env,
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(result.status).toBe(0);
+      return /NOTE<([\s\S]*)>$/.exec(result.stdout)?.[1] ?? '';
+    };
+    // Every up-front guard names itself. The skip path classifies like
+    // the resolve loop: three selected THREADS here, and the one already
+    // resolved before the fetch is subtracted from the residual.
+    for (const [env, guard] of [
+      [{ PUSH_RACE_MERGED: 'true' }, 'salvage merge'],
+      [{ VERIFIED_HEAD: '' }, 'missing verified_head'],
+      [{ VERIFIED_HEAD: 'different-verified-head' }, 'verified_head mismatch'],
+      [{ LIVE_HEAD: 'new-contributor-head' }, 'live-head drift'],
+      [{ LIVE_HEAD_EXIT: '1' }, 'live-head unreadable'],
+    ]) {
+      const note = runNote(env);
+      expect(note).toContain('Review-thread resolution skipped');
+      expect(note).toContain(`guard: \`${guard}\``);
+      expect(note).toContain(
+        'resolved 0 of 3 selected thread(s), 2 left for a later round',
+      );
+    }
+    // R2-3: a round that pushed nothing decides on ONE read — the note
+    // stays byte-identical while the head reads drop from five to one…
+    const noopDriftNote = runNote({
+      LIVE_HEAD: 'new-contributor-head',
+      ROUND_PUSHED: 'false',
+    });
+    expect(noopDriftNote).toContain('Review-thread resolution skipped');
+    expect(noopDriftNote).toContain('guard: `live-head drift`');
+    expect(noopDriftNote).toContain(
+      'resolved 0 of 3 selected thread(s), 2 left for a later round',
+    );
+    expect(readFileSync(headReadCount, 'utf8')).toBe('1');
+    // …and an empty selection skips the head proof entirely: zero reads.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:abc\n');
+    expect(
+      runNote({ LIVE_HEAD: 'new-contributor-head', ROUND_PUSHED: 'false' }),
+    ).toBe('');
+    expect(readFileSync(headReadCount, 'utf8')).toBe('0');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // R3-2: the skip and break paths must count THREADS like the resolve
+    // loop does — classification cannot live only inside the guarded loop,
+    // or exactly the refusing rounds this observability was built for
+    // report id counts: two ids of ONE thread as two threads, and a
+    // pre-fetch-resolved thread as work left behind forever.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    const skipOneThreadTwoIds = runNote({ PUSH_RACE_MERGED: 'true' });
+    expect(skipOneThreadTwoIds).toContain('Review-thread resolution skipped');
+    expect(skipOneThreadTwoIds).toContain('guard: `salvage merge`');
+    expect(skipOneThreadTwoIds).toContain(
+      'resolved 0 of 1 selected thread(s), 1 left for a later round',
+    );
+    // A skip round that re-lists ONLY already-resolved ids converges to
+    // zero left instead of re-reporting a phantom residual every round.
+    writeFileSync(join(dir, 'resolved-comments.txt'), '333\n');
+    expect(runNote({ PUSH_RACE_MERGED: 'true' })).toContain(
+      'resolved 0 of 1 selected thread(s), 0 left for a later round',
+    );
+    // A mid-list break reports the same-thread dedupe it broke past, too.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    const brokeOneThreadTwoIds = runNote({
+      LIVE_HEAD_SEQUENCE: `${localHead},new-contributor-head`,
+    });
+    expect(brokeOneThreadTwoIds).toContain(
+      'Review-thread resolution stopped early',
+    );
+    expect(brokeOneThreadTwoIds).toContain(
+      'resolved 0 of 1 selected thread(s), 1 left for a later round',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // A mid-list abort names its guard too, and carries the partial count.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
+    const stoppedNote = runNote({
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},${localHead},new-contributor-head`,
+    });
+    expect(stoppedNote).toContain('Review-thread resolution stopped early');
+    expect(stoppedNote).toContain('guard: `live-head drift`');
+    expect(stoppedNote).toContain(
+      'resolved 1 of 2 selected thread(s), 1 left for a later round',
+    );
+    const unprovenNote = runNote({ UNKNOWN_THREAD_STATE: 'T_open_1' });
+    expect(unprovenNote).toContain('guard: `thread state unproven`');
+    expect(unprovenNote).toContain('resolved 0 of 2');
+    const ambiguousNote = runNote({
+      RESOLVE_APPLIES: 'false',
+      RESOLVE_EXIT: '0',
+    });
+    expect(ambiguousNote).toContain('guard: `mutation post-check ambiguous`');
+    expect(ambiguousNote).toContain('resolved 0 of 2');
+    // Healthy rounds report a positive count and never name a guard.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n');
+    const healthyNote = runNote();
+    expect(healthyNote).toContain('Resolved all 1 selected review thread(s)');
+    expect(healthyNote).not.toContain('guard:');
+    // Per-thread misses without a stopping guard still show up as a count,
+    // and an incomplete thread fetch is called out as the likely cause.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // R2-2: 333's thread was already resolved BEFORE the fetch — it is
+    // not work left behind, so the residual counts 999 alone; without
+    // the already-resolved probe a re-listed still-valid fix kept the
+    // residual above zero forever.
+    const partialNote = runNote();
+    expect(partialNote).toContain(
+      'Resolved 1 of 3 selected review thread(s); 1 not resolved by this round',
+    );
+    expect(partialNote).toContain('details in the run log');
+    expect(partialNote).not.toContain('guard:');
+    const fetchNote = runNote({ THREADS_FETCH_EXIT: '1' });
+    expect(fetchNote).toContain('thread fetch incomplete');
+    // A round that re-lists ONLY already-resolved ids converges to "all
+    // resolved" instead of reporting a phantom residual forever.
+    writeFileSync(join(dir, 'resolved-comments.txt'), '333\n');
+    expect(runNote()).toContain('Resolved all 1 selected review thread(s)');
+    // R2-1: two ids of ONE thread count one thread in the note.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    expect(runNote()).toContain('Resolved all 1 selected review thread(s)');
+    // A thread another actor resolved between the fetch and the per-thread
+    // guard is not work left for a later round: before it had its own
+    // counter the note said "3 left" while only 2 threads were open.
+    writeFileSync(
+      join(dir, 'resolved-comments.txt'),
+      'rc:222\nrc:111\nrc:444\n',
+    );
+    // The shared normalization iterates ids in sorted order (111, 222,
+    // 444), so the first thread hits the another-actor continue and the
+    // second trips the drift break.
+    const anotherActorThenDrift = runNote({
+      OTHER_ACTOR_RESOLVED: 'T_open_1',
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},new-contributor-head`,
+    });
+    expect(anotherActorThenDrift).toContain(
+      'Review-thread resolution stopped early',
+    );
+    expect(anotherActorThenDrift).toContain('guard: `live-head drift`');
+    expect(anotherActorThenDrift).toContain(
+      'resolved 0 of 3 selected thread(s), 2 left for a later round',
+    );
+    // A duplicate id selects one thread, so it counts once: before the
+    // shared normalization deduplicated, the note reported "1 of 2".
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n111\n');
+    expect(runNote()).toContain('Resolved all 1 selected review thread(s)');
+    // No ids selected → no note: the line appears only when the agent
+    // asked for resolution.
+    writeFileSync(join(dir, 'resolved-comments.txt'), '');
+    expect(runNote()).toBe('');
+    // Non-empty but zero valid ids — agent-authored files do carry
+    // malformed lines. grep -c exits 1 on zero matches, so the || true is
+    // load-bearing under the step's bash -eo pipefail: without it the
+    // assignment aborts the whole push-and-report step.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:abc\n');
+    expect(runNote()).toBe('');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+
     // The SKILL keys resolution on the FINDING being fixed, not on "did I edit
     // a file this round" — an earlier commit's fix that still holds resolves
     // too, or a fixed Critical sits open and reads as unaddressed (#7731).
@@ -18266,7 +20221,15 @@ exit 1
     const runMark = (env) =>
       execFileSync(
         'bash',
-        ['-c', `${markBlock}\nprintf '%s|%s' "$MARK_TS" "$MARK_ROUND"`],
+        // The mark chain nests the report stale-base retry, whose
+        // convergence guard now fetches and speaks on failure: stub gh to
+        // silent success (the fetches read '[]', the guard stays quiet and
+        // falls through exactly as before) and give the fetch files a real
+        // directory, so the exact-output mark assertions stay exact.
+        [
+          '-c',
+          `WORKDIR='${tmpdir()}'\ngh() { :; }\n${markBlock}\nprintf '%s|%s' "$MARK_TS" "$MARK_ROUND"`,
+        ],
         {
           env: {
             ...process.env,
@@ -19210,10 +21173,26 @@ exit 0
   it('bounds qwen subprocess runtime', () => {
     const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
 
-    expect(runner).toContain('50 * 60 * 1000');
+    expect(runner).toContain('90 * 60 * 1000');
     expect(runner).toContain('setTimeout(() =>');
     expect(runner).toContain("killQwen(child, 'SIGKILL')");
     expect(runner).toContain('}, QWEN_TIMEOUT_MS)');
+  });
+
+  it('keeps the assess-candidates budget pinned at 50 minutes', () => {
+    // The runner default moved to 90m for `Develop fix`, and the issue
+    // job has no step-level caps — this env pin is the ONLY guard keeping
+    // assess from inheriting 90m: build (~6m) + assess (90m) + develop
+    // (90m) would exceed the job's 180-minute cap and cancel the always()
+    // reporters (claim withdrawal) — the silent round the pin's own
+    // comment warns about.
+    expect(assessCandidatesStep).toContain("QWEN_TIMEOUT_MS: '3000000'");
+  });
+
+  it('keeps the develop-issue leg on the runner default budget', () => {
+    // `Develop fix` must inherit the runner's 90m default; an env pin here
+    // would silently restore the 50m budget the default raise removed.
+    expect(developFixStep).not.toContain('QWEN_TIMEOUT_MS');
   });
 
   it('kills qwen subprocess descendants on timeout', () => {
@@ -19552,7 +21531,9 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     // CONSEC_FAIL toward a terminal lockout on the exact PR a human is
     // settling (probe-verified entrance). The scan block mirrors prepare's
     // conflict-handoff idempotence wake set; execute the real block.
-    expect(reviewScanJob).toContain('&& "${CONFLICT_PARKED}" != \'true\' ]]');
+    expect(reviewScanJob).toContain(
+      '&& "${CONFLICT_PARKED}" != \'true\' && "${CONV_PARKED}" != \'true\' ]]',
+    );
     const scanParkGateBlock = reviewScanJob.match(
       /CONFLICT_PARKED='false'[\s\S]*?rm -f "\$\{WORKDIR\}\/rv\.scan\.json" "\$\{WORKDIR\}\/rc\.scan\.json" "\$\{WORKDIR\}\/checks\.scan\.json"\n {12}fi\n/,
     )?.[0];
@@ -19678,6 +21659,1262 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     ).toBe('false');
   });
 
+  it('behaviorally trips the convergence breaker on N signal rounds and resumes on a human response (#10107)', () => {
+    // The review side publishes its convergence diagnosis as `rec` codes in
+    // the posted ledger marker; the scan gate is the consumer. The streak
+    // is trailing-consecutive over marker ROUNDS (a dismissed review and
+    // its same-round re-run count once), a healthy or pre-field marker
+    // resets it, and the boundary is max(window key, newest trusted-human
+    // activity) — a human response IS the resume signal. Execute the real
+    // boundary+streak block against fixture state.
+    const streakBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    expect(streakBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-'));
+    try {
+      const led = (round, rec) =>
+        `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          ...(rec === undefined ? {} : { rec }),
+        })} -->`;
+      const botReview = (at, round, rec) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `findings… ${led(round, rec)}`,
+      });
+      const readState = ({ rv = [], rc = [], ic = [], rearmKey = 'none' }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify(rc));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='${rearmKey}'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='not-a-number'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}\n` +
+              `printf '\\n%s %s' "$CONV_STREAK" "$CONVERGENCE_BREAK_ROUNDS"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        const [streak, cap] = out.split('\n').at(-1).split(' ');
+        return { streak: Number(streak), cap: Number(cap) };
+      };
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const threeSignals = [
+        botReview(T(1), 3, ['root-cause-triage']),
+        botReview(T(2), 4, ['batch-fixes', 'stem-surface']),
+        botReview(T(3), 5, ['root-cause-triage', 'batch-fixes']),
+      ];
+      // Three signal rounds, nobody in between → the breaker's bar, and the
+      // malformed knob fell back to its default at the read site.
+      expect(readState({ rv: threeSignals })).toEqual({ streak: 3, cap: 3 });
+      // A healthy round (marker, no codes) resets; so does a pre-field
+      // marker from a CLI predating `rec` — not evidence of divergence.
+      for (const rec of [undefined, []]) {
+        expect(
+          readState({
+            rv: [
+              botReview(T(1), 3, ['batch-fixes']),
+              botReview(T(2), 4, rec),
+              botReview(T(3), 5, ['batch-fixes']),
+            ],
+          }).streak,
+        ).toBe(1);
+      }
+      // 'land-and-defer' is an exit signal, not a divergence one.
+      expect(
+        readState({ rv: [botReview(T(1), 3, ['land-and-defer'])] }).streak,
+      ).toBe(0);
+      // 'successor-chain' is a divergence signal like the other wired
+      // codes — the gate's list is the CLI vocabulary minus the ONE
+      // documented exit code ('land-and-defer'); the lockstep test pins
+      // that contract on both ends.
+      expect(
+        readState({ rv: [botReview(T(1), 3, ['successor-chain'])] }).streak,
+      ).toBe(1);
+      // A dismissed review and its same-round re-run count once — the
+      // NEWEST marker speaks for the round (here: the healthy re-run).
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            { ...botReview(T(2), 4, ['batch-fixes']), state: 'DISMISSED' },
+            botReview(T(3), 4, []),
+          ],
+        }).streak,
+      ).toBe(0);
+      // A review with no parseable marker is not a round — a fallback stub
+      // between signal rounds neither counts nor resets.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(2),
+              state: 'COMMENTED',
+              body: 'fallback — no marker',
+            },
+            botReview(T(3), 4, ['batch-fixes']),
+          ],
+        }).streak,
+      ).toBe(2);
+      // A trusted-human response moves the boundary: only rounds AFTER it
+      // count, so every human touch grants a fresh N-round runway.
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(2),
+              body: 'split the cluster out',
+            },
+          ],
+        }).streak,
+      ).toBe(1);
+      // …but the review bot, an untrusted login, and @qwen-code command
+      // comments move nothing (commands act through their own routes).
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              author_association: 'NONE',
+              created_at: T(2),
+              body: 'suggestion digest',
+            },
+            {
+              user: { login: 'drive-by' },
+              author_association: 'NONE',
+              created_at: T(2),
+              body: 'bump',
+            },
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(2),
+              body: '@qwen-code /takeover',
+            },
+          ],
+        }).streak,
+      ).toBe(3);
+      // The window key is the other boundary: /retry or re-engaging resets
+      // the breaker exactly like every other census.
+      expect(readState({ rv: threeSignals, rearmKey: T(2) }).streak).toBe(1);
+      // A marker whose payload parses to a NON-object (number, string,
+      // array, boolean) is skipped like an unparseable one. Under jq >=
+      // 1.7 (the CI/production platform) the old `!= null` select let
+      // `.led.round` raise "Cannot index number" outside any try — the
+      // `|| echo 0` fallback turned one bad marker into CONV_STREAK=0 for
+      // the WHOLE window. jq 1.6 masks the crash (its assignment's
+      // try scope swallows the downstream error), so this witness bites
+      // only on 1.7+.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(2),
+              state: 'CHANGES_REQUESTED',
+              body: '<!-- qwen-review-ledger 42 -->',
+            },
+            botReview(T(3), 5, ['batch-fixes']),
+          ],
+        }).streak,
+      ).toBe(2);
+      // A trusted-human REVIEW moves the boundary too — the notice
+      // promises "a review or comment counts", so the reviews arm's
+      // state filter and submitted_at field must decide here.
+      expect(
+        readState({
+          rv: [
+            ...threeSignals,
+            {
+              user: { login: 'alice' },
+              author_association: 'MEMBER',
+              submitted_at: T(2),
+              state: 'COMMENTED',
+              body: 'review feedback, not an issue comment',
+            },
+          ],
+        }).streak,
+      ).toBe(1);
+      // An APPROVE-state review is a maintainer response too — the notice
+      // promises "a review or comment counts", and a maintainer who resolves
+      // the flagged issues themselves approves without a separate comment.
+      expect(
+        readState({
+          rv: [
+            ...threeSignals,
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              submitted_at: T(4),
+              state: 'APPROVED',
+              body: 'resolved the flagged issues myself',
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // A DISMISSED review keeps the boundary where the human put it: a
+      // resume review later dismissed (manually, or by dismiss-stale on a
+      // force-push) must not snap the boundary back to the window key and
+      // silently re-park under the stale pre-resume notice.
+      expect(
+        readState({
+          rv: [
+            ...threeSignals,
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              submitted_at: T(4),
+              state: 'DISMISSED',
+              body: 'resume review, dismissed later',
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // The streak is trailing-consecutive in TIME, not in round number:
+      // jq's group_by re-sorts the deduped rounds by the grouping key, so
+      // the reduce re-sorts by submitted_at first. Rounds land out of order
+      // exactly where the per-round dedup exists for them — a dismissed
+      // round's re-run. Rounds 3-6 signal at T1-T4, then round 3's HEALTHY
+      // re-run lands at T5: the newest event is healthy, so the trailing
+      // streak is 0 even though round-number order reads a signal tail of
+      // three — a false park in the unsafe direction.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            botReview(T(2), 4, ['batch-fixes']),
+            botReview(T(3), 5, ['batch-fixes']),
+            botReview(T(4), 6, ['batch-fixes']),
+            botReview(T(5), 3, []),
+          ],
+        }).streak,
+      ).toBe(0);
+      // Control: a late SIGNAL re-run extends in time order too.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, []),
+            botReview(T(2), 4, ['batch-fixes']),
+            botReview(T(3), 5, ['batch-fixes']),
+            botReview(T(4), 6, ['batch-fixes']),
+            botReview(T(5), 3, ['batch-fixes']),
+          ],
+        }).streak,
+      ).toBe(4);
+      // An edited body can hold more than one marker; the NEWEST describes
+      // the round — a `last` → `first` mutation stays green on every
+      // single-marker body, so pin a two-marker one: a healthy marker
+      // edited in AFTER the original signal marker speaks for the round.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            botReview(T(2), 4, ['batch-fixes']),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(3),
+              state: 'CHANGES_REQUESTED',
+              body: `findings… ${led(5, ['batch-fixes'])} amended after re-check ${led(5, [])}`,
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // The boundary reads the NEWEST trusted-human activity, not the
+      // first: a `min` would anchor the boundary at the first response
+      // forever, and every later response — the act the notice says
+      // resumes the loop — would fail to advance it.
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(2),
+              body: 'looking into it',
+            },
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(4),
+              body: 'keep going',
+            },
+          ],
+        }).streak,
+      ).toBe(0);
+      // The loop's own convergence-break notice must not count as
+      // trusted-human activity even though its author carries a trusted
+      // association on this repo — the marker is not in the
+      // machine-marker exclusion regex, so the bot-login filter is the
+      // only thing keeping the park from self-disarming on its own
+      // notice.
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              author_association: 'MEMBER',
+              created_at: T(2),
+              body: '<!-- autofix-convergence-break --> notice',
+            },
+          ],
+        }).streak,
+      ).toBe(3);
+      // Wiring: the trip parks the candidate before target emission, posts
+      // the once-per-boundary notice under its own marker, and is a PARK —
+      // never the fleet shepherd's terminal-stop headline.
+      expect(reviewScanJob).toContain(
+        'fleet_row "${PR}" \'convergence-parked\'',
+      );
+      // The release lever only exists under the takeover label, so the
+      // notice branches on it like the cap notices — two CONV_BODY texts,
+      // both under the park marker, neither a terminal-stop headline.
+      const noticeBodies =
+        reviewScanJob.match(
+          /CONV_BODY="\$\(printf '⏸️ AutoFix paused by a review convergence signal[^\n]*/g,
+        ) ?? [];
+      expect(noticeBodies).toHaveLength(2);
+      for (const body of noticeBodies) {
+        expect(body).toContain('<!-- autofix-convergence-break -->');
+        expect(body).not.toContain('🤖 AutoFix stopped');
+        // The codes clause claims exactly what CONV_CODES derives: the
+        // union since the last maintainer response, not the window key.
+        expect(body).toContain(
+          'codes observed since the last maintainer response',
+        );
+        expect(body).toContain('自上次维护者响应以来观察到的信号码');
+      }
+      expect(noticeBodies[0]).toContain('stop` to release takeover');
+      expect(noticeBodies[1]).toContain('to take it over');
+      expect(reviewScanJob).toContain('--body "${CONV_BODY}"');
+      expect(reviewScanJob).toContain(
+        'select((.body // "") | contains("<!-- autofix-convergence-break -->"))',
+      );
+      // Trip branch, EXECUTED: the -ge threshold, the park's `continue`,
+      // the once-per-boundary notice dedup, and the CONV_CODES union are
+      // the breaker's core effect — a substring pin cannot see a threshold
+      // off by one, a missing `continue` (the parked PR still dispatched),
+      // or a dedup that reposts every scan. Run the real block through a
+      // loop (a `continue` needs one); a sentinel after the block says
+      // whether the candidate fell through to dispatch or parked.
+      // The verdict derives ABOVE the stale-base update (a base merge into
+      // a parked PR would self-lift the park); the trip branch is the park
+      // ACTION on that verdict. The harness runs the production order:
+      // boundary+streak read, verdict derivation, then the action.
+      const parkedDerivation = reviewScanJob.match(
+        /CONV_PARKED='false'\n {12}if \[\[ "\$\{CONV_STREAK\}" -ge "\$\{CONVERGENCE_BREAK_ROUNDS\}" \]\]; then\n {14}CONV_PARKED='true'\n {12}else[\s\S]*?\n {12}fi\n/,
+      )?.[0];
+      expect(parkedDerivation).toBeTruthy();
+      const tripBlock = reviewScanJob.match(
+        /if \[\[ "\$\{CONV_PARKED\}" == 'true' \]\]; then\n[\s\S]*?\n {14}continue\n/,
+      )?.[0];
+      expect(tripBlock).toBeTruthy();
+      const runTrip = ({
+        rv = [],
+        ic = [],
+        dryRun = 'true',
+        noticedAt,
+        takeover = 'false',
+      }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify([]));
+        writeFileSync(
+          join(dir, 'ic.json'),
+          JSON.stringify(
+            noticedAt === undefined
+              ? ic
+              : [
+                  ...ic,
+                  {
+                    user: { login: 'qwen-code-dev-bot' },
+                    created_at: noticedAt,
+                    body: '<!-- autofix-convergence-break --> earlier notice',
+                  },
+                ],
+          ),
+        );
+        const ghCalls = join(dir, 'gh-calls');
+        if (existsSync(ghCalls)) rmSync(ghCalls);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
+              `DRY_RUN='${dryRun}'\nSKIP_LABEL='autofix/skip'\n` +
+              `RETRY_COMMAND='@qwen-code /retry'\nTAKEOVER_COMMAND='@qwen-code /takeover'\n` +
+              `HAS_TAKEOVER='${takeover}'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `fleet_row() { printf 'fleet_row: %s\\n' "$*"; }\n` +
+              `gh() {\n` +
+              `  case "\${1:-}" in\n` +
+              `    pr) if [[ "\${2:-}" == 'view' ]]; then\n` +
+              `          printf '{"labels":[{"name":"triage"}]}'\n` +
+              `        else\n` +
+              `          printf '%s\\n' "\${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `        fi ;;\n` +
+              `    api) if [[ "\${2:-}" == 'user' ]]; then\n` +
+              `           printf 'qwen-code-dev-bot'\n` +
+              `         else\n` +
+              `           printf '%s\\n' "api \${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `         fi ;;\n` +
+              `    *) printf '%s\\n' "$*" >> "\${WORKDIR}/gh-calls" ;;\n` +
+              `  esac\n` +
+              `}\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}` +
+              `${parkedDerivation.replace(/\n {12}/g, '\n')}` +
+              `SENTINEL=''\n` +
+              `for PR in 1; do\n` +
+              `${tripBlock.replace(/\n {12}/g, '\n')}\n` +
+              `fi\n` +
+              `SENTINEL='reached'\ndone\n` +
+              `printf '\\nsentinel=%s' "$SENTINEL"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return {
+          out,
+          parked: !out.includes('sentinel=reached'),
+          commentCalls: existsSync(ghCalls)
+            ? readFileSync(ghCalls, 'utf8')
+            : '',
+        };
+      };
+      // At the bar the candidate parks before dispatch; under it, it is
+      // selected normally.
+      const atBar = runTrip({ rv: threeSignals });
+      expect(atBar.parked).toBe(true);
+      expect(atBar.out).toContain('convergence-parked');
+      expect(atBar.out).toContain(
+        '🧪 DRY-RUN: would post convergence-break notice on #1',
+      );
+      expect(runTrip({ rv: threeSignals.slice(0, 2) }).parked).toBe(false);
+      // The notice carries the UNION of signal codes observed since the
+      // boundary — wider than the trailing streak: a round that reset the
+      // streak still contributes its code, and the reworded notice claims
+      // exactly that.
+      const union = runTrip({
+        rv: [
+          botReview(T(1), 3, ['stem-surface']),
+          botReview(T(2), 4, []),
+          botReview(T(3), 5, ['root-cause-triage']),
+          botReview(T(4), 6, ['root-cause-triage']),
+          botReview(T(5), 7, ['root-cause-triage']),
+        ],
+      });
+      expect(union.parked).toBe(true);
+      expect(union.out).toContain('(codes: root-cause-triage, stem-surface)');
+      // The notice posts once per boundary; a notice already present
+      // after the boundary suppresses the repost but not the park. The
+      // live-label gate runs outside DRY_RUN, against a stubbed gh whose
+      // calls are journaled.
+      const fresh = runTrip({ rv: threeSignals, dryRun: 'false' });
+      expect(fresh.parked).toBe(true);
+      expect(fresh.commentCalls).toContain('comment');
+      // A non-takeover PR's notice offers takeover itself: `/takeover stop`
+      // is the remove branch's logged no-op without the label, and command
+      // comments do not even move the breaker's boundary.
+      expect(fresh.commentCalls).toContain('to take it over');
+      expect(fresh.commentCalls).not.toContain('stop` to release takeover');
+      // Under the label the release lever exists and is advertised.
+      const taken = runTrip({
+        rv: threeSignals,
+        dryRun: 'false',
+        takeover: 'true',
+      });
+      expect(taken.parked).toBe(true);
+      expect(taken.commentCalls).toContain('stop` to release takeover');
+      expect(taken.commentCalls).not.toContain('to take it over');
+      const dedup = runTrip({
+        rv: threeSignals,
+        dryRun: 'false',
+        noticedAt: T(9),
+      });
+      expect(dedup.parked).toBe(true);
+      expect(dedup.commentCalls).not.toContain('comment');
+      // The dedup's time filter is not vacuous: a notice OLDER than the
+      // boundary (a maintainer response resumed the loop after the first
+      // park) must not suppress the fresh notice a re-trip earns — the
+      // af-152 promise. Every case above ran the dedup against an EMPTY
+      // boundary, where `> $since` cannot be told from "any notice ever".
+      const resumed = runTrip({
+        rv: [
+          botReview(T(3), 5, ['root-cause-triage']),
+          botReview(T(4), 6, ['batch-fixes']),
+          botReview(T(5), 7, ['root-cause-triage']),
+        ],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(2),
+            body: 'resuming — batch the remaining fixes',
+          },
+        ],
+        dryRun: 'false',
+        noticedAt: T(1),
+      });
+      expect(resumed.parked).toBe(true);
+      expect(resumed.commentCalls).toContain('comment');
+      // The park HOLD: a clean round (a push-triggered review resets the
+      // streak exactly like this) does not release a posted park — the
+      // notice holds it until the boundary itself moves, so a re-trip can
+      // never park under a stale notice, and the dedup never reposts while
+      // the hold stands.
+      const held = runTrip({
+        rv: [
+          botReview(T(1), 3, ['root-cause-triage']),
+          botReview(T(2), 4, ['root-cause-triage']),
+          botReview(T(3), 5, []),
+        ],
+        dryRun: 'false',
+        noticedAt: T(4),
+      });
+      expect(held.parked).toBe(true);
+      expect(held.commentCalls).not.toContain('comment');
+      // …and a trusted-human response after the notice moves the boundary
+      // past it, releasing the hold: under the bar the candidate runs.
+      const released = runTrip({
+        rv: [
+          botReview(T(2), 3, ['root-cause-triage']),
+          botReview(T(3), 4, ['root-cause-triage']),
+        ],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(5),
+            body: 'looking at it myself',
+          },
+        ],
+        dryRun: 'false',
+        noticedAt: T(1),
+      });
+      expect(released.parked).toBe(false);
+      // The codes clause matches its derivation: the union is keyed to
+      // CONV_SINCE, so codes observed BEFORE a mid-window maintainer
+      // response do not ride the notice posted after the response moved
+      // the boundary.
+      const spanned = runTrip({
+        rv: [
+          botReview(T(1), 3, ['root-cause-triage']),
+          botReview(T(2), 4, ['root-cause-triage']),
+          botReview(T(4), 5, ['batch-fixes']),
+          botReview(T(5), 6, ['batch-fixes']),
+          botReview(T(6), 7, ['batch-fixes']),
+        ],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(3),
+            body: 'addressed the first cluster',
+          },
+        ],
+      });
+      expect(spanned.parked).toBe(true);
+      expect(spanned.out).toContain('(codes: batch-fixes)');
+      expect(spanned.out).not.toContain('root-cause-triage');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a convergence-parked PR out of the scan stale-base update (#10107)', () => {
+    // The verdict derives ABOVE the stale-base section and the update's
+    // gate refuses a parked PR beside the conflict park: a base merge into
+    // a parked PR re-fires every synchronize-triggered workflow on the new
+    // head, and the base-merge round reviews an unchanged diff — its clean
+    // marker resets the streak, silently self-lifting the park with zero
+    // human activity (af-108's exact hazard). Execute the real read, the
+    // real verdict derivation, and the real gate: a tripped streak must
+    // suppress the update-branch call, and an untripped one must still
+    // update.
+    const streakBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    expect(streakBlock).toBeTruthy();
+    const parkedDerivation = reviewScanJob.match(
+      /CONV_PARKED='false'\n {12}if \[\[ "\$\{CONV_STREAK\}" -ge "\$\{CONVERGENCE_BREAK_ROUNDS\}" \]\]; then\n {14}CONV_PARKED='true'\n {12}else[\s\S]*?\n {12}fi\n/,
+    )?.[0];
+    expect(parkedDerivation).toBeTruthy();
+    // The verdict precedes the gate that consumes it.
+    expect(reviewScanJob.indexOf("CONV_PARKED='false'")).toBeLessThan(
+      reviewScanJob.indexOf('Auto-update a PR that is red ONLY'),
+    );
+    const staleBaseBlock = reviewScanJob.match(
+      /( {12}# Auto-update a PR that is red ONLY because of a stale base[\s\S]*?\n {12}fi\n)\n {12}# Convergence-signal circuit breaker \(#10107\): the park action on/,
+    )?.[1];
+    expect(staleBaseBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-base-'));
+    try {
+      const botReview = (at, round) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          rec: ['root-cause-triage'],
+        })} -->`,
+      });
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const runStaleBase = ({ rv, ic = [] }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify([]));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const ghCalls = join(dir, 'gh-calls');
+        if (existsSync(ghCalls)) rmSync(ghCalls);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
+              `DRY_RUN='false'\nREVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `CONFLICT_PARKED='false'\nMAIN_HEAD='mainsha'\nPR_HEAD_OID='prheadsha'\n` +
+              `CHECKS_JSON='[{"name":"Qwen Code CI","workflowName":"Qwen Code CI","conclusion":"FAILURE"}]'\n` +
+              `MAIN_GREEN_CHECKS='["Qwen Code CI"]'\n` +
+              `BASE_UPDATE_CUTOFF='2025-12-31T00:00:00Z'\n` +
+              `fleet_row() { :; }\n` +
+              `gh() {\n` +
+              `  case "\${1:-}" in\n` +
+              `    pr) printf '%s\\n' "\${*:2}" >> "\${WORKDIR}/gh-calls" ;;\n` +
+              `    api) if [[ "\${2:-}" == 'user' ]]; then\n` +
+              `           printf 'qwen-code-dev-bot'\n` +
+              `         elif [[ "$*" == *'/compare/'* ]]; then\n` +
+              `           printf 'behind'\n` +
+              `         else\n` +
+              `           printf '%s\\n' "api \${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `         fi ;;\n` +
+              `  esac\n` +
+              `}\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}` +
+              `${parkedDerivation.replace(/\n {12}/g, '\n')}` +
+              `SENTINEL=''\n` +
+              `for PR in 1; do\n` +
+              `${staleBaseBlock.replace(/^ {12}/gm, '')}\n` +
+              `SENTINEL='reached'\ndone\n` +
+              `printf '\\nCONV_PARKED=%s sentinel=%s' "$CONV_PARKED" "$SENTINEL"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        const last = out.split('\n').at(-1);
+        return {
+          parked: /CONV_PARKED=true/.test(last),
+          fellThrough: /sentinel=reached/.test(last),
+          calls: existsSync(ghCalls) ? readFileSync(ghCalls, 'utf8') : '',
+        };
+      };
+      // Tripped: the verdict parks and the stale-base gate refuses the head
+      // move — no update-branch call, no base-updated marker.
+      const parked = runStaleBase({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+      });
+      expect(parked.parked).toBe(true);
+      expect(parked.fellThrough).toBe(true);
+      expect(parked.calls).not.toContain('update-branch');
+      expect(parked.calls).not.toContain('autofix-base-updated');
+      // Untripped: the SAME red-on-PR/green-on-main/behind state updates
+      // the base as before — the guard suppresses only the parked case.
+      const unparked = runStaleBase({ rv: [] });
+      expect(unparked.parked).toBe(false);
+      expect(unparked.fellThrough).toBe(false);
+      expect(unparked.calls).toContain('update-branch');
+      // The park HOLD reaches the gate too: a clean round after a posted
+      // notice resets the streak but does not release the park.
+      const held = runStaleBase({
+        rv: [
+          botReview(T(1), 3),
+          botReview(T(2), 4),
+          {
+            user: { login: 'qwen-code-ci-bot' },
+            submitted_at: T(3),
+            state: 'COMMENTED',
+            body: `<!-- qwen-review-ledger ${JSON.stringify({
+              v: 1,
+              round: 5,
+              findings: [],
+            })} -->`,
+          },
+        ],
+        ic: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: T(9),
+            body: '<!-- autofix-convergence-break --> notice',
+          },
+        ],
+      });
+      expect(held.parked).toBe(true);
+      expect(held.fellThrough).toBe(true);
+      expect(held.calls).not.toContain('update-branch');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a convergence-parked PR out of the report stale-base retry (#10122)', () => {
+    // The report step's stale-base retry is a sibling wake leg the scan's
+    // CONV_PARKED cannot cover: that reading is scan-local, and the
+    // report's inputs froze at prepare time — a PR parked AFTER prepare
+    // would merge main in here on a failed round, and the base-merge
+    // round's clean marker would reset the streak, self-lifting the park
+    // with zero human activity. The guard re-derives the scan gate's
+    // reading over fresh fetches (the lockstep pin covers the programs);
+    // execute the real block.
+    const retryBlock = reviewAddressReportStep.match(
+      /STALE_BASE_RETRY=false\n[\s\S]*?\n {16}fi\n/,
+    )?.[0];
+    expect(retryBlock).toBeTruthy();
+    // Wiring: the guard runs inside the conflict skip and BEFORE the
+    // merge attempt it guards.
+    expect(retryBlock.indexOf('CONV_PARKED_R')).toBeLessThan(
+      retryBlock.indexOf('update-branch'),
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-report-'));
+    try {
+      const botReview = (at, round, rec = ['root-cause-triage']) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          ...(rec ? { rec } : {}),
+        })} -->`,
+      });
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const runRetry = ({
+        rv,
+        ic = [],
+        verdict = 'sound',
+        shellOpts = 'set -e',
+        fetchFail = false,
+      }) => {
+        writeFileSync(join(dir, 'rv.fixture.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.fixture.json'), JSON.stringify([]));
+        writeFileSync(join(dir, 'ic.fixture.json'), JSON.stringify(ic));
+        const ghCalls = join(dir, 'gh-calls');
+        if (existsSync(ghCalls)) rmSync(ghCalls);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${shellOpts}\nWORKDIR='${dir}'\nREPO='example-owner/example-repo'\nPR=1\n` +
+              `FETCH_FAIL='${fetchFail}'\n` +
+              `DEFAULT_BRANCH='main'\nAUDIT_VERDICT='${verdict}'\nREPORT_HEAD='reportheadsha'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `gh() {\n` +
+              `  case "\${1:-}" in\n` +
+              `    api)\n` +
+              `      if [[ "$*" == *'update-branch'* ]]; then\n` +
+              `        printf '%s\\n' "api \${*:2}" >> "\${WORKDIR}/gh-calls"\n` +
+              `      elif [[ "\${FETCH_FAIL}" == 'true' ]] && [[ "$*" == *'/pulls/1/reviews'* || "$*" == *'/pulls/1/comments'* || "$*" == *'/issues/1/comments'* ]]; then\n` +
+              `        return 1\n` +
+              `      elif [[ "$*" == *'/pulls/1/reviews'* ]]; then\n` +
+              `        cat "\${WORKDIR}/rv.fixture.json"\n` +
+              `      elif [[ "$*" == *'/pulls/1/comments'* ]]; then\n` +
+              `        cat "\${WORKDIR}/rc.fixture.json"\n` +
+              `      elif [[ "$*" == *'/issues/1/comments'* ]]; then\n` +
+              `        cat "\${WORKDIR}/ic.fixture.json"\n` +
+              `      elif [[ "$*" == *'/compare/'* ]]; then\n` +
+              `        printf 'behind'\n` +
+              `      elif [[ "$*" == *'/commits/'* ]]; then\n` +
+              `        printf 'mainsha'\n` +
+              `      fi ;;\n` +
+              `  esac\n` +
+              `}\n` +
+              `${retryBlock.replace(/^ {16}/gm, '')}\n` +
+              `printf '\\nSTALE_BASE_RETRY=%s' "$STALE_BASE_RETRY"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return {
+          out,
+          stale: /STALE_BASE_RETRY=true/.test(out.split('\n').at(-1)),
+          calls: existsSync(ghCalls) ? readFileSync(ghCalls, 'utf8') : '',
+        };
+      };
+      // The finding's scenario arm: the round fails its gate, the streak
+      // is tripped, the PR compares behind — NO merge. The comparator arm
+      // (a conflict verdict) skips the whole leg, guard included.
+      const parked = runRetry({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+      });
+      expect(parked.calls).not.toContain('update-branch');
+      expect(parked.stale).toBe(false);
+      expect(parked.out).toContain('convergence-parked');
+      const conflict = runRetry({ rv: [], verdict: 'conflict' });
+      expect(conflict.calls).toBe('');
+      expect(conflict.stale).toBe(false);
+      // The park HOLD reaches the report leg too: a clean round after a
+      // posted notice does not release it.
+      const held = runRetry({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5, null)],
+        ic: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: T(9),
+            body: '<!-- autofix-convergence-break --> notice',
+          },
+        ],
+      });
+      expect(held.calls).not.toContain('update-branch');
+      expect(held.stale).toBe(false);
+      // A trusted-human response after the signals moves the boundary —
+      // the retry merges main exactly as before the guard.
+      const resumed = runRetry({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+        ic: [
+          {
+            user: { login: 'alice' },
+            author_association: 'OWNER',
+            created_at: T(6),
+            body: 'on it',
+          },
+        ],
+      });
+      expect(resumed.calls).toContain('update-branch');
+      expect(resumed.stale).toBe(true);
+      // Untripped: the merge attempt happens as before.
+      const clean = runRetry({ rv: [] });
+      expect(clean.calls).toContain('update-branch');
+      expect(clean.stale).toBe(true);
+      // R3-8's witness, executed under the step shell's production
+      // semantics: a transient gh failure of the guard's three fresh
+      // fetches must NOT abort the report step under -eo pipefail — the
+      // errexit-exempt fetches let the block run to completion (the report
+      // comment and eval marker still post), and the merge gate fails
+      // CLOSED on the unreadable park state: no update-branch.
+      const fetchFailed = runRetry({
+        rv: [],
+        fetchFail: true,
+        shellOpts: 'set -eo pipefail',
+      });
+      expect(fetchFailed.out).toContain('STALE_BASE_RETRY=false');
+      expect(fetchFailed.calls).not.toContain('update-branch');
+      expect(fetchFailed.out).toContain('fail closed');
+      // Comparator under the same shell: healthy fetches still merge.
+      const healthyPipefail = runRetry({
+        rv: [],
+        shellOpts: 'set -eo pipefail',
+      });
+      expect(healthyPipefail.calls).toContain('update-branch');
+      expect(healthyPipefail.stale).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('parks a feedback-idle PR visibly — the park action outranks the idle fast-path (#10122)', () => {
+    // The verdict derives above the idle fast-path, and the park ACTION
+    // must too: a parked PR whose signal rounds all sit at or below the
+    // eval watermark IS the idle case, and the notice and fleet row this
+    // action writes are the park's only visible escalation — below the
+    // fast-path the idle `continue` would fire first and the park would
+    // go invisible (the fleet says 'idle', the notice never posts). Run
+    // the production order: verdict, park action, idle fast-path.
+    expect(reviewScanJob.indexOf('convergence park active')).toBeLessThan(
+      reviewScanJob.indexOf('fleet_row "${PR}" \'idle\''),
+    );
+    const streakBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    const parkedDerivation = reviewScanJob.match(
+      /CONV_PARKED='false'\n {12}if[\s\S]*?\n {12}fi\n/,
+    )?.[0];
+    const tripBlock = reviewScanJob.match(
+      /if \[\[ "\$\{CONV_PARKED\}" == 'true' \]\]; then\n[\s\S]*?\n {14}continue\n/,
+    )?.[0];
+    const idleBlock = reviewScanJob.match(
+      /N_FAILED_CHECKS="\$\(jq --arg wm[\s\S]*?\n {14}continue\n {12}fi\n/,
+    )?.[0];
+    expect(
+      streakBlock && parkedDerivation && tripBlock && idleBlock,
+    ).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-idle-'));
+    try {
+      const botReview = (at, round) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          rec: ['root-cause-triage'],
+        })} -->`,
+      });
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const runIdleRace = ({ rv, ic = [] }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify([]));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='none'\nPR=1\nREPO='owner/repo'\n` +
+              `DRY_RUN='true'\nSKIP_LABEL='autofix/skip'\n` +
+              `RETRY_COMMAND='@qwen-code /retry'\nTAKEOVER_COMMAND='@qwen-code /takeover'\n` +
+              `HAS_TAKEOVER='false'\nROUND='1'\nEFF_MAX_ROUNDS='6'\n` +
+              `EFF_WM='2026-01-01T08:00:00Z'\nCHECKS_JSON='[]'\n` +
+              `PR_META='{"headRefOid":"h1"}'\nRED_HEAD='h1'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `fleet_row() { printf 'fleet_row: %s\\n' "$*"; }\n` +
+              `gh() {\n` +
+              `  if [[ "\${1:-}" == 'pr' && "$*" == *'mergeable'* ]]; then\n` +
+              `    printf 'MERGEABLE'\n` +
+              `  else\n` +
+              `    printf '{"labels":[]}'\n` +
+              `  fi\n` +
+              `}\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}` +
+              `${parkedDerivation.replace(/\n {12}/g, '\n')}` +
+              `SENTINEL=''\n` +
+              `for PR in 1; do\n` +
+              `${tripBlock.replace(/\n {12}/g, '\n')}\n` +
+              `fi\n` +
+              `${idleBlock.replace(/^ {12}/gm, '')}\n` +
+              `SENTINEL='reached'\ndone\n` +
+              `printf '\\nsentinel=%s' "$SENTINEL"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return out;
+      };
+      // Three signal rounds fully consumed by the eval watermark and no
+      // new feedback: the idle case. The park still acts — notice and
+      // fleet row post, and the candidate spends no dispatch.
+      const parked = runIdleRace({
+        rv: [botReview(T(1), 3), botReview(T(2), 4), botReview(T(3), 5)],
+      });
+      expect(parked).not.toContain('sentinel=reached');
+      expect(parked).toContain('convergence-parked');
+      expect(parked).toContain(
+        '🧪 DRY-RUN: would post convergence-break notice on #1',
+      );
+      // Under the bar the same idle PR idles as before.
+      const idle = runIdleRace({
+        rv: [botReview(T(1), 3), botReview(T(2), 4)],
+      });
+      expect(idle).toContain('fleet_row: 1 idle');
+      expect(idle).not.toContain('convergence-break notice');
+      // …and a non-idle unparked candidate still falls through to dispatch.
+      const selected = runIdleRace({
+        rv: [
+          botReview(T(1), 3),
+          botReview(T(2), 4),
+          {
+            user: { login: 'alice' },
+            author_association: 'MEMBER',
+            submitted_at: T(9),
+            state: 'COMMENTED',
+            body: 'fresh feedback above the watermark',
+          },
+        ],
+      });
+      expect(selected).toContain('sentinel=reached');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('mirrors the convergence breaker live in prepare, discarding without comment (#10107)', () => {
+    // A target can be emitted moments before the tripping review lands (the
+    // review's own submitted trigger routes a round for exactly that
+    // review), so the leg re-derives the scan gate's reading and idles via
+    // STALE — no agent run, no marker, no comment; the notice stays the
+    // scan's job. Execute the real mirror block.
+    const mirrorBlock = prepareBranchAndFeedbackStep.match(
+      /# Convergence-break mirror[\s\S]*?\n {10}fi\n/,
+    )?.[0];
+    expect(mirrorBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-mirror-'));
+    try {
+      const botReview = (at, round) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          rec: ['batch-fixes'],
+        })} -->`,
+      });
+      const staleOf = ({
+        rv = [],
+        rc = [],
+        ic = [],
+        stale = 'false',
+        rearmKey = 'none',
+        rounds = '3',
+      }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify(rc));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nLIVE_REARM_KEY='${rearmKey}'\nSTALE='${stale}'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='${rounds}'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'\n` +
+              `${mirrorBlock.replace(/\n {10}/g, '\n')}\nprintf '\\n%s' "$STALE"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return {
+          stale: out.trim().split('\n').pop(),
+          parked:
+            out.includes('convergence break pending') ||
+            out.includes('convergence park holds'),
+        };
+      };
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const threeSignals = [
+        botReview(T(1), 3),
+        botReview(T(2), 4),
+        botReview(T(3), 5),
+      ];
+      // The breaker holds → the leg discards, and says why.
+      expect(staleOf({ rv: threeSignals })).toEqual({
+        stale: 'true',
+        parked: true,
+      });
+      // Under the bar → the leg runs.
+      expect(staleOf({ rv: threeSignals.slice(0, 2) })).toEqual({
+        stale: 'false',
+        parked: false,
+      });
+      // A trusted-human response since the streak → resumed.
+      expect(
+        staleOf({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'alice' },
+              author_association: 'MEMBER',
+              created_at: T(4),
+              body: 'batching these myself',
+            },
+          ],
+        }),
+      ).toEqual({ stale: 'false', parked: false });
+      // An already-stale leg is not re-derived (the block never unsets it).
+      expect(staleOf({ rv: threeSignals, stale: 'true' }).stale).toBe('true');
+      // The mirror's window-key wiring is the scan harness's rearmKey case:
+      // a re-armed window counts only signals after the new key — a fresh
+      // runway, not a silent discard of the leg the scan still allows.
+      expect(staleOf({ rv: threeSignals, rearmKey: T(2) })).toEqual({
+        stale: 'false',
+        parked: false,
+      });
+      // The mirror's malformed-knob fallback matches the scan's (the scan
+      // side's is pinned by the 'not-a-number' case above): with a garbage
+      // repo var the mirror must park at the SAME threshold, or it burns an
+      // agent round the scan already refused.
+      expect(staleOf({ rv: threeSignals, rounds: 'garbage' })).toEqual({
+        stale: 'true',
+        parked: true,
+      });
+      // The park HOLD rides along: a posted notice newer than the boundary
+      // keeps the leg STALE after a clean round reset the streak — a target
+      // dispatched before the clean round must not land on a PR the scan
+      // still holds parked.
+      expect(
+        staleOf({
+          rv: [
+            botReview(T(1), 3),
+            botReview(T(2), 4),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(3),
+              state: 'COMMENTED',
+              body: `<!-- qwen-review-ledger ${JSON.stringify({
+                v: 1,
+                round: 5,
+                findings: [],
+              })} -->`,
+            },
+          ],
+          ic: [
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: T(9),
+              body: '<!-- autofix-convergence-break --> notice',
+            },
+          ],
+        }),
+      ).toEqual({ stale: 'true', parked: true });
+      // …until a trusted-human response moves the boundary past the notice:
+      // the hold releases with the park.
+      expect(
+        staleOf({
+          rv: [botReview(T(1), 3)],
+          ic: [
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: T(1),
+              body: '<!-- autofix-convergence-break --> notice',
+            },
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(5),
+              body: 'resuming',
+            },
+          ],
+        }),
+      ).toEqual({ stale: 'false', parked: false });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('pins the convergence signal codes inside the review CLI vocabulary, and the two gates in lockstep (#10107)', () => {
+    // The vocabulary is a CONTRACT owned by the review CLI: the workflow
+    // wires actions to codes the marker publishes, so a workflow code the
+    // CLI can never emit is a breaker that can never trip, and a renamed
+    // CLI code silently disarms it. Pin membership on both ends, and the
+    // deliberate absence of the exit code.
+    const codesEnv = workflow.match(
+      /CONVERGENCE_SIGNAL_CODES: '(\[[^\n]*\])'/,
+    )?.[1];
+    expect(codesEnv).toBeTruthy();
+    const signalCodes = JSON.parse(codesEnv);
+    expect(signalCodes.length).toBeGreaterThan(0);
+    const convergenceTs = readFileSync(
+      'packages/cli/src/commands/review/lib/convergence.ts',
+      'utf8',
+    );
+    const vocab = convergenceTs
+      .match(/RECOMMENDATION_CODES = \[([\s\S]*?)\] as const/)?.[1]
+      .match(/'([a-z-]+)'/g)
+      .map((c) => c.replaceAll("'", ''));
+    expect(vocab).toBeTruthy();
+    for (const code of signalCodes) {
+      expect(vocab).toContain(code);
+    }
+    // …and the converse: every divergence code the CLI can emit is wired —
+    // the vocabulary minus the ONE documented exit code. A code the CLI
+    // emits that the gate never counts takes the streak reduce's else-0
+    // branch and RESETS an accumulated streak instead of extending it.
+    for (const code of vocab) {
+      if (code === 'land-and-defer') continue;
+      expect(signalCodes).toContain(code);
+    }
+    // 'land-and-defer' means "this loop can end by merging" — pausing on it
+    // would park exactly the PR a human should merge.
+    expect(vocab).toContain('land-and-defer');
+    expect(signalCodes).not.toContain('land-and-defer');
+    // The marker really publishes the field the gates read.
+    const ledgerTs = readFileSync(
+      'packages/cli/src/commands/review/lib/ledger.ts',
+      'utf8',
+    );
+    expect(ledgerTs).toContain('payload.rec = rec');
+    // Lockstep: the scan gate and the prepare mirror must read the SAME
+    // streak and the SAME boundary, or one side burns rounds the other
+    // refused. The jq programs reference only their own --arg names, so
+    // the two sides' programs must be verbatim-identical modulo
+    // indentation; only the shell variable names around them differ.
+    // A program opens as `--arg… "${VAR}" '` + newline and contains no
+    // single quote of its own, so the next `'` closes it.
+    // Per-line, not whole-string, normalization: it absorbs the scan/mirror
+    // indentation difference but preserves whitespace INSIDE jq string
+    // literals — the machine-marker exclusion regex ends in a load-bearing
+    // trailing space, and a one-sided literal edit there must fail the pin
+    // instead of normalizing into it.
+    const jqProgramsOf = (block) =>
+      [...block.matchAll(/" '\n([\s\S]+?)'/g)].map((m) =>
+        m[1]
+          .split('\n')
+          .map((line) => line.trimStart())
+          .join(' ')
+          .trim(),
+      );
+    const scanBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    const mirrorBlock = prepareBranchAndFeedbackStep.match(
+      /# Convergence-break mirror[\s\S]*?\n {10}fi\n/,
+    )?.[0];
+    const reportBlock = reviewAddressReportStep.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK_R=0\n/,
+    )?.[0];
+    expect(reportBlock).toBeTruthy();
+    const scanPrograms = jqProgramsOf(scanBlock);
+    // Two programs each: the human-activity boundary and the streak.
+    expect(scanPrograms).toHaveLength(2);
+    // Three sites run the SAME programs: the scan gate, the prepare mirror
+    // (which also carries the park hold's census as a third program), and
+    // the report step's stale-base guard.
+    const mirrorPrograms = jqProgramsOf(mirrorBlock);
+    expect(mirrorPrograms.slice(0, 2)).toEqual(scanPrograms);
+    expect(jqProgramsOf(reportBlock)).toEqual(scanPrograms);
+    // The hold census is one program in the three lockstepped sites.
+    const scanParkBlock = reviewScanJob.match(
+      /CONV_PARKED='false'\n {12}if[\s\S]*?\n {12}fi\n/,
+    )?.[0];
+    expect(scanParkBlock).toBeTruthy();
+    const reportParkBlock = reviewAddressReportStep.match(
+      /if \[\[ "\$\{CONV_STREAK_R\}" -ge "\$\{CONVERGENCE_BREAK_ROUNDS\}" \]\]; then\n[\s\S]*?\n {18}fi\n/,
+    )?.[0];
+    expect(reportParkBlock).toBeTruthy();
+    const censusPrograms = jqProgramsOf(scanParkBlock);
+    expect(censusPrograms).toHaveLength(1);
+    expect(mirrorPrograms[2]).toEqual(censusPrograms[0]);
+    expect(jqProgramsOf(reportParkBlock)).toEqual(censusPrograms);
+    // Witness that the pin now sees a one-sided literal edit: a single extra
+    // space inside ONE side's exclusion regex (its trailing space is
+    // load-bearing) normalized away under the old whole-string collapse.
+    const mutatedScanBlock = scanBlock.replace(
+      'qwen-review-ack) ',
+      'qwen-review-ack)  ',
+    );
+    expect(mutatedScanBlock).not.toEqual(scanBlock);
+    expect(jqProgramsOf(mutatedScanBlock)).not.toEqual(scanPrograms);
+    // The design pointers resolve.
+    expect(designDoc).toContain('<a id="af-151"></a>');
+    expect(designDoc).toContain('<a id="af-152"></a>');
+    expect(designDoc).toContain('<a id="af-153"></a>');
+    expect(designDoc).toContain('<a id="af-154"></a>');
+  });
+
   it('a conflict round parks quietly — no stale-base merge in its report', () => {
     // The conflict round's own stale-base retry would re-fire every
     // synchronize-triggered workflow on the new head; those loop-generated
@@ -19701,10 +22938,34 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     // level, which outranks any $GITHUB_ENV plant; the gate itself then
     // runs through the workflow's env -i clean-child pattern, so its bash
     // inherits nothing at all (enumerating plants is the failure mode the
-    // verdict pipeline kept hitting).
+    // verdict pipeline kept hitting). LD_* load at startup the same way, so
+    // they are pinned empty at step level too — an in-body unset cannot
+    // unload a library already mapped into the parent running the digest
+    // check, and a bare unset is itself a BASH_FUNC shadow target (R6-2,
+    // R8-1) — and RUNNER_TEMP/WORKDIR/BRANCH steer that digest check and
+    // the child's tree, so they are pinned from trusted expression context
+    // too (R6-3). CI reaches the child's `CI="${CI:-true}"` expansion from
+    // the step environment, and `:-true` only covers an UNSET CI — a
+    // $GITHUB_ENV plant of CI=false survives the expansion and inverts the
+    // gate's CI semantics — so CI is pinned at step level too (R1-1).
+    // HOME reaches the child's allowlist from the step environment, and
+    // npm resolves its userconfig from HOME — a planted HOME's .npmrc
+    // script-shell wraps every verdict-determining `npm run`, so a red
+    // branch reports green; HOME is pinned from the stage-time capture
+    // (R8-3).
     for (const step of [verificationGateSteps[1], repairVerificationGateStep]) {
       expect(step).toContain("BASH_ENV: ''");
       expect(step).toContain("SHELLOPTS: ''");
+      expect(step).toContain("LD_PRELOAD: ''");
+      expect(step).toContain("LD_AUDIT: ''");
+      expect(step).toContain("LD_LIBRARY_PATH: ''");
+      expect(step).toContain("RUNNER_TEMP: '${{ runner.temp }}'");
+      expect(step).toContain(
+        "WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'",
+      );
+      expect(step).toContain("BRANCH: '${{ matrix.target.branch }}'");
+      expect(step).toContain("CI: 'true'");
+      expect(step).toContain("HOME: '${{ steps.stage.outputs.trusted_home }}'");
       expect(step).toContain('/usr/bin/env -i');
       expect(step).toContain(
         'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
@@ -19715,6 +22976,10 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
         'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
       );
     }
+    // The review stage step records HOME before any branch code runs — the
+    // trusted_path doctrine — and only it: the issue job's stage has no
+    // gate child re-injecting HOME.
+    expect(workflow.match(/trusted_home=\$\{HOME\}/g) ?? []).toHaveLength(1);
   });
 });
 
@@ -20271,7 +23536,26 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.headAfter).toBe('feature');
   });
 
-  it('keeps the green path intact', () => {
+  it('gates every mapfile-crossing runGate flow on the host probe', () => {
+    // These flows run the REAL script past the bite section's
+    // unconditional top-level `mapfile -d ''`: on a bash without mapfile
+    // (macOS ships 3.2) the spawn dies there with exit 127 before the
+    // semantics under test can execute, so each carries the host gate.
+    // Two siblings a main merge added went ungated and turned the revived
+    // macOS lane red; the pin keeps a dropped gate from doing it again.
+    const self = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+    for (const title of [
+      'keeps the green path intact',
+      'rejects a conflict verdict whose round completed as fixed',
+      'locks the runner file-command backing files against env plants',
+    ]) {
+      expect(self).toMatch(
+        new RegExp(`it\\.skipIf\\(!hasBashMapfile\\)\\(\\s*'${title}'`),
+      );
+    }
+  });
+
+  it.skipIf(!hasBashMapfile)('keeps the green path intact', () => {
     const r = runGate({ failAt: [] });
     expect(r.status).toBe(0);
     expect(r.outputs).toContain('outcome=fixed');
@@ -20718,30 +24002,33 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     );
   });
 
-  it('rejects a conflict verdict whose round completed as fixed', () => {
-    // The routing check cannot see the planted-handoff shape: conflict +
-    // handoff.md + commit + address-summary + green checks clears every
-    // earlier gate and would push the contested code under outcome=fixed
-    // while the report posts the park marker. The refusal sits at the push
-    // boundary — NOT at the verdict gate, where it would also refuse a
-    // legitimate repair-pass re-audit to conflict (which runs behind the
-    // first pass's commit and stops with failure.md).
-    const r = runGate({
-      kissAudit: true,
-      auditJson: conflictAuditJson,
-      handoffMd: 'conflict handoff\n',
-    });
-    expect(r.status).toBe(1);
-    expect(r.outputs).not.toContain('outcome=fixed');
-    expect(r.outputs).not.toContain('retryable=true');
-    // The validated verdict still surfaces: the trail marker posts and the
-    // park engages on the handoff's question.
-    expect(r.outputs).toContain('audit_verdict=conflict');
-    expect(r.outputs).toContain('outcome=failed');
-    expect(r.rejection).toContain(
-      'growth-audit verdict is conflict but the round completed as fixed',
-    );
-  });
+  it.skipIf(!hasBashMapfile)(
+    'rejects a conflict verdict whose round completed as fixed',
+    () => {
+      // The routing check cannot see the planted-handoff shape: conflict +
+      // handoff.md + commit + address-summary + green checks clears every
+      // earlier gate and would push the contested code under outcome=fixed
+      // while the report posts the park marker. The refusal sits at the push
+      // boundary — NOT at the verdict gate, where it would also refuse a
+      // legitimate repair-pass re-audit to conflict (which runs behind the
+      // first pass's commit and stops with failure.md).
+      const r = runGate({
+        kissAudit: true,
+        auditJson: conflictAuditJson,
+        handoffMd: 'conflict handoff\n',
+      });
+      expect(r.status).toBe(1);
+      expect(r.outputs).not.toContain('outcome=fixed');
+      expect(r.outputs).not.toContain('retryable=true');
+      // The validated verdict still surfaces: the trail marker posts and the
+      // park engages on the handoff's question.
+      expect(r.outputs).toContain('audit_verdict=conflict');
+      expect(r.outputs).toContain('outcome=failed');
+      expect(r.rejection).toContain(
+        'growth-audit verdict is conflict but the round completed as fixed',
+      );
+    },
+  );
 
   it('passes a conflict round that stopped with a non-empty handoff', () => {
     // The handoff.md stop shape the routing check exists for: conflict +
@@ -20870,19 +24157,22 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('kiss_audit=true');
   });
 
-  it('locks the runner file-command backing files against env plants', () => {
-    // The strip removes the GITHUB_ENV VARIABLE from the checks, but the
-    // backing files under $RUNNER_TEMP/_runner_file_commands/ stay
-    // discoverable (a predictable path) and writable — an append there
-    // plants environment into every later step of the job, the PAT-
-    // bearing one included. The gate locks them for the step's lifetime.
-    const r = runGate({ forgeEnvFile: true });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain('env forge blocked: backing file locked');
-    // The gate's OWN channel keeps working through the lock.
-    expect(r.outputs).toContain('outcome=fixed');
-    expect(r.outputs).toContain('kiss_audit=false');
-  });
+  it.skipIf(!hasBashMapfile)(
+    'locks the runner file-command backing files against env plants',
+    () => {
+      // The strip removes the GITHUB_ENV VARIABLE from the checks, but the
+      // backing files under $RUNNER_TEMP/_runner_file_commands/ stay
+      // discoverable (a predictable path) and writable — an append there
+      // plants environment into every later step of the job, the PAT-
+      // bearing one included. The gate locks them for the step's lifetime.
+      const r = runGate({ forgeEnvFile: true });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('env forge blocked: backing file locked');
+      // The gate's OWN channel keeps working through the lock.
+      expect(r.outputs).toContain('outcome=fixed');
+      expect(r.outputs).toContain('kiss_audit=false');
+    },
+  );
 
   it('leaves the growth-audit verdict check inert on non-audit rounds', () => {
     // Without the KISS_AUDIT tag a malformed verdict file must not engage
@@ -21206,7 +24496,7 @@ describe('stale sandbox container cleanup', () => {
         '#!/bin/bash\necho "$@" >> "${AGENT_WORKDIR}/docker-calls.txt"\nexit 0\n',
       );
       chmodSync(join(bin, 'docker'), 0o755);
-      // The launcher line exactly as packages/cli/src/utils/sandbox.ts
+      // The launcher line exactly as packages/cli/src/serve/sandbox.ts
       // prints it, then the wedge shape: one line, then silence.
       const stub = join(dir, 'qwen');
       writeFileSync(

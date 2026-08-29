@@ -28,13 +28,19 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { runScratchTree, scratchTreeCommand } from './scratch-tree.js';
+import yargs, { type Argv } from 'yargs';
+import {
+  runScratchTree,
+  scratchTreeCommand,
+  type ScratchTreeArgs,
+} from './scratch-tree.js';
 import { scratchWorktreePath } from './lib/paths.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 
@@ -54,7 +60,7 @@ describe('runScratchTree', () => {
 
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
-    repo = mkdtempSync(join(tmpdir(), 'qwen-scratch-tree-'));
+    repo = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-scratch-tree-')));
     git(repo, 'init', '-q', '-b', 'main');
     git(repo, 'config', 'user.email', 't@t.t');
     git(repo, 'config', 'user.name', 't');
@@ -269,6 +275,10 @@ describe('runScratchTree', () => {
     // passes the registration gate and fails inside the reset — the catch must
     // take it to discard-and-rebuild rather than let the throw escape.
     const first = run();
+    // The git-created gitfile refuses an in-place overwrite on Windows
+    // (EPERM, even after clearing the read-only attribute); deleting and
+    // recreating works there and is an ordinary rewrite on POSIX.
+    rmSync(join(first.path!, '.git'), { force: true });
     writeFileSync(join(first.path!, '.git'), 'gitdir: /nowhere/at/all\n');
 
     const second = run();
@@ -372,6 +382,7 @@ describe('runScratchTree', () => {
     execFileSync('git', ['commit', '-qm', 'one'], { cwd: other });
 
     const first = run();
+    rmSync(join(first.path!, '.git'), { force: true }); // see the note above
     writeFileSync(
       join(first.path!, '.git'),
       `gitdir: ${join(other, '.git')}\n`,
@@ -457,6 +468,7 @@ describe('runScratchTree', () => {
       '--git-dir',
     );
 
+    rmSync(join(first.path!, '.git'), { force: true }); // see the note above
     writeFileSync(join(first.path!, '.git'), `gitdir: ${admin}\n`);
 
     const second = run();
@@ -695,7 +707,11 @@ describe('runScratchTree', () => {
     writeFileSync(join(worktree, 'a.ts'), 'export const x = 2;\n');
     writeFileSync(join(worktree, '__probe__.test.ts'), 'it("x", () => {});');
 
-    const r = run();
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--abc123',
+      fetchedSha: headSha,
+    });
     expect(r.available).toBe(true);
     expect(r.sharedTreeResidue.sort()).toEqual(['__probe__.test.ts', 'a.ts']);
     expect(r.sharedTreeResidueTotal).toBe(2);
@@ -710,7 +726,11 @@ describe('runScratchTree', () => {
     for (let i = 0; i < 13; i++) {
       writeFileSync(join(worktree, `f${i}.ts`), 'x\n');
     }
-    const r = run();
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--abc123',
+      fetchedSha: headSha,
+    });
     expect(r.sharedTreeResidueTotal).toBe(13);
     expect(r.sharedTreeResidue).toHaveLength(12);
     expect(r.note).toContain('1 more paths not listed here');
@@ -728,7 +748,11 @@ describe('runScratchTree', () => {
       cwd: worktree,
     });
 
-    const r = run();
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--abc123',
+      fetchedSha: headSha,
+    });
     expect(r.sharedTreeResidue.sort()).toEqual([
       '.gitignore',
       'a.ts',
@@ -769,10 +793,99 @@ describe('runScratchTree', () => {
     },
   );
 
-  it('says nothing about residue when the shared worktree is clean', () => {
+  it('refuses a CLEAN shared worktree it measured without the fetched sha', () => {
+    // The probe's clean verdict is the dangerous one: a forged pair answers
+    // clean too, and this caller brings no record to pin the identity — so
+    // an empty measurement is unmeasured, never clean (#9557). The note is
+    // the fail-closed half: an unmeasured tree is not a clean one.
     const r = run();
     expect(r.sharedTreeResidue).toEqual([]);
     expect(r.note).not.toContain('NOT clean');
+    expect(r.sharedTreeUnmeasured).toContain('brought no record');
+    expect(r.note).toContain('could not be measured');
+    // ...and the note does not blame `git status`: the refusal fired AFTER a
+    // clean status, so a triager sent to debug the git environment finds
+    // nothing. The framing names a reason, not a failed command.
+    expect(r.note).toContain('(reason: ');
+    expect(r.note).not.toContain('git status failed');
+  });
+
+  it('measures a CLEAN shared worktree when the caller brings the fetched sha', () => {
+    // The pipeline caller's shape: fetch-pr records the sha in the plan and
+    // agent-prompt welds it into this command, so a healthy run measures
+    // clean — an unmeasured note that fired on every run would be noise
+    // nobody reads, and the genuine refusals would drown in it (#9742).
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--pinned',
+      fetchedSha: headSha,
+    });
+    expect(r.available).toBe(true);
+    expect(r.sharedTreeResidue).toEqual([]);
+    expect(r.sharedTreeUnmeasured).toBeUndefined();
+    expect(r.note).not.toContain('could not be measured');
+  });
+
+  it('refuses BEFORE any reset or creation when the worktree is not at the fetched sha it brought', () => {
+    // The pin-mismatch signal the anchor exists for: the shared tree at B
+    // while the plan records reviewed commit A used to proceed with
+    // reset/creation at B and report `available: true`, handing a verifier
+    // an available tree at code other than the reviewed head with the
+    // mismatch disclosed only inside a NOTE. The refusal must come first —
+    // no reset, no creation, no path.
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--wrong-sha',
+      fetchedSha: `deadbeef${'0'.repeat(32)}`,
+    });
+    expect(r.available).toBe(false);
+    expect(r.path).toBeUndefined();
+    expect(r.note).toContain('not the fetched PR head');
+    expect(
+      existsSync(scratchWorktreePath(worktree, 'verify--round-1--wrong-sha')),
+    ).toBe(false);
+  });
+
+  it('refuses a fetched sha that is not a full Git object ID', () => {
+    // The record arrives over a CLI flag and is welded into commands a
+    // verifier copies; a shape the pin cannot compare is refused before it
+    // reaches anything — neither the 39-hex truncation nor a non-hex string
+    // is a commit. Full object IDs are 40 hex (SHA-1) or 64 hex (SHA-256).
+    for (const sha of ['not-a-sha', 'a'.repeat(39), 'g'.repeat(40)]) {
+      const r = runScratchTree({
+        worktree,
+        label: 'verify--bad-sha',
+        fetchedSha: sha,
+      });
+      expect(r.available).toBe(false);
+      expect(r.path).toBeUndefined();
+      expect(r.note).toContain('not a full Git object ID');
+    }
+    // A 64-hex value IS the shape — on this SHA-1 tree it reaches the
+    // mismatch refusal, proving the validator admitted it.
+    const sha256Shape = runScratchTree({
+      worktree,
+      label: 'verify--sha256-shape',
+      fetchedSha: 'ab'.repeat(32),
+    });
+    expect(sha256Shape.available).toBe(false);
+    expect(sha256Shape.note).toContain('not the fetched PR head');
+    expect(sha256Shape.note).not.toContain('not a full Git object ID');
+  });
+
+  it('folds case when comparing the fetched sha, like the residue pin', () => {
+    // The plan records `git rev-parse` verbatim and a caller may carry it
+    // uppercase; the pin folds case on both sides, so the scratch-tree
+    // validation must too — an uppercase record of the RIGHT commit is not
+    // a mismatch.
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--upper-sha',
+      fetchedSha: headSha.toUpperCase(),
+    });
+    expect(r.available).toBe(true);
+    expect(r.sharedTreeResidue).toEqual([]);
+    expect(r.sharedTreeUnmeasured).toBeUndefined();
   });
 
   it('links the review worktree’s node_modules in, and says so', () => {
@@ -826,7 +939,11 @@ describe('runScratchTree', () => {
       const parent = join(repo, '.qwen', 'tmp');
       chmodSync(parent, 0o555); // `git worktree add` cannot create the directory
       try {
-        const r = runScratchTree({ worktree, label: 'verify--round-1--zzz' });
+        const r = runScratchTree({
+          worktree,
+          label: 'verify--round-1--zzz',
+          fetchedSha: headSha,
+        });
         expect(r.available).toBe(false);
         expect(r.sharedTreeResidue).toEqual(['__probe__.test.ts']);
         // The total belongs to the same report: a list longer than its own total
@@ -841,6 +958,55 @@ describe('runScratchTree', () => {
       }
     },
   );
+
+  describe('the CLI option contract', () => {
+    // Every fetchedSha test above builds its args by hand, but the only
+    // production delivery of the sha is the `--fetched-sha` flag, read off
+    // yargs' camel-cased parse as `fetchedSha`. If the option key and the
+    // field ever drift, every real invocation arrives unpinned and the suite
+    // stays green — the bug class `--build-test` shipped into `test-plan`,
+    // pinned here the same way: parse through the real builder, and assert on
+    // what the run does with the parse rather than on the parse's shape.
+    it('parses --fetched-sha into the field runScratchTree actually reads', () => {
+      // .strict() matters: a lenient parser camel-cases unknown flags and
+      // passes them through, so dropping the --fetched-sha registration from
+      // the builder would keep this test green while the real command (whose
+      // root parser IS strict) rejects the flag.
+      const parse = (argv: string[]) =>
+        (scratchTreeCommand.builder as (y: Argv) => Argv)(
+          yargs([]).strict(),
+        ).parseSync(argv) as unknown as ScratchTreeArgs;
+
+      // Reachable only if the parsed field reached the residue anchor: the
+      // identical call without it answers unmeasured instead of clean.
+      const clean = runScratchTree(
+        parse([
+          '--worktree',
+          worktree,
+          '--label',
+          'verify--round-1--cli',
+          '--fetched-sha',
+          headSha,
+        ]),
+      );
+      expect(clean.sharedTreeUnmeasured).toBeUndefined();
+      expect(clean.sharedTreeResidue).toEqual([]);
+
+      // And a wrong sha still reaches the pin through the same parse.
+      const forged = runScratchTree(
+        parse([
+          '--worktree',
+          worktree,
+          '--label',
+          'verify--round-1--cli-forged',
+          '--fetched-sha',
+          `deadbeef${'0'.repeat(32)}`,
+        ]),
+      );
+      expect(forged.available).toBe(false);
+      expect(forged.note).toContain('not the fetched PR head');
+    });
+  });
 
   describe('the command handler', () => {
     beforeEach(() => {

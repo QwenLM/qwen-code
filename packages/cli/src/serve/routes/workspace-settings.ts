@@ -20,7 +20,8 @@ import {
   getNestedProperty,
   getSettingDefinition,
   validateSettingValue,
-} from '../../utils/settingsUtils.js';
+  WORKSPACE_RESTRICTED_SETTING_KEYS,
+} from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
@@ -101,6 +102,37 @@ interface SettingsResponse {
 }
 
 const SECURITY_SENSITIVE_SETTINGS = new Set(['tools.approvalMode']);
+
+/**
+ * Refuse a workspace-scope write of a setting the merge strips anyway.
+ *
+ * R8-1: `stripWorkspaceRestrictedSettings` drops these before every merge, so
+ * persisting one at workspace scope writes a committable dead entry into the
+ * repo's `.qwen/settings.json` and answers 200 + `requiresRestart: true` while
+ * the feature never turns on — GET then reports `workspace: true` beside
+ * `effective: false`, and the warnings channel carries only `corrupted`, so the
+ * client never learns the write was inert. `tools.workflowsEnabled` is the
+ * first restricted key with `showInDialog: true`, which is what puts it in
+ * `getAllowedKeys()` and made this reachable. The TUI dialog already filters
+ * these; this is the same trap one layer over.
+ *
+ * User scope is untouched — that scope honors the key.
+ *
+ * Returns true when the request was answered and the caller must stop.
+ */
+function rejectWorkspaceRestrictedWrite(
+  res: Response,
+  scope: string,
+  key: string,
+): boolean {
+  if (scope !== 'workspace' || !WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key))
+    return false;
+  res.status(400).json({
+    error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
+    code: 'workspace_restricted_setting',
+  });
+  return true;
+}
 
 function getAllowedKeys(includeLiveVoice = false): Set<string> {
   const keys = new Set(
@@ -389,6 +421,8 @@ export function registerWorkspaceSettingsRoutes(
         return;
       }
 
+      if (rejectWorkspaceRestrictedWrite(res, scope, key)) return;
+
       if (LIVE_MANAGED_SETTINGS.has(key)) {
         res.status(400).json({
           error: `Setting "${key}" must be changed through the Live setup API`,
@@ -599,6 +633,8 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         });
         return;
       }
+
+      if (rejectWorkspaceRestrictedWrite(res, scope, key)) return;
       if (LIVE_MANAGED_SETTINGS.has(key)) {
         res.status(400).json({
           error: `Setting "${key}" must be changed through the Live setup API`,

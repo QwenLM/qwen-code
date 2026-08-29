@@ -52,15 +52,84 @@ export interface LedgerFinding {
    * flag, which is exactly what they mean.
    */
   k?: 1;
+  /**
+   * A Critical's two decision axes (#10291), read off the posted claim
+   * line's `[certifies-falsely]`/`[fails-closed]` and
+   * `[regression]`/`[new-surface]` tags: `d` is the direction (`c` / `f`),
+   * `b` the baseline (`r` / `n`) — one letter each on the body-bytes
+   * discipline, spelled out by `LEDGER_DIRECTIONS` / `LEDGER_BASELINES`.
+   * Absent when the claim carried no tag, which is also how a marker
+   * written before the fields existed reads. They decide nothing in this
+   * module: the next round's Step 6 routing reads them off the side file,
+   * and the autofix tooling keys on them (#9907). A value this version does
+   * not know is normalised to absent like `k`, never used to reject the
+   * entry.
+   */
+  d?: 'c' | 'f';
+  b?: 'r' | 'n';
   line?: number;
   /** One line, capped — enough for the next round to re-locate the claim. */
   title: string;
+}
+
+/** The marker's one-letter direction spellings, and what each means. */
+export const LEDGER_DIRECTIONS = {
+  c: 'certifies-falsely',
+  f: 'fails-closed',
+} as const;
+/** The marker's one-letter baseline spellings, and what each means. */
+export const LEDGER_BASELINES = {
+  r: 'regression',
+  n: 'new-surface',
+} as const;
+
+/**
+ * The axes a finding carries, spelled out — `fails-closed, new-surface` —
+ * or `''` when it carries neither. One renderer for the side-file table and
+ * the terminal, so the two cannot spell a classification differently.
+ */
+export function axesOf(f: Pick<LedgerFinding, 'd' | 'b'>): string {
+  return [
+    f.d === undefined ? undefined : LEDGER_DIRECTIONS[f.d],
+    f.b === undefined ? undefined : LEDGER_BASELINES[f.b],
+  ]
+    .filter((a) => a !== undefined)
+    .join(', ');
+}
+
+/**
+ * One Critical that LEFT the work list at round `r`: open in round `r-1`'s
+ * marker, absent from round `r`'s. Compact field names (`r`/`f`) on the same
+ * body-bytes discipline as the findings.
+ */
+export interface LedgerClosure {
+  /** The round whose marker the finding is absent from. */
+  r: number;
+  /** The closed finding's id — its ORIGINAL round's id, e.g. `R9-1`. */
+  id: string;
+  /** The closed finding's file. */
+  f: string;
 }
 
 export interface Ledger {
   v: 1;
   round: number;
   findings: LedgerFinding[];
+  /**
+   * The Criticals that LEFT the work list at THIS marker's round — open in
+   * the previous round's marker, absent from this one. The divergence
+   * sentinel (#9905) reads them: `fixed` and `superseded` both read as
+   * closure, a positional diff cannot tell them apart, and the advisory
+   * note does not need it to.
+   *
+   * This round's own minted set only — NO carry-forward: the sentinel's
+   * K=2 check reads closures at round N (minted while composing) and N-1
+   * (read back off this field), so older entries are dead bytes. Absent on
+   * every ledger written before the field existed, which reads as "no
+   * closures recorded" and silences the sentinel — the honest posture on
+   * thin history.
+   */
+  closed?: LedgerClosure[];
   /**
    * How many findings the size cap dropped, when it dropped any. Absent means
    * the list is complete — which is the claim the next round acts on, so the
@@ -83,6 +152,17 @@ export interface Ledger {
    * anchors must not disagree about what a clean round is. The findings
    * still ride; only the anchor is withheld.
    *
+   * Withheld is not lost when the graft's guards allow the recovery: a
+   * fail-closed round's marker carries no `sha`, but recovery (`pr-context`)
+   * grafts the anchor forward from the most recent EARLIER own marker that
+   * carries one — the withhold is about the fail-closed round's own range,
+   * while an earlier round's "clean up to sha" stays true, and scoping the
+   * next round `sha..HEAD` re-covers the gap. The graft fires only when the
+   * winning work list is complete, the source is a STRICTLY earlier own
+   * round, and the walk has a known identity; refused, the withhold stands
+   * and later rounds stay full-range until a round re-establishes the chain
+   * (issue #9902).
+   *
    * It also never crosses accounts: `pr-context` strips it from a marker
    * another account posted, so a foreign body can never decide which lines
    * this pipeline stops looking at.
@@ -104,6 +184,26 @@ export interface Ledger {
    * model naming no range qualifies nothing.
    */
   model?: string;
+  /**
+   * Source-diff line count as of the FIRST round that recorded one, carried
+   * forward unchanged. A baseline, never re-measured: growth is only legible
+   * cumulatively. A change that arrives at 228 source lines and leaves at 920
+   * grew 4x, yet only ~1.3x per round across six rounds — a per-round delta
+   * would never notice, which is why this is a baseline and not "last round's
+   * size".
+   *
+   * Its only consumer is one advisory paragraph telling a human that the shape
+   * of the change, rather than the current patch, may be the open question.
+   * Like every other marker field this is untrusted body data, but unlike a
+   * finding there is no code to re-assert a bare number against: a forged small
+   * value fires the paragraph, a forged large one silences it. That is the
+   * entire blast radius — it never reaches a verdict, a cap, or an event.
+   *
+   * Unlike `sha`, this survives truncation. A partial finding list must not
+   * certify a commit range, but it says nothing about how big the diff is, and
+   * the measurement is true either way.
+   */
+  src0?: number;
   /**
    * How many inline comments this round posted — convergence telemetry, and
    * the ONLY field here that decides nothing.
@@ -163,9 +263,103 @@ export interface Ledger {
    * which leaves the trend unevaluable rather than measured on the wrong
    * number.
    *
+   * One accepted seam: the counting RULE changed once — a fix-induced
+   * re-report (a carried id fronting a NEW defect) moved from re-post to
+   * first-time — and nothing parts an old-rule marker from a new one, on
+   * purpose. A loop in flight at the change compares one round counted under
+   * each rule for exactly one round; the old rule UNDERCOUNTED (it dropped
+   * the marked re-reports), so the mixed comparison can fire the volume
+   * advisory spuriously — and, when the undercount reaches 0 because the
+   * predecessor's whole new output was re-reports the old rule dropped, the
+   * `prev.fresh > 0` restart guard suppresses the comparison, masking the
+   * advisory for that one round. Either way the advisory decides
+   * nothing, names itself an observation, and heals the round after, when
+   * both points are counted under the new rule. A marker version was not
+   * paid for that: `parseLedger` refuses any `v` it does not know, so
+   * bumping it for a count no gate reads would cost an old reader the WHOLE
+   * marker — work list, anchor, streak — the same reason every field added
+   * since has degraded by absence instead.
+   *
    * Rides and sheds with `posted`, which it qualifies.
    */
   fresh?: number;
+  /**
+   * How many rounds — this one included — have been counted against the
+   * churn bar since the last round measured converging; a round that could
+   * not measure carries the count without adding to it. This is the ONE
+   * field here that is neither telemetry nor a gate on scope: it is the
+   * review's own standing claim about the pull request, carried exactly the
+   * way a finding id is, and `compose-review` reads it back to decide
+   * whether to file the non-convergence finding.
+   *
+   * So it does NOT ride in the volume tier that sheds first. It is a single
+   * small integer, and the pull request most likely to be churning is also
+   * the one whose marker is closest to its byte cap — shedding it there
+   * would disarm the mechanism on exactly the pull requests it exists for.
+   *
+   * It cannot decide alone, and that is deliberate: the body it rides on is
+   * another account's writable surface, so `compose-review` files nothing on
+   * a recovered streak unless THIS round's own census is also above the bar.
+   * Recovery hands this account only its OWN streak besides — a foreign
+   * winner's is stripped at the seam (`pr-context`) — so a forged marker
+   * plants neither the streak nor the finding.
+   */
+  churnRounds?: number;
+  /**
+   * How many consecutive rounds — this one included — the first-time-finding
+   * rate did not fall; the streak the severity floor's early trigger reads
+   * (#9903). A round whose rate fell resets it to zero — there is no
+   * carry-on-unmeasured here, unlike `churnRounds`: the churn streak arms a
+   * blocking Critical where late filing loses the mechanism, while this one
+   * engages a disclosed, non-capping deferral posture where a FALSE
+   * engagement silently defers real Suggestions, so the cheap error is a
+   * wiped streak (one delayed engagement), never a carried one.
+   *
+   * Once the streak reaches the bar it is PINNED, not re-measured: the
+   * floor it engages moves fresh Suggestions into the deferral channel, so
+   * the posted-set trend the signal reads goes quiet precisely because the
+   * floor is working — and re-measuring against a pre-trigger floor
+   * assumption would flap engagement at period two through the trend's own
+   * `floorChanged` guard. The pin is the latch: later rounds engage on the
+   * recorded streak alone until the round-6 rule takes over anyway.
+   *
+   * Same trust shape as `churnRounds`, whose group it rides in: clamped to
+   * the marker's own round at every read, stripped from foreign winners at
+   * the `pr-context` seam, and kept out of the volume tier that sheds first
+   * — the pull request whose rate never falls is exactly the one whose
+   * marker sits at the byte cap. Worst case for a planted streak:
+   * Suggestions move into a DISCLOSED deferral list — nothing is withheld,
+   * no verdict is capped, and an explicit `--severity-floor suggestion`
+   * disengages.
+   */
+  flatRounds?: number;
+  /**
+   * The recommendation codes this round's convergence diagnosis matched —
+   * the machine-readable half of the observation (#9623), re-published on
+   * the one surface an OUTSIDE consumer can reach. The composed result and
+   * the durable artifact already carry them, but both live inside this
+   * process; the autofix takeover loop reads the posted review body, and
+   * without the codes there its only view of "is this loop converging" is
+   * prose (#10107).
+   *
+   * A carrier, not a contract restatement: the closed vocabulary is owned
+   * by `RECOMMENDATION_CODES` in `convergence.ts`, and membership is
+   * enforced at the ONE write site (`compose-review` passes the codes off
+   * `result.recommendations`, which `recommendationsFor` derived — typed,
+   * so an out-of-vocabulary code cannot arrive). Spelled `string[]` here
+   * because this module is `convergence.ts`'s runtime dependency and the
+   * narrow type would close an import cycle for a field this side only
+   * bounds and never interprets.
+   *
+   * Write-only telemetry: `parseLedger` deliberately does not read it back.
+   * Nothing CLI-side consumes a PRIOR round's codes — each round re-derives
+   * its own from its own diagnosis — and recovering them would hand the
+   * next round a value another account's writable surface controls, for no
+   * reader. Same rung as the streaks above (small, zero-omitted, above the
+   * shed cascade), and for the same reason: the pull request whose loop is
+   * not converging is exactly the one whose marker sits at the byte cap.
+   */
+  rec?: string[];
 }
 
 /**
@@ -230,6 +424,22 @@ export const LEDGER_ID_READBACK = new RegExp(
  */
 export const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
 
+/**
+ * The claim LOCATOR of a work-list entry or a built finding's title: the
+ * carried id stripped through the readback above, the part before the first
+ * ' — ' kept, backticks gone. Stated once because every consumer that joins
+ * claims by it — the gate-repost dedup, the closure mint (#9905), and the
+ * successor chain's fresh side — must project the SAME shape, and a second
+ * spelling is the drift class this module's header exists to prevent.
+ */
+export function claimLocator(entry: string): string {
+  const claim = entry.trim().replace(LEDGER_ID_READBACK, '').trim();
+  const dash = claim.indexOf(' — ');
+  // Backticks stripped: the gate renders the path through `mdField`, and a
+  // re-post that types the locator plainly names the same finding.
+  return (dash === -1 ? claim : claim.slice(0, dash)).replace(/`/g, '').trim();
+}
+
 /** Caps keep the marker a footnote, never a payload: GitHub's body limit is
  *  65,536 chars and the marker rides inside it. Every cap binds BOTH halves —
  *  the serializer so the write side is bounded, the parser so a hand-edited
@@ -281,6 +491,13 @@ export const LEDGER_MAX_MODEL = 64;
  */
 export const LEDGER_MAX_ID = 24;
 /**
+ * The closure list's bound. One round's closures are bounded by the previous
+ * work list's size (`LEDGER_MAX_FINDINGS`), so fifty covers every mintable
+ * round; the cap exists for the hand-edited marker, which is bound by no
+ * mint. The byte cap below still binds the whole marker either way.
+ */
+export const LEDGER_MAX_CLOSED = 50;
+/**
  * The highest round a marker may claim.
  *
  * The round is not decoration: `compose-review` stamps this round's findings
@@ -323,6 +540,31 @@ export function volumeOf(n: unknown): number | undefined {
     ? Math.min(n, LEDGER_MAX_VOLUME)
     : undefined;
 }
+
+/**
+ * The ONE reading of the churn streak: a non-negative whole number of rounds,
+ * clamped to the round cap it shares a domain with — or `undefined`.
+ *
+ * Separate from `volumeOf` because the ceilings mean different things: a
+ * volume is a comment count and caps where a review surface stops being one;
+ * a streak counts ROUNDS, and past `LEDGER_MAX_ROUND` the same float64
+ * argument that bounds `round` applies to it unchanged.
+ */
+export function streakOf(n: unknown): number | undefined {
+  return typeof n === 'number' && Number.isInteger(n) && n >= 0
+    ? Math.min(n, LEDGER_MAX_ROUND)
+    : undefined;
+}
+
+/**
+ * Bounds on the recommendation-code carrier (`Ledger.rec`). The vocabulary
+ * is closed at the write site; these bound only the SHAPE, so a value the
+ * vocabulary could never contain cannot spend the byte budget. Eight is
+ * twice the design's emitted set; forty covers the longest code in the
+ * design's full menu with room for a successor vocabulary.
+ */
+export const LEDGER_MAX_REC_CODES = 8;
+export const LEDGER_MAX_REC_CODE = 40;
 
 /**
  * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
@@ -381,6 +623,7 @@ export function serializeLedger(ledger: Ledger): string {
     dropped: number,
     anchor: boolean,
     volume: 'both' | 'posted' | 'none',
+    closures: boolean,
   ): string => {
     const payload: Ledger = {
       v: 1,
@@ -389,6 +632,22 @@ export function serializeLedger(ledger: Ledger): string {
       round: roundOut,
       findings,
     };
+    // The closure list rides with the findings but is NOT one of them: it
+    // feeds an advisory note, so the byte budget sheds it ahead of the
+    // anchor pair and the work list (see the cascade below), and shedding
+    // it never sets `dropped` — closures certify no range, so there is no
+    // completeness claim to protect. Newest-kept, like the findings.
+    if (closures) {
+      const closedOut = (ledger.closed ?? [])
+        .filter((c) => isLedgerClosure(c, roundOut))
+        .slice(-LEDGER_MAX_CLOSED)
+        .map((c) => ({
+          r: c.r,
+          id: c.id.slice(0, LEDGER_MAX_ID),
+          f: c.f.slice(0, LEDGER_MAX_FILE),
+        }));
+      if (closedOut.length > 0) payload.closed = closedOut;
+    }
     // The volume telemetry rides OUTSIDE the truncation rule that governs the
     // anchor — it qualifies no range, so a partial work list says nothing
     // about it — but it is the FIRST thing the byte budget sheds (see the
@@ -415,6 +674,36 @@ export function serializeLedger(ledger: Ledger): string {
         if (prevPostedOut !== undefined) payload.prevPosted = prevPostedOut;
       }
     }
+    // The streak rides ABOVE the shed cascade — see the field's own note. It
+    // is bounded like the round it counts (same domain, same arithmetic
+    // hazard past the cap) and omitted at zero, so a converging pull request
+    // spends no bytes on it at all.
+    const streak = streakOf(ledger.churnRounds);
+    if (streak !== undefined && streak > 0) payload.churnRounds = streak;
+    // Same rung, same bound, same zero-omission for the floor trigger's
+    // streak — the pull request whose rate never falls is exactly the one
+    // whose marker sits at the byte cap.
+    const flat = streakOf(ledger.flatRounds);
+    if (flat !== undefined && flat > 0) payload.flatRounds = flat;
+    // The recommendation codes ride the streak rung — same size class, same
+    // zero-omission, and the same argument for sitting above the shed
+    // cascade. Bounded here the way every written field is: membership
+    // belongs to the write site (see `Ledger.rec`); this bounds only the
+    // shape, deduplicated in first-seen order so a repeated code cannot
+    // spend the budget twice.
+    if (Array.isArray(ledger.rec)) {
+      const rec = [
+        ...new Set(
+          ledger.rec.filter(
+            (c): c is string =>
+              typeof c === 'string' &&
+              c.length > 0 &&
+              c.length <= LEDGER_MAX_REC_CODE,
+          ),
+        ),
+      ].slice(0, LEDGER_MAX_REC_CODES);
+      if (rec.length > 0) payload.rec = rec;
+    }
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -434,6 +723,13 @@ export function serializeLedger(ledger: Ledger): string {
         if (model) payload.model = model;
       }
     }
+    // Unconditional, unlike `sha` above: the ruling that withholds an anchor
+    // from a partial list does not extend to a measurement of the diff. ~12
+    // bytes against LEDGER_MAX_BYTES, and losing it would silently reset a
+    // baseline the next round cannot recompute.
+    if (Number.isInteger(ledger.src0) && (ledger.src0 as number) > 0) {
+      payload.src0 = ledger.src0;
+    }
     return `${OPEN}${JSON.stringify(payload).replace(/--/g, '-\\u002d')}${CLOSE}`;
   };
   // Drop from the END until the whole marker fits. Trailing entries are the
@@ -448,7 +744,7 @@ export function serializeLedger(ledger: Ledger): string {
   // 51 findings in, 24 kept, and it said 26 missing.
   const total = ledger.findings.length;
   let kept = capped.length;
-  let marker = render(capped, total - kept, true, 'both');
+  let marker = render(capped, total - kept, true, 'both', true);
   if (marker.length > LEDGER_MAX_BYTES) {
     // Between "both volumes" and "no volume" there is a rung worth having:
     // the CARRIED value goes first, this round's own count second. The
@@ -457,7 +753,7 @@ export function serializeLedger(ledger: Ledger): string {
     // and stamps as its own `prevPosted` — so shedding them as one unit
     // dropped a count that still fitted, and broke the chain a round
     // earlier than the budget required.
-    marker = render(capped, total - kept, true, 'posted');
+    marker = render(capped, total - kept, true, 'posted', true);
   }
   if (marker.length > LEDGER_MAX_BYTES) {
     // The VOLUME sheds first — it is the only thing here that decides
@@ -468,7 +764,13 @@ export function serializeLedger(ledger: Ledger): string {
     // marker that fit WITH its anchor over the cap and make the re-render
     // pay with the anchor instead — trading a full-diff re-review for a
     // trend line.
-    marker = render(capped, total - kept, true, 'none');
+    marker = render(capped, total - kept, true, 'none', true);
+  }
+  if (marker.length > LEDGER_MAX_BYTES) {
+    // The closure list sheds next: it feeds the sentinel's advisory note,
+    // and losing it costs one round of lineage, while everything below it
+    // — the anchor, the work list — is a claim the next round acts on.
+    marker = render(capped, total - kept, true, 'none', false);
   }
   if (marker.length > LEDGER_MAX_BYTES) {
     // Shed the anchor PAIR before any finding: `dropped` withholds the pair
@@ -477,11 +779,11 @@ export function serializeLedger(ledger: Ledger): string {
     // first keeps the whole work list — recovery degrades to the full diff,
     // which the findings survive — and findings start going only when the
     // anchorless form still exceeds the cap.
-    marker = render(capped, total - kept, false, 'none');
+    marker = render(capped, total - kept, false, 'none', false);
   }
   while (marker.length > LEDGER_MAX_BYTES && kept > 0) {
     kept--;
-    marker = render(capped.slice(0, kept), total - kept, false, 'none');
+    marker = render(capped.slice(0, kept), total - kept, false, 'none', false);
   }
   return marker;
 }
@@ -547,12 +849,60 @@ export function isLedgerFinding(
 }
 
 /**
+ * Is this a closure entry this pipeline would admit, against the round the
+ * marker claims? The same rules as the findings, minus the fields a closure
+ * does not carry: the caps bind on read as on write, a closure claiming a
+ * round past the marker's own is a squat — the marker's round IS the newest
+ * state it can describe — and the id obeys the SAME grammar and id-round
+ * bounds `isLedgerFinding` applies in this file. Skipping them here let a
+ * hand-edited or forged marker plant arbitrary ≤24-char tokens — an empty
+ * string, `R9999-1` spelling a round nobody ran, a live link or mention —
+ * into the posted advisory and the machine-readable `basis`, through the
+ * route whose comment names the planted-marker threat.
+ */
+export function isLedgerClosure(
+  c: unknown,
+  markerRound: number,
+): c is LedgerClosure {
+  const e = c as LedgerClosure | null | undefined;
+  if (
+    !e ||
+    typeof e !== 'object' ||
+    !Number.isInteger(e.r) ||
+    e.r < 1 ||
+    e.r > markerRound ||
+    typeof e.id !== 'string' ||
+    e.id.length > LEDGER_MAX_ID ||
+    !LEDGER_ID_SHAPE.test(e.id) ||
+    typeof e.f !== 'string' ||
+    e.f === '' ||
+    e.f.length > LEDGER_MAX_FILE
+  ) {
+    return false;
+  }
+  const idRound = Number(e.id.slice(1).split('-')[0]);
+  if (!Number.isSafeInteger(idRound)) return false;
+  if (idRound < 1 || idRound > Math.min(markerRound, LEDGER_MAX_ROUND)) {
+    return false;
+  }
+  // The id must also be OLDER than the closure: a closure at round r
+  // records a finding still OPEN in round r-1's work list, so its mint
+  // round is strictly below r — equality is only possible at the round cap,
+  // where consecutive rounds re-stamp the same `R<cap>-*` space. The mint
+  // (compose-review) copies ids out of the recovered work list, so its own
+  // output cannot violate this; the cross-check binds the hand-edited and
+  // planted routes, where an `idRound >= r` entry seeds the chain join with
+  // a generation that never stood open.
+  return idRound < e.r || e.r >= LEDGER_MAX_ROUND;
+}
+
+/**
  * A finding normalised to the caps the serializer writes under. Applied on
  * READ too: the caps are the serializer's contract, and neither a
  * hand-edited marker nor a side file is bound by it.
  */
 export function normalizeLedgerFinding(f: LedgerFinding): LedgerFinding {
-  const { k: _k, ...rest } = f;
+  const { k: _k, d: _d, b: _b, ...rest } = f;
   return {
     ...rest,
     id: f.id.slice(0, LEDGER_MAX_ID),
@@ -567,6 +917,10 @@ export function normalizeLedgerFinding(f: LedgerFinding): LedgerFinding {
     // decides-nothing siblings (`posted`, `prevPosted`, `floor`) are all
     // normalised the same way.
     ...(f.k === 1 ? { k: 1 as const } : {}),
+    // The axes too: a spelling this version does not know reads as "not
+    // classified", which every consumer treats as "posts at any floor".
+    ...(f.d === 'c' || f.d === 'f' ? { d: f.d } : {}),
+    ...(f.b === 'r' || f.b === 'n' ? { b: f.b } : {}),
   };
 }
 
@@ -645,6 +999,14 @@ export function parseLedger(body: string | undefined): Ledger | null {
       sha && rawModel !== '' && rawModel.length <= LEDGER_MAX_MODEL
         ? rawModel
         : undefined;
+    // Survives truncation on read as it does on write — a partial list still
+    // measured the same diff. Anything that is not a positive integer is
+    // dropped, so a garbled baseline degrades to "unknown" (silence) rather
+    // than to a number that would read as no growth.
+    const src0 =
+      Number.isInteger(raw.src0) && (raw.src0 as number) > 0
+        ? (raw.src0 as number)
+        : undefined;
     // The volume fields are normalised on READ exactly as they are bounded
     // on write, and independently of `dropped`: they qualify no range, so a
     // truncated work list has no bearing on them. A shape the serializer
@@ -653,6 +1015,29 @@ export function parseLedger(body: string | undefined): Ledger | null {
     // no gate reads.
     const posted = volumeOf(raw.posted);
     const prevPosted = volumeOf(raw.prevPosted);
+    // The streak survives a truncated work list for the same reason the
+    // volumes do — it qualifies no range — and it is the field the
+    // non-convergence rule reads. Clamped on read as on write; a shape
+    // the serializer would not have written does not survive. Clamped to
+    // the marker's own ROUND too:
+    // the streak counts rounds INSIDE the round it rides, and the pipeline's
+    // own writes advance it at most once per round, so a legitimate marker
+    // can never carry more counted rounds than rounds it claims. The marker
+    // body is any GitHub user's writable surface, and an unclamped streak
+    // inflates the posted ordinal ("the 10000th round…") past everything the
+    // pull request ever ran. Same invariant the finding-id filter enforces
+    // above: a claim about rounds that did not exist is not read.
+    const churnRounds = Math.min(streakOf(raw.churnRounds) ?? 0, raw.round);
+    // Same read for the floor trigger's streak — with the honest-maximum
+    // clamp `prevLedgerFacts` applies on the other route into the trigger:
+    // the signal that advances the streak gates on round >= 3, so at round
+    // N no honest marker carries more than N - 2, and a planted one
+    // claiming more would engage the floor off rounds the signal could
+    // never have measured.
+    const flatRounds = Math.min(
+      streakOf(raw.flatRounds) ?? 0,
+      Math.max(raw.round - 2, 0),
+    );
     // The floor qualifies `posted`, so it survives only beside it: a floor
     // alone would let a later round compare postures across rounds whose
     // volumes it does not have, which is not a comparison anyone can act on.
@@ -668,15 +1053,30 @@ export function parseLedger(body: string | undefined): Ledger | null {
       freshRaw !== undefined && posted !== undefined && freshRaw <= posted
         ? freshRaw
         : undefined;
+    // The closure history, validated like the findings: the caps and the
+    // round bind on read as on write. No `dropped` counterpart — closures
+    // certify nothing, so a truncated history has no completeness claim to
+    // protect, and the sentinel reads absence as silence either way.
+    const closed = (Array.isArray(raw.closed) ? raw.closed : [])
+      .filter((c): c is LedgerClosure => isLedgerClosure(c, raw.round))
+      .slice(-LEDGER_MAX_CLOSED);
+    // `rec` is deliberately NOT recovered — write-only telemetry for the
+    // workflow consumer, per the field's own note: every round re-derives
+    // its own codes, and reading a prior round's back would hand this
+    // account a value another account's writable surface controls.
     return {
       v: 1,
       round: raw.round,
       findings,
+      ...(closed.length > 0 ? { closed } : {}),
       ...(dropped ? { dropped } : {}),
       ...(sha ? { sha } : {}),
       ...(model ? { model } : {}),
+      ...(src0 ? { src0 } : {}),
       ...(posted === undefined ? {} : { posted }),
       ...(prevPosted === undefined ? {} : { prevPosted }),
+      ...(churnRounds === 0 ? {} : { churnRounds }),
+      ...(flatRounds === 0 ? {} : { flatRounds }),
       ...(floor === undefined ? {} : { floor }),
       ...(fresh === undefined ? {} : { fresh }),
     };

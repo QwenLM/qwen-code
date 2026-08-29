@@ -20,7 +20,7 @@ import type {
   DaemonSettingDescriptor,
   DaemonSettingUpdateResult,
   DaemonWorkspaceSettingsStatus,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   WEB_SHELL_LANGUAGES,
   languageLabel,
@@ -89,6 +89,8 @@ interface SettingsMessageProps {
   /** Model list/add/delete/select, rendered inside the Model category. */
   modelManagement?: ModelManagementProps;
   embedded?: boolean;
+  /** Category to select on open (deep link, e.g. 'Daemon'). */
+  initialCategory?: string;
 }
 
 export interface SettingsMessageSettingsState {
@@ -114,8 +116,9 @@ const SUB_DIALOG_KEYS = new Set([
 const HIDDEN_SETTING_KEYS = new Set([
   'ui.hideTips',
   'ui.enableUserFeedback',
+  // Compact behavior is fixed on in the web shell; the daemon schema still
+  // carries the retired setting, so keep it hidden from the panel.
   'ui.compactMode',
-  'ui.compactInline',
   'mcpServers',
 ]);
 const LIVE_SETTING_KEYS = new Set([
@@ -418,6 +421,7 @@ export function SettingsMessage({
   onChatWidthModeChange,
   modelManagement,
   embedded = false,
+  initialCategory,
 }: SettingsMessageProps) {
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
@@ -497,9 +501,18 @@ export function SettingsMessage({
   useEffect(() => {
     if (categories.length === 0) return;
     if (!categories.some((category) => category.id === activeCategory)) {
-      setActiveCategory(categories[0]!.id);
+      // A deep link (initialCategory) only matters while no valid category
+      // is selected, so it wins on mount but never overrides a later manual
+      // switch. Keeping this in one effect avoids two effects racing to set
+      // the initial category under StrictMode double-invocation.
+      const preferred =
+        initialCategory &&
+        categories.some((category) => category.id === initialCategory)
+          ? initialCategory
+          : categories[0]!.id;
+      setActiveCategory(preferred);
     }
-  }, [activeCategory, categories]);
+  }, [activeCategory, categories, initialCategory]);
 
   useEffect(() => {
     if (error) setMessage(error.message);

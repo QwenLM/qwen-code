@@ -100,11 +100,13 @@ export const effortCommand: SlashCommand = {
     // Apply at runtime (takes effect next turn) and persist for future sessions.
     // Provider adapters clamp the tier to what the active model supports.
     applyReasoningEffort(config, tier);
-    settings.setValue(
-      getPersistScopeForModelSelection(settings),
-      'model.reasoningEffort',
-      tier,
-    );
+    if (context.executionPolicy?.persistModelSelection !== false) {
+      settings.setValue(
+        getPersistScopeForModelSelection(settings),
+        'model.reasoningEffort',
+        tier,
+      );
+    }
 
     return {
       type: 'message',

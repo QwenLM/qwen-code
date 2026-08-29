@@ -10,7 +10,7 @@ import {
   useConnection,
   useTranscriptBlocks,
   useWorkspace,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { transcriptBlocksToDaemonMessages } from '../adapters/transcriptToMessages';
 import type { Message } from '../adapters/types';
 import {
@@ -36,7 +36,7 @@ const BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS = 8;
 // registration. Require repeated misses before treating the agent as gone.
 const MISSING_BACKGROUND_AGENT_GRACE_MISSES = 2;
 // Insight JSON can split one growing text block into multiple projected
-// messages, so prefix identity reuse is unsafe once its marker appears.
+// messages, so the tail needs a full projection once its marker appears.
 const INSIGHT_CONTENT_MARKER = '"insight_';
 
 interface MessageProjection {
@@ -201,8 +201,32 @@ export function projectStreamingTailMessages(
     typeof before.text !== 'string' ||
     typeof after.text !== 'string' ||
     after.text.length < before.text.length ||
-    (!summaryProvesTailAppend && !after.text.startsWith(before.text)) ||
-    after.text.includes(INSIGHT_CONTENT_MARKER) ||
+    (!summaryProvesTailAppend && !after.text.startsWith(before.text))
+  ) {
+    return undefined;
+  }
+
+  if (after.text.includes(INSIGHT_CONTENT_MARKER)) {
+    const tailPrefix = `${before.id}-`;
+    const firstTailMessageIndex = previous.messages.findIndex(
+      (message) =>
+        message.id === before.id || message.id.startsWith(tailPrefix),
+    );
+    if (firstTailMessageIndex < 0) return undefined;
+    const messages = transcriptBlocksToLocalizedMessages(blocks, t);
+    for (let i = 0; i < firstTailMessageIndex; i += 1) {
+      if (
+        messages[i]?.id !== previous.messages[i]?.id ||
+        messages[i]?.role !== previous.messages[i]?.role
+      ) {
+        break;
+      }
+      messages[i] = previous.messages[i];
+    }
+    return messages;
+  }
+
+  if (
     (previousTail.role !== 'assistant' && previousTail.role !== 'thinking') ||
     previousTail.isStreaming !== true ||
     (after.kind === 'assistant') !== (previousTail.role === 'assistant')

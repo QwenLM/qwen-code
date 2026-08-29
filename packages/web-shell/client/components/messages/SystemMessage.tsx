@@ -46,6 +46,52 @@ interface SystemMessageProps {
   onRetryClick?: () => void;
 }
 
+function formatVisionBridgeNotice(
+  data: unknown,
+  t: ReturnType<typeof useI18n>['t'],
+): string | undefined {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return undefined;
+  }
+  const notice = data as Record<string, unknown>;
+  const status = notice['status'];
+  if (status !== 'ok' && status !== 'failed' && status !== 'skipped') {
+    return undefined;
+  }
+  const modelName =
+    typeof notice['modelName'] === 'string'
+      ? notice['modelName']
+      : t('visionBridge.model');
+  const modelEndpoint = notice['modelEndpoint'];
+  const target =
+    typeof modelEndpoint === 'string'
+      ? `${modelName} (${modelEndpoint})`
+      : modelName;
+  const convertedCount = notice['convertedCount'];
+  const omittedCount = notice['omittedCount'];
+  const egressOccurred = notice['egressOccurred'];
+  if (
+    typeof convertedCount !== 'number' ||
+    !Number.isFinite(convertedCount) ||
+    !Number.isInteger(convertedCount) ||
+    convertedCount < 0 ||
+    typeof omittedCount !== 'number' ||
+    !Number.isFinite(omittedCount) ||
+    !Number.isInteger(omittedCount) ||
+    omittedCount < 0 ||
+    typeof egressOccurred !== 'boolean'
+  ) {
+    return undefined;
+  }
+  return t(`visionBridge.${status}`, {
+    modelName,
+    target,
+    convertedCount,
+    omittedCount,
+    egressOccurred: egressOccurred ? 1 : 0,
+  });
+}
+
 export const SystemMessage = memo(function SystemMessage({
   content,
   variant,
@@ -185,6 +231,12 @@ export const SystemMessage = memo(function SystemMessage({
           ? CircleMinusIcon
           : InfoIcon;
 
+  const visionBridgeContent =
+    source === 'vision_bridge_notice'
+      ? formatVisionBridgeNotice(data, t)
+      : undefined;
+  const displayContent = visionBridgeContent ?? content;
+
   const taskKind = stringField('kind');
   const taskCommandLabel = stringField('commandLabel');
   const taskDescription = stringField('description');
@@ -218,11 +270,11 @@ export const SystemMessage = memo(function SystemMessage({
   })();
 
   const renderedContent = preserveWhitespace ? (
-    <pre>{content}</pre>
+    <pre>{displayContent}</pre>
   ) : variant === 'info' ? (
-    <Markdown content={content} />
+    <Markdown content={displayContent} />
   ) : (
-    <pre>{content}</pre>
+    <pre>{displayContent}</pre>
   );
 
   if (isTaskNotification) {

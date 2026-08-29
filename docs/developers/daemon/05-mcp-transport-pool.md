@@ -315,11 +315,12 @@ ordering.
 The pool key comes from `fingerprint(cfg)` in `mcp-pool-key.ts`. The hash covers
 all transport-defining fields:
 
-> `transport, command, args, cwd, env, url, httpUrl, tcp, headers, timeout, oauth`
+> `transport, command, args, cwd, env, url, httpUrl, tcp, headers, timeout, versionNegotiation, oauth`
 
 Per-session filtering and metadata fields (`includeTools`, `excludeTools`,
 `trust`, `description`, `extensionName`, `discoveryTimeoutMs`) are excluded, so
-sessions with different filters can share one entry.
+sessions with different filters can share one entry. The automatic negotiation
+opt-in is included because it changes how the underlying process connects.
 
 For the OAuth cell, `canonicalOAuth(o)` hashes every `MCPOAuthConfig` field:
 `clientId`, `clientSecret`, sorted `scopes`, sorted `audiences`,

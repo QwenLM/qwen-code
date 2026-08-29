@@ -19,11 +19,16 @@ import {
   LEDGER_MAX_TITLE,
   LEDGER_MAX_BYTES,
   LEDGER_MAX_MODEL,
+  LEDGER_MAX_ROUND,
   LEDGER_MAX_VOLUME,
   LEDGER_MAX_ID,
+  LEDGER_MAX_CLOSED,
   LEDGER_ID_SHAPE,
-  LEDGER_MAX_ROUND,
+  LEDGER_MAX_REC_CODES,
+  LEDGER_MAX_REC_CODE,
+  axesOf,
   isLedgerFinding,
+  normalizeLedgerFinding,
   type Ledger,
   type LedgerFinding,
 } from './ledger.js';
@@ -710,6 +715,233 @@ describe('LEDGER_ID_READBACK', () => {
   });
 });
 
+// The closure list the divergence sentinel (#9905) rides on the marker:
+// validated and capped on both ends like the findings, but with no
+// `dropped` counterpart — closures certify nothing, so a truncated history
+// has no completeness claim to protect.
+describe('ledger marker — the closure list (#9905)', () => {
+  it('round-trips the closures through serialize and parse', () => {
+    const marker = serializeLedger({
+      ...LEDGER,
+      closed: [
+        { r: 2, id: 'R1-1', f: 'src/a.ts' },
+        { r: 2, id: 'R1-2', f: 'src/c.ts' },
+      ],
+    });
+    const back = parseLedger(`body\n\n${marker}`)!;
+    expect(back.closed).toEqual([
+      { r: 2, id: 'R1-1', f: 'src/a.ts' },
+      { r: 2, id: 'R1-2', f: 'src/c.ts' },
+    ]);
+    expect(back.dropped).toBeUndefined();
+    expect(back.findings).toHaveLength(2);
+  });
+
+  it('omits the field entirely when there are no closures', () => {
+    const back = parseLedger(serializeLedger(LEDGER))!;
+    expect(back.closed).toBeUndefined();
+    expect(JSON.stringify(back)).not.toContain('closed');
+  });
+
+  it('drops malformed entries and a closure claiming a FUTURE round', () => {
+    // Same squat rule as the findings: the marker's round is the newest
+    // state it can describe, so a closure past it is not one.
+    const back = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":2,"findings":[],' +
+        '"closed":[{"r":2,"id":"R1-1","f":"a.ts"},{"r":3,"id":"R3-1","f":"b.ts"},' +
+        '{"r":1},{"r":"2","id":"R1-2","f":"c.ts"},null]} -->',
+    )!;
+    expect(back.closed).toEqual([{ r: 2, id: 'R1-1', f: 'a.ts' }]);
+  });
+
+  it('binds the count cap on read, keeping the NEWEST entries', () => {
+    // Fed a RAW marker, not a serialize round-trip: the write side already
+    // sheds to the cap, so a round-tripped list never reaches the
+    // parse-side slice — the half that binds a hand-edited or planted
+    // marker no serializer ever capped.
+    const closed = Array.from({ length: LEDGER_MAX_CLOSED + 10 }, (_, i) => ({
+      r: 2,
+      id: `R1-${i}`,
+      f: 'a.ts',
+    }));
+    const back = parseLedger(
+      `<!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"closed":${JSON.stringify(closed)}} -->`,
+    )!;
+    expect(back.closed).toHaveLength(LEDGER_MAX_CLOSED);
+    expect(back.closed![0]!.id).toBe('R1-10');
+    expect(back.closed![LEDGER_MAX_CLOSED - 1]!.id).toBe('R1-59');
+  });
+
+  it('refuses closure ids the finding grammar refuses — squats, links, empty', () => {
+    // The admission test applies the SAME grammar and id-round bounds
+    // `isLedgerFinding` does in this file: a hand-edited or forged marker
+    // must not plant arbitrary ≤24-char tokens into the posted advisory and
+    // the machine-readable `basis` — an empty id renders a blank generation
+    // (` → `), `R9999-1` spells a round nobody ran, a link or mention rides
+    // the route whose own comment names the planted-marker threat — while
+    // the ledger's admission test refuses every one of them as a finding.
+    // The one honest entry survives.
+    const longFile = 'z'.repeat(LEDGER_MAX_FILE + 1);
+    const back = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":2,"findings":[],' +
+        '"closed":[' +
+        '{"r":2,"id":"R9999-1","f":"a.ts"},' +
+        '{"r":2,"id":"","f":"a.ts"},' +
+        '{"r":2,"id":"not-an-id","f":"a.ts"},' +
+        '{"r":2,"id":"[x](http://evil.example)","f":"a.ts"},' +
+        '{"r":2,"id":"@mention ping","f":"a.ts"},' +
+        '{"r":2,"id":"R1-1","f":""},' +
+        // Two fixtures each refused by ONE conjunct alone — the two
+        // conjuncts no earlier fixture isolated: `R1-1x` passes the
+        // id-round arithmetic (round 1 in bounds, below r), so the shape
+        // check is its only refuser; the long `f` passes every other
+        // check, so the length bound is its only refuser. Deleting either
+        // conjunct admitted its fixture with the suite green.
+        '{"r":2,"id":"R1-1x","f":"a.ts"},' +
+        `{"r":2,"id":"R1-3","f":"${longFile}"},` +
+        '{"r":2,"id":"R2-1","f":"b.ts"},' +
+        '{"r":2,"id":"R1-2","f":"a.ts"}' +
+        ']} -->',
+    )!;
+    // `R2-1` at r=2 spells a finding closed the very round it was minted —
+    // the pipeline's own writer cannot produce that shape (a closure at
+    // round r closes a finding OPEN in round r-1's work list), so the
+    // admission test refuses it like the other planted tokens.
+    expect(back.closed).toEqual([{ r: 2, id: 'R1-2', f: 'a.ts' }]);
+  });
+
+  it('admits a same-round closure id ONLY at the round cap — the escape hatch', () => {
+    // At the cap, consecutive rounds re-stamp the same `R<cap>-*` id space,
+    // so a minted closure's id round EQUALS its closure round — admitted
+    // only via the escape hatch. Below the cap the same shape spells a
+    // finding closed the very round it was minted, and the admission test
+    // refuses it like the planted `R2-1` above.
+    const atCap = parseLedger(
+      `<!-- qwen-review-ledger {"v":1,"round":${LEDGER_MAX_ROUND},"findings":[],` +
+        `"closed":[{"r":${LEDGER_MAX_ROUND},"id":"R${LEDGER_MAX_ROUND}-1","f":"a.ts"}]} -->`,
+    )!;
+    expect(atCap.closed).toEqual([
+      { r: LEDGER_MAX_ROUND, id: `R${LEDGER_MAX_ROUND}-1`, f: 'a.ts' },
+    ]);
+    const belowCap = parseLedger(
+      `<!-- qwen-review-ledger {"v":1,"round":${LEDGER_MAX_ROUND},"findings":[],` +
+        `"closed":[{"r":${LEDGER_MAX_ROUND - 1},"id":"R${LEDGER_MAX_ROUND}-1","f":"a.ts"}]} -->`,
+    )!;
+    expect(belowCap.closed ?? []).toEqual([]);
+  });
+
+  it('sheds closures BEFORE the anchor pair, and never sets `dropped` for them', () => {
+    // The cascade order is the priority order: advisory history goes before
+    // the anchor (a full re-review) and the work list (a ruling owed). A
+    // marker that paid a finding — or its anchor — for a divergence hint
+    // would invert the module's priorities, and `dropped` over a trimmed
+    // hint would withhold the anchor over advisory data.
+    const wide: Ledger = {
+      v: 1,
+      round: 9,
+      // Sized so the findings ALONE nearly fill the byte budget: the
+      // closures overflow it, so the shed order is observable — the
+      // closures go, the anchor and the work list stay.
+      findings: Array.from({ length: 21 }, (_, i) => ({
+        id: `R9-${i}`,
+        sev: 'C' as const,
+        file: 'p/'.repeat(100).slice(0, LEDGER_MAX_FILE),
+        line: 99999,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      })),
+      // Ids the admission test ADMITS — the shape and length legal, the
+      // id round below the closure round: an invalid id is dropped by the
+      // serializer's admission filter before the byte cascade ever runs,
+      // and this test would pass vacuously over the shed stage it names.
+      closed: Array.from({ length: LEDGER_MAX_CLOSED }, (_, i) => ({
+        r: 9,
+        id: `R8-${i}`,
+        f: 'p/'.repeat(100).slice(0, LEDGER_MAX_FILE),
+      })),
+      sha: 'deadbeef00112233',
+    };
+    const marker = serializeLedger(wide);
+    expect(marker.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+    const back = parseLedger(`body\n\n${marker}`)!;
+    expect(back.closed ?? []).toHaveLength(0);
+    expect(back.sha).toBe('deadbeef00112233');
+    expect(back.findings).toHaveLength(21);
+    expect(back.dropped).toBeUndefined();
+  });
+});
+
+// `src0` is the approach signal's baseline — see `Ledger.src0`. It is the one
+// field that survives truncation, because the ruling that withholds an anchor
+// from a partial finding list does not extend to a measurement of the diff.
+describe('ledger src0 — the approach-signal baseline', () => {
+  it('serializes a positive baseline and omits a missing or zero one', () => {
+    expect(
+      serializeLedger({ v: 1, round: 2, findings: [], src0: 228 }),
+    ).toContain('"src0":228');
+    expect(serializeLedger({ v: 1, round: 2, findings: [] })).not.toContain(
+      'src0',
+    );
+    expect(
+      serializeLedger({ v: 1, round: 2, findings: [], src0: 0 }),
+    ).not.toContain('src0');
+  });
+
+  // The explicit ruling the schema demands of any new field: `sha` is dropped
+  // on a truncated list because a partial work list must not certify a commit
+  // range; `src0` certifies nothing, so it rides.
+  it('survives truncation where the anchor does not', () => {
+    const findings = Array.from({ length: 400 }, (_, i) => ({
+      id: `R1-${i}`,
+      sev: 'S' as const,
+      file: `src/some/reasonably/long/path/to/file-${i}.ts`,
+      line: i,
+      title: `a finding title long enough to push the marker past its byte cap ${i}`,
+    }));
+    const parsed = parseLedger(
+      serializeLedger({
+        v: 1,
+        round: 3,
+        findings,
+        sha: 'deadbeef00112233445566778899aabbccddeeff',
+        src0: 228,
+      }),
+    );
+    expect(parsed?.dropped).toBeGreaterThan(0);
+    expect(parsed?.sha).toBeUndefined();
+    expect(parsed?.src0).toBe(228);
+  });
+
+  // A garbled baseline must degrade to "unknown" — which the consumer reads as
+  // silence — rather than to a number that would read as no growth.
+  it.each([0, -5, 1.5, '228', null, undefined])(
+    'drops a non-positive-integer baseline (%p)',
+    (bad) => {
+      const marker = `<!-- qwen-review-ledger ${JSON.stringify({
+        v: 1,
+        round: 2,
+        findings: [],
+        src0: bad,
+      })} -->`;
+      expect(parseLedger(marker)?.src0).toBeUndefined();
+    },
+  );
+
+  it('round-trips a baseline alongside the -- escaping', () => {
+    const parsed = parseLedger(
+      serializeLedger({
+        v: 1,
+        round: 4,
+        findings: [
+          { id: 'R1-1', sev: 'C', file: 'a.ts', title: 'rejects --unsafe' },
+        ],
+        src0: 512,
+      }),
+    );
+    expect(parsed?.src0).toBe(512);
+    expect(parsed?.findings[0].title).toBe('rejects --unsafe');
+  });
+});
+
 describe('the volume fields — telemetry across the untrusted boundary', () => {
   // This suite is the marker's untrusted-input boundary: `parseLedger` reads
   // PR bodies any account can write, so the volume fields are pinned here
@@ -874,5 +1106,452 @@ describe('the volume fields — telemetry across the untrusted boundary', () => 
     expect(l.dropped).toBeGreaterThan(0);
     expect(l.sha).toBeUndefined();
     expect(l.posted).toBe(12);
+  });
+});
+
+describe('the churn streak', () => {
+  const base = { v: 1 as const, round: 3, findings: [] };
+  const handCrafted = (over: Record<string, unknown>) =>
+    `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 5,
+      findings: [{ id: 'R5-1', sev: 'S', file: 'a.ts', title: 'x' }],
+      ...over,
+    })} -->`;
+
+  // The boundary is located by the PROPERTY, never by a byte count: the
+  // serializer self-sheds, so `serializeLedger(...).length` can never be
+  // observed above the cap and any arithmetic built on it measures the shed
+  // output rather than the pressure. So: grow the last entry's path a byte
+  // at a time until the carried volume is the thing that stops fitting, and
+  // keep the render one byte BELOW that as the control.
+  const withVolume = (findings: LedgerFinding[], over: Partial<Ledger> = {}) =>
+    serializeLedger({
+      ...base,
+      ...over,
+      findings,
+      posted: 12,
+      prevPosted: 9,
+    });
+
+  const atTheVolumeBoundary = (over: Partial<Ledger> = {}) => {
+    const findings: LedgerFinding[] = [];
+    for (let i = 0; i < LEDGER_MAX_FINDINGS; i++) {
+      const next: LedgerFinding = {
+        id: `R3-${i + 1}`,
+        sev: 'S',
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      };
+      if (withVolume([...findings, next], over).includes('"prevPosted"')) {
+        findings.push(next);
+      } else {
+        break;
+      }
+    }
+    // Whole findings are ~130 bytes each, so the coarse fill lands up to one
+    // entry short. Pad the last entry's PATH — the one capped field with room
+    // left — until the carried volume is exactly what no longer fits.
+    const grow = (n: number): LedgerFinding[] => {
+      const fs = findings.slice();
+      const last = fs[fs.length - 1];
+      fs[fs.length - 1] = { ...last, file: last.file + 'x'.repeat(n) };
+      return fs;
+    };
+    const room = LEDGER_MAX_FILE - findings[findings.length - 1].file.length;
+    let pad = 0;
+    while (pad < room && withVolume(grow(pad), over).includes('"prevPosted"')) {
+      pad++;
+    }
+    return { over: grow(pad), under: grow(pad - 1) };
+  };
+
+  it('keeps the streak through the FIRST byte squeeze', () => {
+    // The streak is NOT telemetry: it is the review's own standing claim
+    // about the pull request, and `compose-review` reads it back to decide
+    // whether to file the non-convergence finding. The pull request most
+    // likely to be churning is also the one whose marker is closest to its
+    // byte cap, so shedding the streak there would disarm the mechanism on
+    // exactly the pull requests it exists for.
+    const { over, under } = atTheVolumeBoundary({ churnRounds: 3 });
+    // The control proves the fixture is AT the boundary rather than merely
+    // over-fat: one byte less and the carried volume still fits.
+    expect(withVolume(under, { churnRounds: 3 })).toContain('"prevPosted":9');
+    const written = withVolume(over, { churnRounds: 3 });
+    expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+    expect(written).not.toContain('"prevPosted"');
+    expect(written).toContain('"churnRounds":3');
+    expect(parseLedger(written)?.churnRounds).toBe(3);
+    expect(parseLedger(written)?.findings).toHaveLength(over.length);
+  });
+
+  it('keeps the streak past the rung where the VOLUME itself goes', () => {
+    // The census rung alone cannot tell the two placements apart: a streak
+    // wrongly nested inside the volume block still survives the first squeeze
+    // (the cascade's second rung still writes a volume). The discriminating
+    // fixture is the rung where `posted` ITSELF is shed — there the correct
+    // placement keeps the streak and the nested one drops it, which is
+    // exactly the pull request this mechanism is for: fifty findings, marker
+    // at its cap, and the one integer that can end the loop.
+    const fat = (n: number): LedgerFinding[] =>
+      Array.from({ length: n }, (_, i) => ({
+        id: `R3-${i + 1}`,
+        sev: 'S' as const,
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      }));
+    let n = 1;
+    let written = '';
+    for (; n <= LEDGER_MAX_FINDINGS; n++) {
+      written = serializeLedger({
+        ...base,
+        findings: fat(n),
+        posted: 12,
+        prevPosted: 9,
+        churnRounds: 3,
+      });
+      if (!written.includes('"posted"')) break;
+    }
+    // The fixture reached that rung at all — otherwise the assertions below
+    // are about a marker that never squeezed and prove nothing.
+    expect(written).not.toContain('"posted"');
+    expect(written).toContain('"churnRounds":3');
+    expect(parseLedger(written)?.churnRounds).toBe(3);
+  });
+
+  it('omits a zero streak rather than spending bytes on it', () => {
+    // A converging pull request is the common case; it should cost nothing.
+    const written = serializeLedger({ ...base, churnRounds: 0 });
+    expect(written).not.toContain('churnRounds');
+    expect(parseLedger(written)?.churnRounds).toBeUndefined();
+  });
+
+  it.each([
+    ['a float', 2.5],
+    ['a negative', -1],
+    ['a string', '7'],
+    ['null', null],
+    ['a NaN', Number.NaN],
+  ])('refuses %s as a streak without losing the ledger', (_label, bad) => {
+    const l = parseLedger(handCrafted({ churnRounds: bad }))!;
+    expect(l.findings).toHaveLength(1);
+    expect(l.churnRounds).toBeUndefined();
+  });
+
+  it('clamps the streak to the round cap on write AND on read', () => {
+    // Same domain as `round`, same arithmetic hazard past the cap — and the
+    // raw text is asserted for the same reason the volume cap's is: a
+    // round-trip alone passes while the write side emits uncapped digits.
+    const over = LEDGER_MAX_ROUND + 1;
+    const written = serializeLedger({ ...base, churnRounds: over });
+    expect(written).toContain(`"churnRounds":${LEDGER_MAX_ROUND}`);
+    expect(written).not.toContain(String(over));
+    expect(
+      parseLedger(handCrafted({ round: LEDGER_MAX_ROUND, churnRounds: over }))
+        ?.churnRounds,
+    ).toBe(LEDGER_MAX_ROUND);
+  });
+
+  it('clamps a recovered streak to the marker’s own round', () => {
+    // The streak counts rounds INSIDE the round it rides, so a legitimate
+    // marker can never carry more counted rounds than rounds it claims.
+    // The marker body is any GitHub user's writable surface: unclamped,
+    // `{round: 2, churnRounds: 9999}` beside one honest above-bar round
+    // posts "the 10000th round…" on a pull request in its third. Same
+    // invariant the finding-id squat filter enforces — a claim about rounds
+    // that did not exist is not read.
+    const forged = `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'a.ts', title: 'x' }],
+      churnRounds: 9999,
+    })} -->`;
+    expect(parseLedger(forged)?.churnRounds).toBe(2);
+    // A streak AT the round rides untouched — the clamp strips nothing a
+    // legitimate marker can carry (round 5 is the handCrafted default).
+    expect(parseLedger(handCrafted({ churnRounds: 5 }))?.churnRounds).toBe(5);
+  });
+});
+
+describe('the flat streak', () => {
+  // Mirror of the churn block above for the floor trigger's streak (#9903):
+  // the two fields share the serializer rung and the trust shape, and two
+  // mutations of the diff's own lines — nesting the write inside the
+  // volume-shed block, and deleting the parse-side clamp — survive the whole
+  // suite unless pinned here. The values used are HONEST ones (round 3
+  // carries at most 1): the read clamps to the honest maximum, because the
+  // signal that advances the streak gates on round >= 3.
+  const base = { v: 1 as const, round: 3, findings: [] };
+  const handCrafted = (over: Record<string, unknown>) =>
+    `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 5,
+      findings: [{ id: 'R5-1', sev: 'S', file: 'a.ts', title: 'x' }],
+      ...over,
+    })} -->`;
+
+  const withVolume = (findings: LedgerFinding[], over: Partial<Ledger> = {}) =>
+    serializeLedger({
+      ...base,
+      ...over,
+      findings,
+      posted: 12,
+      prevPosted: 9,
+    });
+
+  const atTheVolumeBoundary = (over: Partial<Ledger> = {}) => {
+    const findings: LedgerFinding[] = [];
+    for (let i = 0; i < LEDGER_MAX_FINDINGS; i++) {
+      const next: LedgerFinding = {
+        id: `R3-${i + 1}`,
+        sev: 'S',
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      };
+      if (withVolume([...findings, next], over).includes('"prevPosted"')) {
+        findings.push(next);
+      } else {
+        break;
+      }
+    }
+    const grow = (n: number): LedgerFinding[] => {
+      const fs = findings.slice();
+      const last = fs[fs.length - 1];
+      fs[fs.length - 1] = { ...last, file: last.file + 'x'.repeat(n) };
+      return fs;
+    };
+    const room = LEDGER_MAX_FILE - findings[findings.length - 1].file.length;
+    let pad = 0;
+    while (pad < room && withVolume(grow(pad), over).includes('"prevPosted"')) {
+      pad++;
+    }
+    return { over: grow(pad), under: grow(pad - 1) };
+  };
+
+  it('keeps the streak through the FIRST byte squeeze', () => {
+    // The pull request whose first-time-finding rate never falls is exactly
+    // the one whose marker sits at the byte cap; shedding the latched streak
+    // there would silently release the floor between rounds 4 and 6.
+    const { over, under } = atTheVolumeBoundary({ flatRounds: 1 });
+    expect(withVolume(under, { flatRounds: 1 })).toContain('"prevPosted":9');
+    const written = withVolume(over, { flatRounds: 1 });
+    expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+    expect(written).not.toContain('"prevPosted"');
+    expect(written).toContain('"flatRounds":1');
+    expect(parseLedger(written)?.flatRounds).toBe(1);
+    expect(parseLedger(written)?.findings).toHaveLength(over.length);
+  });
+
+  it('keeps the streak past the rung where the VOLUME itself goes', () => {
+    // The discriminating rung: a streak wrongly nested inside the volume
+    // block survives the first squeeze but sheds with `posted` itself — the
+    // correct placement keeps it, on exactly the over-cap markers.
+    const fat = (n: number): LedgerFinding[] =>
+      Array.from({ length: n }, (_, i) => ({
+        id: `R3-${i + 1}`,
+        sev: 'S' as const,
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      }));
+    let n = 1;
+    let written = '';
+    for (; n <= LEDGER_MAX_FINDINGS; n++) {
+      written = serializeLedger({
+        ...base,
+        findings: fat(n),
+        posted: 12,
+        prevPosted: 9,
+        flatRounds: 1,
+      });
+      if (!written.includes('"posted"')) break;
+    }
+    expect(written).not.toContain('"posted"');
+    expect(written).toContain('"flatRounds":1');
+    expect(parseLedger(written)?.flatRounds).toBe(1);
+  });
+
+  it('omits a zero streak rather than spending bytes on it', () => {
+    const written = serializeLedger({ ...base, flatRounds: 0 });
+    expect(written).not.toContain('flatRounds');
+    expect(parseLedger(written)?.flatRounds).toBeUndefined();
+  });
+
+  it.each([
+    ['a float', 2.5],
+    ['a negative', -1],
+    ['a string', '7'],
+    ['null', null],
+    ['a NaN', Number.NaN],
+  ])('refuses %s as a streak without losing the ledger', (_label, bad) => {
+    const l = parseLedger(handCrafted({ flatRounds: bad }))!;
+    expect(l.findings).toHaveLength(1);
+    expect(l.flatRounds).toBeUndefined();
+  });
+
+  it('clamps the streak to the round cap on write AND on read', () => {
+    const over = LEDGER_MAX_ROUND + 1;
+    const written = serializeLedger({ ...base, flatRounds: over });
+    expect(written).toContain(`"flatRounds":${LEDGER_MAX_ROUND}`);
+    expect(written).not.toContain(String(over));
+    // The read side clamps TIGHTER — to the honest maximum: at the round
+    // cap no honest run has measured more than cap - 2 firing rounds.
+    expect(
+      parseLedger(handCrafted({ round: LEDGER_MAX_ROUND, flatRounds: over }))
+        ?.flatRounds,
+    ).toBe(LEDGER_MAX_ROUND - 2);
+  });
+
+  it('clamps a recovered streak to the honest maximum, not merely the round', () => {
+    // The signal that advances the streak gates on round >= 3, so rounds
+    // 1–2 are unmeasurable and at round N no honest marker carries more
+    // than N - 2. The round-clamp alone admitted `{round: 2, flatRounds: 2}`
+    // — a streak the serializer never emits, which the model-side routing
+    // reads raw off the side file.
+    const forged = `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'a.ts', title: 'x' }],
+      flatRounds: 9999,
+    })} -->`;
+    expect(parseLedger(forged)?.flatRounds).toBeUndefined();
+    expect(parseLedger(handCrafted({ flatRounds: 9999 }))?.flatRounds).toBe(3);
+    // A streak AT the honest maximum rides untouched (round 5 → 3).
+    expect(parseLedger(handCrafted({ flatRounds: 3 }))?.flatRounds).toBe(3);
+  });
+});
+
+describe('the recommendation-code carrier (#10107)', () => {
+  // The field is the workflow consumer's ONLY view of the diagnosis's
+  // machine-readable half, so the tests pin the two properties that carry
+  // the feature: it survives the byte cascade on exactly the over-cap
+  // markers where a non-converging loop lives, and it is write-only — a
+  // recovered marker contributes no codes, because nothing CLI-side may act
+  // on a value another account's writable surface controls.
+  const base = { v: 1 as const, round: 3, findings: [] };
+
+  it('carries the codes past the rung where the volume sheds', () => {
+    const fat = (n: number): LedgerFinding[] =>
+      Array.from({ length: n }, (_, i) => ({
+        id: `R3-${i + 1}`,
+        sev: 'S' as const,
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      }));
+    let written = '';
+    for (let n = 1; n <= LEDGER_MAX_FINDINGS; n++) {
+      written = serializeLedger({
+        ...base,
+        findings: fat(n),
+        posted: 12,
+        prevPosted: 9,
+        rec: ['root-cause-triage', 'batch-fixes'],
+      });
+      if (!written.includes('"posted"')) break;
+    }
+    expect(written).not.toContain('"posted"');
+    expect(written).toContain('"rec":["root-cause-triage","batch-fixes"]');
+    expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+  });
+
+  it('omits an empty or absent set rather than spending bytes on it', () => {
+    expect(serializeLedger({ ...base })).not.toContain('"rec"');
+    expect(serializeLedger({ ...base, rec: [] })).not.toContain('"rec"');
+  });
+
+  it('bounds the shape: drops non-strings and overlong codes, dedupes, caps the count', () => {
+    const written = serializeLedger({
+      ...base,
+      rec: [
+        'batch-fixes',
+        'batch-fixes',
+        '',
+        'x'.repeat(LEDGER_MAX_REC_CODE + 1),
+        7 as unknown as string,
+        null as unknown as string,
+        ...Array.from({ length: LEDGER_MAX_REC_CODES + 3 }, (_, i) => `c${i}`),
+      ],
+    });
+    const parsed = JSON.parse(
+      written.replace('<!-- qwen-review-ledger ', '').replace(' -->', ''),
+    ) as { rec: string[] };
+    expect(parsed.rec[0]).toBe('batch-fixes');
+    expect(parsed.rec).toHaveLength(LEDGER_MAX_REC_CODES);
+    expect(new Set(parsed.rec).size).toBe(parsed.rec.length);
+    expect(parsed.rec.every((c) => c.length <= LEDGER_MAX_REC_CODE)).toBe(true);
+  });
+
+  it('is write-only: parseLedger recovers no codes from a marker that carries them', () => {
+    const written = serializeLedger({ ...base, rec: ['stem-surface'] });
+    expect(written).toContain('"rec":["stem-surface"]');
+    expect(parseLedger(written)).not.toHaveProperty('rec');
+  });
+
+  it('stays comment-safe under the -- escape a code could smuggle', () => {
+    // Codes are vocabulary-bound at the write site, but the serializer's
+    // escape must hold for the shape bound alone: a `--` inside the payload
+    // would close the HTML comment early and spill the tail as visible text.
+    const written = serializeLedger({ ...base, rec: ['a--b'] });
+    expect(written.indexOf('-->')).toBe(written.length - '-->'.length);
+    expect(
+      (
+        JSON.parse(
+          written.replace('<!-- qwen-review-ledger ', '').replace(' -->', ''),
+        ) as { rec: string[] }
+      ).rec,
+    ).toEqual(['a--b']);
+  });
+});
+
+describe('the finding axes (#10291)', () => {
+  it('round-trips a classified Critical, and spends no bytes on an unclassified one', () => {
+    const marker = serializeLedger({
+      v: 1,
+      round: 3,
+      findings: [
+        { id: 'R3-1', sev: 'C', d: 'f', b: 'n', file: 'a.ts', title: 'wedge' },
+        { id: 'R3-2', sev: 'C', d: 'c', file: 'b.ts', title: 'lie' },
+        { id: 'R3-3', sev: 'C', file: 'c.ts', title: 'unclassified' },
+      ],
+    });
+    const back = parseLedger(marker)!;
+    expect(back.findings[0]).toMatchObject({ d: 'f', b: 'n' });
+    expect(back.findings[1]).toMatchObject({ d: 'c' });
+    expect(back.findings[1].b).toBeUndefined();
+    expect(back.findings[2].d).toBeUndefined();
+    expect(back.findings[2].b).toBeUndefined();
+    expect(marker.match(/"d":/g)).toHaveLength(2);
+    expect(marker.match(/"b":/g)).toHaveLength(1);
+  });
+
+  it('normalises an unrecognised axis instead of dropping the finding — the fields decide nothing', () => {
+    // The marker is a cross-environment carrier: a later version adding a
+    // third direction, a hand edit, or a foreign marker must not make an
+    // older CLI drop the finding from the work list.
+    const marker =
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[' +
+      '{"id":"R3-1","sev":"C","file":"a.ts","title":"t","d":"x","b":"n"}' +
+      ']} -->';
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings).toEqual([
+      { id: 'R3-1', sev: 'C', file: 'a.ts', title: 't', b: 'n' },
+    ]);
+    expect(parsed.dropped).toBeUndefined();
+    expect(
+      normalizeLedgerFinding({
+        id: 'R3-1',
+        sev: 'C',
+        file: 'a.ts',
+        title: 't',
+        d: 'f',
+        b: 'z' as never,
+      }),
+    ).toEqual({ id: 'R3-1', sev: 'C', file: 'a.ts', title: 't', d: 'f' });
+  });
+
+  it('spells the axes out once, for every renderer', () => {
+    expect(axesOf({ d: 'f', b: 'n' })).toBe('fails-closed, new-surface');
+    expect(axesOf({ d: 'c' })).toBe('certifies-falsely');
+    expect(axesOf({ b: 'r' })).toBe('regression');
+    expect(axesOf({})).toBe('');
   });
 });

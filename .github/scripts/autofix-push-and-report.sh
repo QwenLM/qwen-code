@@ -2,10 +2,12 @@
 # Push the round's commit to the PR head and post the round report.
 #
 # The body below is the 'Push and report' step of review-address in
-# .github/workflows/qwen-autofix.yml, byte-identical to the inline block it
-# came from: 626 lines, ~41 KB. The file it left is within a few KB of the
-# repo's 470,000-byte gate, and GitHub stops starting runs past 512,000 without
-# saying so (.github/scripts/check-workflow-size.sh). No absolute size is
+# .github/workflows/qwen-autofix.yml — the inline block it came from (626
+# lines, ~41 KB at the move), its long comments since migrated to
+# qwen-autofix.md pointers like the rest of the workflow. The file it left
+# is within a few KB of the repo's 470,000-byte gate, and GitHub stops starting
+# runs past 512,000 without saying so (.github/scripts/check-workflow-size.sh).
+# No absolute size is
 # quoted here on purpose — main moves it every day, and a number that decays is
 # how this comment earned three review rounds. It is also
 # the step docs/design/autofix-gate-runner-isolation.md moves into its own
@@ -78,15 +80,8 @@ MODEL_DISPLAY="${MODEL:-default}"
 # Growth-audit trail (+ re-arm on sound): audit rounds record the
 # verdict under the key the baseline was READ under — same rule as
 # the growth markers, same dead-key hazard (a supersede-exempt
-# round can report under a stale WINDOW after a re-arm). The
-# verdict comes from AUDIT_VERDICT — the verdict the verification
-# GATE validated and surfaced as a step output — NOT a re-read of
-# growth-audit.json: the branch's own build/tests run as the runner
-# user and WORKDIR is a predictable path they can write, so the
-# file could change after the gate looked. Re-arming is allowed
-# for completed rounds only ($1 = allow): a sound verdict whose
-# round then FAILED must not re-anchor the window — the failure
-# path re-measures under the same window instead.
+# round can report under a stale WINDOW after a re-arm).
+# Full rationale → qwen-autofix.md#af-131
 emit_growth_audit_marker() {
   local allow_rearm="${1:-false}"
   [[ "${KISS_AUDIT}" == 'true' ]] || return 0
@@ -123,17 +118,76 @@ fi
 # replies — silence in still-open threads was a no-op-only gap.
 resolve_and_reply_threads() {
   CAN_RESOLVE_THREADS='false'
+  # Round-report observability (#10106): a guard refusing round after
+  # round reads, on the PR, exactly like resolution working — 0/90 on
+  # #9729 stayed invisible for days. Each refusing guard records its
+  # name, and the counters feed one host-authored line in the round
+  # report; the ::warning:: lines below reach only the run log.
+  RESOLUTION_GUARD=''
+  RESOLUTION_SELECTED_N=0
+  CONFIRMED_RESOLVED_N=0
+  RESOLVED_BY_OTHERS_N=0
+  ALREADY_RESOLVED_N=0
   if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
-    LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
-    if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
-      echo "::warning::skipping review-thread resolution because the pushed head includes commits merged after deterministic verification"
-    elif [[ -z "${VERIFIED_HEAD}" || "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
-      echo "::warning::skipping review-thread resolution because the pushed head is not the exact deterministically verified commit"
-    elif LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" &&
-      [[ -n "${LIVE_PR_HEAD}" && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
-      CAN_RESOLVE_THREADS='true'
-    else
-      echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
+    # One spelling of the id grammar (optional rc: prefix, CR bytes
+    # stripped, digits only, deduplicated), shared by the counter and
+    # the classification + resolve loops below. CRs go through tr, not
+    # a sed \r escape: BSD sed on the macOS test lane does not
+    # interpret \r, and this block runs there unchanged (ci.yml records
+    # #9220 — this defect class — having shipped to main once).
+    RESOLVED_IDS="$(tr -d '\r' < "${WORKDIR}/resolved-comments.txt" | sed 's/^rc://' | grep -E '^[0-9]+$' | sort -u || true)"
+    RESOLUTION_SELECTED_N="$(grep -c . <<< "${RESOLVED_IDS}" || true)"
+    # Nothing selected resolves nothing, so the head guards below have
+    # no resolution to gate — a malformed file (zero valid ids) must
+    # not spend this PAT-bearing step's reads on a proof nothing needs.
+    if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then
+      LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
+      if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
+        RESOLUTION_GUARD='salvage merge'
+        echo "::warning::skipping review-thread resolution because the pushed head includes commits merged after deterministic verification"
+      elif [[ -z "${VERIFIED_HEAD}" ]]; then
+        RESOLUTION_GUARD='missing verified_head'
+        echo "::warning::skipping review-thread resolution because this round recorded no deterministically verified commit"
+      elif [[ "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+        RESOLUTION_GUARD='verified_head mismatch'
+        echo "::warning::skipping review-thread resolution because the pushed head is not the exact deterministically verified commit"
+      else
+        # The PR read model is eventually consistent: a headRefOid read
+        # seconds after this round's OWN push routinely still returns the
+        # previous head — on #9729 every pushed round tripped this guard
+        # that way, silently, for days (#10106). Give propagation a
+        # bounded window before declaring drift; the per-mutation guards
+        # below stay single-shot, because once the head was observed
+        # equal a later mismatch means it actually moved. A round that
+        # pushed nothing has no push to propagate — a mismatched head
+        # there moves only further away, never back — so one read
+        # decides.
+        # The delay knob exists for tests; anything but a single digit
+        # (e.g. a GITHUB_ENV plant stalling this PAT-bearing step) falls
+        # back to the default.
+        [[ "${LIVE_HEAD_RETRY_DELAY:-}" =~ ^[0-9]$ ]] || LIVE_HEAD_RETRY_DELAY=5
+        LIVE_HEAD_ATTEMPTS=5
+        [[ "${ROUND_PUSHED:-}" == 'true' ]] || LIVE_HEAD_ATTEMPTS=1
+        LIVE_HEAD_EVER_READ='false'
+        for (( live_head_attempt = 1; live_head_attempt <= LIVE_HEAD_ATTEMPTS; live_head_attempt++ )); do
+          LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" || LIVE_PR_HEAD=''
+          if [[ -n "${LIVE_PR_HEAD}" ]]; then
+            LIVE_HEAD_EVER_READ='true'
+            if [[ "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
+              CAN_RESOLVE_THREADS='true'
+              break
+            fi
+          fi
+          [[ "${live_head_attempt}" == "${LIVE_HEAD_ATTEMPTS}" ]] || sleep "${LIVE_HEAD_RETRY_DELAY}"
+        done
+        if [[ "${CAN_RESOLVE_THREADS}" != 'true' ]]; then
+          # drift: a head was read but never matched; unreadable: no read
+          # returned any head (auth/API health, not a contributor push).
+          RESOLUTION_GUARD='live-head drift'
+          [[ "${LIVE_HEAD_EVER_READ}" == 'true' ]] || RESOLUTION_GUARD='live-head unreadable'
+          echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
+        fi
+      fi
     fi
   fi
   # Resolve the review threads whose findings the agent actually
@@ -174,8 +228,57 @@ resolve_and_reply_threads() {
       echo "::warning::a review thread carries more than 100 comments; a comment past that page is not mapped to its thread"
     fi
   fi
+  # The counters above start in id space, but the note they feed counts
+  # THREADS — on every path, not just the resolving one. Classify every
+  # selected id against the fetched threads here: a guard-refused round
+  # or a mid-list break that skipped this would report id counts — two
+  # ids of ONE thread as two threads, and a thread already resolved
+  # before the fetch re-reported as left behind every round.
+  if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then
+    RESOLUTION_SELECTED_N=0
+    CLASSIFIED_PAIRS=''
+    SEEN_THREAD_IDS=''
+    while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
+      # A file with no valid ids normalizes to an empty list; the
+      # here-string still yields one empty iteration.
+      [[ -n "${rc_id}" ]] || continue
+      thread_id="$(jq -r --argjson id "${rc_id}" \
+        'map(select(.isResolved | not)
+           | select(any(.comments.nodes[]; .databaseId == $id)))
+         | .[0].id // ""' <<< "${THREADS_JSON}")"
+      thread_open='true'
+      if [[ -z "${thread_id}" ]]; then
+        thread_open='false'
+        # The open-thread filter above hides an id whose thread was
+        # resolved BEFORE the fetch; find it anyway, or it stays in
+        # the residual count every round — the SKILL has the agent
+        # re-list a still-holding fix, so the count never converges.
+        thread_id="$(jq -r --argjson id "${rc_id}" \
+          'map(select(any(.comments.nodes[]; .databaseId == $id)))
+           | .[0].id // ""' <<< "${THREADS_JSON}")"
+        if [[ -z "${thread_id}" ]]; then
+          echo "::warning::comment ${rc_id} matched no open review thread"
+          RESOLUTION_SELECTED_N=$(( RESOLUTION_SELECTED_N + 1 ))
+          continue
+        fi
+      fi
+      # A thread can carry more than one selected id — the feedback
+      # renderer lists a reply under a Critical root as its own finding
+      # — so its second id must not count a second thread nor reach
+      # the resolve loop as a re-resolve.
+      if grep -qxF "${thread_id}" <<< "${SEEN_THREAD_IDS}"; then
+        continue
+      fi
+      SEEN_THREAD_IDS="${SEEN_THREAD_IDS}${thread_id}"$'\n'
+      RESOLUTION_SELECTED_N=$(( RESOLUTION_SELECTED_N + 1 ))
+      if [[ "${thread_open}" == 'false' ]]; then
+        ALREADY_RESOLVED_N=$(( ALREADY_RESOLVED_N + 1 ))
+        continue
+      fi
+      CLASSIFIED_PAIRS="${CLASSIFIED_PAIRS}${rc_id}"$'\t'"${thread_id}"$'\n'
+    done <<< "${RESOLVED_IDS}"
+  fi
   if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
-    CONFIRMED_RESOLVED_N=0
     read_thread_guard() {
       gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}" -f query='
         query($owner:String!,$name:String!,$pr:Int!,$threadId:ID!){
@@ -183,26 +286,23 @@ resolve_and_reply_threads() {
           node(id:$threadId){... on PullRequestReviewThread{isResolved}}
         }' --jq '[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv'
     }
-    while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
-      rc_id="${rc_id%$'\r'}"
-      rc_id="${rc_id#rc:}"
-      [[ "${rc_id}" =~ ^[0-9]+$ ]] || continue
-      thread_id="$(jq -r --argjson id "${rc_id}" \
-        'map(select(.isResolved | not)
-           | select(any(.comments.nodes[]; .databaseId == $id)))
-         | .[0].id // ""' <<< "${THREADS_JSON}")"
-      if [[ -z "${thread_id}" ]]; then
-        echo "::warning::comment ${rc_id} matched no open review thread"
-        continue
-      fi
+    # The classification above already mapped each id to its thread and
+    # counted each thread once, so this loop resolves each thread once
+    # and reads its own resolution as confirmed — never as "another
+    # actor" resolving it between the fetch and the guard.
+    while IFS=$'\t' read -r rc_id thread_id; do
+      [[ -n "${rc_id}" ]] || continue
       if ! IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null) ||
         [[ -z "${LIVE_PR_HEAD}" || "${LIVE_PR_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+        RESOLUTION_GUARD='live-head drift'
         echo "::warning::stopping review-thread resolution because the live PR head moved before resolving comment ${rc_id}"
         break
       elif [[ "${THREAD_IS_RESOLVED}" == 'true' ]]; then
+        RESOLVED_BY_OTHERS_N=$(( RESOLVED_BY_OTHERS_N + 1 ))
         echo "::warning::comment ${rc_id} was resolved by another actor before this round could resolve it"
         continue
       elif [[ "${THREAD_IS_RESOLVED}" != 'false' ]]; then
+        RESOLUTION_GUARD='thread state unproven'
         echo "::warning::stopping review-thread resolution because the state of comment ${rc_id} could not be proven"
         break
       fi
@@ -225,20 +325,42 @@ resolve_and_reply_threads() {
       elif [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'false' && "${RESOLVE_SUCCEEDED}" == 'false' ]]; then
         echo "::warning::could not resolve the review thread for comment ${rc_id}"
       else
+        RESOLUTION_GUARD='mutation post-check ambiguous'
         echo "::warning::the live PR head or thread state could not be proven after resolving comment ${rc_id}; stopping review-thread resolution"
         break
       fi
-    done < "${WORKDIR}/resolved-comments.txt"
+    done <<< "${CLASSIFIED_PAIRS}"
     echo "🧵 confirmed ${CONFIRMED_RESOLVED_N} selected review thread(s) resolved while the verified head remained live"
+  fi
+  # One host-authored line for the round report (#10106): name the
+  # refusing guard and count the threads left behind. All text is fixed
+  # host strings plus counts — nothing agent-controlled.
+  RESOLUTION_NOTE=''
+  if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then
+    RESOLUTION_LEFT_N=$(( RESOLUTION_SELECTED_N - CONFIRMED_RESOLVED_N - RESOLVED_BY_OTHERS_N - ALREADY_RESOLVED_N ))
+    if [[ -n "${RESOLUTION_GUARD}" ]]; then
+      RESOLUTION_PHASE='skipped'
+      RESOLUTION_PHASE_ZH='被跳过'
+      if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
+        RESOLUTION_PHASE='stopped early'
+        RESOLUTION_PHASE_ZH='提前中止'
+      fi
+      RESOLUTION_NOTE="⚠️ Review-thread resolution ${RESOLUTION_PHASE} — guard: \`${RESOLUTION_GUARD}\`; resolved ${CONFIRMED_RESOLVED_N} of ${RESOLUTION_SELECTED_N} selected thread(s), ${RESOLUTION_LEFT_N} left for a later round. · 评审线程关闭${RESOLUTION_PHASE_ZH}——守卫:\`${RESOLUTION_GUARD}\`;选中 ${RESOLUTION_SELECTED_N} 条,本轮关闭 ${CONFIRMED_RESOLVED_N} 条,其余 ${RESOLUTION_LEFT_N} 条留待后续轮次。"
+    elif [[ "${RESOLUTION_LEFT_N}" -gt 0 ]]; then
+      RESOLUTION_DETAIL='details in the run log'
+      RESOLUTION_DETAIL_ZH='详见运行日志'
+      if [[ "${THREADS_FETCH_OK:-true}" != 'true' ]]; then
+        RESOLUTION_DETAIL='thread fetch incomplete; details in the run log'
+        RESOLUTION_DETAIL_ZH='线程拉取不完整,详见运行日志'
+      fi
+      RESOLUTION_NOTE="🧵 Resolved ${CONFIRMED_RESOLVED_N} of ${RESOLUTION_SELECTED_N} selected review thread(s); ${RESOLUTION_LEFT_N} not resolved by this round (${RESOLUTION_DETAIL}). · 选中评审线程 ${RESOLUTION_SELECTED_N} 条,已关闭 ${CONFIRMED_RESOLVED_N} 条;其余 ${RESOLUTION_LEFT_N} 条本轮未关闭(${RESOLUTION_DETAIL_ZH})。"
+    else
+      RESOLUTION_NOTE="🧵 Resolved all ${RESOLUTION_SELECTED_N} selected review thread(s). · 已关闭全部选中的 ${RESOLUTION_SELECTED_N} 条评审线程。"
+    fi
   fi
   # The mirror of the resolve above: a finding the agent did NOT
   # resolve keeps its thread open, and this answers it IN that thread.
-  # Without it the reason sits only in the round summary, so the
-  # reviewer who opens the still-open thread sees silence and cannot
-  # tell their finding was read. Same neutralisation as the summary
-  # body — a reply is model output posted verbatim under the bot
-  # identity, so it could otherwise smuggle a forged control marker.
-  # Best-effort: a reply failure must never fail a good push.
+  # Full rationale → qwen-autofix.md#af-132
   if [[ -s "${WORKDIR}/comment-replies.json" ]] &&
     jq -e 'type == "array"' "${WORKDIR}/comment-replies.json" > /dev/null 2>&1; then
     REPLIED_N=0
@@ -271,12 +393,8 @@ resolve_and_reply_threads() {
       # later round whose agent rewrites an unchanged declination
       # must not post the same bot reply twice on one thread
       # (observed 2026-08-16: an identical reply posted three
-      # times, #9296). Skip when the thread already carries a
-      # comment by the bot whose body EQUALS the neutralised body
-      # about to be posted; a changed body — a new reason in a
-      # later round — still posts. Best-effort like the rest: with
-      # a stale or empty threads view this degrades to the old
-      # post-always behavior.
+      # times, #9296).
+      # Full rationale → qwen-autofix.md#af-133
       if jq -e --argjson id "${root_id}" --arg bot "${AUTOFIX_BOT}" \
         --arg body "${REPLY_BODY}" '
           map(select(any(.comments.nodes[]; .databaseId == $id)))
@@ -338,8 +456,9 @@ run_deferred_upsert() {
   if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
     echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
   fi
-  # The child's output is agent-reachable content, so a line-start
-  # `::` is neutralized before it reaches this step's stdout.
+  # The child's output is agent-reachable content, so both workflow-command
+  # syntaxes are neutralized before it reaches this step's stdout (`##[`
+  # parses mid-line too — #9761).
   while IFS= read -r _upsert_line; do
     # Wrapper-authored lines carry a marker and are emitted
     # VERBATIM so they still render as GitHub annotations; the
@@ -349,7 +468,10 @@ run_deferred_upsert() {
     elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
       printf '%s\n' "${_upsert_line#__upsert_trusted__}"
     else
-      printf '%s\n' "${_upsert_line//::/;;}"
+      # The canonical two-expression neutralizer, identical to every other
+      # echo site — one spelling for the whole family, so a syntax change
+      # cannot drift across two implementations.
+      printf '%s\n' "${_upsert_line}" | sed -e 's/::/;;/g' -e 's/##\[/##［/g'
     fi
   done <<< "${UPSERT_OUT}"
 }
@@ -382,13 +504,8 @@ bash "${RUNNER_TEMP}/resanitize-git-config.sh"
 if [[ "${OUTCOME}" == "fixed" ]]; then
   NEXT_ROUND="$(( ROUND + 1 ))"
   # The tree the gate verified is what gets pushed: assert HEAD is
-  # the gate's verified_head before touching credentials. A repo
-  # redirect (a planted .git/commondir/GIT_DIR — the first defused
-  # by resanitize, the second by the env strip) would otherwise let
-  # `git rev-parse HEAD` and the push read an attacker repo whose
-  # HEAD differs; this compares against the value the gate recorded
-  # in GITHUB_OUTPUT (unreachable from a disk write). Empty
-  # verified_head only on a noop, which does not reach this push.
+  # the gate's verified_head before touching credentials.
+  # Full rationale → qwen-autofix.md#af-134
   HEAD_NOW="$(git rev-parse HEAD)"
   if [[ -z "${VERIFIED_HEAD}" || "${HEAD_NOW}" != "${VERIFIED_HEAD}" ]]; then
     echo "::error::HEAD ${HEAD_NOW} is not the gate's verified head ${VERIFIED_HEAD:-<empty>} — refusing to push"
@@ -463,6 +580,7 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
       PUSH_RACE_MERGED='true'
     fi
   done
+  ROUND_PUSHED='true'
   resolve_and_reply_threads
   # Best-effort: verified out-of-footprint findings persist into
   # the per-PR tracking issue (script content from expression
@@ -499,6 +617,10 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
       echo
       echo "⚠️ The branch received new commits while this round ran; they were merged into this push, but this round's verification predates that merge — re-check anything that landed mid-run. · 本轮运行期间分支收到了新的提交；本次推送已将其合并，但本轮验证在合并之前完成——请复查运行期间落地的改动。"
     fi
+    if [[ -n "${RESOLUTION_NOTE}" ]]; then
+      echo
+      echo "${RESOLUTION_NOTE}"
+    fi
     echo
     echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human. · 有空请复审；第 ${MAX_ROUNDS} 轮后本 bot 停止并将 PR 交给人工。"
     echo
@@ -522,6 +644,7 @@ else
   # No push happened, so the verified head is the unchanged
   # origin head; resolution's own live-head guards still apply.
   PUSH_RACE_MERGED='false'
+  ROUND_PUSHED='false'
   resolve_and_reply_threads
   # Best-effort: verified out-of-footprint findings persist into
   # the per-PR tracking issue (script content from expression
@@ -539,6 +662,10 @@ else
     fi
     echo
     echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicts with main (no review fix needed, but a rebase/merge is required before merge). · 与 main 有冲突（无需评审修复，但合并前需 rebase/merge）。' || echo 'no conflict with main. · 与 main 无冲突。')"
+    if [[ -n "${RESOLUTION_NOTE}" ]]; then
+      echo
+      echo "${RESOLUTION_NOTE}"
+    fi
     echo
     echo "---"
     echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
@@ -560,13 +687,8 @@ fi
 
 # Bounded retry on the report post: this one comment carries the
 # round's ENTIRE persisted state (autofix-eval watermark/round,
-# redcheck head, growth baseline). The push has already landed, so
-# a transient API failure here loses the marker while keeping the
-# growth — the retry scan would re-anchor the baseline at the
-# post-push size and re-evaluate feedback it already addressed.
-# Three attempts bound that to genuine outages; the final failure
-# keeps today's semantics (step fails, no marker, next scan
-# retries the round).
+# redcheck head, growth baseline).
+# Full rationale → qwen-autofix.md#af-135
 REPORT_POSTED='false'
 for attempt in 1 2 3; do
   if gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"; then
@@ -590,13 +712,8 @@ if [[ "${OUTCOME}" == "fixed" && "${MAX_ROUNDS}" == "${TAKEOVER_MAX_ROUNDS}" ]] 
   # Crossing trigger, not an equality test: failure rounds also
   # advance the round counter, so `push@9, crash@10, push@11`
   # would skip an exact %10 check forever — and a failure-heavy
-  # PR is the very PR the digest exists for. Post on the first
-  # PUSHED round once 10+ rounds have accumulated since the last
-  # digest in THIS window (or since the window opened). The
-  # window opens at the round SEED, not at zero: a '/takeover
-  # from 60' counter starts at 60, so the no-digest-yet baseline
-  # is the seed — otherwise the seed-inflated counter digests on
-  # the window's first push with a 1-2 round census.
+  # PR is the very PR the digest exists for.
+  # Full rationale → qwen-autofix.md#af-136
   MS_LAST="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" --argjson start "${ROUND_START:-0}" '
     [ .[] | select((.user.login // "") == $ab) | (.body // "")
       | [ scan("<!-- autofix-milestone round=([0-9]+) win=([^ ]+) -->") ] | .[]
