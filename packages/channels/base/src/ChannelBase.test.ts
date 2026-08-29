@@ -8,6 +8,7 @@ import type {
   ChannelMemoryEntry,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   Envelope,
@@ -97,6 +98,13 @@ class TestChannel extends ChannelBase {
   userInputPresentationHandler?: (
     context: ChannelUserInputRequestContext,
   ) => Promise<UserInputPresentationResult>;
+  permissionPresentations: ChannelPermissionRequestContext[] = [];
+  permissionPresentationResult: UserInputPresentationResult = {
+    kind: 'unsupported',
+  };
+  permissionPresentationHandler?: (
+    context: ChannelPermissionRequestContext,
+  ) => Promise<UserInputPresentationResult>;
 
   async connect() {
     this.connected = true;
@@ -133,6 +141,16 @@ class TestChannel extends ChannelBase {
       return this.userInputPresentationHandler(context);
     }
     return this.userInputPresentationResult;
+  }
+
+  protected async presentPermissionRequest(
+    context: ChannelPermissionRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    this.permissionPresentations.push(context);
+    if (this.permissionPresentationHandler) {
+      return this.permissionPresentationHandler(context);
+    }
+    return this.permissionPresentationResult;
   }
 
   override supportsProactiveSend(): boolean {
@@ -1814,6 +1832,164 @@ describe('ChannelBase', () => {
       await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
       expect(ch.userInputPresentations).toEqual([]);
       expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+
+      await active.finish();
+    });
+
+    it('presents an attended ordinary permission before text fallback', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+
+      emitPermission(active.sessionId, 'req-native-permission');
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]).toMatchObject({
+        requestId: 'req-native-permission',
+        sessionId: active.sessionId,
+        runId: expect.any(String),
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'test-chan',
+          senderId: 'owner-1',
+          chatId: 'chat1',
+        },
+        title: 'Run req-native-permission',
+        decisions: [
+          { kind: 'allow_once', label: 'Allow once' },
+          {
+            kind: 'allow_always',
+            label: 'always allow for this project',
+          },
+          { kind: 'deny', label: 'Deny' },
+        ],
+      });
+      expect(ch.sent).toEqual([]);
+
+      await active.finish();
+    });
+
+    it('omits persistent permission decisions that were not advertised', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-once-only', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+      ]);
+
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      expect(ch.permissionPresentations[0]!.decisions).toEqual([
+        { kind: 'allow_once', label: 'Allow once' },
+        { kind: 'deny', label: 'Deny' },
+      ]);
+
+      await active.finish();
+    });
+
+    it('falls back to permission commands when native presentation is unsupported', async () => {
+      const ch = createChannel();
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-native-fallback');
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.permissionPresentations).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('/approve        allow once');
+      expect(ch.sent[0]!.text).toContain('/approve-always');
+      expect(ch.sent[0]!.text).toContain('/deny           deny');
+
+      await active.finish();
+    });
+
+    it('falls back when handled follows an unavailable native decision', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationHandler = async (context) => {
+        await context.respond('allow_always');
+        return { kind: 'handled' };
+      };
+      const active = await startActiveSession(ch);
+
+      emitPermission(active.sessionId, 'req-invalid-native-decision', [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow once' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Deny' },
+      ]);
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.sent[0]!.text).toContain('/approve        allow once');
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await active.finish();
+    });
+
+    it('maps native permission decisions to original option ids exactly once', async () => {
+      const ch = createChannel();
+      ch.permissionPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitPermission(active.sessionId, 'req-native-response');
+      await vi.waitFor(() =>
+        expect(ch.permissionPresentations).toHaveLength(1),
+      );
+      const context = ch.permissionPresentations[0]!;
+      respondToPermissionMock().mockImplementation(
+        async (requestId: string, response: { outcome: unknown }) => {
+          (bridge as unknown as EventEmitter).emit('permissionResolved', {
+            requestId,
+            outcome: response.outcome,
+          });
+          return true;
+        },
+      );
+
+      const first = context.respond('allow_always');
+      const second = context.respond('deny');
+
+      await expect(first).resolves.toBe(true);
+      await expect(second).resolves.toBe(true);
+      expect(respondToPermissionMock()).toHaveBeenCalledOnce();
+      expect(respondToPermissionMock()).toHaveBeenCalledWith(
+        'req-native-response',
+        {
+          outcome: {
+            outcome: 'selected',
+            optionId: 'proceed_always_project',
+          },
+        },
+      );
+
+      await active.finish();
+    });
+
+    it('lets owner text commands share the native permission response promise', async () => {
+      let presentation!: ChannelPermissionRequestContext;
+      const ch = createChannel();
+      ch.permissionPresentationHandler = async (context) => {
+        presentation = context;
+        return { kind: 'presented' };
+      };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitPermission(active.sessionId, 'req-card-command-race');
+      await vi.waitFor(() => expect(presentation).toBeDefined());
+
+      const cardResponse = presentation.respond('allow_once');
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/deny req-card-command-race',
+        }),
+      );
+
+      await expect(cardResponse).resolves.toBe(true);
+      expect(respondToPermissionMock()).toHaveBeenCalledOnce();
+      expect(respondToPermissionMock()).toHaveBeenCalledWith(
+        'req-card-command-race',
+        { outcome: { outcome: 'selected', optionId: 'proceed_once' } },
+      );
 
       await active.finish();
     });

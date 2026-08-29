@@ -242,6 +242,24 @@ export interface ChannelUserInputRequestContext {
   respond(response: ChannelUserInputResponse): Promise<boolean>;
 }
 
+export type ChannelPermissionDecision = 'allow_once' | 'allow_always' | 'deny';
+
+export interface ChannelPermissionRequestContext {
+  requestId: string;
+  sessionId: string;
+  runId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  precedingSegmentId?: string;
+  title: string;
+  decisions: Array<{
+    kind: ChannelPermissionDecision;
+    label: string;
+  }>;
+  onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
+  respond(decision: ChannelPermissionDecision): Promise<boolean>;
+}
+
 export interface ChannelOutputSegmentContext {
   channelName: string;
   sessionId: string;

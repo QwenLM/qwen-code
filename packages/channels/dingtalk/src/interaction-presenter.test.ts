@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type {
   ChannelOutputSegmentContext,
+  ChannelPermissionRequestContext,
   ChannelUserInputRequestContext,
   UserInputSettlementReason,
 } from '@qwen-code/channel-base';
@@ -10,6 +11,7 @@ import {
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
+import { PermissionCardController } from './permission-card-controller.js';
 import { QuestionCardController } from './question-card-controller.js';
 import { StatusCardController } from './status-card-controller.js';
 
@@ -99,6 +101,28 @@ function questionContext(
   };
 }
 
+function permissionContext(): ChannelPermissionRequestContext {
+  return {
+    requestId: 'permission-1',
+    sessionId: 'session-1',
+    runId: 'run-1',
+    owner: { kind: 'channel_user', id: 'owner-1' },
+    target: {
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      senderId: 'owner-1',
+      isGroup: true,
+    },
+    title: 'Run tests',
+    decisions: [
+      { kind: 'allow_once', label: 'Allow once' },
+      { kind: 'deny', label: 'Deny' },
+    ],
+    onSettled: () => () => {},
+    respond: vi.fn().mockResolvedValue(true),
+  };
+}
+
 function createHarness() {
   const projectionOrder: string[] = [];
   const client = {
@@ -136,9 +160,16 @@ function createHarness() {
     reserveRunProjection: (runId) =>
       presenterRef.current?.reserveProjection(runId),
   });
+  const permissionCards = new PermissionCardController({
+    client,
+    timeoutMs: 300_000,
+    reserveRunProjection: (runId) =>
+      presenterRef.current?.reserveProjection(runId),
+  });
   const presenter = new DingtalkInteractionPresenter({
     statusCards,
     questionCards,
+    permissionCards,
     sendFallback,
   });
   presenterRef.current = presenter;
@@ -148,6 +179,7 @@ function createHarness() {
     presenter,
     projectionOrder,
     questionCards,
+    permissionCards,
     statusCards,
     cancelRun,
     sendFallback,
@@ -424,6 +456,41 @@ describe('DingtalkInteractionPresenter', () => {
         .mocked(client.createAndDeliver)
         .mock.calls.map(([request]) => request.templateId),
     ).toEqual([QUESTION_CARD_TEMPLATE_ID]);
+  });
+
+  it('presents a permission card through the matching attended run', async () => {
+    const { client, presenter } = createHarness();
+
+    await expect(
+      presenter.presentPermission(permissionContext()),
+    ).resolves.toEqual({ kind: 'presented' });
+
+    expect(client.createAndDeliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateId: QUESTION_CARD_TEMPLATE_ID,
+        outTrackId: expect.stringMatching(/^qwen-permission-/),
+      }),
+    );
+  });
+
+  it('rejects permission presentation outside the owning run target', async () => {
+    const { client, presenter } = createHarness();
+    const context = permissionContext();
+    context.target = { ...context.target, chatId: 'another-chat' };
+
+    await expect(presenter.presentPermission(context)).resolves.toEqual({
+      kind: 'unsupported',
+    });
+    expect(client.createAndDeliver).not.toHaveBeenCalled();
+  });
+
+  it('cancels permission cards when their run terminalizes', () => {
+    const { presenter, permissionCards } = createHarness();
+    const cancelRun = vi.spyOn(permissionCards, 'cancelRun');
+
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+
+    expect(cancelRun).toHaveBeenCalledWith('run-1');
   });
 
   it('correlates direct runs by conversation and delivers cards to the user', async () => {

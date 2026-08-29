@@ -120,6 +120,8 @@ export type {
   ChannelMemoryScopeMode,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionDecision,
+  ChannelPermissionRequestContext,
   ChannelPlugin,
   ChannelPromptOwner,
   ChannelProactiveTarget,

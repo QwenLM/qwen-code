@@ -8,6 +8,8 @@ import type {
   ChannelMemoryTarget,
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionDecision,
+  ChannelPermissionRequestContext,
   ChannelPromptOwner,
   ChannelProactiveTarget,
   ChannelRuntimeIdentity,
@@ -279,6 +281,7 @@ type PendingPermission = {
   sourceLabel?: string;
   taskName?: string;
   userInputPresented?: boolean;
+  permissionPresented?: boolean;
   settlementListeners: Set<(reason: UserInputSettlementReason) => void>;
   settled?: UserInputSettlementReason;
   responsePromise?: Promise<boolean>;
@@ -691,6 +694,10 @@ export abstract class ChannelBase {
       if (presentation && (await presentation)) {
         return;
       }
+      const permissionPresentation = this.tryPresentPermission(pending);
+      if (permissionPresentation && (await permissionPresentation)) {
+        return;
+      }
       const text = this.formatPermissionRequest(pending);
       if (
         target.threadId !== undefined &&
@@ -804,6 +811,156 @@ export abstract class ChannelBase {
         return false;
       }
     })();
+  }
+
+  private tryPresentPermission(
+    pending: PendingPermission,
+  ): Promise<boolean> | undefined {
+    const active = this.activePrompts.get(pending.sessionId);
+    const toolCall = pending.request.toolCall as unknown as Record<
+      string,
+      unknown
+    >;
+    const meta = isRecord(toolCall['_meta']) ? toolCall['_meta'] : undefined;
+    const isUserQuestion =
+      meta?.['qwenInteractionKind'] === 'user_question' ||
+      meta?.['toolName'] === 'ask_user_question' ||
+      toolCall['kind'] === 'ask_user_question';
+    const decisions = this.permissionPresentationDecisions(pending);
+    if (
+      !active ||
+      active.loopPrompt ||
+      !active.owner ||
+      isUserQuestion ||
+      !decisions
+    ) {
+      return undefined;
+    }
+
+    const precedingSegment = this.closeOutputSegment(
+      pending.sessionId,
+      active,
+      pending.target,
+    );
+    let respondInvoked = false;
+    const context: ChannelPermissionRequestContext = {
+      requestId: pending.requestId,
+      sessionId: pending.sessionId,
+      runId: active.runId,
+      owner: active.owner,
+      target: pending.target,
+      ...(precedingSegment
+        ? { precedingSegmentId: precedingSegment.segmentId }
+        : {}),
+      title: sanitizeQuotedText(
+        pending.request.toolCall.title || 'Tool use',
+        160,
+      ),
+      decisions,
+      onSettled: (listener) => {
+        if (pending.settled) {
+          listener(pending.settled);
+          return () => {};
+        }
+        pending.settlementListeners.add(listener);
+        return () => {
+          pending.settlementListeners.delete(listener);
+        };
+      },
+      respond: (decision) => {
+        const response = this.permissionPresentationResponse(pending, decision);
+        if (!response) return Promise.resolve(false);
+        respondInvoked = true;
+        return this.respondToUserInput(pending, response);
+      },
+    };
+    pending.permissionPresented = true;
+    return (async () => {
+      try {
+        if (precedingSegment) {
+          await this.notifyOutputSegmentEnd(
+            pending.target.chatId,
+            pending.sessionId,
+            precedingSegment,
+            'input_requested',
+          );
+        }
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        const result = await this.presentPermissionRequest(context);
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        if (
+          result.kind === 'presented' ||
+          (result.kind === 'handled' && respondInvoked)
+        ) {
+          return true;
+        }
+        pending.permissionPresented = false;
+        return false;
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] permission presentation failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        pending.permissionPresented = false;
+        return false;
+      }
+    })();
+  }
+
+  private permissionPresentationDecisions(
+    pending: PendingPermission,
+  ): ChannelPermissionRequestContext['decisions'] | undefined {
+    const allowOnceId = this.approvalOptionId(pending);
+    if (!allowOnceId) return undefined;
+    const allowOnce = pending.request.options.find(
+      (option) => option.optionId === allowOnceId,
+    );
+    const allowAlways = this.approvalAlwaysOption(pending);
+    const deny =
+      pending.request.options.find((option) => option.kind === 'reject_once') ??
+      pending.request.options.find(
+        (option) =>
+          option.optionId === 'cancel' &&
+          (option as { kind?: string }).kind === undefined,
+      );
+    return [
+      {
+        kind: 'allow_once',
+        label: sanitizeQuotedText(allowOnce?.name || 'Allow once', 80),
+      },
+      ...(allowAlways
+        ? [
+            {
+              kind: 'allow_always' as const,
+              label: sanitizeQuotedText(allowAlways.label, 80),
+            },
+          ]
+        : []),
+      {
+        kind: 'deny',
+        label: sanitizeQuotedText(deny?.name || 'Deny', 80),
+      },
+    ];
+  }
+
+  private permissionPresentationResponse(
+    pending: PendingPermission,
+    decision: ChannelPermissionDecision,
+  ): ChannelUserInputResponse | undefined {
+    if (decision === 'deny') return this.denialResponse(pending);
+    const optionId =
+      decision === 'allow_once'
+        ? this.approvalOptionId(pending)
+        : this.approvalAlwaysOption(pending)?.optionId;
+    return optionId
+      ? { outcome: { outcome: 'selected', optionId } }
+      : undefined;
   }
 
   private normalizeUserQuestions(
@@ -1067,6 +1224,12 @@ export abstract class ChannelBase {
 
   protected async presentUserInputRequest(
     _context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    return { kind: 'unsupported' };
+  }
+
+  protected async presentPermissionRequest(
+    _context: ChannelPermissionRequestContext,
   ): Promise<UserInputPresentationResult> {
     return { kind: 'unsupported' };
   }
@@ -2845,7 +3008,7 @@ export abstract class ChannelBase {
     return (
       pending.target.chatId === envelope.chatId &&
       pending.target.threadId === envelope.threadId &&
-      (!pending.userInputPresented ||
+      ((!pending.userInputPresented && !pending.permissionPresented) ||
         pending.target.senderId === envelope.senderId) &&
       (this.isSharedSessionTarget(pending.target) ||
         pending.target.senderId === envelope.senderId)
@@ -3072,9 +3235,10 @@ export abstract class ChannelBase {
 
     let accepted: boolean;
     try {
-      accepted = pending.userInputPresented
-        ? await this.respondToUserInput(pending, response)
-        : await this.bridge.respondToPermission(pending.requestId, response);
+      accepted =
+        pending.userInputPresented || pending.permissionPresented
+          ? await this.respondToUserInput(pending, response)
+          : await this.bridge.respondToPermission(pending.requestId, response);
     } catch (err) {
       this.removePendingPermission(pending.requestId);
       process.stderr.write(

@@ -15,6 +15,7 @@ import { BlockStreamer } from '@qwen-code/channel-base';
 import type {
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
+  ChannelPermissionRequestContext,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   Envelope,
@@ -331,6 +332,11 @@ it('validates interactive card config in the adapter', () => {
       interactiveCards: { questionCard: { timeoutMs: 0 } },
     }),
   ).toThrow('questionCard.timeoutMs');
+  expect(() =>
+    createChannel({
+      interactiveCards: { permissionCard: { timeoutMs: 0 } },
+    }),
+  ).toThrow('permissionCard.timeoutMs');
 });
 
 it('does not initialize or subscribe to cards when configuration is omitted', () => {
@@ -352,6 +358,10 @@ it('does not initialize or subscribe to cards when configuration is omitted', ()
   expect(
     (channel as unknown as { questionCardController?: unknown })
       .questionCardController,
+  ).toBeUndefined();
+  expect(
+    (channel as unknown as { permissionCardController?: unknown })
+      .permissionCardController,
   ).toBeUndefined();
 });
 
@@ -758,6 +768,51 @@ it('routes the built-in btn_stop action to the status card controller', () => {
   expect(claimStop).toHaveBeenCalledWith('status-1', 'owner-1');
 });
 
+it('routes permission callbacks before question callbacks', () => {
+  const permissionResult: DingtalkCardCallbackResult = {
+    kind: 'accepted',
+    execute: vi.fn().mockResolvedValue(undefined),
+  };
+  const claimPermission = vi.fn().mockReturnValue(permissionResult);
+  const claimQuestion = vi.fn().mockReturnValue({ kind: 'ignored' });
+  class CallbackRoutingChannel extends DingtalkChannel {
+    route(callback: DingtalkCardCallback) {
+      return this.routeCardCallback(callback);
+    }
+  }
+  const channel = new CallbackRoutingChannel(
+    'test-dingtalk',
+    {
+      type: 'dingtalk',
+      token: '',
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      senderPolicy: 'open',
+      allowedUsers: [],
+      sessionScope: 'user',
+      cwd: '/tmp',
+      groupPolicy: 'open',
+      dmPolicy: 'open',
+      groups: {},
+    } as never,
+    {} as never,
+  );
+  Object.assign(channel, {
+    permissionCardController: { claim: claimPermission },
+    questionCardController: { claim: claimQuestion },
+  });
+  const callback: DingtalkCardCallback = {
+    outTrackId: 'permission-1',
+    actionId: 'submit',
+    actorId: 'owner-1',
+    formData: { permission_decision: 'allow_once' },
+  };
+
+  expect(channel.route(callback)).toBe(permissionResult);
+  expect(claimPermission).toHaveBeenCalledWith(callback);
+  expect(claimQuestion).not.toHaveBeenCalled();
+});
+
 it('keeps callbacks and ACKs bound to the client that received them', async () => {
   const firstIndex = dingtalkSdkMock.instances.length;
   const channel = createChannel();
@@ -924,6 +979,15 @@ function getUserInputHook(
   const fn = (channel as unknown as Record<string, unknown>)[
     'presentUserInputRequest'
   ] as (context: ChannelUserInputRequestContext) => Promise<{ kind: string }>;
+  return fn.bind(channel);
+}
+
+function getPermissionHook(
+  channel: DingtalkChannelInstance,
+): (context: ChannelPermissionRequestContext) => Promise<{ kind: string }> {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'presentPermissionRequest'
+  ] as (context: ChannelPermissionRequestContext) => Promise<{ kind: string }>;
   return fn.bind(channel);
 }
 
@@ -2274,6 +2338,85 @@ describe('DingtalkChannel question cards', () => {
 
     await expect(
       getUserInputHook(channel)({ ...context, runId: 'unknown' }),
+    ).resolves.toEqual({ kind: 'unsupported' });
+  });
+});
+
+describe('DingtalkChannel permission cards', () => {
+  function permissionContext(): ChannelPermissionRequestContext {
+    return {
+      requestId: 'permission-1',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        senderId: 'owner-1',
+        chatId: 'cid-1',
+        isGroup: true,
+      },
+      title: 'Run tests',
+      decisions: [
+        { kind: 'allow_once', label: 'Allow once' },
+        { kind: 'deny', label: 'Deny' },
+      ],
+      onSettled: () => () => {},
+      respond: vi.fn().mockResolvedValue(true),
+    };
+  }
+
+  it.each([
+    undefined,
+    { enabled: false },
+    { permissionCard: { enabled: false } },
+  ])(
+    'returns unsupported when permission cards are disabled: %j',
+    async (interactiveCards) => {
+      const channel = createChannel({ interactiveCards });
+      (
+        channel as unknown as {
+          cardRuns: Map<string, unknown>;
+        }
+      ).cardRuns.set('run-1', {
+        ownerId: 'owner-1',
+        target: { chatId: 'cid-1', isGroup: true },
+      });
+
+      await expect(
+        getPermissionHook(channel)(permissionContext()),
+      ).resolves.toEqual({ kind: 'unsupported' });
+    },
+  );
+
+  it('presents through the matching attended run only', async () => {
+    const channel = createChannel();
+    const presentPermission = vi
+      .fn()
+      .mockResolvedValueOnce({ kind: 'presented' });
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          presentPermission: typeof presentPermission;
+        };
+        cardRuns: Map<string, unknown>;
+      }
+    ).interactionPresenter = { presentPermission };
+    (channel as unknown as { cardRuns: Map<string, unknown> }).cardRuns.set(
+      'run-1',
+      {
+        ownerId: 'owner-1',
+        target: { chatId: 'cid-1', isGroup: true },
+      },
+    );
+    const context = permissionContext();
+
+    await expect(getPermissionHook(channel)(context)).resolves.toEqual({
+      kind: 'presented',
+    });
+    expect(presentPermission).toHaveBeenCalledWith(context);
+
+    await expect(
+      getPermissionHook(channel)({ ...context, runId: 'unknown' }),
     ).resolves.toEqual({ kind: 'unsupported' });
   });
 });
