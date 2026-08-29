@@ -1060,11 +1060,134 @@ export class HookRunner {
     shellType: ShellType,
   ): string {
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
-    const escapedCwd = escapeShellArg(input.cwd, shellType);
-    return command.replace(
-      /\$(?:QWEN|GEMINI|CLAUDE)_PROJECT_DIR(?![0-9A-Za-z_\p{L}\p{N}])/gu,
-      () => escapedCwd,
-    );
+    return this.expandProjectDirPlaceholders(command, input.cwd, shellType);
+  }
+
+  /**
+   * Replaces every `$QWEN_PROJECT_DIR` / `$GEMINI_PROJECT_DIR` /
+   * `$CLAUDE_PROJECT_DIR` placeholder with the hook's cwd.
+   *
+   * A placeholder written unquoted (`$QWEN_PROJECT_DIR/hooks/check.sh`) needs
+   * the substituted path itself quoted so spaces survive; a placeholder
+   * already written inside quotes (`"$QWEN_PROJECT_DIR/hooks/check.sh"`) must
+   * NOT be re-quoted, or the extra quote pair nests inside the author's own
+   * quotes and corrupts the command. This tracks the quote region the
+   * placeholder sits in — as written in the source command, not in the
+   * substituted output — and picks the substitution for that region.
+   */
+  private expandProjectDirPlaceholders(
+    command: string,
+    cwd: string,
+    shellType: ShellType,
+  ): string {
+    const placeholderPattern =
+      /\$(?:QWEN|GEMINI|CLAUDE)_PROJECT_DIR(?![0-9A-Za-z_\p{L}\p{N}])/gu;
+    // cmd.exe has no single-quoted string syntax; a `'` there is a literal
+    // character, not a quote delimiter.
+    const tracksSingleQuotes = shellType !== 'cmd';
+
+    let inSingleQuote = false;
+    let inDoubleQuote = false;
+    let result = '';
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = placeholderPattern.exec(command))) {
+      for (let i = lastIndex; i < match.index; i++) {
+        const ch = command[i];
+        if (tracksSingleQuotes && ch === "'" && !inDoubleQuote) {
+          inSingleQuote = !inSingleQuote;
+        } else if (ch === '"' && !inSingleQuote) {
+          inDoubleQuote = !inDoubleQuote;
+        }
+      }
+      result += command.slice(lastIndex, match.index);
+      const afterPlaceholder = placeholderPattern.lastIndex;
+
+      if (shellType === 'cmd' && !inDoubleQuote) {
+        // Unlike bash, cmd.exe does NOT concatenate a quoted token directly
+        // followed by unquoted text into one argument — it starts a new
+        // token at the closing quote. So a documented placeholder-first
+        // path like `$QWEN_PROJECT_DIR/.qwen/hooks/check.cmd` would expand
+        // to `"C:\..."` + `/.qwen/hooks/check.cmd` as two separate tokens,
+        // and cmd tries to execute just the quoted directory. Pull the
+        // literal suffix up to the next cmd delimiter into the same quoted
+        // region as the expanded path.
+        const suffixEnd = this.findCmdTokenEnd(command, afterPlaceholder);
+        result += escapeShellArg(
+          cwd + command.slice(afterPlaceholder, suffixEnd),
+          'cmd',
+        );
+        lastIndex = suffixEnd;
+        placeholderPattern.lastIndex = suffixEnd;
+        continue;
+      }
+
+      result += this.substituteProjectDirPlaceholder(
+        match[0],
+        cwd,
+        shellType,
+        inSingleQuote,
+        inDoubleQuote,
+      );
+      lastIndex = afterPlaceholder;
+    }
+    result += command.slice(lastIndex);
+    return result;
+  }
+
+  /** Index of the next cmd.exe argument delimiter at or after `start`. */
+  private findCmdTokenEnd(command: string, start: number): number {
+    const delimiters = new Set([' ', '\t', '&', '|', '<', '>', '(', ')']);
+    let i = start;
+    while (i < command.length && !delimiters.has(command[i])) {
+      i++;
+    }
+    return i;
+  }
+
+  private substituteProjectDirPlaceholder(
+    matchedText: string,
+    cwd: string,
+    shellType: ShellType,
+    inSingleQuote: boolean,
+    inDoubleQuote: boolean,
+  ): string {
+    switch (shellType) {
+      case 'bash':
+        if (inSingleQuote) {
+          // Nothing expands inside '...' in bash; leave the placeholder text
+          // as-is rather than splicing a path that could contain a `'` and
+          // break out of the author's quotes.
+          return matchedText;
+        }
+        if (inDoubleQuote) {
+          // Only \ $ ` " are special inside "..." in bash; escape those in
+          // the raw path so it can't terminate the surrounding quotes.
+          return cwd.replace(/([\\$`"])/g, '\\$1');
+        }
+        return escapeShellArg(cwd, 'bash');
+      case 'cmd':
+        // The unquoted case is handled by the caller (it also absorbs the
+        // literal path suffix into the quoted region), so this is only ever
+        // reached with inDoubleQuote true: cmd.exe has no $VAR semantics
+        // inside "...", so splice the raw path into the existing quoted
+        // region instead of nesting another pair.
+        return cwd.replace(/"/g, '""');
+      case 'powershell':
+        if (inSingleQuote) {
+          // PowerShell literal strings escape an embedded `'` by doubling it.
+          return cwd.replace(/'/g, "''");
+        }
+        if (inDoubleQuote) {
+          // Escape ` $ " with PowerShell's backtick escape so the raw path
+          // can't trigger interpolation or close the surrounding quotes.
+          return cwd.replace(/([`$"])/g, '`$1');
+        }
+        return escapeShellArg(cwd, 'powershell');
+      default:
+        return escapeShellArg(cwd, shellType);
+    }
   }
 
   /**

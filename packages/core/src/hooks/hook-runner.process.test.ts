@@ -132,8 +132,6 @@ describe.runIf(process.platform === 'win32')(
           input,
         );
 
-        if (!result.success) console.log('placeholder-first result', result);
-
         expect(result.success).toBe(true);
         expect(result.stdout?.trim()).toBe('FOUND');
       } finally {
