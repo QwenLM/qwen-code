@@ -49,7 +49,11 @@ export function isRequest(body) {
   );
 }
 
-const FAILED = new Set(['infra_failed', 'agent_failed']);
+// `unknown` — a result comment whose sentence this script does not know — is
+// counted as a FAILURE on purpose: if the workflow's wording drifts, the watch
+// should raise a visible (and visibly mislabelled) alarm rather than fall
+// silent while the lane is broken. A test pins every producer sentence.
+const FAILED = new Set(['infra_failed', 'agent_failed', 'unknown']);
 const OK = new Set(['pushed', 'resolved_nopush', 'noop', 'dry_run']);
 
 // Classifies a result comment by the fixed sentences `Report result` and

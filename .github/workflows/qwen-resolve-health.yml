@@ -19,8 +19,20 @@ on:
         required: false
         default: '5'
         type: 'string'
+      unanswered:
+        description: 'Requests with no result comment after 3h that raise the alarm (default 3)'
+        required: false
+        default: '3'
+        type: 'string'
 
 permissions: {}
+
+# One assessment at a time: a dispatch landing while a cron tick is paginating
+# comments would otherwise race it to the check-then-create and file the
+# tracking issue twice.
+concurrency:
+  group: 'qwen-resolve-health'
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -47,4 +59,5 @@ jobs:
           GH_TOKEN: '${{ github.token }}'
           REPO: '${{ github.repository }}'
           RESOLVE_HEALTH_THRESHOLD: '${{ github.event.inputs.threshold || 5 }}'
+          RESOLVE_HEALTH_UNANSWERED: '${{ github.event.inputs.unanswered || 3 }}'
         run: 'node .github/scripts/resolve-health.mjs'

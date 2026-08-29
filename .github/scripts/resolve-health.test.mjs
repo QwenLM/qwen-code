@@ -27,6 +27,10 @@ const workflow = parse(
   ),
 );
 const ci = readFileSync(join(here, '..', 'workflows', 'ci.yml'), 'utf8');
+const producer = readFileSync(
+  join(here, '..', 'workflows', 'qwen-code-pr-review.yml'),
+  'utf8',
+);
 
 const BOT = 'qwen-code-dev-bot';
 let nextId = 1000;
@@ -81,6 +85,42 @@ describe('resolve-health: classification', () => {
     );
     // A comment without the marker is not a result, whatever it says.
     assert.equal(classifyResult(PUSHED), null);
+    // Drift is loud, not silent: an unrecognised sentence is a failure.
+    assert.equal(
+      classifyResult(`${RESULT_MARKER}\nQwen Code did something new.`),
+      'unknown',
+    );
+  });
+
+  it('classifies every result sentence the producer workflow actually emits', () => {
+    // Read the sentences from `resolve-pr`'s report steps rather than from
+    // hand-copied constants, so a wording change in the workflow fails here
+    // instead of turning into `unknown` at runtime.
+    const start = producer.indexOf('\n  resolve-pr:');
+    const rest = producer.slice(start + 1);
+    const next = rest.search(/\n {2}[A-Za-z]/);
+    const job = next === -1 ? rest : rest.slice(0, next);
+    const sentences = [...job.matchAll(/echo "(Qwen Code [^"\\]*)/g)].map(
+      (m) => m[1],
+    );
+    assert.ok(
+      sentences.length >= 6,
+      `expected the report sentences, found ${sentences.length}`,
+    );
+    for (const sentence of sentences) {
+      const kind = classifyResult(`${RESULT_MARKER}\n${sentence}`);
+      assert.ok(
+        kind && kind !== 'unknown',
+        `producer sentence is not classified: ${sentence}`,
+      );
+    }
+    // And the constants this file uses are real producer sentences.
+    for (const sentence of [PUSHED, AGENT_FAILED, SKIPPED, NOOP]) {
+      assert.ok(
+        producer.includes(sentence),
+        `stale test constant: ${sentence}`,
+      );
+    }
   });
 
   it('matches requests the way the workflow trigger does', () => {
@@ -126,6 +166,58 @@ describe('resolve-health: assessment', () => {
     // A success anywhere after the failures resets the streak.
     prs[1].comments.push(result('2026-08-25T00:00:00Z', MOVED, 2));
     assert.equal(assess(prs, { now, threshold: 3 }).streak, 0);
+  });
+
+  it('does not depend on the order PRs or comments arrive in', () => {
+    // `fetchPrs` returns search order (best match), not chronology; the
+    // streak must come from timestamps alone.
+    const chronological = [
+      {
+        number: 1,
+        comments: [
+          result('2026-08-20T00:00:00Z', PUSHED, 1),
+          result('2026-08-24T00:00:00Z', AGENT_FAILED, 1),
+        ],
+      },
+      {
+        number: 2,
+        comments: [
+          result('2026-08-22T00:00:00Z', AGENT_FAILED, 2),
+          result('2026-08-23T00:00:00Z', PUSHED, 2),
+        ],
+      },
+      {
+        number: 3,
+        comments: [result('2026-08-25T00:00:00Z', INFRA_FAILED, 3)],
+      },
+    ];
+    const shuffled = [chronological[2], chronological[0], chronological[1]].map(
+      (pr) => ({
+        ...pr,
+        comments: [...pr.comments].reverse(),
+      }),
+    );
+    const a = assess(chronological, { now });
+    const b = assess(shuffled, { now });
+    assert.equal(a.streak, 2);
+    assert.equal(b.streak, 2);
+    assert.deepEqual(
+      b.attempts.map((r) => r.at),
+      a.attempts.map((r) => r.at),
+    );
+  });
+
+  it('alarms at the default threshold and not one below it', () => {
+    const failures = (n) => [
+      {
+        number: 5,
+        comments: Array.from({ length: n }, (_, i) =>
+          result(`2026-08-2${i + 1}T00:00:00Z`, AGENT_FAILED, 5),
+        ),
+      },
+    ];
+    assert.equal(assess(failures(4), { now }).alarm, false);
+    assert.equal(assess(failures(5), { now }).alarm, true);
   });
 
   it('flags a request with no result once it is older than the stale window', () => {
@@ -256,6 +348,7 @@ describe('resolve-health: end to end against a recording gh', () => {
         return '11\n12\n';
       }
       if (path === 'repos/QwenLM/qwen-code/issues/11/comments') {
+        assert.ok(args.includes('--paginate') && args.includes('per_page=100'));
         return [
           [
             '1',
@@ -301,6 +394,13 @@ describe('resolve-health: end to end against a recording gh', () => {
         ].join('\n');
       }
       if (path === 'repos/QwenLM/qwen-code/issues' && args[2] === 'GET') {
+        // Only OPEN issues carrying the label are candidates; without
+        // `state=open` a closed, older tracking issue would be revived.
+        assert.ok(
+          args.includes('state=open'),
+          'issue lookup must filter state=open',
+        );
+        assert.ok(args.includes('--paginate'));
         return [
           ['90', b64('unrelated open issue')].join('\t'),
           [
@@ -366,6 +466,18 @@ describe('qwen-resolve-health.yml', () => {
     const run = job.steps.find((s) => s.run);
     assert.equal(run.run, 'node .github/scripts/resolve-health.mjs');
     assert.equal(run.env.GH_TOKEN, '${{ github.token }}');
+    // main() throws without REPO; the thresholds are the operator's knobs.
+    assert.equal(run.env.REPO, '${{ github.repository }}');
+    assert.equal(
+      run.env.RESOLVE_HEALTH_THRESHOLD,
+      '${{ github.event.inputs.threshold || 5 }}',
+    );
+    assert.equal(
+      run.env.RESOLVE_HEALTH_UNANSWERED,
+      '${{ github.event.inputs.unanswered || 3 }}',
+    );
+    assert.equal(workflow.concurrency.group, 'qwen-resolve-health');
+    assert.equal(workflow.concurrency['cancel-in-progress'], false);
   });
 
   it('runs on a schedule and can be dispatched', () => {
@@ -376,6 +488,9 @@ describe('qwen-resolve-health.yml', () => {
   });
 
   it('has its test wired into the CI helper-test list', () => {
-    assert.ok(ci.includes('.github/scripts/resolve-health.test.mjs'));
+    // HELPER_TESTS is the single list both runner profiles expand; membership
+    // there, not a mention anywhere in the file, is what runs the test.
+    const helperTests = parse(ci).env.HELPER_TESTS.split(/\s+/);
+    assert.ok(helperTests.includes('.github/scripts/resolve-health.test.mjs'));
   });
 });
