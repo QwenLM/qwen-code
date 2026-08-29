@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SessionIdCaseConflictError,
@@ -1200,6 +1201,72 @@ describe('unarchiveDaemonSessions', () => {
     expect(records.map((record) => record.at)).toEqual([1, 2]);
     expect(danglingInFlightPromptIds(records)).toEqual([]);
     expect(fs.existsSync(archivedLedger)).toBe(false);
+  });
+
+  it('preserves both ledger halves when reconciliation cannot commit the merge', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440115';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const warnings: string[] = [];
+    const service = new SessionService(workspaceDir, {
+      onWarning: (message) => warnings.push(message),
+    });
+    const activeLedger = service.getPromptLedgerPath(sessionId);
+    const archivedPr = service.getPrSessionPathForArchiveState(
+      sessionId,
+      'archived',
+    );
+    const archivedLedger = path.join(
+      path.dirname(archivedPr),
+      `${sessionId}.ledger.jsonl`,
+    );
+    const activeContents =
+      '{"v":1,"promptId":"p1","terminal":"completed","at":2}\n';
+    fs.mkdirSync(path.dirname(activeLedger), { recursive: true });
+    fs.mkdirSync(path.dirname(archivedLedger), { recursive: true });
+    fs.writeFileSync(
+      archivedLedger,
+      '{"v":1,"promptId":"p1","state":"in_flight","at":1}\n',
+    );
+    fs.writeFileSync(activeLedger, activeContents, { mode: 0o600 });
+
+    const writeFileSync = fs.writeFileSync.bind(fs);
+    const writeSpy = vi
+      .spyOn(fs, 'writeFileSync')
+      .mockImplementation((file, data, options) => {
+        const filePath = file.toString();
+        if (
+          filePath === activeLedger ||
+          (filePath.startsWith(`${activeLedger}.`) && filePath.endsWith('.tmp'))
+        ) {
+          writeFileSync(file, String(data).slice(0, 32), options);
+          const error = new Error('ENOSPC: injected ledger write failure');
+          (error as NodeJS.ErrnoException).code = 'ENOSPC';
+          throw error;
+        }
+        return writeFileSync(file, data, options);
+      });
+    syncBuiltinESMExports();
+
+    let result: Awaited<ReturnType<typeof unarchiveDaemonSessions>>;
+    try {
+      result = await unarchiveDaemonSessions({
+        sessionIds: [sessionId],
+        service,
+        coordinator: new SessionArchiveCoordinator(),
+      });
+    } finally {
+      writeSpy.mockRestore();
+      syncBuiltinESMExports();
+    }
+
+    expect(result).toMatchObject({
+      alreadyActive: [sessionId],
+      errors: [],
+    });
+    expect(fs.readFileSync(activeLedger, 'utf8')).toBe(activeContents);
+    expect(fs.existsSync(archivedLedger)).toBe(true);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('failed to move prompt ledger');
   });
 
   it('collapses case-variant spellings in one batch to a single unarchive', async () => {

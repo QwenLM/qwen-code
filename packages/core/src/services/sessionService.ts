@@ -11,6 +11,7 @@ import {
   type PreparedUsageBeforeTranscriptDeletion,
 } from './usageHistoryService.js';
 import { getProjectHash } from '../utils/paths.js';
+import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -1601,6 +1602,7 @@ export class SessionService {
     sourcePath: string,
     destinationPath: string,
     action: 'archive' | 'unarchive',
+    assertCanCommit?: () => void,
   ): void {
     if (!fs.existsSync(sourcePath)) {
       return;
@@ -1624,13 +1626,14 @@ export class SessionService {
         fs.appendFileSync(destinationPath, `\n${payload}`, 'utf8');
       } else {
         const destinationContents = fs.readFileSync(destinationPath, 'utf8');
-        fs.writeFileSync(
+        atomicWriteFileSync(
           destinationPath,
           `${payload}${destinationContents.length > 0 ? '\n' : ''}${destinationContents}`,
-          'utf8',
+          { encoding: 'utf8', assertCanCommit },
         );
       }
     }
+    assertCanCommit?.();
     fs.unlinkSync(sourcePath);
   }
 
@@ -1720,7 +1723,12 @@ export class SessionService {
     );
     try {
       assertCleanupOwned?.();
-      this.moveLedgerSidecar(sourceLedger, destinationLedger, action);
+      this.moveLedgerSidecar(
+        sourceLedger,
+        destinationLedger,
+        action,
+        assertCleanupOwned,
+      );
     } catch (error) {
       if (error instanceof SessionWriterError) throw error;
       assertCleanupOwned?.();
