@@ -48,6 +48,7 @@ import type {
   VisionBridgeResult,
   MemoryWriteCandidate,
   CronTaskDelivery,
+  CronRunSessionOutcome,
   InvocationContextV1,
   ChatRecordingService,
   TurnResultRecordPayload,
@@ -210,6 +211,12 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
+import {
+  buildScheduledTaskRunPrompt,
+  scheduledTaskRunSessionName,
+  scheduledTaskRunSourceId,
+  SCHEDULED_TASK_RUN_SOURCE_TYPE,
+} from '../../runtime/scheduled-task-run.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import {
@@ -1413,6 +1420,8 @@ interface CronFire {
    * calling `onFire` and writes the run record under the same value, so it
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
+  sessionMode?: 'persistent' | 'per_run';
+  name?: string;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
 }
@@ -7920,6 +7929,22 @@ export class Session implements SessionContext {
     scheduler.start((job: CronFire) => {
       if (this.cronDisabledByTokenLimit) return;
       if (job.missed && detectAutonomousSentinel(job.prompt)) return;
+      // A missed one-shot arrives as a synthetic carrier whose prompt is the
+      // confirm-first notification ("ask the user before running it"). It
+      // inherits sessionMode from the task it stands for, so without this
+      // guard it would be wrapped in the execute-now header and run headless,
+      // with nobody attached to answer the confirmation. Carriers belong in
+      // the controller session; only real fires get a fresh child.
+      if (
+        !job.missed &&
+        job.sessionMode === 'per_run' &&
+        job.cronExpr !== '@wakeup' &&
+        !job.delivery &&
+        !detectAutonomousSentinel(job.prompt)
+      ) {
+        void this.#dispatchCronToFreshSession(job);
+        return;
+      }
       this.#enqueueCronPrompt({
         prompt: job.prompt,
         source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
@@ -7932,6 +7957,88 @@ export class Session implements SessionContext {
       });
       void this.#drainCronQueue();
     });
+  }
+
+  /**
+   * Runs a per-run scheduled fire in a fresh child session created through the
+   * daemon. The scheduler has already booked the run; this attributes it to the
+   * child that accepted it. If the daemon cannot create the child, the fire
+   * falls back to this (persistent) session so it is not lost — a consumed
+   * one-shot has no scheduled retry — and the run record keeps the failure
+   * marker alongside the session it actually ran in.
+   */
+  async #dispatchCronToFreshSession(job: CronFire): Promise<void> {
+    const scheduler = this.config.getCronScheduler();
+    const taskId = job.id ?? 'unknown';
+    // Captured before the awaited RPC below: processJob re-stamps this very
+    // jobs-map entry on the next matching minute, so a spawn that outlasts one
+    // interval would otherwise annotate the *next* fire's run record.
+    const firedAt = job.lastFiredAt;
+    const triggeredAt = firedAt ?? Date.now();
+    const record = async (outcome: CronRunSessionOutcome): Promise<void> => {
+      if (!job.id || firedAt === undefined) return;
+      await scheduler
+        .annotateRunSession(job.id, firedAt, outcome)
+        .catch((error) => {
+          debugLogger.warn(
+            `Scheduled task ${taskId} could not record its run session: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+    };
+    let sessionId: string;
+    try {
+      const response = await this.client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        {
+          prompt: buildScheduledTaskRunPrompt({
+            id: taskId,
+            name: job.name,
+            cron: job.cronExpr ?? '',
+            prompt: job.prompt,
+            triggeredAt,
+            trigger: 'scheduled',
+          }),
+          completion: 'sent',
+          // Title the child from the task and its trigger time — never from
+          // the built prompt, whose first line is the execution-context
+          // header. Same shape the manual-run route gives its children.
+          name: scheduledTaskRunSessionName(
+            job.name ?? job.prompt,
+            triggeredAt,
+          ),
+          ...(job.id
+            ? {
+                sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,
+                sourceId: scheduledTaskRunSourceId(job.id),
+              }
+            : {}),
+          callerSessionId: this.sessionId,
+        },
+      );
+      const responseSessionId = response['sessionId'];
+      if (
+        typeof responseSessionId !== 'string' ||
+        responseSessionId.length === 0
+      ) {
+        throw new Error('bridge returned a missing session id');
+      }
+      sessionId = responseSessionId;
+    } catch (error) {
+      debugLogger.warn(
+        `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      await record({ sessionId: this.sessionId, dispatchFailed: true });
+      this.#enqueueCronPrompt({
+        prompt: job.prompt,
+        source: 'cron',
+        ...(job.id ? { taskId: job.id } : {}),
+        ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
+      });
+      void this.#drainCronQueue();
+      return;
+    }
+    this.relatedAgentIds.add(sessionId);
+    await record({ sessionId });
   }
 
   #startCronSchedulerInRuntime(): Promise<void> {
