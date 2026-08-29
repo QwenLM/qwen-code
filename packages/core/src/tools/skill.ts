@@ -460,6 +460,26 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     return 'ask';
   }
 
+  /**
+   * Apply the skill's side effects — `allowedTools` session allow rules and
+   * frontmatter hooks — when the folder-trust gate allows it. Idempotent:
+   * both underlying registrations dedup already-applied entries.
+   */
+  private applySideEffects(skill: SkillConfig): void {
+    if (!canApplySkillSideEffects(skill, this.config)) {
+      debugLogger.warn(
+        `Skill "${this.params.skill}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
+      );
+      return;
+    }
+    // Auto-approve the skill's declared allowedTools for the rest of the session.
+    applySkillAllowedTools(
+      this.config.getPermissionManager(),
+      skill.allowedTools,
+    );
+    this.registerHooks(skill);
+  }
+
   private registerHooks(skill: SkillConfig): void {
     debugLogger.debug('Skill hooks check:', {
       hasHooks: !!skill.hooks,
@@ -704,6 +724,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // onSkillLoaded, which adds the name to the loaded set.
       if (this.isSkillLoaded(this.params.skill)) {
         this.onSkillLoaded(this.params.skill);
+        // Re-evaluated on every invocation, not just the first load: folder
+        // trust can be granted mid-session (IDE trust notifications flip it
+        // live), and a project skill first invoked while untrusted must not
+        // stay side-effect-less for the rest of the session. Both grants
+        // dedup, so re-applying is idempotent.
+        this.applySideEffects(skill);
         void this.recordAutoSkillUsageBestEffort(skill);
         const msg = `Skill "${this.params.skill}" is already loaded in context.`;
         return {
@@ -715,19 +741,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
       this.onSkillLoaded(this.params.skill, llmContent);
-
-      if (canApplySkillSideEffects(skill, this.config)) {
-        // Auto-approve the skill's declared allowedTools for the rest of the session.
-        applySkillAllowedTools(
-          this.config.getPermissionManager(),
-          skill.allowedTools,
-        );
-        this.registerHooks(skill);
-      } else {
-        debugLogger.warn(
-          `Skill "${this.params.skill}" is a project skill in an untrusted folder; ignoring its allowedTools and hooks.`,
-        );
-      }
+      this.applySideEffects(skill);
 
       void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {

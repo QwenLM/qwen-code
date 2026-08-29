@@ -2313,6 +2313,37 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-referenced-env');
   });
 
+  it('never expands Qwen-internal secrets referenced from workspace settings.env', async () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+    delete process.env['FAST_PATH_LEAKED_COPY'];
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-secret-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        env: {
+          FAST_PATH_LEAKED_COPY: 'copy=${QWEN_SERVER_TOKEN}/$qwen_server_token',
+        },
+      }),
+    );
+    process.chdir(tempWorkspace);
+
+    try {
+      await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+      // The placeholders survive verbatim, exactly like an unset variable's;
+      // the daemon bearer token is never copied under another key.
+      expect(process.env['FAST_PATH_LEAKED_COPY']).toBe(
+        'copy=${QWEN_SERVER_TOKEN}/$qwen_server_token',
+      );
+    } finally {
+      delete process.env['FAST_PATH_LEAKED_COPY'];
+    }
+  });
+
   it('expands home .env fallback placeholders in workspace settings.env', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     delete process.env['FAST_PATH_REFERENCED_TOKEN'];

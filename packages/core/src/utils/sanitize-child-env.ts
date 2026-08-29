@@ -15,11 +15,11 @@ import { PRIVATE_ACP_CAPABILITY_ENV } from './invocation-context.js';
  *
  * `QWEN_SERVER_TOKEN` is the serve-daemon bearer token, `QWEN_DAEMON_TOKEN`
  * is the channel-daemon worker token, `QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN`
- * is the daemon-local external-tool guard credential (handed to the ACP
- * child through an explicitly built spawn environment, never by
- * inheritance), and `QWEN_CODE_PRIVATE_ACP_CAPABILITY` authenticates the
- * daemon-spawned ACP child. Their direct consumers already scrub them from
- * `process.env` after reading them.
+ * is the daemon-local external-tool guard credential (never handed to the
+ * ACP child: the daemon holds it for its loopback guard client and every
+ * spawn path explicitly scrubs it), and `QWEN_CODE_PRIVATE_ACP_CAPABILITY`
+ * authenticates the daemon-spawned ACP child. Their direct consumers
+ * already scrub them from `process.env` after reading them.
  *
  * The same list gates `$VAR` substitution in settings, extension and hook
  * configuration (`isInternalSecretEnvVar`): those files can come from a
@@ -63,10 +63,13 @@ export function isInternalSecretEnvVar(name: string): boolean {
 export function sanitizeChildEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-  const sanitized: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (!isInternalSecretEnvVar(key)) {
-      sanitized[key] = value;
+  // Spread + delete rather than rebuilding by assignment: assignment routes
+  // an own `__proto__` key through the prototype setter and drops it, while
+  // spread copies it as a plain own property like every other variable.
+  const sanitized: NodeJS.ProcessEnv = { ...env };
+  for (const key of Object.keys(sanitized)) {
+    if (isInternalSecretEnvVar(key)) {
+      delete sanitized[key];
     }
   }
   return sanitized;

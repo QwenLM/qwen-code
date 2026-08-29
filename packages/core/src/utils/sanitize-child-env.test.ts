@@ -86,6 +86,21 @@ describe('sanitizeChildEnv', () => {
     });
     expect(result).toEqual({ PATH: '/usr/bin' });
   });
+
+  it('keeps an own __proto__ variable like any other (computed key, not a prototype literal)', () => {
+    const result = sanitizeChildEnv({
+      ['__proto__']: 'keep',
+      QWEN_SERVER_TOKEN: 'super-secret',
+      PATH: '/usr/bin',
+    });
+    expect(Object.prototype.hasOwnProperty.call(result, '__proto__')).toBe(
+      true,
+    );
+    expect(Object.getOwnPropertyDescriptor(result, '__proto__')?.value).toBe(
+      'keep',
+    );
+    expect(result['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
 });
 
 describe('isInternalSecretEnvVar', () => {

@@ -584,6 +584,30 @@ describe('SkillTool', () => {
       expect(registerSkillHooks).toHaveBeenCalledTimes(1);
     });
 
+    it('applies the side effects on re-invocation once trust is granted mid-session', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      await invoke(repoSkill);
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+
+      vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+      const result = await invoke(repoSkill);
+
+      // The dedup guard still answers "already loaded"...
+      expect(partToString(result.llmContent)).toContain('already loaded');
+      // ...but the gate is re-evaluated and the grants are applied now.
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(registerSkillHooks).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps refusing on re-invocation while the folder stays untrusted', async () => {
+      vi.mocked(config.isTrustedFolder).mockReturnValue(false);
+      await invoke(repoSkill);
+      await invoke(repoSkill);
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      expect(registerSkillHooks).not.toHaveBeenCalled();
+    });
+
     it('applies both for a user skill regardless of folder trust', async () => {
       vi.mocked(config.isTrustedFolder).mockReturnValue(false);
 
