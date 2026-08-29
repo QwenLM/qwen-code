@@ -22,6 +22,12 @@
  * leaves the mechanism tests (which use a stand-in component) green. This guard
  * pins the dependency directly, so a deps-array cleanup or an `exhaustive-deps`
  * autofix cannot quietly delete the fix.
+ *
+ * The same reasoning extends to the #9507 provider link: the composer layout
+ * key must survive in the dependency arrays of the AgentViewContext state and
+ * actions memos, or setAgentComposerLayoutKey updates never reach the
+ * AppContainer measure effect guarded above. useMemo deps are invisible to
+ * TypeScript, so they are pinned here at the source level as well.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -38,6 +44,11 @@ const composerSource = readFileSync(
   'utf8',
 );
 
+const agentViewContextSource = readFileSync(
+  join(import.meta.dirname, 'contexts', 'AgentViewContext.tsx'),
+  'utf8',
+);
+
 /** Extract the dependency array of the controls-height measurement effect. */
 function controlsHeightEffectDeps(): string {
   const measureAt = source.indexOf('measureElement(mainControlsRef.current)');
@@ -47,6 +58,24 @@ function controlsHeightEffectDeps(): string {
   const depsClose = source.indexOf(']);', depsOpen);
   expect(depsClose).toBeGreaterThan(depsOpen);
   return source.slice(depsOpen, depsClose);
+}
+
+/**
+ * Extract the dependency array of a useMemo in AgentViewContext.tsx. The
+ * slice runs from the deps-array opening bracket to its closing bracket, so
+ * it covers only the deps list, not the memoized object literal above it.
+ * That is deliberate: the guarded mutation keeps the value in the literal
+ * while dropping it from the deps, which must fail the assertion below even
+ * though the literal still mentions the identifier.
+ */
+function agentViewMemoDeps(memoAnchor: string): string {
+  const memoAt = agentViewContextSource.indexOf(memoAnchor);
+  expect(memoAt).toBeGreaterThan(-1);
+  const depsOpen = agentViewContextSource.indexOf('\n    [', memoAt);
+  expect(depsOpen).toBeGreaterThan(-1);
+  const depsClose = agentViewContextSource.indexOf('\n    ],', depsOpen);
+  expect(depsClose).toBeGreaterThan(depsOpen);
+  return agentViewContextSource.slice(depsOpen, depsClose);
 }
 
 describe('AppContainer controls-height measurement wiring', () => {
@@ -95,5 +124,32 @@ describe('AppContainer controls-height measurement wiring', () => {
     expect(composerSource).toMatch(
       /useEffect\(\(\)\s*=>\s*\{\s*setAgentComposerLayoutKey\(composerLayoutKey\);\s*\},\s*\[composerLayoutKey,\s*setAgentComposerLayoutKey\]\)/,
     );
+  });
+});
+
+describe('AgentViewContext propagation of the composer layout key (#9507)', () => {
+  it('lists agentComposerLayoutKey in the state memo dependencies', () => {
+    const deps = agentViewMemoDeps('const state: AgentViewState = useMemo(');
+    // Sanity: this is the state memo's deps array (the literal above it
+    // mirrors the same identifiers, so anchor on entries plus position).
+    expect(deps).toContain('activeView');
+    expect(deps).toContain('agentMessageQueues');
+    // The #9507 provider link: the object literal still lists the key when
+    // this dep is dropped, so nothing looks wrong — but the memoized context
+    // value goes stale, setAgentComposerLayoutKey updates stop reaching the
+    // AppContainer controls-height measure effect, and the composer/tab bar
+    // overflow fixed in round 2 returns. TypeScript cannot see memo deps, so
+    // this source guard is the only protection.
+    expect(deps).toContain('agentComposerLayoutKey');
+  });
+
+  it('lists setAgentComposerLayoutKey in the actions memo dependencies', () => {
+    const deps = agentViewMemoDeps(
+      'const actions: AgentViewActions = useMemo(',
+    );
+    expect(deps).toContain('setAgentShellFocused');
+    // Dropping this entry hands consumers a stale actions object whose
+    // setAgentComposerLayoutKey identity predates the provider re-render.
+    expect(deps).toContain('setAgentComposerLayoutKey');
   });
 });
