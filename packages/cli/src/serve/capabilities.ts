@@ -357,6 +357,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_display_name: { since: 'v1' },
   scratch_workspace_registration: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
+  // A native OS directory picker can be opened on the daemon host
+  // (osascript on macOS, PowerShell on Windows, zenity on a Linux host
+  // with a display). Headless hosts omit the tag so clients hide the
+  // Browse affordance instead of surfacing a guaranteed picker failure.
+  native_directory_picker: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
   // memory, workspace agent CRUD, and persisted session organization surfaces.
@@ -502,6 +507,7 @@ export interface AdvertiseFeatureToggles {
   persistentWorkspaceRegistrationAvailable?: boolean;
   scratchWorkspaceRegistrationAvailable?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  nativeDirectoryPickerAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
@@ -639,6 +645,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'workspace_runtime_removal',
     (toggles) => toggles.workspaceRuntimeRemovalAvailable === true,
+  ],
+  [
+    'native_directory_picker',
+    (toggles) => toggles.nativeDirectoryPickerAvailable === true,
   ],
   [
     'workspace_qualified_acp',

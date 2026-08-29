@@ -40,6 +40,7 @@ import {
   Storage,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import { isNativeDirectoryPickerAvailable } from '../../packages/cli/src/serve/native-directory-picker.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -293,6 +294,9 @@ describe('qwen serve — capabilities envelope', () => {
     // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
     // `prompt_absolute_deadline`, `writer_idle_timeout`,
     // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
+    // `native_directory_picker` is host-conditional (the daemon host's GUI
+    // environment, not a spawn flag) and is spliced at its registry
+    // position below.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
@@ -410,6 +414,9 @@ describe('qwen serve — capabilities envelope', () => {
       'persistent_workspace_registration',
       'workspace_display_name',
       'workspace_runtime_removal',
+      ...(isNativeDirectoryPickerAvailable()
+        ? ['native_directory_picker']
+        : []),
       'workspace_qualified_rest_core',
       'extension_management_v2',
       'extension_git_credentials',
