@@ -817,6 +817,37 @@ describe('SchemaValidator', () => {
     });
   });
 
+  describe('canEnforce', () => {
+    it('requires the runtime dialect to recognize the full vocabulary', () => {
+      const tupleKeywords = {
+        prefixItems: [{ type: 'string' }],
+        minItems: 1,
+        maxItems: 1,
+        items: false,
+      };
+
+      expect(
+        SchemaValidator.canEnforce({
+          type: 'array',
+          ...tupleKeywords,
+        }),
+      ).toBe(false);
+      expect(
+        SchemaValidator.canEnforce({
+          $schema: 'https://json-schema.org/draft/2020-12/schema',
+          type: 'array',
+          ...tupleKeywords,
+        }),
+      ).toBe(true);
+      expect(
+        SchemaValidator.canEnforce({
+          type: 'object',
+          properties: { value: { type: 'string' } },
+        }),
+      ).toBe(true);
+    });
+  });
+
   describe('non-string to string coercion', () => {
     const schema = {
       type: 'object',

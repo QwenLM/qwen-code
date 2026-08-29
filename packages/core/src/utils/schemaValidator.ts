@@ -46,11 +46,23 @@ const ajvOptions = {
   },
 };
 
+const strictCompileOptions = {
+  strictSchema: true,
+  strictRequired: false,
+  strictTypes: false,
+  strictTuples: false,
+  validateFormats: false,
+  allowUnionTypes: true,
+};
+
 // Draft-07 validator (default)
 const ajvDefault: Ajv = new AjvClass(ajvOptions);
 
 // Draft-2020-12 validator for MCP servers using rmcp
 const ajv2020: Ajv = new Ajv2020Class(ajvOptions);
+
+const ajvStrictDefault: Ajv = new AjvClass(strictCompileOptions);
+const ajvStrict2020: Ajv = new Ajv2020Class(strictCompileOptions);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const addFormatsFunc = (addFormats as any).default || addFormats;
@@ -84,23 +96,38 @@ function getValidator(schema: AnySchema): Ajv {
   return ajvDefault;
 }
 
+function getStrictValidator(schema: AnySchema): Ajv {
+  return typeof schema === 'object' &&
+    schema !== null &&
+    '$schema' in schema &&
+    isDraft2020Uri(schema.$schema)
+    ? ajvStrict2020
+    : ajvStrictDefault;
+}
+
 /**
  * Simple utility to validate objects against JSON Schemas.
  * Supports both draft-07 (default) and draft-2020-12 schemas.
  */
 export class SchemaValidator {
-  static canCompile(schema: unknown): boolean {
+  /**
+   * Returns true only when the runtime validator recognizes the schema's full
+   * vocabulary. This prevents lenient compilation from being mistaken for
+   * local enforcement when deciding whether wire constraints may be relaxed.
+   */
+  static canEnforce(schema: unknown): boolean {
     if (
-      (typeof schema !== 'object' ||
-        schema === null ||
-        Array.isArray(schema)) &&
-      typeof schema !== 'boolean'
+      typeof schema !== 'object' ||
+      schema === null ||
+      Array.isArray(schema)
     ) {
       return false;
     }
 
     try {
-      getValidator(schema as AnySchema).compile(schema as AnySchema);
+      const anySchema = schema as AnySchema;
+      getStrictValidator(anySchema).compile(anySchema);
+      getValidator(anySchema).compile(anySchema);
       return true;
     } catch {
       return false;
@@ -135,18 +162,11 @@ export class SchemaValidator {
     // or anything using a custom `format`. Keep typo detection;
     // tolerate the looser-but-still-spec-valid patterns users actually
     // ship in `--json-schema`.
-    const strictOptions = {
-      strictSchema: true, // catches unknown keywords (typos)
-      strictRequired: false, // allow `required` without `properties`
-      strictTypes: false, // allow inferred / partial type info
-      validateFormats: false, // unknown `format` values don't fail
-      allowUnionTypes: true, // type: ["a","b"]
-    };
     const strictAjv: Ajv = isDraft2020Uri(
       (schema as { $schema?: unknown }).$schema,
     )
-      ? new Ajv2020Class(strictOptions)
-      : new AjvClass(strictOptions);
+      ? new Ajv2020Class(strictCompileOptions)
+      : new AjvClass(strictCompileOptions);
     addFormatsFunc(strictAjv);
     try {
       strictAjv.compile(schema as AnySchema);

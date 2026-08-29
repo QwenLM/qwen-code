@@ -5907,11 +5907,30 @@ describe('OpenAIContentConverter', () => {
         properties: {},
         additionalProperties: false,
       };
+      const unsupportedVocabularySchema = {
+        type: 'object',
+        properties: {
+          tuple: {
+            type: 'array',
+            prefixItems: [
+              {
+                type: 'object',
+                properties: {},
+                additionalProperties: false,
+              },
+            ],
+          },
+        },
+      };
       const tools = [
         {
           functionDeclarations: [
             { name: 'supported', parametersJsonSchema: supportedSchema },
             { name: 'unsupported', parametersJsonSchema: unsupportedSchema },
+            {
+              name: 'unsupported_vocabulary',
+              parametersJsonSchema: unsupportedVocabularySchema,
+            },
             {
               name: 'without_local_schema',
               parameters: {
@@ -5938,6 +5957,11 @@ describe('OpenAIContentConverter', () => {
           },
         },
         {
+          name: 'unsupported_vocabulary',
+          description: '',
+          parameters: unsupportedVocabularySchema,
+        },
+        {
           name: 'without_local_schema',
           description: '',
           parameters: {
@@ -5955,6 +5979,10 @@ describe('OpenAIContentConverter', () => {
       expect(unsupportedSchema.$schema).toBe(
         'https://json-schema.org/draft/2019-09/schema',
       );
+      expect(
+        unsupportedVocabularySchema.properties.tuple.prefixItems[0]
+          .additionalProperties,
+      ).toBe(false);
     });
 
     it('should convert Gemini tools with parameters field', async () => {

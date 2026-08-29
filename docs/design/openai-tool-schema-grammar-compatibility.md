@@ -14,7 +14,7 @@ Keep the registered tool set unchanged. Before an OpenAI-compatible request is s
 - omit `minLength`, `maxLength`, `minItems`, and `maxItems` values at or above the grammar repetition boundary of 2000;
 - preserve smaller limits and all other supported constraints.
 
-Apply these grammar-specific relaxations only when the source schema compiles with the same validator used before tool execution. If local validation cannot enforce the source schema, keep its grammar constraints on the wire rather than broadening both enforcement layers.
+Apply these grammar-specific relaxations only when the source schema both compiles with the validator used before tool execution and passes strict vocabulary compilation for that validator's selected dialect. If local validation cannot enforce the complete schema, keep its grammar constraints on the wire rather than broadening both enforcement layers.
 
 The original schema remains attached to the tool and continues to drive client-side parameter validation. The provider receives a schema it can compile, while Qwen Code still rejects tool calls that violate the original limits.
 
