@@ -16,9 +16,23 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
  * Windows can expose file IDs that exceed JavaScript's safe integer range.
  * Neither value can be compared as an exact identity proof.
  *
- * This predicate is the shared semantics for every conversation-identity
- * check in this package (deletion journal, ACP managed relocation): import
- * it, do not restate it.
+ * This predicate is the shared verifiability semantics for the
+ * conversation-identity checks that import it (the standalone deletion
+ * journal, the ACP agent, and review/lib/same-file.ts). Two call sites keep
+ * a deliberate local restatement — edit them in lockstep with this
+ * predicate:
+ *
+ * - `syncStandaloneRoot` (serve/conversations/conversation-workspace.ts)
+ *   inlines the predicate and the root-identity composite around the open
+ *   file handle it re-validates before and after `sync`;
+ * - `hasExpectedManagedDirectoryIdentity` (acp-integration/acpAgent.ts)
+ *   inlines the composite because the wire expectation `{ device, inode }`
+ *   carries no `inodeVerifiable` field and must keep deriving verifiability
+ *   from `inode !== 0`.
+ *
+ * Core's canonical predicate (core/src/utils/file-identity.ts) is
+ * deliberately LOOSER (`Number(ino) !== 0`) — do not align the two; see the
+ * same-file.ts import site for why.
  */
 export function hasVerifiableInode(ino: number): boolean {
   return Number.isSafeInteger(ino) && ino > 0;
@@ -154,8 +168,11 @@ function hasRootIdentity(
  * are available they must match; where the filesystem reports none, there is
  * nothing to compare and reporting a change would be a false positive that
  * blocks the feature outright, so only the device is required.
+ *
+ * Also the anti-swap comparator for ACP managed relocation: acpAgent.ts
+ * imports it directly rather than restating it.
  */
-function isSameDirectoryIdentity(before: Stats, after: Stats): boolean {
+export function isSameDirectoryIdentity(before: Stats, after: Stats): boolean {
   const beforeVerifiable = hasVerifiableInode(before.ino);
   const afterVerifiable = hasVerifiableInode(after.ino);
   return (

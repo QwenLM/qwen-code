@@ -229,6 +229,7 @@ import {
   getConversationDirectoryName,
   hasVerifiableInode,
   isSameConversationPath,
+  isSameDirectoryIdentity,
 } from '../utils/conversation-directory-identity.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
@@ -3199,6 +3200,14 @@ function isOwnerOnlyDirectory(stats: Stats): boolean {
   return (stats.mode & 0o077) === 0;
 }
 
+/**
+ * Deliberately local, NOT the module's `hasRootIdentity`: the wire
+ * expectation payload `{ device, inode }` carries no `inodeVerifiable`
+ * field, so verifiability must keep being derived from `inode !== 0` here
+ * (the parser admits only safe integers >= 0, so the two derivations
+ * coincide). The comparison itself must stay in lockstep with
+ * `hasRootIdentity` in utils/conversation-directory-identity.ts.
+ */
 function hasExpectedManagedDirectoryIdentity(
   stats: Stats,
   expected: { device: number; inode: number },
@@ -3208,16 +3217,6 @@ function hasExpectedManagedDirectoryIdentity(
     stats.dev === expected.device &&
     inodeVerifiable === (expected.inode !== 0) &&
     (!inodeVerifiable || stats.ino === expected.inode)
-  );
-}
-
-function isSameManagedDirectoryIdentity(left: Stats, right: Stats): boolean {
-  const leftVerifiable = hasVerifiableInode(left.ino);
-  const rightVerifiable = hasVerifiableInode(right.ino);
-  return (
-    left.dev === right.dev &&
-    leftVerifiable === rightVerifiable &&
-    (!leftVerifiable || left.ino === right.ino)
   );
 }
 
@@ -10022,7 +10021,7 @@ class QwenAgent implements Agent {
           if (
             !isOwnerOnlyDirectory(rootBefore) ||
             !isOwnerOnlyDirectory(rootAfter) ||
-            !isSameManagedDirectoryIdentity(rootBefore, rootAfter) ||
+            !isSameDirectoryIdentity(rootBefore, rootAfter) ||
             (conversationDirectoryExpectation !== undefined &&
               (!isSameConversationPath(
                 canonicalRoot,
@@ -10064,7 +10063,7 @@ class QwenAgent implements Agent {
           if (
             !isOwnerOnlyDirectory(targetBefore) ||
             !isOwnerOnlyDirectory(targetAfter) ||
-            !isSameManagedDirectoryIdentity(targetBefore, targetAfter) ||
+            !isSameDirectoryIdentity(targetBefore, targetAfter) ||
             (conversationDirectoryExpectation !== undefined &&
               (!isSameConversationPath(
                 canonicalPath,
@@ -10104,7 +10103,7 @@ class QwenAgent implements Agent {
           }
           if (
             !isOwnerOnlyDirectory(rootFinal) ||
-            !isSameManagedDirectoryIdentity(rootFinal, rootAfter) ||
+            !isSameDirectoryIdentity(rootFinal, rootAfter) ||
             (conversationDirectoryExpectation !== undefined &&
               !hasExpectedManagedDirectoryIdentity(
                 rootFinal,

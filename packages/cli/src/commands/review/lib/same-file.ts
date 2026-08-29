@@ -7,22 +7,17 @@
 import { realpathSync, statSync } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-
-/**
- * True iff `ino` can be used as proof of file identity.
- *
- * Tighter than core's canonical `hasVerifiableInode` (`Number(ino) !== 0`)
- * on purpose: `Stats.ino` carries the 64-bit NTFS file index rounded at the
- * JS boundary, so two DISTINCT Windows files whose indices land in one
- * double-rounding bucket surface with equal `ino` and would compare as one
- * file here. Only safe positive values are exact identity proof; everything
- * else degrades to the canonical-spelling comparison below. Core's looser
- * predicate is deliberately left alone — tightening it would also flip
- * `assertVerifiableTranscriptIdentity` on >2^53 Windows transcript inodes.
- */
-function hasVerifiableInode(ino: number): boolean {
-  return Number.isSafeInteger(ino) && ino > 0;
-}
+// Verifiability is the shared strict predicate from the conversation
+// identity module — tighter than core's canonical `hasVerifiableInode`
+// (`Number(ino) !== 0`) on purpose: `Stats.ino` carries the 64-bit NTFS
+// file index rounded at the JS boundary, so two DISTINCT Windows files
+// whose indices land in one double-rounding bucket surface with equal
+// `ino` and would compare as one file here. Only safe positive values are
+// exact identity proof; everything else degrades to the canonical-spelling
+// comparison below. Core's looser predicate is deliberately left alone —
+// tightening it would also flip `assertVerifiableTranscriptIdentity` on
+// >2^53 Windows transcript inodes.
+import { hasVerifiableInode } from '../../../utils/conversation-directory-identity.js';
 
 function tryStat(path: string): Stats | undefined {
   try {
