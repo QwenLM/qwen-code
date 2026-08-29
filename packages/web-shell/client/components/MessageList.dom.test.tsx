@@ -2793,6 +2793,96 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(assistantActions(c, 'summary')).toBe('true');
   });
 
+  it('does not render final actions while AskUserQuestion is waiting', () => {
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+    const c = mount(
+      [
+        userMsg('review-request'),
+        asstMsg('critical-findings'),
+        standaloneToolMsg('ask-user', 'AskUserQuestion'),
+      ],
+      undefined,
+      { customization: { renderAssistantTurnFooter } },
+    );
+
+    expect(assistantActions(c, 'critical-findings')).toBe('false');
+    expect(renderAssistantTurnFooter).not.toHaveBeenCalled();
+    expect(c.querySelector('[data-testid="assistant-turn-footer"]')).toBeNull();
+  });
+
+  it('restores final actions after matched agent notifications even when launch rows stay pending', () => {
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+
+    const c = mount(
+      [
+        userMsg('review-request'),
+        asstMsg('critical-findings'),
+        standaloneToolMsg('ask-user', 'AskUserQuestion'),
+        userMsg('ask-user-answer'),
+        firstAgent,
+        secondAgent,
+        asstMsg('report'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+        backgroundNotificationMsg('bg-2', 'call-agent-2'),
+        thinkingMsg('late-thinking'),
+        asstMsg('final-supplement'),
+      ],
+      undefined,
+      { customization: { renderAssistantTurnFooter } },
+    );
+
+    expect(assistantActions(c, 'report')).toBe('false');
+    expect(assistantActions(c, 'final-supplement')).toBe('true');
+    expect(renderAssistantTurnFooter.mock.calls.map(([info]) => info)).toEqual(
+      expect.arrayContaining([
+        {
+          turnId: 'ask-user-answer',
+          message: {
+            id: 'final-supplement',
+            content: 'answer',
+            isStreaming: undefined,
+            timestamp: undefined,
+          },
+        },
+      ]),
+    );
+    expect(
+      renderAssistantTurnFooter.mock.calls.every(
+        ([info]) => info.message.id === 'final-supplement',
+      ),
+    ).toBe(true);
+    expect(
+      c.querySelectorAll('[data-testid="assistant-turn-footer"]'),
+    ).toHaveLength(1);
+  });
+
+  it('does not release an older turn for another agent completion', () => {
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      asstMsg('a1'),
+      userMsg('u2'),
+      secondAgent,
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+      asstMsg('a2'),
+    ]);
+
+    expect(assistantActions(c, 'a1')).toBe('false');
+    expect(assistantActions(c, 'a2')).toBe('true');
+  });
+
   it('keeps actions suppressed for stale agents until they reconcile terminal', () => {
     const firstAgent = agentMsg('agent-1');
     const secondAgent = agentMsg('agent-2');
@@ -2826,6 +2916,32 @@ describe('MessageList — turn collapse (DOM)', () => {
     });
 
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('restores the custom footer during readonly transcript replay', () => {
+    const staleAgent = agentMsg('agent-1');
+    staleAgent.tools[0]!.status = 'pending';
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+    const c = mount([userMsg('u1'), staleAgent, asstMsg('a1')], undefined, {
+      transcriptRenderMode: 'readonly',
+      customization: { renderAssistantTurnFooter },
+    });
+
+    expect(assistantActions(c, 'a1')).toBe('true');
+    expect(renderAssistantTurnFooter).toHaveBeenCalledWith({
+      turnId: 'u1',
+      message: {
+        id: 'a1',
+        content: 'answer',
+        isStreaming: undefined,
+        timestamp: undefined,
+      },
+    });
+    expect(
+      c.querySelectorAll('[data-testid="assistant-turn-footer"]'),
+    ).toHaveLength(1);
   });
 
   it('keeps final actions for a pending foreground agent in a completed turn', () => {

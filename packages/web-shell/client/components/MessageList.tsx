@@ -794,6 +794,7 @@ function collectFinalAssistantTurnIds(
   }
 
   const turnIdByAssistantId = new Map<string, string>();
+  const completedAgentCallIds = completedBackgroundAgentCallIds(items);
   for (let k = 0; k < userIdxs.length; k++) {
     const start = userIdxs[k];
     const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
@@ -808,7 +809,7 @@ function collectFinalAssistantTurnIds(
     // whether it is the latest turn or the user has moved on to a newer one.
     if (
       gateBackgroundAgentStatus &&
-      turnHasActiveBackgroundAgent(items, start, end)
+      turnHasActiveBackgroundAgent(items, start, end, completedAgentCallIds)
     ) {
       continue;
     }
@@ -1667,13 +1668,16 @@ function turnHasActiveBackgroundAgent(
   items: readonly DisplayItem[],
   start: number,
   end: number,
+  completedAgentCallIds = completedBackgroundAgentCallIds(items),
 ): boolean {
   return someTurnToolCall(
     items,
     start,
     end,
     (tool) =>
-      isBackgroundSubAgentToolCall(tool) && isActiveToolStatus(tool.status),
+      isBackgroundSubAgentToolCall(tool) &&
+      isActiveToolStatus(tool.status) &&
+      !completedAgentCallIds.has(tool.callId),
   );
 }
 
@@ -1751,6 +1755,17 @@ function backgroundAgentCompletion(
   return item.type === 'message'
     ? backgroundAgentCompletionForMessage(item.message)
     : null;
+}
+
+function completedBackgroundAgentCallIds(
+  items: readonly DisplayItem[],
+): ReadonlySet<string> {
+  const callIds = new Set<string>();
+  for (const item of items) {
+    const callId = backgroundAgentCompletion(item)?.callId;
+    if (callId) callIds.add(callId);
+  }
+  return callIds;
 }
 
 interface BackgroundAgentSummaryState {
