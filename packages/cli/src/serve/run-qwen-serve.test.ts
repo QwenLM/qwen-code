@@ -10623,7 +10623,7 @@ describe('runQwenServe runtime startup failures', () => {
         fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-picker-')),
       );
       // Keep the runtime from mounting so the bootstrap `/capabilities` and
-      // `/daemon-status` envelopes stay the ones being served.
+      // `/daemon/status` envelopes stay the ones being served.
       vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
         throw new Error('runtime boom');
       });
@@ -10666,7 +10666,6 @@ describe('runQwenServe runtime startup failures', () => {
         // Probed once while the bootstrap app was built, not per request.
         expect(probe.mock.calls.length).toBe(probeCallsAfterBoot);
       } finally {
-        probe.mockRestore();
         await handle.close();
       }
     },

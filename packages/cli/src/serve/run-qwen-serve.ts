@@ -2573,9 +2573,9 @@ function createBootstrapServeApp(input: {
   } = input;
   const app = express();
   // The probe stats `/dev/console` (macOS) or scans `PATH` for `zenity`
-  // (Linux), and both bootstrap endpoints rebuild their envelope per request,
-  // so evaluate it once here — the runtime path likewise probes once, at
-  // `createApp` time (server.ts).
+  // (Linux), and both bootstrap endpoints below rebuild their envelope per
+  // request, so evaluate it once here — the runtime path likewise probes once,
+  // at `createApp` time (server.ts).
   const nativeDirectoryPickerAvailable = isNativeDirectoryPickerAvailable();
 
   installSameOriginOriginStrip(app, getPort);
