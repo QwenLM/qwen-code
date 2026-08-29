@@ -1088,13 +1088,42 @@ export class HookRunner {
 
     let inSingleQuote = false;
     let inDoubleQuote = false;
+    let inComment = false;
     let result = '';
     let lastIndex = 0;
     let match: RegExpExecArray | null;
+    // The character that escapes the next one when not inside single quotes
+    // (bash and PowerShell); cmd's `^` escapes even inside double quotes.
+    const escapeChar =
+      shellType === 'bash' ? '\\' : shellType === 'powershell' ? '`' : '^';
 
     while ((match = placeholderPattern.exec(command))) {
       for (let i = lastIndex; i < match.index; i++) {
         const ch = command[i];
+        if (inComment) {
+          if (ch === '\n') {
+            inComment = false;
+          }
+          continue;
+        }
+        if (!inSingleQuote && ch === escapeChar) {
+          // The escaped character can't end a quote region or start a
+          // comment — bash's `\'`/`\"`, PowerShell's `` `" ``, cmd's `^&`.
+          i++;
+          continue;
+        }
+        if (
+          shellType === 'bash' &&
+          !inSingleQuote &&
+          !inDoubleQuote &&
+          ch === '#' &&
+          (i === 0 || /\s/.test(command[i - 1]))
+        ) {
+          // An unquoted `#` at a word boundary starts a bash comment that
+          // runs to the next newline; nothing inside it is live shell text.
+          inComment = true;
+          continue;
+        }
         if (tracksSingleQuotes && ch === "'" && !inDoubleQuote) {
           inSingleQuote = !inSingleQuote;
         } else if (ch === '"' && !inSingleQuote) {
@@ -1103,6 +1132,14 @@ export class HookRunner {
       }
       result += command.slice(lastIndex, match.index);
       const afterPlaceholder = placeholderPattern.lastIndex;
+
+      if (inComment) {
+        // A placeholder written inside a `#` comment is documentation, not
+        // live code; leave it exactly as the author wrote it.
+        result += match[0];
+        lastIndex = afterPlaceholder;
+        continue;
+      }
 
       if (shellType === 'cmd' && !inDoubleQuote) {
         // Unlike bash, cmd.exe does NOT concatenate a quoted token directly
@@ -1138,7 +1175,25 @@ export class HookRunner {
 
   /** Index of the next cmd.exe argument delimiter at or after `start`. */
   private findCmdTokenEnd(command: string, start: number): number {
-    const delimiters = new Set([' ', '\t', '&', '|', '<', '>', '(', ')']);
+    // `,` `;` `=` also separate cmd arguments; `"` starts a new quoted
+    // region that must not be absorbed into this one; `^` is cmd's escape
+    // character and needs its own (unhandled) escaping logic to consume
+    // safely, so stop before it rather than swallowing it blind.
+    const delimiters = new Set([
+      ' ',
+      '\t',
+      '&',
+      '|',
+      '<',
+      '>',
+      '(',
+      ')',
+      ',',
+      ';',
+      '=',
+      '"',
+      '^',
+    ]);
     let i = start;
     while (i < command.length && !delimiters.has(command[i])) {
       i++;
