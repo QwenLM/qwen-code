@@ -2842,7 +2842,13 @@ describe('registerSessionPrBackfillRoutes', () => {
         (w: { workspaceCwd: string }) =>
           w.workspaceCwd === broken.runtime.workspaceCwd,
       );
-      expect(brokenResult.error).toEqual(expect.any(String));
+      // Pin the exact guard message: expect.any(String) also matches an
+      // unrelated error, leaving this isolation path uncovered if the
+      // failure mechanism changes (WorkspaceGenerationClosedError,
+      // workspace-registry.ts).
+      expect(brokenResult.error).toBe(
+        'Workspace runtime generation is no longer active.',
+      );
       const good = response.body.workspaces.find(
         (w: { workspaceCwd: string }) =>
           w.workspaceCwd === seeded.runtime.workspaceCwd,
