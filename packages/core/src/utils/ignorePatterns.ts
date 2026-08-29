@@ -6,7 +6,7 @@
 
 import path from 'node:path';
 import type { Config } from '../config/config.js';
-import { getAllGeminiMdFilenames } from '../memory/const.js';
+import { getAllMemoryFilenames } from './memory-constants.js';
 
 /**
  * Common ignore patterns used across multiple tools for basic exclusions.
@@ -160,7 +160,7 @@ export class FileExclusions {
 
     // Add dynamic patterns (like context filenames)
     if (includeDynamicPatterns) {
-      for (const filename of getAllGeminiMdFilenames()) {
+      for (const filename of getAllMemoryFilenames()) {
         patterns.push(`**/${filename}`);
       }
     }

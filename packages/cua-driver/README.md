@@ -4,7 +4,7 @@ Qwen Code's vendored distribution of the cross-platform Cua Driver runtime.
 It provides native desktop and browser automation over MCP, a one-shot CLI,
 and in-process Python and TypeScript SDKs.
 
-This tree is based on upstream `cua-driver-rs-v0.17.0`. The upstream snapshot
+This tree is based on upstream `cua-driver-rs-v0.20.0`. The upstream snapshot
 is recorded in [`.vendored-from`](.vendored-from); Qwen-owned differences are
 documented in [`.vendored-patches.md`](.vendored-patches.md) and
 [`docs/relative-coordinates-design.md`](docs/relative-coordinates-design.md).
@@ -14,18 +14,18 @@ documented in [`.vendored-patches.md`](.vendored-patches.md) and
 macOS and Linux:
 
 ```bash
-CUA_DRIVER_RS_VERSION=0.17.0 \
+CUA_DRIVER_RS_VERSION=0.20.2 \
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:CUA_DRIVER_RS_VERSION = "0.17.0"
+$env:CUA_DRIVER_RS_VERSION = "0.20.2"
 irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex
 ```
 
-Expected: qwen-cua-driver 0.17.0.
+Expected: qwen-cua-driver 0.20.2.
 
 The released product uses Qwen-owned identities throughout:
 
@@ -59,16 +59,20 @@ qwen mcp add cua-driver qwen-cua-driver mcp
 Other MCP clients can use the same executable and arguments. Shell-oriented
 automation can call tools through `qwen-cua-driver call`.
 
-## 0.17 runtime and SDK surface
+## 0.20 runtime and SDK surface
 
-The 0.17 base includes the SDK-owned runtime and versioned C ABI, generated
+The 0.20 base includes the SDK-owned runtime and versioned C ABI, generated
 Python and TypeScript UniFFI bindings, typed browser automation, permission
-modes, runtime-owned consent adapters, per-session capture scope,
-snapshot-bound element tokens, closed action results, `verify_state`, native
-menu invocation, clipboard tools, window framing, and semantic cursor themes.
+modes, runtime-owned consent adapters, transport-owned implicit lifecycle
+sessions, per-action target selection, capability manifests across permission
+profiles, snapshot-bound element tokens, closed action results, `verify_state`,
+foreground-focus verification, native menu and clipboard operations, window
+framing, and semantic cursor themes. Browser approval tokens are retired;
+existing-profile access now requires a trusted launch grant, bounded manifest,
+or embedding-host authorization.
 
-Python applications import `cua_driver`. TypeScript applications retain the
-upstream-compatible `@trycua/cua-driver` package name. Both use the same
+Python applications import `cua_driver`. TypeScript applications import the
+Qwen-owned `@qwen-code/cua-sdk` package. Both use the same
 in-process native runtime; MCP remains the agent-facing boundary implemented by
 `qwen-cua-driver`.
 
@@ -81,6 +85,13 @@ and generated bindings are documented in [`contract/README.md`](contract/README.
 `standard` is the promptless default for ordinary automation. `bounded`
 admits only reviewed tools and resources. `unrestricted` requires
 `--dangerously-bypass-approvals`.
+
+The mode belongs to the process that owns the runtime and is fixed at launch:
+`qwen-cua-driver serve` takes the flags, while `qwen-cua-driver mcp` and embedding hosts
+use the matching `CUA_DRIVER_PERMISSION_MODE`,
+`CUA_DRIVER_CAPABILITY_MANIFEST_FILE`, and
+`CUA_DRIVER_CAPABILITY_MANIFEST_APPROVED` variables. Choose it before starting
+the daemon; a running daemon must be restarted to change it.
 
 Attaching to an existing logged-in Chromium profile remains explicit:
 

@@ -7,12 +7,12 @@
 import { randomUUID } from 'node:crypto';
 import type {
   Config,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
   ToolCallRequestInfo,
   McpToolProgressData,
   ShellProgressData,
 } from '@qwen-code/qwen-code-core';
-import { GeminiEventType } from '@qwen-code/qwen-code-core';
+import { LlmEventType } from '@qwen-code/qwen-code-core';
 import type {
   CLIAssistantMessage,
   CLIMessage,
@@ -29,6 +29,7 @@ import {
   type ResultOptions,
   type JsonOutputAdapterInterface,
 } from './BaseJsonOutputAdapter.js';
+import { observeHeadlessToolResultWire } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * Stream JSON output adapter that emits messages immediately
@@ -67,7 +68,11 @@ export class StreamJsonOutputAdapter
     }
 
     // Emit messages immediately in stream mode
-    this.outputStream.write(`${JSON.stringify(message)}\n`);
+    const frame = `${JSON.stringify(message)}\n`;
+    if ('session_id' in message) {
+      observeHeadlessToolResultWire(message as CLIMessage, frame);
+    }
+    this.outputStream.write(frame);
   }
 
   /**
@@ -126,8 +131,8 @@ export class StreamJsonOutputAdapter
     this.emitMessage(message);
   }
 
-  override processEvent(event: ServerGeminiStreamEvent): void {
-    if (event.type === GeminiEventType.GoalState) {
+  override processEvent(event: ServerLlmStreamEvent): void {
+    if (event.type === LlmEventType.GoalState) {
       const signature = JSON.stringify(event.value);
       if (signature === this.lastGoalStateSignature) return;
       this.lastGoalStateSignature = signature;
@@ -148,7 +153,7 @@ export class StreamJsonOutputAdapter
     // Active goal updates are session-level metadata, not message content.
     // They intentionally bypass the base finalized guard so late goal state
     // changes can still reach stream consumers.
-    if (event.type === GeminiEventType.ActiveGoal) {
+    if (event.type === LlmEventType.ActiveGoal) {
       this.emitStreamEventIfEnabled(
         {
           type: 'active_goal',

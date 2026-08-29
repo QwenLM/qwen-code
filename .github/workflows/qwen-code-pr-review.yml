@@ -50,13 +50,33 @@ on:
 
 concurrency:
   # PR lifecycle events share a PR-scoped group so new pushes restart the delay
-  # and closed PRs stop any in-flight lifecycle review.
-  # Comment/review events use per-run groups to avoid cancelling active reviews.
+  # and closed PRs stop any in-flight lifecycle review. Every review_requested
+  # run — the bot-directed one included — gets a per-run group: membership is
+  # decided here, before `authorize` runs, but whether a bot request reviews
+  # anything is `authorize`'s call on the REQUESTER's write permission. A
+  # requester without write produces a guaranteed all-skipped run, and as a
+  # shared-group member that no-op can supersede a lifecycle run sitting
+  # PENDING behind a still-terminating review — a pending run is replaced by
+  # any newer run in the group, cancel-in-progress notwithstanding. That is
+  # the exact race that lost the automatic review on PR #9091, left open for
+  # anyone who can request the bot without write permission. The per-run group
+  # costs only an occasional duplicate review when an authorized bot request
+  # lands while the lifecycle run for the same head still queues: compute,
+  # never a lost review. Comment/review events use per-run groups to avoid
+  # cancelling active reviews.
   group: >-
     ${{ github.event_name == 'pull_request_target' &&
+    github.event.action != 'review_requested' &&
     format('qwen-pr-review-pr-{0}', github.event.pull_request.number) ||
     format('qwen-pr-review-run-{0}', github.run_id) }}
   cancel-in-progress: "${{ github.event_name == 'pull_request_target' && (github.event.action == 'synchronize' || github.event.action == 'closed') }}"
+
+env:
+  # Dedup marker for the review-failure fallback comments. The in-job step
+  # and the fallback-comment job both build their body from it, and the
+  # cross-job dedup matches it — the sites must stay byte-identical or the
+  # dedup silently posts duplicates, so the literal is defined once here.
+  FALLBACK_MARKER: '<!-- qwen-review-fallback -->'
 
 jobs:
   precheck-pr:
@@ -124,6 +144,9 @@ jobs:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ github.event.issue.number || github.event.pull_request.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          # Empty for a pull_request_review trigger: review bodies have no
+          # reactions endpoint, so only the two comment shapes get the 👀.
+          COMMENT_ID: '${{ github.event.comment.id }}'
         run: |-
           set -euo pipefail
           PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')"
@@ -131,37 +154,68 @@ jobs:
             echo "PR #${PR_NUMBER} is ${PR_STATE}; skipping acknowledgement." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # The 👀 on the command itself is the one signal GitHub renders in
+          # place, next to what the requester typed. Best effort: a failed
+          # reaction must not cost the ack comment below.
+          case "$GITHUB_EVENT_NAME" in
+            issue_comment)
+              REACTION_PATH="repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" ;;
+            pull_request_review_comment)
+              REACTION_PATH="repos/${GITHUB_REPOSITORY}/pulls/comments/${COMMENT_ID}/reactions" ;;
+            *)
+              REACTION_PATH="" ;;
+          esac
+          if [ -n "$REACTION_PATH" ] && [ -n "$COMMENT_ID" ]; then
+            gh api --method POST "$REACTION_PATH" -f content=eyes > /dev/null \
+              || echo "Could not react to comment ${COMMENT_ID}." >> "$GITHUB_STEP_SUMMARY"
+          fi
           # Blank line after the marker, or none of the prose below renders. A
           # line opening with `<!--` starts an HTML block that runs to the line
           # containing the closing delimiter, and the REST of that line stays
           # inside it — so gluing the text on shipped it as raw source with a
           # dead link. Verified against GitHub's own renderer.
-          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is queued in [workflow run](%s)._' "$RUN_URL")"
-          EXISTING_ACK_ID="$(
-            # -F would otherwise make gh api default to POST.
-            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-              --method GET \
-              --paginate \
-              -F per_page=100 \
-              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
-          )" || EXISTING_ACK_ID=""
-          if [ -n "$EXISTING_ACK_ID" ]; then
-            gh api \
-              --method PATCH \
-              "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ACK_ID}" \
-              -f body="$ACK_BODY" > /dev/null
-            echo "Queued acknowledgement updated on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
-          else
-            gh pr comment "$PR_NUMBER" \
-              --repo "$GITHUB_REPOSITORY" \
-              --body "$ACK_BODY"
-            echo "Queued acknowledgement posted on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          #
+          # A command-triggered run executes against the base branch, so its
+          # `review-pr` check attaches to main's commit and never shows under
+          # this PR's checks — the link here is the only way to watch it.
+          ACK_BODY="$(printf '<!-- qwen-review-ack -->\n\n_Qwen Code review request accepted. Review is running in [workflow run](%s). A command-triggered review is not listed under the checks of this PR; the result is posted here as a review when it finishes._' "$RUN_URL")"
+          # One ack per PR, and it must sit right under the command that asked
+          # for it. Editing the previous ack in place kept the count at one but
+          # left the notice wherever the FIRST request landed — on a 15-comment
+          # thread that was comment #2, above the previous day's triage, and
+          # the requester reading from the bottom concluded nothing had
+          # started. Delete-then-post keeps the count and moves the notice to
+          # the bottom. Nothing keys on the comment id: every consumer
+          # (qwen-autofix's bot-comment filters, the review's bypass audit)
+          # matches the marker.
+          # -F would otherwise make gh api default to POST.
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --method GET \
+            --paginate \
+            -F per_page=100 \
+            | jq -r '.[] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]") | .id' \
+            | while read -r STALE_ACK_ID; do
+                [ -n "$STALE_ACK_ID" ] || continue
+                gh api --method DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${STALE_ACK_ID}" \
+                  || echo "Could not delete stale acknowledgement ${STALE_ACK_ID}." >> "$GITHUB_STEP_SUMMARY"
+              done
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$ACK_BODY"
+          echo "Queued acknowledgement posted on PR #${PR_NUMBER}." >> "$GITHUB_STEP_SUMMARY"
 
   review-config:
+    # Bot-requested review_requested only: a CODEOWNERS-covered PR open
+    # auto-requests every owner individually (#8945), spawning one
+    # review_requested run per owner. Only the run where the bot itself is
+    # the requested reviewer can reach review-pr, so the human-requested
+    # siblings must skip here instead of each spending a runner. KEEP IN
+    # SYNC with the review_requested clauses in precheck-pr.if and
+    # authorize.if, and with the bot_login constant below.
     if: |-
       github.event_name == 'pull_request_target' &&
-      github.event.action == 'review_requested'
+      github.event.action == 'review_requested' &&
+      github.event.requested_reviewer.login == 'qwen-code-ci-bot'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions: {}
     outputs:
@@ -225,6 +279,11 @@ jobs:
     # Only run for PR-target events and supported command comments — not every
     # unrelated comment — to avoid spawning a job per comment. The downstream
     # `if`s still do the exact command body match; this prefix is just a filter.
+    # review_requested must additionally request the bot itself: a
+    # CODEOWNERS-covered PR open auto-requests every owner individually
+    # (#8945), and precheck-pr's identical predicate only covers fork PRs —
+    # without this clause each same-repo sibling run spends an authorize job
+    # (permission API + runner slot) before review-pr no-op exits.
     if: |-
       !cancelled() &&
       (github.event_name != 'pull_request_target' ||
@@ -232,6 +291,9 @@ jobs:
       (github.event_name != 'pull_request_target' ||
        github.event.pull_request.head.repo.full_name == github.repository ||
        needs.precheck-pr.outputs.decision == 'allow_triage') &&
+      (github.event_name != 'pull_request_target' ||
+       github.event.action != 'review_requested' ||
+       github.event.requested_reviewer.login == 'qwen-code-ci-bot') &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.command == 'resolve') ||
@@ -383,6 +445,55 @@ jobs:
       pull-requests: 'write'
       issues: 'write'
     steps:
+      # The runner worker dies in FinalizeJob with EACCES when it loses write
+      # access to its own directories (observed: '/home/github-runner' no
+      # longer creatable), taking the whole job down with no fallback comment
+      # and no cleanup — see the PR #8894 incident. The known trigger on this
+      # shared pool is a prior containerised job running as root. Probe every
+      # directory the review must create files in, repair single-directory
+      # ownership with the same sudo pattern as 'Restore workspace ownership',
+      # and fail fast with a clear message when repair is impossible — cheaper
+      # than burning hours of review budget to die at finalize. Only catches
+      # corruption already present at job start; mid-run corruption is covered
+      # by the fallback-comment job instead.
+      - name: 'Verify runner directory health'
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          # Three levels above the workspace (_work/owner/repo) is the runner
+          # root, whose _diag/pages dir is what FinalizeJob creates in.
+          RUNNER_ROOT="$(cd "$GITHUB_WORKSPACE/../../.." && pwd)"
+          dirs=("$HOME" "${RUNNER_TEMP:?}" "$RUNNER_ROOT")
+          # A writable runner root does not prove an existing _diag writable
+          # (ownership is per-directory), so probe it too; when absent, it is
+          # created by FinalizeJob, which only needs the runner root.
+          if [ -d "$RUNNER_ROOT/_diag" ]; then
+            dirs+=("$RUNNER_ROOT/_diag")
+          fi
+          status=0
+          for dir in "${dirs[@]}"; do
+            probe="$(mktemp -u "$dir/.qwen-health-XXXXXX")"
+            if touch "$probe" 2>/dev/null; then
+              rm -f "$probe"
+              continue
+            fi
+            echo "::warning::no write access to $dir; attempting single-directory repair"
+            sudo -n chown "$RUNNER_UID:$RUNNER_GID" "$dir" 2>/dev/null || true
+            sudo -n chmod u+rwx "$dir" 2>/dev/null || true
+            if touch "$probe" 2>/dev/null; then
+              rm -f "$probe"
+              echo "repaired write access to $dir"
+            else
+              echo "::error::runner directory still unusable after repair: $dir"
+              status=1
+            fi
+          done
+          if [ "$status" != 0 ]; then
+            echo "::error::runner directories unhealthy; failing fast instead of dying at job finalize"
+          fi
+          exit "$status"
+
       # Self-hosted runners reuse the workspace; a prior containerised job can
       # leave root-owned, read-only files anywhere in it. Restore ownership and
       # write permission unconditionally before checkout — probing only .qwen
@@ -445,8 +556,108 @@ jobs:
           "${GIT_SAFE[@]}" worktree prune -v || true
           echo "stale agent state cleaned"
 
+      # A cancelled verify can leave either the active project state or its
+      # protected recovery backup unreadable to the runner user. Remove only
+      # those two known names before checkout reuses the workspace.
+      # `.qwen.root-orig` is emitted by recovery tooling OUTSIDE this repo —
+      # nothing here produces it (git grep matches only these sweep copies
+      # and their pins in scripts/tests/review-worktree-cleanup-workflow.
+      # test.js). It is the backup name a cancelled verify's recovery leaves
+      # after renaming an unreadable, root-owned `.qwen` aside (observed on
+      # the shared pool; first recorded around review run 33146730771). If
+      # that producer's naming changes or a third residue name appears,
+      # update the for-loop list in every sweep copy or the checkout
+      # poisoning this sweep exists for silently recurs.
+      - name: 'Clean stale .qwen before checkout'
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # If a foreign-owned directory cannot move to a different parent,
+            # quarantine the runner-owned workspace and recreate the checkout
+            # root. Warm contents are lost only on this unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
+      # Self-heals on the reused self-hosted pool in two observed shapes: a
+      # transient network drop mid-fetch (curl 92 / early EOF), and a
+      # corrupted persisted workspace whose refs claim objects missing from
+      # its object store — every fetch then dies in negotiation with
+      # "remote did not send all necessary objects" until the repo is wiped
+      # (ecs-qwen-runner-64c-23, 2026-08-13..15: seven review jobs failed on
+      # the SAME missing SHAs). The heal below wipes the WHOLE workspace, not
+      # just .git, so a hostile tree can't trip the re-clone; everything in
+      # it is disposable (later steps reinstall deps and tools).
       - name: 'Checkout base branch'
+        id: 'checkout'
+        continue-on-error: true
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          fetch-depth: 0
+
+      - name: 'Reset workspace after failed checkout'
+        if: "steps.checkout.outcome == 'failure'"
+        run: |-
+          set -uo pipefail
+          # Pool wipe idiom (serve-ab.yml, qwen-triage.yml): empties the
+          # workspace but keeps the directory itself for the retry checkout.
+          # GITHUB_WORKSPACE is set by actions/runner (always
+          # <runner workspace>/<repo>/<repo>), so the `:?` guard is the only
+          # STRING check this needs. The wipe also validates the filesystem
+          # OBJECT at $WS against its resolved path: `[ -L ]`/`[ -d ]` see
+          # only the FINAL path component, so a symlinked INTERMEDIATE
+          # component would pass both and let find delete content OUTSIDE
+          # the runner workspace through the redirection, then run the
+          # secret-bearing review step there — refuse any path that does not
+          # resolve to itself instead. A legitimate workspace is always a
+          # runner-created plain directory with no symlink components, so
+          # refusal costs nothing. The sudo leg only helps on pool members
+          # WITH passwordless sudo; on the rest a root-owned poisoning
+          # degrades to warn-and-retry — the heal chain must never fail, so
+          # the retry still runs against survivors.
+          WS="${GITHUB_WORKSPACE:?}"
+          if [ "$(realpath -- "$WS")" != "$WS" ] || [ -L "$WS" ] || [ ! -d "$WS" ]; then
+            echo "::error::workspace is not a plain directory or resolves through symlinks: $WS"
+            exit 1
+          fi
+          if find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || sudo -n find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; then
+            echo "::warning::first checkout failed; wiped the workspace for a clean retry"
+          else
+            echo "::warning::could not wipe the workspace; the retry checkout may fail again"
+          fi
+          survivors="$( (find "$WS" -mindepth 1 -maxdepth 1 2>/dev/null || true) | tr '\n' ' ' | cut -c1-500)"
+          if [ -n "$survivors" ]; then
+            echo "::warning::workspace wipe left survivors: ${survivors}; the retry checkout runs against them"
+          fi
+
+      - name: 'Checkout base branch (retry)'
+        if: "steps.checkout.outcome == 'failure'"
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.repository.default_branch }}'
@@ -760,17 +971,12 @@ jobs:
           QWEN_CODE_API_TIMEOUT_MS: '600000'
           QWEN_STREAM_IDLE_TIMEOUT_MS: '600000'
           QWEN_STREAM_MAX_LIFETIME_MS: '1800000'
-          # Evidence-image destination for `qwen review publish-assets` —
-          # OPT-IN by design: the command refuses to push images anywhere the
-          # user did not designate, so with the repository variable unset the
-          # review simply keeps its evidence as prose and local paths. Set the
-          # variable (e.g. to this repository) to let reviews embed capture
-          # PNGs; images land on commit-pinned pr-assets/<pr>-review branches,
-          # pushed with the same CI_BOT_PAT this step already uses for gh.
-          # Retention: the visuals cleanup workflow deletes those branches
-          # only when the variable points at THIS repository — a fork or
-          # scratch destination manages its own retention.
-          QWEN_REVIEW_ASSETS_REPO: '${{ vars.QWEN_REVIEW_ASSETS_REPO }}'
+          # Evidence-image destination for `qwen review publish-assets`.
+          # It must be a dedicated external host repository: project-local
+          # image branches are fetched by ordinary clones and permanently
+          # inflate this repository. Unset or self-targeting configurations
+          # deliberately degrade to prose and local artifact paths.
+          QWEN_REVIEW_ASSETS_REPO: "${{ vars.QWEN_REVIEW_ASSETS_REPO != github.repository && vars.QWEN_REVIEW_ASSETS_REPO || '' }}"
           # Per-run agent home so this review's session/memory cannot leak into
           # the next on the reused self-hosted workspace (reset in "Clean stale
           # agent state"). Must match the QWEN_HOME computed there.
@@ -801,6 +1007,22 @@ jobs:
           }
 
           REPO="${GITHUB_REPOSITORY}"
+
+          # Normalize the assets-repo designation before the CLI reads it.
+          # The env-level guard compares the RAW variable, so whitespace
+          # variants (" QwenLM/qwen-code ") and case variants slip past it;
+          # trim both ends and re-check self-targeting case-insensitively
+          # (repository names are case-insensitive). A padded or case-shifted
+          # self-reference must degrade to prose exactly like an unset one.
+          QWEN_REVIEW_ASSETS_REPO="${QWEN_REVIEW_ASSETS_REPO#"${QWEN_REVIEW_ASSETS_REPO%%[![:space:]]*}"}"
+          QWEN_REVIEW_ASSETS_REPO="${QWEN_REVIEW_ASSETS_REPO%"${QWEN_REVIEW_ASSETS_REPO##*[![:space:]]}"}"
+          if [ -n "${QWEN_REVIEW_ASSETS_REPO}" ] &&
+             [ "$(printf '%s' "${QWEN_REVIEW_ASSETS_REPO}" | tr '[:upper:]' '[:lower:]')" = \
+               "$(printf '%s' "${REPO}" | tr '[:upper:]' '[:lower:]')" ]; then
+            QWEN_REVIEW_ASSETS_REPO=''
+          fi
+          export QWEN_REVIEW_ASSETS_REPO
+
           REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
           # Set by configure_qwen_network once the wrapper dir exists.
@@ -1169,6 +1391,7 @@ jobs:
           KIND=''
           run_review_once() {
             local attempt_timeout="$1"
+            local attempt_prompt="$2"
             OUTCOME='fatal'
             REASON=''
             KIND=''
@@ -1221,11 +1444,21 @@ jobs:
             stop_token="qwen-review-stop-$(date +%s%N)-${RANDOM}${RANDOM}"
             echo "::stop-commands::${stop_token}"
             # GNU timeout times out command children unless --foreground is used.
+            # The agent runs no-sandbox with the full job environment, and
+            # the runner applies whatever it appends to $GITHUB_PATH /
+            # $GITHUB_ENV to every LATER step (prepending the path file,
+            # shell lookup included). Point both at invocation-scoped decoys
+            # so appends die with PROXY_BIN no matter how the step exits —
+            # SIGKILL, set -e abort, chmod 444 on the real files, or an
+            # EXIT-trap bypass all become irrelevant because the real
+            # command files are never in the agent's environment.
+            GITHUB_PATH="$PROXY_BIN/decoy.github-path" \
+            GITHUB_ENV="$PROXY_BIN/decoy.github-env" \
             timeout --kill-after=10s "${attempt_timeout}s" qwen \
               --auth-type openai \
               --approval-mode yolo \
               "${MODEL_ARGS[@]}" \
-              --prompt "$PROMPT" \
+              --prompt "$attempt_prompt" \
               --output-format stream-json \
               | tee "$LOG_PATH"
             local ps=("${PIPESTATUS[@]}")
@@ -1321,16 +1554,17 @@ jobs:
 
           # Retry budget: all attempts SHARE QWEN_TIMEOUT, so two tries can never
           # exceed the single-review budget (nor the job timeout), and that
-          # shared budget is the only thing that needs to bound them. A retry
-          # re-runs the whole review from scratch rather than resuming the failed
-          # one, so on a large PR it spends minutes re-fetching, re-chunking and
-          # re-launching agents before the first finding exists — a short retry
-          # cap makes the retry die on the clock instead of clearing the
-          # transient it was meant to clear. Every attempt therefore gets the
-          # whole remaining budget. Retry only a `retryable` outcome, only once,
-          # and only when enough budget is left for the retry to plausibly
-          # finish; below that, report the transient failure so the next run
-          # starts over with a full budget.
+          # shared budget is the only thing that needs to bound them. Each retry
+          # runs FRESH — a retry re-runs the whole review from scratch rather
+          # than resuming the failed one. `--resume` is a local convenience
+          # only: on CI the review runs no-sandbox on the reviewed PR's own
+          # code, and `runNonInteractiveCli`'s cleanup deletes the attempt's
+          # worktree the moment it exits, so there is no interrupted state on
+          # disk for a next attempt to continue — a resume would refuse
+          # `worktree-gone` and start over anyway. Retry only a `retryable`
+          # outcome, only once, and only when enough budget is left for the
+          # retry to plausibly finish; below that, report the transient failure
+          # so the next run starts over with a full budget.
           BUDGET_SECONDS=$(( QWEN_TIMEOUT * 60 ))
           RETRY_BACKOFF_SECONDS=60
           RETRY_MIN_SECONDS=600
@@ -1342,7 +1576,7 @@ jobs:
             if [ "$attempt_timeout" -lt 30 ]; then
               fail "${REASON:-Qwen review ran out of time budget before it could complete.}" 1 "$KIND"
             fi
-            run_review_once "$attempt_timeout"
+            run_review_once "$attempt_timeout" "$PROMPT"
             if [ "$OUTCOME" = "success" ]; then
               break
             fi
@@ -1595,6 +1829,86 @@ jobs:
             echo "Skipping fallback comment: PR #${PR_NUMBER} moved from ${EXPECTED_HEAD_SHA} to ${current_head}." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # Re-runs of failed jobs keep the same run id: a prior attempt that
+          # died before reaching this step already got a fallback comment for
+          # this run from the fallback-comment job. Dedup on the marker plus
+          # this run's URL exactly as that job does; a FAILED lookup defers to
+          # it (it retries and fails closed) instead of risking a duplicate —
+          # posting on a failed listing is how a transient 5xx mints one.
+          bot_login="$(gh api user --jq '.login' 2>/dev/null)" || bot_login=""
+          fallback_bodies=""
+          if [ -n "$bot_login" ] \
+            && fallback_bodies="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json comments \
+              --jq ".comments[] | select(.author.login == \"$bot_login\") | select(.body | contains(\"$FALLBACK_MARKER\")) | .body")"; then
+            case "$fallback_bodies" in
+              *"actions/runs/${GITHUB_RUN_ID})"*)
+                echo "A fallback comment for this run already exists; skipping." >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+                ;;
+            esac
+          else
+            echo "Fallback comment dedup lookup failed; deferring to the fallback-comment job." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Same guard as the fallback-comment job's, for the same reason: a
+          # review posted moments before this step runs makes every body
+          # below — each one ending in a retry instruction — contradict the
+          # review already on the PR. Scoped to the bot's own account and to a
+          # submission at or after this run was CREATED, so a stale review from
+          # an earlier run cannot silence a genuinely dead one; an unavailable
+          # creation time declines to fire and posts.
+          # What a match proves, exactly: a bot review of this PR was
+          # submitted while this run was alive. It is deliberately NOT keyed on
+          # the reviewed head. Two revisions of this guard were, and the head
+          # is not a stable attribute of a run: a push moves the PR's head
+          # between the post and this step, and a re-run recomputes the
+          # reviewed head from a later attempt — in both, THIS run's own review
+          # stops matching and the contradictory comment ships. The window is
+          # anchored on `createdAt`, not `startedAt`, against the same class of
+          # drift: re-running a failed job keeps the run id (the dedup above
+          # relies on that) while run-level `startedAt` moves to the
+          # re-executed attempt — measured on runs 32219268680 (created
+          # 05:23:57Z, startedAt 05:51:26Z) and 32218596441 (05:13:04Z →
+          # 05:22:05Z).
+          #
+          # Under this workflow's per-run concurrency an overlapping run's
+          # review can also fall inside the window, and then this run's failure
+          # goes unannounced. Accepted: that silence coincides with a bot
+          # review of this PR a reader can see, which is exactly the state that
+          # makes this comment's claim false. What the bot-author and
+          # creation-time clauses rule out is silence with NO review at all.
+          #
+          # The account is not this pipeline's alone: finalize-release.yml,
+          # qwen-triage-finalize.yml, and the triage skill all post approvals
+          # under it. Excluding those bodies by name cannot be finished — it
+          # shipped missing one ("LGTM, looks ready to ship. ✅"), and any
+          # producer rewording fails in the dangerous direction: a foreign
+          # LGTM buys silence for a genuinely dead run. So the filter matches
+          # positively on what only this pipeline's composed reviews carry:
+          # every composed body ends in the "via Qwen Code /review"
+          # attribution footer or carries the invisible qwen-review-ledger
+          # marker — at least one rides every body, a zero-findings APPROVE
+          # included — and no foreign approval carries either. A marker that
+          # ever changes shape stops the guard firing and the comment posts:
+          # the pre-guard status quo, not a masked dead run.
+          run_created="$(gh run view "${GITHUB_RUN_ID:?}" --repo "$GITHUB_REPOSITORY" --json createdAt --jq '.createdAt' 2>/dev/null)" || run_created=""
+          posted_reviews=""
+          # Three outcomes, and the guard must not be silent about the third:
+          # a lookup that DIED degrades to the false comment this whole change
+          # removes, and an oncall reading the log could not tell it from "no
+          # review matched". Every sibling lookup in this step announces its
+          # failures; this one says so too, then posts.
+          if [ -z "$run_created" ]; then
+            echo "::warning::already-posted guard unavailable (no run creation time); posting the fallback comment"
+            echo "Already-posted guard unavailable (run creation time missing); proceeding to post." >> "$GITHUB_STEP_SUMMARY"
+          elif ! posted_reviews="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate \
+            --jq ".[] | select(.user.login == \"$bot_login\") | select(.submitted_at >= \"$run_created\") | select((.body // \"\") | contains(\"via Qwen Code /review\") or contains(\"qwen-review-ledger\")) | .id" 2>/dev/null)"; then
+            echo "::warning::already-posted guard unavailable (reviews listing failed); posting the fallback comment"
+            echo "Already-posted guard unavailable (reviews listing failed); proceeding to post." >> "$GITHUB_STEP_SUMMARY"
+          elif [ -n "$posted_reviews" ]; then
+            echo "Skipping fallback comment: a bot review of this PR was submitted after this run was created." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"
           if [ "$FAILURE_KIND" = "timeout" ]; then
             if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then
@@ -1609,26 +1923,219 @@ jobs:
           else
             body="**Qwen Code review did not complete successfully.** ${FAILURE_REASON} A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
           fi
+          # Blank line after the marker or the prose renders as raw source —
+          # same HTML-block quirk as the ack marker. The fallback-comment job
+          # dedupes on this marker plus this run's URL.
+          body="$(printf '%s\n\n%s' "$FALLBACK_MARKER" "$body")"
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --body "$body"
+
+      # Preserve the review's machine record for later consumers — an agent
+      # collecting deferred Suggestions, a maintainer auditing the run.
+      # GUARANTEE BOUNDARY, stated so the artifact is read correctly:
+      #  - CLOSED — anything contributor-COMMITTED: the upload never reads
+      #    the review worktree (.qwen/tmp/review-pr-<N>/ is a checkout of
+      #    the PR head), so a force-committed file or symlink in the PR
+      #    tree cannot reach the artifact without the review agent's
+      #    cooperation, and `-type f` (no -L) keeps even agent-planted
+      #    symlinks in the trusted trees out.
+      #  - CLOSED — runner command files and PATH shims: the agent's
+      #    $GITHUB_PATH/$GITHUB_ENV point at invocation-scoped decoys
+      #    ('Run review'), and this step runs an absolute shell with a
+      #    pinned PATH, so prepended shims — including any dropped into
+      #    the agent-writable capture-tools dir — resolve nothing here.
+      #  - CLOSED — foreign-uid and cross-job residue at a fixed path:
+      #    staging is a fresh mktemp dir per run (unpredictable name,
+      #    minted 0700 for the runner user), and the upload reads only the
+      #    path this step outputs — residue an earlier job leaves in
+      #    RUNNER_TEMP (including root-owned residue this job cannot
+      #    remove, documented at the network-proxy wiring in 'Run review')
+      #    cannot squat the staging path and is never read.
+      #  - ACCEPTED, not a hole to keep patching: a prompt-injected agent
+      #    with arbitrary code execution already holds the job's PAT,
+      #    network and unsandboxed shell. REGULAR files it plants in
+      #    .qwen/reviews/ or .qwen/tmp/ during the review match these
+      #    patterns and ride the upload with no provenance distinction,
+      #    and a same-uid survivor of the review step that discovers the
+      #    fresh staging dir can still plant files into it before the
+      #    upload reads it (the fixed-path relink variant is gone — there
+      #    is no fixed path to relink). Read the artifact as the run's
+      #    BEST-EFFORT record, never an integrity-attested one: the
+      #    authoritative channel is the posted review body, and the
+      #    reliable re-check of any finding is a fresh review run, not
+      #    this file set.
+      - name: 'Stage review artifacts'
+        id: 'stage'
+        if: 'always()'
+        continue-on-error: true
+        shell: '/bin/bash --noprofile --norc -eo pipefail {0}'
+        env:
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+        run: |-
+          set -uo pipefail
+          # Resolve nothing through the job PATH: shims prepended by
+          # earlier steps or dropped into agent-writable dirs stay inert
+          # (the interpreter itself is pinned absolutely on the step).
+          PATH=/usr/bin:/bin
+          # The value rides find's -name patterns — pin it to digits so a
+          # dispatch-supplied string can never widen the glob.
+          case "${PR_NUMBER}" in
+            ''|*[!0-9]*)
+              echo "no valid PR number resolved; nothing to stage"
+              exit 0
+              ;;
+          esac
+          # Stage into a FRESH per-run dir, never a fixed path: RUNNER_TEMP
+          # survives across jobs on this pool, and the triage workflow's
+          # containerised jobs write it as root through the bind mount
+          # (measured hazard, see the network-proxy wiring in 'Run review')
+          # — a fixed staging path could arrive pre-occupied by foreign-uid
+          # residue this job cannot remove, and the unconditional upload
+          # would then publish that residue as this run's record. A mktemp
+          # name is unpredictable and minted 0700 for the runner user, so
+          # no earlier job can have planted it; the path rides to the
+          # upload step via GITHUB_OUTPUT, never a constant residue can
+          # squat. This step's exit-0 paths that skip the publish below
+          # simply leave the output unset, and the upload reads an empty
+          # path and uploads nothing (continue-on-error).
+          STAGE="$(mktemp -d "${{ runner.temp }}/qwen-review-upload.XXXXXX")"
+          echo "dir=${STAGE}" >> "${GITHUB_OUTPUT}"
+          find .qwen/reviews -maxdepth 1 -type f \
+            \( -name "*-pr-${PR_NUMBER}.*" -o -name "*-pr-${PR_NUMBER}-cost-ledger.json" \) \
+            -exec cp -p {} "$STAGE/" \; 2>/dev/null || true
+          find .qwen/tmp -maxdepth 1 -type f \
+            -name "qwen-review-pr-${PR_NUMBER}-*" \
+            -exec cp -p {} "$STAGE/" \; 2>/dev/null || true
+          # NO listing of the staged files: filenames are agent-writable
+          # (a prompt-injected agent can plant one containing newlines and
+          # `::error::`-shaped text), step stdout is parsed for workflow
+          # commands, and the agent's own output is stop-commands-wrapped
+          # upstream precisely so this channel stays closed ('Run review').
+          # The artifact itself is the record of what staged.
+
+      # The upload reads only the staged directory the stage step minted
+      # and output — never a fixed or contributor-writable path. An unset
+      # dir (guard exit, stage step crashed) interpolates empty, the
+      # action errors, and continue-on-error uploads nothing: the correct
+      # failure direction. The name carries run_attempt: a re-run keeps the
+      # run_id, and without the suffix the second attempt 409s on the
+      # first attempt's artifact while continue-on-error leaves the STALE
+      # one as the only record (qwen-triage.yml names its re-runnable
+      # uploads the same way). Runs BEFORE 'Clean review worktrees'; never
+      # fails the job — a run that wrote nothing uploads nothing, and an
+      # upload error must not flip an already-posted review red.
+      - name: 'Upload review artifacts'
+        if: 'always()'
+        continue-on-error: true
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'qwen-review-pr-${{ steps.context.outputs.pr_number }}-attempt-${{ github.run_attempt }}'
+          path: '${{ steps.stage.outputs.dir }}'
+          retention-days: 90
+          if-no-files-found: 'ignore'
 
       # A cancelled or timed-out review may not reach the CLI's process cleanup.
       # Remove both the worktree directories and Git's worktree registrations so
       # the next job on this reused runner can delete qwen-review/* branches.
       # The sweep deletes all review artifacts, not just this PR's: safe because
       # a runner executes one job at a time.
+      #
+      # The removal owns its own permission repair. A containerised job on this
+      # shared pool can leave a review worktree owned by another uid and
+      # read-only (measured, run 32577821716 / PR #9718: a leftover
+      # scratch-verify tree held files this job's user could not unlink, and
+      # the NEXT review's checkout died on them with EACCES — both the
+      # pre-checkout ownership restore and the checkout's own wipe degraded
+      # because the runner had no passwordless sudo). A removal that gives up
+      # on the first EACCES re-poisons the next job, so a failed rm gets a
+      # repair ladder instead: chmod what this user owns, then passwordless
+      # sudo chown/chmod where the pool member has it, each followed by a
+      # retry. Members without sudo still degrade to a named warning —
+      # nothing unprivileged can remove a foreign-owned tree — but the heal
+      # chain must never fail the job.
       - name: 'Clean review worktrees'
         if: 'always()'
         timeout-minutes: 5
         run: |-
           set -uo pipefail
+          # Sweep the per-run staging dirs 'Stage review artifacts' mints
+          # under RUNNER_TEMP, which survives across jobs on this pool: the
+          # upload has already run, and a runner executes one job at a time,
+          # so nothing else owns a live staging dir. Runs BEFORE the .git
+          # check so a job that dies before checkout still sweeps. The
+          # legacy fixed path rides along; foreign-uid residue that refuses
+          # removal stays — it can never be published, because the upload
+          # reads only the per-run mktemp path this job output.
+          rm -rf "${RUNNER_TEMP:-/tmp}"/qwen-review-upload.* \
+            "${RUNNER_TEMP:-/tmp}"/qwen-review-upload 2>/dev/null || true
           if [ ! -e .git ]; then
             echo "no Git checkout; nothing to clean"
             exit 0
           fi
 
           GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+
+          # The repair ladder for one leftover tree (see the step comment).
+          # A path outside the workspace or resolving through symlinks is
+          # refused rather than repaired: the sudo leg escalates to root,
+          # and a planted link would aim a chown/chmod -R outside the
+          # workspace. Warning echoes strip CR and LF from every path
+          # expansion first: leftover names are untrusted glob entries, and a
+          # fresh line on the runner's stdout — which it splits on bare CR as
+          # well as LF — would parse as a workflow command.
+          remove_review_tree() {
+            local abs="$1"
+            case "$abs" in
+              /*) : ;;
+              *) abs="$GITHUB_WORKSPACE/$abs" ;;
+            esac
+            [ -e "$abs" ] || [ -L "$abs" ] || return 0
+            rm -rf "$abs" 2>/dev/null && return 0
+            # Refuse a path that resolves through symlinks, but compare
+            # against the workspace's OWN resolved path: an ancestor the
+            # workspace itself sits under (a macOS /tmp -> /private/tmp
+            # local run) is legitimate and must not read as a redirect —
+            # only a symlink planted BELOW the workspace does. The refusal
+            # names the branch that fired so the on-call knows which case
+            # hit.
+            local ws_real rel abs_real reason=''
+            ws_real="$(realpath -- "$GITHUB_WORKSPACE" 2>/dev/null)" ||
+              ws_real="$GITHUB_WORKSPACE"
+            case "$abs" in
+              "$GITHUB_WORKSPACE"/*) rel="${abs#"$GITHUB_WORKSPACE/"}" ;;
+              *) rel='' ;;
+            esac
+            abs_real="$(realpath -- "$abs" 2>/dev/null)" || abs_real=''
+            if [ -z "$rel" ]; then
+              reason='outside the workspace'
+            elif [ -L "$abs" ]; then
+              reason='path is a symlink'
+            elif [ -z "$abs_real" ]; then
+              reason='path could not be resolved'
+            elif [ "$abs_real" != "$ws_real/$rel" ]; then
+              reason='resolves through symlinks'
+            fi
+            if [ -n "$reason" ]; then
+              echo "::warning::refusing to repair review worktree path (${reason}): ${abs//[$'\r\n']/ }"
+              return 0
+            fi
+            chmod -R u+rwX "$abs" 2>/dev/null || true
+            rm -rf "$abs" 2>/dev/null && return 0
+            local sudo_probe='password-gated'
+            command -v sudo >/dev/null 2>&1 || sudo_probe='absent'
+            if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+              sudo_probe='ok'
+              sudo -n chown -R "$(id -u):$(id -g)" "$abs" 2>/dev/null || true
+              sudo -n chmod -R u+rwX "$abs" 2>/dev/null || true
+            fi
+            rm -rf "$abs" 2>/dev/null && return 0
+            echo "::warning::could not remove review worktree: ${abs//[$'\r\n']/ } (permission repair failed; sudo: $sudo_probe; owner: $(ls -ld "$abs" 2>/dev/null | awk 'NR==1 {print $3}'))"
+            # return 0 even when the warning echo fails: the heal chain must
+            # never fail the job.
+            return 0
+          }
+
           "${GIT_SAFE[@]}" worktree prune -v || true
           "${GIT_SAFE[@]}" worktree list --porcelain \
             | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
@@ -1637,22 +2144,34 @@ jobs:
                 # Registered paths come from leftover git metadata and are
                 # untrusted: the awk filter above matched by substring, so reject
                 # `..` traversal and re-anchor to the review prefix before the
-                # destructive remove.
+                # destructive remove. The skip warnings strip CR/LF from the
+                # path for the same reason the ladder's warnings do (above).
                 case "$worktree" in
                   */../*|../*|*/..)
-                    echo "::warning::skipping suspicious review worktree path: $worktree"
+                    echo "::warning::skipping suspicious review worktree path: ${worktree//[$'\r\n']/ }"
                     continue
                     ;;
                   "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
                   *)
-                    echo "::warning::skipping unexpected review worktree path: $worktree"
+                    echo "::warning::skipping unexpected review worktree path: ${worktree//[$'\r\n']/ }"
                     continue
                     ;;
                 esac
+                # `git worktree remove` unlinks entries the same way rm does,
+                # so a foreign-owned entry defeats it too; the repair ladder
+                # retries it, and whatever git still leaves behind goes through
+                # the same ladder below (registrations are pruned afterwards).
                 "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
-                  echo "::warning::could not remove review worktree: $worktree"
+                  remove_review_tree "$worktree"
               done || true
           rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          # Survivors of the glob are exactly the permission-poisoned trees;
+          # run each through the repair ladder individually so one poisoned
+          # entry cannot mask its siblings.
+          for leftover in .qwen/tmp/review-pr-*; do
+            [ -e "$leftover" ] || [ -L "$leftover" ] || continue
+            remove_review_tree "$leftover"
+          done
           "${GIT_SAFE[@]}" worktree prune -v || true
           "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
             | while read -r review_ref; do
@@ -1662,6 +2181,230 @@ jobs:
               done || true
           rm -f .qwen/tmp/qwen-review-lease-pr-*.json 2>/dev/null || true
           echo "review worktrees cleaned"
+
+  # A review job that dies abnormally — runner crash, host loss, or the
+  # FinalizeJob EACCES from the PR #8894 incident — never reaches its in-job
+  # 'Post fallback comment on failure' step, leaving the PR with no review and
+  # no explanation. This dependent job runs on an ephemeral hosted runner, so
+  # it survives whatever killed the review job, and posts the retry guidance
+  # itself. Every upstream job whose failure marks review-pr 'skipped' opens
+  # the gate — the incident's trigger can kill the chain's earlier
+  # self-hosted jobs first (authorize / review-config), and a transient API
+  # failure can kill the hosted ones (precheck-pr / delay-automatic-review) —
+  # a skipped review is just as unexplained as a dead one. It skips when a
+  # fallback comment for this run already exists — matched by the
+  # qwen-review-fallback marker plus this run's URL, since the ack comment
+  # also links the run and must not suppress this one; the same check dedupes
+  # re-runs, which keep the same run id. A review-pr that dies to its own
+  # job-level timeout is auto-CANCELLED by GitHub — result 'cancelled' and
+  # failure() false — which opens neither a failure-only gate nor the in-job
+  # step, so the gate admits 'cancelled' — but only when the upstream chain
+  # finished. `always()` keeps this job running through a RUN-level cancel
+  # (it does not die with the run), so a concurrency supersede used to post
+  # a false "did not complete" while the surviving run was still reviewing:
+  # on PR #9131 a same-head pull_request_target pair started 1s apart, the
+  # newer run cancelled the older inside authorize, and the older run's gate
+  # saw review-pr 'cancelled' (run 32558544379) — same-head, so the in-step
+  # head-moved guard could not catch it. The two cancels are separable in
+  # `needs`: a job-level timeout cancels review-pr ALONE — authorize and
+  # delay-automatic-review completed long before — while a run-level cancel
+  # sweeps the whole chain, so 'cancelled' opens the gate only when neither
+  # upstream job was itself cancelled. A run-level cancel landing AFTER the
+  # chain finished (mid-review) still opens the gate: the push-supersede
+  # flavor is then suppressed by the in-step head-moved guard, the close
+  # flavor (a `closed`-action run joining the PR-scoped group hours in, the
+  # head unchanged) by the in-step PR-state check, and a same-head twin
+  # cannot land that late — its cancel fires at run creation, seconds in.
+  # A manual run-cancel during the delay window goes
+  # silent under this rule (the person who cancelled does not need retry
+  # guidance); a cancel landing mid-review still posts, but with the
+  # cancellation body, not the failure one — the step branches on
+  # REVIEW_PR_RESULT. For a cancel nothing failed and nothing retries
+  # automatically, so the failure body's claims are false and read as a
+  # pipeline outage to the PR author (issue #10109: run 32875478404 was
+  # run-cancelled two minutes into the review, no successor run existed,
+  # and the full "pipeline failed" comment posted anyway). The cancelled
+  # case cannot simply go silent: the job-level-timeout flavor — the very
+  # reason 'cancelled' is admitted here — reaches this job as the same
+  # result, so one accurate body covers both flavors. The PR number comes
+  # from the event payload, not the dead job's outputs, which do not
+  # survive a crash.
+  fallback-comment:
+    needs:
+      [
+        'precheck-pr',
+        'review-config',
+        'authorize',
+        'delay-automatic-review',
+        'review-pr',
+      ]
+    if: |-
+      always() &&
+      (needs.review-pr.result == 'failure' ||
+       (needs.review-pr.result == 'cancelled' &&
+        needs.authorize.result != 'cancelled' &&
+        needs.delay-automatic-review.result != 'cancelled') ||
+       needs.authorize.result == 'failure' ||
+       needs.review-config.result == 'failure' ||
+       needs.delay-automatic-review.result == 'failure' ||
+       needs.precheck-pr.result == 'failure') &&
+      github.event.inputs.command != 'resolve' &&
+      !(github.event_name == 'issue_comment' &&
+       startsWith(github.event.comment.body, '@qwen-code /resolve')) &&
+      github.repository == 'QwenLM/qwen-code' &&
+      (github.event_name != 'workflow_dispatch' ||
+       github.event.inputs.review_mode == 'comment')
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      pull-requests: 'write'
+    steps:
+      - name: 'Post fallback comment'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}'
+          REVIEW_PR_RESULT: '${{ needs.review-pr.result }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -uo pipefail
+          if [ -z "$PR_NUMBER" ]; then
+            echo "Could not determine the PR number; skipping fallback comment." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # A push landing mid-review leaves this comment pointing at a dead
+          # run while a fresh review of the new head already queues (per-run
+          # concurrency groups are not cancelled by pushes). The run's head
+          # is comparable only on pull_request_target events — comment and
+          # review runs report main's tip as headSha — so guard only there,
+          # and when the comparison is unavailable or fails, posting wins
+          # over silence.
+          if [ "${GITHUB_EVENT_NAME:-}" = "pull_request_target" ]; then
+            run_head="$(gh run view "${GITHUB_RUN_ID:?}" --repo "$GITHUB_REPOSITORY" --json headSha --jq '.headSha' 2>/dev/null)" || run_head=""
+            current_head="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq '.headRefOid' 2>/dev/null)" || current_head=""
+            if [ -n "$run_head" ] && [ -n "$current_head" ] && [ "$run_head" != "$current_head" ]; then
+              echo "Skipping fallback comment: PR #${PR_NUMBER} moved from ${run_head} to ${current_head} since this run started." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
+          # Dedup lookup with bounded retry: a FAILED lookup is never treated
+          # as an EMPTY result — posting on a failed listing is how a
+          # transient 5xx mints a permanent duplicate (same norm as
+          # upsert-bot-comment.sh). The author scope resolves the
+          # authenticated login dynamically so a participant posting the
+          # marker can never capture the lookup, and the filter cannot drift
+          # from the account CI_BOT_PAT posts as.
+          bot_login=""
+          fallback_bodies=""
+          for _attempt in 1 2 3; do
+            if bot_login="$(gh api user --jq '.login')" \
+              && [ -n "$bot_login" ] \
+              && fallback_bodies="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json comments \
+                --jq ".comments[] | select(.author.login == \"$bot_login\") | select(.body | contains(\"$FALLBACK_MARKER\")) | .body")"; then
+              break
+            fi
+            bot_login=""
+            fallback_bodies=""
+            sleep 10
+          done
+          if [ -z "$bot_login" ]; then
+            echo "::error::fallback comment dedup lookup failed after retries; refusing to post on a failed listing"
+            echo "Fallback comment lookup failed after retries; skipping to avoid a duplicate." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          case "$fallback_bodies" in
+            *"actions/runs/${GITHUB_RUN_ID})"*)
+              echo "A fallback comment for this run already exists; skipping." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+              ;;
+          esac
+          pr_state="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')" || {
+            echo "::error::could not verify PR #${PR_NUMBER} state; refusing to post on a failed lookup"
+            echo "Could not verify PR #${PR_NUMBER} (API error); failing instead of guessing." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          if [ "$pr_state" != "OPEN" ]; then
+            echo "Skipping fallback comment: PR #${PR_NUMBER} is ${pr_state}." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # A run that DID post its review must not be announced as one that
+          # could not. The review job can fail AFTER the post — the CLI exiting
+          # silently, a cleanup step dying — and this body's claim ("failed
+          # before a review could be posted"), with its retry instruction, then
+          # contradicts the review sitting right above it. Measured on PR
+          # #9342: the review posted at 11:56:34Z, the job failed at 12:00:53Z,
+          # and this comment landed at 12:01:00Z asking for a fresh ~3-hour
+          # review; the autofix takeover loop reads the same feed a human does.
+          #
+          # What a match proves, exactly: a bot review of this PR was
+          # submitted while this run was alive. It is deliberately NOT keyed on
+          # the reviewed head. Two revisions of this guard were, and the head
+          # is not a stable attribute of a run: a push moves the PR's head
+          # between the post and this step, and a re-run recomputes the
+          # reviewed head from a later attempt — in both, THIS run's own review
+          # stops matching and the contradictory comment ships. The window is
+          # anchored on `createdAt`, not `startedAt`, against the same class of
+          # drift: re-running a failed job keeps the run id (the dedup above
+          # relies on that) while run-level `startedAt` moves to the
+          # re-executed attempt — measured on runs 32219268680 (created
+          # 05:23:57Z, startedAt 05:51:26Z) and 32218596441 (05:13:04Z →
+          # 05:22:05Z).
+          #
+          # Under this workflow's per-run concurrency an overlapping run's
+          # review can also fall inside the window, and then this run's failure
+          # goes unannounced. Accepted: that silence coincides with a bot
+          # review of this PR a reader can see, which is exactly the state that
+          # makes this comment's claim false. What the bot-author and
+          # creation-time clauses rule out is silence with NO review at all.
+          #
+          # The account is not this pipeline's alone: finalize-release.yml,
+          # qwen-triage-finalize.yml, and the triage skill all post approvals
+          # under it. Excluding those bodies by name cannot be finished — it
+          # shipped missing one ("LGTM, looks ready to ship. ✅"), and any
+          # producer rewording fails in the dangerous direction: a foreign
+          # LGTM buys silence for a genuinely dead run. So the filter matches
+          # positively on what only this pipeline's composed reviews carry:
+          # every composed body ends in the "via Qwen Code /review"
+          # attribution footer or carries the invisible qwen-review-ledger
+          # marker — at least one rides every body, a zero-findings APPROVE
+          # included — and no foreign approval carries either. A marker that
+          # ever changes shape stops the guard firing and the comment posts:
+          # the pre-guard status quo, not a masked dead run.
+          run_created="$(gh run view "${GITHUB_RUN_ID:?}" --repo "$GITHUB_REPOSITORY" --json createdAt --jq '.createdAt' 2>/dev/null)" || run_created=""
+          posted_reviews=""
+          # Three outcomes, and the guard must not be silent about the third:
+          # a lookup that DIED degrades to the false comment this whole change
+          # removes, and an oncall reading the log could not tell it from "no
+          # review matched". Every sibling lookup in this step announces its
+          # failures; this one says so too, then posts.
+          if [ -z "$run_created" ]; then
+            echo "::warning::already-posted guard unavailable (no run creation time); posting the fallback comment"
+            echo "Already-posted guard unavailable (run creation time missing); proceeding to post." >> "$GITHUB_STEP_SUMMARY"
+          elif ! posted_reviews="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate \
+            --jq ".[] | select(.user.login == \"$bot_login\") | select(.submitted_at >= \"$run_created\") | select((.body // \"\") | contains(\"via Qwen Code /review\") or contains(\"qwen-review-ledger\")) | .id" 2>/dev/null)"; then
+            echo "::warning::already-posted guard unavailable (reviews listing failed); posting the fallback comment"
+            echo "Already-posted guard unavailable (reviews listing failed); proceeding to post." >> "$GITHUB_STEP_SUMMARY"
+          elif [ -n "$posted_reviews" ]; then
+            echo "Skipping fallback comment: a bot review of this PR was submitted after this run was created." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # A cancelled review-pr reaches this job through the gate's
+          # compound clause with two indistinguishable-in-`needs` flavors:
+          # its own job-level timeout (auto-CANCELLED by GitHub), and a
+          # run/job cancel landing after the upstream chain finished. For
+          # neither is the failure body true — nothing failed, nothing is
+          # retried automatically (issue #10109) — so the cancelled case
+          # gets one body accurate for both flavors. It keeps the
+          # `[workflow logs](RUN_URL)` markdown link the cross-job dedup
+          # anchors on, and the retry instruction the timeout flavor needs.
+          if [ "$REVIEW_PR_RESULT" = "cancelled" ]; then
+            body="**Qwen Code review was cancelled before a review could be posted.** Nothing failed and nothing is retried automatically: the run was cancelled — by an operator, an upstream event, or the job exceeding its execution time limit. If you still want a review of this PR, request one with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
+          else
+            body="**Qwen Code review did not complete successfully.** The review pipeline failed before a review could be posted. A transient error is retried automatically; if you are seeing this, retry with \`@qwen-code /review\`. See [workflow logs](${RUN_URL})."
+          fi
+          body="$(printf '%s\n\n%s' "$FALLBACK_MARKER" "$body")"
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$body"
 
   resolve-pr:
     needs: ['authorize']
@@ -1682,12 +2425,24 @@ jobs:
           startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', fromJSON('"\n"'))) ||
           startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', fromJSON('"\r"')))))
       )
-    # Pinned to an ephemeral hosted runner. The conflict-resolution agent step
-    # runs with `sandbox: true`, which on Linux needs docker or podman to launch
-    # the sandbox; the self-hosted ECS pool ships no container runtime, so routing
-    # this job there fails the agent before it starts (exit 44, "failed to
-    # determine command for sandbox"). Hosted runners ship docker and are
-    # ephemeral, which suits the sandboxed conflict-resolution job.
+    # Pinned to an ephemeral hosted runner, for the ephemerality: this job
+    # merges the base branch and pushes to the PR's head, and a fresh runner is
+    # the cheapest way to be sure it carries nothing from an earlier attempt.
+    #
+    # It is NOT pinned for want of a container runtime. That was the recorded
+    # reason and it is not true: qwen-autofix.yml's `review-address` runs with
+    # `sandbox: "docker"` on the `ecs-qwen` labels, gated on a `docker info`
+    # preflight that fails the job outright, and it passes there (measured on
+    # `ecs-qwen-runner-hk-*` and `ecs-qwen-runner-sg-*`; qwen-triage's container
+    # jobs prove the same pool independently). The runtime spelling is not what
+    # decides it either: `sandbox: true` probes docker first (then podman) with
+    # the same probe as `sandbox: "docker"`, so on the pool's docker-only
+    # runners both spellings resolve when the daemon answers and both exit 44
+    # when it does not — the only divergence (docker down, podman up) favours
+    # `true`. The variable is daemon state, and autofix's preflight is what
+    # checks it up front, failing the job in seconds instead of at agent
+    # startup. Anything moving a sandboxed job onto the pool should copy that
+    # preflight — see #9556.
     runs-on: 'ubuntu-latest'
     timeout-minutes: 120
     # Shared with qwen-autofix.yml's review-address job — see the rationale
@@ -1905,31 +2660,40 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          # coreTools specifiers (e.g. `run_shell_command(git add)`) are advisory:
+          # The input name is `settings` — this action version has no
+          # `settings_json` input, and an unknown input is silently dropped.
+          # That is exactly what happened to this block: every /resolve run so
+          # far ignored it, and the agent ran without the turn cap, toolset
+          # allowlist, or the sandbox the runs-on comment above assumes.
+          # tools.core specifiers (e.g. `run_shell_command(git add)`) are advisory:
           # the permission manager keys on the tool name and drops the parenthesised
           # command. Real containment = sandbox + write authorization + no agent token.
-          settings_json: |-
+          settings: |-
             {
-              "maxSessionTurns": 400,
-              "coreTools": [
-                "read_file",
-                "read_many_files",
-                "glob",
-                "search_file_content",
-                "write_file",
-                "run_shell_command(cat)",
-                "run_shell_command(git add)",
-                "run_shell_command(git checkout)",
-                "run_shell_command(git commit)",
-                "run_shell_command(git diff)",
-                "run_shell_command(git log)",
-                "run_shell_command(git merge)",
-                "run_shell_command(git status)",
-                "run_shell_command(ls)",
-                "run_shell_command(mkdir)",
-                "run_shell_command(pwd)"
-              ],
-              "sandbox": true
+              "model": {
+                "maxSessionTurns": 400
+              },
+              "tools": {
+                "core": [
+                  "read_file",
+                  "read_many_files",
+                  "glob",
+                  "search_file_content",
+                  "write_file",
+                  "run_shell_command(cat)",
+                  "run_shell_command(git add)",
+                  "run_shell_command(git checkout)",
+                  "run_shell_command(git commit)",
+                  "run_shell_command(git diff)",
+                  "run_shell_command(git log)",
+                  "run_shell_command(git merge)",
+                  "run_shell_command(git status)",
+                  "run_shell_command(ls)",
+                  "run_shell_command(mkdir)",
+                  "run_shell_command(pwd)"
+                ],
+                "sandbox": true
+              }
             }
           prompt: |-
             ## Role

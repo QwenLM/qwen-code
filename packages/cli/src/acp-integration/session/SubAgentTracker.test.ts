@@ -605,6 +605,62 @@ describe('SubAgentTracker', () => {
       });
     });
 
+    it('hides project persistence for a standalone nested permission', async () => {
+      requestPermissionSpy.mockResolvedValue({
+        outcome: {
+          outcome: 'selected',
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+        },
+      });
+      tracker = new SubAgentTracker(
+        mockContext,
+        mockClient,
+        'parent-call-123',
+        'test-subagent',
+        undefined,
+        (params, signal) => requestPermissionSpy(params, signal),
+        {
+          allowProjectPersistence: false,
+          allowUserPersistence: true,
+        },
+      );
+      tracker.setup(eventEmitter, abortController.signal);
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+
+      eventEmitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        createApprovalEvent({
+          name: 'shell',
+          callId: 'call-standalone-shell',
+          confirmationDetails: {
+            type: 'exec',
+            title: 'Confirm shell',
+            command: 'git status',
+            rootCommand: 'git',
+            permissionRules: ['Bash(git status)'],
+          } as AgentApprovalRequestEvent['confirmationDetails'],
+          respond: respondSpy,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      });
+      const request = requestPermissionSpy.mock.calls[0]?.[0] as {
+        options: Array<{ optionId: string }>;
+      };
+      expect(request.options.map((option) => option.optionId)).not.toContain(
+        ToolConfirmationOutcome.ProceedAlwaysProject,
+      );
+      expect(request.options.map((option) => option.optionId)).toContain(
+        ToolConfirmationOutcome.ProceedAlwaysUser,
+      );
+      expect(respondSpy).not.toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedAlwaysProject,
+        expect.anything(),
+      );
+    });
+
     it('notifies when nested ask_user_question is cancelled', async () => {
       requestPermissionSpy.mockResolvedValue({
         outcome: { outcome: 'cancelled' },

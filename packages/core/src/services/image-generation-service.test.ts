@@ -145,6 +145,132 @@ describe('generateImage', () => {
     });
   });
 
+  it('uses the MiniMax image generation schema for regional base URLs', async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            base_resp: { request_id: 'request-3', status_code: 0 },
+            data: { image_urls: ['https://cdn.example.com/generated/mm.png'] },
+            metadata: { success_count: 1, failed_count: 0 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(PNG_BYTES, {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        }),
+      );
+
+    const result = await generateImage({
+      baseUrl: 'https://api.minimax.io/v1',
+      apiKey: 'secret',
+      model: 'image-01',
+      prompt: 'A product card',
+      size: '1024*1024',
+      signal: new AbortController().signal,
+      fetchFn,
+    });
+
+    expect(result).toEqual({
+      bytes: Buffer.from(PNG_BYTES),
+      mimeType: 'image/png',
+      requestId: 'request-3',
+    });
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(
+      'https://api.minimax.io/v1/image_generation',
+    );
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toEqual({
+      model: 'image-01',
+      prompt: 'A product card',
+      n: 1,
+      prompt_optimizer: true,
+      response_format: 'url',
+      width: 1024,
+      height: 1024,
+    });
+  });
+
+  it('accepts a full MiniMax image generation endpoint', async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: { image_urls: ['https://cdn.example.com/generated/mm.png'] },
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(PNG_BYTES, { status: 200 }));
+
+    await generateImage({
+      baseUrl: 'https://api.minimaxi.com/v1/image_generation',
+      apiKey: 'secret',
+      model: 'image-01-live',
+      prompt: 'poster',
+      signal: new AbortController().signal,
+      fetchFn,
+    });
+
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(
+      'https://api.minimaxi.com/v1/image_generation',
+    );
+  });
+
+  it('decodes MiniMax base64 image responses without downloading', async () => {
+    const base64Png = Buffer.from(PNG_BYTES).toString('base64');
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          data: { image_urls: [`data:image/png;base64,${base64Png}`] },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await generateImage({
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKey: 'secret',
+      model: 'image-01',
+      prompt: 'poster',
+      signal: new AbortController().signal,
+      fetchFn,
+    });
+
+    expect(result.bytes).toEqual(Buffer.from(PNG_BYTES));
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces MiniMax application errors returned with HTTP 200', async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          base_resp: {
+            status_code: 1008,
+            status_msg: 'insufficient balance',
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(
+      generateImage({
+        baseUrl: 'https://api.minimax.io/v1',
+        apiKey: 'secret',
+        model: 'image-01',
+        prompt: 'poster',
+        signal: new AbortController().signal,
+        fetchFn,
+      }),
+    ).rejects.toThrow('Image generation failed (1008: insufficient balance).');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
   it('sends a public reference image with the MiniMax image generation schema', async () => {
     const fetchFn = vi
       .fn<typeof fetch>()
@@ -248,31 +374,6 @@ describe('generateImage', () => {
       }),
     ).rejects.toThrow(/public HTTPS URL/i);
     expect(fetchFn).not.toHaveBeenCalled();
-  });
-
-  it('surfaces MiniMax application errors returned with HTTP 200', async () => {
-    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          base_resp: {
-            status_code: 1008,
-            status_msg: 'insufficient balance',
-          },
-        }),
-        { status: 200 },
-      ),
-    );
-
-    await expect(
-      generateImage({
-        baseUrl: 'https://api.minimax.io/v1',
-        apiKey: 'secret',
-        model: 'image-01',
-        prompt: 'Portrait variation',
-        signal: new AbortController().signal,
-        fetchFn,
-      }),
-    ).rejects.toThrow('Image generation failed (1008: insufficient balance).');
   });
 
   it('pins the validated result hostname for the download connection', async () => {

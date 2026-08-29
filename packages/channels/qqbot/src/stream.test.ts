@@ -52,16 +52,23 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected handleInbound(_env: unknown): Promise<void> {
       return Promise.resolve();
     }
+    protected getResponseMessageId(_sessionId: string): string | undefined {
+      return undefined;
+    }
     protected async onResponseComplete(
       _chatId: string,
       fullText: string,
-      _sessionId: string,
+      sessionId: string,
     ): Promise<void> {
       await (
         this as unknown as {
-          sendMessage: (c: string, t: string) => Promise<void>;
+          sendResponseMessage: (
+            c: string,
+            t: string,
+            s: string,
+          ) => Promise<void>;
         }
-      ).sendMessage(_chatId, fullText);
+      ).sendResponseMessage(_chatId, fullText, sessionId);
     }
     onSessionDied(_sessionId: string): void {
       // no-op in mock; overridden by QQChannel
@@ -135,12 +142,23 @@ function onResponseChunk(
   chatId: string,
   chunk: string,
   sessionId: string,
+  messageId?: string,
 ) {
   return (
     ch as unknown as {
-      onResponseChunk: (c: string, h: string, s: string) => void;
+      onResponseChunk: (
+        c: string,
+        h: string,
+        s: string,
+        segment?: { messageId?: string },
+      ) => void;
     }
-  ).onResponseChunk(chatId, chunk, sessionId);
+  ).onResponseChunk(
+    chatId,
+    chunk,
+    sessionId,
+    messageId ? { messageId } : undefined,
+  );
 }
 
 function onResponseComplete(
@@ -332,6 +350,52 @@ describe('idle-flush timer', () => {
     vi.advanceTimersByTime(1500);
     await drain();
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps same-chat streams bound to their originating messages', async () => {
+    const ch = makeChannel();
+    const replyContexts = (
+      ch as unknown as {
+        replyContextByMessageId: Map<
+          string,
+          { chatId: string; msgId: string; timestamp: number }
+        >;
+      }
+    ).replyContextByMessageId;
+    const timestamp = Date.now();
+    replyContexts.set('msg-a', {
+      chatId: 'test-chat',
+      msgId: 'msg-a',
+      timestamp,
+    });
+    replyContexts.set('msg-b', {
+      chatId: 'test-chat',
+      msgId: 'msg-b',
+      timestamp,
+    });
+
+    onResponseChunk(ch, 'test-chat', 'a-1', 'session-a', 'msg-a');
+    onResponseChunk(ch, 'test-chat', 'b-1', 'session-b', 'msg-b');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(mockSendQQMessage.mock.calls[0][3]).toMatchObject({
+      msg_id: 'msg-a',
+      msg_seq: 1,
+    });
+    expect(mockSendQQMessage.mock.calls[1][3]).toMatchObject({
+      msg_id: 'msg-b',
+      msg_seq: 1,
+    });
+
+    onResponseChunk(ch, 'test-chat', 'a-2', 'session-a', 'msg-a');
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(mockSendQQMessage.mock.calls[2][3]).toMatchObject({
+      msg_id: 'msg-a',
+      msg_seq: 2,
+    });
   });
 });
 

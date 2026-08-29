@@ -17,6 +17,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { getTeamName, resolveActiveTeamName } from '../agents/team/identity.js';
+import { sanitizeName } from '../agents/team/teamHelpers.js';
 import { listTasks } from '../agents/team/tasks.js';
 
 export interface TaskListParams {
@@ -65,9 +66,24 @@ class TaskListInvocation extends BaseToolInvocation<
       };
     }
 
+    let ownerFilter: string | undefined;
+    if (this.params.owner !== undefined) {
+      ownerFilter = sanitizeName(this.params.owner);
+      if (!ownerFilter) {
+        const msg =
+          'Cannot filter by owner: owner must include at least one ' +
+          'letter, number, or hyphen.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+    }
+
     const tasks = await listTasks(teamName, {
       status: this.params.status,
-      owner: this.params.owner,
+      owner: ownerFilter,
       blockedBy: this.params.blockedBy,
     });
 

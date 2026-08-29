@@ -185,7 +185,6 @@ async function generateMiniMaxImage(
       },
     ];
   }
-
   let response: Response;
   try {
     response = await request.fetchFn(generationUrl, {
@@ -421,7 +420,6 @@ function normalizeReferenceImage(value: string): string {
   }
   return parsed.toString();
 }
-
 function findMiniMaxGeneratedImage(
   payload: unknown,
 ): { kind: 'url' | 'base64'; value: string } | undefined {

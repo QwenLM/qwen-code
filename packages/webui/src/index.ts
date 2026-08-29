@@ -25,6 +25,13 @@ export type {
   PlatformType,
 } from './context/PlatformContext';
 
+export {
+  ExpandControlContext,
+  useExpandControl,
+  useControlledExpanded,
+} from './context/ExpandControlContext';
+export type { ExpandControlContextValue } from './context/ExpandControlContext';
+
 // Layout components
 export { default as Container } from './components/layout/Container';
 export { default as Header } from './components/layout/Header';
