@@ -6,6 +6,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
+import styles from '../SessionPrStateIcon.module.css';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -130,6 +131,88 @@ describe('SessionDetailsTooltip', () => {
     // Non-http(s) bindings are dropped, matching the badge surface.
     expect(details?.querySelector('a[href="javascript:alert(1)"]')).toBeNull();
     expect(details?.textContent).not.toContain('#9999');
+
+    act(() => root.unmount());
+  });
+
+  it('marks pull request state with GitHub-style icons', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionDetailsTooltip
+            session={{
+              sessionId: 'session-1',
+              workspaceCwd: '/work/qwen-code',
+              clientCount: 1,
+              prs: [
+                {
+                  number: 9500,
+                  url: 'https://github.com/o/r/pull/9500',
+                  state: 'merged',
+                },
+                {
+                  number: 9501,
+                  url: 'https://github.com/o/r/pull/9501',
+                  state: 'closed',
+                },
+                {
+                  number: 9502,
+                  url: 'https://github.com/o/r/pull/9502',
+                  state: 'open',
+                },
+                { number: 9503, url: 'https://github.com/o/r/pull/9503' },
+              ],
+            }}
+            label="Fix CI"
+            time=""
+            completedUnread={false}
+          >
+            <button type="button">Fix CI</button>
+          </SessionDetailsTooltip>
+        </I18nProvider>,
+      );
+    });
+
+    await openDetails(container);
+
+    const details = document.querySelector('[role="dialog"]');
+    const byNumber = (number: number) =>
+      details?.querySelector(`a[href="https://github.com/o/r/pull/${number}"]`);
+    const rowIcon = (number: number) =>
+      byNumber(number)?.parentElement?.querySelector('svg');
+    expect(rowIcon(9500)?.classList.contains('lucide-git-merge')).toBe(true);
+    expect(rowIcon(9500)?.classList.contains(styles.sessionPrStateMerged)).toBe(
+      true,
+    );
+    expect(
+      rowIcon(9501)?.classList.contains('lucide-git-pull-request-closed'),
+    ).toBe(true);
+    expect(rowIcon(9501)?.classList.contains(styles.sessionPrStateClosed)).toBe(
+      true,
+    );
+    expect(rowIcon(9502)?.classList.contains('lucide-git-pull-request')).toBe(
+      true,
+    );
+    expect(rowIcon(9502)?.classList.contains(styles.sessionPrStateOpen)).toBe(
+      true,
+    );
+    // A state-less binding keeps the neutral icon without a state color;
+    // swapped or dropped state branches are the exact regression this pins.
+    expect(rowIcon(9503)?.classList.contains('lucide-git-pull-request')).toBe(
+      true,
+    );
+    expect(rowIcon(9503)?.className).not.toContain('sessionPrState');
+
+    // State lives in the icon; visible text stays the bare PR label, with an
+    // sr-only " · State" suffix so screen readers keep the information.
+    expect(byNumber(9500)?.textContent).toBe('Pull Request #9500 · Merged');
+    expect(byNumber(9501)?.textContent).toBe('Pull Request #9501 · Closed');
+    expect(byNumber(9502)?.textContent).toBe('Pull Request #9502');
 
     act(() => root.unmount());
   });

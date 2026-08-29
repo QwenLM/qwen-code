@@ -163,6 +163,11 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
           ATT: attemptFile,
           DUR: durationFile,
           PRM: promptFile,
+          // The step initializes PROXY_BIN before the retry loop and the
+          // agent invocation's decoy GITHUB_PATH/GITHUB_ENV wiring expands
+          // it; the extraction starts at OUTCOME='', past the init, so the
+          // harness must supply it (set -u would otherwise abort the loop).
+          PROXY_BIN: join(dir, 'proxy-bin'),
         },
       });
     } catch (e) {
@@ -2534,6 +2539,55 @@ describe('bot comment markers', () => {
     expect(ackLine).toContain('[workflow run](%s)');
     expect(ackLine).toContain('"$RUN_URL"');
   });
+
+  describe('queued ack placement', () => {
+    // One ack per PR, but it has to land under the command that asked for
+    // it. The in-place PATCH kept the count at one and left the notice at
+    // the position of the FIRST request — comment #2 of 15 on #10259 — so
+    // a requester reading from the bottom saw nothing start. Delete the
+    // stale ack(s), then post: same count, right position. Nothing keys on
+    // the comment id (autofix filters and the bypass audit match the
+    // marker), so recreating is safe.
+    const ackRun = parse(workflow).jobs['ack-review-request'].steps[0].run;
+
+    it('deletes stale acks and posts a fresh one instead of editing in place', () => {
+      expect(ackRun).not.toContain('--method PATCH');
+      expect(ackRun).toContain(
+        '--method DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${STALE_ACK_ID}"',
+      );
+      // Every stale ack, not just the last: a PATCH-era thread can carry
+      // several after a failed delete, and `last` would leave the rest.
+      expect(ackRun).not.toMatch(/\|\s*last\s*\|/);
+      // The post is unconditional — no `else` branch that skips it when a
+      // stale ack existed.
+      const postIndex = ackRun.indexOf('gh pr comment "$PR_NUMBER"');
+      expect(postIndex).toBeGreaterThan(ackRun.indexOf('--method DELETE'));
+      expect(ackRun.slice(0, postIndex)).not.toMatch(/^\s*else\s*$/m);
+    });
+
+    it('reacts 👀 to the triggering comment, best effort', () => {
+      expect(ackRun).toContain('-f content=eyes');
+      expect(ackRun).toContain(
+        'repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions',
+      );
+      expect(ackRun).toContain(
+        'repos/${GITHUB_REPOSITORY}/pulls/comments/${COMMENT_ID}/reactions',
+      );
+      // A failed reaction must not abort the ack under `set -e`.
+      expect(ackRun).toMatch(/content=eyes[^\n]*\n\s*\|\| echo/);
+      expect(
+        parse(workflow).jobs['ack-review-request'].steps[0].env.COMMENT_ID,
+      ).toBe('${{ github.event.comment.id }}');
+    });
+
+    it('tells the requester the run is not a PR check', () => {
+      // A command-triggered run executes against the base branch, so its
+      // review-pr check never shows under the PR — the ack link is the only
+      // handle, and the copy has to say so or the requester keeps looking
+      // for a yellow dot.
+      expect(ackRun).toContain('not listed under the checks of this PR');
+    });
+  });
 });
 
 describe('qwen pr review concurrency routing', () => {
@@ -3008,10 +3062,13 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(
       inJobStep.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
     ).toHaveLength(4);
-    // Same invariant for the fallback job's body: the cross-job dedup
-    // matches `actions/runs/<id>)`, anchored on the markdown link's closing
-    // paren — a body that rendered the URL differently would escape it.
-    expect(step.run).toContain('See [workflow logs](${RUN_URL}).');
+    // Same invariant for the fallback job's TWO bodies (failure and
+    // cancelled): the cross-job dedup matches `actions/runs/<id>)`, anchored
+    // on the markdown link's closing paren — a body that rendered the URL
+    // differently would escape it.
+    expect(
+      step.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
+    ).toHaveLength(2);
     expect(inJobStep.run).toContain(
       `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
     );
@@ -3023,6 +3080,16 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
         `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
       ),
     ).toBeLessThan(inJobStep.run.indexOf('gh pr comment'));
+  });
+
+  it('wires the needs result the cancelled-body branch keys on (issue #10109)', () => {
+    // The step's bash runs under `set -u`, so dropping this env wiring
+    // fails the step loudly instead of silently reverting every cancelled
+    // run to the false "pipeline failed" body.
+    expect(step.env.REVIEW_PR_RESULT).toBe('${{ needs.review-pr.result }}');
+    expect(step.run).toContain(
+      'if [ "$REVIEW_PR_RESULT" = "cancelled" ]; then',
+    );
   });
 
   it('scopes the dedup to the authenticated bot login, resolved dynamically', () => {
@@ -3281,6 +3348,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       reviews = '[]',
       runCreated = '',
       runStartedAttempt = '',
+      reviewPrResult = 'failure',
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
@@ -3408,6 +3476,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               REVIEWS_JSON: reviews,
               RUN_CREATED: runCreated,
               RUN_STARTED_ATTEMPT: runStartedAttempt,
+              REVIEW_PR_RESULT: reviewPrResult,
             },
           },
         );
@@ -3432,6 +3501,33 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.status).toBe(0);
     expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
     expect(r.posted).toContain('actions/runs/12345');
+  });
+
+  it('posts the cancellation body, not the failure one, for a cancelled review-pr', () => {
+    // Issue #10109: a cancelled review-pr reaches the gate two ways — its
+    // own job-level timeout, and a run/job cancel landing after the
+    // upstream chain finished (run 32875478404) — and for neither is
+    // "pipeline failed / retried automatically" true. Silence would regress
+    // the timeout flavor, so the cancelled case gets its own body.
+    const cancelled = runFallbackStep('default', {
+      reviewPrResult: 'cancelled',
+    });
+    expect(cancelled.status).toBe(0);
+    expect(cancelled.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    expect(cancelled.posted).toContain('cancelled');
+    // The claims the issue calls out must not ride a cancellation...
+    expect(cancelled.posted).not.toContain('did not complete successfully');
+    expect(cancelled.posted).not.toContain('The review pipeline failed');
+    expect(cancelled.posted).not.toContain(
+      'A transient error is retried automatically',
+    );
+    // ...while the `)`-anchored run URL the cross-job dedup matches and the
+    // retry instruction (the job-timeout flavor's reader needs it) stay.
+    expect(cancelled.posted).toContain('actions/runs/12345)');
+    expect(cancelled.posted).toContain('@qwen-code /review');
+    // The failure path keeps the original body.
+    const failed = runFallbackStep('default', { reviewPrResult: 'failure' });
+    expect(failed.posted).toContain('did not complete successfully');
   });
 
   it('dedupes on the marker plus this run URL', () => {

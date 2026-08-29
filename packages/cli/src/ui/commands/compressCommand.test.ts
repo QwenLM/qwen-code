@@ -7,7 +7,7 @@
 import {
   CompressionStatus,
   type ChatCompressionInfo,
-  type GeminiClient,
+  type LlmClient,
 } from '@qwen-code/qwen-code-core';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { compressCommand } from './compressCommand.js';
@@ -23,10 +23,10 @@ describe('compressCommand', () => {
     context = createMockCommandContext({
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChat: mockTryCompressChat,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -256,10 +256,10 @@ describe('compressCommand', () => {
       executionMode: 'non_interactive',
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChat: mockTryCompressChat,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -288,10 +288,10 @@ describe('compressCommand', () => {
       executionMode: 'acp',
       services: {
         config: {
-          getGeminiClient: () =>
+          getLlmClient: () =>
             ({
               tryCompressChat: mockTryCompressChat,
-            }) as unknown as GeminiClient,
+            }) as unknown as LlmClient,
         },
       },
     });
@@ -346,10 +346,10 @@ describe('compressCommand', () => {
       const ctx = createMockCommandContext({
         services: {
           config: {
-            getGeminiClient: () =>
+            getLlmClient: () =>
               ({
                 tryCompressChat: mockTryCompressChat,
-              }) as unknown as GeminiClient,
+              }) as unknown as LlmClient,
           },
         },
         invocation: {
@@ -371,10 +371,10 @@ describe('compressCommand', () => {
       const ctx = createMockCommandContext({
         services: {
           config: {
-            getGeminiClient: () =>
+            getLlmClient: () =>
               ({
                 tryCompressChat: mockTryCompressChat,
-              }) as unknown as GeminiClient,
+              }) as unknown as LlmClient,
           },
         },
         invocation: { raw: '/compress    ', name: 'compress', args: '    ' },
@@ -393,10 +393,10 @@ describe('compressCommand', () => {
       const ctx = createMockCommandContext({
         services: {
           config: {
-            getGeminiClient: () =>
+            getLlmClient: () =>
               ({
                 tryCompressChat: mockTryCompressChat,
-              }) as unknown as GeminiClient,
+              }) as unknown as LlmClient,
           },
         },
         invocation: {
@@ -416,10 +416,10 @@ describe('compressCommand', () => {
       const ctx = createMockCommandContext({
         services: {
           config: {
-            getGeminiClient: () =>
+            getLlmClient: () =>
               ({
                 tryCompressChat: mockTryCompressChat,
-              }) as unknown as GeminiClient,
+              }) as unknown as LlmClient,
           },
         },
         invocation: { raw: `/compress ${long}`, name: 'compress', args: long },
@@ -438,10 +438,10 @@ describe('compressCommand', () => {
       const ctx = createMockCommandContext({
         services: {
           config: {
-            getGeminiClient: () =>
+            getLlmClient: () =>
               ({
                 tryCompressChat: mockTryCompressChat,
-              }) as unknown as GeminiClient,
+              }) as unknown as LlmClient,
           },
         },
         invocation: {

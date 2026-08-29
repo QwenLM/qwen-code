@@ -2,6 +2,7 @@
 
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   WebShellCustomizationProvider,
@@ -15,6 +16,7 @@ import type {
   MobileComposerBackend,
   SlashMenuState,
 } from '../hooks/useComposerCore';
+import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
 
@@ -33,6 +35,30 @@ const mockComposerCoreState = vi.hoisted(() => ({
   }>,
   removeTopTag: vi.fn(),
 }));
+
+// Stand in for the branch picker so the tests can assert what the composer
+// hands it (the git status behind its action hints) without driving Radix.
+vi.mock('./BranchPickerPopover', async () => {
+  const { createElement } = await import('react');
+  return {
+    BranchPickerPopover: ({
+      children,
+      status,
+    }: {
+      children?: unknown;
+      status?: { operation?: string; unstaged?: number };
+    }) =>
+      createElement(
+        'div',
+        {
+          'data-testid': 'branch-picker',
+          'data-status-operation': status?.operation ?? undefined,
+          'data-status-unstaged': status?.unstaged ?? undefined,
+        },
+        children,
+      ),
+  };
+});
 
 // Mock useWorkspace so BranchPickerPopover can render without a real provider.
 vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
@@ -102,6 +128,13 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
 });
 
 const composerCoreState = vi.hoisted(() => ({
+  viewRef: { current: null } as { current: unknown },
+  workspaceActionsRef: { current: undefined } as {
+    current: AtMentionWorkspaceActions | undefined;
+  },
+  getText: vi.fn(() => ''),
+  setText: vi.fn(),
+  insertText: vi.fn(),
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
@@ -180,12 +213,13 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         options?.workspaceUploadBusy ?? false;
       return {
         containerRef: React.createRef<HTMLDivElement>(),
-        viewRef: { current: null },
+        viewRef: composerCoreState.viewRef,
+        workspaceActionsRef: composerCoreState.workspaceActionsRef,
         mobileComposer: composerCoreState.mobileComposer,
         focus: composerCoreState.focus,
         submitText: vi.fn(),
         clearText: vi.fn(),
-        getText: vi.fn(() => ''),
+        getText: composerCoreState.getText,
         hasInput: vi.fn(() => false),
         hasAttachments:
           mockComposerCoreState.pastedImages.length > 0 ||
@@ -222,8 +256,8 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         removeTopTag: mockComposerCoreState.removeTopTag,
         addTags: composerCoreState.addTags,
         removeInlineTags: vi.fn(),
-        insertText: vi.fn(),
-        setText: vi.fn(),
+        insertText: composerCoreState.insertText,
+        setText: composerCoreState.setText,
         submit: vi.fn(),
         clear: vi.fn(),
         retryLast: vi.fn(),
@@ -294,6 +328,10 @@ const mounted: Array<{
 
 afterEach(() => {
   composerCoreState.slashMenu = null;
+  composerCoreState.viewRef.current = null;
+  composerCoreState.getText.mockReset().mockReturnValue('');
+  composerCoreState.setText.mockReset();
+  composerCoreState.insertText.mockReset();
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
@@ -302,6 +340,7 @@ afterEach(() => {
   composerCoreState.ingestFiles.mockReset();
   composerCoreState.clearImageDragState.mockReset();
   composerCoreState.addTags.mockReset();
+  composerCoreState.workspaceActionsRef.current = undefined;
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
   voiceButtonState.onActiveChange = undefined;
@@ -327,6 +366,7 @@ interface ChatEditorRenderProps {
     size?: number;
   }>;
   gitBranch?: string;
+  gitStatus?: DaemonWorkspaceGitStatus;
   workspaceName?: string;
   workspaceTitle?: string;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
@@ -354,6 +394,7 @@ interface ChatEditorRenderProps {
   customization?: WebShellCustomization;
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
+  skills?: Array<{ name: string; description: string }>;
 }
 
 function renderChatEditorInto(
@@ -449,6 +490,372 @@ describe('ChatEditor voice toolbar integration', () => {
     expect(
       hidden.querySelector('[data-testid="live-voice-button"]'),
     ).toBeNull();
+  });
+});
+
+describe('ChatEditor add menu (+)', () => {
+  const trigger = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-add-menu-trigger"]',
+    );
+
+  it('renders at the front of the toolbar when addMenu is opted in', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu', 'approvalMode', 'voice'],
+    });
+    const button = trigger(container);
+    expect(button).not.toBeNull();
+    const leading = container.querySelector(
+      '[data-web-shell-toolbar-leading]',
+    )!;
+    expect(leading.contains(button)).toBe(true);
+    const modeButton = container.querySelector('[data-web-shell-mode-button]')!;
+    expect(
+      button!.compareDocumentPosition(modeButton) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('does not render when addMenu is not in the toolbar list', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode', 'voice'],
+    });
+    expect(trigger(container)).toBeNull();
+  });
+
+  it('stays off by default when the host passes no toolbar list', () => {
+    const container = renderChatEditor({});
+    expect(trigger(container)).toBeNull();
+  });
+
+  it('discards a pending file picker when the composer owner changes', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      sessionId: 'session-a',
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const staleInput = container.querySelector<HTMLInputElement>(
+      'input[type="file"]:not([data-web-shell-upload-input])',
+    )!;
+
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['addMenu'],
+      sessionId: 'session-b',
+    });
+    expect(staleInput.isConnected).toBe(false);
+
+    Object.defineProperty(staleInput, 'files', {
+      value: [new File(['hello'], 'note.txt', { type: 'text/plain' })],
+      configurable: true,
+    });
+    await act(async () => {
+      staleInput.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+  });
+
+  it('discards a pending file picker when file ingestion is disabled', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      customization: { fileUploadEnabled: true },
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const staleInput = container.querySelector<HTMLInputElement>(
+      'input[type="file"]:not([data-web-shell-upload-input])',
+    )!;
+
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['addMenu'],
+      customization: { fileUploadEnabled: false },
+    });
+    expect(staleInput.isConnected).toBe(false);
+    expect(composerCoreState.focus).toHaveBeenCalled();
+
+    Object.defineProperty(staleInput, 'files', {
+      value: [new File(['hello'], 'note.txt', { type: 'text/plain' })],
+      configurable: true,
+    });
+    await act(async () => {
+      staleInput.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+  });
+
+  it('closes an open add menu when the composer becomes disabled', async () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+    });
+    await openAddSubmenu(container, 'composer-add-menu-file');
+
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['addMenu'],
+      disabled: true,
+    });
+
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    expect(
+      portalRoot.querySelector('[data-testid="composer-add-menu-file"]'),
+    ).toBeNull();
+  });
+
+  it('closes an open add menu when a workspace capability disappears', async () => {
+    composerCoreState.workspaceActionsRef.current = {
+      loadExtensionsStatus: vi.fn().mockResolvedValue({
+        extensions: [
+          {
+            name: 'reviewer',
+            description: 'Reviews code',
+            isActive: true,
+          },
+        ],
+      }),
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+    });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-extensions',
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(
+      portalRoot.querySelector(
+        '[data-testid="composer-add-menu-extensions-item"]',
+      ),
+    ).not.toBeNull();
+
+    composerCoreState.workspaceActionsRef.current = undefined;
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { visibleToolbarActions: ['addMenu'] });
+
+    expect(
+      portalRoot.querySelector(
+        '[data-testid="composer-add-menu-extensions-item"]',
+      ),
+    ).toBeNull();
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  async function openAddSubmenu(container: HTMLDivElement, testId: string) {
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    await act(async () => {
+      trigger(container)!.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(`[data-testid="${testId}"]`)!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    return portalRoot;
+  }
+
+  it('routes add-menu attachments through the composer file lane', async () => {
+    const container = renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const file = new File(['hello'], 'note.txt', { type: 'text/plain' });
+    const input =
+      container.querySelector<HTMLInputElement>('input[type=file]')!;
+    Object.defineProperty(input, 'files', {
+      value: [file],
+      configurable: true,
+    });
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledWith([file]);
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('refocuses the composer when the add-menu file picker is canceled', async () => {
+    const container = renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-file',
+    );
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const input =
+      container.querySelector<HTMLInputElement>('input[type=file]')!;
+    composerCoreState.focus.mockClear();
+    await act(async () => {
+      input.dispatchEvent(new Event('cancel'));
+    });
+
+    expect(composerCoreState.ingestFiles).not.toHaveBeenCalled();
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('routes add-menu references through the inline tag lane', async () => {
+    let docLength = 0;
+    const dispatch = vi.fn();
+    composerCoreState.viewRef.current = {
+      state: {
+        doc: {
+          get length() {
+            return docLength;
+          },
+        },
+      },
+      dispatch,
+    };
+    composerCoreState.addTags.mockImplementation(() => {
+      docLength = 14;
+    });
+    composerCoreState.workspaceActionsRef.current = {
+      globWorkspace: vi.fn().mockResolvedValue({ matches: ['src/index.ts'] }),
+    };
+    const container = renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-reference-file',
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    await act(async () => {
+      portalRoot
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-reference-file-item"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    expect(composerCoreState.addTags).toHaveBeenCalledWith(
+      [expect.objectContaining({ kind: 'file', serialized: '@src/index.ts' })],
+      { placement: 'inline', position: 'end' },
+    );
+    expect(dispatch).toHaveBeenCalledWith({
+      selection: { anchor: 14 },
+      scrollIntoView: true,
+    });
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  async function selectReviewSkill(container: HTMLDivElement) {
+    const portalRoot = await openAddSubmenu(
+      container,
+      'composer-add-menu-skills',
+    );
+    const skill = portalRoot.querySelector<HTMLElement>(
+      '[data-testid="composer-add-menu-skills-item"]',
+    )!;
+    await act(async () => {
+      skill.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, button: 0 }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+  }
+
+  it('prepends a skill without replacing the desktop draft', async () => {
+    const dispatch = vi.fn();
+    const focus = vi.fn();
+    composerCoreState.viewRef.current = {
+      state: { doc: { toString: () => 'existing draft' } },
+      dispatch,
+      focus,
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      skills: [{ name: 'review', description: '' }],
+    });
+
+    await selectReviewSkill(container);
+
+    expect(dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 0, insert: '/review ' },
+      selection: { anchor: 8 },
+      scrollIntoView: true,
+    });
+    expect(focus).toHaveBeenCalled();
+  });
+
+  it('refocuses the desktop editor when the skill is already prepended', async () => {
+    const dispatch = vi.fn();
+    const focus = vi.fn();
+    composerCoreState.viewRef.current = {
+      state: { doc: { toString: () => '/review existing draft' } },
+      dispatch,
+      focus,
+    };
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      skills: [{ name: 'review', description: '' }],
+    });
+
+    await selectReviewSkill(container);
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('prepends a skill through the textarea backend on touch', async () => {
+    composerCoreState.mobileComposer = {
+      textareaRef: createRef<HTMLTextAreaElement>(),
+      value: 'existing draft',
+      onChange: vi.fn(),
+      onBlur: vi.fn(),
+      placeholder: '',
+    } satisfies MobileComposerBackend;
+    composerCoreState.getText.mockReturnValue('existing draft');
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      skills: [{ name: 'review', description: '' }],
+    });
+
+    await selectReviewSkill(container);
+
+    expect(composerCoreState.insertText).toHaveBeenCalledWith('/review ');
+    expect(composerCoreState.setText).not.toHaveBeenCalled();
+    expect(
+      container.querySelector<HTMLTextAreaElement>('textarea')!.selectionStart,
+    ).toBe(0);
   });
 });
 
@@ -718,6 +1125,25 @@ describe('ChatEditor git branch toolbar integration', () => {
         '[aria-label="Current Git branch: feature/web-shell"]',
       ),
     ).not.toBeNull();
+  });
+
+  it('hands the workspace git status to the branch picker for its action hints', () => {
+    const container = renderChatEditor({
+      gitBranch: 'feature/web-shell',
+      gitStatus: {
+        v: 2,
+        workspaceCwd: '/repo',
+        branch: 'feature/web-shell',
+        operation: 'rebase',
+        unstaged: 4,
+        computedAt: 1,
+      },
+      visibleToolbarActions: ['gitBranch'],
+    });
+
+    const picker = container.querySelector('[data-testid="branch-picker"]');
+    expect(picker?.getAttribute('data-status-operation')).toBe('rebase');
+    expect(picker?.getAttribute('data-status-unstaged')).toBe('4');
   });
 
   it('hides the git branch indicator without a branch or visible action', () => {
@@ -1120,6 +1546,33 @@ describe('ChatEditor toolbar popovers', () => {
       expect(
         observed.has(document.querySelector('[data-test-toolbar-right]')!),
       ).toBe(true);
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it('remeasures the toolbar when addMenu visibility changes', () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    let observers = 0;
+    globalThis.ResizeObserver = class ResizeObserverMock {
+      constructor(_callback: ResizeObserverCallback) {
+        observers += 1;
+      }
+
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    };
+
+    try {
+      const container = renderChatEditor({
+        visibleToolbarActions: ['approvalMode'],
+      });
+      const before = observers;
+      rerenderChatEditor(container, {
+        visibleToolbarActions: ['addMenu', 'approvalMode'],
+      });
+      expect(observers).toBeGreaterThan(before);
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }
