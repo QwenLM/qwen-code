@@ -436,6 +436,12 @@ jobs:
         run: |-
           npm run release:version "${RELEASE_VERSION}"
 
+      - name: 'Validate pnpm lockfile'
+        if: "${{ hashFiles('pnpm-lock.yaml') != '' }}"
+        run: |-
+          PNPM_PACKAGE="$(node -p "require('./package.json').packageManager")"
+          npx --yes "${PNPM_PACKAGE}" install --lockfile-only --frozen-lockfile --ignore-scripts
+
       - name: 'Commit and Conditionally Push package versions'
         id: 'push_release_branch'
         env:
@@ -446,7 +452,11 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
         run: |-
-          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json
+          LOCKFILES=(package-lock.json)
+          if [[ -f pnpm-lock.yaml ]]; then
+            LOCKFILES+=(pnpm-lock.yaml)
+          fi
+          git add package.json "${LOCKFILES[@]}" packages/*/package.json packages/channels/*/package.json integrations/*/package.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else

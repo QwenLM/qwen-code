@@ -122,9 +122,12 @@ describe('CUA release workflow', () => {
 });
 
 describe('release workflow', () => {
-  it('stages every integration package manifest after versioning', () => {
-    expect(workflow).toContain(
-      'git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json',
+  it('validates and stages the pnpm lock when the release ref has one', () => {
+    expect(workflow).toMatch(
+      /npm run release:version "\$\{RELEASE_VERSION\}"[\s\S]*?hashFiles\('pnpm-lock\.yaml'\) != ''[\s\S]*?npx --yes "\$\{PNPM_PACKAGE\}" install --lockfile-only --frozen-lockfile --ignore-scripts/,
+    );
+    expect(workflow).toMatch(
+      /LOCKFILES=\(package-lock\.json\)[\s\S]*?if \[\[ -f pnpm-lock\.yaml \]\]; then[\s\S]*?LOCKFILES\+=\(pnpm-lock\.yaml\)[\s\S]*?git add package\.json "\$\{LOCKFILES\[@\]\}"/,
     );
   });
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,7 +15,27 @@ import {
   findSupplementaryLicenseFiles,
   getFallbackLicenseText,
   normalizeRepositoryUrl,
+  runNoticeGeneration,
 } from './generate-notices.js';
+
+describe('runNoticeGeneration', () => {
+  it('skips prepare-time generation for dependency-only worktree setup', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      await runNoticeGeneration({
+        npm_lifecycle_event: 'prepare',
+        QWEN_SKIP_PREPARE: '1',
+      });
+
+      expect(log).toHaveBeenCalledWith(
+        'Skipping VS Code notice generation because QWEN_SKIP_PREPARE is set.',
+      );
+    } finally {
+      log.mockRestore();
+    }
+  });
+});
 
 describe('findLicenseFile', () => {
   let packageDir;

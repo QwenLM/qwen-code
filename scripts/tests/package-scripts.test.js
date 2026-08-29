@@ -6,6 +6,7 @@
 
 import {
   chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -16,8 +17,10 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 import { hooks as pnpmHooks } from '../../.pnpmfile.mjs';
+import { getPinnedPnpmPackage } from '../pnpm-package.js';
 
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
@@ -33,6 +36,15 @@ function readWorkflow(relativePath) {
 }
 
 describe('package scripts', () => {
+  it('accepts only an exact pnpm package-manager version', () => {
+    expect(getPinnedPnpmPackage({ packageManager: 'pnpm@11.24.0' })).toBe(
+      'pnpm@11.24.0',
+    );
+    expect(() =>
+      getPinnedPnpmPackage({ packageManager: 'pnpm@latest' }),
+    ).toThrow('packageManager must pin an exact pnpm version');
+  });
+
   it('links file-based internal packages to their live pnpm workspaces', () => {
     const packageJson = {
       dependencies: {
@@ -49,22 +61,34 @@ describe('package scripts', () => {
     });
   });
 
+  it('keeps the internal release-age exception independent of the version', () => {
+    const workspace = parse(
+      readFileSync(path.join(root, 'pnpm-workspace.yaml'), 'utf8'),
+    );
+
+    expect(workspace.minimumReleaseAgeExclude).toEqual([
+      '@qwen-code/channel-base',
+    ]);
+  });
+
   it('bootstraps worktrees with frozen pnpm dependencies and skips prepare', () => {
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-setup-'));
+    const commandDir = path.join(binDir, 'runner bin');
     const logFile = path.join(binDir, 'corepack.log');
+    mkdirSync(commandDir);
 
     try {
       if (process.platform === 'win32') {
         writeFileSync(
-          path.join(binDir, 'corepack.cmd'),
+          path.join(commandDir, 'corepack.cmd'),
           '@echo %QWEN_SKIP_PREPARE% %*>>"%WORKTREE_SETUP_LOG%"\r\n',
         );
       } else {
         writeFileSync(
-          path.join(binDir, 'corepack'),
+          path.join(commandDir, 'corepack'),
           '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $*" >> "$WORKTREE_SETUP_LOG"\n',
         );
-        chmodSync(path.join(binDir, 'corepack'), 0o755);
+        chmodSync(path.join(commandDir, 'corepack'), 0o755);
       }
 
       const result = spawnSync(
@@ -75,7 +99,7 @@ describe('package scripts', () => {
           encoding: 'utf8',
           env: {
             ...process.env,
-            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            PATH: `${commandDir}${path.delimiter}${process.env.PATH ?? ''}`,
             WORKTREE_SETUP_LOG: logFile,
           },
         },
@@ -92,20 +116,20 @@ describe('package scripts', () => {
 
   it('falls back to registry access when the pnpm store is incomplete', () => {
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-fallback-'));
-    const logFile = path.join(binDir, 'corepack.log');
+    const logFile = path.join(binDir, 'npx.log');
 
     try {
       if (process.platform === 'win32') {
         writeFileSync(
-          path.join(binDir, 'corepack.cmd'),
-          '@echo %QWEN_SKIP_PREPARE% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if "%4"=="--offline" exit /b 1\r\n',
+          path.join(binDir, 'npx.cmd'),
+          '@echo %QWEN_SKIP_PREPARE% %*>>"%WORKTREE_SETUP_LOG%"\r\n@if "%5"=="--offline" exit /b 1\r\n',
         );
       } else {
         writeFileSync(
-          path.join(binDir, 'corepack'),
-          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $*" >> "$WORKTREE_SETUP_LOG"\n[ "$4" != "--offline" ]\n',
+          path.join(binDir, 'npx'),
+          '#!/bin/sh\necho "$QWEN_SKIP_PREPARE $*" >> "$WORKTREE_SETUP_LOG"\n[ "$5" != "--offline" ]\n',
         );
-        chmodSync(path.join(binDir, 'corepack'), 0o755);
+        chmodSync(path.join(binDir, 'npx'), 0o755);
       }
 
       const result = spawnSync(
@@ -116,7 +140,7 @@ describe('package scripts', () => {
           encoding: 'utf8',
           env: {
             ...process.env,
-            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            PATH: binDir,
             WORKTREE_SETUP_LOG: logFile,
           },
         },
@@ -124,8 +148,8 @@ describe('package scripts', () => {
 
       expect(result.status).toBe(0);
       expect(readFileSync(logFile, 'utf8').trim().split('\n')).toEqual([
-        '1 pnpm install --frozen-lockfile --offline',
-        '1 pnpm install --frozen-lockfile --prefer-offline',
+        '1 --yes pnpm@11.24.0 install --frozen-lockfile --offline',
+        '1 --yes pnpm@11.24.0 install --frozen-lockfile --prefer-offline',
       ]);
     } finally {
       rmSync(binDir, { recursive: true, force: true });
@@ -184,6 +208,77 @@ describe('package scripts', () => {
         "  '@qwen-code/node-repl-mcp',\n" +
         '];',
     );
+  });
+
+  it('refreshes the pnpm lockfile after release version changes', () => {
+    const versionScript = readFileSync(
+      path.join(root, 'scripts/version.js'),
+      'utf8',
+    );
+
+    expect(versionScript).toContain(
+      "runFile(process.platform === 'win32' ? 'npx.cmd' : 'npx'",
+    );
+  });
+
+  it('smoke-tests the real worktree bootstrap on every supported host', () => {
+    const workflow = parse(
+      readWorkflow('.github/workflows/pnpm-worktree-smoke.yml'),
+    );
+    const job = workflow.jobs.install;
+
+    expect(job.strategy.matrix.os).toEqual([
+      'ubuntu-latest',
+      'macos-latest',
+      'windows-latest',
+    ]);
+    expect(
+      job.steps.find(
+        (step) => step.name === 'Install frozen pnpm worktree dependencies',
+      )?.run,
+    ).toBe('node scripts/setup-worktree.js');
+
+    expect(
+      job.steps.find(
+        (step) => step.name === 'Ensure bootstrap keeps the worktree clean',
+      )?.run,
+    ).toBe('git diff --exit-code');
+
+    const buildStep = job.steps.find(
+      (step) => step.name === 'Build with pnpm workspace dependencies',
+    );
+    expect(buildStep?.if).toBe("${{ matrix.os == 'ubuntu-latest' }}");
+    expect(buildStep?.run).toBe('npm run build');
+  });
+
+  it('runs the pnpm smoke workflow when a dependency input changes', () => {
+    const workflow = parse(
+      readWorkflow('.github/workflows/pnpm-worktree-smoke.yml'),
+    );
+    const expectedPaths = [
+      '.github/workflows/pnpm-worktree-smoke.yml',
+      '.npmrc',
+      '.pnpmfile.mjs',
+      'package.json',
+      'packages/*/package.json',
+      '!packages/desktop-shell/package.json',
+      '!packages/live-host/package.json',
+      'packages/channels/*/package.json',
+      'integrations/*/package.json',
+      'patches/**',
+      'packages/audio-capture/install.js',
+      'packages/core/scripts/postinstall.js',
+      'packages/vscode-ide-companion/scripts/generate-notices.js',
+      'pnpm-lock.yaml',
+      'pnpm-workspace.yaml',
+      'scripts/generate-git-commit-info.js',
+      'scripts/prepare.js',
+      'scripts/pnpm-package.js',
+      'scripts/setup-worktree.js',
+    ];
+
+    expect(workflow.on.pull_request.paths).toEqual(expectedPaths);
+    expect(workflow.on.push.paths).toEqual(expectedPaths);
   });
 
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {

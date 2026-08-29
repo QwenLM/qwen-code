@@ -1,0 +1,89 @@
+name: 'pnpm Worktree Smoke'
+
+on:
+  pull_request:
+    branches:
+      - 'main'
+      - 'release/**'
+    paths:
+      - '.github/workflows/pnpm-worktree-smoke.yml'
+      - '.npmrc'
+      - '.pnpmfile.mjs'
+      - 'package.json'
+      - 'packages/*/package.json'
+      - '!packages/desktop-shell/package.json'
+      - '!packages/live-host/package.json'
+      - 'packages/channels/*/package.json'
+      - 'integrations/*/package.json'
+      - 'patches/**'
+      - 'packages/audio-capture/install.js'
+      - 'packages/core/scripts/postinstall.js'
+      - 'packages/vscode-ide-companion/scripts/generate-notices.js'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'scripts/generate-git-commit-info.js'
+      - 'scripts/prepare.js'
+      - 'scripts/pnpm-package.js'
+      - 'scripts/setup-worktree.js'
+  push:
+    branches:
+      - 'main'
+    paths:
+      - '.github/workflows/pnpm-worktree-smoke.yml'
+      - '.npmrc'
+      - '.pnpmfile.mjs'
+      - 'package.json'
+      - 'packages/*/package.json'
+      - '!packages/desktop-shell/package.json'
+      - '!packages/live-host/package.json'
+      - 'packages/channels/*/package.json'
+      - 'integrations/*/package.json'
+      - 'patches/**'
+      - 'packages/audio-capture/install.js'
+      - 'packages/core/scripts/postinstall.js'
+      - 'packages/vscode-ide-companion/scripts/generate-notices.js'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'scripts/generate-git-commit-info.js'
+      - 'scripts/prepare.js'
+      - 'scripts/pnpm-package.js'
+      - 'scripts/setup-worktree.js'
+  workflow_dispatch:
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}'
+  cancel-in-progress: true
+
+permissions:
+  contents: 'read'
+
+jobs:
+  install:
+    name: 'Install (${{ matrix.os }})'
+    runs-on: '${{ matrix.os }}'
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - 'ubuntu-latest'
+          - 'macos-latest'
+          - 'windows-latest'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Set up Node.js 22.x'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+
+      - name: 'Install frozen pnpm worktree dependencies'
+        run: 'node scripts/setup-worktree.js'
+
+      - name: 'Ensure bootstrap keeps the worktree clean'
+        run: 'git diff --exit-code'
+
+      - name: 'Build with pnpm workspace dependencies'
+        if: "${{ matrix.os == 'ubuntu-latest' }}"
+        run: 'npm run build'

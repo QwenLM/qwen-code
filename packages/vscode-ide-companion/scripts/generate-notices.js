@@ -506,11 +506,26 @@ async function main() {
   }
 }
 
+export async function runNoticeGeneration(env = process.env) {
+  const skipPrepare =
+    env.npm_lifecycle_event === 'prepare' &&
+    ['1', 'true'].includes((env.QWEN_SKIP_PREPARE ?? '').toLowerCase());
+
+  if (skipPrepare) {
+    console.log(
+      'Skipping VS Code notice generation because QWEN_SKIP_PREPARE is set.',
+    );
+    return;
+  }
+
+  await main();
+}
+
 // Only run when executed directly (e.g. `npm run generate:notices`), not when
 // imported by tests.
 if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  main().catch(console.error);
+  runNoticeGeneration().catch(console.error);
 }

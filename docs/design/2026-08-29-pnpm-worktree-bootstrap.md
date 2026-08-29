@@ -35,16 +35,18 @@ manifests stay npm-compatible until CI is cut over, while pnpm gets live
 workspace links. The compatibility hook can be removed when the manifests
 adopt `workspace:` during the final cutover.
 
-New worktrees use `node scripts/setup-worktree.js`. The script invokes the
-pinned pnpm version through Corepack, freezes the lockfile, and first attempts
-an offline install from the shared local store. It retries with registry access
-only when that cache-only attempt is incomplete. This avoids waiting for pnpm
-to prefetch optional binaries for other platforms on the common warm-store
-path. The script sets `QWEN_SKIP_PREPARE=1`, keeping dependency install scripts
-enabled while skipping the repository's eager build, bundle, and Husky setup.
-Script execution does not implicitly install stale dependencies; the bootstrap
-command is the explicit installation boundary. Builds remain available on
-demand.
+New worktrees use `node scripts/setup-worktree.js`. The script prefers Corepack
+so an existing pnpm cache can stay fully offline, and falls back to npm's
+bundled `npx` on Node versions that no longer include Corepack. Both paths use
+the exact pnpm package declared by `packageManager`. The script freezes the
+lockfile and first attempts an offline install from the shared local store. It
+retries with registry access only when that cache-only attempt is incomplete.
+This avoids waiting for pnpm to prefetch optional binaries for other platforms
+on the common warm-store path. The script sets `QWEN_SKIP_PREPARE=1`, keeping
+dependency install scripts enabled while skipping repository build, bundle,
+Husky setup, and npm-layout notice generation. Script execution does not
+implicitly install stale dependencies; the bootstrap command is the explicit
+installation boundary. Builds remain available on demand.
 
 ## Migration boundary
 
@@ -53,17 +55,26 @@ workspace orchestration, and CI caches. It does not replace npm where npm is
 the product boundary, including registry publication, extension installation,
 self-update, and fixtures that intentionally exercise npm behavior.
 
-The first draft keeps `package-lock.json` and npm-based CI operational while
-pnpm compatibility is verified. The final cutover will switch CI installation
-and lockfile checks before removing the npm lockfile.
+The first stage keeps `package-lock.json` and npm-based build and release paths
+operational. Release versioning refreshes and commits both lockfiles, and a
+path-filtered workflow exercises the real frozen worktree bootstrap on Linux,
+macOS, and Windows whenever a dependency input changes. The generated pnpm
+lockfile is excluded from the repository's human-authored YAML style rules. The
+release-age exception for the internal channel base package is package-scoped,
+so a version bump does not require a configuration edit.
+
+Later stages will switch development and CI orchestration to pnpm, followed by
+release dependency installation and builds. npm remains the product boundary
+for package creation, registry publication, and clean artifact installation
+until the scripts that intentionally read `package-lock.json` are migrated.
 
 ## Verification
 
 The pnpm path must complete a frozen install and pass the full repository build
 with the same effective compiler and Node type versions as npm. Script tests
 cover the bootstrap command, its prepare-skip environment, and the transitional
-workspace rewrite. A dependency-only worktree still cannot launch the CLI
-before the packages it imports through `dist` are built; removing that existing
-build prerequisite is outside this migration. CI conversion is not complete
-until macOS, Windows, and Linux installations all use the committed pnpm
-lockfile.
+workspace rewrite. The cross-platform workflow provides the real install gate;
+release versioning performs a second frozen lockfile check before it commits or
+publishes. A dependency-only worktree still cannot launch the CLI before the
+packages it imports through `dist` are built; removing that existing build
+prerequisite is outside this migration.
