@@ -335,6 +335,147 @@ export function redactStructuredOutputArgsForRecording(
   };
 }
 
+/**
+ * Join thought parts into the single thought content part an assistant
+ * record carries: texts concatenated in order with `joinWith`, first
+ * `thoughtSignature` wins. The one implementation is shared by
+ * `processStreamResponse` (contiguous fragments of one thought, joined
+ * with `''`) and `buildRecordMessageFromHistoryParts` (one complete
+ * trimmed thought per merged attempt, joined with a blank line) so the
+ * record shape has a single owner.
+ */
+function buildThoughtContentPart(
+  parts: readonly Part[],
+  joinWith = '',
+): Part | undefined {
+  let texts = parts
+    .filter((part) => part.thought)
+    .map((part) => (typeof part.text === 'string' ? part.text : ''));
+  if (joinWith !== '') {
+    // Complete per-thought pieces: trim each so the separator is the only
+    // boundary whitespace. Fragment joins (`''`) must keep interior
+    // whitespace untouched.
+    texts = texts.map((text) => text.trim()).filter((text) => text !== '');
+  }
+  const thoughtText = texts.join(joinWith).trim();
+  if (thoughtText === '') {
+    return undefined;
+  }
+  const thoughtPart: Part = { text: thoughtText, thought: true };
+  const thoughtSignature = parts.find(
+    (part) => part.thought && part.thoughtSignature,
+  )?.thoughtSignature;
+  if (thoughtSignature) {
+    thoughtPart.thoughtSignature = thoughtSignature;
+  }
+  return thoughtPart;
+}
+
+/**
+ * Project an in-memory history turn's parts into the message shape every
+ * other `recordAssistantTurn` call site writes: optional thought part
+ * first, then one trimmed `{text}` built from the non-thought text parts,
+ * then functionCall parts passed through
+ * `redactStructuredOutputArgsForRecording`. Anything else
+ * (`inlineData`/`fileData`) is dropped — no other assistant record carries
+ * those, and persisting them would both bloat the JSONL and hand transcript
+ * consumers a message shape they never otherwise see.
+ *
+ * Exported for tests.
+ */
+export function buildRecordMessageFromHistoryParts(parts: Part[]): Part[] {
+  // A coalesced recovery turn carries one thought part per merged attempt,
+  // and keeping only the first would silently drop each continuation's
+  // thinking from the transcript. `buildThoughtContentPart` is shared with
+  // `processStreamResponse` so the merged record's thought shape cannot
+  // drift from the per-stream records around it.
+  const thoughtPart = buildThoughtContentPart(parts, '\n\n');
+  if (thoughtPart && parts.filter((part) => part.thought).length > 1) {
+    // Each signature covers only the one attempt's thought it was issued
+    // with. Keeping the first alongside text joined from every attempt
+    // persists a pair the model never produced, and `--resume` re-feeds it
+    // to a signature-verifying backend. Absence degrades gracefully; a
+    // wrong pair does not.
+    delete thoughtPart.thoughtSignature;
+  }
+  const contentText = parts
+    .filter((part) => !part.thought && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('')
+    .trim();
+  const functionCallParts = parts
+    .map((part) =>
+      part.functionCall ? redactStructuredOutputArgsForRecording(part) : null,
+    )
+    .filter(
+      (part): part is { functionCall: NonNullable<Part['functionCall']> } =>
+        part !== null,
+    );
+  return [
+    ...(thoughtPart ? [thoughtPart] : []),
+    ...(contentText ? [{ text: contentText }] : []),
+    ...functionCallParts,
+  ];
+}
+
+/**
+ * Merge token usage across every deferred recovery attempt into one usage
+ * object for the single merged transcript record. That record replaces N
+ * per-attempt records, so it must carry the whole turn's output spend:
+ * output-side counts (`candidatesTokenCount`, `thoughtsTokenCount`) are
+ * summed across attempts — and `totalTokenCount` raised by the same amount —
+ * while prompt-side counts stay the final attempt's, since every attempt
+ * re-sends the same grown prompt and summing those would multiply-count the
+ * shared context. When the final attempt reports no usage at all there is no
+ * prompt-side baseline to merge into, so the record honestly carries none
+ * rather than a fabricated output-only object.
+ *
+ * Exported for tests.
+ */
+export function mergeDeferredUsageMetadata(
+  records: ReadonlyArray<{ tokens?: GenerateContentResponseUsageMetadata }>,
+): GenerateContentResponseUsageMetadata | undefined {
+  const finalTokens = records[records.length - 1]?.tokens;
+  if (finalTokens === undefined) {
+    return undefined;
+  }
+  let extraCandidates = 0;
+  let extraThoughts = 0;
+  for (const record of records.slice(0, -1)) {
+    extraCandidates += record.tokens?.candidatesTokenCount ?? 0;
+    extraThoughts += record.tokens?.thoughtsTokenCount ?? 0;
+  }
+  const extraTotal = extraCandidates + extraThoughts;
+  if (extraTotal === 0) {
+    return finalTokens;
+  }
+  const merged: GenerateContentResponseUsageMetadata = { ...finalTokens };
+  if (extraCandidates > 0) {
+    merged.candidatesTokenCount =
+      (merged.candidatesTokenCount ?? 0) + extraCandidates;
+  }
+  if (extraThoughts > 0) {
+    merged.thoughtsTokenCount =
+      (merged.thoughtsTokenCount ?? 0) + extraThoughts;
+  }
+  merged.totalTokenCount = (merged.totalTokenCount ?? 0) + extraTotal;
+  return merged;
+}
+
+/**
+ * Last-wins `candidates[0]` finish-reason derivation, shared by the outer
+ * send loop, both recovery continuation streams, and
+ * `processStreamResponse`'s record-deferral decision. All four callers must
+ * agree on whether a stream ended in MAX_TOKENS — a divergent copy would let
+ * the record-deferral decision disagree with the recovery-entry decision and
+ * strand or duplicate a JSONL record.
+ */
+function firstCandidateFinishReason(
+  chunk: GenerateContentResponse | undefined,
+): FinishReason | undefined {
+  return chunk?.candidates?.[0]?.finishReason;
+}
+
 function shouldStopAfterHardRescue(
   shouldForceFromHard: boolean,
   hardLimit: number,
@@ -1976,6 +2117,22 @@ export class LlmChat {
     | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
     | null = null;
 
+  /**
+   * MAX_TOKENS output-recovery turns whose durable JSONL record is deferred.
+   * The recovery loop merges the split model turns back into one turn in
+   * `this.history` (via `coalesceRecoveryPairs`), but the transcript record is
+   * append-only and cannot be merged after the fact. So each MAX_TOKENS turn
+   * and its continuations stash their record args here instead of writing
+   * immediately, and the recovery block flushes exactly one merged record
+   * (derived from the coalesced history turn) once recovery settles — keeping
+   * the durable record and in-memory history in agreement the same way the
+   * transport-cut continuation path does. A list, so every degraded exit
+   * (escalation discard, functionCall skip, abandonment) stays lossless.
+   */
+  private deferredMaxTokensRecords: Array<
+    Parameters<ChatRecordingService['recordAssistantTurn']>[0]
+  > = [];
+
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
   /**
@@ -3316,6 +3473,11 @@ export class LlmChat {
               transportContinuationPrefix.length > 0
                 ? transportContinuationPrefix
                 : undefined,
+              // Defer the record if this turn truncates at MAX_TOKENS and the
+              // recovery block (below) will own it — unless the user pinned
+              // maxOutputTokens, in which case recovery is disabled and the
+              // turn records normally.
+              hasUserMaxTokensOverride ? undefined : 'on-max-tokens',
               acceptQuietToolResultCompletion,
             );
 
@@ -3339,7 +3501,7 @@ export class LlmChat {
               if (chunkParts?.some((part) => part.functionCall)) {
                 streamYieldedFunctionCall = true;
               }
-              const fr = chunk.candidates?.[0]?.finishReason;
+              const fr = firstCandidateFinishReason(chunk);
               if (fr) lastFinishReason = fr;
               yield { type: StreamEventType.CHUNK, value: chunk };
             }
@@ -3844,6 +4006,7 @@ export class LlmChat {
             requestContents: Content[];
             params: SendMessageParameters;
             rollback: () => void;
+            recordDeferral?: 'on-max-tokens' | 'always';
           },
           retryEvent: Extract<StreamEvent, { type: StreamEventType.RETRY }> = {
             type: StreamEventType.RETRY,
@@ -3867,6 +4030,7 @@ export class LlmChat {
                 requestRouteKey,
                 turnGoalContext,
                 undefined,
+                attemptState.recordDeferral,
                 acceptQuietToolResultCompletion,
               );
               for await (const chunk of stream) {
@@ -3951,6 +4115,17 @@ export class LlmChat {
             ) {
               self.history.pop();
             }
+            // The truncated turn's deferred record must follow history: the
+            // escalated attempt replaces it wholesale, so discard the stash to
+            // avoid persisting an output the live session threw away.
+            if (self.deferredMaxTokensRecords.length > 0) {
+              debugLogger.debug(
+                `[MAX_TOKENS_DEFER] Discarding ` +
+                  `${self.deferredMaxTokensRecords.length} deferred ` +
+                  `record(s) replaced by the escalated attempt`,
+              );
+            }
+            self.deferredMaxTokensRecords.length = 0;
             // Signal UI to discard partial output
             yield {
               type: StreamEventType.RETRY,
@@ -3970,12 +4145,14 @@ export class LlmChat {
               requestContents,
               params: escalatedParams,
               rollback: () => self.popPendingPartialAssistantTurn(),
+              // Still a possible MAX_TOKENS turn the recovery loop will own.
+              recordDeferral: 'on-max-tokens',
             }))) {
               if (event.type === StreamEventType.RETRY) {
                 yield event;
                 continue;
               }
-              const fr = event.value.candidates?.[0]?.finishReason;
+              const fr = firstCandidateFinishReason(event.value);
               if (fr) recoveryFinishReason = fr;
               yield event;
             }
@@ -4105,6 +4282,10 @@ export class LlmChat {
                     ),
                     params: iterationParams,
                     rollback: rollbackRecoveryAttempt,
+                    // Always defer: even the final STOP continuation must be
+                    // coalesced into the single merged record, not written
+                    // separately.
+                    recordDeferral: 'always',
                   };
                 },
                 { type: StreamEventType.RETRY, isContinuation: true },
@@ -4113,7 +4294,7 @@ export class LlmChat {
                   yield event;
                   continue;
                 }
-                const fr = event.value.candidates?.[0]?.finishReason;
+                const fr = firstCandidateFinishReason(event.value);
                 if (fr) recoveryFinishReason = fr;
                 yield event;
               }
@@ -4151,8 +4332,54 @@ export class LlmChat {
           // persist as a synthetic user turn in durable history. The user
           // never sent that message, and leaving it in history would bias
           // later turns and pollute compression / replay / export.
-          if (successfulRecoveries > 0) {
-            self.coalesceRecoveryPairs(successfulRecoveries);
+          const coalescedPairs =
+            successfulRecoveries > 0
+              ? self.coalesceRecoveryPairs(successfulRecoveries)
+              : 0;
+
+          // Flush the deferred JSONL records. When every recovery pair merged
+          // cleanly into one history turn, write a single record built from
+          // that coalesced turn — projected through
+          // `buildRecordMessageFromHistoryParts` so its message keeps the
+          // record shape every other assistant record uses (one trimmed text
+          // part, structured_output args redacted, no inlineData/fileData) —
+          // and the durable transcript `--resume` reads carries the same
+          // merged content as in-memory history. If nothing coalesced
+          // (recovery skipped on a functionCall turn) or the merge bailed
+          // defensively, fall back to the per-attempt records, which still
+          // match the un-coalesced history.
+          const deferredRecords = self.deferredMaxTokensRecords;
+          self.deferredMaxTokensRecords = [];
+          if (deferredRecords.length > 0) {
+            const mergedTurn = self.history[self.history.length - 1];
+            if (
+              successfulRecoveries > 0 &&
+              coalescedPairs === successfulRecoveries &&
+              mergedTurn?.role === 'model'
+            ) {
+              debugLogger.debug(
+                `[MAX_TOKENS_DEFER] Flushing one merged record from ` +
+                  `${deferredRecords.length} deferred attempt(s) ` +
+                  `(coalescedPairs=${coalescedPairs})`,
+              );
+              self.chatRecordingService?.recordAssistantTurn({
+                ...deferredRecords[deferredRecords.length - 1]!,
+                tokens: mergeDeferredUsageMetadata(deferredRecords),
+                message: buildRecordMessageFromHistoryParts(
+                  mergedTurn.parts ?? [],
+                ),
+              });
+            } else {
+              debugLogger.debug(
+                `[MAX_TOKENS_DEFER] Flushing ${deferredRecords.length} ` +
+                  `deferred record(s) per-attempt (coalescedPairs=` +
+                  `${coalescedPairs}, successfulRecoveries=` +
+                  `${successfulRecoveries})`,
+              );
+              for (const record of deferredRecords) {
+                self.chatRecordingService?.recordAssistantTurn(record);
+              }
+            }
           }
         }
 
@@ -4436,6 +4663,33 @@ export class LlmChat {
           }
           self.clearPendingPartialState();
         }
+        // Flush any MAX_TOKENS records still deferred when the block did not
+        // reach its own emit point — consumer abandonment mid-recovery (the
+        // generator's `.return()` runs this `finally`) or a throw escaping the
+        // recovery block (e.g. the escalated attempt exhausting invalid-stream
+        // retries). Written as-is (per attempt): lossless, and identical to the
+        // pre-fix output for these degraded paths. The normal path already
+        // drained and cleared the list before getting here.
+        if (self.deferredMaxTokensRecords.length > 0) {
+          const stranded = self.deferredMaxTokensRecords;
+          self.deferredMaxTokensRecords = [];
+          debugLogger.debug(
+            `[MAX_TOKENS_DEFER] Flushing ${stranded.length} stranded ` +
+              `deferred record(s) on abandoned/failed recovery`,
+          );
+          for (const record of stranded) {
+            try {
+              self.chatRecordingService?.recordAssistantTurn(record);
+            } catch (recordErr) {
+              debugLogger.error(
+                '[RECOVERY_FLUSH] Failed to persist deferred JSONL record: ' +
+                  (recordErr instanceof Error
+                    ? recordErr.message
+                    : String(recordErr)),
+              );
+            }
+          }
+        }
       }
     })();
   }
@@ -4462,6 +4716,7 @@ export class LlmChat {
     routeKey = this.currentRouteKey(),
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
+    recordDeferral?: 'on-max-tokens' | 'always',
     acceptQuietToolResultCompletion = false,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
@@ -4545,6 +4800,7 @@ export class LlmChat {
       routeKey,
       goalContext,
       transportContinuationPrefix,
+      recordDeferral,
       acceptQuietToolResultCompletion,
     );
   }
@@ -5090,6 +5346,13 @@ export class LlmChat {
     routeKey: string,
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
+    // When the MAX_TOKENS output-recovery flow owns this turn, defer its record
+    // instead of writing immediately so the recovery block can emit one merged
+    // record. `'on-max-tokens'` defers only if the turn finishes MAX_TOKENS
+    // (a normal STOP still records now); `'always'` defers unconditionally,
+    // used for recovery continuations whose final attempt ends STOP but must
+    // still be coalesced. See `deferredMaxTokensRecords`.
+    recordDeferral?: 'on-max-tokens' | 'always',
     acceptQuietToolResultCompletion = false,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
@@ -5110,6 +5373,15 @@ export class LlmChat {
 
     let hasToolCall = false;
     let hasFinishReason = false;
+    // Last finish reason carried by a chunk this generator actually yielded,
+    // captured at the yield boundary below — after the
+    // `isToolResultContinuation` strip, so on tool-result continuations it
+    // stays undefined and the record-deferral decision falls back to the
+    // first-wins `deferredFinishReason` the synthetic trailing chunk
+    // re-emits. Both are therefore the value the outer loop's recovery-entry
+    // decision consumes; do not capture earlier or the two decisions can
+    // disagree on suppressed or stripped finish chunks.
+    let yieldedFinishReason: FinishReason | undefined;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let pendingProtocolParts: Part[] = [];
     const takePendingProtocolParts = (): Part[] => {
@@ -5166,7 +5438,6 @@ export class LlmChat {
         hasFinishReason ||=
           chunk?.candidates?.some((candidate) => candidate.finishReason) ??
           false;
-
         if (isValidResponse(chunk)) {
           const candidate = chunk.candidates?.[0];
           let content = candidate?.content;
@@ -5353,6 +5624,17 @@ export class LlmChat {
           !protocolTextWasSuppressed ||
           !protocolTagDetector.blockingOutput
         ) {
+          // Capture the finish reason from exactly the chunks the outer send
+          // loop will consume (last-wins via `firstCandidateFinishReason`,
+          // after the tool-result-continuation strip above), so the
+          // record-deferral decision below cannot disagree with the
+          // recovery-entry decision: a finish reason on a suppressed or
+          // stripped chunk never reaches the outer loop, and one this
+          // capture misses never enters recovery.
+          const yieldedChunkFinishReason = firstCandidateFinishReason(chunk);
+          if (yieldedChunkFinishReason) {
+            yieldedFinishReason = yieldedChunkFinishReason as FinishReason;
+          }
           yield chunk;
         }
       }
@@ -5386,26 +5668,7 @@ export class LlmChat {
       }
     }
 
-    let thoughtContentPart: Part | undefined;
-    const thoughtText = allModelParts
-      .filter((part) => part.thought)
-      .map((part) => part.text)
-      .join('')
-      .trim();
-
-    if (thoughtText !== '') {
-      thoughtContentPart = {
-        text: thoughtText,
-        thought: true,
-      };
-
-      const thoughtSignature = allModelParts.filter(
-        (part) => part.thoughtSignature && part.thought,
-      )?.[0]?.thoughtSignature;
-      if (thoughtContentPart && thoughtSignature) {
-        thoughtContentPart.thoughtSignature = thoughtSignature;
-      }
-    }
+    const thoughtContentPart = buildThoughtContentPart(allModelParts);
 
     let contentParts = allModelParts.filter((part) => !part.thought);
     const consolidatedHistoryParts: Part[] = [];
@@ -5517,7 +5780,7 @@ export class LlmChat {
     // exhausted the quiet completion is accepted rather than failing the
     // run (#9026): some model families legitimately end turns silently
     // after a tool result.
-    const hasAnyContent = contentText || thoughtText;
+    const hasAnyContent = contentText || thoughtContentPart !== undefined;
     const lacksVisibleToolResultProgress =
       isToolResultContinuation &&
       (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
@@ -5706,6 +5969,31 @@ export class LlmChat {
         // `--resume` rehydrates a turn the live session correctly
         // discarded.
         this.pendingPartialAssistantRecord = recordArgs;
+      } else if (
+        recordDeferral === 'always' ||
+        (recordDeferral === 'on-max-tokens' &&
+          // Both terms are the finish reason the outer send loop actually
+          // consumes: `yieldedFinishReason` is captured at the yield
+          // boundary (so stripped and suppressed chunks are excluded by
+          // construction), and on tool-result continuations, where every
+          // real finish chunk is stripped, `deferredFinishReason` is the
+          // value the synthetic trailing chunk re-emits. The deferral
+          // decision therefore cannot disagree with the recovery-entry
+          // decision on any stream shape.
+          (yieldedFinishReason ?? deferredFinishReason) ===
+            FinishReason.MAX_TOKENS)
+      ) {
+        // MAX_TOKENS output-recovery owns this turn: stash the record so the
+        // recovery block can emit a single merged one matching coalesced
+        // history. The append-only transcript cannot be coalesced after the
+        // fact, so it must not be written here.
+        this.deferredMaxTokensRecords.push(recordArgs);
+        debugLogger.debug(
+          `[MAX_TOKENS_DEFER] Deferring assistant record ` +
+            `(mode=${recordDeferral}, yielded=${yieldedFinishReason}, ` +
+            `deferred=${deferredFinishReason}, stashed=` +
+            `${this.deferredMaxTokensRecords.length})`,
+        );
       } else {
         this.chatRecordingService?.recordAssistantTurn(recordArgs);
       }
@@ -5796,11 +6084,16 @@ export class LlmChat {
    *
    * If any pair doesn't match that shape the method bails defensively
    * rather than corrupting history.
+   *
+   * Returns the number of pairs actually merged. The deferred-record flush
+   * relies on this: it emits one merged transcript record only when every pair
+   * coalesced (return value === pairCount), otherwise it keeps the per-attempt
+   * records so the durable transcript still matches the un-merged history.
    */
-  private coalesceRecoveryPairs(pairCount: number): void {
+  private coalesceRecoveryPairs(pairCount: number): number {
     for (let i = 0; i < pairCount; i++) {
       const len = this.history.length;
-      if (len < 3) return;
+      if (len < 3) return i;
 
       const modelContinuation = this.history[len - 1]!;
       const userRecovery = this.history[len - 2]!;
@@ -5811,7 +6104,7 @@ export class LlmChat {
         userRecovery.role !== 'user' ||
         precedingModel.role !== 'model'
       ) {
-        return;
+        return i;
       }
 
       precedingModel.parts = appendRecoveryContinuationParts(
@@ -5821,6 +6114,7 @@ export class LlmChat {
       // Drop the (userRecovery, modelContinuation) pair.
       this.history.splice(len - 2, 2);
     }
+    return pairCount;
   }
 }
 

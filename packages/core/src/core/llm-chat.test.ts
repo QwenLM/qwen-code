@@ -18,6 +18,8 @@ import {
   LlmChat,
   InvalidStreamError,
   approvedPlanRedactionText,
+  buildRecordMessageFromHistoryParts,
+  mergeDeferredUsageMetadata,
   redactApprovedPlansInHistory,
   redactStructuredOutputArgsForRecording,
   StreamEventType,
@@ -154,6 +156,31 @@ describe('LlmChat', async () => {
   let mockConfig: Config;
   const config: GenerateContentConfig = {};
 
+  // Shared by the transport-continuation and output-token-recovery suites:
+  // a chat wired to a mock ChatRecordingService, and the first recorded
+  // text part of a given recordAssistantTurn call.
+  function chatWithRecorder(recordAssistantTurn: ReturnType<typeof vi.fn>) {
+    return new LlmChat(
+      mockConfig,
+      config,
+      [],
+      {
+        recordAssistantTurn,
+        recordChatCompression: vi.fn(),
+      } as unknown as ConstructorParameters<typeof LlmChat>[3],
+      uiTelemetryService,
+    );
+  }
+
+  function recordedText(
+    recordAssistantTurn: ReturnType<typeof vi.fn>,
+    callIndex = 0,
+  ): string | undefined {
+    const message = recordAssistantTurn.mock.calls[callIndex]![0]
+      .message as Array<{ text?: string }>;
+    return message.find((part) => part.text !== undefined)?.text;
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockAcquireSleepInhibitor.mockReturnValue({
@@ -247,19 +274,6 @@ describe('LlmChat', async () => {
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(35_000);
     await resultPromise;
-  }
-
-  function chatWithRecorder(recordAssistantTurn: ReturnType<typeof vi.fn>) {
-    return new LlmChat(
-      mockConfig,
-      config,
-      [],
-      {
-        recordAssistantTurn,
-        recordChatCompression: vi.fn(),
-      } as unknown as ConstructorParameters<typeof LlmChat>[3],
-      uiTelemetryService,
-    );
   }
 
   async function collectStreamWithFakeTimers(
@@ -9742,16 +9756,10 @@ describe('LlmChat', async () => {
        * shapes failed exactly there: deduping the record against the trimmed
        * `contentText` while history used the raw part, and merging in the
        * outer send loop after the record had already been appended.
+       *
+       * These tests use the shared `chatWithRecorder` / `recordedText`
+       * helpers from the enclosing `describe('LlmChat')` scope.
        */
-      function recordedText(
-        recordAssistantTurn: ReturnType<typeof vi.fn>,
-        callIndex = 0,
-      ): string | undefined {
-        const message = recordAssistantTurn.mock.calls[callIndex]![0]
-          .message as Array<{ text?: string }>;
-        return message.find((part) => part.text !== undefined)?.text;
-      }
-
       it('records the delivered prefix with the resumed remainder in one turn', async () => {
         vi.useFakeTimers();
         try {
@@ -14406,6 +14414,7 @@ describe('LlmChat', async () => {
         text?: string;
         functionCall?: unknown;
         thought?: boolean;
+        inlineData?: unknown;
       }>,
       finishReason?: string,
     ): GenerateContentResponse {
@@ -14954,6 +14963,713 @@ describe('LlmChat', async () => {
 
       expect(lastEntry.role).toBe('model');
       expect(text).toBe('Alpha shared recovery suffix and continuation');
+    });
+
+    it('records the coalesced recovery turn once, matching in-memory history', async () => {
+      // The JSONL transcript that `--resume` / `--continue` reads is written
+      // by `recordAssistantTurn`, not by `this.history`. `coalesceRecoveryPairs`
+      // merges the split recovery turns back into one model turn in history, so
+      // the durable record must be a single turn with the same text — otherwise
+      // resume rehydrates the duplicated, split turn the live session merged.
+      // (Sibling of the transport-cut continuation invariant fixed by #8624.)
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk([{ text: 'Alpha shared recovery suffix' }], 'MAX_TOKENS'),
+        ]),
+        makeStream([
+          makeChunk(
+            [{ text: 'shared recovery suffix and continuation' }],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-pro',
+        { message: 'write a long essay' },
+        'prompt-recovery-record-once',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const historyLast = recordingChat.getHistory().at(-1)!;
+      const historyText = historyLast.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      expect(historyText).toBe('Alpha shared recovery suffix and continuation');
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe(historyText);
+    });
+
+    it('records one merged turn on the non-escalation recovery path', async () => {
+      // No discarded initial attempt here (model does not escalate), so the
+      // truncated turn is deferred directly and merged with its continuation.
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: ' ending.' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'prompt-direct-recovery-record',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const historyText = recordingChat
+        .getHistory()
+        .at(-1)!
+        .parts?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      expect(historyText).toBe('Hello ending.');
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe(historyText);
+    });
+
+    it('still records the truncated turn once when recovery is skipped for a functionCall', async () => {
+      // Recovery is skipped when the truncated turn carries a functionCall, but
+      // deferral must never lose that turn's durable record.
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([
+          makeChunk(
+            [
+              {
+                functionCall: { name: 'write_file', args: { file_path: '/x' } },
+              },
+            ],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                functionCall: { name: 'write_file', args: { file_path: '/x' } },
+              },
+            ],
+            'MAX_TOKENS',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-pro',
+        { message: 'write a file' },
+        'prompt-recovery-skip-record',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      const recordedParts = recordAssistantTurn.mock.calls[0]![0]
+        .message as Array<{ functionCall?: unknown }>;
+      expect(recordedParts.some((part) => part.functionCall)).toBe(true);
+    });
+
+    it('redacts structured_output args in the merged recovery record', async () => {
+      // The merged flush must not bypass
+      // `redactStructuredOutputArgsForRecording`: when the truncated attempt
+      // ends before any functionCall (so recovery runs) and the continuation
+      // completes the `structured_output` call, the coalesced history turn
+      // carries the raw args — but the JSONL record must still carry the
+      // placeholder, like every other assistant record.
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([makeChunk([{ text: 'Partial answer ' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk(
+            [
+              { text: 'and done.' },
+              {
+                functionCall: {
+                  name: 'structured_output',
+                  args: { secret: 'the full structured payload' },
+                },
+              },
+            ],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'produce structured output' },
+        'prompt-recovery-redaction',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      // In-memory history keeps the raw args (redaction is record-only).
+      const historyParts = recordingChat.getHistory().at(-1)!.parts!;
+      const historyCall = historyParts.find((part) => part.functionCall);
+      expect(historyCall?.functionCall?.args).toEqual({
+        secret: 'the full structured payload',
+      });
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      const recordedCall = (
+        recordAssistantTurn.mock.calls[0]![0].message as Array<{
+          functionCall?: { name?: string; args?: Record<string, unknown> };
+        }>
+      ).find((part) => part.functionCall);
+      expect(recordedCall?.functionCall?.name).toBe('structured_output');
+      expect(recordedCall?.functionCall?.args).toEqual({
+        __redacted: 'structured_output payload (see stdout result)',
+      });
+    });
+
+    it('drops inlineData from the merged recovery record but keeps it in history', async () => {
+      // The merged record must keep the shape every other assistant record
+      // uses — [thought?, {text}?, functionCalls?] — so non-text parts from
+      // the coalesced turn (inlineData/fileData) never land in the JSONL.
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([
+          makeChunk(
+            [
+              { text: 'A picture of ' },
+              { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+            ],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([makeChunk([{ text: 'a cat.' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'draw and describe' },
+        'prompt-recovery-inline-data',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const historyParts = recordingChat.getHistory().at(-1)!.parts!;
+      expect(historyParts.some((part) => 'inlineData' in part)).toBe(true);
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      const recordedMessage = recordAssistantTurn.mock.calls[0]![0]
+        .message as Part[];
+      expect(recordedMessage.some((part) => 'inlineData' in part)).toBe(false);
+      expect(recordedText(recordAssistantTurn)).toBe('A picture of a cat.');
+    });
+
+    it('defers on a malformed multi-finish stream (STOP before MAX_TOKENS)', async () => {
+      // Last-wins finish-reason capture: the record-deferral decision must
+      // agree with the recovery-entry decision even when a malformed stream
+      // yields STOP before MAX_TOKENS. First-wins capture would record the
+      // truncated turn immediately while recovery still runs and coalesces,
+      // producing two records for one merged history turn.
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([
+          makeChunk([{ text: 'Hello' }], 'STOP'),
+          makeChunk([{ text: ' there' }], 'MAX_TOKENS'),
+        ]),
+        makeStream([makeChunk([{ text: ' ending.' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'prompt-recovery-multi-finish',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const historyText = recordingChat
+        .getHistory()
+        .at(-1)!
+        .parts?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      expect(historyText).toBe('Hello there ending.');
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe(historyText);
+    });
+
+    it('flushes deferred records when the consumer abandons mid-recovery', async () => {
+      // The `finally` stranded-record flush is the only guard for deferred
+      // records on degraded exits: breaking out of the `for await` runs the
+      // generator's `.return()`, which must still write the truncated
+      // attempt's record — otherwise output the user already saw never
+      // reaches the JSONL transcript.
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: ' ending.' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'prompt-recovery-abandoned',
+      );
+      for await (const event of stream) {
+        if (
+          event.type === StreamEventType.RETRY &&
+          (event as { isContinuation?: boolean }).isContinuation
+        ) {
+          break;
+        }
+      }
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe('Hello');
+    });
+
+    it('coalesceRecoveryPairs reports partially merged pairs on a malformed tail', () => {
+      // The deferred-record flush writes one merged record only when the
+      // returned count equals `successfulRecoveries`; a partial merge must
+      // fall back to per-attempt records. This pins the partial-count
+      // return, which the recovery loop cannot produce via its own turns.
+      const chat = new LlmChat(
+        mockConfig,
+        config,
+        [
+          { role: 'user', parts: [{ text: 'q' }] },
+          { role: 'model', parts: [{ text: 'A' }] },
+          { role: 'user', parts: [{ text: 'recovery' }] },
+          { role: 'model', parts: [{ text: ' continuation' }] },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+      const merged = (
+        chat as unknown as { coalesceRecoveryPairs(n: number): number }
+      ).coalesceRecoveryPairs(2);
+      // One pair merges; the second bails (history too short), so the
+      // caller must see 1 !== 2 and keep the per-attempt records.
+      expect(merged).toBe(1);
+      const history = chat.getHistory();
+      expect(history).toHaveLength(2);
+      expect(
+        history
+          .at(-1)!
+          .parts?.map((part) => part.text)
+          .join(''),
+      ).toBe('A continuation');
+    });
+
+    it('coalesceRecoveryPairs reports partially merged pairs on a role-mismatched tail', () => {
+      // The length bail above is the only defensive check the existing
+      // synthetic test exercises. This pins the other one: a tail long
+      // enough to walk, but whose second pair breaks the
+      // [precedingModel, userRecovery, modelContinuation] role shape.
+      const chat = new LlmChat(
+        mockConfig,
+        config,
+        [
+          { role: 'user', parts: [{ text: 'q' }] },
+          // Malformed: two user turns in a row, so the second pair's
+          // "preceding model" slot is actually a user turn.
+          { role: 'user', parts: [{ text: 'oops' }] },
+          { role: 'user', parts: [{ text: 'recovery-1' }] },
+          { role: 'model', parts: [{ text: 'continuation-1' }] },
+          { role: 'user', parts: [{ text: 'recovery-2' }] },
+          { role: 'model', parts: [{ text: 'continuation-2' }] },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+      const merged = (
+        chat as unknown as { coalesceRecoveryPairs(n: number): number }
+      ).coalesceRecoveryPairs(2);
+      // The first pair merges cleanly; the second bails on the role check
+      // (precedingModel.role !== 'model'), so the caller must see 1 !== 2.
+      expect(merged).toBe(1);
+      const history = chat.getHistory();
+      expect(history).toHaveLength(4);
+      expect(history.map((entry) => entry.role)).toEqual([
+        'user',
+        'user',
+        'user',
+        'model',
+      ]);
+      expect(
+        history
+          .at(-1)!
+          .parts?.map((part) => part.text)
+          .join(''),
+      ).toBe('continuation-1continuation-2');
+    });
+
+    it('falls back to per-attempt records when the coalesce step reports a partial merge for two successful recoveries', async () => {
+      // Every existing test that reaches the per-attempt fallback does so
+      // with successfulRecoveries === 0 (recovery skipped or never
+      // entered). This drives two REAL successful recovery iterations
+      // (successfulRecoveries === 2) and forces `coalesceRecoveryPairs` to
+      // report a partial merge, the way a genuine role-mismatched tail
+      // would — pinning that the flush's `coalescedPairs ===
+      // successfulRecoveries` comparison, not just the private method in
+      // isolation, actually gates the merged-vs-per-attempt choice.
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([makeChunk([{ text: 'A' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'B' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'C' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'D' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const realCoalesce = (
+        recordingChat as unknown as { coalesceRecoveryPairs(n: number): number }
+      ).coalesceRecoveryPairs.bind(recordingChat);
+      vi.spyOn(
+        recordingChat as unknown as {
+          coalesceRecoveryPairs(n: number): number;
+        },
+        'coalesceRecoveryPairs',
+      ).mockImplementation((pairCount: number) => {
+        // History still merges for real (so in-memory state stays
+        // correct); only the count reported back to the flush caller is
+        // forced partial, the way the role-mismatch bail would report it.
+        realCoalesce(pairCount);
+        return pairCount - 1;
+      });
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-pro',
+        { message: 'essay' },
+        'prompt-recovery-partial-coalesce',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // Per-attempt fallback: one record per deferred attempt (the initial
+      // truncated turn B plus recovery continuations C and D — escalation
+      // attempt A is discarded and never recorded), matching the
+      // un-coalesced history the mutant scenario would otherwise silently
+      // misreport as one merged record.
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(3);
+      const recordedTexts = recordAssistantTurn.mock.calls.map((_, i) =>
+        recordedText(recordAssistantTurn, i),
+      );
+      expect(recordedTexts).toEqual(['B', 'C', 'D']);
+    });
+
+    it('buildRecordMessageFromHistoryParts keeps a lone attempt’s thought signature', () => {
+      // The signature is dropped only when the joined text spans more than
+      // one thought part. A single-attempt turn's signature still covers its
+      // own text, so it must survive into the record.
+      expect(
+        buildRecordMessageFromHistoryParts([
+          { text: 'Only thinking. ', thought: true, thoughtSignature: 'sig-1' },
+          { text: 'Hello.' },
+        ]),
+      ).toEqual([
+        { text: 'Only thinking.', thought: true, thoughtSignature: 'sig-1' },
+        { text: 'Hello.' },
+      ]);
+    });
+
+    it('buildRecordMessageFromHistoryParts joins thoughts and keeps record shape', () => {
+      // Direct unit coverage for the exported projection helper: thought
+      // texts join into one part (no signature, since none covers the joined
+      // text), text parts fuse and trim, functionCall args are redacted,
+      // inlineData is dropped.
+      const message = buildRecordMessageFromHistoryParts([
+        { text: 'First thinking. ', thought: true, thoughtSignature: 'sig-1' },
+        { text: 'More thinking.', thought: true, thoughtSignature: 'sig-2' },
+        { text: '  Hello' },
+        { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+        { text: ' world.  ' },
+        {
+          functionCall: {
+            name: 'structured_output',
+            args: { secret: 'payload' },
+          },
+        },
+      ]);
+      expect(message).toEqual([
+        {
+          text: 'First thinking.\n\nMore thinking.',
+          thought: true,
+        },
+        { text: 'Hello world.' },
+        {
+          functionCall: {
+            name: 'structured_output',
+            args: {
+              __redacted: 'structured_output payload (see stdout result)',
+            },
+          },
+        },
+      ]);
+    });
+
+    it('mergeDeferredUsageMetadata sums output-side counts, keeps final prompt-side counts', () => {
+      expect(
+        mergeDeferredUsageMetadata([
+          {
+            tokens: {
+              promptTokenCount: 10,
+              candidatesTokenCount: 100,
+              thoughtsTokenCount: 5,
+              totalTokenCount: 115,
+            },
+          },
+          {
+            tokens: {
+              promptTokenCount: 120,
+              candidatesTokenCount: 20,
+              thoughtsTokenCount: 2,
+              totalTokenCount: 142,
+            },
+          },
+        ]),
+      ).toEqual({
+        promptTokenCount: 120,
+        candidatesTokenCount: 120,
+        thoughtsTokenCount: 7,
+        totalTokenCount: 247,
+      });
+      // Single attempt or missing usage: final attempt's tokens pass through.
+      expect(
+        mergeDeferredUsageMetadata([{ tokens: { totalTokenCount: 9 } }]),
+      ).toEqual({ totalTokenCount: 9 });
+      expect(mergeDeferredUsageMetadata([{}, {}])).toBeUndefined();
+      // Final attempt without usage: no prompt-side baseline exists, so the
+      // merged record carries none rather than a fabricated output-only
+      // object that under-reports the turn.
+      expect(
+        mergeDeferredUsageMetadata([
+          {
+            tokens: {
+              promptTokenCount: 5000,
+              candidatesTokenCount: 800,
+              totalTokenCount: 5800,
+            },
+          },
+          {},
+        ]),
+      ).toBeUndefined();
+    });
+
+    it('joins every attempt’s thought content in the merged recovery record', async () => {
+      // A coalesced recovery turn carries one thought part per merged attempt.
+      // The merged record must join them all the way `processStreamResponse`
+      // builds `thoughtContentPart` — keeping only the first would silently
+      // drop each continuation's thinking from the transcript.
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([
+          makeChunk(
+            [{ text: 'First thinking. ', thought: true }, { text: 'Hello' }],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([
+          makeChunk(
+            [{ text: 'More thinking.', thought: true }, { text: ' ending.' }],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'think and write a long essay' },
+        'prompt-recovery-thought-join',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      const recordedMessage = recordAssistantTurn.mock.calls[0]![0]
+        .message as Part[];
+      const thoughtParts = recordedMessage.filter((part) => part.thought);
+      expect(thoughtParts).toHaveLength(1);
+      // Each attempt's thought is trimmed when it lands in history; the
+      // merged record joins the trimmed texts with a blank-line separator.
+      expect(thoughtParts[0]!.text).toBe('First thinking.\n\nMore thinking.');
+      // Multi-attempt thought text carries no signature: each signature
+      // covers only its own attempt's thought, and `--resume` re-feeds this
+      // record to signature-verifying backends.
+      expect(thoughtParts[0]!.thoughtSignature).toBeUndefined();
+      // `recordedText` would return the thought part here; look up the
+      // non-thought content part explicitly.
+      const contentPart = recordedMessage.find(
+        (part) => !part.thought && part.text !== undefined,
+      );
+      expect(contentPart?.text).toBe('Hello ending.');
+    });
+
+    it('sums output-side usage across deferred attempts in the merged record', async () => {
+      // The merged record replaces one JSONL record per attempt, so it must
+      // carry the whole turn's output spend — not just the final attempt's.
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const withUsage = (
+        chunk: GenerateContentResponse,
+        usage: Record<string, number>,
+      ): GenerateContentResponse =>
+        ({
+          ...chunk,
+          usageMetadata: usage,
+        }) as unknown as GenerateContentResponse;
+      const streams = [
+        makeStream([
+          withUsage(makeChunk([{ text: 'Hello' }], 'MAX_TOKENS'), {
+            promptTokenCount: 10,
+            candidatesTokenCount: 100,
+            totalTokenCount: 110,
+          }),
+        ]),
+        makeStream([
+          withUsage(makeChunk([{ text: ' ending.' }], 'STOP'), {
+            promptTokenCount: 120,
+            candidatesTokenCount: 20,
+            totalTokenCount: 140,
+          }),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'prompt-recovery-usage-merge',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      const tokens = recordAssistantTurn.mock.calls[0]![0].tokens as {
+        promptTokenCount: number;
+        candidatesTokenCount: number;
+        totalTokenCount: number;
+      };
+      // Prompt-side counts stay the final attempt's; output-side counts sum.
+      expect(tokens.promptTokenCount).toBe(120);
+      expect(tokens.candidatesTokenCount).toBe(120);
+      expect(tokens.totalTokenCount).toBe(240);
+    });
+
+    it('defers the tool-result-continuation record on the first-wins stripped finish reason', async () => {
+      // On tool-result continuations the real finish chunks are stripped
+      // before consumers see them, and the outer loop's recovery-entry
+      // decision sees only the re-emitted first-wins `deferredFinishReason`.
+      // The record-deferral decision must read the same value: judged by the
+      // last-wins observed reason, a `[MAX_TOKENS, STOP]` stream would record
+      // the truncated turn immediately while recovery still runs — two
+      // records for one merged history turn.
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      recordingChat.setHistory([
+        { role: 'user', parts: [{ text: 'read the file' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-trc-max-tokens',
+                name: 'read_file',
+                args: { path: '/tmp/input' },
+              },
+            },
+          ],
+        },
+      ]);
+      const streams = [
+        makeStream([
+          makeChunk([{ text: 'Partial after tool' }], 'MAX_TOKENS'),
+          makeChunk([{ text: '' }], 'STOP'),
+        ]),
+        makeStream([makeChunk([{ text: ' and finished.' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        {
+          message: {
+            functionResponse: {
+              id: 'call-trc-max-tokens',
+              name: 'read_file',
+              response: { output: 'file contents' },
+            },
+          },
+        },
+        'prompt-recovery-tool-result-continuation',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const historyText = recordingChat
+        .getHistory()
+        .at(-1)!
+        .parts?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      expect(historyText).toBe('Partial after tool and finished.');
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordedText(recordAssistantTurn)).toBe(historyText);
     });
 
     it('should coalesce recovery text that replays a previous tail anchor', async () => {
