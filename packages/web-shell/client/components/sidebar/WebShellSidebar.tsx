@@ -5547,148 +5547,181 @@ export function WebShellSidebar({
                               ? (primarySessionStats ?? null)
                               : undefined
                           }
-                          headerActions={(visible, { overview, gitBranch }) => {
-                            if (
-                              lockedWorkspaceCwd &&
-                              lockedWorkspaceOptions?.render
-                            ) {
-                              return null;
-                            }
-                            const canRemove =
-                              !lockedWorkspaceCwd &&
-                              workspaceRemovalEnabled &&
-                              !ws.primary &&
-                              ws.removable === true;
-                            if (!ws.trusted && !canRemove) return null;
-                            const wsCwd = ws.primary ? undefined : ws.cwd;
-                            const realPath = isAbsolutePath(ws.cwd);
-                            const canRename =
-                              !lockedWorkspaceCwd &&
-                              workspaceRenameEnabled &&
-                              realPath;
-                            // Management pages read the connection's bound
-                            // workspace, so only the primary row can open
-                            // its own view today (#10399, layer B1).
-                            const canManage =
-                              ws.primary &&
-                              ws.trusted &&
-                              Boolean(onOpenWorkspaceManagement);
-                            const menuActions: WorkspaceMenuActions = {
-                              ...(canRename
-                                ? { rename: () => requestWorkspaceRename(ws) }
-                                : {}),
-                              ...(realPath
-                                ? { copyPath: () => copyWorkspacePath(ws) }
-                                : {}),
-                              ...(ws.trusted
-                                ? { newSession: () => handleNewSession(wsCwd) }
-                                : {}),
-                              // A worktree needs a git repository; without a
-                              // branch the composer never shows the armed
-                              // intent and the daemon rejects the session.
-                              ...(ws.trusted &&
-                              onNewWorktreeSession &&
-                              gitBranch
-                                ? {
-                                    newWorktreeSession: () =>
-                                      void onNewWorktreeSession(wsCwd),
-                                  }
-                                : {}),
-                              ...(canManage
-                                ? {
-                                    openManagement: (
-                                      target: WorkspaceManagementTarget,
-                                    ) =>
-                                      onOpenWorkspaceManagement?.(
-                                        target,
-                                        ws.cwd,
-                                      ),
-                                  }
-                                : {}),
-                              ...(ws.trusted && realPath
-                                ? { reload: () => reloadWorkspaceRuntime(ws) }
-                                : {}),
-                              ...(canRemove
-                                ? { remove: () => requestWorkspaceRemoval(ws) }
-                                : {}),
-                            };
-                            return (
-                              <div
-                                className={styles.workspaceHeaderActions}
-                                style={{
-                                  visibility: visible ? 'visible' : 'hidden',
-                                }}
-                              >
-                                {ws.trusted && (
-                                  <>
-                                    {canOrganizeWorkspace(ws.cwd) && (
-                                      <button
-                                        className={styles.workspaceHeaderAction}
-                                        type="button"
-                                        title={t('sidebar.groupCreate')}
-                                        aria-label={t('sidebar.groupCreate')}
-                                        onClick={(event) => {
-                                          event.preventDefault();
-                                          event.stopPropagation();
-                                          if (ws.primary) {
-                                            handleCreateGroup();
-                                          } else {
-                                            handleCreateWorkspaceGroup(ws.cwd);
-                                          }
-                                        }}
-                                      >
-                                        <PlusIcon size={16} strokeWidth={1.2} />
-                                      </button>
-                                    )}
-                                    <button
-                                      className={styles.workspaceHeaderAction}
-                                      type="button"
-                                      title={t('sidebar.newTask')}
-                                      aria-label={t('sidebar.newTask')}
-                                      onClick={(event) => {
-                                        event.preventDefault();
-                                        event.stopPropagation();
-                                        handleNewSession(wsCwd);
+                          // A locked sidebar with a custom header renders no
+                          // action area, so wire nothing: the section then
+                          // skips the git poll that only feeds these actions.
+                          headerActions={
+                            lockedWorkspaceCwd && lockedWorkspaceOptions?.render
+                              ? undefined
+                              : (visible, { overview, gitBranch }) => {
+                                  const canRemove =
+                                    !lockedWorkspaceCwd &&
+                                    workspaceRemovalEnabled &&
+                                    !ws.primary &&
+                                    ws.removable === true;
+                                  if (!ws.trusted && !canRemove) return null;
+                                  const wsCwd = ws.primary ? undefined : ws.cwd;
+                                  const realPath = isAbsolutePath(ws.cwd);
+                                  const canRename =
+                                    !lockedWorkspaceCwd &&
+                                    workspaceRenameEnabled &&
+                                    realPath;
+                                  // Management pages read the connection's bound
+                                  // workspace, so only the primary row can open
+                                  // its own view today (#10399, layer B1).
+                                  const canManage =
+                                    ws.primary &&
+                                    ws.trusted &&
+                                    Boolean(onOpenWorkspaceManagement);
+                                  const menuActions: WorkspaceMenuActions = {
+                                    ...(canRename
+                                      ? {
+                                          rename: () =>
+                                            requestWorkspaceRename(ws),
+                                        }
+                                      : {}),
+                                    ...(realPath
+                                      ? {
+                                          copyPath: () => copyWorkspacePath(ws),
+                                        }
+                                      : {}),
+                                    ...(ws.trusted
+                                      ? {
+                                          newSession: () =>
+                                            handleNewSession(wsCwd),
+                                        }
+                                      : {}),
+                                    // A worktree needs a git repository; without a
+                                    // branch the composer never shows the armed
+                                    // intent and the daemon rejects the session.
+                                    ...(ws.trusted &&
+                                    onNewWorktreeSession &&
+                                    gitBranch
+                                      ? {
+                                          newWorktreeSession: () =>
+                                            void onNewWorktreeSession(wsCwd),
+                                        }
+                                      : {}),
+                                    ...(canManage
+                                      ? {
+                                          openManagement: (
+                                            target: WorkspaceManagementTarget,
+                                          ) =>
+                                            onOpenWorkspaceManagement?.(
+                                              target,
+                                              ws.cwd,
+                                            ),
+                                        }
+                                      : {}),
+                                    ...(ws.trusted && realPath
+                                      ? {
+                                          reload: () =>
+                                            reloadWorkspaceRuntime(ws),
+                                        }
+                                      : {}),
+                                    ...(canRemove
+                                      ? {
+                                          remove: () =>
+                                            requestWorkspaceRemoval(ws),
+                                        }
+                                      : {}),
+                                  };
+                                  return (
+                                    <div
+                                      className={styles.workspaceHeaderActions}
+                                      style={{
+                                        visibility: visible
+                                          ? 'visible'
+                                          : 'hidden',
                                       }}
                                     >
-                                      <SquarePenIcon
-                                        size={16}
-                                        strokeWidth={1.2}
-                                      />
-                                    </button>
-                                  </>
-                                )}
-                                {/* A locked (embedded) sidebar keeps its
+                                      {ws.trusted && (
+                                        <>
+                                          {canOrganizeWorkspace(ws.cwd) && (
+                                            <button
+                                              className={
+                                                styles.workspaceHeaderAction
+                                              }
+                                              type="button"
+                                              title={t('sidebar.groupCreate')}
+                                              aria-label={t(
+                                                'sidebar.groupCreate',
+                                              )}
+                                              onClick={(event) => {
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                if (ws.primary) {
+                                                  handleCreateGroup();
+                                                } else {
+                                                  handleCreateWorkspaceGroup(
+                                                    ws.cwd,
+                                                  );
+                                                }
+                                              }}
+                                            >
+                                              <PlusIcon
+                                                size={16}
+                                                strokeWidth={1.2}
+                                              />
+                                            </button>
+                                          )}
+                                          <button
+                                            className={
+                                              styles.workspaceHeaderAction
+                                            }
+                                            type="button"
+                                            title={t('sidebar.newTask')}
+                                            aria-label={t('sidebar.newTask')}
+                                            onClick={(event) => {
+                                              event.preventDefault();
+                                              event.stopPropagation();
+                                              handleNewSession(wsCwd);
+                                            }}
+                                          >
+                                            <SquarePenIcon
+                                              size={16}
+                                              strokeWidth={1.2}
+                                            />
+                                          </button>
+                                        </>
+                                      )}
+                                      {/* A locked (embedded) sidebar keeps its
                                     action area to the session controls the
                                     host already expects. */}
-                                {!lockedWorkspaceCwd && (
-                                  <WorkspaceMenu
-                                    workspace={ws}
-                                    actions={menuActions}
-                                    overview={overview}
-                                    disabled={
-                                      (workspaceRemovalSubmitting &&
-                                        workspaceRemovalCandidate?.id ===
-                                          ws.id) ||
-                                      (workspaceRenameSubmitting &&
-                                        workspaceRenameCandidate?.id === ws.id)
-                                    }
-                                    triggerClassName={
-                                      styles.workspaceHeaderAction
-                                    }
-                                    contentStyle={SESSION_MENU_PORTAL_STYLE}
-                                    onOpenChange={handleSessionMenuOpenChange}
-                                    onPointerDownOutside={
-                                      handleSessionMenuPointerDownOutside
-                                    }
-                                    onCloseAutoFocus={
-                                      handleSessionMenuCloseAutoFocus
-                                    }
-                                  />
-                                )}
-                              </div>
-                            );
-                          }}
+                                      {!lockedWorkspaceCwd && (
+                                        <WorkspaceMenu
+                                          workspace={ws}
+                                          actions={menuActions}
+                                          overview={overview}
+                                          disabled={
+                                            (workspaceRemovalSubmitting &&
+                                              workspaceRemovalCandidate?.id ===
+                                                ws.id) ||
+                                            (workspaceRenameSubmitting &&
+                                              workspaceRenameCandidate?.id ===
+                                                ws.id)
+                                          }
+                                          triggerClassName={
+                                            styles.workspaceHeaderAction
+                                          }
+                                          contentStyle={
+                                            SESSION_MENU_PORTAL_STYLE
+                                          }
+                                          onOpenChange={
+                                            handleSessionMenuOpenChange
+                                          }
+                                          onPointerDownOutside={
+                                            handleSessionMenuPointerDownOutside
+                                          }
+                                          onCloseAutoFocus={
+                                            handleSessionMenuCloseAutoFocus
+                                          }
+                                        />
+                                      )}
+                                    </div>
+                                  );
+                                }
+                          }
                         />
                         {ws.primary &&
                         (projectExpanded || searchQuery.trim()) ? (

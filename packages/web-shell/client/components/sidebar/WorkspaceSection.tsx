@@ -508,10 +508,18 @@ export function WorkspaceSection({
   // paying for a subscription it no longer lists. While the query is active
   // a missing page is a fetch in progress (a source switch swapped the query
   // key), and stale counts above an empty list would mislead — show none.
-  const [retainedStats, setRetainedStats] = useState<WorkspaceSessionStats>();
+  // The retained value is tagged with the source it was computed for: a
+  // global source switch while the row is collapsed must not keep showing
+  // the previous source's numbers.
+  const [retained, setRetained] = useState<{
+    stats: WorkspaceSessionStats;
+    sourceType: string | undefined;
+  }>();
   useEffect(() => {
-    if (liveStats) setRetainedStats(liveStats);
-  }, [liveStats]);
+    if (liveStats) setRetained({ stats: liveStats, sourceType });
+  }, [liveStats, sourceType]);
+  const retainedStats =
+    retained && retained.sourceType === sourceType ? retained.stats : undefined;
   const stats =
     overviewEnabled && sessionStats !== null
       ? (liveStats ?? (sessionsActive ? undefined : retainedStats))

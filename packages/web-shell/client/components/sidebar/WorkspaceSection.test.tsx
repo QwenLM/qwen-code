@@ -141,6 +141,7 @@ function renderSection(
       context: { overview: unknown; gitBranch: string | null | undefined },
     ) => ReactNode;
     sessionStats: WorkspaceSessionStats | null;
+    renderSessions: boolean;
   }> = {},
 ): void {
   act(() => {
@@ -173,6 +174,7 @@ function renderSection(
           renderHeader={overrides.renderHeader}
           headerActions={overrides.headerActions}
           sessionStats={overrides.sessionStats}
+          renderSessions={overrides.renderSessions}
         />
       </I18nProvider>,
     );
@@ -1399,22 +1401,106 @@ describe('WorkspaceSection overview gates', () => {
     const client = makeOverviewClient();
     const counts = () =>
       container.querySelector<HTMLElement>('[class*="headerCounts"]');
+    // Production wiring for the primary row: the sidebar lists its sessions
+    // itself, so the section renders none and owns no catalog query.
     renderSection({
       client,
       expanded: true,
       overviewEnabled: true,
-      sessionStats: { total: 4, running: 1, attention: 0, truncated: false },
+      renderSessions: false,
+      sessionStats: { total: 4, running: 1, attention: 2, truncated: true },
     });
     await flush();
-    expect(counts()?.textContent).toBe('14');
-    // A source switch: the sidebar has no page for the new source yet.
+    expect(counts()?.textContent).toBe('214+');
+    expect(
+      counts()?.querySelector('[class*="headerCountAttention"]')?.textContent,
+    ).toBe('2');
+    expect(
+      counts()?.querySelector('[class*="headerCountTotal"]')?.textContent,
+    ).toBe('4+');
+    expect(
+      counts()
+        ?.querySelector('[class*="headerCountTotal"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('4+ sessions');
+    // A source switch: the sidebar has no page for the new source yet, and
+    // the retained counts must not fill the gap.
     renderSection({
       client,
       expanded: true,
       overviewEnabled: true,
+      renderSessions: false,
       sessionStats: null,
     });
     await flush();
     expect(counts()).toBeNull();
+  });
+
+  it('passes the overview snapshot to the header actions', async () => {
+    const headerActions = vi.fn(() => null);
+    renderSection({
+      client: makeOverviewClient(),
+      expanded: true,
+      overviewEnabled: true,
+      headerActions,
+    });
+    await flush();
+    await flush();
+    expect(
+      headerActions.mock.calls.some(([, context]) => Boolean(context.overview)),
+    ).toBe(true);
+  });
+});
+
+describe('WorkspaceSection retained counts across a source switch', () => {
+  it('drops counts retained for a previous source while collapsed', async () => {
+    const channelPage = new Promise<{ sessions: DaemonSessionSummary[] }>(
+      () => {},
+    );
+    const defaultPage = Promise.resolve({
+      sessions: [
+        { sessionId: 'a', workspaceCwd: '/tmp/other' },
+        { sessionId: 'b', workspaceCwd: '/tmp/other' },
+        { sessionId: 'c', workspaceCwd: '/tmp/other' },
+      ] as DaemonSessionSummary[],
+    });
+    const listWorkspaceSessionsPage = vi.fn(
+      (options?: { sourceType?: string }) =>
+        options?.sourceType === 'channel' ? channelPage : defaultPage,
+    );
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const workspace = { ...trustedWorkspace, id: 'other', cwd: '/tmp/other' };
+    const counts = () =>
+      container.querySelector<HTMLElement>('[class*="headerCounts"]');
+    const render = (expanded: boolean, sourceType: string) =>
+      renderSection({
+        client,
+        workspace,
+        expanded,
+        overviewEnabled: true,
+        sourceType,
+      });
+
+    render(true, 'default');
+    await flush();
+    expect(counts()?.textContent).toBe('3');
+    render(false, 'default');
+    await flush();
+    expect(counts()?.textContent).toBe('3');
+    // The global source switches while the row stays collapsed: the default
+    // source's counts no longer describe the active source.
+    render(false, 'channel');
+    await flush();
+    expect(counts()).toBeNull();
+    // Switching back restores the counts that source still owns.
+    render(false, 'default');
+    await flush();
+    expect(counts()?.textContent).toBe('3');
   });
 });

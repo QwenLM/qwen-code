@@ -154,6 +154,9 @@ describe('WorkspaceOverview', () => {
       'MCP: 3 of 4 connected, 1 failed',
     );
     expect(chip('skills').textContent).toBe('Skills11');
+    expect(chip('skills').getAttribute('title')).toBe(
+      'Skills: 11 of 12 enabled',
+    );
     expect(chip('context').textContent).toBe('Context2');
     expect(chip('context').getAttribute('title')).toBe(
       'Context: 2 context files, 5 rules',
@@ -229,6 +232,38 @@ describe('WorkspaceOverview', () => {
       'Context: unavailable on this daemon',
     );
     expect(chip('mcp').getAttribute('title')).toBe('MCP: not initialized yet');
+  });
+
+  it('spells out the extensions and channels tooltips', async () => {
+    await render(
+      <WorkspaceOverview
+        overview={snapshot}
+        items={['extensions', 'channels']}
+      />,
+    );
+    expect(chip('extensions').getAttribute('title')).toBe(
+      'Extensions: 4 of 4 active',
+    );
+    expect(chip('channels').getAttribute('title')).toBe(
+      'Channels: 2 of 2 connected',
+    );
+    await render(
+      <WorkspaceOverview
+        overview={{
+          extensions: { total: 4, active: 2 },
+          channels: { configured: 2, connected: 1, failed: 1 },
+          fetchedAt: 1,
+        }}
+        items={['extensions', 'channels']}
+      />,
+    );
+    expect(chip('extensions').getAttribute('title')).toBe(
+      'Extensions: 2 of 4 active',
+    );
+    expect(chip('channels').getAttribute('title')).toBe(
+      'Channels: 1 of 2 connected, 1 failed',
+    );
+    expect(chip('channels').className).toMatch(/chipIssue/);
   });
 
   it('renders nothing until the first snapshot lands', async () => {

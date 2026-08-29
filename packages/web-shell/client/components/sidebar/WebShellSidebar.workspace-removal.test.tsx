@@ -3255,6 +3255,28 @@ describe('WebShellSidebar workspace removal', () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it('polls no git status for a locked workspace with a custom header', async () => {
+    const workspaceGit = vi
+      .fn()
+      .mockResolvedValue({ v: 2, workspaceCwd: '/tmp/other', branch: 'main' });
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceGit,
+    }));
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      lockedWorkspace: { render: () => <span>custom header</span> },
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('custom header');
+    expect(workspaceAction('/tmp/other')).toBeUndefined();
+    expect(workspaceGit).not.toHaveBeenCalled();
+  });
+
   it('keeps plain folder headers when the overview is switched off', () => {
     renderSidebar({ workspaceOverview: false });
     expect(
