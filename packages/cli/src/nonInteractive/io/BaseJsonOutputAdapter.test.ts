@@ -7,9 +7,9 @@
 import { Buffer } from 'node:buffer';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
-  GeminiEventType,
+  LlmEventType,
   type Config,
-  type ServerGeminiStreamEvent,
+  type ServerLlmStreamEvent,
   type ToolCallRequestInfo,
   type AgentResultDisplay,
 } from '@qwen-code/qwen-code-core';
@@ -293,7 +293,7 @@ describe('BaseJsonOutputAdapter', () => {
     it('should build message with text blocks', () => {
       adapter.startAssistantMessage();
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Hello world',
       });
 
@@ -316,7 +316,7 @@ describe('BaseJsonOutputAdapter', () => {
     it('should set stop_reason to tool_use when message contains only tool_use blocks', () => {
       adapter.startAssistantMessage();
       adapter.processEvent({
-        type: GeminiEventType.ToolCallRequest,
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-1',
           name: 'test_tool',
@@ -443,7 +443,7 @@ describe('BaseJsonOutputAdapter', () => {
       adapter.startAssistantMessage();
       const state = adapter['mainAgentMessageState'];
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'text',
       });
 
@@ -483,7 +483,7 @@ describe('BaseJsonOutputAdapter', () => {
       adapter.startAssistantMessage();
       const state = adapter['mainAgentMessageState'];
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'test',
       });
 
@@ -504,7 +504,7 @@ describe('BaseJsonOutputAdapter', () => {
       adapter.startAssistantMessage();
       const state = adapter['mainAgentMessageState'];
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'test',
       });
 
@@ -522,7 +522,7 @@ describe('BaseJsonOutputAdapter', () => {
       adapter.startAssistantMessage();
       const state = adapter['mainAgentMessageState'];
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'test',
       });
       state.openBlocks.add(0);
@@ -768,7 +768,7 @@ describe('BaseJsonOutputAdapter', () => {
     it('should reset main agent message state', () => {
       adapter.startAssistantMessage();
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'test',
       });
 
@@ -787,7 +787,7 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should process Content events', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Hello',
       });
 
@@ -801,7 +801,7 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should process Citation events', () => {
       adapter.processEvent({
-        type: GeminiEventType.Citation,
+        type: LlmEventType.Citation,
         value: 'Citation text',
       });
 
@@ -813,9 +813,9 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should ignore non-string Citation values', () => {
       adapter.processEvent({
-        type: GeminiEventType.Citation,
+        type: LlmEventType.Citation,
         value: 123,
-      } as unknown as ServerGeminiStreamEvent);
+      } as unknown as ServerLlmStreamEvent);
 
       const state = adapter['mainAgentMessageState'];
       expect(state.blocks).toHaveLength(0);
@@ -823,7 +823,7 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should process Thought events', () => {
       adapter.processEvent({
-        type: GeminiEventType.Thought,
+        type: LlmEventType.Thought,
         value: {
           subject: 'Planning',
           description: 'Thinking',
@@ -841,7 +841,7 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should process ToolCallRequest events', () => {
       adapter.processEvent({
-        type: GeminiEventType.ToolCallRequest,
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-1',
           name: 'test_tool',
@@ -863,7 +863,7 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should process Finished events with usage metadata', () => {
       adapter.processEvent({
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: {
           reason: undefined,
           usageMetadata: {
@@ -882,13 +882,13 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should ignore events after finalization', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'First',
       });
       adapter.finalizeAssistantMessage();
 
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Second',
       });
 
@@ -907,7 +907,7 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should build and return assistant message', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Test response',
       });
 
@@ -1273,7 +1273,7 @@ describe('BaseJsonOutputAdapter', () => {
     beforeEach(() => {
       adapter.startAssistantMessage();
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Response text',
       });
       const message = adapter.finalizeAssistantMessage();
@@ -1765,6 +1765,34 @@ describe('BaseJsonOutputAdapter', () => {
         const result = toolResultContent(response);
 
         expect(result).toBe('Tool result');
+      });
+
+      it('maps mcp_app displays to fallbackText', () => {
+        const response = {
+          callId: 'app-1',
+          resultDisplay: {
+            type: 'mcp_app' as const,
+            serverName: 'demo',
+            resourceUri: 'ui://demo/dashboard',
+            html: '<main>Revenue</main>',
+            toolResult: {
+              content: [{ type: 'text', text: 'Dashboard ready' }],
+            },
+            toolArguments: {},
+            fallbackText: 'Dashboard ready',
+          },
+          responseParts: [
+            {
+              functionResponse: {
+                response: {},
+              },
+            },
+          ],
+          error: undefined,
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe('Dashboard ready');
       });
 
       it('includes the vision bridge disclosure with tool content', () => {

@@ -57,7 +57,6 @@
   display: flex;
   width: 100%;
   justify-content: flex-start;
-  margin: 12px 0;
 }
 
 .notificationBubbleColumn {

@@ -904,22 +904,30 @@ describe('ReadFileTool', () => {
 
       it('preserves ordinary images for the shared tool-result bridge', async () => {
         const imagePath = path.join(tempRootDir, 'image.png');
-        await fsp.writeFile(
-          imagePath,
-          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-        );
+        await sharp({
+          create: {
+            width: 8,
+            height: 8,
+            channels: 3,
+            background: '#306090',
+          },
+        })
+          .png()
+          .toFile(imagePath);
         const invocation = createTextOnlyTool().build({
           file_path: imagePath,
         }) as ToolInvocation<ReadFileToolParams, ToolResult>;
 
         const result = await invocation.execute(abortSignal);
 
-        expect(result.llmContent).toMatchObject({
-          inlineData: {
-            mimeType: 'image/png',
-            displayName: 'image.png',
-          },
-        });
+        // An ordinary decodable image keeps its inline media (the rendered
+        // overview) and never routes through the vision bridge.
+        const parts = result.llmContent as Array<{
+          inlineData?: { mimeType?: string };
+        }>;
+        expect(
+          parts.some((part) => part.inlineData?.mimeType === 'image/jpeg'),
+        ).toBe(true);
         expect(visionBridgeMocks.runVisionBridge).not.toHaveBeenCalled();
       });
     });

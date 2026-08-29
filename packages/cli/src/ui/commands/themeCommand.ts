@@ -20,6 +20,7 @@ export const themeCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
+  canRunDuringStreaming: true,
   action: (_context, _args): OpenDialogActionReturn | MessageActionReturn => {
     // Reject before opening the dialog: with NO_COLOR the theme picker
     // cannot run, and returning a message lets the processor record the

@@ -64,7 +64,11 @@ import {
   MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
   type ChannelStartupReportMessage,
 } from '../../serve/channel-worker-startup-ipc.js';
-import { isLoopbackBind } from '../../serve/loopback-binds.js';
+import {
+  isHostGateLoopback,
+  isLoopbackBind,
+} from '../../serve/loopback-binds.js';
+import { isOwnInterfaceAddress } from '../../serve/local-bind-addresses.js';
 import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
@@ -95,6 +99,7 @@ import {
 } from './loop-runtime.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
+const SESSION_ATTACHMENTS_FEATURE = 'session_attachments';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
 
@@ -137,7 +142,7 @@ interface DaemonSessionClientStaticLike {
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
-  load(
+  resume(
     client: DaemonClientLike,
     sessionId: string,
     req: {
@@ -210,7 +215,7 @@ export function createDaemonSessionFactory({
       sessionScope: 'thread' as const,
     };
     if (req.sessionId) {
-      return await DaemonSessionClient.load(
+      return await DaemonSessionClient.resume(
         client,
         req.sessionId,
         daemonReq,
@@ -324,8 +329,35 @@ function validateDaemonWorkerUrl(daemonUrl: string): void {
   } catch {
     throw new Error(`${QWEN_DAEMON_URL_ENV} must be a valid URL.`);
   }
-  if (parsed.protocol !== 'http:' || !isLoopbackBind(parsed.hostname)) {
-    throw new Error(`${QWEN_DAEMON_URL_ENV} must use an http loopback URL.`);
+  // A daemon bound to a concrete interface (`--hostname 192.168.1.100`)
+  // listens on that socket ONLY — loopback is not bound, so rewriting the
+  // URL to `127.0.0.1` would trade this rejection for `ECONNREFUSED`. The
+  // worker dials the bound address itself, and an own-interface address
+  // keeps the daemon token on this host exactly as loopback does, which is
+  // the property this rule protects; anything else (a routable third-party
+  // host, a DNS name we would have to resolve to find out) stays refused.
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      `${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL or a ` +
+        `literal address of one of this machine's interfaces.`,
+    );
+  }
+  if (isHostGateLoopback(parsed.hostname)) return;
+  if (isLoopbackBind(parsed.hostname)) {
+    // Order matters: this refusal must run BEFORE the own-interface escape
+    // below — a wide 127/8 address can be assigned to a local interface
+    // (`ip addr add 127.0.0.2/8 dev lo`), and the gate 403s it either way.
+    throw new Error(
+      `${QWEN_DAEMON_URL_ENV} points at a loopback address the daemon's ` +
+        `Host header gate refuses (it answers only 127.0.0.1, localhost, ` +
+        `and [::1]); use one of those spellings instead.`,
+    );
+  }
+  if (!isOwnInterfaceAddress(parsed.hostname)) {
+    throw new Error(
+      `${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL or a ` +
+        `literal address of one of this machine's interfaces.`,
+    );
   }
 }
 
@@ -481,6 +513,24 @@ export async function runChannelDaemonWorker(
   const loopController = loopStore
     ? createChannelLoopController(loopStore)
     : undefined;
+  if (loopStore) {
+    const multiSessionChannels = new Set(
+      parsed
+        .filter(({ config }) => config.multiSession)
+        .map(({ name }) => name),
+    );
+    if (multiSessionChannels.size > 0) {
+      const loops = await abortableStartup(loopStore.list(), startupSignal);
+      const conflicting = loops.find(
+        (loop) => loop.enabled && multiSessionChannels.has(loop.channelName),
+      );
+      if (conflicting) {
+        throw new Error(
+          `Channel "${conflicting.channelName}" cannot enable multiSession while it has an enabled Channel loop. Disable the loop first.`,
+        );
+      }
+    }
+  }
 
   const bridge = new DaemonChannelBridge({
     cwd: daemonWorkspace,
@@ -489,6 +539,9 @@ export async function runChannelDaemonWorker(
       DaemonSessionClient: sdk.DaemonSessionClient,
       clientId: `qwen-channel-worker:${process.pid}`,
     }),
+    sessionAttachments: capabilities.features.includes(
+      SESSION_ATTACHMENTS_FEATURE,
+    ),
     ...(opts.promptAuthorization
       ? { promptAuthorization: opts.promptAuthorization }
       : {}),
@@ -550,6 +603,7 @@ export async function runChannelDaemonWorker(
     router = createdRouter;
     for (const { name, config } of parsed) {
       createdRouter.setChannelScope(name, config.sessionScope);
+      createdRouter.setChannelLoopsEnabled(name, !config.multiSession);
       if (config['webhooks']) {
         createdRouter.setChannelApprovalMode(name, config.approvalMode);
       }
@@ -594,7 +648,9 @@ export async function runChannelDaemonWorker(
                   freshWithinSeconds: OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS,
                 }),
             },
-            ...(loopController ? { loopController } : {}),
+            ...(loopController && !config.multiSession
+              ? { loopController }
+              : {}),
           }),
           startupSignal,
         ),

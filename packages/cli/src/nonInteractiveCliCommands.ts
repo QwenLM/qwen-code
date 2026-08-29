@@ -8,7 +8,7 @@ import type { PartListUnion } from '@google/genai';
 import {
   parseSlashCommand,
   parseStackedSlashCommands,
-} from './utils/commands.js';
+} from './ui/commands/commands.js';
 import {
   Logger,
   uiTelemetryService,
@@ -35,6 +35,7 @@ import {
   type SlashCommand,
   type SlashCommandActionReturn,
   type ExecutionMode,
+  type NonInteractiveSlashCommandPolicy,
 } from './ui/commands/types.js';
 import { createNonInteractiveUI } from './ui/noninteractive/nonInteractiveUi.js';
 import type { HistoryItemWithoutId } from './ui/types.js';
@@ -55,6 +56,15 @@ function getSkillCommandName(command: SlashCommand): string {
   return command.skillDetail?.name ?? command.name;
 }
 
+export function isCommandAllowedByPolicy(
+  command: Pick<SlashCommand, 'kind' | 'name'>,
+  policy?: NonInteractiveSlashCommandPolicy,
+): boolean {
+  if (!policy || command.kind !== CommandKind.BUILT_IN) return true;
+  if (command.name === 'clear' && !policy.allowSessionReset) return false;
+  return !policy.blockedBuiltinCommandNames.includes(command.name);
+}
+
 /**
  * Result of handling a slash command in non-interactive mode.
  *
@@ -66,7 +76,7 @@ function getSkillCommandName(command: SlashCommand): string {
  * - 'unsupported': Command cannot be executed in this mode
  * - 'no_command': No command was found or executed
  */
-export type NonInteractiveSlashCommandResult =
+export type NonInteractiveSlashCommandResult = (
   | {
       type: 'submit_prompt';
       content: PartListUnion;
@@ -102,7 +112,22 @@ export type NonInteractiveSlashCommandResult =
     }
   | {
       type: 'no_command';
-    };
+    }
+) & {
+  /** Present when a command was resolved and executed. */
+  resolvedCommand?: ResolvedSlashCommandInfo;
+};
+
+/**
+ * The command the processor actually resolved the input to — shadowing-aware.
+ * Callers that gate behavior on "which command ran" (e.g. the ACP recording
+ * gate for the built-in `advisor`) must use this, not the raw input token:
+ * a user-defined command named `advisor` shadows the built-in.
+ */
+export interface ResolvedSlashCommandInfo {
+  name: string;
+  kind: CommandKind;
+}
 
 /**
  * Converts a SlashCommandActionReturn to a NonInteractiveSlashCommandResult.
@@ -281,22 +306,30 @@ async function registerModelInvocableCommands(
   config: Config,
   executionMode: ExecutionMode,
   settings?: LoadedSettings,
+  executionPolicy?: NonInteractiveSlashCommandPolicy,
 ): Promise<void> {
   if (!settings) {
     return;
   }
 
   config.setModelInvocableCommandsProvider(() =>
-    commandService.getModelInvocableCommands().map((cmd) => ({
-      name: cmd.name,
-      description: cmd.modelDescription ?? cmd.description,
-    })),
+    commandService
+      .getModelInvocableCommands()
+      .filter((cmd) => isCommandAllowedByPolicy(cmd, executionPolicy))
+      .map((cmd) => ({
+        name: cmd.name,
+        description: cmd.modelDescription ?? cmd.description,
+      })),
   );
 
   config.setModelInvocableCommandsExecutor(
     async (name: string, args: string = '') => {
       const commands = commandService.getModelInvocableCommands();
-      const cmd = commands.find((c) => c.name === name);
+      const cmd = commands.find(
+        (candidate) =>
+          candidate.name === name &&
+          isCommandAllowedByPolicy(candidate, executionPolicy),
+      );
       if (!cmd?.action) return null;
       const minimalContext = {
         executionMode,
@@ -306,6 +339,7 @@ async function registerModelInvocableCommands(
           args,
         },
         services: { config, settings, logger: null },
+        ...(executionPolicy ? { executionPolicy } : {}),
       } as unknown as CommandContext;
       const result = await cmd.action(minimalContext, args);
       if (!result || result.type !== 'submit_prompt') return null;
@@ -369,6 +403,7 @@ export const handleSlashCommand = async (
   config: Config,
   settings: LoadedSettings,
   sessionHooks?: NonInteractiveSlashCommandSessionHooks,
+  executionPolicy?: NonInteractiveSlashCommandPolicy,
 ): Promise<NonInteractiveSlashCommandResult> => {
   const trimmed = rawQuery.trim();
   if (!trimmed.startsWith('/')) {
@@ -426,11 +461,15 @@ export const handleSlashCommand = async (
     config,
     executionMode,
     settings,
+    executionPolicy,
   );
   const allCommands = allCommandService.getCommands();
   const filteredCommands = commandService
     .getCommandsForMode(executionMode)
-    .filter((cmd) => !isDisabled(cmd));
+    .filter(
+      (cmd) =>
+        !isDisabled(cmd) && isCommandAllowedByPolicy(cmd, executionPolicy),
+    );
 
   // First, try to parse with filtered commands
   const { commandToExecute, args } = parseSlashCommand(
@@ -451,6 +490,7 @@ export const handleSlashCommand = async (
       if (!skill.action) continue;
       const skillContext = {
         executionMode,
+        ...(executionPolicy ? { executionPolicy } : {}),
         invocation: {
           raw: `/${skill.name}`,
           name: skill.name,
@@ -541,6 +581,15 @@ export const handleSlashCommand = async (
           originalType: 'filtered_command',
         };
       }
+      if (!isCommandAllowedByPolicy(knownCommand, executionPolicy)) {
+        return {
+          type: 'unsupported',
+          reason: t('The command "/{{command}}" is not available here.', {
+            command: typedToken,
+          }),
+          originalType: 'unsupported_action',
+        };
+      }
       // Command exists but is not allowed in this mode
       return {
         type: 'unsupported',
@@ -557,6 +606,11 @@ export const handleSlashCommand = async (
   if (!commandToExecute.action) {
     return { type: 'no_command' };
   }
+
+  const resolvedCommand: ResolvedSlashCommandInfo = {
+    name: commandToExecute.name,
+    kind: commandToExecute.kind,
+  };
 
   // Not used by custom commands but may be in the future.
   const sessionStats: SessionStatsState = {
@@ -580,6 +634,9 @@ export const handleSlashCommand = async (
 
   const context: CommandContext = {
     executionMode,
+    ...(executionPolicy ? { executionPolicy } : {}),
+    abortSignal:
+      commandToExecute.name === 'advisor' ? abortController.signal : undefined,
     services: {
       config,
       settings,
@@ -627,6 +684,7 @@ export const handleSlashCommand = async (
       type: 'message',
       messageType: 'info',
       content: 'Command executed successfully.',
+      resolvedCommand,
     };
   }
 
@@ -646,18 +704,24 @@ export const handleSlashCommand = async (
     }
     if (hookResult.blockedResult) {
       recordSkillCommandInvocation(false);
-      return hookResult.blockedResult;
+      return { ...hookResult.blockedResult, resolvedCommand };
     }
     recordSkillCommandInvocation(true);
     void recordAutoSkillCommandUsage(config, commandToExecute);
-    return handleCommandResult(
-      { ...result, content: hookResult.content },
-      outputHistoryItems,
-    );
+    return {
+      ...handleCommandResult(
+        { ...result, content: hookResult.content },
+        outputHistoryItems,
+      ),
+      resolvedCommand,
+    };
   }
 
   // Handle different result types
-  return handleCommandResult(result, outputHistoryItems);
+  return {
+    ...handleCommandResult(result, outputHistoryItems),
+    resolvedCommand,
+  };
 };
 
 /**
@@ -673,6 +737,7 @@ export const getAvailableCommands = async (
   abortSignal: AbortSignal,
   mode: ExecutionMode = 'acp',
   settings?: LoadedSettings,
+  executionPolicy?: NonInteractiveSlashCommandPolicy,
 ): Promise<SlashCommand[]> => {
   try {
     const loaders = [
@@ -697,8 +762,13 @@ export const getAvailableCommands = async (
       config,
       mode,
       settings,
+      executionPolicy,
     );
-    return commandService.getCommandsForMode(mode) as SlashCommand[];
+    return commandService
+      .getCommandsForMode(mode)
+      .filter((command) =>
+        isCommandAllowedByPolicy(command, executionPolicy),
+      ) as SlashCommand[];
   } catch (error) {
     // Handle errors gracefully - log and return empty array
     debugLogger.error('Error loading available commands:', error);
