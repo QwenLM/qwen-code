@@ -162,6 +162,29 @@ describe('StatusCardController', () => {
     expect(content.endsWith('b'.repeat(2_000))).toBe(true);
   });
 
+  it('does not rewind content after delayed card creation', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    const creationGate = deferred<void>();
+    vi.mocked(client.createAndDeliver).mockImplementationOnce(async () => {
+      await creationGate.promise;
+    });
+
+    controller.replace(segment(), target, 'initial');
+    controller.replace(segment(), target, 'queued');
+    await vi.advanceTimersByTimeAsync(500);
+    controller.replace(segment(), target, 'latest');
+
+    creationGate.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      vi
+        .mocked(client.openOrUpdateStream)
+        .mock.calls.map(([request]) => request.content),
+    ).toEqual(['latest', 'latest']);
+  });
+
   it('hides streamed image paths in status snapshots', async () => {
     vi.useFakeTimers();
     const { client, controller } = createHarness();

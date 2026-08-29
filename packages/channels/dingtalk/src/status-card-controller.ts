@@ -385,7 +385,6 @@ export class StatusCardController {
       record.pendingSnapshot === undefined
     )
       return;
-    const content = record.pendingSnapshot;
     record.pendingSnapshot = undefined;
     const write = record.writeChain
       .then(async () => {
@@ -394,7 +393,7 @@ export class StatusCardController {
         await this.options.client.openOrUpdateStream({
           outTrackId: record.outTrackId,
           key: 'content',
-          content,
+          content: sanitizeStreamingImageMarkers(record.content),
           finalize: false,
         });
         record.streamRetryAttempt = 0;
