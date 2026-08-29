@@ -4029,6 +4029,23 @@ export class AcpDispatcher {
             }
             return;
           }
+          const rawScope = params['scope'];
+          if (
+            rawScope !== undefined &&
+            rawScope !== 'project' &&
+            rawScope !== 'user'
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`scope` must be "project", "user", or omitted',
+                ),
+              );
+            }
+            return;
+          }
           try {
             const available =
               await this.bridge.isWorkspaceMemoryRememberAvailable();
@@ -4052,6 +4069,7 @@ export class AcpDispatcher {
             const task = this.workspaceRememberLane.enqueue({
               content: content.trim(),
               contextMode: rawContextMode,
+              ...(rawScope ? { scope: rawScope } : {}),
               ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
               ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
             });
@@ -4132,6 +4150,23 @@ export class AcpDispatcher {
             }
             return;
           }
+          const rawScope = params['scope'];
+          if (
+            rawScope !== undefined &&
+            rawScope !== 'project' &&
+            rawScope !== 'user'
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`scope` must be "project", "user", or omitted',
+                ),
+              );
+            }
+            return;
+          }
           try {
             const available =
               await this.bridge.isWorkspaceMemoryRememberAvailable();
@@ -4154,6 +4189,7 @@ export class AcpDispatcher {
             }
             const task = this.workspaceRememberLane.enqueueForget({
               query: trimmedQuery,
+              ...(rawScope ? { scope: rawScope } : {}),
               ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
               ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
             });

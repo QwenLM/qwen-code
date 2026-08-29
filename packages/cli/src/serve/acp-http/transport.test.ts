@@ -675,6 +675,8 @@ class FakeBridge {
     originatorClientId: string;
   }> = [];
   runtimeMcpRemoves: Array<{ name: string; originatorClientId: string }> = [];
+  workspaceMemoryRememberCalls: Array<Record<string, unknown>> = [];
+  workspaceMemoryForgetCalls: Array<Record<string, unknown>> = [];
   runtimeMcpAddResult: {
     shadowedSettings?: boolean;
     skipped?: boolean;
@@ -709,10 +711,16 @@ class FakeBridge {
       originatorClientId,
     };
   }
-  async runWorkspaceMemoryRemember() {
-    return { summary: 'remembered', filesTouched: [], touchedScopes: [] };
+  async runWorkspaceMemoryRemember(request: Record<string, unknown>) {
+    this.workspaceMemoryRememberCalls.push(request);
+    return {
+      summary: 'remembered',
+      filesTouched: ['/mem/project/remembered.md'],
+      touchedScopes: ['project'],
+    };
   }
-  async runWorkspaceMemoryForget() {
+  async runWorkspaceMemoryForget(request: Record<string, unknown>) {
+    this.workspaceMemoryForgetCalls.push(request);
     return {
       summary: 'forgot',
       removedEntries: [],
@@ -10452,7 +10460,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         };
         expect(completed.result).toMatchObject({
           status: 'completed',
-          result: { summary: 'No memory files updated.' },
+          result: { summary: 'Memory update completed.' },
         });
       } finally {
         reader.close();
@@ -10491,6 +10499,49 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           status: 'completed',
           result: { summary: 'forgot' },
         });
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/workspace/memory/forget carries a scope through, and omits it when unscoped', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 84,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'stale project note', scope: 'project' },
+        });
+        const scoped = (await reader.next()) as {
+          result: { taskId: string; status: string; scope?: string };
+        };
+        // The dispatcher's `...(rawScope ? { scope: rawScope } : {})` is the
+        // only thing carrying the caller's scope into the destructive lane;
+        // until now no test over the wire drove either direction of it.
+        expect(scoped.result.scope).toBe('project');
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'anything' },
+        });
+        const unscoped = (await reader.next()) as {
+          result: { taskId: string; status: string };
+        };
+        expect(unscoped.result).not.toHaveProperty('scope');
+
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        // A `scope: undefined` reaching the bridge reads as a requested scope
+        // to anything checking for the key, so the omitted arm is asserted
+        // strictly rather than by value.
+        expect(bridge.workspaceMemoryForgetCalls).toStrictEqual([
+          { query: 'stale project note', scope: 'project' },
+          { query: 'anything' },
+        ]);
       } finally {
         reader.close();
       }
@@ -10614,7 +10665,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(completed!.result).toMatchObject({
           taskId: restTask.taskId,
           status: 'completed',
-          result: { summary: 'No memory files updated.' },
+          result: { summary: 'Memory update completed.' },
         });
       } finally {
         reader.close();

@@ -602,6 +602,7 @@ export interface ChangeSessionCwdResult {
 }
 
 export type BridgeWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
+export type BridgeWorkspaceMemoryRememberTargetScope = 'project' | 'user';
 export type BridgeAutoMemoryTopic =
   | 'user'
   | 'feedback'
@@ -611,6 +612,7 @@ export type BridgeAutoMemoryTopic =
 export interface BridgeWorkspaceMemoryRememberRequest {
   content: string;
   contextMode: BridgeWorkspaceMemoryRememberContextMode;
+  scope?: BridgeWorkspaceMemoryRememberTargetScope;
 }
 
 export interface BridgeWorkspaceMemoryRememberResult {
@@ -621,6 +623,7 @@ export interface BridgeWorkspaceMemoryRememberResult {
 
 export interface BridgeWorkspaceMemoryForgetRequest {
   query: string;
+  scope?: BridgeWorkspaceMemoryRememberTargetScope;
 }
 
 export interface BridgeWorkspaceMemoryForgetMatch {

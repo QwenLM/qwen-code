@@ -54,6 +54,20 @@ const EN: Messages = {
   'branchPicker.createdBranch': (v) => `Created branch ${v?.branch ?? ''}`,
   'branchPicker.pushSuccess': 'Pushed successfully',
   'branchPicker.pullSuccess': 'Updated successfully',
+  'branchPicker.hint.upToDate': 'Up to date',
+  'branchPicker.hint.noUpstream': 'No upstream',
+  'branchPicker.hint.upstreamGone': 'Upstream gone',
+  'branchPicker.hint.behindDirty': (v) =>
+    `↓${v?.count ?? 0} · uncommitted changes`,
+  'branchPicker.hint.setsUpstream': 'Sets upstream on push',
+  'branchPicker.hint.aheadBehind': (v) =>
+    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · update first`,
+  'branchPicker.hint.nothingToPush': 'Nothing to push',
+  'branchPicker.hint.noChanges': 'No changes',
+  'branchPicker.hint.changes': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'change' : 'changes'}`,
+  'branchPicker.hint.changesUntracked': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'change' : 'changes'} (${v?.untracked ?? 0} untracked)`,
   'gitCommit.title': 'Commit',
   'gitCommit.messagePlaceholder': 'Commit message (⌘/Ctrl+Enter to commit)',
   'gitCommit.generating': 'Generating commit message…',
@@ -3078,6 +3092,10 @@ const EN: Messages = {
   'settings.localControl.maySleep': 'This Mac may sleep',
   'settings.localControl.urlRedacted':
     'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
+  'localControl.open': 'Mobile access',
+  'localControl.disabledHint':
+    'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
+  'localControl.openSettings': 'Open Settings',
   'settings.models.title': 'Models',
   'settings.models.add': '+ Add Model',
   'settings.models.setCurrent': 'Set current',
@@ -3155,6 +3173,18 @@ const ZH: Messages = {
   'branchPicker.createdBranch': (v) => `已创建分支 ${v?.branch ?? ''}`,
   'branchPicker.pushSuccess': '推送成功',
   'branchPicker.pullSuccess': '更新成功',
+  'branchPicker.hint.upToDate': '已是最新',
+  'branchPicker.hint.noUpstream': '无上游分支',
+  'branchPicker.hint.upstreamGone': '上游分支已不存在',
+  'branchPicker.hint.behindDirty': (v) => `↓${v?.count ?? 0} · 有未提交更改`,
+  'branchPicker.hint.setsUpstream': '推送时设置上游',
+  'branchPicker.hint.aheadBehind': (v) =>
+    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · 请先更新`,
+  'branchPicker.hint.nothingToPush': '无待推送',
+  'branchPicker.hint.noChanges': '无更改',
+  'branchPicker.hint.changes': (v) => `${v?.count ?? 0} 处更改`,
+  'branchPicker.hint.changesUntracked': (v) =>
+    `${v?.count ?? 0} 处更改（${v?.untracked ?? 0} 未跟踪）`,
   'gitCommit.title': '提交',
   'gitCommit.messagePlaceholder': '提交信息（⌘/Ctrl+Enter 提交）',
   'gitCommit.generating': '正在生成提交信息…',
@@ -6036,6 +6066,10 @@ const ZH: Messages = {
   'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
   'settings.localControl.urlRedacted':
     '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
+  'localControl.open': '手机访问',
+  'localControl.disabledHint':
+    '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
+  'localControl.openSettings': '打开设置',
   'settings.models.title': '模型',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',
