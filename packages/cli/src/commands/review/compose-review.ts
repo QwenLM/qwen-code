@@ -2175,6 +2175,7 @@ export function composeReview(
     closuresThisRound,
     churnRounds,
     flatRounds,
+    result.recommendations,
   );
   // `postedInline` came out of the body composer on the same input, so only
   // the predecessor's volume — which only this scope read — is added here.
@@ -2804,6 +2805,7 @@ function ledgerMarkerFor(
   closed: LedgerClosure[],
   churnRounds: number,
   flatRounds: number,
+  recommendations: readonly Recommendation[] | undefined,
 ): string | null {
   try {
     if (!input.planPath) return null;
@@ -2965,6 +2967,14 @@ function ledgerMarkerFor(
       // The floor trigger's streak rides beside the churn streak — same
       // rung, same zero-omission; see the field's own note in `Ledger`.
       ...(flatRounds > 0 ? { flatRounds } : {}),
+      // The diagnosis's matched codes, off the SAME derivation the posted
+      // paragraph and `result.recommendations` render from — one origin, so
+      // the codes an outside consumer wires (#10107) and the sentences a
+      // human reads cannot describe different rounds. Absent when the round
+      // produced no diagnosis, exactly as the result field is.
+      ...(recommendations !== undefined && recommendations.length > 0
+        ? { rec: recommendations.map((r) => r.code) }
+        : {}),
     });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
