@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { WebViewContent } from './WebViewContent.js';
+import * as vscode from 'vscode';
 
 vi.mock('vscode', () => ({
   Uri: {
@@ -13,6 +14,9 @@ vi.mock('vscode', () => ({
       fsPath: `/ext/${parts.join('/')}`,
     })),
   },
+  env: {
+    language: 'en'
+  }
 }));
 
 /**
@@ -94,5 +98,19 @@ describe('WebViewContent', () => {
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
     expect(html).not.toContain('data-web-shell-transcript');
+  });
+
+  it('injects vscode.env.language into html lang attribute (zh-CN)', () => {
+    vscode.env.language = 'zh-CN';
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+    expect(html).toContain('<html lang="zh-CN">');
+  });
+
+  it('injects vscode.env.language into html lang attribute (en)', () => {
+    vscode.env.language = 'en';
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+    expect(html).toContain('<html lang="en">');
   });
 });
