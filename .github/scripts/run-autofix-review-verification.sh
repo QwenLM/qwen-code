@@ -1104,8 +1104,14 @@ WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__
 # assertion and earns nothing. supertest's .expect( is the throwing
 # exception — a member call whose mismatch rejects the awaited promise —
 # so the member form counts on every arm. This del-side/blob RE counts a
-# bare expect( call.
-WEAKEN_ASSERT_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.poll)?\(|\.expect(\.poll)?\('
+# bare expect( call. The expect MEMBERS whitelisted beside poll are the
+# complete throwing assertions — soft( collects failures and throws at
+# test end, assertions(/hasAssertions( throw on a count mismatch,
+# unreachable( throws unconditionally — so deleting such a line removes
+# a pinning assertion exactly like deleting expect(...).toBe(...). The
+# list stays a whitelist on purpose: anything(/any(/arrayContaining(
+# are NON-throwing asymmetric matchers and must not count.
+WEAKEN_ASSERT_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.(poll|soft|assertions|hasAssertions|unreachable))?\(|\.expect(\.(poll|soft|assertions|hasAssertions|unreachable))?\('
 # Added lines count an expect( only when a matcher chain follows it on
 # the same line: expect('anything') passes for any return value, the
 # maximal relaxation of an assertion. The del side stays bare on
@@ -1113,8 +1119,10 @@ WEAKEN_ASSERT_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|
 # removal — the fail-closed direction, one ack entry answers it. The
 # member form .expect( IS its own assertion, but it carries the same
 # matcher-tail requirement here on purpose: a bare-added member call
-# then measures as removal-only — the fail-closed direction.
-WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.poll)?\(.*\)[[:space:]]*\.|\.expect(\.poll)?\(.*\)[[:space:]]*\.'
+# then measures as removal-only — the fail-closed direction. The
+# throwing members need no tail: the CALL itself fails the test, so an
+# added expect.unreachable( earns addition credit as written.
+WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.poll)?\(.*\)[[:space:]]*\.|(^|[^A-Za-z0-9_$.])expect\.(soft|assertions|hasAssertions|unreachable)\(|\.expect(\.poll)?\(.*\)[[:space:]]*\.'
 # Marker shapes beyond the dotted one-line form: a concurrent/
 # sequential/shuffle chain ahead of the modifier (test.concurrent.skip(),
 # describe.concurrent.skip()) or BEHIND it (it.skip.concurrent( — vitest
@@ -1145,7 +1153,19 @@ WEAKEN_DEL_ACC=()
 WEAKEN_ADD_ACC=()
 WEAKEN_SKIP_ADD_ACC=()
 WEAKEN_SKIP_DEL_ACC=()
-WEAKEN_ROUND_COMMITS="$(git rev-list --first-parent "origin/${BRANCH}..${BRANCH}" 2> /dev/null)" || WEAKEN_MEASURED='false'
+# Test files a main-derived merge of THIS round landed (status A at the
+# merge): for the round's own post-merge commits they are pre-existing
+# coverage exactly like the pre-round ref's files -- main's newly landed
+# tests may not be silently weakened or deleted in the same round.
+WEAKEN_MERGE_INTRODUCED=()
+# Files measured at a main-derived merge commit: the byte-identity tip
+# netting may not drop their charges, because for an --ours resolution
+# the damage IS the identity with the pre-round bytes.
+WEAKEN_MERGE_TOUCHED=()
+# Oldest-first: a merge's WEAKEN_MERGE_INTRODUCED seed must land before
+# the post-merge commits that consult it, and a pre-round-baseline re-add
+# measurement reads the accumulators the earlier commits filled.
+WEAKEN_ROUND_COMMITS="$(git rev-list --first-parent --reverse "origin/${BRANCH}..${BRANCH}" 2> /dev/null)" || WEAKEN_MEASURED='false'
 # The accumulator slot holding ${1}'s counts, or failure on first sight.
 weaken_file_slot() {
   local f="${1}" weaken_i
@@ -1239,11 +1259,12 @@ weaken_strip_code() {
   awk '
     function flushident() {
       if (ident == "") return
+      pltok = ltok
       if (ident ~ /^(return|typeof|yield|await|throw|void|delete|do|else|in|of|case|new|instanceof|if|for|while|switch|catch|with)$/) ltok = ident
       else ltok = "id"
       ident = ""
     }
-    BEGIN { inc = 0; q = ""; tpl = 0; regx = 0; rcls = 0; ltok = ""; ident = ""; pd = 0 }
+    BEGIN { inc = 0; q = ""; tpl = 0; regx = 0; rcls = 0; ltok = ""; pltok = ""; ident = ""; pd = 0 }
     {
       line = $0; out = ""; n = length(line); i = 1
       regx = 0; rcls = 0
@@ -1283,9 +1304,20 @@ weaken_strip_code() {
         if (ch == "\047" || ch == "\"" || ch == "`") { flushident(); q = ch; i += 1; continue }
         if (ch ~ /[A-Za-z0-9_$]/) { ident = ident ch; out = out ch; i += 1; continue }
         flushident()
-        if (ch == "(") { pd += 1; pk[pd] = (ltok ~ /^(if|for|while|switch|catch|with)$/) ? 1 : 0; ltok = "(" }
-        else if (ch == ")") { ctl = (pd > 0 && pk[pd]); if (pd > 0) pd -= 1; ltok = (ctl ? ")ctl" : ")") }
-        else if (ch !~ /[[:space:]]/) { ltok = ch }
+        if (ch == "(") { pd += 1; pk[pd] = (ltok ~ /^(if|for|while|switch|catch|with)$/) ? 1 : 0; pltok = ltok; ltok = "(" }
+        else if (ch == ")") { ctl = (pd > 0 && pk[pd]); if (pd > 0) pd -= 1; pltok = ltok; ltok = (ctl ? ")ctl" : ")") }
+        else if (ch !~ /[[:space:]]/) {
+          # Postfix ++/-- (and a TS postfix !) FOLLOW a value: the '/'
+          # after n++ / n-- / x! is division, not a regex head. pltok is
+          # the token class ahead of the PREVIOUS operator char, so a
+          # duplicated + or - with a value behind it resolves as a value
+          # itself; an adjacent-byte check keeps n + +x unary (a space
+          # breaks adjacency). A prefix ! after an operator or at line
+          # start keeps the regex-head behavior.
+          if ((ch == "+" || ch == "-") && substr(line, i - 1, 1) == ch && pltok ~ /^(id|str|[)\]])$/) { pltok = ltok; ltok = "id" }
+          else if (ch == "!" && ltok ~ /^(id|str|[)\]])$/) { pltok = ltok; ltok = "id" }
+          else { pltok = ltok; ltok = ch }
+        }
         if (ch == "{" && tpl > 0) br[tpl] += 1
         out = out ch; i += 1
       }
@@ -1308,12 +1340,31 @@ weaken_join_markers() {
     }
     END { if (buf != "") print buf }'
 }
+# Count the lines of ${1} that match regex ${3} and whose exact text is
+# absent from ${2}: the per-line freight census the merge blob arm uses.
+# Both blobs arrive through the same strip, so only untouched regions
+# net to zero; the sets compare byte-for-byte on the stripped lines.
+weaken_count_absent() {
+  awk -v re="${3}" '
+    NR == FNR { seen[$0] = 1; next }
+    $0 ~ re && !($0 in seen) { c += 1 }
+    END { print c + 0 }
+  ' <(printf '%s\n' "${2}") <(printf '%s\n' "${1}")
+}
 # Fold one commit's diff of one test file into the per-file accumulators.
 # When ${3} is set the commit is a merge whose second parent is derived
 # from origin/main: the same file at that parent decides line authorship,
 # keeping only what the merge resolution itself authored.
 weaken_count_commit_file() {
-  local c="${1}" f="${2}" is_merge="${3}" p2='' have_p2='' kept='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot weaken_has_edits='' weaken_old='' weaken_new='' weaken_old_stripped='' weaken_new_stripped='' weaken_old_n weaken_new_n weaken_o weaken_mb_n weaken_p2_n weaken_old_skip_n weaken_new_skip_n weaken_s weaken_mb_stripped='' weaken_p2_stripped='' weaken_mb_skip_n weaken_p2_skip_n
+  local c="${1}" f="${2}" is_merge="${3}" pre_base="${4:-}" p2='' have_p2='' kept='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot weaken_has_edits='' weaken_old='' weaken_new='' weaken_old_stripped='' weaken_new_stripped='' weaken_old_n weaken_new_n weaken_o weaken_old_skip_n weaken_new_skip_n weaken_s weaken_mb_stripped='' weaken_p2_stripped='' weaken_freight_del weaken_freight_add weaken_mb_skip_n weaken_p2_skip_n
+  # A status-A re-add of a pre-existing path measures against the
+  # PRE-ROUND blob, not the commit's parent: main's deletion rode the
+  # merge in as freight, so the parent side is empty and the re-add
+  # would net as pure addition.
+  local old_ref="${c}^"
+  if [[ -n "${pre_base}" ]]; then
+    old_ref="origin/${BRANCH}"
+  fi
   if [[ -n "${is_merge}" ]]; then
     # An empty blob is not a missing one: key the freight filter on git
     # show's exit status, so a modify/delete resolution (main deleted the
@@ -1336,7 +1387,7 @@ weaken_count_commit_file() {
   # `binary`) otherwise collapses this hunk into the "Binary files differ"
   # banner -- no @@ content, every counter zeroed while the file still
   # enumerates as changed.
-  if ! diff_body="$(git diff --text -U0 --no-renames "${c}^" "${c}" -- ":(literal)${f}" 2> /dev/null)"; then
+  if ! diff_body="$(git diff --text -U0 --no-renames "${old_ref}" "${c}" -- ":(literal)${f}" 2> /dev/null)"; then
     return 1
   fi
   # Everything from the first `@@` on is hunk content, so the ---/+++ file
@@ -1349,6 +1400,14 @@ weaken_count_commit_file() {
   add_lines="$(sed -n 's/^+//p' <<< "${diff_body}")"
   del_lines="$(sed -n 's/^-//p' <<< "${diff_body}")"
   [[ -n "${add_lines}" || -n "${del_lines}" ]] && weaken_has_edits=1
+  # An --ours resolution keeps the branch side byte-identical, so the
+  # first-parent diff body is empty -- yet the resolution discarded
+  # everything main's side added. The second-parent diff is the edit
+  # evidence for the blob-density cross-check in that shape.
+  if [[ -n "${is_merge}" ]] &&
+    ! git diff --quiet --no-renames "${c}^2" "${c}" -- ":(literal)${f}" 2> /dev/null; then
+    weaken_has_edits=1
+  fi
   if [[ -n "${is_merge}" ]]; then
     add_lines="$(while IFS= read -r l; do
       if [[ -n "${l}" ]] && ! grep -qxF -- "${l}" <<< "${p2}"; then
@@ -1413,7 +1472,7 @@ weaken_count_commit_file() {
     # gets the same whole-blob backstop below. A merge's blob delta
     # carries main-side freight exactly like the line counts: subtract
     # main's own density delta so it neither charges nor shields.
-    weaken_old="$(git show "${c}^:${f}" 2> /dev/null)" || weaken_old=''
+    weaken_old="$(git show "${old_ref}:${f}" 2> /dev/null)" || weaken_old=''
     weaken_new="$(git show "${c}:${f}" 2> /dev/null)" || weaken_new=''
     weaken_old_stripped="$(weaken_strip_code <<< "${weaken_old}")"
     weaken_new_stripped="$(weaken_strip_code <<< "${weaken_new}")"
@@ -1426,9 +1485,28 @@ weaken_count_commit_file() {
     if [[ -n "${is_merge}" && -z "${kept}" ]]; then
       weaken_mb_stripped="$(weaken_strip_code <<< "${base_blob}")"
       weaken_p2_stripped="$(weaken_strip_code <<< "${p2}")"
-      weaken_mb_n="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${weaken_mb_stripped}" || true)"
-      weaken_p2_n="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${weaken_p2_stripped}" || true)"
-      weaken_o=$(( weaken_o - (weaken_mb_n - weaken_p2_n) ))
+      # Freight is classified per LINE, never a subtraction of whole-blob
+      # density totals: git keeps an addition that branch AND main both
+      # made byte-identically ONCE in the result, so a total-level
+      # subtraction counts it twice — a phantom positive weaken_o that
+      # rejects an honest merge. Charge what MAIN removed (present at the
+      # merge base, absent from main's side) and credit what main added
+      # that the branch did not already carry — the same classification
+      # the line arm applies per diff line.
+      weaken_freight_del="$(weaken_count_absent "${weaken_mb_stripped}" "${weaken_p2_stripped}" "${WEAKEN_ASSERT_RE}")"
+      weaken_freight_add="$(weaken_count_absent "${weaken_p2_stripped}" "${weaken_mb_stripped}"$'\n'"${weaken_old_stripped}" "${WEAKEN_ASSERT_RE}")"
+      weaken_o=$(( weaken_o - (weaken_freight_del - weaken_freight_add) ))
+      # The skip arm keeps the whole-blob census subtraction: its defect
+      # direction is shielding (the subtraction can only DEFLATE weaken_s,
+      # never inflate it), and a resolution-introduced marker that the
+      # line counts miss would need an added marker line at once
+      # freight-filtered (byte-identical to main's side) and
+      # resolution-authored -- unreachable while the line arm counts
+      # added markers on the freight-filtered view. The assert arm's
+      # defect direction is phantom rejection, which IS reachable
+      # (shared byte-identical additions) and fixed above. A byte-copy
+      # duplicate-marker corner can still over-deflate here; the escape
+      # hatch is one ack entry, the fail-closed direction.
       weaken_mb_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_mb_stripped}" || true)"
       weaken_p2_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_p2_stripped}" || true)"
       weaken_s=$(( weaken_s - (weaken_p2_skip_n - weaken_mb_skip_n) ))
@@ -1475,25 +1553,76 @@ while IFS= read -r c; do
   if git rev-parse -q --verify "${c}^2" > /dev/null 2>&1 &&
     git merge-base --is-ancestor "${c}^2" origin/main 2> /dev/null; then
     is_merge=1
+    # The merge's status-A pathspec files are main's newly landed tests;
+    # for the round's OWN post-merge commits they are pre-existing
+    # coverage the freight machinery must no longer shield.
+    while IFS= read -r -d '' weaken_mf; do
+      [[ -n "${weaken_mf}" ]] || continue
+      WEAKEN_MERGE_INTRODUCED+=("${weaken_mf}")
+    done < <(git diff --name-only -z --no-renames --diff-filter=A "${c}^" "${c}" \
+      -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
   fi
+  # M, D, and T: a file deleted in one round commit and re-added weakened in
+  # a later one escapes a modify-only scan (the delete commit is D, the
+  # re-add A, neither M), and a pre-existing file replaced by a symlink is
+  # status T while still matching the pathspec and existing at the tip. The
+  # pre-round pre-existence guard below keeps a genuinely round-introduced
+  # file out of the D arm of this filter. A main-derived merge additionally
+  # enumerates the union of BOTH parents' views: a resolution that keeps
+  # the branch side byte-identical (--ours) leaves the first-parent diff
+  # empty while discarding main-side additions, so only the second-parent
+  # diff lists the file.
+  weaken_commit_files=()
   while IFS= read -r -d '' f; do
     [[ -n "${f}" ]] || continue
-    # Pre-existing means present at the PRE-ROUND ref: a file this round (or
-    # its merge) introduced first has no prior coverage to weaken.
-    if ! git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null; then
+    weaken_commit_files+=("${f}")
+  done < <(git diff --name-only -z --no-renames --diff-filter=MDT "${c}^" "${c}" \
+    -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
+  if [[ -n "${is_merge}" ]]; then
+    while IFS= read -r -d '' f; do
+      [[ -n "${f}" ]] || continue
+      if ! weaken_member "${f}" "${weaken_commit_files[@]}"; then
+        weaken_commit_files+=("${f}")
+      fi
+    done < <(git diff --name-only -z --no-renames --diff-filter=MDT "${c}^2" "${c}" \
+      -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
+  fi
+  for f in "${weaken_commit_files[@]}"; do
+    # Pre-existing means present at the PRE-ROUND ref — or landed by one
+    # of this round's own main-derived merges: for the round's post-merge
+    # commits, main's newly landed tests are coverage the round owes,
+    # whether it weakens them (status M here) or deletes them (status D).
+    if ! git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null &&
+      ! weaken_member "${f}" "${WEAKEN_MERGE_INTRODUCED[@]}"; then
       continue
+    fi
+    if [[ -n "${is_merge}" ]]; then
+      WEAKEN_MERGE_TOUCHED+=("${f}")
     fi
     if ! weaken_count_commit_file "${c}" "${f}" "${is_merge}"; then
       WEAKEN_MEASURED='false'
       break
     fi
-  # M, D, and T: a file deleted in one round commit and re-added weakened in
-  # a later one escapes a modify-only scan (the delete commit is D, the
-  # re-add A, neither M), and a pre-existing file replaced by a symlink is
-  # status T while still matching the pathspec and existing at the tip. The
-  # pre-round pre-existence guard above keeps a genuinely round-introduced
-  # file out of the D arm of this filter.
-  done < <(git diff --name-only -z --no-renames --diff-filter=MDT "${c}^" "${c}" \
+  done
+  [[ "${WEAKEN_MEASURED}" == 'true' ]] || break
+  # A status-A re-add of a path that WAS pre-existing: main deleted the
+  # file, the round merged the deletion in as freight, and the round's own
+  # commit re-added the file weakened — status A is outside the MDT
+  # enumeration above, and the net-range D arm never lists a file present
+  # at the tip. Measured against the PRE-ROUND blob (the fourth argument),
+  # the re-add nets exactly what the round's authorship removed. The
+  # guard keeps a round-introduced file out: its re-adds have no
+  # pre-round coverage to weaken.
+  while IFS= read -r -d '' f; do
+    [[ -n "${f}" ]] || continue
+    if ! git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null; then
+      continue
+    fi
+    if ! weaken_count_commit_file "${c}" "${f}" '' 'preround'; then
+      WEAKEN_MEASURED='false'
+      break
+    fi
+  done < <(git diff --name-only -z --no-renames --diff-filter=A "${c}^" "${c}" \
     -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
 done <<< "${WEAKEN_ROUND_COMMITS}"
 if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
@@ -1506,8 +1635,15 @@ if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
     # per-commit arm charges a deletion by its full line count (the D
     # filter), while a later byte-identical restore is status A, outside
     # that filter, and never earns an offsetting credit. The netting
-    # principle reads the tip, not the sequence.
-    if git diff --quiet "origin/${BRANCH}" "${BRANCH}" -- ":(literal)${f}" 2> /dev/null; then
+    # principle reads the tip, not the sequence — and it applies only
+    # when the tip reading is meaningful: a file absent at the pre-round
+    # ref reads absent-on-both-sides as identity (masking the deletion of
+    # a test a round merge landed), and a file a main-derived merge
+    # touched is exempt because an --ours resolution's damage IS the
+    # identity with the pre-round bytes.
+    if git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null &&
+      ! weaken_member "${f}" "${WEAKEN_MERGE_TOUCHED[@]}" &&
+      git diff --quiet "origin/${BRANCH}" "${BRANCH}" -- ":(literal)${f}" 2> /dev/null; then
       continue
     fi
     w_del="${WEAKEN_DEL_ACC[weaken_idx]}"

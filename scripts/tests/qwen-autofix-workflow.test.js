@@ -23379,10 +23379,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       mainMoves: ['git rm -q pkg/a.test.ts', 'git commit -qm main-deletes'],
       round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
     },
-    // Main ADDS a test file, the round merges it and edits that new file:
-    // it never was pre-existing coverage of this round.
-    'merge-added': {
-      files: { 'pkg/a.test.ts': WT_BASE },
+    // Main adds a test file, the round merges it and weakens it in its
+    // OWN post-merge commit: main's newly landed tests are coverage the
+    // round owes from the merge on — the freight machinery may not
+    // shield the post-merge authorship. The merge's introduction itself
+    // stays uncharged (exactly ONE assertion is measured removed).
+    'merge-introduced-weaken': {
+      files: {},
       mainMoves: [
         ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE }),
         'git add pkg/b.test.ts && git commit -qm main-adds-test',
@@ -23392,6 +23395,101 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         ...fixtureWrite({
           'pkg/b.test.ts': WT_BASE.filter((l) => !l.includes('expect(two())')),
         }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The sibling shape with a deletion: the round deletes the test its
+    // own merge brought in. Absent at the pre-round ref on BOTH sides of
+    // the net range, only the widened pre-existence guard sees it.
+    'merge-introduced-delete': {
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE }),
+        'git add pkg/b.test.ts && git commit -qm main-adds-test',
+      ],
+      round: [
+        'git merge -q --no-edit origin/main',
+        'git rm -q pkg/b.test.ts',
+        AGENT_COMMIT,
+      ],
+    },
+    // Main deletes a pre-existing test; the round merges the deletion in
+    // as freight and its own commit re-adds the file WEAKENED. The re-add
+    // is status A — outside the MDT enumeration and present at the tip —
+    // so it is measured against the pre-round blob instead.
+    'merge-delete-readd': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['git rm -q pkg/a.test.ts', 'git commit -qm main-deletes'],
+      round: [
+        'git merge -q --no-edit origin/main',
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('expect(two())')),
+        }),
+        'git add pkg/a.test.ts && git commit -qm readd-weakened',
+        AGENT_COMMIT,
+      ],
+    },
+    // Branch and main both add the SAME assertion block byte-identically;
+    // main also renames a title. Git keeps the shared addition ONCE — a
+    // whole-blob density subtraction counts it in both the branch blob
+    // and the freight term and phantoms a charge on this honest merge.
+    'merge-shared-addition': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+          "it('shared', () => {",
+          '  expect(shared()).toBe(7);',
+          '});',
+        ],
+      },
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a renamed', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+            "it('shared', () => {",
+            '  expect(shared()).toBe(7);',
+            '});',
+          ],
+        }),
+        'git add pkg/a.test.ts && git commit -qm main-renames-and-adds',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    // The --ours resolution: the conflict resolution keeps the branch
+    // side byte-identical, so the first-parent diff is empty while the
+    // resolution discarded everything main's side added. Only the
+    // second-parent enumeration lists the file, and the tip's identity
+    // with the pre-round bytes IS the damage — netting may not drop it.
+    'merge-ours-drop': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: { 'pkg/a.test.ts': WT_BRANCH_SIDE },
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(22);',
+            '  expect(extra()).toBe(5);',
+            '});',
+          ],
+        }),
+        'git add pkg/a.test.ts && git commit -qm main-rewrites-and-adds',
+      ],
+      round: [
+        'git merge -q --no-edit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BRANCH_SIDE }),
+        'git add pkg/a.test.ts && git commit -qm resolution-ours',
         AGENT_COMMIT,
       ],
     },
@@ -24048,6 +24146,64 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             "import request from 'supertest';",
             "it('rejects a missing name with 400', async () => {",
             "  await request(app).post('/x').expect(400);",
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A throwing expect MEMBER the bare-form RE cannot see: unreachable(
+    // throws unconditionally, so deleting the line removes a pinning
+    // assertion from the try/catch-fail pattern without touching expect(.
+    'expect-unreachable': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('must throw', () => {",
+          '  try {',
+          '    boom();',
+          '  } catch {',
+          "    expect.unreachable('should have thrown');",
+          '  }',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('must throw', () => {",
+            '  try {',
+            '    boom();',
+            '  } catch {',
+            '  }',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // Postfix ++ leaves the classifier at an operator char, so a buggy
+    // lexer opens regex state at the division after n++ and swallows the
+    // assertion on that line out of BOTH blobs. Commenting the line out
+    // then nets 0/0 unless the postfix resolves as division.
+    'postfix-wrap': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  const half = n++ / expect(n).toBeDefined(), ok = a / b;',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  /*',
+            '  const half = n++ / expect(n).toBeDefined(), ok = a / b;',
+            '  */',
             '});',
           ],
         }),
@@ -24877,7 +25033,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       'does not charge a round for a test its base merge deleted on main',
       'does not charge an edit that keeps an existing skip marker',
       'accepts a dash-prefixed filename once acknowledged',
-      'does not charge edits to a test the base merge itself introduced',
+      'does not charge a merge both sides strengthened identically',
       'accepts an honest ack for a newline-named test file',
       'accepts an honest ack for a tab-named test file',
       'does not charge a delete restored byte-identically in the same round',
@@ -25822,13 +25978,45 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     },
   );
 
+  it('charges a weakening of a test the round merged in from main', () => {
+    // A test main landed arrives through the round's OWN merge: for the
+    // round's post-merge commits it is pre-existing coverage, and the
+    // freight machinery may not shield the post-merge authorship. The
+    // merge's introduction itself stays uncharged — exactly one
+    // assertion measures removed, not the two the file carried in.
+    const r = runGate({ weaken: 'merge-introduced-weaken' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/b.test.ts');
+    expect(r.rejection).toContain('net 1 assertion line(s) removed');
+  });
+
+  it('charges deleting a test the round merged in from main', () => {
+    // Absent at the pre-round ref on BOTH sides of the net range, the
+    // deletion is visible only through the merge-introduced guard.
+    const r = runGate({ weaken: 'merge-introduced-delete' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/b.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('charges a weakened re-add of a test main deleted', () => {
+    // Main's deletion rides the merge in as freight; the round's own
+    // re-add is status A, outside the MDT enumeration and present at the
+    // tip. Measured against the pre-round blob, the re-add nets what the
+    // round removed.
+    const r = runGate({ weaken: 'merge-delete-readd' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
   it.skipIf(!hasBashMapfile)(
-    'does not charge edits to a test the base merge itself introduced',
+    'does not charge a merge both sides strengthened identically',
     () => {
-      // A file the merge brought in never was pre-existing coverage of
-      // this round; measuring it would charge main's new test to the
-      // round's edits.
-      const r = runGate({ weaken: 'merge-added' });
+      // Branch and main add the SAME assertion block byte-identically;
+      // git keeps it once. A whole-blob density subtraction phantoms a
+      // removal charge on this honest merge; per-line freight does not.
+      const r = runGate({ weaken: 'merge-shared-addition' });
       expect(r.status).toBe(0);
       expect(r.advisories).not.toContain('weakened or removed pre-existing');
     },
@@ -25964,6 +26152,17 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // while resolving a merge conflict IS counted, with main's own
     // density delta neither charging nor shielding.
     const r = runGate({ weaken: 'merge-wrap' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('charges an --ours resolution that drops main-side assertions', () => {
+    // The resolution keeps the branch side byte-identical: the
+    // first-parent diff is empty, so only the second-parent enumeration
+    // lists the file, and the tip's identity with the pre-round bytes is
+    // the damage the netting must not drop.
+    const r = runGate({ weaken: 'merge-ours-drop' });
     expect(r.status).toBe(1);
     expect(r.rejection).toContain('pkg/a.test.ts');
     expect(r.rejection).toContain('assertion line(s) removed');
@@ -26218,6 +26417,26 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // assert.deepEqual without a call executes no assertion; the alias
     // line may earn no add-side credit that cancels the removal.
     const r = runGate({ weaken: 'assert-alias-export' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects deleting an expect.unreachable( line', () => {
+    // unreachable( throws unconditionally — the must-throw pattern's
+    // only pin. The bare-form RE cannot see the member; the whitelisted
+    // throwing members count on every arm.
+    const r = runGate({ weaken: 'expect-unreachable' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects commenting out an assertion after a postfix operator', () => {
+    // n++ must resolve the following '/' as division: a regex-state
+    // mislex swallows the assertion out of both blobs and the
+    // comment-wrap nets 0/0.
+    const r = runGate({ weaken: 'postfix-wrap' });
     expect(r.status).toBe(1);
     expect(r.rejection).toContain('pkg/a.test.ts');
     expect(r.rejection).toContain('assertion line(s) removed');
