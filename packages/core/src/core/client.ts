@@ -57,7 +57,7 @@ import { createSessionStartProfiler } from './session-start-profiler.js';
 const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
-import { GeminiChat, type RepairOrphanedToolUseOptions } from './geminiChat.js';
+import { LlmChat, type RepairOrphanedToolUseOptions } from './llm-chat.js';
 import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -70,10 +70,10 @@ import {
 } from './prompts.js';
 import {
   CompressionStatus,
-  GeminiEventType,
+  LlmEventType,
   Turn,
   type ChatCompressionInfo,
-  type ServerGeminiStreamEvent,
+  type ServerLlmStreamEvent,
 } from './turn.js';
 
 // Services
@@ -261,16 +261,13 @@ function sameGoalPermit(
 }
 
 type ActiveGoalEventValue = Exclude<
-  Extract<
-    ServerGeminiStreamEvent,
-    { type: GeminiEventType.ActiveGoal }
-  >['value'],
+  Extract<ServerLlmStreamEvent, { type: LlmEventType.ActiveGoal }>['value'],
   null
 >;
 
 type GoalStateStreamEvent = Extract<
-  ServerGeminiStreamEvent,
-  { type: GeminiEventType.GoalState }
+  ServerLlmStreamEvent,
+  { type: LlmEventType.GoalState }
 >;
 
 function projectActiveGoal(
@@ -374,8 +371,8 @@ export function getMainSessionBaseSystemPrompt(
       );
 }
 
-export class GeminiClient {
-  private chat?: GeminiChat;
+export class LlmClient {
+  private chat?: LlmChat;
   private initializedSessionId: string | undefined;
   /**
    * Open session-swap telemetry transaction, if any. See
@@ -423,6 +420,7 @@ export class GeminiClient {
   private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
+  private warnedAboutUnreachableEagerTools = false;
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
   // set is seeded on the first drain from the current skills (the startup
@@ -450,7 +448,7 @@ export class GeminiClient {
     snapshotEntries: AvailableSkillEntry[],
   ): void {
     this.announcedSkillReminderKeys = new Set(
-      snapshotEntries.map(GeminiClient.skillEntryKey),
+      snapshotEntries.map(LlmClient.skillEntryKey),
     );
     this.skillRemindersInitialized = true;
   }
@@ -520,6 +518,7 @@ export class GeminiClient {
         restoreRuntime.apiHistory,
         sessionStartSource ?? SessionStartSource.Resume,
       );
+      this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
       const chat = this.getChat();
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
@@ -550,6 +549,7 @@ export class GeminiClient {
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
       );
+      this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
@@ -609,11 +609,18 @@ export class GeminiClient {
     }
   }
 
+  private restoreLoadedSkillsFromHistory(history: Content[]): void {
+    const skillTool = this.config.getToolRegistry().getTool(ToolNames.SKILL) as
+      | { restoreLoadedSkillsFromHistory?: (history: Content[]) => void }
+      | undefined;
+    skillTool?.restoreLoadedSkillsFromHistory?.(history);
+  }
+
   async addHistory(content: Content) {
     this.getChat().addHistory(content);
   }
 
-  getChat(): GeminiChat {
+  getChat(): LlmChat {
     if (!this.chat) {
       throw new Error('Chat not initialized');
     }
@@ -838,7 +845,7 @@ export class GeminiClient {
   /**
    * Fire-and-forget StopFailure hook for loop-detection early returns.
    * Matches the detached pattern used by the CLI's API-error path
-   * (useGeminiStream.ts) — output and errors are ignored.
+   * (use-llm-stream.ts) — output and errors are ignored.
    */
   private fireLoopDetectedStopFailure(loopType: string | null): void {
     if (this.config.getDisableAllHooks()) return;
@@ -854,13 +861,13 @@ export class GeminiClient {
   /**
    * Walk-only accessor for the set of `functionResponse.id` strings in
    * raw history. Callers that only need the dedup id set (notably
-   * `useGeminiStream.handleCompletedTools`) MUST prefer this over
+   * `useLlmStream.handleCompletedTools`) MUST prefer this over
    * {@link getHistory}, which deep-clones the entire conversation via
    * `structuredClone` on every call. On long sessions with sizable
    * tool outputs the clone is a multi-millisecond hit on the React UI
    * thread; running it on every tool-completion batch caused visible
    * frame drops during streaming. See
-   * `GeminiChat.getHistoryFunctionResponseIds` for the implementation.
+   * `LlmChat.getHistoryFunctionResponseIds` for the implementation.
    */
   getHistoryFunctionResponseIds(): Set<string> {
     return this.getChat().getHistoryFunctionResponseIds();
@@ -870,7 +877,7 @@ export class GeminiClient {
    * Walk-only accessor for the handled tool-call id → (name, args)
    * fingerprint map used by duplicate provider-id replay detection. Same
    * no-clone rationale as {@link getHistoryFunctionResponseIds}. See
-   * `GeminiChat.getHistoryToolCallFingerprints` for the implementation.
+   * `LlmChat.getHistoryToolCallFingerprints` for the implementation.
    */
   getHistoryToolCallFingerprints(): Map<string, string> {
     return this.getChat().getHistoryToolCallFingerprints();
@@ -922,7 +929,7 @@ export class GeminiClient {
    * {@link stripOrphanedUserEntriesFromHistory}, which only handles trailing
    * `user` entries.
    *
-   * This `GeminiClient` method is the resume-path entry point — called once
+   * This `LlmClient` method is the resume-path entry point — called once
    * from {@link startChat} after the transcript loads, covering `--resume`
    * of a session that crashed between a partial-tool_use push and the
    * tool's eventual completion.
@@ -930,14 +937,14 @@ export class GeminiClient {
    * The other two coverage points (Retry submit path after
    * `stripOrphanedUserEntriesFromHistory`, and the defensive pass at the
    * start of every UserQuery / Cron send) live one layer down inside
-   * `GeminiChat.sendMessageStream` and call the standalone
+   * `LlmChat.sendMessageStream` and call the standalone
    * `repairOrphanedToolUseTurns(history)` function directly — they don't
    * route through this wrapper. Anyone tracing the repair-pass coupling
    * between the client and chat layers should follow that path
    * separately rather than expect everything to funnel through here.
    *
    * Synthesizes an `error` `functionResponse`. The React tool scheduler
-   * (`useGeminiStream.handleCompletedTools`) MUST dedupe by `callId` against
+   * (`useLlmStream.handleCompletedTools`) MUST dedupe by `callId` against
    * the live history before submitting its own `tool_result` — otherwise a
    * late real result lands as a second `user[tool_result]` block (orphan
    * because the synthetic already consumed the matching `tool_use`).
@@ -1504,7 +1511,7 @@ export class GeminiClient {
   /**
    * Re-prepend a fresh startup-context prelude after auto-compaction.
    *
-   * Auto-compaction runs in-place inside `GeminiChat.sendMessageStream`
+   * Auto-compaction runs in-place inside `LlmChat.sendMessageStream`
    * (`setHistory([summary, ack, ...kept])`) and does NOT route through
    * `tryCompressChat` → `startChat`, so — unlike manual `/compress` — the
    * startup prelude at history[0] is consumed into the summary and never
@@ -1660,14 +1667,19 @@ export class GeminiClient {
    * backed deferred tools.
    *
    * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
-   * tool_search` or a deny rule), every deferred tool is eagerly revealed
-   * here so it lands in the declaration list. Skipping this would leave the
-   * tool both off the declarations AND off the deferred-summary list (since
-   * `undefined` is returned in that branch) — a silent disappearance that's
-   * harder to diagnose than seeing the tool name absent from `/mcp` output.
+   * tool_search` or a deny rule), deferred tools are eagerly revealed here so
+   * they land in the declaration list. Tools explicitly demoted by
+   * `tools.eager` stay hidden unless the history-reveal pass above already
+   * re-exposed one for a resumed session — that schema stays in the
+   * declarations, so it is not counted unreachable below. Skipping this for
+   * ordinary deferred tools would leave them both off the declarations AND
+   * off the deferred-summary list
+   * (since `undefined` is returned in that branch) — a silent disappearance.
    *
    * Returns `undefined` when ToolSearch is unavailable: reminders must not
-   * advertise tools the model has no way to load on demand.
+   * advertise tools the model has no way to load on demand. Tools held back
+   * by `tools.eager` in that state are unreachable for the session, which is
+   * warned about once per session.
    */
   private resolveDeferredToolsForReminder(
     deferredSummary: readonly DeferredToolSummary[],
@@ -1676,8 +1688,29 @@ export class GeminiClient {
     const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
     if (!toolSearchAvailable) {
       if (deferredSummary.length > 0) {
+        const withheld: string[] = [];
         for (const t of deferredSummary) {
+          if (toolRegistry.isPermissionDeferred(t.name)) {
+            // The history-reveal pass runs first at both call sites and
+            // re-exposes resume-referenced tools regardless of why they
+            // are deferred. Such a tool's schema IS in the declarations,
+            // so calling it unreachable would be false for this session.
+            if (!toolRegistry.isDeferredToolRevealed(t.name)) {
+              withheld.push(t.name);
+            }
+            continue;
+          }
           toolRegistry.revealDeferredTool(t.name);
+        }
+        if (withheld.length > 0 && !this.warnedAboutUnreachableEagerTools) {
+          this.warnedAboutUnreachableEagerTools = true;
+          // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
+          console.warn(
+            `tools.eager is holding back ${withheld.length} tool(s) in a session with no tool_search, ` +
+              `so nothing can load them on demand and they are unreachable until restart: ${withheld.join(', ')}. ` +
+              `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to keep them loadable, ` +
+              `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,
+          );
         }
       }
       return undefined;
@@ -1829,7 +1862,7 @@ export class GeminiClient {
       return;
     }
 
-    const currentKeys = new Set(entries.map(GeminiClient.skillEntryKey));
+    const currentKeys = new Set(entries.map(LlmClient.skillEntryKey));
     const wasInitialized = this.skillRemindersInitialized;
     const removedNames: string[] = [];
 
@@ -1871,7 +1904,7 @@ export class GeminiClient {
     // by coreToolScheduler above.
     const newEntries: AvailableSkillEntry[] = [];
     for (const entry of entries) {
-      const key = GeminiClient.skillEntryKey(entry);
+      const key = LlmClient.skillEntryKey(entry);
       if (this.announcedSkillReminderKeys.has(key)) {
         continue;
       }
@@ -1995,7 +2028,7 @@ export class GeminiClient {
     sessionStartSource = extraHistory
       ? SessionStartSource.Resume
       : SessionStartSource.Startup,
-  ): Promise<GeminiChat> {
+  ): Promise<LlmChat> {
     this.forceFullIdeContext = true;
     this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
@@ -2068,7 +2101,7 @@ export class GeminiClient {
       const chat = profiler.timeSync(
         'gemini_chat_construct',
         () =>
-          new GeminiChat(
+          new LlmChat(
             this.config,
             {
               systemInstruction,
@@ -2609,7 +2642,7 @@ export class GeminiClient {
     prompt_id: string,
     options?: SendMessageOptions,
     turns: number = MAX_TURNS,
-  ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
+  ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
     const startsInteraction =
       messageType === SendMessageType.UserQuery ||
@@ -2693,18 +2726,18 @@ export class GeminiClient {
       if (unsubscribeGoalState) return;
       unsubscribeGoalState = runtime.subscribe((value, cause) => {
         pendingGoalStateEvents.push({
-          type: GeminiEventType.GoalState,
+          type: LlmEventType.GoalState,
           value,
           ...(cause !== undefined ? { cause } : {}),
         });
       });
       pendingGoalStateEvents.push({
-        type: GeminiEventType.GoalState,
+        type: LlmEventType.GoalState,
         value: runtime.getSnapshot(),
       });
     };
-    const takePendingGoalEvents = (): ServerGeminiStreamEvent[] => {
-      const events: ServerGeminiStreamEvent[] = [];
+    const takePendingGoalEvents = (): ServerLlmStreamEvent[] => {
+      const events: ServerLlmStreamEvent[] = [];
       for (const stateEvent of pendingGoalStateEvents.splice(
         0,
         pendingGoalStateEvents.length,
@@ -2716,7 +2749,7 @@ export class GeminiClient {
           lastEmittedActiveGoal = nextActiveGoal;
           if (nextActiveGoal) {
             events.push({
-              type: GeminiEventType.ActiveGoal,
+              type: LlmEventType.ActiveGoal,
               value: nextActiveGoal,
             });
           }
@@ -2725,7 +2758,7 @@ export class GeminiClient {
         ) {
           lastEmittedActiveGoal = nextActiveGoal;
           events.push({
-            type: GeminiEventType.ActiveGoal,
+            type: LlmEventType.ActiveGoal,
             value: nextActiveGoal ?? null,
           });
         }
@@ -2805,7 +2838,7 @@ export class GeminiClient {
       return takePendingGoalEvents();
     };
     let strippedRetryEntries: Content[] = [];
-    // Snapshot of GeminiChat's user-content push counter, taken right after the
+    // Snapshot of LlmChat's user-content push counter, taken right after the
     // strip. The Retry's re-submitted content is the first thing the send
     // pushes, so if the counter advances at all that content landed.
     let pushCountAfterStrip = 0;
@@ -2986,7 +3019,7 @@ export class GeminiClient {
             endCurrentInteraction('cancelled');
           }
           yield {
-            type: GeminiEventType.UserPromptSubmitBlocked,
+            type: LlmEventType.UserPromptSubmitBlocked,
             value: {
               reason: hookOutput.getEffectiveReason(),
               originalPrompt: promptText,
@@ -3248,6 +3281,15 @@ export class GeminiClient {
         }
       }
 
+      // A runtime-scheduled Goal turn is not a session turn. `maxSessionTurns`
+      // counts every model call the user's own prompts drive, tool
+      // continuations included; a Goal that reads a few files per
+      // continuation would spend a user-set cap of N in N/4 continuations
+      // and die mid-run with no resume path in headless. Autonomous Goal
+      // spend is bounded by the Goal's own token budget instead (armed at
+      // creation, re-armed only by an explicit resume or edit), and the
+      // headless host excludes runtime Goal turns from the same cap for the
+      // same reason, so counting them here would split the two ceilings.
       if (messageType !== SendMessageType.Retry && !isGoalRuntimeTurn) {
         // Attribution snapshots are recorded on every non-retry turn. File
         // history snapshots are created only at UserQuery boundaries; later
@@ -3286,7 +3328,7 @@ export class GeminiClient {
           this.sessionTurnCount > this.config.getMaxSessionTurns()
         ) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-          yield { type: GeminiEventType.MaxSessionTurns };
+          yield { type: LlmEventType.MaxSessionTurns };
           endCurrentInteraction(
             'error',
             'max session turns exceeded',
@@ -3296,11 +3338,12 @@ export class GeminiClient {
         }
       }
 
-      // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
-      const boundedTurns =
-        messageType === SendMessageType.Goal
-          ? MAX_TURNS
-          : Math.min(turns, MAX_TURNS);
+      // Ensure turns never exceeds MAX_TURNS to prevent infinite loops. A
+      // runtime Goal turn honours the caller's budget like every other
+      // message type: each continuation is a fresh top-level send that
+      // starts from MAX_TURNS on its own, so nothing about a Goal needs to
+      // outlive one turn's recursion allowance.
+      const boundedTurns = Math.min(turns, MAX_TURNS);
       if (!boundedTurns) {
         this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
         endCurrentInteraction('error', 'max turns exhausted', 'max_turns');
@@ -3318,6 +3361,9 @@ export class GeminiClient {
         ) {
           return undefined;
         }
+        // Same ceiling as the session-turn check above, same exclusion: a
+        // runtime Goal turn does not count toward `maxSessionTurns`, so it
+        // must not be refused steer input on that count either.
         const maxSessionTurns = this.config.getMaxSessionTurns();
         if (
           !isGoalRuntimeTurn &&
@@ -3337,7 +3383,7 @@ export class GeminiClient {
         return steerInput;
       };
 
-      // Auto-compaction happens inside GeminiChat.sendMessageStream and surfaces
+      // Auto-compaction happens inside LlmChat.sendMessageStream and surfaces
       // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
       // still calls tryCompressChat directly for the full reset (env refresh +
       // forceFullIdeContext flip).
@@ -3345,10 +3391,10 @@ export class GeminiClient {
       const sessionTokenLimit = this.config.getSessionTokenLimit();
       if (sessionTokenLimit > 0) {
         // An exact `\0` full-turn route selector resolves to its route before
-        // GeminiChat.sendMessageStream stamps counts under it, so the gate
+        // LlmChat.sendMessageStream stamps counts under it, so the gate
         // must key the resolved route too — the raw selector key can never
         // match a stamped count. Mirrors the resolution at the top of
-        // GeminiChat.sendMessageStream (#9454).
+        // LlmChat.sendMessageStream (#9454).
         const exactRoute = model.endsWith('\0')
           ? await this.config
               .getBaseLlmClient()
@@ -3363,7 +3409,7 @@ export class GeminiClient {
         if (lastPromptTokenCount > sessionTokenLimit) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
           yield {
-            type: GeminiEventType.SessionTokenLimitExceeded,
+            type: LlmEventType.SessionTokenLimitExceeded,
             value: {
               currentTokens: lastPromptTokenCount,
               limit: sessionTokenLimit,
@@ -3608,7 +3654,7 @@ export class GeminiClient {
         : getActiveGoal(this.config.getSessionId());
       if (activeGoalAtTurnStart) {
         yield {
-          type: GeminiEventType.ActiveGoal,
+          type: LlmEventType.ActiveGoal,
           value: activeGoalAtTurnStart,
         };
       }
@@ -3617,13 +3663,13 @@ export class GeminiClient {
       // Mutates `lastEmittedActiveGoal` when an event is returned.
       const maybeEmitActiveGoalChange = (
         nextActiveGoal: ActiveGoal | undefined,
-      ): ServerGeminiStreamEvent | undefined => {
+      ): ServerLlmStreamEvent | undefined => {
         if (activeGoalEquals(lastEmittedActiveGoal, nextActiveGoal)) {
           return undefined;
         }
         lastEmittedActiveGoal = nextActiveGoal;
         return {
-          type: GeminiEventType.ActiveGoal,
+          type: LlmEventType.ActiveGoal,
           value: nextActiveGoal ?? null,
         };
       };
@@ -3668,24 +3714,24 @@ export class GeminiClient {
             settleSteerInput(attachedSteerInput, attachedSteerPushCount);
             steerInputSettled = true;
           }
-          if (event.type === GeminiEventType.ToolCallRequest) {
+          if (event.type === LlmEventType.ToolCallRequest) {
             hasToolCalls = true;
           } else if (
-            event.type === GeminiEventType.Retry ||
-            event.type === GeminiEventType.ModelFallback
+            event.type === LlmEventType.Retry ||
+            event.type === LlmEventType.ModelFallback
           ) {
             hasToolCalls = false;
             agentOutput.restartAttempt(
-              event.type === GeminiEventType.Retry &&
+              event.type === LlmEventType.Retry &&
                 event.isContinuation === true,
             );
           }
-          if (event.type === GeminiEventType.Content) {
+          if (event.type === LlmEventType.Content) {
             agentOutput.appendText(event.value);
-          } else if (event.type === GeminiEventType.Finished) {
+          } else if (event.type === LlmEventType.Finished) {
             agentOutput.observeFinishReason(event.value?.reason);
           }
-          if (messageDisplay && event.type === GeminiEventType.Content) {
+          if (messageDisplay && event.type === LlmEventType.Content) {
             messageDisplay.addChunk(event.value);
           }
           if (shouldUpdateIdeContextState && !didUpdateIdeContextState) {
@@ -3712,7 +3758,7 @@ export class GeminiClient {
             }
             const loopType = this.loopDetector.getLastLoopType();
             yield {
-              type: GeminiEventType.LoopDetected,
+              type: LlmEventType.LoopDetected,
               ...(loopType && { value: { loopType } }),
             };
             if (arenaAgentClient) {
@@ -3744,7 +3790,7 @@ export class GeminiClient {
             }
             const loopType = this.loopDetector.getLastLoopType();
             yield {
-              type: GeminiEventType.LoopDetected,
+              type: LlmEventType.LoopDetected,
               ...(loopType && { value: { loopType } }),
             };
             if (arenaAgentClient) {
@@ -3760,14 +3806,14 @@ export class GeminiClient {
           }
           // Update arena status on Finished events — stats are derived
           // automatically from uiTelemetryService by the reporter.
-          if (arenaAgentClient && event.type === GeminiEventType.Finished) {
+          if (arenaAgentClient && event.type === LlmEventType.Finished) {
             await arenaAgentClient.updateStatus();
           }
 
           // Re-send a full IDE context blob on the next regular message — auto
           // compaction inside chat.sendMessageStream may have summarized away
           // the previous merged IDE context.
-          if (event.type === GeminiEventType.ChatCompressed) {
+          if (event.type === LlmEventType.ChatCompressed) {
             this.forceFullIdeContext = true;
             // Auto-compaction summarized away the startup prelude. Rebuild it
             // before the next turn so env/tool/MCP context isn't lost for the
@@ -3804,15 +3850,15 @@ export class GeminiClient {
             yield goalEvent;
           }
           if (
-            (event.type === GeminiEventType.UserCancelled && signal.aborted) ||
-            event.type === GeminiEventType.Error
+            (event.type === LlmEventType.UserCancelled && signal.aborted) ||
+            event.type === LlmEventType.Error
           ) {
             for (const goalEvent of await finalizeInterruptedGoalTurn()) {
               yield goalEvent;
             }
           }
           yield event;
-          if (event.type === GeminiEventType.Error) {
+          if (event.type === LlmEventType.Error) {
             this.forceFullIdeContext = true;
             if (arenaAgentClient) {
               const status = event.value.error?.status;
@@ -3966,7 +4012,7 @@ export class GeminiClient {
         // This should happen regardless of the hook's decision
         if (stopOutput?.systemMessage) {
           yield {
-            type: GeminiEventType.HookSystemMessage,
+            type: LlmEventType.HookSystemMessage,
             value: stopOutput.systemMessage,
           };
         }
@@ -3991,7 +4037,7 @@ export class GeminiClient {
               stopHookBlockingCap,
             );
             yield {
-              type: GeminiEventType.HookSystemMessage,
+              type: LlmEventType.HookSystemMessage,
               value: warning,
             };
             debugLogger.warn(warning);
@@ -4005,7 +4051,7 @@ export class GeminiClient {
               yield goalEvent;
             }
             yield {
-              type: GeminiEventType.StopHookLoop,
+              type: LlmEventType.StopHookLoop,
               value: {
                 iterationCount: currentIterationCount,
                 reasons: currentReasons,
@@ -4113,7 +4159,7 @@ export class GeminiClient {
               yield activeGoalEvent;
             }
             yield {
-              type: GeminiEventType.HookSystemMessage,
+              type: LlmEventType.HookSystemMessage,
               value: warning,
             };
             debugLogger.warn(warning);
@@ -4129,7 +4175,7 @@ export class GeminiClient {
           }
 
           yield {
-            type: GeminiEventType.StopHookLoop,
+            type: LlmEventType.StopHookLoop,
             value: {
               iterationCount: currentIterationCount,
               reasons: currentReasons,
@@ -4146,7 +4192,16 @@ export class GeminiClient {
           // these semantics (fresh DaemonToolLoopState per continuation).
           // Runaway protection is preserved: the cap still bounds each
           // iteration, and the chain itself is bounded by
-          // stopHookBlockingCap / MAX_GOAL_ITERATIONS.
+          // stopHookBlockingCap / MAX_GOAL_ITERATIONS. Those are the only
+          // Goal-specific bounds on this path (a user-set maxSessionTurns
+          // still cuts the chain: each hook hop is a plain send with no
+          // Goal permit, so it counts as a session turn): the legacy hook
+          // Goal recurses inside one sendMessageStream call, so the
+          // runtime's token budget (which meters continuations the Goal
+          // runtime schedules) never sees it, and the recursion budget is
+          // not decremented below because a 50-iteration chain with steer
+          // and next-speaker continues would otherwise exhaust MAX_TURNS
+          // before its own iteration cap.
           this.loopDetector.reset(prompt_id);
 
           const activeGoal = getActiveGoal(this.config.getSessionId());
@@ -4551,7 +4606,7 @@ export class GeminiClient {
   }
 
   /**
-   * Wrapper around {@link GeminiChat.tryCompress} that restores main-session
+   * Wrapper around {@link LlmChat.tryCompress} that restores main-session
    * startup context after successful compaction and flips the IDE full-context
    * flag for the next regular message.
    */
@@ -4586,7 +4641,7 @@ export class GeminiClient {
           previousSessionStartSource,
         );
       }
-      // startChat() creates a new GeminiChat without touching FileReadCache,
+      // startChat() creates a new LlmChat without touching FileReadCache,
       // so prior read_file results that were summarised away would still
       // resolve to the file_unchanged placeholder. Clear so post-compaction
       // Reads re-emit bytes the model can no longer see in history.
@@ -4660,7 +4715,7 @@ export class GeminiClient {
 
   /**
    * Fast, rule-based compression without any LLM side-query.
-   * Delegates to {@link GeminiChat.compressFast} and handles post-compression
+   * Delegates to {@link LlmChat.compressFast} and handles post-compression
    * FileReadCache disarming.
    */
   async tryCompressChatFast(): Promise<ChatCompressionInfo> {
@@ -4681,3 +4736,6 @@ export class GeminiClient {
     return info;
   }
 }
+
+/** @deprecated Use `LlmClient`; retained until a future major release. */
+export { LlmClient as GeminiClient };

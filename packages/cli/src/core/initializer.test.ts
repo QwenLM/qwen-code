@@ -44,7 +44,7 @@ describe('initializeApp', () => {
   let mockConfig: {
     getModelsConfig: ReturnType<typeof vi.fn>;
     getIdeMode: ReturnType<typeof vi.fn>;
-    getGeminiMdFileCount: ReturnType<typeof vi.fn>;
+    getMemoryFileCount: ReturnType<typeof vi.fn>;
   };
   let mockSettings: {
     merged: Record<string, unknown>;
@@ -60,7 +60,7 @@ describe('initializeApp', () => {
         wasAuthTypeExplicitlyProvided: vi.fn().mockReturnValue(false),
       }),
       getIdeMode: vi.fn().mockReturnValue(false),
-      getGeminiMdFileCount: vi.fn().mockReturnValue(0),
+      getMemoryFileCount: vi.fn().mockReturnValue(0),
     };
 
     mockSettings = {
@@ -96,7 +96,7 @@ describe('initializeApp', () => {
 
     expect(result.authError).toBeNull();
     expect(result.themeError).toBeNull();
-    expect(result.geminiMdFileCount).toBe(0);
+    expect(result.memoryFileCount).toBe(0);
   });
 
   it('should return authError when auth fails', async () => {
