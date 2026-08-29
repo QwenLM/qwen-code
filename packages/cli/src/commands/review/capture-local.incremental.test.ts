@@ -22,6 +22,7 @@ import {
   realpathSync,
   symlinkSync,
   existsSync,
+  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -42,6 +43,11 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   }),
   writeStderrLineSafe: vi.fn(),
 }));
+
+// Spy-mode interception (as in local-anchor.test.ts): every fs call still
+// delegates to the real implementation, but the absence-walk probes can be
+// counted.
+vi.mock('node:fs', { spy: true });
 
 let repo: string;
 let cwd: string;
@@ -1913,5 +1919,56 @@ describe('capture-local — round-15 findings: the candidate under visibility bi
     expect(readFileSync(join(repo, next.diffPath), 'utf8')).toContain(
       'hidden edit',
     );
+  });
+});
+
+describe('capture-local — a vanished subtree probes its missing chain once', () => {
+  it('shares ancestor probes across vanished siblings, not one walk per path', () => {
+    // A bulk deletion committed between rounds drops the whole subtree from
+    // both the plan and the cache: every vanished path misses the round's
+    // hashes and proves absence through the SAME missing ancestor chain.
+    // Without the per-enumeration memo, every path re-walks the chain — one
+    // statSync per missing ancestor per path, depth times siblings (R2-1).
+    const siblingCount = 5;
+    const chain = ['vendor', 'a', 'b', 'c'];
+    write('.gitignore', '.qwen/\nplan.json\n');
+    write('src/keep.ts', 'export const k = 0;\n');
+    for (let i = 0; i < siblingCount; i++) {
+      write(
+        join('vendor', 'a', 'b', 'c', `f${i}.ts`),
+        `export const f = ${i};\n`,
+      );
+    }
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    // Dirty every tracked file so round 1 captures them all.
+    write('src/keep.ts', 'export const k = 1;\n');
+    for (let i = 0; i < siblingCount; i++) {
+      write(
+        join('vendor', 'a', 'b', 'c', `f${i}.ts`),
+        `export const f = ${i}; // edited\n`,
+      );
+    }
+    const cachePath = promoteCandidate(capture(), 'model-a');
+
+    // The bulk deletion, COMMITTED: HEAD moves, round 2 degrades to the full
+    // capture — and still asks which cached paths vanished from the tree.
+    rmSync(join(repo, 'vendor'), { recursive: true, force: true });
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'drop the vendor subtree');
+
+    vi.mocked(statSync).mockClear();
+    capture({ cache: cachePath, model: 'model-a' });
+    const chainProbes = vi
+      .mocked(statSync)
+      .mock.calls.filter(([p]) => String(p).startsWith(join(repo, 'vendor')));
+    // The walk was measured — at least one full chain under the deleted
+    // subtree (a broken filter would answer 0 and fail here, not pass
+    // vacuously below).
+    expect(chainProbes.length).toBeGreaterThanOrEqual(chain.length);
+    // Shared, not multiplied: one probe per missing ancestor, never depth
+    // per vanished path. Without the memo this is siblingCount ×
+    // chain.length (20); with it, exactly chain.length (4).
+    expect(chainProbes.length).toBeLessThanOrEqual(chain.length + siblingCount);
   });
 });

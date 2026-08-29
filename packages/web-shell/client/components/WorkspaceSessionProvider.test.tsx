@@ -29,7 +29,7 @@ const mocks = vi.hoisted(() => ({
   appProps: [] as Array<Record<string, unknown>>,
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: ({
     children,
     ...props
