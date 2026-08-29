@@ -222,15 +222,15 @@ describe('autofix-status-heartbeat body', () => {
 
 describe('fake-shim call-record publication', () => {
   // The loop tests gate on a readCalls(...) count and then assert record
-  // content. Run 33223243920 failed the whole helper-test step with no
-  // identifiable test: a redirect-only publication creates the record file
-  // before its argv content lands, so a poll inside that window reads a
-  // torn record and a content assertion fails under CPU contention. The
-  // rename publication must make that impossible: a record is observable
-  // only complete. The filler argv widens the writer's create-to-content
+  // content: a redirect-only publication creates the record file before
+  // its argv content lands, so a poll inside that window reads a torn
+  // record and a content assertion fails under CPU contention. The rename
+  // publication must make that impossible: a record is observable only
+  // complete. The filler argv widens the writer's create-to-content
   // window from microseconds to milliseconds so a non-atomic writer is
   // caught reliably, and the post-exit pass keeps the witness honest on a
-  // fast host where the writer wins every poll race.
+  // fast host where the writer wins every poll race. (Run 33223243920's
+  // ENOTEMPTY was the teardown race witnessed below, not this one.)
   async function witnessAtomicPublication(shimPath, records, env, argv) {
     const child = spawn(shimPath, argv, {
       env: { ...process.env, ...env },
@@ -243,7 +243,6 @@ describe('fake-shim call-record publication', () => {
     let observations = 0;
     const assertComplete = () => {
       for (const call of readCalls(records)) {
-        if (call.length === 0) continue;
         observations += 1;
         assert.equal(
           call.at(-1),
@@ -263,13 +262,15 @@ describe('fake-shim call-record publication', () => {
     );
   }
 
-  function fillerArgv() {
-    const argv = [
+  function fillerArgv(
+    prefix = [
       'api',
       'repos/octo/repo/issues/comments/777',
       '--method',
       'PATCH',
-    ];
+    ],
+  ) {
+    const argv = [...prefix];
     for (let i = 0; i < 10000; i++) {
       argv.push(`filler-${i}-${'x'.repeat(48)}`);
     }
@@ -292,11 +293,7 @@ describe('fake-shim call-record publication', () => {
     const dir = freshTmp();
     const gh = fakeGhBin(dir);
     const timeoutRecords = fakeTimeoutBin(gh.bin, dir);
-    const argv = ['5', 'head', '-c', '64'];
-    for (let i = 0; i < 10000; i++) {
-      argv.push(`filler-${i}-${'x'.repeat(48)}`);
-    }
-    argv.push('--sentinel-end');
+    const argv = fillerArgv(['5', 'head', '-c', '64']);
     await witnessAtomicPublication(
       join(gh.bin, 'timeout'),
       timeoutRecords,
@@ -357,8 +354,8 @@ describe('autofix-status-heartbeat loop', () => {
   // shows up as uncaughtException-style asynchronous activity in node:test.
   function awaitExit(child, timeoutMs) {
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        killGroup(child);
+      const timer = setTimeout(async () => {
+        await killLoop(child);
         resolve('timeout');
       }, timeoutMs);
       // 'close', not 'exit': Node can deliver 'exit' before the child's
@@ -376,6 +373,43 @@ describe('autofix-status-heartbeat loop', () => {
       process.kill(-child.pid, 'SIGKILL');
     } catch {
       // the group is already gone — nothing left to kill
+    }
+  }
+
+  // The kill topology needs coreutils `timeout` (each tick's subtree gets
+  // its own process group) and procps pkill/pgrep (the session kill and
+  // its oracle); hosts without them keep the group-kill fallback here and
+  // still carry the pinned statement list in the workflow test.
+  const haveSessionKillTools =
+    spawnSync('bash', [
+      '-c',
+      'command -v timeout >/dev/null && command -v pkill >/dev/null && command -v pgrep >/dev/null',
+    ]).status === 0;
+
+  // Kill the loop's whole session, not just its group: each tick's
+  // `timeout … gh` subtree runs in its own process group (coreutils
+  // timeout default), so a group-only kill landing mid-tick leaves it
+  // alive and the surviving fake gh keeps creating entries in the records
+  // dir while the afterEach cleanup rmSync's it — the ENOTEMPTY that
+  // failed run 33223243920 with its test body green. The loop child is
+  // the session leader (detached spawn), so the session kill reaches
+  // every escapee, and the wait pins that no writer outlives the kill.
+  // The group kill stays as the fallback for hosts without the session
+  // tools.
+  async function killLoop(child) {
+    if (haveSessionKillTools) {
+      spawnSync('bash', [
+        '-c',
+        `pkill -KILL -s ${child.pid} 2>/dev/null || true`,
+      ]);
+    }
+    killGroup(child);
+    if (haveSessionKillTools) {
+      await waitFor(
+        () => spawnSync('pgrep', ['-s', String(child.pid)]).status !== 0,
+        5000,
+        50,
+      );
     }
   }
 
@@ -410,7 +444,7 @@ describe('autofix-status-heartbeat loop', () => {
       const pid = readFileSync(join(workdir, 'heartbeat.pid'), 'utf8').trim();
       assert.equal(pid, String(child.pid));
     } finally {
-      killGroup(child);
+      await killLoop(child);
     }
   });
 
@@ -430,7 +464,7 @@ describe('autofix-status-heartbeat loop', () => {
         `expected a bounded tick count with a 1s interval, got ${count}`,
       );
     } finally {
-      killGroup(child);
+      await killLoop(child);
     }
   });
 
@@ -451,7 +485,7 @@ describe('autofix-status-heartbeat loop', () => {
       const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
       assert.match(logText, /self-exit: pid file removed/);
     } finally {
-      killGroup(child);
+      await killLoop(child);
     }
   });
 
@@ -476,7 +510,7 @@ describe('autofix-status-heartbeat loop', () => {
       const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
       assert.match(logText, /self-exit: pid file removed or replaced/);
     } finally {
-      killGroup(child);
+      await killLoop(child);
     }
   });
 
@@ -505,7 +539,7 @@ describe('autofix-status-heartbeat loop', () => {
       const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
       assert.match(logText, /interval 600s max_age 20400s/);
     } finally {
-      killGroup(child);
+      await killLoop(child);
     }
     // Magnitude plants pass the shape guard and ride the same env
     // carrier: a huge interval means the loop sleeps past every
@@ -534,7 +568,7 @@ describe('autofix-status-heartbeat loop', () => {
         /interval 600s max_age 20400s/,
       );
     } finally {
-      killGroup(magChild);
+      await killLoop(magChild);
     }
     // Bash arithmetic wraps modulo 2^64: an interval of exactly 2^64
     // wraps to 0 and passes a comparison-only `<= 3600` guard while the
@@ -562,7 +596,7 @@ describe('autofix-status-heartbeat loop', () => {
         /interval 600s max_age 20400s/,
       );
     } finally {
-      killGroup(wrapChild);
+      await killLoop(wrapChild);
     }
   });
 
@@ -618,7 +652,7 @@ describe('autofix-status-heartbeat loop', () => {
       );
       assert.ok(stampWrite, 'the stamp write must run under timeout 5');
     } finally {
-      killGroup(child);
+      await killLoop(child);
     }
   });
 
@@ -774,7 +808,7 @@ describe('autofix-status-heartbeat loop', () => {
       const code = await awaitExit(child, 8000);
       assert.equal(code, 0, 'the stop marker must end the loop cleanly');
     } finally {
-      killGroup(child);
+      await killLoop(child);
     }
   });
 
@@ -790,7 +824,7 @@ describe('autofix-status-heartbeat loop', () => {
       const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
       assert.match(logText, /PATCH failed; continuing/);
     } finally {
-      killGroup(child);
+      await killLoop(child);
     }
   });
 
@@ -828,7 +862,7 @@ describe('autofix-status-heartbeat loop', () => {
         'a plant on the ambient PATH must never be resolved',
       );
     } finally {
-      killGroup(child);
+      await killLoop(child);
     }
   });
 
@@ -923,7 +957,7 @@ describe('autofix-status-heartbeat loop', () => {
         'minted gh config dirs must not outlive their gh call',
       );
     } finally {
-      killGroup(child);
+      await killLoop(child);
     }
   });
 
@@ -953,7 +987,7 @@ describe('autofix-status-heartbeat loop', () => {
       const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
       assert.match(logText, /gh config mint failed; skipping this tick/);
     } finally {
-      killGroup(child);
+      await killLoop(child);
     }
   });
 
@@ -996,19 +1030,9 @@ describe('autofix-status-heartbeat loop', () => {
         'the stamp must not outlive the loop',
       );
     } finally {
-      killGroup(child);
+      await killLoop(child);
     }
   });
-
-  // The mid-tick kill-topology witness needs coreutils `timeout` (which
-  // gives the tick its own process group) and procps pkill/pgrep (the
-  // session kill and its oracle); hosts without them still carry the
-  // pinned statement list in the workflow test.
-  const haveSessionKillTools =
-    spawnSync('bash', [
-      '-c',
-      'command -v timeout >/dev/null && command -v pkill >/dev/null && command -v pgrep >/dev/null',
-    ]).status === 0;
 
   function processAlive(pid) {
     try {
@@ -1067,9 +1091,48 @@ describe('autofix-status-heartbeat loop', () => {
         );
         assert.ok(emptied, 'the session kill must empty the loop session');
       } finally {
-        spawnSync('bash', ['-c', `pkill -KILL -s ${pid} 2>/dev/null || true`]);
-        killGroup(child);
+        await killLoop(child);
       }
+    },
+  );
+
+  it(
+    'the teardown kill empties the whole loop session before cleanup',
+    {
+      skip: haveSessionKillTools
+        ? false
+        : 'requires coreutils timeout + procps pkill/pgrep',
+    },
+    async () => {
+      // Run 33223243920: the FIFO-stamp test body passed but its afterEach
+      // rmSync threw ENOTEMPTY on the records dir — teardown killed only
+      // the loop's process group, and the mid-tick `timeout … gh` subtree
+      // (its own group) outlived it, the surviving fake gh still creating
+      // entries during the removal. Kill via the same path every teardown
+      // now uses, with a tick in flight, and witness the session empty
+      // BEFORE cleanup: with the session kill removed, killGroup stays
+      // group-only and the slow gh is still asleep in the session here.
+      const dir = freshTmp();
+      const gh = fakeGhBin(dir);
+      const { env } = loopEnv(dir, gh, { GH_SLEEP_SECONDS: '15' });
+      const child = startLoop(env);
+      const pid = child.pid;
+      try {
+        const inFlight = await waitFor(
+          () => readCalls(gh.records).length >= 1,
+          8000,
+        );
+        assert.ok(inFlight, 'the slow gh must put a tick in flight');
+      } finally {
+        await killLoop(child);
+      }
+      assert.ok(
+        spawnSync('pgrep', ['-s', String(pid)]).status !== 0,
+        'the teardown kill must empty the loop session before cleanup',
+      );
+      // The incident's failing call, immediately after the kill: with no
+      // surviving writer it cannot throw ENOTEMPTY.
+      rmSync(gh.records, { recursive: true });
     },
   );
 
@@ -1108,7 +1171,7 @@ describe('autofix-status-heartbeat loop', () => {
         const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
         assert.match(logText, /self-exit: pid file removed or replaced/);
       } finally {
-        killGroup(child);
+        await killLoop(child);
       }
     },
   );
@@ -1153,7 +1216,7 @@ describe('autofix-status-heartbeat loop', () => {
         const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
         assert.match(logText, /self-exit: pid file removed or replaced/);
       } finally {
-        killGroup(child);
+        await killLoop(child);
       }
     },
   );
@@ -1188,7 +1251,7 @@ describe('autofix-status-heartbeat loop', () => {
         assert.ok(ok, 'the bounded stamp write must not stall the tick');
         assert.ok(child.exitCode === null, 'the loop must keep pulsing');
       } finally {
-        killGroup(child);
+        await killLoop(child);
       }
     },
   );
