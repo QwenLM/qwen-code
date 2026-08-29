@@ -321,9 +321,11 @@ export function EmbeddedApp() {
   const latestSubmittedPromptRef = useRef<{
     sessionId: string;
     prompt: string;
-  }>();
+  } | undefined>(undefined);
   const sessionSwitchStartedAtRef = useRef(0);
-  const sessionSwitchTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const sessionSwitchTimerRef = useRef<
+    ReturnType<typeof setTimeout> | undefined
+  >(undefined);
   const historyButtonRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<WebShellApi | null>(null);
   const composerRef = useRef<WebShellComposerApi | null>(null);
@@ -363,9 +365,9 @@ export function EmbeddedApp() {
     [],
   );
 
-  // Stable identity: Web Shell re-runs its error-notification effect
-  // whenever this callback changes, so a fresh arrow every render would
-  // re-notify — and re-render — forever while a connection error persists.
+  // Web Shell reports each distinct connection error value only once, so a
+  // new identity here (e.g. when `t` is rebuilt on a language switch) re-runs
+  // its notification effect without re-delivering a persisted error.
   const handleShellError = useCallback(
     (error: Error) => {
       clearInsight();
@@ -1357,11 +1359,15 @@ export function EmbeddedApp() {
           cycleModeOnTab
           onUserMessageEditRequest={(turnIndex, content) => {
             const queuedPrompt = latestSubmittedPromptRef.current;
-            const editsQueuedPrompt =
-              queuedPrompt?.sessionId === runtime.sessionId &&
-              queuedPrompt.prompt !== content;
-            const editContent = editsQueuedPrompt
-              ? queuedPrompt.prompt
+            const queuedPromptForEdit =
+              queuedPrompt &&
+              queuedPrompt.sessionId === runtime.sessionId &&
+              queuedPrompt.prompt !== content
+                ? queuedPrompt
+                : undefined;
+            const editsQueuedPrompt = queuedPromptForEdit !== undefined;
+            const editContent = queuedPromptForEdit
+              ? queuedPromptForEdit.prompt
               : content;
             composerRef.current?.clear({ text: true, tags: true });
             composerRef.current?.setText(editContent);
