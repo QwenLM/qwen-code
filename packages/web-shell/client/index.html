@@ -88,6 +88,200 @@
         };
       })();
     </script>
+    <!--
+      Boot watchdog: when the app never mounts (a dev-server restart
+      invalidating module URLs mid-load, the daemon unreachable, a rotated
+      auth token, ...) the page would otherwise stay blank with no error and
+      no way to recover. After a grace period — or immediately when a
+      script/module resource fails to load — render a visible, theme-aware
+      fallback showing the captured errors and a reload action. Errors thrown
+      by a booting module are captured too, but surfaced by the grace timer
+      rather than immediately, so a burst accumulates in one panel. Kept
+      dependency-free ES5 so it runs even if every module import fails.
+
+      This script deliberately runs before #root is parsed, so it is already
+      listening while the module graph loads. Everything therefore resolves
+      #root lazily, and the mount observer installs on DOMContentLoaded when
+      the element does not exist yet — a MutationObserver created here
+      against a null root would be silently dropped.
+
+      Invariant: #root must stay empty until React mounts. Mount detection
+      keys off "first child that is not the fallback box", so a static child
+      (e.g. a boot spinner) would read as mounted and disable the watchdog;
+      keep #root empty in index.html. Both terminal states — a real mount,
+      or the fallback being rendered — uninstall the watchdog (listeners,
+      timer, observer) and release its captured errors, so nothing survives
+      a settled boot. The fallback box, once shown, is sticky, so a late
+      timer never overwrites a more specific earlier reason.
+    -->
+    <script>
+      !(function () {
+        var GRACE_MS = 15000;
+        var MAX_ERRORS = 5;
+        var errors = [];
+        var timer = null;
+        var observer = null;
+        var pendingInstall = false;
+        function rootEl() {
+          return document.getElementById('root');
+        }
+        function fallbackPresent() {
+          var r = rootEl();
+          return !!(r && r.querySelector('[data-boot-fallback]'));
+        }
+        function appMounted() {
+          var r = rootEl();
+          return !!(
+            r &&
+            r.firstElementChild &&
+            !r.firstElementChild.hasAttribute('data-boot-fallback')
+          );
+        }
+        function pushError(msg) {
+          if (errors.length < MAX_ERRORS) errors.push(msg);
+        }
+        function uninstall() {
+          if (timer !== null) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          if (observer) {
+            observer.disconnect();
+            observer = null;
+          }
+          if (pendingInstall) {
+            document.removeEventListener('DOMContentLoaded', installObserver);
+            pendingInstall = false;
+          }
+          window.removeEventListener('error', onError, true);
+          window.removeEventListener('unhandledrejection', onRejection);
+          errors.length = 0;
+        }
+        function show(reason) {
+          var r = rootEl();
+          if (!r || appMounted() || fallbackPresent()) return;
+          var dark = document.documentElement.classList.contains('theme-dark');
+          var box = document.createElement('div');
+          box.setAttribute('data-boot-fallback', '');
+          box.style.cssText =
+            'min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;box-sizing:border-box;font-family:system-ui,sans-serif;text-align:center;background:' +
+            (dark ? '#0d0d0d' : '#ffffff') +
+            ';color:' +
+            (dark ? '#e5e5e5' : '#1a1a1a');
+          var h = document.createElement('h1');
+          h.style.cssText = 'font-size:18px;margin:0';
+          h.textContent = 'Web Shell 加载失败 / failed to load';
+          var p = document.createElement('p');
+          p.style.cssText =
+            'margin:0;font-size:13px;opacity:.75;max-width:560px';
+          p.textContent = reason;
+          box.appendChild(h);
+          box.appendChild(p);
+          if (errors.length) {
+            var pre = document.createElement('pre');
+            pre.style.cssText =
+              'margin:0;font-size:11px;opacity:.6;max-width:720px;max-height:160px;overflow:auto;text-align:left;white-space:pre-wrap';
+            pre.textContent = errors.join('\n');
+            box.appendChild(pre);
+          }
+          var btn = document.createElement('button');
+          btn.textContent = '重新加载 / Reload';
+          btn.style.cssText =
+            'padding:8px 20px;border-radius:8px;border:1px solid ' +
+            (dark ? '#444' : '#ccc') +
+            ';background:' +
+            (dark ? '#222' : '#f5f5f5') +
+            ';color:inherit;font-size:14px;cursor:pointer';
+          btn.addEventListener('click', function () {
+            location.reload();
+          });
+          box.appendChild(btn);
+          r.textContent = '';
+          r.appendChild(box);
+          // The box is terminal — it is sticky, and further errors would
+          // never reach the panel — so release everything here rather than
+          // waiting on a mount that may never come.
+          uninstall();
+        }
+        function onError(e) {
+          var t = e && e.target;
+          // An inline <script> that throws also targets a SCRIPT element, so
+          // require a src/href: only a failed *fetch* proves boot is
+          // impossible right now.
+          var isResource = !!(
+            t &&
+            ((t.tagName === 'SCRIPT' && t.src) ||
+              (t.tagName === 'LINK' && t.href))
+          );
+          var msg = (e && e.message) || 'unknown error';
+          if (isResource) msg += ' (' + (t.src || t.href) + ')';
+          pushError(msg);
+          if (appMounted()) return;
+          // Runtime errors and rejections are captured and surfaced by the
+          // grace timer (or by a later resource failure) so a burst of boot
+          // errors accumulates in the panel instead of being truncated to
+          // the first one.
+          if (isResource) {
+            show(
+              'A required resource failed to load: ' +
+                msg +
+                '. This usually happens right after a dev-server or daemon restart — reload the page.',
+            );
+          }
+        }
+        function onRejection(e) {
+          var reason = e && e.reason;
+          pushError(
+            String(
+              (reason && reason.message) || reason || 'unhandled rejection',
+            ),
+          );
+        }
+        function installObserver() {
+          if (pendingInstall) {
+            document.removeEventListener('DOMContentLoaded', installObserver);
+            pendingInstall = false;
+          }
+          if (observer) return;
+          var root = rootEl();
+          if (!root) {
+            // #root is parsed after this script; retry once the document is
+            // complete. Nothing is lost meanwhile: React cannot have mounted
+            // into an element that does not exist yet.
+            if (!pendingInstall) {
+              pendingInstall = true;
+              document.addEventListener('DOMContentLoaded', installObserver);
+            }
+            return;
+          }
+          // A mount that beat this install would never produce a record.
+          if (appMounted()) {
+            uninstall();
+            return;
+          }
+          if (typeof MutationObserver === 'undefined') return;
+          observer = new MutationObserver(function () {
+            if (appMounted()) uninstall();
+          });
+          observer.observe(root, { childList: true });
+        }
+        window.addEventListener('error', onError, true);
+        window.addEventListener('unhandledrejection', onRejection);
+        installObserver();
+        timer = setTimeout(function () {
+          if (!appMounted()) {
+            show(
+              'The app did not start within ' +
+                GRACE_MS / 1000 +
+                's. The daemon may be restarting or its access token may have rotated — reload the page.',
+            );
+          }
+          // The grace period is over either way: mounted, fallback shown, or
+          // show() declined. Nothing this watchdog can still do is useful.
+          uninstall();
+        }, GRACE_MS);
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/main.tsx"></script>
   </body>
