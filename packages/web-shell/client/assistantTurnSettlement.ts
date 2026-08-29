@@ -9,7 +9,7 @@ import {
   useDaemonPromptSettled,
   useTranscriptStore,
   type DaemonPromptSettledEvent,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useCallback, useRef } from 'react';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 import type {
