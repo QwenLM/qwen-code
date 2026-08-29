@@ -10371,6 +10371,14 @@ describe('Session', () => {
           description: 'Deferred tool bridge',
           build: vi.fn((params: Record<string, unknown>) => ({ params })),
         };
+        // The bridge needs both halves registered: resolution rejects a
+        // hidden target when tool_search is unregistered (R1-5 guard).
+        const toolSearch = {
+          name: core.ToolNames.TOOL_SEARCH,
+          kind: core.Kind.Other,
+          description: 'Deferred tool discovery',
+          build: vi.fn((params: Record<string, unknown>) => ({ params })),
+        };
         const target = {
           name: 'mcp__github__create_issue',
           kind: core.Kind.Other,
@@ -10391,14 +10399,18 @@ describe('Session', () => {
             ? bridge
             : name === target.name
               ? target
-              : undefined,
+              : name === toolSearch.name
+                ? toolSearch
+                : undefined,
         );
         mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
           name === bridge.name
             ? bridge
             : name === target.name
               ? target
-              : undefined,
+              : name === toolSearch.name
+                ? toolSearch
+                : undefined,
         );
         mockToolRegistry.isDeferredAndHidden.mockImplementation(
           (name: string) => name === target.name,
