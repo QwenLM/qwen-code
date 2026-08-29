@@ -180,7 +180,9 @@ export function findUrlAtRow(row: BufferRow, x: number): UrlHit | null {
       // The URL run reaches the end of the row text. The last character
       // may occupy TWO columns (CJK/emoji): a wide final glyph owns both
       // its cells, so the boundary is its start column plus its width.
-      const lastChar = row.text[hit.end - 1] ?? '';
+      // Use the last code POINT (not UTF-16 unit) so non-BMP emoji
+      // (surrogate pairs) are measured correctly.
+      const lastChar = [...row.text.slice(0, hit.end)].at(-1) ?? '';
       const lastColumn = row.cellColumns[row.cellColumns.length - 1] ?? 0;
       endCellExclusive = lastColumn + (stringWidth(lastChar) || 1);
     }

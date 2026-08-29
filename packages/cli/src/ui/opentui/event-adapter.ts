@@ -700,16 +700,16 @@ export function createEventMapper(
       }
       case 'finished': {
         closeThought();
+        // ink parity: handleFinishedEvent clears an active auto-retry
+        // countdown BEFORE adding the finish-reason notice — the fold
+        // only pops when the last item is the retry row, so clearing
+        // first (like every other terminal case) is required.
+        out.push({ type: 'retry-countdown-clear' });
         // ink parity: handleFinishedEvent adds `{type: 'info'}` for
         // non-STOP finish reasons.
         const reason = (ev.value as { reason?: string } | undefined)?.reason;
         const message = reason ? FINISH_REASON_NOTICES[reason] : undefined;
         if (message) out.push({ type: 'info', text: `⚠  ${message}` });
-        // ink parity: handleFinishedEvent clears an active auto-retry
-        // countdown — a terminal event inside the countdown window must not
-        // leave a stale ↻ row. The backend treats a redundant clear as a
-        // no-op when no countdown is running.
-        out.push({ type: 'retry-countdown-clear' });
         // Segment marker only — the turn settles when the live generator
         // returns (backend emits `done`), NOT here: `finished` arrives
         // before tool execution, so mapping it to `done` flashed a fake
