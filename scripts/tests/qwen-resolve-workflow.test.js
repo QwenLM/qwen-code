@@ -49,11 +49,31 @@ function step(section, name) {
   return match?.[0] ?? '';
 }
 
+// The behavioural tests below execute shell sliced out of the workflow's
+// `run: |-` blocks; the index guards and the 10-space dedent live in one
+// place so a drifted helper cannot silently extract a wrong range.
+function extractBlock(source, startMarker, endMarker, options = {}) {
+  const { includeStart = true, includeEnd = true } = options;
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(
+    endMarker,
+    start === -1 ? 0 : start + startMarker.length,
+  );
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  const sliceStart = includeStart ? start : start + startMarker.length;
+  return source
+    .slice(sliceStart, includeEnd ? end + endMarker.length : end)
+    .replace(/^ {10}/gm, '');
+}
+
 function reviewGhWrapper(runStep) {
-  const start = runStep.indexOf('cat > "$proxy_bin/gh" <<\'QWEN_GH_WRAPPER\'');
-  const bodyStart = runStep.indexOf('\n', start) + 1;
-  const end = runStep.indexOf('\n          QWEN_GH_WRAPPER', bodyStart);
-  return runStep.slice(bodyStart, end).replace(/^ {10}/gm, '');
+  return extractBlock(
+    runStep,
+    'cat > "$proxy_bin/gh" <<\'QWEN_GH_WRAPPER\'\n',
+    '\n          QWEN_GH_WRAPPER',
+    { includeStart: false, includeEnd: false },
+  );
 }
 
 function runReviewGhWrapper(
@@ -847,11 +867,12 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
   // The replay functions, dedented out of the `run: |-` block so a real git
   // fixture can exercise them exactly as the runner will.
   function replayFunctions() {
-    const start = reportStep.indexOf('replay_give_up() {');
-    const end = reportStep.indexOf('\n          if [ "$OUTCOME" = "fixed" ]');
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    return reportStep.slice(start, end).replace(/^ {10}/gm, '');
+    return extractBlock(
+      reportStep,
+      'replay_give_up() {',
+      '\n          if [ "$OUTCOME" = "fixed" ]',
+      { includeEnd: false },
+    );
   }
 
   const gitEnv = {
@@ -881,23 +902,27 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
   // on branch qwen-resolve/pr-1 holding the agent's resolution of a.txt (the
   // conflicted file) merged on top of the ORIGINAL head; and a contributor
   // clone that can move the head. Returns the paths and the original head SHA.
-  function makeFixture(resolveWith = 'edit') {
+  function makeFixture(resolveWith = 'edit', options = {}) {
+    const { conflicted = 'a.txt', sibling = null } = options;
     const root = mkdtempSync(path.join(tmpdir(), 'qwen-resolve-replay-'));
     const origin = path.join(root, 'origin.git');
     const contributor = path.join(root, 'contributor');
     const runner = path.join(root, 'runner');
     git(root, 'init', '-q', '--bare', origin);
     git(root, 'init', '-q', '-b', 'main', contributor);
-    writeFileSync(path.join(contributor, 'a.txt'), 'shared line\n');
+    writeFileSync(path.join(contributor, conflicted), 'shared line\n');
     writeFileSync(path.join(contributor, 'b.txt'), 'b original\n');
+    if (sibling) {
+      writeFileSync(path.join(contributor, sibling), 'sibling original\n');
+    }
     git(contributor, 'add', '.');
     git(contributor, 'commit', '-q', '-m', 'chore: seed');
     git(contributor, 'checkout', '-q', '-b', 'feature');
-    writeFileSync(path.join(contributor, 'a.txt'), 'feature side\n');
+    writeFileSync(path.join(contributor, conflicted), 'feature side\n');
     git(contributor, 'commit', '-q', '-am', 'feat: feature side');
     const originalHead = git(contributor, 'rev-parse', 'HEAD');
     git(contributor, 'checkout', '-q', 'main');
-    writeFileSync(path.join(contributor, 'a.txt'), 'main side\n');
+    writeFileSync(path.join(contributor, conflicted), 'main side\n');
     writeFileSync(path.join(contributor, 'c.txt'), 'c from main\n');
     git(contributor, 'add', '.');
     git(contributor, 'commit', '-q', '-m', 'feat: main side');
@@ -935,10 +960,18 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
     });
     if (resolveWith === 'delete') {
       // Deleting the conflicted file IS the agent's resolution of it.
-      git(runner, 'rm', '-q', '--', 'a.txt');
+      // Literal pathspecs: a glob-named file must not take its wildcard
+      // siblings with it.
+      spawnSync('git', ['rm', '-q', '--', conflicted], {
+        cwd: runner,
+        env: { ...gitEnv, GIT_LITERAL_PATHSPECS: '1' },
+      });
     } else {
-      writeFileSync(path.join(runner, 'a.txt'), 'resolved by agent\n');
-      git(runner, 'add', 'a.txt');
+      writeFileSync(path.join(runner, conflicted), 'resolved by agent\n');
+      spawnSync('git', ['add', '--', conflicted], {
+        cwd: runner,
+        env: { ...gitEnv, GIT_LITERAL_PATHSPECS: '1' },
+      });
     }
     git(runner, 'commit', '-q', '-m', 'fix: resolve merge conflicts with main');
     const resolvedCommit = git(runner, 'rev-parse', 'HEAD');
@@ -1247,39 +1280,41 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
   });
 
   function classifyFunction() {
-    const start = reportStep.indexOf('classify_push_failure() {');
-    const endMarker = '\n          }';
-    const end = reportStep.indexOf(endMarker, start);
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    return reportStep
-      .slice(start, end + endMarker.length)
-      .replace(/^ {10}/gm, '');
+    return extractBlock(
+      reportStep,
+      'classify_push_failure() {',
+      '\n          }',
+    );
   }
 
-  function classifyLog(lines) {
+  function classifyScript(lines, scriptLines, extraEnv = {}) {
     const dir = mkdtempSync(path.join(tmpdir(), 'qwen-classify-'));
     try {
       const pushLog = path.join(dir, 'push.log');
       writeFileSync(pushLog, `${lines.join('\n')}\n`);
-      const result = spawnSync(
+      return spawnSync(
         'bash',
         [
           '-c',
-          [
-            'set -euo pipefail',
-            classifyFunction(),
-            'classify_push_failure',
-            'printf "reason=%s\\n" "$push_fail_reason"',
-          ].join('\n'),
+          ['set -euo pipefail', classifyFunction(), ...scriptLines].join('\n'),
         ],
-        { encoding: 'utf8', env: { ...process.env, push_log: pushLog } },
+        {
+          encoding: 'utf8',
+          env: { ...process.env, push_log: pushLog, ...extraEnv },
+        },
       );
-      expect(result.status, result.stdout + result.stderr).toBe(0);
-      return result.stdout.match(/^reason=(.*)$/m)?.[1];
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+
+  function classifyLog(lines) {
+    const result = classifyScript(lines, [
+      'classify_push_failure',
+      'printf "reason=%s\\n" "$push_fail_reason"',
+    ]);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    return result.stdout.match(/^reason=(.*)$/m)?.[1];
   }
 
   const staleInfoLog = (branch) => [
@@ -1292,6 +1327,27 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
     expect(classifyLog(staleInfoLog('feature'))).toBe('moved');
     expect(classifyLog(staleInfoLog('fix/permission-prompt'))).toBe('moved');
     expect(classifyLog(staleInfoLog('fix-403-error'))).toBe('moved');
+    // A branch that merely CONTAINS a moved-reason phrase — even parenthesised,
+    // which refnames legally allow — is not a lease decline: git prints the
+    // real reason last on the line, and the moved arm anchors to end-of-line.
+    // These also pin the parenthesised patterns against a bare-word
+    // regression, which every one of these branch names would trip.
+    expect(
+      classifyLog([
+        ' ! [remote rejected] HEAD -> x(non-fast-forward)y (protected branch hook declined)',
+      ]),
+    ).toBe('permission');
+    expect(
+      classifyLog([
+        ' ! [remote rejected] HEAD -> fix/non-fast-forward (cannot be updated)',
+      ]),
+    ).toBe('permission');
+    expect(
+      classifyLog([
+        ' ! [remote rejected] HEAD -> fix/non-fast-forward-retry (pre-receive hook declined)',
+        "fatal: unable to access 'https://github.com/contributor/repo.git/': The requested URL returned error: 403",
+      ]),
+    ).toBe('permission');
     // Genuine access problems still classify as permission, the workflow-scope
     // arm keeps its priority over both, and unknown failures stay 'other'.
     expect(
@@ -1311,40 +1367,23 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
     // After a failed replay push, classify_push_failure runs a second time;
     // the reported reason must come from the second push's log, not the stale
     // 'moved' from the first.
-    const dir = mkdtempSync(path.join(tmpdir(), 'qwen-classify-'));
-    try {
-      const pushLog = path.join(dir, 'push.log');
-      writeFileSync(pushLog, `${staleInfoLog('feature').join('\n')}\n`);
-      const result = spawnSync(
-        'bash',
-        [
-          '-c',
-          [
-            'set -euo pipefail',
-            classifyFunction(),
-            'classify_push_failure',
-            'printf "first=%s\\n" "$push_fail_reason"',
-            'printf "%s\\n" "$SECOND_LOG" > "$push_log"',
-            'classify_push_failure',
-            'printf "second=%s\\n" "$push_fail_reason"',
-          ].join('\n'),
-        ],
-        {
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            push_log: pushLog,
-            SECOND_LOG:
-              "fatal: unable to access 'https://github.com/contributor/repo.git/': The requested URL returned error: 403",
-          },
-        },
-      );
-      expect(result.status, result.stdout + result.stderr).toBe(0);
-      expect(result.stdout).toContain('first=moved');
-      expect(result.stdout).toContain('second=permission');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const result = classifyScript(
+      staleInfoLog('feature'),
+      [
+        'classify_push_failure',
+        'printf "first=%s\\n" "$push_fail_reason"',
+        'printf "%s\\n" "$SECOND_LOG" > "$push_log"',
+        'classify_push_failure',
+        'printf "second=%s\\n" "$push_fail_reason"',
+      ],
+      {
+        SECOND_LOG:
+          "fatal: unable to access 'https://github.com/contributor/repo.git/': The requested URL returned error: 403",
+      },
+    );
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain('first=moved');
+    expect(result.stdout).toContain('second=permission');
   });
 
   it('says in the replay comment what the run artifact does and does not describe', () => {
@@ -1359,7 +1398,7 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
     );
     expect(arm).toContain('the resolution was replayed on top of it');
     expect(arm).toContain(
-      'files still conflicting that the new commits did not touch',
+      'where a file still conflicted and the new commits had not touched it',
     );
     expect(arm).toContain(
       'describes the original resolution it was replayed from',
@@ -1443,17 +1482,74 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
     }
   });
 
+  // Conflicted filenames legally carry glob characters; the replay's per-file
+  // diff/checkout/rm pathspecs must stay literal (GIT_LITERAL_PATHSPECS) or a
+  // file named `a[1].txt` widens every one of them to its sibling `a1.txt`.
+  it('replays when the head moved only in a glob sibling of the conflicted file', () => {
+    const fixture = makeFixture('edit', {
+      conflicted: 'a[1].txt',
+      sibling: 'a1.txt',
+    });
+    try {
+      const newHead = moveHead(
+        fixture,
+        'a1.txt',
+        'sibling edited by the new head\n',
+      );
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('0');
+      expect(out.HEAD_SHA).toBe(newHead);
+      expect(out.replayed_on).toBe(newHead);
+      // Both files intact: the agent's resolution of the conflicted file and
+      // the new head's edit of its wildcard sibling.
+      expect(readFileSync(path.join(fixture.runner, 'a[1].txt'), 'utf8')).toBe(
+        'resolved by agent\n',
+      );
+      expect(readFileSync(path.join(fixture.runner, 'a1.txt'), 'utf8')).toBe(
+        'sibling edited by the new head\n',
+      );
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a glob sibling alive when a deletion resolution is replayed', () => {
+    const fixture = makeFixture('delete', {
+      conflicted: 'a[1].txt',
+      sibling: 'a1.txt',
+    });
+    try {
+      const newHead = moveHead(
+        fixture,
+        'a1.txt',
+        'sibling edited by the new head\n',
+      );
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('0');
+      expect(out.HEAD_SHA).toBe(newHead);
+      expect(out.replayed_on).toBe(newHead);
+      // The agent deleted a[1].txt; `git rm` must not have staged its
+      // wildcard sibling along with it.
+      expect(existsSync(path.join(fixture.runner, 'a[1].txt'))).toBe(false);
+      expect(readFileSync(path.join(fixture.runner, 'a1.txt'), 'utf8')).toBe(
+        'sibling edited by the new head\n',
+      );
+      expect(
+        git(fixture.runner, 'ls-tree', '--name-only', out.head).split('\n'),
+      ).toContain('a1.txt');
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   // --- authorize retry loop: behaviour against a scripted gh ---
 
   function authorizeRetryBlock() {
-    const start = authorizeStep.indexOf('api_error_file="$(mktemp)"');
-    const endMarker = '\n          esac';
-    const end = authorizeStep.indexOf(endMarker, start);
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    return authorizeStep
-      .slice(start, end + endMarker.length)
-      .replace(/^ {10}/gm, '');
+    return extractBlock(
+      authorizeStep,
+      'api_error_file="$(mktemp)"',
+      '\n          esac',
+    );
   }
 
   function runAuthorizeRetry(plan) {
