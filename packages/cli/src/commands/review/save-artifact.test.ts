@@ -82,6 +82,15 @@ const verdict = {
   // `save-artifact.ts` does.
   bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: true },
   lowSignal: { agents: 4, srcDiffLines: 120 },
+  // Populated on purpose, like `deferredCount` above: the copy test then
+  // proves passthrough rather than only the validator's absent-means-null.
+  approachSignal: {
+    round: 6,
+    src0: 228,
+    srcDiffLines: 920,
+    growth: 920 / 228,
+    nonConverged: true,
+  },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
 };
 
@@ -677,6 +686,77 @@ describe('saveReviewArtifact', () => {
       expect(
         JSON.parse(readFileSync(paths.out, 'utf8')).verdict.deferredCount,
       ).toBe(0);
+    }
+  });
+
+  it.each(['round', 'src0', 'srcDiffLines'] as const)(
+    'refuses a zero-valued approachSignal.%s',
+    (key) => {
+      const paths = fixture();
+      writeJson(paths.composed, {
+        ...verdict,
+        approachSignal: { ...verdict.approachSignal, [key]: 0 },
+      });
+
+      expect(() =>
+        saveReviewArtifact({
+          ...paths,
+          target: 'local',
+          effort: 'medium',
+        }),
+      ).toThrow(new RegExp(`approachSignal\\.${key}`));
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it.each([
+    ['a negative round', { round: -1 }],
+    ['a fractional round', { round: 1.5 }],
+    ['a non-numeric round', { round: 'six' }],
+    ['a negative growth', { growth: -1 }],
+    ['a non-numeric growth', { growth: 'big' }],
+    ['a non-boolean nonConverged', { nonConverged: 'yes' }],
+  ] as Array<[string, Record<string, unknown>]>)(
+    'refuses a present approachSignal carrying %s',
+    (_label, bad) => {
+      // Same discipline as deferredCount: the absent-means-null default
+      // must not swallow a PRESENT malformed value into the durable artifact.
+      const paths = fixture();
+      writeJson(paths.composed, {
+        ...verdict,
+        approachSignal: { ...verdict.approachSignal, ...bad },
+      });
+
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(/approachSignal/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
+  it('refuses a present approachSignal that is not an object', () => {
+    const paths = fixture();
+    writeJson(paths.composed, { ...verdict, approachSignal: 'junk' });
+
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/approachSignal/);
+    expect(existsSync(paths.out)).toBe(false);
+  });
+
+  it('reads an absent or null approachSignal as null — a pre-signal composed file must still save', () => {
+    // Null rides the same absence semantics as the sibling deferredCount:
+    // a presence-required read would refuse every composed file written
+    // before this field existed.
+    const paths = fixture();
+    const { approachSignal: _absent, ...preSignal } = verdict;
+    for (const composed of [preSignal, { ...verdict, approachSignal: null }]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+      expect(
+        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.approachSignal,
+      ).toBeNull();
+      rmSync(paths.out, { force: true });
     }
   });
 

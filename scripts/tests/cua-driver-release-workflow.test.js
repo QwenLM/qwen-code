@@ -22,9 +22,9 @@ const powershellInstaller = readFileSync(
 );
 
 describe('CUA SDK release workflow', () => {
-  it('fails closed when a production dispatch disables notarization', () => {
+  it('fails closed when a driver production dispatch disables notarization', () => {
     expect(workflow).toContain(
-      '"${{ inputs.dry_run }}" != "true" && "${{ inputs.notarize }}" != "true"',
+      '"${{ inputs.dry_run }}" != "true" && "${{ inputs.node_repl_only }}" != "true" && "${{ inputs.notarize }}" != "true"',
     );
   });
 
@@ -49,9 +49,7 @@ describe('CUA SDK release workflow', () => {
   });
 
   it('keeps installer version assignments machine-rewritable', () => {
-    expect(shellInstaller).toMatch(
-      /^CUA_DRIVER_RS_BAKED_VERSION="[^"\n]+"$/mu,
-    );
+    expect(shellInstaller).toMatch(/^CUA_DRIVER_RS_BAKED_VERSION="[^"\n]+"$/mu);
     expect(powershellInstaller).toMatch(
       /^\$Script:CuaDriverRsBakedVersion = "[^"\n]+"$/mu,
     );

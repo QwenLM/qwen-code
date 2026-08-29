@@ -12,6 +12,7 @@ import {
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   type ChannelLoopToolHandler,
+  type ChannelPromptImage,
 } from './ChannelAgentBridge.js';
 
 const child = vi.hoisted(() => {
@@ -515,6 +516,85 @@ describe('AcpBridge', () => {
     });
   });
 
+  it('sends multiple images before the text prompt', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'describe both', {
+      images: [
+        { data: 'first', mimeType: 'image/png' },
+        { data: 'second', mimeType: 'image/jpeg' },
+      ],
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [
+        { type: 'image', data: 'first', mimeType: 'image/png' },
+        { type: 'image', data: 'second', mimeType: 'image/jpeg' },
+        { type: 'text', text: 'describe both' },
+      ],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+  });
+
+  it('sends a legacy-only image pair as one inline image block', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'describe', {
+      imageBase64: 'base64-image',
+      imageMimeType: 'image/png',
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [
+        { type: 'image', data: 'base64-image', mimeType: 'image/png' },
+        { type: 'text', text: 'describe' },
+      ],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+  });
+
+  it('drops malformed prompt image entries before the text prompt', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'describe', {
+      images: [
+        { data: 'AQID', mimeType: 'image/png' },
+        { data: '', mimeType: 'image/webp' },
+        { data: 'BAUG', mimeType: '' },
+        null as unknown as ChannelPromptImage,
+      ],
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [
+        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        { type: 'text', text: 'describe' },
+      ],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+  });
+
   it('excludes nested subagent text from the final response', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
@@ -586,6 +666,31 @@ describe('AcpBridge', () => {
     await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
       'Final answer.',
     );
+  });
+
+  it('emits discrete vision bridge notices as text chunks', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const textChunks: Array<[string, string]> = [];
+    bridge.on('textChunk', (sessionId, text) => {
+      textChunks.push([sessionId, text]);
+    });
+
+    bridge.handleSessionUpdate({
+      sessionId: 's-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Vision bridge cancelled.' },
+        _meta: {
+          source: 'vision_bridge_notice',
+          qwenDiscreteMessage: true,
+        },
+      },
+    });
+
+    expect(textChunks).toEqual([['s-1', 'Vision bridge cancelled.']]);
   });
 
   it('emits a completed background response separately from the active turn', () => {

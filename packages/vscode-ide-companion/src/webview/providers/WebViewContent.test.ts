@@ -64,7 +64,7 @@ describe('WebViewContent', () => {
     const webview = createMockWebview();
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
-    expect(html).toContain('<script src=');
+    expect(html).toContain('<script type="module" src=');
     expect(html).toContain('webview.js');
   });
 
@@ -73,5 +73,26 @@ describe('WebViewContent', () => {
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
     expect(html).toContain('data-extension-uri=');
+  });
+
+  it('grants wasm-unsafe-eval to script-src unconditionally', () => {
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain("script-src https://csp.source 'wasm-unsafe-eval';");
+  });
+
+  it('allows the WebShell transcript to use its inlined fonts', () => {
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain('font-src data:;');
+  });
+
+  it('does not set data-web-shell-transcript on the body', () => {
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).not.toContain('data-web-shell-transcript');
   });
 });

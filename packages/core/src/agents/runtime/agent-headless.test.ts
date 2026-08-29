@@ -29,13 +29,14 @@ import {
   resolveContentGeneratorConfigWithSources,
   AuthType,
 } from '../../core/contentGenerator.js';
-import { GeminiChat } from '../../core/geminiChat.js';
+import { LlmChat } from '../../core/llm-chat.js';
+import { LlmEventType } from '../../core/turn.js';
 import {
   getToolCallFingerprint,
   normalizeModelToolCallIds,
 } from '../../core/toolCallIdUtils.js';
 import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
-import { getInitialChatHistory } from '../../utils/environmentContext.js';
+import { getInitialChatHistory } from '../../core/environmentContext.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../../tools/tools.js';
 import {
@@ -61,8 +62,9 @@ import { AgentTerminateMode } from './agent-types.js';
 import { WriteFileTool } from '../../tools/write-file.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
+import { LoopDetectionService } from '../../services/loopDetectionService.js';
 
-vi.mock('../../core/geminiChat.js');
+vi.mock('../../core/llm-chat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../core/contentGenerator.js')>();
@@ -72,9 +74,7 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
     createContentGenerator: vi.fn().mockResolvedValue({
       generateContent: vi.fn(),
       generateContentStream: vi.fn(),
-      countTokens: vi.fn().mockResolvedValue({ totalTokens: 100 }),
       embedContent: vi.fn(),
-      useSummarizedThinking: vi.fn().mockReturnValue(false),
     }),
     createContentGeneratorConfig: vi.fn().mockReturnValue({
       model: DEFAULT_QWEN_MODEL,
@@ -90,7 +90,7 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
     }),
   };
 });
-vi.mock('../../utils/environmentContext.js', () => ({
+vi.mock('../../core/environmentContext.js', () => ({
   SYSTEM_REMINDER_OPEN: '<system-reminder>',
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
@@ -349,13 +349,13 @@ describe('subagent.ts', () => {
       mockGetHistoryToolCallFingerprints = vi.fn(
         () => new Map<string, string>(),
       );
-      vi.mocked(GeminiChat).mockImplementation(
+      vi.mocked(LlmChat).mockImplementation(
         () =>
           ({
             sendMessageStream: mockSendMessageStream,
             setLastPromptTokenCount: vi.fn(),
             getHistoryToolCallFingerprints: mockGetHistoryToolCallFingerprints,
-          }) as unknown as GeminiChat,
+          }) as unknown as LlmChat,
       );
 
       // Default mock for executeToolCall
@@ -376,7 +376,7 @@ describe('subagent.ts', () => {
     const getGenerationConfigFromMock = (
       callIndex = 0,
     ): GenerateContentConfig & { systemInstruction?: string | Content } => {
-      const callArgs = vi.mocked(GeminiChat).mock.calls[callIndex];
+      const callArgs = vi.mocked(LlmChat).mock.calls[callIndex];
       const generationConfig = callArgs?.[1];
       // Ensure it's defined before proceeding
       expect(generationConfig).toBeDefined();
@@ -497,10 +497,10 @@ describe('subagent.ts', () => {
     });
 
     describe('execute - Initialization and Prompting', () => {
-      it('should correctly template the system prompt and initialize GeminiChat', async () => {
+      it('should correctly template the system prompt and initialize LlmChat', async () => {
         const { config } = await createMockConfig();
 
-        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(LlmChat).mockClear();
 
         const promptConfig: PromptConfig = {
           systemPrompt: 'Hello ${name}, your task is ${task}.',
@@ -522,9 +522,9 @@ describe('subagent.ts', () => {
 
         await scope.execute(context);
 
-        // Check if GeminiChat was initialized correctly by the subagent
-        expect(GeminiChat).toHaveBeenCalledTimes(1);
-        const callArgs = vi.mocked(GeminiChat).mock.calls[0];
+        // Check if LlmChat was initialized correctly by the subagent
+        expect(LlmChat).toHaveBeenCalledTimes(1);
+        const callArgs = vi.mocked(LlmChat).mock.calls[0];
 
         // Check Generation Config
         const generationConfig = getGenerationConfigFromMock();
@@ -581,7 +581,7 @@ describe('subagent.ts', () => {
         followUpContext.set('task_prompt', 'Follow-up task');
         await scope.execute(followUpContext);
 
-        expect(GeminiChat).toHaveBeenCalledTimes(1);
+        expect(LlmChat).toHaveBeenCalledTimes(1);
         expect(toolRegistry.warmAll).toHaveBeenCalledTimes(1);
         expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
         expect(mockSendMessageStream.mock.calls[0][1].message).toEqual([
@@ -785,7 +785,7 @@ describe('subagent.ts', () => {
           '# Output language preference: English\nRespond in English.';
         vi.spyOn(config, 'getUserMemory').mockReturnValue(userMemoryContent);
 
-        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(LlmChat).mockClear();
 
         const promptConfig: PromptConfig = {
           systemPrompt: 'You are a test agent.',
@@ -824,7 +824,7 @@ describe('subagent.ts', () => {
         vi.spyOn(config, 'getUserMemory').mockReturnValue('');
         vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('');
 
-        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(LlmChat).mockClear();
 
         const promptConfig: PromptConfig = {
           systemPrompt: 'You are a test agent.',
@@ -854,7 +854,7 @@ describe('subagent.ts', () => {
         vi.spyOn(config, 'getUserMemory').mockReturnValue('   \n\n  ');
         vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('');
 
-        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(LlmChat).mockClear();
 
         const promptConfig: PromptConfig = {
           systemPrompt: 'You are a test agent.',
@@ -886,7 +886,7 @@ describe('subagent.ts', () => {
           autoMemoryContent,
         );
 
-        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(LlmChat).mockClear();
 
         const promptConfig: PromptConfig = {
           systemPrompt: 'You are a test agent.',
@@ -917,7 +917,7 @@ describe('subagent.ts', () => {
 
       it('should replace env history with initialMessages when both initialMessages and systemPrompt are set', async () => {
         const { config } = await createMockConfig();
-        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(LlmChat).mockClear();
 
         const initialMessages: Content[] = [
           { role: 'user', parts: [{ text: 'prior user turn' }] },
@@ -943,7 +943,7 @@ describe('subagent.ts', () => {
 
         await scope.execute(context);
 
-        const callArgs = vi.mocked(GeminiChat).mock.calls[0];
+        const callArgs = vi.mocked(LlmChat).mock.calls[0];
         const generationConfig = getGenerationConfigFromMock();
         const history = callArgs[2];
 
@@ -958,7 +958,7 @@ describe('subagent.ts', () => {
 
       it('should skip env history when initialMessages is an empty array', async () => {
         const { config } = await createMockConfig();
-        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(LlmChat).mockClear();
         vi.mocked(getInitialChatHistory).mockClear();
 
         const promptConfig: PromptConfig = {
@@ -980,7 +980,7 @@ describe('subagent.ts', () => {
 
         await scope.execute(context);
 
-        const callArgs = vi.mocked(GeminiChat).mock.calls[0];
+        const callArgs = vi.mocked(LlmChat).mock.calls[0];
         const generationConfig = getGenerationConfigFromMock();
 
         expect(generationConfig.systemInstruction).toContain('System Agent.');
@@ -990,7 +990,7 @@ describe('subagent.ts', () => {
 
       it('should use renderedSystemPrompt verbatim and bypass templating', async () => {
         const { config } = await createMockConfig();
-        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(LlmChat).mockClear();
 
         const rendered = 'Verbatim parent system prompt ${name}';
         const promptConfig: PromptConfig = {
@@ -2872,7 +2872,7 @@ describe('subagent.ts', () => {
           { text: 'Let me think...' as string, thought: true },
           { text: 'Here is the answer.' as string },
         ]);
-        vi.mocked(GeminiChat).mockImplementation(
+        vi.mocked(LlmChat).mockImplementation(
           () =>
             ({
               sendMessageStream: mockSendMessageStream,
@@ -2880,7 +2880,7 @@ describe('subagent.ts', () => {
               getHistoryToolCallFingerprints: vi.fn(
                 () => new Map<string, string>(),
               ),
-            }) as unknown as GeminiChat,
+            }) as unknown as LlmChat,
         );
 
         const eventEmitter = new AgentEventEmitter();
@@ -2968,7 +2968,7 @@ describe('subagent.ts', () => {
           { text: 'Internal reasoning here.' as string, thought: true },
           { text: 'The final answer.' as string },
         ]);
-        vi.mocked(GeminiChat).mockImplementation(
+        vi.mocked(LlmChat).mockImplementation(
           () =>
             ({
               sendMessageStream: mockSendMessageStream,
@@ -2976,7 +2976,7 @@ describe('subagent.ts', () => {
               getHistoryToolCallFingerprints: vi.fn(
                 () => new Map<string, string>(),
               ),
-            }) as unknown as GeminiChat,
+            }) as unknown as LlmChat,
         );
 
         const scope = await AgentHeadless.create(
@@ -3036,7 +3036,7 @@ describe('subagent.ts', () => {
             }
           })();
         });
-        vi.mocked(GeminiChat).mockImplementation(
+        vi.mocked(LlmChat).mockImplementation(
           () =>
             ({
               sendMessageStream: mockSendMessageStream,
@@ -3044,7 +3044,7 @@ describe('subagent.ts', () => {
               getHistoryToolCallFingerprints: vi.fn(
                 () => new Map<string, string>(),
               ),
-            }) as unknown as GeminiChat,
+            }) as unknown as LlmChat,
         );
 
         const scope = await AgentHeadless.create(
@@ -3435,6 +3435,62 @@ describe('subagent.ts', () => {
           'rejected to prevent writing truncated content',
         );
       });
+
+      it.each([
+        { retry: { type: 'retry' as const, isContinuation: true } },
+        { retry: { type: 'retry' as const } },
+      ])(
+        'forwards retry events to subagent loop detection',
+        async ({ retry }) => {
+          const loopSpy = vi
+            .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
+            .mockReturnValue(false);
+
+          const { config } = await createMockConfig();
+          mockSendMessageStream.mockResolvedValue(
+            (async function* () {
+              yield {
+                ...retry,
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    {
+                      finishReason: 'STOP',
+                      content: { parts: [{ text: 'done' }] },
+                    },
+                  ],
+                },
+              };
+            })(),
+          );
+
+          const scope = await AgentHeadless.create(
+            'test-agent',
+            config,
+            promptConfig,
+            defaultModelConfig,
+            defaultRunConfig,
+            { tools: [] },
+            new AgentEventEmitter(),
+          );
+
+          await scope.execute(new ContextState());
+
+          const retryArg = loopSpy.mock.calls.find(
+            ([event]) => event.type === LlmEventType.Retry,
+          )?.[0] as { type: LlmEventType; isContinuation?: boolean };
+          expect(retryArg).toEqual(
+            expect.objectContaining({ type: LlmEventType.Retry }),
+          );
+          if ('isContinuation' in retry) {
+            expect(retryArg.isContinuation).toBe(true);
+          } else {
+            expect(retryArg).not.toHaveProperty('isContinuation');
+          }
+        },
+      );
 
       it('keeps automatic max token escalation warm for the next agent round', async () => {
         const writeFileToolDef: FunctionDeclaration = {

@@ -11,6 +11,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -79,6 +80,27 @@ const reviewCleanStep = reviewCleanSteps[reviewCleanIndex].run;
 const agentStateCleanStep = reviewCleanSteps.find(
   (s) => s.name === 'Clean stale agent state',
 ).run;
+const reviewPreCheckoutSweepIndex = reviewCleanSteps.findIndex(
+  (s) => s.name === 'Clean stale .qwen before checkout',
+);
+const reviewPreCheckoutSweepStep =
+  reviewCleanSteps[reviewPreCheckoutSweepIndex]?.run;
+const reviewCheckoutIndex = reviewCleanSteps.findIndex(
+  (s) => s.name === 'Checkout base branch',
+);
+// Both copies are directly executable (the review copy ends at `done`;
+// the ci.yml copy's trailing artifact sweep skips workspaces without a
+// .git), and every fixture below that executes a sweep copy — the
+// plain-delete, symlink, and quarantine-fallback paths alike — loops over
+// BOTH of them against its own workspace: a mutant that survives the
+// substring pins — e.g. a `continue` right after the for-loop head
+// silently no-op-ing one copy, or a dropped `mkdir -p "$quarantine"`
+// defeating one copy's move-out fallback — must fail behaviorally on the
+// copy it touches (mutation-probed).
+const executableCleanCopies = [
+  { id: 'ci.yml', run: ciCleanSteps[0].run },
+  { id: 'qwen-code-pr-review.yml', run: reviewPreCheckoutSweepStep },
+];
 // The step's owner-extraction awk is not a worktree filter: anchor on the
 // filter's shape, not the first awk in the step. Derive it once here so the
 // pinning test and the behavioral test always execute the same filter.
@@ -130,6 +152,65 @@ function expectCleanupRecipe(run) {
   expectPipedLoopsIsolated(code, 2);
 }
 
+// Deleting the tree is not always possible: a containerised job on this
+// shared pool can leave residue owned by another uid, and on a pool member
+// without passwordless sudo nothing unprivileged can unlink it. Leaving it
+// in place poisons the checkout of every LATER job scheduled here, so the
+// sweep must move it out of the workspace instead of warning and continuing
+// — renaming needs write permission only on the two parents, and the
+// workspace root is always the runner's own.
+function expectQuarantineFallback(run) {
+  const code = stripComments(run);
+  expect(code).toContain('_qwen-quarantine');
+  // A cancelled verify can leave the protected tree under the recovery name
+  // seen in run 33146730771, so both known top-level names must be swept.
+  // `.qwen.root-orig` is emitted by recovery tooling OUTSIDE this repo —
+  // nothing here produces it (git grep matches only the sweep copies and
+  // these pins), so the pins keep the copies honest, not the producer: if
+  // its naming changes or a third residue name appears on the pool, update
+  // the for-loop list in ci.yml and qwen-code-pr-review.yml, or the sweep
+  // silently no-ops and the checkout poisoning recurs.
+  expect(code).toContain(
+    'for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do',
+  );
+  // The existence guard's `-L` arm is the only thing that sees a dangling
+  // symlink (`-e` follows the link and reports it absent), and the chmod
+  // guard's `! -L` arm is what keeps `chmod -R u+w` from dereferencing a
+  // symlinked leftover into a tree outside the workspace. The behavioral
+  // fixtures below execute both copies where permission fixtures are
+  // available (skipped on the Windows/root lanes): the dangling-symlink
+  // fixture witnesses the existence guard's `-L` arm behaviorally on each
+  // copy, but the chmod guard's `! -L` arm has no behavioral witness (the
+  // live-symlink fixture asserts content, not mode), so pin both arms
+  // textually here on every copy — dropping `-L` fails the dangling-symlink
+  // fixture, while dropping `! -L` keeps this suite green and re-poisons
+  // the checkout (mutation-probed).
+  expect(code).toContain('[ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]');
+  expect(code).toContain('[ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]');
+  // The move must be the fallback of the removal chain, not an
+  // unconditional relocation: a workspace that deletes cleanly keeps its
+  // caches.
+  expect(code).toMatch(
+    /rm -rf -- "\$stale_qwen"[\s\S]*?sudo -n rm -rf -- "\$stale_qwen"[\s\S]*?mv -- "\$stale_qwen"/,
+  );
+  expect(code).toMatch(
+    /mv -- "\$stale_qwen"[\s\S]*?mv -- "\$GITHUB_WORKSPACE"/,
+  );
+  expect(code).toContain('mkdir -p "$GITHUB_WORKSPACE"');
+  expect(code).toContain('cd "$GITHUB_WORKSPACE"');
+  // Same filesystem by construction — a cross-device `mv` degrades to
+  // copy-then-unlink, which fails on exactly the residue this exists for.
+  expect(code).toContain(
+    '"$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"',
+  );
+  // The quarantined tree still needs a human: the warning must name where
+  // it went, and the terminal warning must survive for the case where even
+  // the rename fails.
+  expect(code).toContain(
+    'leaked $stale_name survived every recovery; runner needs manual cleanup',
+  );
+}
+
 function expectHardenedGit(run) {
   expect(run).toContain(
     'GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")',
@@ -153,6 +234,20 @@ const removeReviewTreeFn = reviewCleanStep.slice(
   reviewCleanStep.indexOf('\n}\n', removeTreeFnStart) + 2,
 );
 const bashAvailable = spawnSync('bash', ['-c', 'exit 0']).status === 0;
+// The pre-checkout sweep's ladder is individually guarded: every rung ends
+// in `|| true` with stderr swallowed, so on a Git-Bash-only PATH without
+// coreutils the whole sweep exits 0 while leaving `.qwen` on disk — the
+// behavioral fixture asserting removal must skip there instead of failing.
+const sweepToolsAvailable =
+  bashAvailable &&
+  spawnSync(
+    'bash',
+    [
+      '-c',
+      'command -v rm >/dev/null && command -v chmod >/dev/null && command -v mv >/dev/null',
+    ],
+    { stdio: 'ignore' },
+  ).status === 0;
 // The fixtures defeat rm with a chmod-555 parent, which needs POSIX
 // permission semantics: Git Bash on Windows resolves `bash` but not chmod,
 // and root ignores the bits entirely.
@@ -256,6 +351,7 @@ describe('review worktree cleanup steps', () => {
       expect(cleanIdx, id).toBeLessThan(checkoutIdx);
       expectCleanupRecipe(run);
       expectHardenedGit(run);
+      expectQuarantineFallback(run);
     }
     // The copies are deliberate: a pre-checkout step cannot trust leftover
     // workspace scripts, so the recipe stays inline per job. Pin them
@@ -267,6 +363,111 @@ describe('review worktree cleanup steps', () => {
       );
     }
   });
+
+  it.skipIf(!sweepToolsAvailable)(
+    'removes both known qwen state names without touching .qwenignore',
+    () => {
+      for (const { id, run } of executableCleanCopies) {
+        const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
+        const workspace = join(root, 'workspace');
+        mkdirSync(join(workspace, '.qwen', 'agents'), { recursive: true });
+        mkdirSync(join(workspace, '.qwen.root-orig', 'agents'), {
+          recursive: true,
+        });
+        writeFileSync(join(workspace, '.qwenignore'), 'keep\n');
+
+        try {
+          const result = spawnSync('bash', ['-c', run], {
+            cwd: workspace,
+            env: { ...process.env, GITHUB_WORKSPACE: workspace },
+            encoding: 'utf8',
+          });
+
+          expect(result.status, `${id}: ${result.stderr}`).toBe(0);
+          expect(existsSync(join(workspace, '.qwen')), id).toBe(false);
+          expect(existsSync(join(workspace, '.qwen.root-orig')), id).toBe(
+            false,
+          );
+          expect(existsSync(join(workspace, '.qwenignore')), id).toBe(true);
+          // Deleted, not moved: a workspace that removes cleanly must not
+          // leave a quarantine directory behind on either copy.
+          expect(existsSync(join(root, '_qwen-quarantine')), id).toBe(false);
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it('sweeps both known qwen state names before the review checkout', () => {
+    expect(reviewPreCheckoutSweepStep).toBeDefined();
+    expect(reviewPreCheckoutSweepIndex).toBeGreaterThan(
+      reviewCleanSteps.findIndex(
+        (s) => s.name === 'Restore workspace ownership',
+      ),
+    );
+    expect(reviewPreCheckoutSweepIndex).toBeLessThan(reviewCheckoutIndex);
+    expectQuarantineFallback(reviewPreCheckoutSweepStep);
+  });
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'pre-checkout sweeps unlink a dangling-symlink .qwen via the -L existence arm',
+    () => {
+      for (const { id, run } of executableCleanCopies) {
+        const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
+        const workspace = join(root, 'workspace');
+        mkdirSync(workspace, { recursive: true });
+        const link = join(workspace, '.qwen');
+        try {
+          symlinkSync(join(root, 'missing-target'), link);
+          // -e follows the link, so a dangling leftover reports as absent:
+          // only the -L arm of the existence guard keeps the sweep from
+          // skipping it and leaving checkout to trip on the very residue the
+          // sweep exists to clear.
+          const result = spawnSync('bash', ['-c', run], {
+            cwd: workspace,
+            env: { ...process.env, GITHUB_WORKSPACE: workspace },
+            encoding: 'utf8',
+          });
+
+          expect(result.status, `${id}: ${result.stderr}`).toBe(0);
+          expect(linkExists(link), id).toBe(false);
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'pre-checkout sweeps unlink a live-symlink .qwen without touching its target',
+    () => {
+      for (const { id, run } of executableCleanCopies) {
+        const root = mkdtempSync(join(tmpdir(), 'qwen-ci-cleanup-'));
+        const workspace = join(root, 'workspace');
+        const target = join(root, 'outside-target');
+        const marker = join(target, 'marker.txt');
+        mkdirSync(workspace, { recursive: true });
+        mkdirSync(target, { recursive: true });
+        writeFileSync(marker, 'keep\n');
+        const link = join(workspace, '.qwen');
+        try {
+          symlinkSync(target, link);
+          const result = spawnSync('bash', ['-c', run], {
+            cwd: workspace,
+            env: { ...process.env, GITHUB_WORKSPACE: workspace },
+            encoding: 'utf8',
+          });
+
+          expect(result.status, `${id}: ${result.stderr}`).toBe(0);
+          expect(linkExists(link), id).toBe(false);
+          expect(readFileSync(marker, 'utf8'), id).toBe('keep\n');
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it('keeps the review-job cleanup sweep pinned to paths.ts', () => {
     // `always()` and the end-of-job position are what make the step fire on
@@ -454,6 +655,96 @@ describe('review worktree cleanup steps', () => {
       });
       expect(out.status).toBe(0);
       expect(out.stdout.trim()).toBe(review);
+    },
+  );
+
+  it.skipIf(!sweepToolsAvailable || process.platform === 'win32')(
+    'the pre-checkout sweep quarantines the workspace when the residue itself cannot move',
+    () => {
+      for (const { id, run } of executableCleanCopies) {
+        const root = mkdtempSync(join(tmpdir(), 'ci-quarantine-'));
+        const workspace = join(root, 'repo', 'repo');
+        const residue = join(workspace, '.qwen.root-orig');
+        const marker = join(workspace, 'warm-cache-marker');
+        try {
+          mkdirSync(residue, { recursive: true });
+          writeFileSync(join(residue, 'review-context.json'), '{}\n');
+          writeFileSync(marker, 'warm\n');
+          const out = spawnSync(
+            'bash',
+            [
+              '-c',
+              // Model the incident runner: delete/permission repair fail and
+              // the foreign-owned residue cannot cross to another parent,
+              // while the runner-owned workspace itself still can.
+              `set -euo pipefail\nrm() { return 1; }\nchmod() { return 1; }\nsudo() { return 1; }\nmv() {\n  if [ "$2" = "$GITHUB_WORKSPACE/.qwen.root-orig" ]; then return 1; fi\n  command mv "$@"\n}\n${run}\nprintf '::cwd::%s\\n' "$PWD"`,
+              'clean-stale-qwen',
+            ],
+            {
+              cwd: workspace,
+              env: { ...process.env, GITHUB_WORKSPACE: workspace },
+              encoding: 'utf8',
+            },
+          );
+          expect(out.status, `${id}: ${out.stderr}`).toBe(0);
+          const quarantine = join(root, 'repo', '_qwen-quarantine');
+          expect(existsSync(quarantine), id).toBe(true);
+          expect(readdirSync(quarantine), id).toHaveLength(1);
+          const movedWorkspace = join(quarantine, readdirSync(quarantine)[0]);
+          expect(
+            readFileSync(join(movedWorkspace, 'warm-cache-marker'), 'utf8'),
+            id,
+          ).toBe('warm\n');
+          expect(
+            readFileSync(
+              join(movedWorkspace, '.qwen.root-orig/review-context.json'),
+              'utf8',
+            ),
+            id,
+          ).toBe('{}\n');
+          expect(readdirSync(workspace), id).toEqual([]);
+          expect(out.stdout, id).toContain(`::cwd::${workspace}`);
+          const warnings = out.stdout
+            .split('\n')
+            .filter((line) => line.startsWith('::warning::'));
+          expect(warnings, id).toHaveLength(1);
+          expect(warnings[0], id).toContain('moved the whole workspace');
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'the pre-checkout sweep still deletes residue it can remove',
+    () => {
+      for (const { id, run } of executableCleanCopies) {
+        // The fallback must stay a fallback: a workspace that deletes
+        // cleanly keeps its caches instead of accumulating quarantined
+        // copies.
+        const root = mkdtempSync(join(tmpdir(), 'ci-quarantine-'));
+        const workspace = join(root, 'repo', 'repo');
+        try {
+          mkdirSync(
+            join(workspace, `${toPosix(REVIEW_TMP_DIR)}/review-pr-77`),
+            { recursive: true },
+          );
+          const out = spawnSync('bash', ['-c', run], {
+            cwd: workspace,
+            env: { ...process.env, GITHUB_WORKSPACE: workspace },
+            encoding: 'utf8',
+          });
+          expect(out.status, `${id}: ${out.stderr}`).toBe(0);
+          expect(existsSync(join(workspace, '.qwen')), id).toBe(false);
+          expect(existsSync(join(root, 'repo', '_qwen-quarantine')), id).toBe(
+            false,
+          );
+          expect(out.stdout, id).not.toContain('::warning::');
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      }
     },
   );
 

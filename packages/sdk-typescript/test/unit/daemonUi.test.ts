@@ -659,6 +659,111 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('keeps usage emitted after a tool update in the current turn', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'user.text.delta', text: 'question' },
+        { type: 'assistant.text.delta', text: 'checking' },
+        {
+          type: 'tool.update',
+          toolCallId: 'tool-1',
+          status: 'running',
+        },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 100, outputTokens: 20, cachedTokens: 80 },
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks[1]).toMatchObject({
+      kind: 'assistant',
+      text: 'checking',
+      usage: { inputTokens: 100, outputTokens: 20, cachedTokens: 80 },
+    });
+
+    const nextTurn = reduceDaemonTranscriptEvents(
+      state,
+      [
+        { type: 'user.text.delta', text: 'next question' },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 5, outputTokens: 1 },
+        },
+      ],
+      { now: 3 },
+    );
+    expect(nextTurn.blocks[1]).toMatchObject({
+      usage: { inputTokens: 100, outputTokens: 20, cachedTokens: 80 },
+    });
+  });
+
+  it('does not fall back sub-agent usage into the parent assistant block', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1, retainSubagentBlocks: true }),
+      [
+        { type: 'user.text.delta', text: 'question' },
+        { type: 'assistant.text.delta', text: 'delegating' },
+        {
+          type: 'tool.update',
+          toolCallId: 'sub-1',
+          status: 'running',
+        },
+        {
+          type: 'assistant.text.delta',
+          text: 'child answer',
+          parentToolCallId: 'sub-1',
+        },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 5000, outputTokens: 800 },
+          parentToolCallId: 'sub-1',
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks[1]).not.toHaveProperty('usage');
+    expect(state.blocks[3]).not.toHaveProperty('usage');
+  });
+
+  it('deduplicates legacy sub-agent usage repeated after its execution summary', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'user.text.delta', text: 'question' },
+        { type: 'assistant.text.delta', text: 'delegating' },
+        {
+          type: 'tool.update',
+          toolCallId: 'sub-1',
+          status: 'completed',
+          sourceRecordIds: ['subagent-result'],
+          rawOutput: {
+            executionSummary: {
+              inputTokens: 5000,
+              outputTokens: 800,
+              cachedTokens: 4500,
+            },
+          },
+        },
+        {
+          type: 'assistant.usage',
+          usage: {
+            inputTokens: 5000,
+            outputTokens: 800,
+            cachedTokens: 4500,
+          },
+          sourceRecordIds: ['subagent-result'],
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks[1]).not.toHaveProperty('usage');
+  });
+
   it('keeps sub-agent usage in the parent turn total by default', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
@@ -8575,6 +8680,41 @@ describe('parallel subAgent text interleaving fix', () => {
       inputTokens: 4500,
       outputTokens: 1000,
       totalTokens: 5500,
+    });
+  });
+
+  it('retains executionMode in compacted task_execution output', () => {
+    let state = createDaemonTranscriptState({
+      now: 1,
+      retainSubagentBlocks: false,
+    });
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-task-mode',
+        toolName: 'agent',
+        status: 'running',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'running',
+          executionMode: 'background',
+          subagentName: 'probe',
+        },
+      },
+    ] as DaemonUiEvent[]);
+
+    // Web Shell classification treats executionMode as authoritative from
+    // the first running update; summary-mode compaction must not drop it.
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolCallId: 'agent-task-mode',
+      rawOutput: {
+        type: 'task_execution',
+        status: 'running',
+        executionMode: 'background',
+        subagentName: 'probe',
+      },
     });
   });
 

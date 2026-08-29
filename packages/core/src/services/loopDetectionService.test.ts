@@ -7,14 +7,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type {
-  ServerGeminiContentEvent,
-  ServerGeminiStreamEvent,
-  ServerGeminiThoughtEvent,
-  ServerGeminiToolCallRequestEvent,
+  ServerLlmContentEvent,
+  ServerLlmModelFallbackEvent,
+  ServerLlmRetryEvent,
+  ServerLlmStreamEvent,
+  ServerLlmThoughtEvent,
+  ServerLlmToolCallRequestEvent,
 } from '../core/turn.js';
-import { GeminiEventType } from '../core/turn.js';
+import { LlmEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
+import type { DebugLogger } from '../utils/debugLogger.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
@@ -38,6 +41,7 @@ const ALTERNATING_PATTERN_CYCLES = 3;
 describe('LoopDetectionService', () => {
   let service: LoopDetectionService;
   let mockConfig: Config;
+  let mockDebugLogger: DebugLogger;
 
   // getMaxToolCallsPerTurn mimics the real Config getter, which always
   // returns an effective cap (default applied, <= 0 resolved to Infinity).
@@ -51,9 +55,17 @@ describe('LoopDetectionService', () => {
       getTelemetryEnabled: () => true,
       getMaxToolCallsPerTurn: () => cap,
       isMaxToolCallsPerTurnExplicit: () => explicit,
+      getDebugLogger: () => mockDebugLogger,
     }) as unknown as Config;
 
   beforeEach(() => {
+    mockDebugLogger = {
+      isEnabled: () => true,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
     mockConfig = makeConfig();
     service = new LoopDetectionService(mockConfig);
     vi.clearAllMocks();
@@ -62,8 +74,8 @@ describe('LoopDetectionService', () => {
   const createToolCallRequestEvent = (
     name: string,
     args: Record<string, unknown>,
-  ): ServerGeminiToolCallRequestEvent => ({
-    type: GeminiEventType.ToolCallRequest,
+  ): ServerLlmToolCallRequestEvent => ({
+    type: LlmEventType.ToolCallRequest,
     value: {
       name,
       args,
@@ -73,16 +85,16 @@ describe('LoopDetectionService', () => {
     },
   });
 
-  const createContentEvent = (content: string): ServerGeminiContentEvent => ({
-    type: GeminiEventType.Content,
+  const createContentEvent = (content: string): ServerLlmContentEvent => ({
+    type: LlmEventType.Content,
     value: content,
   });
 
   const createThoughtEvent = (
     subject: string,
     description = '',
-  ): ServerGeminiThoughtEvent => ({
-    type: GeminiEventType.Thought,
+  ): ServerLlmThoughtEvent => ({
+    type: LlmEventType.Thought,
     value: { subject, description },
   });
 
@@ -145,8 +157,8 @@ describe('LoopDetectionService', () => {
         param: 'value',
       });
       const otherEvent = {
-        type: GeminiEventType.UserCancelled,
-      } as unknown as ServerGeminiStreamEvent;
+        type: LlmEventType.UserCancelled,
+      } as unknown as ServerLlmStreamEvent;
 
       // Send events just below the threshold
       for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
@@ -169,8 +181,8 @@ describe('LoopDetectionService', () => {
 
       expect(
         service.checkAlwaysOnSafeties({
-          type: GeminiEventType.Retry,
-        } as ServerGeminiStreamEvent),
+          type: LlmEventType.Retry,
+        } as ServerLlmStreamEvent),
       ).toBe(false);
 
       for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
@@ -364,8 +376,8 @@ describe('LoopDetectionService', () => {
 
       expect(
         service.checkAlwaysOnSafeties({
-          type: GeminiEventType.Retry,
-        } as ServerGeminiStreamEvent),
+          type: LlmEventType.Retry,
+        } as ServerLlmStreamEvent),
       ).toBe(false);
 
       for (const command of variants) {
@@ -601,12 +613,17 @@ describe('LoopDetectionService', () => {
     it('should not detect a loop if repetitions are very far apart', () => {
       service.reset('');
       const repeatedContent = createRepetitiveContent(1, CONTENT_CHUNK_SIZE);
-      const fillerContent = generateRandomString(500);
 
       let isLoop = false;
       for (let i = 0; i < CONTENT_LOOP_THRESHOLD; i++) {
         isLoop = service.addAndCheck(createContentEvent(repeatedContent));
-        isLoop = service.addAndCheck(createContentEvent(fillerContent));
+        // A fresh filler each cycle: repetitions separated by VARYING
+        // content are not a loop. (Reusing one identical filler made the
+        // whole stream byte-periodic, which the long-period rule for
+        // issue #1775 correctly treats as a chant.)
+        isLoop = service.addAndCheck(
+          createContentEvent(generateRandomString(500)),
+        );
       }
       expect(isLoop).toBe(false);
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
@@ -1094,7 +1111,7 @@ describe('LoopDetectionService', () => {
     it('should return false for unhandled event types', () => {
       const otherEvent = {
         type: 'unhandled_event',
-      } as unknown as ServerGeminiStreamEvent;
+      } as unknown as ServerLlmStreamEvent;
       expect(service.addAndCheck(otherEvent)).toBe(false);
       expect(service.addAndCheck(otherEvent)).toBe(false);
     });
@@ -1196,6 +1213,646 @@ describe('LoopDetectionService', () => {
         mockConfig,
         expect.objectContaining({ loop_type: 'repetitive_thoughts' }),
       );
+    });
+  });
+
+  describe('Long verbatim repetition loops (issue #1775)', () => {
+    // The report shows one multi-sentence analysis block (~300 chars)
+    // chanted verbatim many times without the turn halting. The repeated
+    // unit is far longer than the clustered chunk rule's 75-char window,
+    // and on OpenAI-compatible providers such chants often run in the
+    // reasoning stream, which only reaches the service as Thought events.
+    // These tests stream the repeated block with deliberately misaligned
+    // deltas (a size that does not divide the unit) so no two adjacent
+    // deltas are identical, matching real token-stream chunking.
+    const CHANTED_UNIT =
+      'The issue might be that the API call is not being made properly ' +
+      'when the switch is toggled. Let me make sure the fetchPublicRecipes ' +
+      'function is called correctly with the right parameters. The issue ' +
+      'might be that the API call is not being made with the correct ' +
+      'parameters when the switch is toggled.';
+    const DELTA = 17;
+
+    const streamAsMisalignedThoughtDeltas = (
+      text: string,
+      deltaSize = DELTA,
+    ): boolean => {
+      let detected = false;
+      for (let i = 0; i < text.length && !detected; i += deltaSize) {
+        detected = service.addAndCheck(
+          createThoughtEvent('', text.slice(i, i + deltaSize)),
+        );
+      }
+      return detected;
+    };
+
+    const streamAsMisalignedContentDeltas = (
+      text: string,
+      deltaSize = DELTA,
+    ): boolean => {
+      let detected = false;
+      for (let i = 0; i < text.length && !detected; i += deltaSize) {
+        detected = service.addAndCheck(
+          createContentEvent(text.slice(i, i + deltaSize)),
+        );
+      }
+      return detected;
+    };
+
+    it('unit shape sanity: the chanted block exceeds the cluster window', () => {
+      expect(CHANTED_UNIT.length % DELTA).not.toBe(0);
+      expect(CHANTED_UNIT.length).toBeGreaterThan(CONTENT_CHUNK_SIZE * 1.5);
+    });
+
+    it('detects the long chant in the reasoning/thought channel', () => {
+      service.reset('');
+      const detected = streamAsMisalignedThoughtDeltas(CHANTED_UNIT.repeat(40));
+      expect(detected).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('detects the long chant on the visible content channel', () => {
+      service.reset('');
+      const detected = streamAsMisalignedContentDeltas(CHANTED_UNIT.repeat(40));
+      expect(detected).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('detects an even longer (~550-char) repeated unit', () => {
+      service.reset('');
+      // Same symptom class as the follow-up comment on the issue, whose
+      // repeated block is roughly half a kilobyte. Well inside the history
+      // window the long-period rule retains (see MAX_HISTORY_LENGTH).
+      const longUnit =
+        "Now I'm implementing the fix by modifying the version comparison " +
+        "logic to use the API's supportedIosVersions field when available, " +
+        'falling back to the static table only if the API does not have ' +
+        'that information. I realize the core issue: if the device is ' +
+        'already on the newest major release and the table claims a lower ' +
+        'maximum, the comparison correctly evaluates to false. The real ' +
+        'problem is that the static table values are stale and do not ' +
+        'match what the API reports, so I need to prioritize the API data.';
+      expect(longUnit.length).toBeGreaterThan(500);
+      expect(longUnit.length % DELTA).not.toBe(0);
+
+      const detected = streamAsMisalignedThoughtDeltas(longUnit.repeat(20));
+      expect(detected).toBe(true);
+    });
+
+    // Pseudo-random, internally aperiodic units (lowercase only, so no
+    // markdown-structure delta ever resets tracking) for probing unit
+    // lengths the original chant block does not cover.
+    const makeAperiodicUnit = (length: number, seed: number): string => {
+      let state = Math.imul(seed + 1, 2654435761) >>> 0 || 1;
+      let out = '';
+      while (out.length < length) {
+        state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+        out += String.fromCharCode(97 + ((state >>> 16) % 26));
+      }
+      return out.slice(0, length);
+    };
+
+    // Between the clustered rule's ~75-char bound and the span a fixed
+    // five-occurrence window can verify (~238 chars), the verified region
+    // must grow with the occurrence run — a run pinned to the last five
+    // occurrences left these units permanently undetectable.
+    it.each([100, 150, 200])(
+      'detects a %d-char repeated unit in the mid-length band',
+      (unitLength) => {
+        service.reset('');
+        const unit = makeAperiodicUnit(unitLength, unitLength);
+        expect(unit.length % DELTA).not.toBe(0);
+
+        const detected = streamAsMisalignedContentDeltas(unit.repeat(40));
+        expect(detected).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.CHANTING_IDENTICAL_SENTENCES,
+        );
+      },
+    );
+
+    // Units of ~1 KB or more can never fit five occurrences into the
+    // retained history window; once the window saturates, the truncated-run
+    // path must admit them by verifying the whole retained region.
+    it.each([1000, 1500])(
+      'detects a %d-char repeated unit that cannot fit five occurrences in the window',
+      (unitLength) => {
+        service.reset('');
+        const unit = makeAperiodicUnit(unitLength, unitLength);
+        expect(unit.length % DELTA).not.toBe(0);
+
+        const detected = streamAsMisalignedContentDeltas(unit.repeat(30));
+        expect(detected).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.CHANTING_IDENTICAL_SENTENCES,
+        );
+      },
+    );
+
+    it('does not accept a short occurrence run in fresh history', () => {
+      service.reset('');
+      // Three occurrences of a 1000-char unit span only 2050 chars — the
+      // history has not saturated, so the run cannot have been truncated
+      // and the short-run path must not admit it.
+      const unit = makeAperiodicUnit(1000, 7);
+      const detected = streamAsMisalignedContentDeltas(unit.repeat(3));
+      expect(detected).toBe(false);
+    });
+
+    it('detects a chant that starts after a long varied turn fills the window', () => {
+      service.reset('');
+      // The realistic #1775 shape: a long varied turn beyond the retained
+      // window, then the chant starts. Detection must survive
+      // truncateAndUpdate's index adjustment, and it must happen exactly
+      // when the fifth in-window occurrence of the unit lands. The two
+      // bounds pin the window size: a shrunken window (e.g. 2500) cannot
+      // hold five occurrences of a 700-char unit and instead fires early
+      // via the truncated-run path as soon as the filler has flushed out
+      // of the pure-chant window — before the bound below.
+      let filler = '';
+      for (let i = 0; i < 100; i++) {
+        filler += `Step ${i}: consider aspect ${i * 7 + 3} of the problem. `;
+      }
+      expect(filler.length).toBeGreaterThan(2500);
+      const unit = makeAperiodicUnit(700, 42);
+      expect(unit.length % DELTA).not.toBe(0);
+
+      expect(streamAsMisalignedContentDeltas(filler)).toBe(false);
+
+      const chant = unit.repeat(20);
+      let detectedAt = -1;
+      for (let i = 0; i < chant.length; i += DELTA) {
+        if (
+          service.addAndCheck(createContentEvent(chant.slice(i, i + DELTA)))
+        ) {
+          detectedAt = i + DELTA;
+          break;
+        }
+      }
+      expect(detectedAt).not.toBe(-1);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+      // Not before the fifth occurrence can exist (four full units of
+      // span), and immediately once its final chunk lands (plus a
+      // one-delta margin for the streaming boundary).
+      expect(detectedAt).toBeGreaterThan(4 * unit.length);
+      expect(detectedAt).toBeLessThanOrEqual(
+        4 * unit.length + CONTENT_CHUNK_SIZE + DELTA,
+      );
+    });
+
+    it('does not halt on a long, varied reasoning stream', () => {
+      service.reset('');
+      let text = '';
+      for (let i = 0; i < 200; i++) {
+        text += `Step ${i}: consider aspect ${i * 7 + 3} of the problem. `;
+      }
+      expect(streamAsMisalignedThoughtDeltas(text)).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not halt when identical chunks recur at an even stride but intervening text varies', () => {
+      service.reset('');
+      // A fixed 50-char anchor reappearing every 200 chars with VARYING
+      // same-length filler between occurrences: equal-stride occurrences
+      // without a genuinely periodic region must not fire.
+      const anchor =
+        'The quick brown fox jumps over the lazy dog again! '.slice(
+          0,
+          CONTENT_CHUNK_SIZE,
+        );
+      // Pseudo-random, internally aperiodic filler that still has the SAME
+      // length for every seed, so anchor occurrences stay exactly 200 chars
+      // apart. (A modular padding like `(seed + k*7) % 26` is periodic with
+      // period 26 and the existing clustered rule rightly halts on it.)
+      const filler = (seed: number, length: number): string => {
+        let state = ((seed + 1) * 2654435761) >>> 0;
+        let out = `Varying filler number ${seed} `;
+        while (out.length < length) {
+          state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+          out += String.fromCharCode(97 + ((state >>> 16) % 26));
+        }
+        return out;
+      };
+
+      let text = '';
+      for (let i = 0; i < 6; i++) {
+        text += anchor + filler(i, 150);
+      }
+      expect(streamAsMisalignedContentDeltas(text, CONTENT_CHUNK_SIZE)).toBe(
+        false,
+      );
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not halt on fewer than five occurrences of a long unit', () => {
+      service.reset('');
+      // Four full repetitions only yield four equally-spaced occurrences
+      // of any one chunk — below the long-period threshold.
+      const detected = streamAsMisalignedContentDeltas(CHANTED_UNIT.repeat(4));
+      expect(detected).toBe(false);
+    });
+
+    it('detects a visible-content chant after a fenced thought delta', () => {
+      service.reset('');
+      // Reasoning deltas must not drive the content channel's code-block
+      // state: an unbalanced fence in a thought used to flip the shared
+      // inCodeBlock parity, which nothing clears mid-turn, silently
+      // disabling visible-content detection for the rest of the turn.
+      service.addAndCheck(
+        createThoughtEvent('', 'Let me look at this snippet:\n```'),
+      );
+      const detected = streamAsMisalignedContentDeltas(CHANTED_UNIT.repeat(40));
+      expect(detected).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('detects a reasoning chant whose unit contains markdown list markers', () => {
+      service.reset('');
+      // Chain-of-thought often repeats structured units (checklists,
+      // steps). Reasoning text is never rendered markdown, so
+      // list-item-shaped thought deltas must not reset the shared history —
+      // they used to wipe the accumulated evidence every cycle, making the
+      // chant undetectable at any length.
+      const unit =
+        'Review the migration plan:\n' +
+        '- check rollback safety\n' +
+        '- verify indexes\n' +
+        '- confirm the cache invalidation path\n';
+      expect(unit.length).toBeGreaterThan(CONTENT_CHUNK_SIZE * 1.5);
+      expect(unit.length % DELTA).not.toBe(0);
+
+      const detected = streamAsMisalignedThoughtDeltas(unit.repeat(60));
+      expect(detected).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+  });
+
+  describe('Retry and ModelFallback stream-state resets', () => {
+    // The #7832 transport-replay gate admits thought-only cuts, so a
+    // replay retry re-streams the failed attempt's reasoning through the
+    // chunk detectors. With deterministic decoding the re-stream is
+    // verbatim; the accumulated identical copies must not read as a chant,
+    // or a healthy turn halts mid-attempt on a false positive.
+    const ATTEMPT_DELTA = 17;
+
+    // Deterministic pseudo-random non-repetitive text (LCG over a word
+    // list): no repeated 50-gram inside one attempt, so a single streamed
+    // attempt — or a replayed one after a reset — can never fire on its
+    // own.
+    const variedText = (len: number, seed: number): string => {
+      let out = '';
+      let x = seed + 1;
+      const words = [
+        'alpha',
+        'bravo',
+        'charlie',
+        'delta',
+        'echo',
+        'foxtrot',
+        'golf',
+        'hotel',
+        'india',
+        'juliet',
+        'kilo',
+        'lima',
+        'mike',
+        'november',
+        'oscar',
+        'papa',
+        'quebec',
+        'romeo',
+        'sierra',
+        'tango',
+      ];
+      while (out.length < len) {
+        x = (x * 1103515245 + 12345) % 2147483648;
+        out += words[x % words.length] + String(x % 97) + ' ';
+      }
+      return out.slice(0, len);
+    };
+
+    const createRetryEvent = (
+      isContinuation?: boolean,
+    ): ServerLlmRetryEvent => ({
+      type: LlmEventType.Retry,
+      ...(isContinuation !== undefined && { isContinuation }),
+    });
+
+    const createModelFallbackEvent = (): ServerLlmModelFallbackEvent => ({
+      type: LlmEventType.ModelFallback,
+      fromModel: 'primary-model',
+      toModel: 'fallback-model',
+      fallbackIndex: 1,
+    });
+
+    const streamAsThoughts = (text: string): boolean => {
+      let detected = false;
+      for (let i = 0; i < text.length && !detected; i += ATTEMPT_DELTA) {
+        detected = service.addAndCheck(
+          createThoughtEvent('', text.slice(i, i + ATTEMPT_DELTA)),
+        );
+      }
+      return detected;
+    };
+
+    const streamAsContent = (text: string): boolean => {
+      let detected = false;
+      for (let i = 0; i < text.length && !detected; i += ATTEMPT_DELTA) {
+        detected = service.addAndCheck(
+          createContentEvent(text.slice(i, i + ATTEMPT_DELTA)),
+        );
+      }
+      return detected;
+    };
+
+    it('does not halt a healthy turn when replay retries re-stream identical reasoning', () => {
+      service.reset('');
+      // The witness shape: a ~1.4 KB reasoning phase cut twice and
+      // re-streamed byte-identically. Three copies saturate the window;
+      // without the reset the third (healthy) attempt fires
+      // CHANTING_IDENTICAL_SENTENCES mid-stream.
+      const attempt = variedText(1400, 42);
+      expect(streamAsThoughts(attempt)).toBe(false);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsThoughts(attempt)).toBe(false);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsThoughts(attempt)).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('does not halt a healthy turn when replay retries re-stream identical content', () => {
+      service.reset('');
+      const attempt = variedText(1400, 43);
+      expect(streamAsContent(attempt)).toBe(false);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsContent(attempt)).toBe(false);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsContent(attempt)).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('does not halt when rate-limit retries replay five shorter identical copies', () => {
+      service.reset('');
+      // The rate-limit branch replays without a yielded-content guard; five
+      // ~300-char copies reach the five-occurrence path unsaturated.
+      const attempt = variedText(300, 7);
+      for (let copy = 0; copy < 5; copy++) {
+        if (copy > 0) {
+          service.addAndCheck(createRetryEvent());
+        }
+        expect(streamAsThoughts(attempt)).toBe(false);
+      }
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('keeps accumulated evidence across a continuation retry', () => {
+      service.reset('');
+      // Continuation recovery (#7832) keeps the delivered text and appends
+      // genuinely new output — nothing is re-streamed, so the accumulated
+      // evidence must survive. An uninterrupted chant of this unit fires at
+      // ~1258 chars; streaming 1192, continuing, then 100 more must fire at
+      // the same point a continuous stream would.
+      const unit = variedText(298, 21);
+      const chant = unit.repeat(6);
+      expect(streamAsThoughts(chant.slice(0, 1192))).toBe(false);
+      service.addAndCheck(createRetryEvent(true));
+      expect(streamAsThoughts(chant.slice(1192, 1292))).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('drops accumulated evidence on a replay retry at the same point', () => {
+      service.reset('');
+      // Contrast with the continuation test: a replay re-streams from the
+      // start, so the same partial chant must NOT be one short continuation
+      // away from firing after it.
+      const unit = variedText(298, 21);
+      const chant = unit.repeat(6);
+      expect(streamAsThoughts(chant.slice(0, 1192))).toBe(false);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsThoughts(chant.slice(1192, 1292))).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('drops the failed model stream state on ModelFallback', () => {
+      service.reset('');
+      // The fallback model restarts from scratch; with the failed model's
+      // state retained, its two copies plus two more from the fallback model
+      // would fire the long-period escape valve mid-way through the fourth
+      // copy.
+      const attempt = variedText(1400, 99);
+      expect(streamAsThoughts(attempt)).toBe(false);
+      expect(streamAsThoughts(attempt)).toBe(false);
+      service.addAndCheck(createModelFallbackEvent());
+      expect(streamAsThoughts(attempt)).toBe(false);
+      expect(streamAsThoughts(attempt)).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('still halts a genuine chant after a replay restart', () => {
+      service.reset('');
+      // The reset must not blind the detector: a real chant re-accumulates
+      // after the restart and still fires.
+      const unit = variedText(298, 21);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsThoughts(unit.repeat(40))).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+  });
+
+  describe('Truncation hysteresis', () => {
+    // The physical trim walks the whole contentStats map, which at
+    // saturation holds one entry per window position — Θ(window)
+    // synchronous CPU per streamed event. The trim now runs with hysteresis
+    // (a TRUNCATION_SLACK margin), and these tests pin that the change is
+    // behavior-neutral: the fire offsets below were recorded on the
+    // pre-hysteresis implementation and must not drift.
+    const MAX_HISTORY_LENGTH = 4000;
+    const TRUNCATION_SLACK = 1000;
+    const DELTA = 17;
+
+    const variedText = (len: number, seed: number): string => {
+      let out = '';
+      let x = seed + 1;
+      const words = [
+        'alpha',
+        'bravo',
+        'charlie',
+        'delta',
+        'echo',
+        'foxtrot',
+        'golf',
+        'hotel',
+        'india',
+        'juliet',
+        'kilo',
+        'lima',
+        'mike',
+        'november',
+        'oscar',
+        'papa',
+        'quebec',
+        'romeo',
+        'sierra',
+        'tango',
+      ];
+      while (out.length < len) {
+        x = (x * 1103515245 + 12345) % 2147483648;
+        out += words[x % words.length] + String(x % 97) + ' ';
+      }
+      return out.slice(0, len);
+    };
+
+    const U300 =
+      'The issue might be that the API call is not being made properly ' +
+      'when the switch is toggled. Let me make sure the fetchPublicRecipes ' +
+      'function is called correctly with the right parameters. The issue ' +
+      'might be that the API call is not being made with the correct ' +
+      'parameters when the switch is toggled.';
+    const U1200 = variedText(1200, 7);
+    const U1350 = variedText(1350, 9);
+
+    const historyLength = (): number =>
+      (service as unknown as { streamContentHistory: string })
+        .streamContentHistory.length;
+
+    // Streams as Content deltas of DELTA chars and returns the number of
+    // chars streamed when detection fired (-1 when it never fired).
+    const fireOffset = (text: string): number => {
+      service.reset('');
+      let streamed = 0;
+      for (let i = 0; i < text.length; i += DELTA) {
+        const piece = text.slice(i, i + DELTA);
+        streamed += piece.length;
+        if (
+          service.addAndCheck({
+            type: LlmEventType.Content,
+            value: piece,
+          })
+        ) {
+          return streamed;
+        }
+      }
+      return -1;
+    };
+
+    it('unit shape sanity', () => {
+      expect(U300.length).toBe(298);
+      expect(U1200.length).toBe(1200);
+      expect(U1350.length).toBe(1350);
+    });
+
+    it('defers physical truncation until the slack margin, then trims to the window', () => {
+      service.reset('');
+      const text = variedText(5100, 1);
+      // Delta-aligned stream positions: one inside the slack band (past
+      // the window, before the margin) and the first event crossing it.
+      const insideSlackBand =
+        DELTA * Math.floor((MAX_HISTORY_LENGTH + TRUNCATION_SLACK / 2) / DELTA);
+      const trimPoint =
+        DELTA * Math.ceil((MAX_HISTORY_LENGTH + TRUNCATION_SLACK + 1) / DELTA);
+      let streamed = 0;
+      for (let i = 0; i < text.length; i += DELTA) {
+        const piece = text.slice(i, i + DELTA);
+        streamed += piece.length;
+        expect(
+          service.addAndCheck({ type: LlmEventType.Content, value: piece }),
+        ).toBe(false);
+        if (streamed === insideSlackBand) {
+          // Past the window, inside the slack band: no physical trim yet —
+          // the per-event trim would have pinned the length to the window.
+          expect(historyLength()).toBe(insideSlackBand);
+        }
+        if (streamed === trimPoint) {
+          // Crossing the margin trims back to exactly the window.
+          expect(historyLength()).toBe(MAX_HISTORY_LENGTH);
+        }
+      }
+      expect(historyLength()).toBeLessThanOrEqual(
+        MAX_HISTORY_LENGTH + TRUNCATION_SLACK,
+      );
+    });
+
+    it('keeps detection fire offsets identical to the pre-hysteresis baseline', () => {
+      // Recorded on the per-event-trim implementation. Shapes chosen to
+      // fire before saturation (S1), right at it (S2, S4, S7), and after
+      // several physical trims with a non-periodic prefix still inside the
+      // slack band (S3, S5, S6) — the cases where a lazy trim could change
+      // what the escape valve and occurrence runs see.
+      expect(fireOffset(U300.repeat(60))).toBe(1258);
+      expect(fireOffset(U1200.repeat(12))).toBe(4012);
+      expect(fireOffset(variedText(3000, 3) + U1200.repeat(12))).toBe(7004);
+      expect(fireOffset(U1350.repeat(12))).toBe(4012);
+      expect(fireOffset(variedText(4500, 5) + U300.repeat(60))).toBe(5763);
+      expect(fireOffset(variedText(200, 11) + U1200.repeat(12))).toBe(4216);
+      expect(fireOffset(U1200.repeat(4))).toBe(4012);
+    });
+
+    it('never fires on a long varied stream across many trims', () => {
+      expect(fireOffset(variedText(30000, 13))).toBe(-1);
+    });
+  });
+
+  describe('Chanting halt debug-log excerpt', () => {
+    // A reasoning-channel halt exits headless runs with empty stdout and a
+    // label-only stderr; the excerpt debug log is the artifact that tells a
+    // true repetition from a misfire. Kept out of the LoopDetected event
+    // payload on purpose (the event contract stays loop_type + prompt_id).
+    const DELTA = 17;
+
+    const unit =
+      'The issue might be that the API call is not being made properly ' +
+      'when the switch is toggled. Let me make sure the fetchPublicRecipes ' +
+      'function is called correctly with the right parameters. The issue ' +
+      'might be that the API call is not being made with the correct ' +
+      'parameters when the switch is toggled.';
+
+    const streamAsThoughts = (text: string): boolean => {
+      let detected = false;
+      for (let i = 0; i < text.length && !detected; i += DELTA) {
+        detected = service.addAndCheck(
+          createThoughtEvent('', text.slice(i, i + DELTA)),
+        );
+      }
+      return detected;
+    };
+
+    it('logs a short excerpt of one period of the repeated region', () => {
+      service.reset('');
+      expect(streamAsThoughts(unit.repeat(40))).toBe(true);
+
+      const debug = vi.mocked(mockDebugLogger.debug);
+      expect(debug).toHaveBeenCalledTimes(1);
+      const message = String(debug.mock.calls[0]?.[0]);
+      expect(message).toContain(LoopType.CHANTING_IDENTICAL_SENTENCES);
+      const match = /excerpt \((\d+) chars\): (.*)$/.exec(message);
+      expect(match).not.toBeNull();
+      const excerpt = JSON.parse(String(match?.[2])) as string;
+      expect(excerpt.length).toBeGreaterThan(0);
+      expect(excerpt.length).toBeLessThanOrEqual(80);
+      expect(Number(match?.[1])).toBe(excerpt.length);
+      // The excerpt is one period of the chant: it must reappear verbatim
+      // in the repeated unit (allowing a wrap across the unit boundary).
+      expect((unit + unit).includes(excerpt)).toBe(true);
+    });
+
+    it('does not log an excerpt when nothing fires', () => {
+      service.reset('');
+      expect(streamAsThoughts(unit.slice(0, 500))).toBe(false);
+      expect(vi.mocked(mockDebugLogger.debug)).not.toHaveBeenCalled();
     });
   });
 
@@ -1483,12 +2140,12 @@ describe('LoopDetectionService', () => {
     });
 
     const retryEvent = {
-      type: GeminiEventType.Retry,
-    } as ServerGeminiStreamEvent;
+      type: LlmEventType.Retry,
+    } as ServerLlmStreamEvent;
     const finishedEvent = {
-      type: GeminiEventType.Finished,
+      type: LlmEventType.Finished,
       value: { reason: 'STOP' },
-    } as unknown as ServerGeminiStreamEvent;
+    } as unknown as ServerLlmStreamEvent;
 
     it('does not fire at or below the soft cap', () => {
       service.reset('');
@@ -1923,7 +2580,7 @@ describe('LoopDetectionService', () => {
     it('does not count a retried replay toward the global-duplicate threshold', () => {
       service.reset('');
       const stuck = createToolCallRequestEvent('stuck_tool', { param: 'same' });
-      const retry = { type: GeminiEventType.Retry } as ServerGeminiStreamEvent;
+      const retry = { type: LlmEventType.Retry } as ServerLlmStreamEvent;
       // Failed attempt streams (threshold - 3) identical calls, then retries.
       for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD - 3; i++) {
         expect(service.addAndCheckHeuristicLoops(stuck)).toBe(false);

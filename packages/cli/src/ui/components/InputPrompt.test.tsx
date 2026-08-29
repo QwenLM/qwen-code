@@ -32,6 +32,8 @@ import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { UseReverseSearchCompletionReturn } from '../hooks/useReverseSearchCompletion.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import { useVoiceInput } from '../hooks/use-voice-input.js';
+import type { MicrophonePermission } from '../hooks/use-voice-input.js';
+import { createVoiceRecorder } from '../voice/voice-recorder.js';
 import * as clipboardUtils from '../utils/clipboardUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import stripAnsi from 'strip-ansi';
@@ -66,6 +68,9 @@ vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../hooks/use-voice-input.js');
+vi.mock('../voice/voice-recorder.js', () => ({
+  createVoiceRecorder: vi.fn(),
+}));
 vi.mock('../utils/clipboardUtils.js');
 vi.mock('../../services/prompt-stash.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
@@ -216,7 +221,7 @@ describe('InputPrompt', () => {
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: false,
       messageQueue: [],
-      pendingGeminiHistoryItems: [],
+      pendingLlmHistoryItems: [],
     } as unknown as ReturnType<typeof useUIState>);
     mockedUseUIActions.mockReturnValue({
       handleRetryLastPrompt: vi.fn(),
@@ -322,6 +327,7 @@ describe('InputPrompt', () => {
       handleAutocomplete: vi.fn(),
       activeCategory: 'all' as const,
       availableCategories: ['all'] as Array<'all'>,
+      selectCategory: vi.fn(),
       switchCategory: vi.fn(),
     };
     mockedUseCommandCompletion.mockReturnValue(mockCommandCompletion);
@@ -635,7 +641,7 @@ describe('InputPrompt', () => {
     mockedUseUIState.mockReturnValue({
       isFeedbackDialogOpen: true,
       messageQueue: [],
-      pendingGeminiHistoryItems: [],
+      pendingLlmHistoryItems: [],
     } as unknown as ReturnType<typeof useUIState>);
 
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
@@ -646,6 +652,217 @@ describe('InputPrompt', () => {
     });
     expect(props.buffer.handleInput).not.toHaveBeenCalled();
     unmount();
+  });
+
+  describe('voice microphone permission', () => {
+    const setupRecorder = (status: MicrophonePermission) => {
+      const microphoneStatus = vi.fn().mockResolvedValue(status);
+      const { addItem } = setupRecorderWith(microphoneStatus);
+      return { addItem, microphoneStatus };
+    };
+
+    const setupRecorderWith = (
+      microphoneStatus: (() => Promise<MicrophonePermission>) | undefined,
+    ) => {
+      const addItem = vi.fn();
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+        historyManager: { addItem },
+      } as unknown as ReturnType<typeof useUIState>);
+      vi.mocked(createVoiceRecorder).mockReturnValue({
+        start: vi.fn(),
+        stop: vi.fn(),
+        warmup: vi.fn(),
+        microphoneStatus,
+      } as unknown as ReturnType<typeof createVoiceRecorder>);
+      return { addItem };
+    };
+
+    const lastVoiceArgs = () =>
+      mockedUseVoiceInput.mock.calls.at(-1)![0] as Parameters<
+        typeof useVoiceInput
+      >[0];
+
+    it('does not probe or warn about microphone permission during warmup', async () => {
+      const { addItem, microphoneStatus } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        await lastVoiceArgs().warmup?.();
+      });
+
+      expect(microphoneStatus).not.toHaveBeenCalled();
+      expect(addItem).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('warns about a pending permission when a recording starts', async () => {
+      const { addItem, microphoneStatus } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'info',
+            text: expect.stringContaining('needs microphone access'),
+          }),
+          expect.any(Number),
+        );
+      });
+      expect(microphoneStatus).toHaveBeenCalledTimes(1);
+      unmount();
+    });
+
+    it('reports a denied permission as an error when a recording starts', async () => {
+      const { addItem } = setupRecorder('denied');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'error',
+            text: expect.stringContaining('Microphone access is denied.'),
+          }),
+          expect.any(Number),
+        );
+      });
+      unmount();
+    });
+
+    it('warns only once for repeated recordings with the same status', async () => {
+      const { addItem } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(1);
+      });
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).toHaveBeenCalledTimes(1);
+      unmount();
+    });
+
+    it('warns again when the permission status changes between recordings', async () => {
+      const { addItem, microphoneStatus } = setupRecorder('prompt');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(1);
+      });
+
+      // The user dismisses or denies the OS dialog: the next probe reports
+      // 'denied', which must re-warn — as an error — despite the earlier
+      // 'prompt' notice.
+      microphoneStatus.mockResolvedValue('denied');
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(2);
+      });
+      expect(addItem).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: expect.stringContaining('Microphone access is denied'),
+        }),
+        expect.any(Number),
+      );
+      unmount();
+    });
+
+    it('warns only once across remounts when a session ref is supplied', async () => {
+      const { addItem } = setupRecorder('prompt');
+      const voiceMicWarnedStatusRef = { current: null };
+
+      const first = renderWithProviders(
+        <InputPrompt
+          {...props}
+          voiceMicWarnedStatusRef={voiceMicWarnedStatusRef}
+        />,
+      );
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await waitFor(() => {
+        expect(addItem).toHaveBeenCalledTimes(1);
+      });
+      first.unmount();
+
+      const second = renderWithProviders(
+        <InputPrompt
+          {...props}
+          voiceMicWarnedStatusRef={voiceMicWarnedStatusRef}
+        />,
+      );
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).toHaveBeenCalledTimes(1);
+      second.unmount();
+    });
+
+    it('stays quiet when the recorder cannot report permission', async () => {
+      const { addItem } = setupRecorderWith(undefined);
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('stays quiet when the permission probe rejects', async () => {
+      const { addItem } = setupRecorderWith(() =>
+        Promise.reject(new Error('TCC query failed')),
+      );
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('stays quiet when permission is already granted', async () => {
+      const { addItem } = setupRecorder('granted');
+      const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+      await act(async () => {
+        lastVoiceArgs().checkMicrophonePermission?.();
+      });
+      await act(async () => {});
+
+      expect(addItem).not.toHaveBeenCalled();
+      unmount();
+    });
   });
 
   it('lets non-voice keys fall through while voice recording is active', async () => {
@@ -1540,7 +1757,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         historyManager: { addItem },
       } as unknown as ReturnType<typeof useUIState>);
       vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
@@ -5269,7 +5486,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [
+        pendingLlmHistoryItems: [
           {
             type: 'tool_group',
             tools: [
@@ -5772,7 +5989,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued message'],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       const mockPopAllQueued = vi.fn(() => null);
@@ -5803,7 +6020,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
 
@@ -5830,7 +6047,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       const mockPopAllQueued = vi.fn(() => null);
@@ -5865,7 +6082,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued follow-up'],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       const mockPopAllQueued = vi.fn(() => null);
@@ -5899,7 +6116,7 @@ describe('InputPrompt', () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
-        pendingGeminiHistoryItems: [],
+        pendingLlmHistoryItems: [],
         streamingState: StreamingState.Responding,
       } as unknown as ReturnType<typeof useUIState>);
       props.buffer.setText('draft to clear');

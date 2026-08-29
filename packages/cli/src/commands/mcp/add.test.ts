@@ -189,6 +189,35 @@ describe('mcp add command', () => {
     });
   });
 
+  it('should keep dash-prefixed server args in the add tail', async () => {
+    // `unknown-options-as-args` means the server command's own flags belong in
+    // `args` rather than being claimed by this command's options.
+    await parser.parseAsync('add my-server node server.js --inspect');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': {
+        command: 'node',
+        args: ['server.js', '--inspect'],
+      },
+    });
+  });
+
+  it('should keep a -v token in the add tail when this parser is reached', async () => {
+    // Parser-level only: a real `qwen mcp add my-server node server.js -v`
+    // never gets here. resolveBootstrapRoute intercepts every exact version
+    // token before `--` and prints the version instead (base parity — see the
+    // version intercept in cli.ts and its cli.test.ts coverage). Pinned so the
+    // tail's behavior is already known if that intercept is ever narrowed.
+    await parser.parseAsync('add my-server node server.js -v');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': {
+        command: 'node',
+        args: ['server.js', '-v'],
+      },
+    });
+  });
+
   describe('when handling scope and directory', () => {
     const serverName = 'test-server';
     const command = 'echo';

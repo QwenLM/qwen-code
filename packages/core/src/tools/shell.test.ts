@@ -137,7 +137,7 @@ describe('ShellTool', () => {
       getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
       isTruncateToolOutputThresholdExplicit: vi.fn().mockReturnValue(false),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
-      getGeminiClient: vi.fn(),
+      getLlmClient: vi.fn(),
       getFileSystemService: vi.fn().mockReturnValue(mockFileSystemService),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getFileReadCache: vi.fn().mockReturnValue(mockFileReadCache),
@@ -3085,7 +3085,7 @@ describe('ShellTool', () => {
       );
 
       it('passes the 30k Shell default to output truncation', async () => {
-        const truncationModule = await import('../utils/truncation.js');
+        const truncationModule = await import('./truncation.js');
         const spy = vi
           .spyOn(truncationModule, 'truncateToolOutput')
           .mockImplementation(async (_config, _toolName, content) => ({
@@ -3147,7 +3147,7 @@ describe('ShellTool', () => {
         const outputFile = '/tmp/qwen-temp/shell-output.txt';
         const truncatedContent =
           'Tool output was too large and has been truncated.';
-        const truncationModule = await import('../utils/truncation.js');
+        const truncationModule = await import('./truncation.js');
         const spy = vi
           .spyOn(truncationModule, 'truncateToolOutput')
           .mockResolvedValue({ content: truncatedContent, outputFile });
@@ -3186,7 +3186,7 @@ describe('ShellTool', () => {
         (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
           1000,
         );
-        const truncationModule = await import('../utils/truncation.js');
+        const truncationModule = await import('./truncation.js');
         const spy = vi
           .spyOn(truncationModule, 'truncateToolOutput')
           .mockImplementation(async (_config, _toolName, content) => ({
@@ -3222,7 +3222,7 @@ describe('ShellTool', () => {
       const originalOutput = 'A'.repeat(30_001);
       const shortenedContent =
         'Tool output was too large and has been truncated.\n[mocked truncated body]\n[Note: Could not save full output to file]';
-      const truncationModule = await import('../utils/truncation.js');
+      const truncationModule = await import('./truncation.js');
       const spy = vi
         .spyOn(truncationModule, 'truncateToolOutput')
         .mockResolvedValue({ content: shortenedContent });
@@ -3501,7 +3501,7 @@ describe('ShellTool', () => {
         // succeed (the catch fallback returns no `outputFile`, so the
         // shell.ts replacement branch never fires). Mocking here pins
         // ordering, which is all this test cares about.
-        const truncationModule = await import('../utils/truncation.js');
+        const truncationModule = await import('./truncation.js');
         const spy = vi
           .spyOn(truncationModule, 'truncateToolOutput')
           .mockResolvedValue({
@@ -3555,7 +3555,7 @@ describe('ShellTool', () => {
         // output (find /, ls -R) then got line-truncated while the 30k char
         // budget still had room — contradicting the per-tool char-only contract.
         // Pin that shell declares lines: Infinity.
-        const truncationModule = await import('../utils/truncation.js');
+        const truncationModule = await import('./truncation.js');
         const spy = vi
           .spyOn(truncationModule, 'truncateToolOutput')
           .mockImplementation(async (_config, _toolName, content) => ({
@@ -7802,7 +7802,7 @@ describe('ShellTool', () => {
     });
 
     it('keeps truncated timeout detail out of the operational error summary', async () => {
-      const truncationModule = await import('../utils/truncation.js');
+      const truncationModule = await import('./truncation.js');
       const truncationSpy = vi
         .spyOn(truncationModule, 'truncateToolOutput')
         .mockResolvedValue({
