@@ -57,7 +57,15 @@ import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { LlmClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { getSessionProjectDir } from '../utils/sessionIdContext.js';
+import {
+  getSessionProjectDir,
+  sessionIdContext,
+} from '../utils/sessionIdContext.js';
+import {
+  createDebugLogger,
+  resetDebugLoggingState,
+  setDebugLogSession,
+} from '../utils/debugLogger.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -240,6 +248,7 @@ vi.mock('../hooks/index.js', () => {
         getHookSystem: () => {
           fireInstructionsLoadedEvent?: (...args: unknown[]) => unknown;
         },
+        signal?: AbortSignal,
       ) =>
       async (notification: {
         filePath: string;
@@ -256,6 +265,7 @@ vi.mock('../hooks/index.js', () => {
             triggerFilePath: notification.triggerFilePath,
             parentFilePath: notification.parentFilePath,
           },
+          signal,
         );
       },
   };
@@ -604,6 +614,72 @@ describe('Server Config (config.ts)', () => {
       expect(config.getGeminiClient()).toBe(config.getLlmClient());
       await config.shutdown();
     });
+  });
+
+  it('does not replace the global debug fallback during daemon Config creation or rotation', async () => {
+    const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
+    const previousSessionIdEnv = process.env['QWEN_CODE_SESSION_ID'];
+    const bootstrapSessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const daemonSessionId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const rotatedSessionId = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const mkdirSpy = vi
+      .spyOn(fs.promises, 'mkdir')
+      .mockResolvedValue(undefined);
+    const appendFileSpy = vi
+      .spyOn(fs.promises, 'appendFile')
+      .mockResolvedValue(undefined);
+    const unlinkSpy = vi
+      .spyOn(fs.promises, 'unlink')
+      .mockResolvedValue(undefined);
+    const symlinkSpy = vi
+      .spyOn(fs.promises, 'symlink')
+      .mockResolvedValue(undefined);
+
+    try {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+      resetDebugLoggingState();
+      new Config({ ...baseParams, sessionId: bootstrapSessionId });
+      const daemonConfig = sessionIdContext.run(
+        daemonSessionId,
+        () => new Config({ ...baseParams, sessionId: daemonSessionId }),
+      );
+      sessionIdContext.run(daemonSessionId, () => {
+        daemonConfig.startNewSession(rotatedSessionId);
+      });
+
+      process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+      createDebugLogger('DAEMON_FALLBACK').info('process-scoped message');
+
+      await vi.waitFor(() =>
+        expect(appendFileSpy).toHaveBeenCalledWith(
+          Storage.getDebugLogPath(bootstrapSessionId),
+          expect.stringContaining('[DAEMON_FALLBACK] process-scoped message'),
+          'utf8',
+        ),
+      );
+      expect(appendFileSpy).not.toHaveBeenCalledWith(
+        Storage.getDebugLogPath(rotatedSessionId),
+        expect.stringContaining('[DAEMON_FALLBACK] process-scoped message'),
+        'utf8',
+      );
+    } finally {
+      mkdirSpy.mockRestore();
+      appendFileSpy.mockRestore();
+      unlinkSpy.mockRestore();
+      symlinkSpy.mockRestore();
+      resetDebugLoggingState();
+      setDebugLogSession(null);
+      if (previousDebugLogFileEnv === undefined) {
+        delete process.env['QWEN_DEBUG_LOG_FILE'];
+      } else {
+        process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
+      }
+      if (previousSessionIdEnv === undefined) {
+        delete process.env['QWEN_CODE_SESSION_ID'];
+      } else {
+        process.env['QWEN_CODE_SESSION_ID'] = previousSessionIdEnv;
+      }
+    }
   });
 
   describe('shell execution config', () => {
@@ -4134,6 +4210,34 @@ describe('Server Config (config.ts)', () => {
       ).toEqual([initializationError, closeError]);
     });
 
+    it('preserves initialization cancellation when recording close fails', async () => {
+      const config = new Config(baseParams);
+      const controller = new AbortController();
+      const abortReason = new Error('session initialization deadline exceeded');
+      const closeError = new Error('recording close failed');
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: (options?: {
+            signal?: AbortSignal;
+          }) => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockImplementation(async (options) => {
+        controller.abort(abortReason);
+        options?.signal?.throwIfAborted();
+      });
+      const close = vi
+        .spyOn(config, 'closeSessionWriter')
+        .mockRejectedValue(closeError);
+
+      const result = await config
+        .initialize({ signal: controller.signal })
+        .catch((error: unknown) => error);
+
+      expect(result).toBe(abortReason);
+      expect(close).toHaveBeenCalledOnce();
+    });
+
     it('runs due auto-skill curation before loading skills when enabled', async () => {
       const config = new Config({ ...baseParams, enableAutoSkill: true });
 
@@ -4495,6 +4599,73 @@ describe('Server Config (config.ts)', () => {
       await expect(config.initialize()).rejects.toThrow(
         'Config is shutting down',
       );
+    });
+
+    it('rejects a pre-aborted initialization without consuming the Config', async () => {
+      const config = new Config(baseParams);
+      const controller = new AbortController();
+      const abortReason = new Error('initialization cancelled before start');
+      controller.abort(abortReason);
+
+      await expect(
+        config.initialize({ signal: controller.signal }),
+      ).rejects.toBe(abortReason);
+
+      const initializeInternal = vi
+        .spyOn(
+          config as unknown as {
+            initializeInternal: () => Promise<void>;
+          },
+          'initializeInternal',
+        )
+        .mockResolvedValue(undefined);
+      await expect(config.initialize()).resolves.toBeUndefined();
+      expect(initializeInternal).toHaveBeenCalledOnce();
+      await config.shutdown({ shutdownTelemetry: false });
+    });
+
+    it('forwards cancellation into Gemini client initialization', async () => {
+      const config = new Config(baseParams);
+      const controller = new AbortController();
+      const abortReason = new Error('initialization deadline exceeded');
+      const refreshHierarchicalMemory = vi.spyOn(
+        config,
+        'refreshHierarchicalMemory',
+      );
+      let markGeminiEntered!: () => void;
+      const geminiEntered = new Promise<void>((resolve) => {
+        markGeminiEntered = resolve;
+      });
+      const geminiInitialize = vi
+        .spyOn(config.getGeminiClient(), 'initialize')
+        .mockImplementation(async (_source, signal) => {
+          expect(signal).toBe(controller.signal);
+          markGeminiEntered();
+          await new Promise<void>((_resolve, reject) => {
+            if (signal?.aborted) {
+              reject(signal.reason);
+              return;
+            }
+            signal?.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        });
+
+      const initialization = config.initialize({ signal: controller.signal });
+      await geminiEntered;
+      controller.abort(abortReason);
+
+      await expect(initialization).rejects.toBe(abortReason);
+      expect(geminiInitialize).toHaveBeenCalledWith(
+        undefined,
+        controller.signal,
+      );
+      expect(refreshHierarchicalMemory).toHaveBeenCalledWith(
+        'session_start',
+        controller.signal,
+      );
+      await config.shutdown({ shutdownTelemetry: false });
     });
 
     it('preserves graceful writer finalization after successful initialization', async () => {
@@ -7546,6 +7717,71 @@ describe('Server Config (config.ts)', () => {
     patchSessionRecordSpy.mockRestore();
   });
 
+  it('re-asserts the registry record with the current session id, retrying a skipped patch', async () => {
+    // A peer message pinned to an id this process does not hold means the
+    // record may be the stale side (a /clear patch skipped under fd
+    // pressure); re-asserting is the fix, and it retries like the advertise.
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(Promise.resolve(true));
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+
+    await config.reassertSessionRegistryRecord();
+
+    expect(patchSessionRecordSpy).toHaveBeenCalledTimes(2);
+    expect(patchSessionRecordSpy).toHaveBeenLastCalledWith({
+      sessionId: config.getSessionId(),
+      cwd: config.getTargetDir(),
+    });
+    patchSessionRecordSpy.mockRestore();
+  });
+
+  it('bounds the re-assert retry and is a no-op with no registration', async () => {
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(Promise.resolve(true));
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(false);
+    await expect(
+      config.reassertSessionRegistryRecord(),
+    ).resolves.toBeUndefined();
+    expect(patchSessionRecordSpy).toHaveBeenCalledTimes(3);
+
+    patchSessionRecordSpy.mockClear();
+    const unregistered = new Config(baseParams);
+    await unregistered.reassertSessionRegistryRecord();
+    expect(patchSessionRecordSpy).not.toHaveBeenCalled();
+    patchSessionRecordSpy.mockRestore();
+  });
+
+  it('retries the /clear session-id patch when the registry skips it', async () => {
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(Promise.resolve(true));
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+
+    const before = config.getSessionId();
+    config.startNewSession();
+    await config.unregisterSessionRegistry();
+
+    expect(config.getSessionId()).not.toBe(before);
+    const sessionPatches = patchSessionRecordSpy.mock.calls.filter(
+      ([patch]) => 'sessionId' in (patch as object),
+    );
+    expect(sessionPatches).toHaveLength(2);
+    expect(sessionPatches[1]?.[0]).toMatchObject({
+      sessionId: config.getSessionId(),
+    });
+    patchSessionRecordSpy.mockRestore();
+  });
+
   it('gives up on the peer inbox advertise after a bounded retry', async () => {
     const config = new Config(baseParams);
     config.trackSessionRegistration(Promise.resolve(true));
@@ -7961,6 +8197,7 @@ describe('Server Config (config.ts)', () => {
   it('refreshHierarchicalMemory should fire InstructionsLoaded hooks from memory notifications', async () => {
     const config = new Config(baseParams);
     const fireInstructionsLoadedEvent = vi.fn().mockResolvedValue(undefined);
+    const signal = new AbortController().signal;
     config['hookSystem'] = {
       fireInstructionsLoadedEvent,
     } as unknown as HookSystem;
@@ -7974,7 +8211,7 @@ describe('Server Config (config.ts)', () => {
       projectRoot: '/tmp',
     });
 
-    await config.refreshHierarchicalMemory();
+    await config.refreshHierarchicalMemory('session_start', signal);
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     const options = lastCall?.at(-1) as
@@ -7998,6 +8235,7 @@ describe('Server Config (config.ts)', () => {
         triggerFilePath: '/tmp/project/AGENTS.md',
         parentFilePath: '/tmp/project/AGENTS.md',
       },
+      signal,
     );
   });
 

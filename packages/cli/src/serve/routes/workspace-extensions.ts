@@ -341,9 +341,7 @@ const validateExtensionSourceMetadata = (
   const parsed = parsePotentialSourceUrl(installMetadata.source);
   return (
     !!parsed &&
-    (installMetadata.networkPolicy === 'public'
-      ? parsed.protocol === 'https:'
-      : parsed.protocol === 'https:' || parsed.protocol === 'ssh:') &&
+    parsed.protocol === 'https:' &&
     !isBlockedAuthProviderHost(parsed.hostname)
   );
 };
@@ -1108,9 +1106,7 @@ export function registerWorkspaceExtensionRoutes(
           isPortableAbsolutePath(sourceValue) || sourceValue.startsWith('.');
         if (localSource) {
           try {
-            const metadata = await parseInstallSource(sourceValue, {
-              networkPolicy: 'public',
-            });
+            const metadata = await parseInstallSource(sourceValue);
             assertDaemonExtensionInstallSource(
               metadata,
               sourceValue,
@@ -1165,9 +1161,7 @@ export function registerWorkspaceExtensionRoutes(
           res,
           async (extensionManager, _signal, context, operationId) => {
             const prepared = await context!.prepare(async (signal) => {
-              const installMetadata = await parseInstallSource(sourceValue, {
-                networkPolicy: 'public',
-              });
+              const installMetadata = await parseInstallSource(sourceValue);
 
               assertDaemonExtensionInstallSource(
                 installMetadata,
@@ -1970,9 +1964,7 @@ export function registerWorkspaceExtensionRoutes(
       gitCredential?.persistence === 'one_time' ? {} : { source: sourceValue },
       async (extensionManager, _signal, context) => {
         const prepared = await context!.prepare(async (signal) => {
-          const metadata = await parseInstallSource(sourceValue, {
-            networkPolicy: 'public',
-          });
+          const metadata = await parseInstallSource(sourceValue);
           assertDaemonExtensionInstallSource(
             metadata,
             sourceValue,

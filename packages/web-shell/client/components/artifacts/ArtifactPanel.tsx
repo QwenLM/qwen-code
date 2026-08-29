@@ -9,7 +9,7 @@ import type { WebShellRightPanelItem } from '../../customization';
 import {
   type DaemonSessionActions,
   type DaemonScheduledTask,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { EditorState } from '@codemirror/state';
 import { basicSetup, EditorView } from 'codemirror';
 import { DownloadIcon } from 'lucide-react';

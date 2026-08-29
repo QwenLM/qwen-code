@@ -247,6 +247,7 @@ import {
   type WorkspaceManagementHandle,
   type WorkspaceRuntimeRemovalController,
 } from './routes/workspace-management.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   registerWorkspaceGitRoutes,
@@ -591,6 +592,12 @@ export interface ServeAppDeps {
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
   sessionArtifactsPersistenceAvailable?: boolean;
+  /**
+   * Test/embed override for the native directory picker probe. Production
+   * evaluates `isNativeDirectoryPickerAvailable()`; tests pin this so the
+   * capability wiring is assertable on headless hosts too.
+   */
+  nativeDirectoryPickerAvailable?: boolean;
   /**
    * Reverse tool channel (issue #5626, Phase 2). Shared sender registry that
    * bridges the daemon WS (per-connection `ClientMcpRegistrar`) and the ACP
@@ -1018,6 +1025,9 @@ export function createServeApp(
       acpHttpEnabled: acpHttpEnabledAtBoot,
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
+      nativeDirectoryPickerAvailable:
+        deps.nativeDirectoryPickerAvailable ??
+        isNativeDirectoryPickerAvailable(),
       workspaceTrustHotReloadAvailable:
         deps.workspaceTrustHotReloadAvailable === true,
       isPrimaryWorkspaceTrusted: () => isPrimaryWorkspaceTrusted(),
