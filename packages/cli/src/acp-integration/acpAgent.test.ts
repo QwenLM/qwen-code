@@ -17,6 +17,14 @@ import {
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+
+// Spy-mode interception so the unverifiable-inode degradation test can
+// pose the managed-directory stats; everything else delegates to the real
+// implementation.
+vi.mock('node:fs/promises', { spy: true });
+
+const realFsPromises =
+  await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
@@ -5380,6 +5388,65 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }
     });
   });
+
+  it.each([0, Number.MAX_SAFE_INTEGER + 1])(
+    'degrades instead of rejecting an unverifiable standalone inode %s',
+    async (inode) => {
+      // Mirrors the conversation-directory-identity degradation test: on a
+      // volume whose file IDs are not verifiable (FAT-style ino 0, or a
+      // Windows ID past the safe-integer range) the expectation builds
+      // with inode 0 and sessionCd must resolve — a predicate that
+      // unconditionally claims verifiability fails the parity check and
+      // reintroduces the 'working directory identity is compromised'
+      // rejection this PR removes.
+      await withEmptyTrustedFolders(async (directory) => {
+        const settings = makeSessionSettings({ mcpServers: {} });
+        const { agent, agentPromise, sessionId, innerConfig } =
+          await bootRelocatableSession(settings, 'expected-capability');
+        const root = path.join(directory, 'Conversations');
+        const target = path.join(root, getConversationDirectoryName(sessionId));
+        await fs.mkdir(target, { recursive: true, mode: 0o700 });
+        const realLstat = realFsPromises.lstat;
+        vi.mocked(fs.lstat).mockImplementation((async (p: string) => {
+          const stats = await realLstat(p);
+          return {
+            ...stats,
+            ino: inode,
+            isDirectory: () => stats.isDirectory(),
+            isSymbolicLink: () => stats.isSymbolicLink(),
+          } as fs.Stats;
+        }) as unknown as typeof fs.lstat);
+        try {
+          const expectation = await managedConversationExpectation(
+            root,
+            sessionId,
+          );
+          expect(expectation.root.inode).toBe(0);
+          expect(expectation.child.inode).toBe(0);
+          innerConfig.getSessionSourceType.mockReturnValue('standalone');
+          innerConfig.getTargetDir.mockReturnValue(
+            expectation.child.canonicalPath,
+          );
+
+          await expect(
+            agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+              sessionId,
+              path: expectation.child.canonicalPath,
+              allowedRoots: [expectation.root.canonicalPath],
+              managedRelocation: 'live-conversation',
+              conversationDirectoryExpectation: expectation,
+            }),
+          ).resolves.toMatchObject({
+            newCwd: expectation.child.canonicalPath,
+          });
+        } finally {
+          vi.mocked(fs.lstat).mockRestore();
+          mockConnectionState.resolve();
+          await agentPromise;
+        }
+      });
+    },
+  );
 
   it('rejects standalone relocation while child-local background work is active', async () => {
     await withEmptyTrustedFolders(async (directory) => {
