@@ -150,6 +150,63 @@ describe.each([false, true])(
       await unmount(app);
     });
 
+    it('resolves lazy cursor coordinates once per output flush', async () => {
+      const capture = createTestStdout();
+      let updateFooter!: () => void;
+      let xReads = 0;
+      let yReads = 0;
+      let cursorRenderCount = 0;
+
+      function CursorOwner() {
+        cursorRenderCount++;
+        const position = useRef({
+          get x() {
+            xReads++;
+            return 2;
+          },
+          get y() {
+            yReads++;
+            return 0;
+          },
+        }).current;
+        useCursor().setCursorPosition(position);
+        return <Text>input</Text>;
+      }
+
+      function Footer() {
+        const [version, setVersion] = useState(0);
+        updateFooter = () => setVersion((value) => value + 1);
+        return <Text>footer-{version}</Text>;
+      }
+
+      const app = await mount(
+        <Box flexDirection="column">
+          <CursorOwner />
+          <Footer />
+        </Box>,
+        capture.stdout,
+        incrementalRendering,
+      );
+      expect(cursorRenderCount).toBe(1);
+      xReads = 0;
+      yReads = 0;
+
+      await updateAndFlush(app, updateFooter);
+
+      expect(xReads).toBe(1);
+      expect(yReads).toBe(1);
+      expect(cursorRenderCount).toBe(1);
+      xReads = 0;
+      yReads = 0;
+
+      await updateAndFlush(app, updateFooter);
+
+      expect(xReads).toBe(1);
+      expect(yReads).toBe(1);
+      expect(cursorRenderCount).toBe(1);
+      await unmount(app);
+    });
+
     it('reasserts the cursor after Static output is appended', async () => {
       const capture = createTestStdout();
       let appendStatic!: () => void;
