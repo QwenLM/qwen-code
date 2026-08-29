@@ -56,7 +56,10 @@ describe('toolsCommand', () => {
     const mockContext = createMockCommandContext({
       services: {
         config: {
-          getToolRegistry: () => ({ getAllTools: () => [] as Tool[] }),
+          getToolRegistry: () => ({
+            getAllTools: () => [] as Tool[],
+            isDeferredAndHidden: () => false,
+          }),
         },
       },
     });
@@ -78,7 +81,10 @@ describe('toolsCommand', () => {
     const mockContext = createMockCommandContext({
       services: {
         config: {
-          getToolRegistry: () => ({ getAllTools: () => mockTools }),
+          getToolRegistry: () => ({
+            getAllTools: () => mockTools,
+            isDeferredAndHidden: () => false,
+          }),
         },
       },
     });
@@ -94,11 +100,34 @@ describe('toolsCommand', () => {
     expect(message.tools[1].displayName).toBe('Code Editor');
   });
 
+  it('marks deferred tools so a tools.eager allowlist is visible (#10075)', async () => {
+    const mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getToolRegistry: () => ({
+            getAllTools: () => mockTools,
+            isDeferredAndHidden: (name: string) => name === 'code-editor',
+          }),
+        },
+      },
+    });
+
+    if (!toolsCommand.action) throw new Error('Action not defined');
+    await toolsCommand.action(mockContext, '');
+
+    const [message] = (mockContext.ui.addItem as vi.Mock).mock.calls[0];
+    expect(message.tools[0].deferred).toBe(false);
+    expect(message.tools[1].deferred).toBe(true);
+  });
+
   it('should list tools with descriptions when "desc" arg is passed', async () => {
     const mockContext = createMockCommandContext({
       services: {
         config: {
-          getToolRegistry: () => ({ getAllTools: () => mockTools }),
+          getToolRegistry: () => ({
+            getAllTools: () => mockTools,
+            isDeferredAndHidden: () => false,
+          }),
         },
       },
     });

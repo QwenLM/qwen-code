@@ -14,6 +14,7 @@ import {
 } from '../utils/yaml-parser.js';
 import type {
   SubagentConfig,
+  SubagentModelRoute,
   SubagentRuntimeConfig,
   SubagentLevel,
   ListSubagentsOptions,
@@ -1124,17 +1125,21 @@ export class SubagentManager {
     fallbackModelId?: string,
     runtimeAuthOverrides?: AuthOverrides,
   ): Promise<RuntimeContentGeneratorView | undefined> {
-    const resolvedModel = this.resolveModelOverride(config.model, base);
-    const modelId = resolvedModel?.modelId ?? fallbackModelId;
+    const route = this.resolveModelRoute(
+      config,
+      base,
+      runtimeAuthOverrides?.authType,
+    );
+    const modelId = route?.modelId ?? fallbackModelId;
     if (!modelId) {
       return undefined;
     }
 
     const authType =
-      resolvedModel?.authType ??
+      route?.authType ??
       runtimeAuthOverrides?.authType ??
       base.getContentGeneratorConfig().authType;
-    const authOverrides: AuthOverrides = resolvedModel
+    const authOverrides: AuthOverrides = route
       ? { authType: authType as string }
       : {
           ...runtimeAuthOverrides,
@@ -1164,6 +1169,66 @@ export class SubagentManager {
     // ContentGenerator entirely.
     const context = runtimeContext ? buildModelIdContext(runtimeContext) : {};
     return resolveModelId(model, { ...context, currentModel: undefined });
+  }
+
+  /**
+   * Shared route-resolution core for a subagent definition's `model:`
+   * selector: resolve it against `runtimeContext` (with `currentModel`
+   * stripped, so `inherit` yields nothing) and return the concrete model
+   * ID plus the auth type a dedicated ContentGenerator must be created
+   * with. Returns `undefined` when the selector does not resolve to a
+   * concrete model — `inherit`, an unset `fast` selector, or no selector.
+   *
+   * Every spawn path must resolve routes through this single helper so the
+   * same `.qwen/agents/<name>.md` definition always maps to the same
+   * provider route, whether it runs as an ordinary subagent
+   * ({@link buildRuntimeContentGeneratorView}) or as a named teammate
+   * ({@link resolveSubagentModelRoute}).
+   *
+   * @param fallbackAuthType - Middle step of the ordinary-spawn auth
+   * fallback chain: runtime auth overrides carried by the caller. Spawn
+   * paths without such overrides (teammates) pass nothing.
+   */
+  private resolveModelRoute(
+    config: SubagentConfig,
+    runtimeContext: Config,
+    fallbackAuthType?: string,
+  ): SubagentModelRoute | undefined {
+    const resolvedModel = this.resolveModelOverride(
+      config.model,
+      runtimeContext,
+    );
+    if (!resolvedModel?.modelId) {
+      return undefined;
+    }
+    const authType =
+      resolvedModel.authType ??
+      fallbackAuthType ??
+      runtimeContext.getContentGeneratorConfig().authType;
+    return {
+      modelId: resolvedModel.modelId,
+      authType: authType as string,
+    };
+  }
+
+  /**
+   * Resolve a subagent definition's model selector the way the ordinary
+   * subagent spawn path does ({@link buildRuntimeContentGeneratorView}),
+   * returning the concrete model ID plus the auth type a dedicated
+   * ContentGenerator must be created with. Returns `undefined` when the
+   * selector does not resolve to a concrete model — `inherit`, an unset
+   * `fast` selector, or no selector — in which case the caller should
+   * inherit the parent's ContentGenerator unchanged.
+   *
+   * Used by spawn paths outside `createAgentHeadless` that still need the
+   * definition's provider route — the Agent Team teammate path (#10071)
+   * passes it as `inProcess.authOverrides` so InProcessBackend builds the
+   * same per-agent ContentGenerator an ordinary subagent would get.
+   */
+  resolveSubagentModelRoute(
+    config: SubagentConfig,
+  ): SubagentModelRoute | undefined {
+    return this.resolveModelRoute(config, this.config);
   }
 
   /**
