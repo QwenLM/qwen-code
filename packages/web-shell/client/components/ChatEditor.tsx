@@ -3131,6 +3131,7 @@ export const ChatEditor = memo(
                         onOpenChange={setBranchPickerOpen}
                         workspaceCwd={selectedWorkspace?.cwd ?? ''}
                         gitCwd={gitCwd}
+                        status={gitStatus}
                         onOpenDiff={onOpenGitDiff}
                         onOpenCommit={onOpenCommit}
                       >
