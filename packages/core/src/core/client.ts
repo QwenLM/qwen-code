@@ -2842,10 +2842,6 @@ export class LlmClient {
       return takePendingGoalEvents();
     };
     let strippedRetryEntries: Content[] = [];
-    // Snapshot of LlmChat's user-content push counter, taken right after the
-    // strip. The Retry's re-submitted content is the first thing the send
-    // pushes, so if the counter advances at all that content landed.
-    let pushCountAfterStrip = 0;
     const currentPushCount = () =>
       this.getChat().getUserContentPushCount?.() ?? 0;
 
@@ -2921,14 +2917,15 @@ export class LlmClient {
       // grow" even after a successful push and duplicate the prompt. The counter
       // only advances on a push that survived (it's decremented if the push is
       // rolled back), so it is invariant under compression.
+      const pushCountBefore = attachedPushSnapshot();
       const pushCountNow = currentPushCount();
-      if (pushCountNow <= pushCountAfterStrip) {
+      if (pushCountBefore === undefined || pushCountNow <= pushCountBefore) {
         // Diagnostic: restoring means the send never pushed the re-submitted
         // content. If the counter were ever wrong, this line is the anchor for
         // a silent duplicate/loss.
         debugLogger.info('[Retry] restoring stripped orphan entries', {
           entries: strippedRetryEntries.length,
-          pushCountAfterStrip,
+          pushCountBefore,
           pushCountNow,
         });
         for (const entry of strippedRetryEntries) {
@@ -2942,7 +2939,6 @@ export class LlmClient {
 
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
-      pushCountAfterStrip = currentPushCount();
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult

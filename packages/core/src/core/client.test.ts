@@ -10878,7 +10878,7 @@ Other open files:
         ).toHaveBeenCalledOnce();
       });
 
-      it('restores stripped retry entries when the retry stream throws before its first event', async () => {
+      it('restores stripped retry entries when only a concurrent send pushes', async () => {
         const orphanedPrompt: Content = {
           role: 'user',
           parts: [{ text: 'retry me' }],
@@ -10887,8 +10887,14 @@ Other open files:
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
           getHistoryLength: vi.fn().mockReturnValue(0),
-          // Send throws before the push, so the counter never advances → restore.
-          getUserContentPushCount: vi.fn().mockReturnValue(0),
+          // This send throws before its push, but another send advances the
+          // global counter after the strip;
+          // without this Retry's published snapshot that must not suppress
+          // restoration.
+          getUserContentPushCount: vi
+            .fn()
+            .mockReturnValueOnce(0)
+            .mockReturnValue(1),
           setHistory: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi
             .fn()
