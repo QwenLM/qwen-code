@@ -2216,6 +2216,15 @@ export class DaemonClient {
     content: string,
     opts: DaemonWorkspaceMemoryRememberOptions = {},
   ): Promise<DaemonWorkspaceMemoryRememberTask> {
+    if (opts.scope) {
+      // An old daemon silently ignores `scope` and auto-routes the write;
+      // pre-flight so the degradation is a loud capability error instead.
+      await this.requireCapability(
+        opts.scope === 'project'
+          ? 'workspace_memory_remember_project_scope'
+          : 'workspace_memory_remember_user_scope',
+      );
+    }
     return await this.jsonRequest<DaemonWorkspaceMemoryRememberTask>(
       WORKSPACE_MEMORY_REMEMBER_PATH,
       `POST ${WORKSPACE_MEMORY_REMEMBER_PATH}`,
@@ -2224,6 +2233,7 @@ export class DaemonClient {
         body: {
           content,
           contextMode: opts.contextMode ?? 'workspace',
+          ...(opts.scope ? { scope: opts.scope } : {}),
         },
         clientId: opts.clientId,
       },
@@ -2245,12 +2255,20 @@ export class DaemonClient {
     query: string,
     opts: DaemonWorkspaceMemoryForgetOptions = {},
   ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    if (opts.scope) {
+      // Without the tag an old daemon runs an UNSCOPED forget that can
+      // delete entries from both stores — pre-flight instead of degrading.
+      await this.requireCapability('workspace_memory_forget_scope');
+    }
     return await this.jsonRequest<DaemonWorkspaceMemoryForgetTask>(
       WORKSPACE_MEMORY_FORGET_PATH,
       `POST ${WORKSPACE_MEMORY_FORGET_PATH}`,
       {
         method: 'POST',
-        body: { query },
+        body: {
+          query,
+          ...(opts.scope ? { scope: opts.scope } : {}),
+        },
         clientId: opts.clientId,
       },
     );
@@ -3916,11 +3934,12 @@ export class DaemonClient {
   }
 
   /**
-   * Toggle a user-invocable skill in workspace `skills.disabled` settings.
+   * Update workspace Skill settings by name without requiring a loaded Skill.
    * Active ACP sessions refresh their skill validation and command lists before
    * the response returns; `activation` reports deferred or partial refreshes.
    *
-   * Pre-flight `caps.features.includes('workspace_skill_toggle')` before calling.
+   * Pre-flight
+   * `caps.features.includes('workspace_skill_settings_toggle')` before calling.
    */
   async setWorkspaceSkillEnabled(
     skillName: string,
@@ -3950,10 +3969,11 @@ export class DaemonClient {
   }
 
   /**
-   * Toggle up to 100 user-invocable skills and return every target outcome.
+   * Update workspace Skill settings for up to 100 names in one write.
    *
    * Pre-flight
-   * `caps.features.includes('workspace_skill_batch_toggle')` before calling.
+   * `caps.features.includes('workspace_skill_settings_batch_toggle')` before
+   * calling.
    */
   async setWorkspaceSkillsEnabled(
     skillNames: readonly string[],

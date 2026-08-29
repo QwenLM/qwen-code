@@ -196,9 +196,9 @@ const codePath = (p) => `\`${esc(String(p).replace(/[`\r\n]/g, ''))}\``;
  * empty preview), and `renderIncomplete` is true when >=1 scenario failed to
  * render on the PR head — in which case a missing view may be a render failure,
  * not "no change", and the comment must say so instead of a clean bill of
- * health. `hostingFailed` is true when assets rendered but could not be pushed
- * to the PR assets branch; in that state the comment must refresh without
- * broken inline image URLs. Returns the markdown body.
+ * health. `hostingFailed` is true when assets rendered but could not be hosted;
+ * in that state the comment must refresh without broken inline image URLs.
+ * Returns the markdown body.
  */
 export function buildComment(files, ctx = {}) {
   const rawBase = ctx.rawBase ?? '';
@@ -235,7 +235,7 @@ export function buildComment(files, ctx = {}) {
       out.push('');
     }
     out.push(
-      `⚠️ _Preview images rendered, but the publish workflow failed to host them on the PR assets branch${runLink}._ This comment was still refreshed so stale images from an older push do not remain attached to this SHA.`,
+      `⚠️ _Preview images rendered, but the publish workflow failed to host them${runLink}._ This comment was still refreshed so stale images from an older push do not remain attached to this SHA.`,
     );
     out.push('');
     const rendered = [...shots, ...gifs].sort();
