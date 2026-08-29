@@ -7,7 +7,7 @@ import {
   normalizeImageMediaType,
   normalizeTextMediaType,
   readImageTransfer,
-  readTextTransfer,
+  readFileTransfer,
   sanitizeAttachmentName,
 } from './imageIngestion';
 
@@ -58,17 +58,17 @@ describe('image ingestion', () => {
     expect(getAsFile).not.toHaveBeenCalled();
   });
 
-  it('claims unsupported file drops but leaves unsupported file pastes native', () => {
+  it('accepts arbitrary files for both drops and pastes', () => {
     const file = new File(['zip'], 'archive.zip', { type: 'application/zip' });
     const dataTransfer = transfer({ files: [file], types: ['Files'] });
 
     expect(extractFileTransfer(dataTransfer, 'drop')).toMatchObject({
       claimed: true,
       imageCandidates: [],
-      textCandidates: [],
-      rejected: [{ name: 'archive.zip', reason: 'unsupported' }],
+      fileCandidates: [{ file, mediaType: 'application/zip' }],
+      rejected: [],
     });
-    expect(extractFileTransfer(dataTransfer, 'paste').claimed).toBe(false);
+    expect(extractFileTransfer(dataTransfer, 'paste').claimed).toBe(true);
   });
 
   it('claims a supported clipboard item that cannot expose its file', () => {
@@ -142,7 +142,25 @@ describe('image ingestion', () => {
     expect(maxActiveReaders).toBe(4);
   });
 
-  it('rejects files that exceed the remaining encoded-data budget', async () => {
+  it('applies the size limit to each image independently', async () => {
+    const files = [
+      new File(['one'], 'one.png', { type: 'image/png' }),
+      new File(['toolarge'], 'two.png', { type: 'image/png' }),
+    ];
+    const extracted = extractFileTransfer(
+      transfer({ files, types: ['Files'] }),
+      'drop',
+    );
+
+    const result = await readImageTransfer(extracted.imageCandidates, {
+      maxBytes: 4,
+    });
+
+    expect(result.accepted).toHaveLength(1);
+    expect(result.rejected).toEqual([{ name: 'two.png', reason: 'too-large' }]);
+  });
+
+  it('does not share one image size budget across a batch', async () => {
     const files = [
       new File(['one'], 'one.png', { type: 'image/png' }),
       new File(['two'], 'two.png', { type: 'image/png' }),
@@ -153,11 +171,11 @@ describe('image ingestion', () => {
     );
 
     const result = await readImageTransfer(extracted.imageCandidates, {
-      maxEncodedBytes: 4,
+      maxBytes: 4,
     });
 
-    expect(result.accepted).toHaveLength(1);
-    expect(result.rejected).toEqual([{ name: 'two.png', reason: 'too-large' }]);
+    expect(result.accepted).toHaveLength(2);
+    expect(result.rejected).toEqual([]);
   });
 });
 
@@ -207,7 +225,7 @@ describe('text file ingestion', () => {
     expect(normalizeTextMediaType('image/gif', 'anim.gif')).toBeUndefined();
   });
 
-  it('classifies mixed drops into image and text candidates', () => {
+  it('classifies images separately and accepts every other file', () => {
     const image = new File(['png'], 'photo.png', { type: 'image/png' });
     const log = new File(['log'], 'app.log', { type: '' });
     const zip = new File(['zip'], 'archive.zip', { type: 'application/zip' });
@@ -220,10 +238,11 @@ describe('text file ingestion', () => {
     expect(result.imageCandidates.map((c) => c.file.name)).toEqual([
       'photo.png',
     ]);
-    expect(result.textCandidates.map((c) => c.file.name)).toEqual(['app.log']);
-    expect(result.rejected).toEqual([
-      { name: 'archive.zip', reason: 'unsupported' },
+    expect(result.fileCandidates.map((c) => c.file.name)).toEqual([
+      'app.log',
+      'archive.zip',
     ]);
+    expect(result.rejected).toEqual([]);
   });
 
   it('claims a text file paste', () => {
@@ -234,30 +253,30 @@ describe('text file ingestion', () => {
     );
 
     expect(result.claimed).toBe(true);
-    expect(result.textCandidates).toHaveLength(1);
+    expect(result.fileCandidates).toHaveLength(1);
   });
 
-  it('reads text files with their content and size', async () => {
+  it('keeps original file bytes and size', async () => {
     const file = new File(['line1\nline2'], 'app.log', { type: 'text/plain' });
     const extracted = extractFileTransfer(
       transfer({ files: [file], types: ['Files'] }),
       'drop',
     );
 
-    const result = await readTextTransfer(extracted.textCandidates);
+    const result = await readFileTransfer(extracted.fileCandidates);
 
     expect(result.rejected).toEqual([]);
     expect(result.accepted).toEqual([
       {
         name: 'app.log',
         media_type: 'text/plain',
-        text: 'line1\nline2',
+        data: file,
         size: file.size,
       },
     ]);
   });
 
-  it('rejects files whose decoded content contains NUL bytes', async () => {
+  it('keeps binary files without decoding them as text', async () => {
     const binary = new File([new Uint8Array([0x89, 0x00, 0x50])], 'fake.log', {
       type: 'text/plain',
     });
@@ -266,26 +285,79 @@ describe('text file ingestion', () => {
       'drop',
     );
 
-    const result = await readTextTransfer(extracted.textCandidates);
+    const result = await readFileTransfer(extracted.fileCandidates);
 
-    expect(result.accepted).toEqual([]);
-    expect(result.rejected).toEqual([
-      { name: 'fake.log', reason: 'unsupported' },
+    expect(result.accepted).toEqual([
+      {
+        name: 'fake.log',
+        media_type: 'text/plain',
+        data: binary,
+        size: binary.size,
+      },
+    ]);
+    expect(result.rejected).toEqual([]);
+  });
+
+  it('avoids image extensions for files with non-image content types', async () => {
+    const file = new File(['not an image'], 'notes.png', {
+      type: 'text/plain',
+    });
+    const extracted = extractFileTransfer(
+      transfer({ files: [file], types: ['Files'] }),
+      'drop',
+    );
+
+    const result = await readFileTransfer(extracted.fileCandidates);
+
+    expect(result.accepted[0]?.name).toBe('notes.png.file');
+  });
+
+  it.each([
+    ['notes.png.', 'application/pdf'],
+    [`${'a'.repeat(250)}.png`, 'application/pdf'],
+    ['anim.png', 'image/apng'],
+  ])('shields misleading image name %s with MIME %s', async (name, type) => {
+    const file = new File(['data'], name, { type });
+    const extracted = extractFileTransfer(
+      transfer({ files: [file], types: ['Files'] }),
+      'drop',
+    );
+
+    const result = await readFileTransfer(extracted.fileCandidates);
+
+    expect(result.accepted[0]?.name.endsWith('.file')).toBe(true);
+    expect(
+      new TextEncoder().encode(result.accepted[0]?.name).byteLength,
+    ).toBeLessThanOrEqual(255);
+    expect(result.accepted[0]?.media_type).toBe(type);
+  });
+
+  it('normalizes image/jpg before reading an image', async () => {
+    const file = new File(['jpeg'], 'photo.jpg', { type: 'image/jpg' });
+    const extracted = extractFileTransfer(
+      transfer({ files: [file], types: ['Files'] }),
+      'drop',
+    );
+
+    const result = await readImageTransfer(extracted.imageCandidates);
+
+    expect(result.accepted).toEqual([
+      { data: 'anBlZw==', media_type: 'image/jpeg' },
     ]);
   });
 
-  it('rejects text files that exceed the remaining size budget', async () => {
+  it('applies the size limit to each text file independently', async () => {
     const files = [
       new File(['one'], 'one.log', { type: 'text/plain' }),
-      new File(['two'], 'two.log', { type: 'text/plain' }),
+      new File(['four'], 'two.log', { type: 'text/plain' }),
     ];
     const extracted = extractFileTransfer(
       transfer({ files, types: ['Files'] }),
       'drop',
     );
 
-    const result = await readTextTransfer(extracted.textCandidates, {
-      maxEncodedBytes: 3,
+    const result = await readFileTransfer(extracted.fileCandidates, {
+      maxBytes: 3,
     });
 
     expect(result.accepted).toHaveLength(1);
@@ -301,22 +373,26 @@ describe('text file ingestion', () => {
     );
 
     const imageResult = await readImageTransfer(extracted.imageCandidates, {
-      maxEncodedBytes: 4,
+      maxBytes: 4,
     });
-    const textResult = await readTextTransfer(extracted.textCandidates, {
-      maxEncodedBytes: 3,
+    const fileResult = await readFileTransfer(extracted.fileCandidates, {
+      maxBytes: 3,
     });
 
     expect(imageResult.accepted).toHaveLength(1);
-    expect(textResult.accepted).toHaveLength(1);
+    expect(fileResult.accepted).toHaveLength(1);
   });
 });
 
 describe('attachment naming', () => {
-  it('replaces token-unsafe characters and strips control characters', () => {
-    expect(sanitizeAttachmentName('my log(1).log')).toBe('my_log_1_.log');
-    expect(sanitizeAttachmentName('a,b;c.txt')).toBe('a_b_c.txt');
-    expect(sanitizeAttachmentName('weird\nname.log')).toBe('weird_name.log');
+  it('keeps display characters and strips paths and controls', () => {
+    expect(sanitizeAttachmentName('my log(1).log')).toBe('my log(1).log');
+    expect(sanitizeAttachmentName('a,b;c.txt')).toBe('a,b;c.txt');
+    expect(sanitizeAttachmentName('../weird\nname.log')).toBe('weirdname.log');
+    expect(sanitizeAttachmentName('budget 🚀 report.png')).toBe(
+      'budget 🚀 report.png',
+    );
+    expect(sanitizeAttachmentName('bad\ud800name.txt')).toBe('badname.txt');
   });
 
   it('falls back for names that sanitize to nothing', () => {
@@ -330,9 +406,28 @@ describe('attachment naming', () => {
     expect(sanitizeAttachmentName('a\u2066b\u2069.log')).toBe('ab.log');
   });
 
+  it('normalizes names rejected by the daemon', () => {
+    expect(sanitizeAttachmentName('report?.txt. ')).toBe('report_.txt');
+    expect(sanitizeAttachmentName('CON.txt')).toBe('_CON.txt');
+    expect(
+      new TextEncoder().encode(sanitizeAttachmentName('一'.repeat(100)))
+        .byteLength,
+    ).toBeLessThanOrEqual(255);
+  });
+
   it('dedupes against taken names with a numeric suffix', () => {
-    const taken = new Set(['app.log', 'app.log-2']);
-    expect(dedupeAttachmentName('app.log', taken)).toBe('app.log-3');
+    const taken = new Set(['app.log', 'app (1).log']);
+    expect(dedupeAttachmentName('app.log', taken)).toBe('app (2).log');
     expect(dedupeAttachmentName('other.log', taken)).toBe('other.log');
+  });
+
+  it('keeps deduplicated names within the daemon byte limit', () => {
+    const name = `${'一'.repeat(83)}.txt`;
+    const candidate = dedupeAttachmentName(name, new Set([name]));
+
+    expect(candidate).toMatch(/ \(1\)\.txt$/);
+    expect(new TextEncoder().encode(candidate).byteLength).toBeLessThanOrEqual(
+      255,
+    );
   });
 });

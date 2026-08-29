@@ -10,6 +10,7 @@ import {
   matchRemotes,
   normalizeSegment,
   hostsEquivalent,
+  isAoneCanonicalHost,
 } from './remote-match.js';
 
 describe('parseRemoteUrl', () => {
@@ -428,5 +429,46 @@ describe('hostsEquivalent', () => {
   it('different non-Aone hosts are not equivalent', () => {
     expect(hostsEquivalent('github.com', 'gitlab.alibaba-inc.com')).toBe(false);
     expect(hostsEquivalent('a.com', 'b.com')).toBe(false);
+  });
+
+  it('equates the alias across spelling variants (port, dot, case)', () => {
+    // The CR-URL grammar keeps `(?::\d+)?` inside the host capture, so a
+    // review recorded from `code.alibaba-inc.com:443` must still bind a
+    // submission carrying the skill-mandated `gitlab.alibaba-inc.com` —
+    // raw spelling equality died at the gate after the whole review ran.
+    expect(
+      hostsEquivalent('code.alibaba-inc.com:443', 'gitlab.alibaba-inc.com'),
+    ).toBe(true);
+    expect(
+      hostsEquivalent('CODE.ALIBABA-INC.COM', 'gitlab.alibaba-inc.com.'),
+    ).toBe(true);
+    // Same-host spellings with variants are identical too.
+    expect(hostsEquivalent('github.com:443', 'GITHUB.COM')).toBe(true);
+  });
+});
+
+describe('isAoneCanonicalHost', () => {
+  it('accepts only the canonical Aone web/git pair', () => {
+    expect(isAoneCanonicalHost('code.alibaba-inc.com')).toBe(true);
+    expect(isAoneCanonicalHost('gitlab.alibaba-inc.com')).toBe(true);
+  });
+
+  it('normalizes port, trailing dot and case like the family predicate', () => {
+    expect(isAoneCanonicalHost('CODE.ALIBABA-INC.COM')).toBe(true);
+    expect(isAoneCanonicalHost('gitlab.alibaba-inc.com:443')).toBe(true);
+    expect(isAoneCanonicalHost('code.alibaba-inc.com.')).toBe(true);
+  });
+
+  it('REJECTS the family wildcard — a GHE host is not Aone', () => {
+    // The `.alibaba-inc.com` suffix also names GitHub Enterprise
+    // instances; a write must not select a1 on a family resemblance.
+    expect(isAoneCanonicalHost('ghe.alibaba-inc.com')).toBe(false);
+    expect(isAoneCanonicalHost('github.alibaba-inc.com')).toBe(false);
+  });
+
+  it('rejects non-Aone and empty hosts', () => {
+    expect(isAoneCanonicalHost('github.com')).toBe(false);
+    expect(isAoneCanonicalHost(undefined)).toBe(false);
+    expect(isAoneCanonicalHost('')).toBe(false);
   });
 });

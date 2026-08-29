@@ -183,6 +183,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
+  'toolDisplayName.ReportFindings': '上報評審發現',
   'toolDisplayName.DisplayImage': '顯示圖片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '進入計畫模式',
@@ -206,6 +207,7 @@ export default {
   'toolDisplayName.TeamDelete': '刪除團隊',
   'toolDisplayName.TeamPlanApproval': '團隊計畫審批',
   'toolDisplayName.SendMessage': '傳送訊息',
+  'toolDisplayName.RequestShutdown': '請求下線',
   'toolDisplayName.StructuredOutput': '結構化輸出',
   'toolDisplayName.Monitor': '監控',
   'toolDisplayName.NotebookEdit': '編輯 Notebook',
@@ -724,6 +726,7 @@ export default {
   'Tool Output Truncation Lines': '工具輸出截斷行數',
   'Folder Trust': '檔案夾信任',
   'Tool Schema Compliance': 'Tool Schema 兼容性',
+  Unset: '未設定',
   'Auto (detect from system)': '自動（從系統檢測）',
   'Auto (follow user input)': '自動（跟隨使用者輸入）',
   'Auto (detect terminal theme)': '自動（檢測終端主題）',
@@ -2127,6 +2130,7 @@ export default {
   'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
+  'from nested agent': '來自嵌套 agent',
   Running: '執行中',
   Pausing: '暫停中',
   Paused: '已暫停',
@@ -2418,4 +2422,6 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
   'Kept model as {{model}}': '模型保持為 {{model}}',
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny）',
 };

@@ -14,6 +14,7 @@ import {
   logModelSlashCommand,
   MAINLINE_CODER_MODEL,
   isImageCapable,
+  isImageGenerationCapable,
   parseVisionModelSetting,
   resolveModelId,
   type AvailableModel as CoreAvailableModel,
@@ -321,7 +322,7 @@ export function ModelDialog({
         buildModelSelectionKey(m.authType, m.id, m.baseUrl),
       );
       const isSelectableImageModel = isImageModelMode
-        ? m.imageOnly === true &&
+        ? isImageGenerationCapable(m) &&
           config?.resolveImageGenerationModel(imageModelSelector) !== undefined
         : m.imageOnly !== true;
       return (
@@ -331,7 +332,7 @@ export function ModelDialog({
         isSelectableImageModel &&
         (isFastModelMode || !m.fastOnly) &&
         (isVoiceModelMode || !m.voiceOnly) &&
-        (isVisionModelMode || !m.visionOnly)
+        (isVisionModelMode || isImageModelMode || !m.visionOnly)
       );
     });
 

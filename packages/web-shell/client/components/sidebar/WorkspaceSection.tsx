@@ -39,6 +39,7 @@ import {
 import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
+import { sessionMatchesGitQuery } from './sessionSearch';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import styles from './WorkspaceSection.module.css';
@@ -106,6 +107,7 @@ interface WorkspaceSectionProps {
    * instead of a bespoke, feature-poor row.
    */
   renderSession: (session: DaemonSessionSummary) => ReactNode;
+  mapSession?: (session: DaemonSessionSummary) => DaemonSessionSummary;
   showSessionDetails?: boolean;
   headerActions?: (visible: boolean) => ReactNode;
   onRenameGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
@@ -147,6 +149,7 @@ export function WorkspaceSection({
   onExpandedChange,
   renderSessions = true,
   renderSession,
+  mapSession,
   showSessionDetails = true,
   headerActions,
   onRenameGroup,
@@ -428,15 +431,19 @@ export function WorkspaceSection({
 
   const visibleSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    return sessions.filter((session) => {
-      if (excludePinned && session.isPinned) return false;
-      if (!query) return true;
-      const label = (session.displayName || '').toLowerCase();
-      return (
-        label.includes(query) || session.sessionId.toLowerCase().includes(query)
-      );
-    });
-  }, [excludePinned, searchQuery, sessions]);
+    return sessions
+      .map((session) => mapSession?.(session) ?? session)
+      .filter((session) => {
+        if (excludePinned && session.isPinned) return false;
+        if (!query) return true;
+        const label = (session.displayName || '').toLowerCase();
+        return (
+          label.includes(query) ||
+          session.sessionId.toLowerCase().includes(query) ||
+          sessionMatchesGitQuery(session, query)
+        );
+      });
+  }, [excludePinned, mapSession, searchQuery, sessions]);
   const directSessions =
     searchActive || showAllSessions || !limitSessions
       ? visibleSessions
@@ -534,6 +541,8 @@ export function WorkspaceSection({
             onOpenChange={setBranchPickerOpen}
             workspaceCwd={workspace.cwd}
             onBranchChanged={() => void loadGitStatus()}
+            status={gitStatus}
+            onStatusRefreshed={setGitStatus}
             onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
             onOpenCommit={
               onOpenCommit ? () => onOpenCommit(workspace.cwd) : undefined

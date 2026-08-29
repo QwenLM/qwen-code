@@ -111,9 +111,39 @@ describe('openedBrief / readBrief', () => {
   const needle = JSON.stringify(briefPath(PLAN, key));
   const arg = `{"absolute_path":${needle}}`;
 
+  it('does not credit a shell command that merely MENTIONS the brief', () => {
+    // The trap a prose matcher walks into: `findings.ts` has a
+    // same-purpose-looking `namesPath` that matches on a name boundary, and
+    // it credits this arg. Deleting a brief is not opening it — so this atom
+    // matches the whole JSON string value instead, and keeps a different
+    // name so no future consolidation unifies the two the wrong way.
+    const r = rec({
+      successfulCallArgs: [
+        JSON.stringify({ command: `rm ${briefPath(PLAN, key)}` }),
+      ],
+    });
+    expect(openedBrief(r, PLAN, key)).toBe(false);
+  });
+
   it('credits any successful tool whose args name the exact brief path', () => {
     const r = rec({ successfulCallArgs: [arg] });
     expect(openedBrief(r, PLAN, key)).toBe(true);
+  });
+
+  it('credits a match anywhere in the call list, not just the first call', () => {
+    // The shared `argsNameExactPath` wrapper is an existential over the whole
+    // list. Every other fixture here has 0 or 1 arg, so a first-element-only
+    // regression (`args.length > 0 && …(args[0]!, path)`) ships green while
+    // refusing an agent whose first successful call named another file and
+    // whose LATER call opened the brief — its work re-owed. Match in the
+    // second position pins the quantifier for all three atoms.
+    const other = `{"absolute_path":${JSON.stringify(`${PLAN}-other.txt`)}}`;
+    expect(
+      openedBrief(rec({ successfulCallArgs: [other, arg] }), PLAN, key),
+    ).toBe(true);
+    expect(
+      readBrief(rec({ successfulReadFileArgs: [other, arg] }), PLAN, key),
+    ).toBe(true);
   });
 
   it('does not credit a record that made zero successful tool calls', () => {

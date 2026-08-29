@@ -22,7 +22,11 @@ import {
   DaemonSessionClient,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
   createDaemonTranscriptStore,
+  estimateDaemonTranscriptBlockBytes,
   extractServerTimestamp,
+  isTaskExecutionMode,
+  isTrimmedPermissionBlockId,
+  isTrimmedToolBlockId,
   isUnrecognizedDiagnosticReason,
   matchTurnEvent,
   normalizeDaemonEvent,
@@ -32,12 +36,14 @@ import {
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
+  type DaemonTranscriptTruncationDetail,
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
   type DaemonUnrecognizedDiagnostic,
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
+  getWorkspaceModelsAfterSessionClear,
   getPromptSettledKey,
   normalizeWorkspaceIdentity,
   resolveSessionRestoreTimeouts,
@@ -66,6 +72,7 @@ import {
   mapSessionContextReasoning,
   mapSupportedCommands,
   mapWorkspaceSkills,
+  selectGoalStateFromRead,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import {
@@ -158,10 +165,22 @@ interface LiveJournalRepairEpisode {
 interface TranscriptHistoryMaterialization {
   blocks: readonly DaemonTranscriptBlock[];
   nextOrdinal: number;
+  retainedBytes: number;
   toolBlockByCallId: Record<string, string>;
   permissionBlockByRequestId: Record<string, string>;
   unrecognizedDiagnostics: readonly DaemonUnrecognizedDiagnostic[];
 }
+
+type TranscriptHistoryAdmission =
+  | { admitted: true; materialization: TranscriptHistoryMaterialization }
+  | {
+      admitted: false;
+      reason: 'count' | 'bytes';
+      pageBlocks: number;
+      pageBytes: number;
+      /** True when the page can never be admitted, even into an empty window. */
+      impossible: boolean;
+    };
 
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
 const CLIENT_IDENTITY_FEATURE = 'client_identity';
@@ -265,7 +284,7 @@ function materializeTranscriptHistory(
   current: DaemonTranscriptState,
   events: DaemonUiEvent[],
   maxBlocks: number,
-): TranscriptHistoryMaterialization | undefined {
+): TranscriptHistoryAdmission {
   // Drop fetched events whose source records are already displayed.
   // `beforeRecordId` pagination is exclusive of the anchor but the anchor
   // can sit inside the retained window (e.g. the daemon's transcript
@@ -283,6 +302,35 @@ function materializeTranscriptHistory(
       displayedRecordIds.add(recordId);
     }
   }
+  // Secondary content-aware dedup for blocks that carry no recordId — the
+  // locally echoed user prompt, which `suppressOwnUserEcho` keeps from ever
+  // unioning the daemon's recordId-stamped echo. RecordId dedup is blind to
+  // it, so once a trim leaves it as the oldest retained block, a load-older
+  // page returning that same prompt's persisted record would materialize a
+  // second user block and double-count it. The collision is strictly a
+  // boundary pair — the window's oldest block (the echo) against the page's
+  // newest user block (that same prompt's persisted record, adjacent to the
+  // window) — so only that pair is compared below. Keying on text window-wide
+  // would instead drop DISTINCT older prompts the user happened to send twice
+  // ("yes", a retry), permanently orphaning their assistant replies.
+  // The key must key on echo PRESENCE, not non-empty text: image/file-only
+  // prompts submit with empty text, so a `text !== ''` gate would skip their
+  // dedup and double-render the prompt. Fold media into the key (image/file
+  // counts) so two distinct media-only prompts at the boundary don't collapse.
+  const userBlockBoundaryKey = (
+    block: DaemonTranscriptBlock | undefined,
+  ): string | undefined => {
+    if (block?.kind !== 'user') return undefined;
+    const text = (block as { text?: string }).text ?? '';
+    const images = (block as { images?: unknown[] }).images?.length ?? 0;
+    const files = (block as { files?: unknown[] }).files?.length ?? 0;
+    return `${text} img:${images} file:${files}`;
+  };
+  const oldestRetainedBlock = current.blocks[0];
+  const boundaryEchoKey =
+    (oldestRetainedBlock?.sourceRecordIds?.length ?? 0) === 0
+      ? userBlockBoundaryKey(oldestRetainedBlock)
+      : undefined;
   const freshEvents =
     displayedRecordIds.size === 0
       ? events
@@ -294,23 +342,83 @@ function materializeTranscriptHistory(
         );
   const historyStore = createDaemonTranscriptStore({
     maxBlocks: Number.MAX_SAFE_INTEGER,
+    // Trim-free by intent: a media-heavy page would otherwise cross the
+    // default byte budget mid-build and evict the page's oldest records,
+    // which the exclusive pagination anchor can never re-fetch.
+    maxRetainedBytes: Number.POSITIVE_INFINITY,
     nextOrdinal: current.nextOrdinal,
     retainSubagentBlocks: current.retainSubagentBlocks,
   });
   historyStore.dispatch(freshEvents);
   const history = historyStore.getSnapshot();
-  if (history.blocks.length + current.blocks.length > maxBlocks) {
-    return undefined;
+  // Drop the page's newest user block only when it duplicates the window's
+  // oldest recordId-less echo (the boundary pair). A same-text user block
+  // deeper in older history is a distinct prompt and must survive.
+  let pageBlockList = history.blocks;
+  if (boundaryEchoKey !== undefined) {
+    for (let i = history.blocks.length - 1; i >= 0; i -= 1) {
+      const block = history.blocks[i];
+      if (block?.kind !== 'user') continue;
+      if (userBlockBoundaryKey(block) === boundaryEchoKey) {
+        pageBlockList = [
+          ...history.blocks.slice(0, i),
+          ...history.blocks.slice(i + 1),
+        ];
+      }
+      break;
+    }
+  }
+  let pageBytes = 0;
+  for (const block of pageBlockList) {
+    pageBytes += estimateDaemonTranscriptBlockBytes(block);
+  }
+  const pageBlocks = pageBlockList.length;
+  // `impossible` must be evaluated across BOTH dimensions, regardless of
+  // which branch rejects: a page that alone fills the whole block window can
+  // never be admitted (an anchored window always retains at least one block),
+  // and likewise for the byte budget. Equality is already impossible, hence
+  // `>=`. A page rejected by one dimension but impossible in the other would
+  // route to the re-openable latch whose re-open gate is then unsatisfiable —
+  // terminal either way.
+  const impossible =
+    pageBlocks >= maxBlocks || pageBytes >= current.maxRetainedBytes;
+  // Count admission: an over-count merge stays untrimmed while the session
+  // is idle, and the next live trim evicts the freshly prepended oldest
+  // records, which the exclusive pagination anchor can never re-fetch — a
+  // permanent silent gap. Reject atomically.
+  if (pageBlocks + current.blocks.length > maxBlocks) {
+    return {
+      admitted: false,
+      reason: 'count',
+      pageBlocks,
+      pageBytes,
+      impossible,
+    };
+  }
+  // Byte-budget admission: same silent-gap hazard as the count cap — an
+  // over-budget merge is evicted oldest-first by the next live trim.
+  if (current.retainedBytes + pageBytes > current.maxRetainedBytes) {
+    return {
+      admitted: false,
+      reason: 'bytes',
+      pageBlocks,
+      pageBytes,
+      impossible,
+    };
   }
   return {
-    blocks: history.blocks,
-    nextOrdinal: history.nextOrdinal,
-    toolBlockByCallId: history.toolBlockByCallId,
-    permissionBlockByRequestId: history.permissionBlockByRequestId,
-    // History pages can carry frames recorded by newer daemon versions, exactly
-    // forward-compat case the sidechannel exists for (#8823); keep them
-    // instead of dropping the throwaway store's diagnostics.
-    unrecognizedDiagnostics: history.unrecognizedDiagnostics,
+    admitted: true,
+    materialization: {
+      blocks: pageBlockList,
+      nextOrdinal: history.nextOrdinal,
+      retainedBytes: pageBytes,
+      toolBlockByCallId: history.toolBlockByCallId,
+      permissionBlockByRequestId: history.permissionBlockByRequestId,
+      // History pages can carry frames recorded by newer daemon versions, exactly
+      // forward-compat case the sidechannel exists for (#8823); keep them
+      // instead of dropping the throwaway store's diagnostics.
+      unrecognizedDiagnostics: history.unrecognizedDiagnostics,
+    },
   };
 }
 
@@ -318,18 +426,58 @@ function applyTranscriptHistory(
   current: DaemonTranscriptState,
   history: TranscriptHistoryMaterialization,
 ): DaemonTranscriptState {
+  // A page-resurrected real block mapping must win over the current window's
+  // TRIMMED sentinel for the same callId — otherwise the resurrected block is
+  // orphaned and every later live update for that tool hits the sentinel
+  // branch (a false "output trimmed" error block plus dropped updates).
+  // Real-vs-real collisions cannot occur (the recordId dedup filter drops
+  // already-displayed records before materialization).
+  const toolBlockByCallId: Record<string, string> = {
+    ...history.toolBlockByCallId,
+  };
+  for (const [callId, blockId] of Object.entries(current.toolBlockByCallId)) {
+    if (
+      isTrimmedToolBlockId(blockId) &&
+      toolBlockByCallId[callId] !== undefined
+    ) {
+      continue;
+    }
+    toolBlockByCallId[callId] = blockId;
+  }
+  // A resurrected tool is live content again; clear its trimmed-notification
+  // flag so a future re-trim reports it once instead of staying silent.
+  const trimmedToolNotificationByCallId: Record<string, true> = {
+    ...current.trimmedToolNotificationByCallId,
+  };
+  for (const callId of Object.keys(history.toolBlockByCallId)) {
+    delete trimmedToolNotificationByCallId[callId];
+  }
+  // Same sentinel-aware merge for permission blocks: a page-resurrected real
+  // mapping must win over the current window's TRIMMED_PERMISSION sentinel, or
+  // a resurrected pending permission never flips to resolved (the permission
+  // upsert/resolve paths early-return on the sentinel).
+  const permissionBlockByRequestId: Record<string, string> = {
+    ...history.permissionBlockByRequestId,
+  };
+  for (const [requestId, blockId] of Object.entries(
+    current.permissionBlockByRequestId,
+  )) {
+    if (
+      isTrimmedPermissionBlockId(blockId) &&
+      permissionBlockByRequestId[requestId] !== undefined
+    ) {
+      continue;
+    }
+    permissionBlockByRequestId[requestId] = blockId;
+  }
   return {
     ...current,
     blocks: [...history.blocks, ...current.blocks],
+    retainedBytes: current.retainedBytes + history.retainedBytes,
     nextOrdinal: history.nextOrdinal,
-    toolBlockByCallId: {
-      ...history.toolBlockByCallId,
-      ...current.toolBlockByCallId,
-    },
-    permissionBlockByRequestId: {
-      ...history.permissionBlockByRequestId,
-      ...current.permissionBlockByRequestId,
-    },
+    toolBlockByCallId,
+    trimmedToolNotificationByCallId,
+    permissionBlockByRequestId,
     // History entries are older than anything received live, so they go
     // first; the slice keeps the newest entries within the sidechannel cap.
     unrecognizedDiagnostics: [
@@ -371,6 +519,7 @@ function projectSubagentToolUpdate(
   const subagentColor = boundedString(rawOutput?.['subagentColor'], 80);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
   const status = boundedString(rawOutput?.['status'], 80);
+  const executionMode = rawOutput?.['executionMode'];
   const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
   const projectedInput = rawInput
     ? {
@@ -394,6 +543,7 @@ function projectSubagentToolUpdate(
         ...(subagentColor ? { subagentColor } : {}),
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
+        ...(isTaskExecutionMode(executionMode) ? { executionMode } : {}),
         ...(terminateReason ? { terminateReason } : {}),
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }
@@ -515,10 +665,14 @@ interface HeartbeatFailureState {
 
 // Keep enough transcript history for large daemon replay streams so event order
 // and subagent grouping survive replay. Rendering is virtualized, but message
-// normalization still rebuilds from retained blocks today, so this high default
-// is a history-preservation tradeoff rather than a claim that large transcripts
-// are CPU-free. Callers can pass a smaller maxBlocks in constrained contexts.
-const DEFAULT_MAX_BLOCKS = 200_000;
+// normalization still rebuilds from retained blocks today, so this default is a
+// history-preservation tradeoff rather than a claim that large transcripts are
+// CPU-free. This is a block-COUNT ceiling; the memory ceiling is enforced
+// separately by the transcript store's retention byte budget, because blocks
+// can carry large raw tool payloads (an implicit 200k window let a single busy
+// session exhaust renderer memory). Callers can pass a smaller maxBlocks in
+// constrained contexts.
+export const DEFAULT_MAX_BLOCKS = 50_000;
 const TRANSCRIPT_DISPATCH_BATCH_MS = 16;
 
 const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
@@ -526,6 +680,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   agentsVersion: 0,
   toolsVersion: 0,
   settingsVersion: 0,
+  skillsVersion: 0,
   mcpVersion: 0,
   extensionsVersion: 0,
   artifactsVersion: 0,
@@ -545,6 +700,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     createSessionRequest,
     maxQueued = 1024,
     maxBlocks = DEFAULT_MAX_BLOCKS,
+    maxRetainedBytes,
     historyPageSize,
     subagentTranscriptMode = 'full',
     suppressOwnUserEcho = true,
@@ -587,14 +743,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     activeWorkspaceCwdRef.current = resolvedWorkspaceCwd;
   }
 
-  const store = useMemo(
-    () =>
-      createDaemonTranscriptStore({
-        maxBlocks,
-        retainSubagentBlocks: subagentTranscriptMode === 'full',
-      }),
-    [maxBlocks, subagentTranscriptMode],
-  );
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const sessionConfigGenerationRef = useRef(
     new WeakMap<DaemonSessionClient, number>(),
@@ -607,6 +755,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     loading: boolean;
     capacityReached: boolean;
     paginationError: boolean;
+    /**
+     * Footprint of the last page rejected by admission. The eviction
+     * re-open of the capacity latch consults it so the affordance only
+     * reappears once enough capacity has been freed for that page to be
+     * admitted; undefined when the latch came from replay saturation.
+     */
+    rejectedPage?: { blocks: number; bytes: number };
   }>({
     hasMore: false,
     loading: false,
@@ -619,6 +774,169 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     capacityReached: false,
     paginationError: false,
   });
+  // Monotonic counter bumped whenever a block trim invalidates the
+  // pagination position (the anchor record may have been evicted). A
+  // load-older fetch captures it before the await and drops the page if it
+  // moved mid-fetch, so a stale page can never advance the anchor below the
+  // evicted band.
+  const paginationGenerationRef = useRef(0);
+  const store = useMemo(
+    () =>
+      createDaemonTranscriptStore({
+        maxBlocks,
+        ...(maxRetainedBytes !== undefined ? { maxRetainedBytes } : {}),
+        retainSubagentBlocks: subagentTranscriptMode === 'full',
+        onTruncation: (detail) => {
+          if (detail.kind !== 'blocks') return;
+          const history = transcriptHistoryRef.current;
+          const activeSession = sessionRef.current;
+          if (!activeSession || history.sessionId !== activeSession.sessionId) {
+            return;
+          }
+          // Trimming evicts oldest-first, so it can remove the very record
+          // the exclusive `beforeRecordId` anchor points at; the daemon
+          // never returns the anchor itself, so the evicted stretch would
+          // become unreachable. Re-anchor to the oldest retained record and
+          // atomically drop a stale cursor (loadMore prefers cursor over
+          // beforeRecordId, and a cursor-addressed position can never be
+          // re-based after the blocks it points past are evicted). A rewind
+          // (`evictedOldest === false`) drops the newest blocks and leaves
+          // the oldest anchor intact, so it must not trigger re-anchoring.
+          if (detail.evictedOldest !== false) {
+            if (detail.oldestRetainedRecordId !== undefined) {
+              history.beforeRecordId = detail.oldestRetainedRecordId;
+              history.cursor = undefined;
+              // A re-anchoring trim invalidates a latched rejectedPage
+              // footprint: the daemon (exclusive-before, served from disk)
+              // re-serves the evicted band on the next fetch, so the page will
+              // be larger than latched. Grow the latched footprint by the
+              // evicted band so the re-open gate measures the page the
+              // re-anchored fetch actually gets — a stale (too-small) footprint
+              // would churn fetch/reject, or misclassify a now-larger page as
+              // terminal. `store.getSnapshot()` is still pre-trim here: the
+              // store swaps its state only after the reduce completes.
+              if (history.rejectedPage) {
+                const preTrim = store.getSnapshot();
+                const postTrimBlockCount =
+                  detail.blockCount ?? preTrim.blocks.length;
+                const postTrimRetainedBytes =
+                  detail.retainedBytes ?? preTrim.retainedBytes;
+                history.rejectedPage = {
+                  blocks:
+                    history.rejectedPage.blocks +
+                    Math.max(0, preTrim.blocks.length - postTrimBlockCount),
+                  bytes:
+                    history.rejectedPage.bytes +
+                    Math.max(0, preTrim.retainedBytes - postTrimRetainedBytes),
+                };
+              }
+              // A live trim evicts oldest blocks that stay persisted
+              // daemon-side, so there is now fetchable content older than the
+              // re-set anchor. A session that loaded unlatched (hasMore=false,
+              // capacityReached=false) must surface that affordance, or the
+              // evicted band is unreachable until a reload. Mirror the replay
+              // path's olderHistoryReachable gates.
+              if (!history.capacityReached && !history.hasMore) {
+                const features = sessionCapabilitiesRef.current?.features;
+                const windowCaps = store.getSnapshot();
+                const postTrimRetainedBytes =
+                  detail.retainedBytes ?? windowCaps.retainedBytes;
+                const byteCap =
+                  detail.maxRetainedBytes ?? windowCaps.maxRetainedBytes;
+                const olderHistoryReachable =
+                  Array.isArray(features) &&
+                  features.includes(SESSION_TRANSCRIPT_PAGINATION_FEATURE) &&
+                  postTrimRetainedBytes < byteCap;
+                if (olderHistoryReachable) {
+                  history.hasMore = true;
+                  setTranscriptHistoryState({
+                    hasMore: true,
+                    loading: false,
+                    capacityReached: false,
+                    paginationError: history.paginationError,
+                  });
+                }
+              }
+            } else {
+              // Re-anchor uncomputable — no retained block carries a
+              // recordId. The current anchor points at an evicted record the
+              // exclusive pagination contract can never return again; fail
+              // closed instead of offering an affordance that skips the
+              // evicted band.
+              history.beforeRecordId = undefined;
+              history.cursor = undefined;
+              if (history.hasMore) {
+                history.hasMore = false;
+                setTranscriptHistoryState({
+                  hasMore: false,
+                  loading: history.loading,
+                  capacityReached: history.capacityReached,
+                  paginationError: history.paginationError,
+                });
+              }
+            }
+          }
+          // Oldest-first eviction can invalidate an in-flight page's anchor;
+          // bump the generation so the stale page is dropped on resolve. A
+          // rewind leaves the anchor band untouched, so in-flight pages stay
+          // valid and must not be dropped.
+          if (detail.evictedOldest !== false) {
+            paginationGenerationRef.current += 1;
+          }
+          if (history.capacityReached) {
+            // Eviction freed retention capacity, so the page rejected at the
+            // latch may fit now — re-open the load-older affordance, but
+            // only where the sibling paths would have offered it: the daemon
+            // must support pagination and a positional anchor must exist.
+            const features = sessionCapabilitiesRef.current?.features;
+            const paginationSupported =
+              Array.isArray(features) &&
+              features.includes(SESSION_TRANSCRIPT_PAGINATION_FEATURE);
+            const anchored =
+              history.beforeRecordId !== undefined ||
+              history.cursor !== undefined;
+            if (!paginationSupported || !anchored) {
+              return;
+            }
+            // Admission-headroom gate: only re-open when the rejected page
+            // would actually be admitted now. A count trim restores the
+            // window to exactly maxBlocks (zero headroom), so without this
+            // check every live block during streaming would re-open the
+            // latch into an immediate fetch/reject cycle. Caps are stable
+            // across a trim; the snapshot only backs detail-field fallbacks.
+            const windowCaps = store.getSnapshot();
+            const postTrimBlockCount =
+              detail.blockCount ?? windowCaps.blocks.length;
+            const postTrimRetainedBytes =
+              detail.retainedBytes ?? windowCaps.retainedBytes;
+            const blockCap = detail.maxBlocks ?? windowCaps.maxBlocks;
+            const byteCap =
+              detail.maxRetainedBytes ?? windowCaps.maxRetainedBytes;
+            const rejected = history.rejectedPage;
+            // A footprint-less latch (replay saturation) re-opens only on
+            // real count headroom: while the count window is saturated,
+            // count admission rejects every page regardless of bytes.
+            const admissionHeadroom = rejected
+              ? rejected.blocks + postTrimBlockCount <= blockCap &&
+                rejected.bytes + postTrimRetainedBytes <= byteCap
+              : postTrimBlockCount < blockCap;
+            if (!admissionHeadroom) {
+              return;
+            }
+            history.rejectedPage = undefined;
+            history.hasMore = true;
+            history.capacityReached = false;
+            setTranscriptHistoryState({
+              hasMore: true,
+              loading: false,
+              capacityReached: false,
+              paginationError: history.paginationError,
+            });
+          }
+        },
+      }),
+    [maxBlocks, maxRetainedBytes, subagentTranscriptMode],
+  );
   const eventStreamRef = useRef<
     | {
         sessionId: string;
@@ -713,7 +1031,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const next =
         typeof update === 'function' ? update(connectionRef.current) : update;
       connectionRef.current = next;
-      setConnection(next);
+      setConnection(update);
     },
     [],
   );
@@ -1517,7 +1835,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ) &&
               (activeSession.historyHasMore || replayHistoryWasTruncated) &&
               firstPersistedRecordId !== undefined;
-          if (!repairingEpisode) {
+          const replayInjected =
+            shouldInjectReplaySnapshot && replayEvents.length > 0;
+          // After the snapshot is consumed the replay-derived inputs above
+          // (firstPersistedRecordId, replayHistoryWasTruncated) recompute
+          // empty on delta-resume reconnects; keep the history state that
+          // the original injection initialized instead of clobbering it.
+          if (
+            !repairingEpisode &&
+            (replayInjected ||
+              transcriptHistoryRef.current.sessionId !==
+                activeSession.sessionId)
+          ) {
             transcriptHistoryRef.current = {
               sessionId: activeSession.sessionId,
               ...(firstPersistedRecordId !== undefined
@@ -1535,6 +1864,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               paginationError: false,
             });
           } else if (
+            repairingEpisode &&
             !markerStillVisible &&
             firstPersistedRecordId !== undefined
           ) {
@@ -1542,8 +1872,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               firstPersistedRecordId;
             transcriptHistoryRef.current.cursor = undefined;
           }
-          const replayInjected =
-            shouldInjectReplaySnapshot && replayEvents.length > 0;
           if (needsStoreReset && !replayInjected) {
             // Reset needed but no replay data (e.g. fresh session) — reset
             // immediately since there is no dispatch to batch with.
@@ -1672,27 +2000,59 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               (group) => group.transcript,
             );
             let replayExceededCapacity = false;
+            let replayTrimmed = false;
+            let replayTrimmedAnchor: string | undefined;
             const rebuildReplay =
               repairingEpisode !== undefined ||
               replayTarget !== undefined ||
               needsStoreReset ||
               store.getSnapshot().blocks.length === 0;
             if (rebuildReplay) {
-              const replayMaxBlocks = repairingEpisode
-                ? markerStillVisible
+              // Ordinary replay rebuilds under the same cap as live growth:
+              // a session loaded mid-turn can carry a live journal with tens
+              // of thousands of events, and retaining it all (the previous
+              // uncapped rebuild) exhausted renderer memory. Trimming keeps
+              // the most recent blocks; older history stays reachable via
+              // pagination.
+              const replayMaxBlocks =
+                repairingEpisode && markerStillVisible
                   ? repairingEpisode.checkpoint.maxBlocks
-                  : maxBlocks
-                : Number.MAX_SAFE_INTEGER;
+                  : maxBlocks;
+              const observeReplayTrim = (
+                detail: DaemonTranscriptTruncationDetail,
+              ) => {
+                // A rewind also fires `kind: 'blocks'` but with
+                // `evictedOldest: false` — it drops the NEWEST blocks and
+                // leaves the oldest pagination anchor valid, so it must not
+                // latch the capacity/re-anchor path (same gate as the live
+                // store's onTruncation handler above).
+                if (detail.kind === 'blocks' && detail.evictedOldest !== false)
+                  replayTrimmed = true;
+              };
+              // Both rebuild branches can trim (count cap or byte budget), so
+              // both observe it — a marker-visible repair seeded from the
+              // checkpoint is just as able to evict the pagination anchor as
+              // an ordinary rebuild.
               const replayStore = createDaemonTranscriptStore(
                 repairingEpisode && markerStillVisible
                   ? {
                       ...repairingEpisode.checkpoint,
                       maxBlocks: replayMaxBlocks,
+                      onTruncation: observeReplayTrim,
                     }
                   : {
                       maxBlocks: replayMaxBlocks,
                       retainSubagentBlocks:
                         subagentTranscriptModeRef.current === 'full',
+                      // Rebuild under the same byte budget as the live store
+                      // so an oversized replay is trimmed to the same ceiling.
+                      ...(maxRetainedBytes !== undefined
+                        ? { maxRetainedBytes }
+                        : {}),
+                      // The count cap and the default byte budget can both
+                      // evict mid-rebuild; observe either so the pagination
+                      // anchor and capacity indicator reconcile below.
+                      onTruncation: observeReplayTrim,
                     },
               );
               let nextCheckpoint: DaemonTranscriptState | undefined;
@@ -1709,12 +2069,26 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 }
               }
               const replayState = replayStore.getSnapshot();
+              // A rebuild trim (count cap or byte budget) evicted older
+              // blocks; a merely saturated window leaves no in-store room
+              // for pagination either way — surface capacityReached for both.
+              // Repair rebuilds reconcile too: they evict the anchor just as
+              // an ordinary rebuild does.
               replayExceededCapacity =
-                repairingEpisode === undefined &&
-                replayState.blocks.length > maxBlocks;
-              const committedMaxBlocks = repairingEpisode
-                ? replayMaxBlocks
-                : Math.max(maxBlocks, replayState.blocks.length);
+                replayTrimmed || replayState.blocks.length >= replayMaxBlocks;
+              if (replayExceededCapacity) {
+                // The pre-trim anchor can sit inside the trimmed stretch;
+                // re-anchor below to the oldest RETAINED record so
+                // pagination fetches exactly the dropped records.
+                replayTrimmedAnchor = replayState.blocks.find(
+                  (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+                )?.sourceRecordIds?.[0];
+              }
+              // Replay must never ratchet the retention window above the
+              // configured cap: the committed cap is what bounds every
+              // later dispatch, and an escalation here turned one large
+              // replay into permanent unbounded retention.
+              const committedMaxBlocks = replayMaxBlocks;
               store.reset({
                 ...replayState,
                 maxBlocks: committedMaxBlocks,
@@ -1767,13 +2141,52 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               bumpWorkspaceEventSignals(
                 sideEffectEvents,
                 setWorkspaceEventSignals,
+                activeSession.workspaceCwd,
               );
             }
-            if (replayExceededCapacity && historyHasMore) {
-              transcriptHistoryRef.current.hasMore = false;
+            if (replayExceededCapacity) {
+              if (replayTrimmed) {
+                if (replayTrimmedAnchor !== undefined) {
+                  transcriptHistoryRef.current.beforeRecordId =
+                    replayTrimmedAnchor;
+                } else {
+                  // The rebuild trimmed but no retained block carries a
+                  // recordId, so a re-anchor to a retained record is
+                  // uncomputable. Any pre-trim anchor points at an evicted
+                  // record the exclusive pagination contract can never return
+                  // again — drop it unconditionally, mirroring the live store's
+                  // fail-closed branch. Scanning only the fresh replayEvents
+                  // would miss recordIds trimmed from the repair checkpoint in
+                  // a marker-visible live-journal repair, leaving a stale anchor
+                  // with the affordance still on; when no recordId ever existed
+                  // the anchor is already undefined, so the drop is a no-op.
+                  transcriptHistoryRef.current.beforeRecordId = undefined;
+                }
+                // A rebuild trim can evict the records a cursor points past;
+                // drop it so the beforeRecordId (re-anchored or pre-trim) is
+                // authoritative.
+                transcriptHistoryRef.current.cursor = undefined;
+              }
+              // Trimmed/saturated replay content stays persisted daemon-side
+              // and is fetchable through pagination, so keep the load-older
+              // affordance — but only while admission has real headroom: a
+              // positional anchor and byte-budget room. Without byte-budget
+              // headroom (e.g. a single oversized block whose estimate alone
+              // exceeds the budget) no page can ever be admitted, so offering
+              // the affordance would burn it on the first click with no
+              // terminal signal.
+              const postRebuild = store.getSnapshot();
+              const olderHistoryReachable =
+                Array.isArray(capabilities?.features) &&
+                capabilities.features.includes(
+                  SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+                ) &&
+                transcriptHistoryRef.current.beforeRecordId !== undefined &&
+                postRebuild.retainedBytes < postRebuild.maxRetainedBytes;
+              transcriptHistoryRef.current.hasMore = olderHistoryReachable;
               transcriptHistoryRef.current.capacityReached = true;
               setTranscriptHistoryState({
-                hasMore: false,
+                hasMore: olderHistoryReachable,
                 loading: false,
                 capacityReached: true,
                 paginationError: false,
@@ -1792,6 +2205,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
+            // Release the raw snapshot only after the injection above
+            // completed: if normalization/dispatch threw, the recovery path
+            // reloads the session, and the still-retained snapshot keeps the
+            // window consistent until then. On success it is never read again
+            // (SSE continues from lastEventId; older history via pagination),
+            // so dropping it unpins busy-session snapshots that can reach
+            // tens of MiB after adaptive journal growth.
+            activeSession.consumeReplaySnapshot();
           }
           setConnection((current) => ({
             ...current,
@@ -1818,6 +2239,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : current.sessionId === activeSession.sessionId
                   ? (current.tokenCount ?? 0)
                   : 0,
+            goalState:
+              current.sessionId === activeSession.sessionId
+                ? current.goalState
+                : undefined,
             loadingTranscript: undefined,
             catchingUp: replayInjected
               ? current.catchingUp
@@ -1848,24 +2273,75 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               connectionRef.current.context !== undefined);
           const configGeneration =
             sessionConfigGenerationRef.current.get(activeSession) ?? 0;
+          const goalStateAtLoadStart =
+            connectionRef.current.sessionId === activeSession.sessionId
+              ? connectionRef.current.goalState
+              : undefined;
           const gitPromise = skipMetadataRefreshThisIteration
             ? Promise.resolve({ branch: connectionRef.current.gitBranch })
             : activeSession.workspaceCwd
               ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
               : client.workspaceGit();
-          const [providerResult, commandResult, contextResult, gitResult] =
-            await Promise.allSettled([
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : client.workspaceProviders(),
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : activeSession.supportedCommands(),
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : activeSession.context(),
-              gitPromise,
-            ]);
+          const metadataPromise = Promise.allSettled([
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : client.workspaceProviders(),
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : activeSession.supportedCommands(),
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : activeSession.context(),
+            gitPromise,
+          ]);
+          // Hydrate Goal ownership independently so unrelated metadata cannot
+          // leave Slash commands blocked. Reconcile against any Goal frame
+          // that landed while the read was in flight.
+          const goalPromise = activeSession
+            .goal()
+            .then(
+              (response) => response.snapshot,
+              () => undefined,
+            )
+            .then((goalState) => {
+              if (
+                disposed ||
+                abort.signal.aborted ||
+                sessionRef.current !== activeSession
+              ) {
+                return goalState;
+              }
+              setConnection((current) => {
+                if (
+                  sessionRef.current !== activeSession ||
+                  current.sessionId !== activeSession.sessionId
+                ) {
+                  return current;
+                }
+                if (!goalState && goalStateAtLoadStart !== undefined) {
+                  return current;
+                }
+                return {
+                  ...current,
+                  goalState: goalState
+                    ? selectGoalStateFromRead(
+                        current.goalState,
+                        goalState,
+                        goalStateAtLoadStart?.goal?.goalId,
+                      )
+                    : (current.goalState ?? {
+                        v: 2,
+                        goal: null,
+                        activity: 'idle',
+                      }),
+                };
+              });
+              return goalState;
+            });
+          const [
+            [providerResult, commandResult, contextResult, gitResult],
+            goalState,
+          ] = await Promise.all([metadataPromise, goalPromise]);
           if (
             disposed ||
             abort.signal.aborted ||
@@ -1888,6 +2364,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const gitBranch =
             gitResult?.status === 'fulfilled'
               ? (gitResult.value.branch ?? undefined)
+              : undefined;
+          const goalStateFallback =
+            goalState === undefined && goalStateAtLoadStart === undefined
+              ? ({ v: 2, goal: null, activity: 'idle' } as const)
               : undefined;
           const loadWarningTexts = [
             providerResult?.status === 'rejected'
@@ -1926,7 +2406,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
           setConnection((current) => {
             if (
-              sessionRef.current !== activeSession ||
+              abort.signal.aborted ||
+              (sessionRef.current !== undefined &&
+                sessionRef.current !== activeSession) ||
               current.sessionId !== activeSession.sessionId
             ) {
               return current;
@@ -1978,6 +2460,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               context: configSnapshotCurrent
                 ? (context ?? current.context)
                 : current.context,
+              // Reconcile rather than reference-compare: the load response and
+              // any frame that arrived during the load window share a revision
+              // domain, and routing through `selectGoalState` is what registers
+              // the cleared-goal tombstone that keeps a later stale frame from
+              // resurrecting a cleared goal. The read is stamped with the goal
+              // observed when it was issued (`goalStateAtLoadStart`) — a create
+              // that lands inside the load window must not be wiped, and
+              // tombstoned, by a bare-null answer that predates it.
+              goalState: goalState
+                ? selectGoalStateFromRead(
+                    current.goalState,
+                    goalState,
+                    goalStateAtLoadStart?.goal?.goalId,
+                  )
+                : (current.goalState ?? goalStateFallback),
               gitBranch:
                 gitResult.status === 'fulfilled'
                   ? gitBranch
@@ -2127,12 +2624,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 activeSession.clientId,
                 eventOptionsRef.current,
                 (update) => {
-                  setConnectionSynchronous((current) => {
-                    if (sessionRef.current !== activeSession) return current;
-                    return typeof update === 'function'
-                      ? update(current)
-                      : update;
-                  });
+                  if (sessionRef.current !== activeSession) return;
+                  setConnectionSynchronous(update);
                 },
               );
               const uiEvents = filterDaemonUiEventsForTranscript(
@@ -2155,7 +2648,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   break;
                 }
               }
-              bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
+              bumpWorkspaceEventSignals(
+                uiEvents,
+                setWorkspaceEventSignals,
+                activeSession.workspaceCwd,
+              );
               if (uiEvents.length > 0) {
                 const hasGenerationSignal = hasActiveGenerationSignal(uiEvents);
                 setPromptStatus((current) =>
@@ -2463,6 +2960,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               sessionId: undefined,
+              context: undefined,
+              reasoning: undefined,
+              models: getWorkspaceModelsAfterSessionClear(current),
+              goalState: undefined,
               error: undefined,
               errorStatus: undefined,
               missingSession: false,
@@ -2608,6 +3109,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...current,
                 status: 'error',
                 sessionId: undefined,
+                context: undefined,
+                reasoning: undefined,
+                models: getWorkspaceModelsAfterSessionClear(current),
+                goalState: undefined,
                 error: message,
                 errorStatus: resolveConnectionErrorStatus(
                   errorStatus,
@@ -2633,6 +3138,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ...current,
               status: 'disconnected',
               sessionId: undefined,
+              context: undefined,
+              reasoning: undefined,
+              models: getWorkspaceModelsAfterSessionClear(current),
+              goalState: undefined,
               error: message,
               errorStatus: resolveConnectionErrorStatus(
                 errorStatus,
@@ -2820,6 +3329,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     sessionScope,
     maxQueued,
     maxBlocks,
+    maxRetainedBytes,
     store,
     restoreSessionId,
     restoreWorkspaceCwd,
@@ -2961,6 +3471,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ...(authFailure || missingSession
                     ? {
                         sessionId: undefined,
+                        context: undefined,
+                        reasoning: undefined,
+                        models: getWorkspaceModelsAfterSessionClear(current),
+                        goalState: undefined,
                         loadingTranscript: undefined,
                         catchingUp: undefined,
                       }
@@ -3110,6 +3624,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         if (options?.force !== true) {
           return;
         }
+        // A fail-closed trim can drop both anchors. With neither cursor nor
+        // beforeRecordId, the daemon defaults the request to the journal's
+        // oldest page, which would be prepended below the window and re-stamp
+        // a bogus anchor. Refuse to re-arm anchor-less; the affordance stays
+        // closed until a later trim re-establishes an anchor.
+        if (
+          history.beforeRecordId === undefined &&
+          history.cursor === undefined
+        ) {
+          return;
+        }
         // The failed page's cursor was never advanced, so clearing the
         // latched error retries that exact page.
         history.paginationError = false;
@@ -3125,6 +3650,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         capacityReached: false,
         paginationError: false,
       });
+      const fetchPaginationGeneration = paginationGenerationRef.current;
       let terminalFailure = false;
       try {
         const page = await activeSession.getTranscriptPage({
@@ -3140,6 +3666,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           sessionRef.current !== activeSession ||
           transcriptHistoryRef.current !== history
         ) {
+          return;
+        }
+        if (paginationGenerationRef.current !== fetchPaginationGeneration) {
+          // A retention trim re-anchored pagination while this page was in
+          // flight. The page was fetched against the stale anchor; merging it
+          // would advance the anchor below the evicted band and make the
+          // evicted-but-persisted records unreachable. Drop it without
+          // mutating pagination state — every record it carries is older
+          // than the new anchor and will be re-served by the next fetch.
+          history.loading = false;
+          setTranscriptHistoryState({
+            hasMore: history.hasMore,
+            loading: false,
+            capacityReached: history.capacityReached,
+            paginationError: history.paginationError,
+          });
           return;
         }
         if (page.partial || page.replayError) {
@@ -3195,7 +3737,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             );
           }
         }
-        const historyMaterialization =
+        const admission =
           uiEvents.length > 0
             ? materializeTranscriptHistory(
                 store.getSnapshot(),
@@ -3203,10 +3745,30 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 maxBlocks,
               )
             : undefined;
-        if (uiEvents.length > 0 && !historyMaterialization) {
+        if (admission && !admission.admitted) {
+          if (admission.impossible) {
+            // A page that alone exceeds the whole window (block count or
+            // byte budget) can never be admitted in any occupancy state.
+            // Surface a terminal pagination failure instead of a re-openable
+            // capacity latch — otherwise every later trim would re-offer the
+            // same doomed page, and everything older than it would stay
+            // unreachable with no terminal signal.
+            history.rejectedPage = undefined;
+            terminalFailure = true;
+            throw new Error(
+              'Earlier history page exceeds the transcript retention window',
+            );
+          }
           history.hasMore = false;
           history.loading = false;
           history.capacityReached = true;
+          // Remember the rejected page's footprint: the eviction re-open
+          // must only fire once enough capacity has been freed for THIS page
+          // to be admitted, or streaming trims churn fetch/reject/re-render.
+          history.rejectedPage = {
+            blocks: admission.pageBlocks,
+            bytes: admission.pageBytes,
+          };
           setTranscriptHistoryState({
             hasMore: false,
             loading: false,
@@ -3215,7 +3777,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           });
           return;
         }
+        const historyMaterialization = admission?.admitted
+          ? admission.materialization
+          : undefined;
         if (historyMaterialization) {
+          history.rejectedPage = undefined;
           store.reset(
             applyTranscriptHistory(store.getSnapshot(), historyMaterialization),
           );
@@ -3245,6 +3811,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           sessionRef.current !== activeSession ||
           transcriptHistoryRef.current !== history
         ) {
+          return;
+        }
+        if (paginationGenerationRef.current !== fetchPaginationGeneration) {
+          // A retention trim re-anchored — or the fail-closed branch dropped —
+          // the pagination anchor while this fetch was in flight. Restoring
+          // `hasMore` here would revive the load-older affordance in the
+          // anchor-less state the fail-closed branch just closed, and the next
+          // fetch (no cursor, no beforeRecordId) would default to the oldest
+          // page and corrupt the anchor. Leave the fail-closed state intact.
+          history.loading = false;
+          setTranscriptHistoryState({
+            hasMore: history.hasMore,
+            loading: false,
+            capacityReached: history.capacityReached,
+            paginationError: history.paginationError,
+          });
           return;
         }
         const retryable =
@@ -3918,11 +4500,16 @@ function getNumber(
 function bumpWorkspaceEventSignals(
   events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
+  workspaceCwd: string,
 ): void {
   let memory = 0;
   let agents = 0;
   let tools = 0;
   let settings = 0;
+  const skillMutations: Array<
+    NonNullable<DaemonWorkspaceEventSignals['lastSkillMutation']>
+  > = [];
+  const seenSkillMutationIds = new Set<string>();
   let mcp = 0;
   let extensions = 0;
   let artifacts = 0;
@@ -3944,7 +4531,14 @@ function bumpWorkspaceEventSignals(
         tools += 1;
         break;
       case 'workspace.settings.changed':
-        settings += 1;
+        if (event.mutation?.kind === 'skill_toggle') {
+          if (!seenSkillMutationIds.has(event.mutation.id)) {
+            seenSkillMutationIds.add(event.mutation.id);
+            skillMutations.push(event.mutation);
+          }
+        } else {
+          settings += 1;
+        }
         break;
       case 'workspace.mcp.budget_warning':
       case 'workspace.mcp.child_refused':
@@ -3993,22 +4587,61 @@ function bumpWorkspaceEventSignals(
       artifacts +
       init +
       auth ===
-    0
+      0 &&
+    skillMutations.length === 0
   )
     return;
 
-  setSignals((current) => ({
-    memoryVersion: current.memoryVersion + memory,
-    agentsVersion: current.agentsVersion + agents,
-    toolsVersion: current.toolsVersion + tools,
-    settingsVersion: current.settingsVersion + settings,
-    mcpVersion: current.mcpVersion + mcp,
-    extensionsVersion: current.extensionsVersion + extensions,
-    artifactsVersion: current.artifactsVersion + artifacts,
-    ...(lastExtensionChange ? { lastExtensionChange } : {}),
-    initVersion: current.initVersion + init,
-    authVersion: current.authVersion + auth,
-  }));
+  setSignals((current) => {
+    const existing = current.skillMutationsByCwd?.[workspaceCwd] ?? [];
+    const existingIds = new Set(existing.map((mutation) => mutation.id));
+    const newSkillMutations = skillMutations.filter(
+      (mutation) => !existingIds.has(mutation.id),
+    );
+    if (
+      memory +
+        agents +
+        tools +
+        settings +
+        mcp +
+        extensions +
+        artifacts +
+        init +
+        auth ===
+        0 &&
+      newSkillMutations.length === 0
+    ) {
+      return current;
+    }
+    return {
+      memoryVersion: current.memoryVersion + memory,
+      agentsVersion: current.agentsVersion + agents,
+      toolsVersion: current.toolsVersion + tools,
+      settingsVersion: current.settingsVersion + settings,
+      skillsVersion: current.skillsVersion + newSkillMutations.length,
+      mcpVersion: current.mcpVersion + mcp,
+      extensionsVersion: current.extensionsVersion + extensions,
+      artifactsVersion: current.artifactsVersion + artifacts,
+      ...(newSkillMutations.length > 0
+        ? { lastSkillMutation: newSkillMutations.at(-1) }
+        : current.lastSkillMutation
+          ? { lastSkillMutation: current.lastSkillMutation }
+          : {}),
+      ...(newSkillMutations.length > 0
+        ? {
+            skillMutationsByCwd: {
+              ...current.skillMutationsByCwd,
+              [workspaceCwd]: [...existing, ...newSkillMutations],
+            },
+          }
+        : current.skillMutationsByCwd
+          ? { skillMutationsByCwd: current.skillMutationsByCwd }
+          : {}),
+      ...(lastExtensionChange ? { lastExtensionChange } : {}),
+      initVersion: current.initVersion + init,
+      authVersion: current.authVersion + auth,
+    };
+  });
 }
 
 function isTerminalSessionHttpError(error: unknown): boolean {

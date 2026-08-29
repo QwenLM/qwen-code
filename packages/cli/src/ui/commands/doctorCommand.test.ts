@@ -8,14 +8,14 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { doctorCommand } from './doctorCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import * as doctorChecksModule from '../../utils/doctorChecks.js';
+import * as doctorChecksModule from './doctorChecks.js';
 import * as memoryDiagnosticsModule from '../../utils/memoryDiagnostics.js';
 import * as cpuProfilerModule from '../../utils/cpuProfiler.js';
 import { collectMemoryDiagnostics } from '@qwen-code/qwen-code-core';
 import type { Content } from '@google/genai';
 import type { DoctorCheckResult } from '../types.js';
 
-vi.mock('../../utils/doctorChecks.js');
+vi.mock('./doctorChecks.js');
 vi.mock('../../utils/memoryDiagnostics.js');
 vi.mock('../../utils/cpuProfiler.js');
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
@@ -821,7 +821,7 @@ describe('doctorCommand', () => {
             getSessionId: () => 'test-session',
             getCliVersion: () => '0.0.0',
             getTruncateToolOutputThreshold: () => 25_000,
-            getGeminiClient: () => ({
+            getLlmClient: () => ({
               getHistoryShallow: () => {
                 if (options.historyThrows) {
                   throw new Error('history unavailable');
@@ -1014,7 +1014,7 @@ describe('doctorCommand', () => {
             getSessionId: () => 'test-session',
             getCliVersion: () => '0.0.0',
             getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
-            getGeminiClient: () => ({
+            getLlmClient: () => ({
               getHistoryShallow: () => [],
             }),
             getToolRegistry: () => ({
@@ -1108,7 +1108,7 @@ describe('doctorCommand', () => {
           config: {
             getSessionId: () => 'test-session',
             getCliVersion: () => '0.0.0',
-            getGeminiClient: () => ({
+            getLlmClient: () => ({
               getHistoryShallow: () => history,
             }),
           },

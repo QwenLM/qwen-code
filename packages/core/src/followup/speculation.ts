@@ -6,7 +6,7 @@
  * Speculation Engine
  *
  * Speculatively executes the accepted suggestion before the user confirms,
- * using a forked GeminiChat with copy-on-write file isolation.
+ * using a forked LlmChat with copy-on-write file isolation.
  *
  * Flow:
  * 1. Suggestion shown → startSpeculation() fires
@@ -17,9 +17,9 @@
 
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
-import type { GeminiClient } from '../core/client.js';
+import type { LlmClient } from '../core/client.js';
 import type { ToolArtifact } from '../tools/tools.js';
-import { StreamEventType } from '../core/geminiChat.js';
+import { StreamEventType } from '../core/llm-chat.js';
 import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
@@ -35,18 +35,18 @@ import {
   createForkedChat,
   runForkedAgent,
   runWithForkedChatModel,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
 import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
-} from '../utils/tool-response-finalizer.js';
+} from '../tools/tool-response-finalizer.js';
 import {
   observeToolResultBoundary,
   toolResultBoundaryArtifact,
   toolResultPartDiagnosticValues,
-} from '../utils/tool-result-boundary-diagnostics.js';
+} from '../tools/tool-result-boundary-diagnostics.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -141,7 +141,7 @@ export async function startSpeculation(
   parentSignal?: AbortSignal,
   options?: { model?: string },
 ): Promise<SpeculationState> {
-  const cacheSafe = getCacheSafeParams();
+  const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error('CacheSafeParams not available for speculation');
   }
@@ -247,7 +247,7 @@ interface LoopResult {
 async function runSpeculativeLoop(
   config: Config,
   state: SpeculationState,
-  cacheSafe: import('../utils/forkedAgent.js').CacheSafeParams,
+  cacheSafe: import('../agents/forkedAgent.js').CacheSafeParams,
   modelOverride?: string,
 ): Promise<LoopResult> {
   const modelSelector =
@@ -326,6 +326,13 @@ async function runSpeculativeLoop(
         const name = fc.name ?? '';
         const id = fc.id;
         const args = (fc.args ?? {}) as Record<string, unknown>;
+        const toolRegistry = config.getToolRegistry();
+        // Permission-deferred calls must use the normal scheduler approval
+        // path; speculation deliberately bypasses that path.
+        if (toolRegistry.isPermissionDeferred?.(name)) {
+          hitBoundary = true;
+          break;
+        }
         const persistenceCallId =
           id ?? `${name}-${state.id}-${turn}-${responseEntries.length}`;
         let producerObserved = false;
@@ -370,7 +377,6 @@ async function runSpeculativeLoop(
         // Execute the tool directly (bypassing CoreToolScheduler)
         // SECURITY: Only reaches here for read-only tools or writes gated by approvalMode
         try {
-          const toolRegistry = config.getToolRegistry();
           const tool = await toolRegistry.ensureTool(name);
           if (!tool) {
             const responsePart: Part = {
@@ -586,7 +592,7 @@ async function runSpeculativeLoop(
  */
 export async function acceptSpeculation(
   state: SpeculationState,
-  geminiClient: GeminiClient,
+  llmClient: LlmClient,
 ): Promise<SpeculationResult> {
   const timeSavedMs = state.boundary
     ? Math.max(0, state.boundary.completedAt - state.startTime)
@@ -603,7 +609,7 @@ export async function acceptSpeculation(
 
     // Inject into main conversation
     for (const msg of cleanMessages) {
-      await geminiClient.addHistory(msg);
+      await llmClient.addHistory(msg);
     }
 
     state.status = 'completed';
@@ -718,7 +724,7 @@ The assistant responded: ${speculatedSummary || '(tool calls executed)'}
 
 ${SUGGESTION_PROMPT}`;
 
-    const cacheSafeParams = getCacheSafeParams();
+    const cacheSafeParams = getCacheSafeParams(config.getSessionId());
     if (!cacheSafeParams) return null;
     const model = modelOverride ?? config.getFastModel();
     const resolvedModel = model ?? cacheSafeParams.model;

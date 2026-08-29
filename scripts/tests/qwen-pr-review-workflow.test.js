@@ -5,7 +5,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -163,6 +163,11 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
           ATT: attemptFile,
           DUR: durationFile,
           PRM: promptFile,
+          // The step initializes PROXY_BIN before the retry loop and the
+          // agent invocation's decoy GITHUB_PATH/GITHUB_ENV wiring expands
+          // it; the extraction starts at OUTCOME='', past the init, so the
+          // harness must supply it (set -u would otherwise abort the loop).
+          PROXY_BIN: join(dir, 'proxy-bin'),
         },
       });
     } catch (e) {
@@ -1390,15 +1395,64 @@ describe('capture-tools step wiring', () => {
     );
   });
 
-  it('passes the assets-repo variable into the review step', () => {
-    // The CLI reads QWEN_REVIEW_ASSETS_REPO from the environment; the run:
-    // script never names it, so only this assertion sees a dropped or
-    // misspelled wiring line.
+  it('keeps review evidence branches out of the project repository', () => {
+    // The CLI reads QWEN_REVIEW_ASSETS_REPO from the environment. The workflow
+    // passes through only a dedicated external host, never this project repo.
     const doc = parse(workflow);
     expect(
       doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review').env
         .QWEN_REVIEW_ASSETS_REPO,
-    ).toBe('${{ vars.QWEN_REVIEW_ASSETS_REPO }}');
+    ).toBe(
+      "${{ vars.QWEN_REVIEW_ASSETS_REPO != github.repository && vars.QWEN_REVIEW_ASSETS_REPO || '' }}",
+    );
+  });
+
+  it('normalizes whitespace and case variants of the assets-repo designation', () => {
+    // The env-level guard compares the RAW variable, so padded or
+    // case-shifted self-references slip past it; the run body trims and
+    // re-checks before the CLI reads the value. Executed, not asserted as
+    // text: a dropped trim or a case-sensitive compare re-enables a
+    // self-targeting designation while every shape assertion stays green.
+    const run = runReviewStep();
+    const marker = '# Normalize the assets-repo designation';
+    const start = run.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    const endMarker = 'export QWEN_REVIEW_ASSETS_REPO';
+    const end = run.indexOf(endMarker, start);
+    expect(end).toBeGreaterThan(-1);
+    const fragment = run.slice(start, end + endMarker.length);
+
+    function normalize(value) {
+      return execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -euo pipefail',
+            'REPO="QwenLM/qwen-code"',
+            'QWEN_REVIEW_ASSETS_REPO="$DESIGNATION"',
+            fragment,
+            'printf "%s" "$QWEN_REVIEW_ASSETS_REPO"',
+          ].join('\n'),
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, DESIGNATION: value },
+        },
+      );
+    }
+
+    // Self-targeting in every disguise degrades to the empty designation.
+    expect(normalize('QwenLM/qwen-code')).toBe('');
+    expect(normalize(' QwenLM/qwen-code ')).toBe('');
+    expect(normalize('qwenlm/QWEN-CODE')).toBe('');
+    expect(normalize('\tQwenLM/qwen-code\n')).toBe('');
+    // An external host survives, trimmed.
+    expect(normalize('other-org/assets')).toBe('other-org/assets');
+    expect(normalize('  other-org/assets  ')).toBe('other-org/assets');
+    // Unset-ish values stay empty.
+    expect(normalize('')).toBe('');
+    expect(normalize('   ')).toBe('');
   });
 });
 
@@ -2534,6 +2588,55 @@ describe('bot comment markers', () => {
     expect(ackLine).toContain('[workflow run](%s)');
     expect(ackLine).toContain('"$RUN_URL"');
   });
+
+  describe('queued ack placement', () => {
+    // One ack per PR, but it has to land under the command that asked for
+    // it. The in-place PATCH kept the count at one and left the notice at
+    // the position of the FIRST request — comment #2 of 15 on #10259 — so
+    // a requester reading from the bottom saw nothing start. Delete the
+    // stale ack(s), then post: same count, right position. Nothing keys on
+    // the comment id (autofix filters and the bypass audit match the
+    // marker), so recreating is safe.
+    const ackRun = parse(workflow).jobs['ack-review-request'].steps[0].run;
+
+    it('deletes stale acks and posts a fresh one instead of editing in place', () => {
+      expect(ackRun).not.toContain('--method PATCH');
+      expect(ackRun).toContain(
+        '--method DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${STALE_ACK_ID}"',
+      );
+      // Every stale ack, not just the last: a PATCH-era thread can carry
+      // several after a failed delete, and `last` would leave the rest.
+      expect(ackRun).not.toMatch(/\|\s*last\s*\|/);
+      // The post is unconditional — no `else` branch that skips it when a
+      // stale ack existed.
+      const postIndex = ackRun.indexOf('gh pr comment "$PR_NUMBER"');
+      expect(postIndex).toBeGreaterThan(ackRun.indexOf('--method DELETE'));
+      expect(ackRun.slice(0, postIndex)).not.toMatch(/^\s*else\s*$/m);
+    });
+
+    it('reacts 👀 to the triggering comment, best effort', () => {
+      expect(ackRun).toContain('-f content=eyes');
+      expect(ackRun).toContain(
+        'repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions',
+      );
+      expect(ackRun).toContain(
+        'repos/${GITHUB_REPOSITORY}/pulls/comments/${COMMENT_ID}/reactions',
+      );
+      // A failed reaction must not abort the ack under `set -e`.
+      expect(ackRun).toMatch(/content=eyes[^\n]*\n\s*\|\| echo/);
+      expect(
+        parse(workflow).jobs['ack-review-request'].steps[0].env.COMMENT_ID,
+      ).toBe('${{ github.event.comment.id }}');
+    });
+
+    it('tells the requester the run is not a PR check', () => {
+      // A command-triggered run executes against the base branch, so its
+      // review-pr check never shows under the PR — the ack link is the only
+      // handle, and the copy has to say so or the requester keeps looking
+      // for a yellow dot.
+      expect(ackRun).toContain('not listed under the checks of this PR');
+    });
+  });
 });
 
 describe('qwen pr review concurrency routing', () => {
@@ -3008,10 +3111,13 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(
       inJobStep.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
     ).toHaveLength(4);
-    // Same invariant for the fallback job's body: the cross-job dedup
-    // matches `actions/runs/<id>)`, anchored on the markdown link's closing
-    // paren — a body that rendered the URL differently would escape it.
-    expect(step.run).toContain('See [workflow logs](${RUN_URL}).');
+    // Same invariant for the fallback job's TWO bodies (failure and
+    // cancelled): the cross-job dedup matches `actions/runs/<id>)`, anchored
+    // on the markdown link's closing paren — a body that rendered the URL
+    // differently would escape it.
+    expect(
+      step.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
+    ).toHaveLength(2);
     expect(inJobStep.run).toContain(
       `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
     );
@@ -3023,6 +3129,16 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
         `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
       ),
     ).toBeLessThan(inJobStep.run.indexOf('gh pr comment'));
+  });
+
+  it('wires the needs result the cancelled-body branch keys on (issue #10109)', () => {
+    // The step's bash runs under `set -u`, so dropping this env wiring
+    // fails the step loudly instead of silently reverting every cancelled
+    // run to the false "pipeline failed" body.
+    expect(step.env.REVIEW_PR_RESULT).toBe('${{ needs.review-pr.result }}');
+    expect(step.run).toContain(
+      'if [ "$REVIEW_PR_RESULT" = "cancelled" ]; then',
+    );
   });
 
   it('scopes the dedup to the authenticated bot login, resolved dynamically', () => {
@@ -3069,9 +3185,28 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(job.if).toContain("needs.review-pr.result == 'failure'");
     // A review-pr that dies to its own job-level timeout is auto-cancelled
     // (result 'cancelled', failure() false), which would open neither this
-    // gate nor the in-job step; a run-level cancel cancels this queued job
-    // too, so a live evaluation seeing 'cancelled' is the timeout case.
-    expect(job.if).toContain("needs.review-pr.result == 'cancelled'");
+    // gate nor the in-job step — but `always()` keeps this job alive through
+    // a RUN-level cancel, so a bare 'cancelled' clause posts a false "did
+    // not complete" from a concurrency-superseded run while its same-head
+    // twin is still reviewing (PR #9131, run 32558544379 — same head, so
+    // the in-step head-moved guard cannot catch it). The two cancels differ
+    // in `needs`: a timeout cancels review-pr ALONE, a run-level cancel
+    // sweeps the upstream chain too. Pin the full compound clause — the
+    // grouping included — so reverting either upstream conjunct fails here.
+    expect(job.if).toContain(
+      "(needs.review-pr.result == 'cancelled' &&\n" +
+        "  needs.authorize.result != 'cancelled' &&\n" +
+        "  needs.delay-automatic-review.result != 'cancelled') ||",
+    );
+    // ...and that clause must be the ONLY place the gate tests review-pr
+    // for 'cancelled': a merge-conflict resolution keeping both sides
+    // re-adds a bare `== 'cancelled'` disjunct beside the intact compound
+    // clause — in any rendering (bare, parenthesized, respaced) — and the
+    // gate opens on every cancelled review-pr again while the pin above
+    // stays green. Counting occurrences catches every rendering.
+    expect(
+      job.if.match(/needs\.review-pr\.result == 'cancelled'/g),
+    ).toHaveLength(1);
     expect(job.if).toContain("needs.authorize.result == 'failure'");
     expect(job.if).toContain("needs.review-config.result == 'failure'");
     expect(job.if).toContain(
@@ -3118,6 +3253,21 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(run).toContain('status=1');
     expect(run.trim()).toMatch(/exit "\$status"$/);
   });
+
+  // The repair path names its canary with GNU `mktemp -u` (print-only):
+  // BSD mktemp's `-u` still tries to create the file, so in the unwritable
+  // directory the repair case breaks it exits nonzero with an empty name
+  // and the post-repair touch can never succeed. The health probe only
+  // runs on Linux runners (the review pool is Linux-only, same as the
+  // realpath case above), so the defect cannot exist in production; probe
+  // the host, not the platform — a BSD host with GNU coreutils fronting
+  // PATH keeps the coverage.
+  const hasGnuMktemp =
+    spawnSync(
+      'mktemp',
+      ['-u', join(tmpdir(), 'qwen-no-such-dir', '.probe-XXXXXX')],
+      { stdio: 'ignore' },
+    ).status === 0;
 
   // Executed shape for the health probe: run the step's REAL bash against
   // a fake runner tree with a stub sudo, so the repair-vs-fail-fast
@@ -3191,13 +3341,16 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.stdout).not.toContain('repaired');
   });
 
-  it('repairs a single unwritable directory instead of failing fast', () => {
-    // Mutant control: a status=1 right after the first failed touch would
-    // abort this repairable runner (exit 1) — a false fail-fast.
-    const r = runHealthProbe({ breakDir: 'home' });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain('repaired write access');
-  });
+  it.skipIf(!hasGnuMktemp)(
+    'repairs a single unwritable directory instead of failing fast',
+    () => {
+      // Mutant control: a status=1 right after the first failed touch would
+      // abort this repairable runner (exit 1) — a false fail-fast.
+      const r = runHealthProbe({ breakDir: 'home' });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('repaired write access');
+    },
+  );
 
   it('fails fast when repair is impossible', () => {
     // Mutant control: dropping the post-repair re-probe would report this
@@ -3216,6 +3369,20 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.status).toBe(0);
   });
 
+  // The stub answers the guard's reviews and run-view lookups by running the
+  // caller's own `--jq` filter — that filter IS the thing under test — so
+  // these cases need jq on PATH. Windows runners have none, and a stub that
+  // silently produced nothing there would report the guard as broken rather
+  // than untested. Probed once, skipped honestly.
+  const hasJq = (() => {
+    try {
+      execFileSync('jq', ['--version'], { stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
   // Executed shape: run the step's REAL bash with a stub gh that logs every
   // call. The stub pre-applies the dedup filter's semantics to the fixture
   // (the filter's author scope is pinned by the text test above).
@@ -3227,6 +3394,10 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       runHead = '',
       prHead = '',
       useInJobStep = false,
+      reviews = '[]',
+      runCreated = '',
+      runStartedAttempt = '',
+      reviewPrResult = 'failure',
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
@@ -3253,13 +3424,35 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           '#!/bin/bash',
           'echo "gh $*" >> "$CALLS"',
           'cmd="$1"; sub="${2:-}"',
+          // Hoisted: both the run-view and the reviews branches run the
+          // caller's own --jq, so the extraction cannot live inside one of them.
+          'filter=""; prev=""',
+          'for a in "$@"; do if [ "$prev" = "--jq" ]; then filter="$a"; fi; prev="$a"; done',
           'if [ "$cmd" = "api" ] && [ "$sub" = "user" ]; then',
           '  [ "${SCENARIO:-}" = "lookup_fail" ] && exit 1',
           '  echo "qwen-code-ci-bot"; exit 0',
           'fi',
           'if [ "$cmd" = "run" ] && [ "$sub" = "view" ]; then',
+          '  case "$*" in',
+          '    *createdAt*|*startedAt*)',
+          '      [ "${SCENARIO:-}" = "runstart_fail" ] && exit 1',
+          // Real --jq over an object carrying BOTH fields, exactly as the
+          // reviews stub does: a `case` on "$*" answers a combined
+          // `--json createdAt,startedAt --jq .startedAt` from whichever
+          // substring branch comes first, so the discriminator between the
+          // two anchors would silently stop discriminating.
+          '      printf \'{"createdAt":"%s","startedAt":"%s"}\' "${RUN_CREATED:-}" "${RUN_STARTED_ATTEMPT:-}" | jq -r "$filter"; exit 0 ;;',
+          '  esac',
           '  [ "${SCENARIO:-}" = "runview_fail" ] && exit 1',
           '  echo "${RUN_HEAD:-}"; exit 0',
+          'fi',
+          // The reviews lookup runs the step's REAL --jq filter over the
+          // fixture: the guard under test IS that filter (author scope and
+          // submission time — no head clause, which `attributes by TIME, not
+          // by head` pins), so a stub that pre-applied it would pin nothing.
+          'if [ "$cmd" = "api" ] && [ "${sub#repos/}" != "$sub" ]; then',
+          '  [ "${SCENARIO:-}" = "reviews_fail" ] && exit 1',
+          '  printf "%s" "$REVIEWS_JSON" | jq -r "$filter"; exit 0',
           'fi',
           'if [ "$cmd" = "pr" ] && [ "$sub" = "view" ]; then',
           '  case "$*" in',
@@ -3268,13 +3461,17 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           '      cat "$COMMENTS_FILE"; exit 0 ;;',
           '    *state,headRefOid*)',
           '      [ "${SCENARIO:-}" = "state_fail" ] && exit 1',
-          '      printf "OPEN\\t%s\\n" "${PR_HEAD:-}"; exit 0 ;;',
-          '    *headRefOid*)',
-          '      [ "${SCENARIO:-}" = "prview_fail" ] && exit 1',
-          '      echo "${PR_HEAD:-}"; exit 0 ;;',
+          '      state=OPEN; [ "${SCENARIO:-}" = "pr_closed" ] && state=MERGED',
+          '      printf "%s\\t%s\\n" "$state" "${PR_HEAD:-}"; exit 0 ;;',
+          // Live again: the fallback job reverted to a state-only query when
+          // the guard stopped keying on the head, so this branch has a caller
+          // once more (the in-job step keeps the combined shape above).
           '    *state*)',
           '      [ "${SCENARIO:-}" = "state_fail" ] && exit 1',
           '      [ "${SCENARIO:-}" = "pr_closed" ] && echo "MERGED" || echo "OPEN"; exit 0 ;;',
+          '    *headRefOid*)',
+          '      [ "${SCENARIO:-}" = "prview_fail" ] && exit 1',
+          '      echo "${PR_HEAD:-}"; exit 0 ;;',
           '  esac',
           'fi',
           'if [ "$cmd" = "pr" ] && [ "$sub" = "comment" ]; then',
@@ -3291,7 +3488,18 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       try {
         stdout = execFileSync(
           'bash',
-          ['-c', useInJobStep ? inJobStep.run : step.run],
+          [
+            '-c',
+            // The runner substitutes `${{ vars.* }}` before bash ever sees the
+            // script; feeding the raw expression to bash is a `bad substitution`
+            // that skips the assignment and leaves the variable unset — the
+            // timeout body then compares against an empty string. Substituting
+            // here is what makes "the step's real bash" true.
+            (useInJobStep ? inJobStep.run : step.run).replace(
+              /\$\{\{ vars\.QWEN_REVIEW_MAX_TIMEOUT_MINUTES \}\}/g,
+              '180',
+            ),
+          ],
           {
             encoding: 'utf8',
             env: {
@@ -3314,6 +3522,10 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               CALLS: calls,
               COMMENTS_FILE: commentsFile,
               POSTED: posted,
+              REVIEWS_JSON: reviews,
+              RUN_CREATED: runCreated,
+              RUN_STARTED_ATTEMPT: runStartedAttempt,
+              REVIEW_PR_RESULT: reviewPrResult,
             },
           },
         );
@@ -3338,6 +3550,33 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.status).toBe(0);
     expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
     expect(r.posted).toContain('actions/runs/12345');
+  });
+
+  it('posts the cancellation body, not the failure one, for a cancelled review-pr', () => {
+    // Issue #10109: a cancelled review-pr reaches the gate two ways — its
+    // own job-level timeout, and a run/job cancel landing after the
+    // upstream chain finished (run 32875478404) — and for neither is
+    // "pipeline failed / retried automatically" true. Silence would regress
+    // the timeout flavor, so the cancelled case gets its own body.
+    const cancelled = runFallbackStep('default', {
+      reviewPrResult: 'cancelled',
+    });
+    expect(cancelled.status).toBe(0);
+    expect(cancelled.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    expect(cancelled.posted).toContain('cancelled');
+    // The claims the issue calls out must not ride a cancellation...
+    expect(cancelled.posted).not.toContain('did not complete successfully');
+    expect(cancelled.posted).not.toContain('The review pipeline failed');
+    expect(cancelled.posted).not.toContain(
+      'A transient error is retried automatically',
+    );
+    // ...while the `)`-anchored run URL the cross-job dedup matches and the
+    // retry instruction (the job-timeout flavor's reader needs it) stay.
+    expect(cancelled.posted).toContain('actions/runs/12345)');
+    expect(cancelled.posted).toContain('@qwen-code /review');
+    // The failure path keeps the original body.
+    const failed = runFallbackStep('default', { reviewPrResult: 'failure' });
+    expect(failed.posted).toContain('did not complete successfully');
   });
 
   it('dedupes on the marker plus this run URL', () => {
@@ -3419,7 +3658,12 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     });
     expect(r.status).toBe(0);
     expect(r.posted).not.toBe('');
-    expect(r.calls).not.toContain('run view');
+    // Pinned on the head lookup itself, not on `gh run view` as a whole:
+    // the already-posted guard below asks the same command for this run's
+    // createdAt on every event, and a blanket "no run view" assertion would
+    // read that as a head comparison it never makes.
+    expect(r.calls).not.toContain('headSha');
+    expect(r.calls).not.toContain('--json headRefOid');
   });
 
   it('degrades to POSTING when the head comparison lookups fail', () => {
@@ -3448,6 +3692,285 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     });
     expect(r.status).toBe(0);
     expect(r.posted).not.toBe('');
+  });
+
+  // A run can fail AFTER posting its review — the CLI exiting silently, a
+  // cleanup step dying — and both fallback bodies then announce a review
+  // sitting right above them as one that could not be posted, retry
+  // instruction attached. Measured on PR #9342: review posted 11:56:34Z,
+  // review-pr failed 12:00:53Z, the comment landed 12:01:00Z asking for a
+  // fresh ~3-hour review; the autofix takeover loop reads the same feed a
+  // human does. The guard is a FILTER (author scope and submission
+  // time), so these run the step's real bash over review fixtures.
+  // The run was CREATED at 09:08:38Z; a re-run of its failed job later moved
+  // run-level startedAt to 11:30:00Z. Attempt 1's review sits between them —
+  // the shape that separates the two anchors.
+  const RUN_CREATED = '2026-08-18T09:08:38Z';
+  const RUN_RESTARTED = '2026-08-18T11:30:00Z';
+  const AFTER = '2026-08-18T11:56:34Z';
+  const MID_RERUN = '2026-08-18T10:00:00Z';
+  const BEFORE = '2026-08-17T10:00:00Z';
+  const reviewFixture = (login, commit, submitted, body = null) =>
+    JSON.stringify([
+      {
+        id: 1,
+        user: { login },
+        commit_id: commit,
+        submitted_at: submitted,
+        body,
+      },
+    ]);
+
+  // The bot account posts more than this pipeline's reviews:
+  // finalize-release.yml approves release PRs under the same CI_BOT_PAT,
+  // qwen-triage-finalize.yml posts a deferred APPROVE under
+  // QWEN_CODE_BOT_TOKEN || CI_BOT_PAT, and the triage skill posts its own
+  // commit-pinned APPROVE through the reviews API. In-window approvals like
+  // these must not buy the silence that only THIS pipeline's own review
+  // earns.
+  const FOREIGN_APPROVAL_BODIES = [
+    'Automated second approval for the release version bump.',
+    'LGTM, looks ready to ship — CI landed green after the review. ✅',
+    'LGTM, looks ready to ship. ✅',
+  ];
+
+  // What the guard recognizes a review THIS pipeline composed by: every
+  // composed body carries the "via Qwen Code /review" attribution footer or
+  // the invisible qwen-review-ledger marker — at least one, never neither —
+  // and no foreign approval carries either. Matching on that evidence is how
+  // the guard stays closed to a producer set no exclusion list can finish.
+  const REVIEW_FOOTER = '_— qwen3.8-max via Qwen Code /review (v0.21.14)_';
+  const REVIEW_LEDGER = '<!-- qwen-review-ledger {"v":1,"round":2} -->';
+  const COMPOSED_REVIEW_BODIES = [
+    // Attribution on: the footer and the ledger marker both ride the body.
+    `No issues found. LGTM! ✅\n\n${REVIEW_FOOTER}\n\n${REVIEW_LEDGER}`,
+    // Attribution off: no footer, but the ledger marker still rides.
+    `No issues found. LGTM! ✅\n\n${REVIEW_LEDGER}`,
+    // Pre-ledger bundles posted the footer alone.
+    `No issues found. LGTM! ✅\n\n${REVIEW_FOOTER}`,
+  ];
+
+  for (const useInJobStep of [false, true]) {
+    const site = useInJobStep ? 'in-job step' : 'fallback job';
+
+    it.skipIf(!hasJq)(
+      `${site} stays silent when THIS run already posted its review`,
+      () => {
+        // Every shape compose-review can post must buy the silence: the
+        // guard attributes by the markers a composed body carries, so each
+        // marker alone — and both together — has to match.
+        for (const body of COMPOSED_REVIEW_BODIES) {
+          const r = runFallbackStep('default', {
+            useInJobStep,
+            prHead: 'HEADSHA1',
+            runCreated: RUN_CREATED,
+            runStartedAttempt: RUN_RESTARTED,
+            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER, body),
+          });
+          expect(r.status, body).toBe(0);
+          expect(r.posted, body).toBe('');
+          expect(r.summary, body).toContain(
+            'a bot review of this PR was submitted',
+          );
+        }
+      },
+    );
+
+    it.skipIf(!hasJq)(
+      `${site} still posts when no review can be attributed to this run`,
+      () => {
+        // Each clause alone must keep the fallback speaking, or a stale or
+        // foreign review buys silence on a genuinely dead pipeline: an earlier
+        // run's review (outside the window), another account's, an unsubmitted
+        // (PENDING) one, and none at all. The head is deliberately not a clause
+        // — see the attribute-by-TIME test below.
+        const cases = {
+          stale: reviewFixture(
+            'qwen-code-ci-bot',
+            'HEADSHA1',
+            BEFORE,
+            COMPOSED_REVIEW_BODIES[0],
+          ),
+          foreign: reviewFixture(
+            'someone-else',
+            'HEADSHA1',
+            AFTER,
+            COMPOSED_REVIEW_BODIES[0],
+          ),
+          pending: reviewFixture(
+            'qwen-code-ci-bot',
+            'HEADSHA1',
+            null,
+            COMPOSED_REVIEW_BODIES[0],
+          ),
+          none: '[]',
+        };
+        for (const [name, reviews] of Object.entries(cases)) {
+          const r = runFallbackStep('default', {
+            useInJobStep,
+            prHead: 'HEADSHA1',
+            runCreated: RUN_CREATED,
+            runStartedAttempt: RUN_RESTARTED,
+            reviews,
+          });
+          expect(r.posted, name).not.toBe('');
+        }
+      },
+    );
+
+    it.skipIf(!hasJq)(
+      `${site} still posts when the only in-window reviews are foreign approvals`,
+      () => {
+        // The guard's author + window clauses match ANY review the account
+        // posts, and the account also approves release PRs (finalize-release
+        // .yml), posts deferred triage approvals (qwen-triage-finalize.yml),
+        // and approves through the triage skill's reviews-API call. None of
+        // these bodies carries a composed-review marker, so none may silence
+        // the fallback while THIS pipeline's review is absent — the LGTM
+        // would mask a dead run.
+        for (const body of FOREIGN_APPROVAL_BODIES) {
+          const r = runFallbackStep('default', {
+            useInJobStep,
+            prHead: 'HEADSHA1',
+            runCreated: RUN_CREATED,
+            runStartedAttempt: RUN_RESTARTED,
+            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER, body),
+          });
+          expect(r.posted, body).not.toBe('');
+        }
+      },
+    );
+
+    it.skipIf(!hasJq)(
+      `${site} survives a job re-run: attempt 1's review still silences it`,
+      () => {
+        // Re-running a failed job keeps the run id but moves run-level
+        // startedAt to the re-executed attempt (measured: runs 32219268680 and
+        // 32218596441 report startedAt ~28 and ~9 minutes after createdAt).
+        // Anchored there, attempt 1's review reads as older than "this run",
+        // and a re-run that fails before posting contradicts it — the very
+        // shape this guard exists to stop. The stub answers createdAt and
+        // startedAt with DIFFERENT values, so this fails if the guard reads
+        // the wrong field.
+        const r = runFallbackStep('default', {
+          useInJobStep,
+          prHead: 'HEADSHA1',
+          runCreated: RUN_CREATED,
+          runStartedAttempt: RUN_RESTARTED,
+          reviews: reviewFixture(
+            'qwen-code-ci-bot',
+            'HEADSHA1',
+            MID_RERUN,
+            COMPOSED_REVIEW_BODIES[0],
+          ),
+        });
+        expect(r.status).toBe(0);
+        expect(r.posted).toBe('');
+        expect(r.summary).toContain('a bot review of this PR was submitted');
+      },
+    );
+
+    it.skipIf(!hasJq)(
+      `${site} says so in the log when the guard cannot run`,
+      () => {
+        // A lookup that DIED degrades to the false comment this change
+        // removes, and silence there leaves an oncall unable to tell it from
+        // "no review matched". Both unavailable paths announce themselves.
+        for (const scenario of ['runstart_fail', 'reviews_fail']) {
+          const r = runFallbackStep(scenario, {
+            useInJobStep,
+            prHead: 'HEADSHA1',
+            runCreated: RUN_CREATED,
+            runStartedAttempt: RUN_RESTARTED,
+            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+          });
+          expect(r.posted, scenario).not.toBe('');
+          expect(r.stdout, scenario).toContain(
+            '::warning::already-posted guard',
+          );
+          expect(r.summary, scenario).toContain(
+            'Already-posted guard unavailable',
+          );
+        }
+      },
+    );
+
+    it.skipIf(!hasJq)(
+      `${site} posts when this run's creation time is unavailable`,
+      () => {
+        // Without a start time there is no proof the review landed during THIS
+        // run, and posting wins over silence — the same call the head-moved
+        // guard makes when its comparison is unavailable.
+        const r = runFallbackStep('runstart_fail', {
+          useInJobStep,
+          prHead: 'HEADSHA1',
+          runCreated: RUN_CREATED,
+          runStartedAttempt: RUN_RESTARTED,
+          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+        });
+        expect(r.posted).not.toBe('');
+      },
+    );
+
+    it.skipIf(!hasJq)(
+      `${site} posts when the reviews lookup itself fails`,
+      () => {
+        // Same direction as every other lookup this step makes for a SKIP
+        // decision: a failed listing is never read as "a review exists".
+        const r = runFallbackStep('reviews_fail', {
+          useInJobStep,
+          prHead: 'HEADSHA1',
+          runCreated: RUN_CREATED,
+          runStartedAttempt: RUN_RESTARTED,
+          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+        });
+        expect(r.posted).not.toBe('');
+      },
+    );
+  }
+
+  it.skipIf(!hasJq)(
+    "attributes by TIME, not by head — a moved head cannot hide this run's review",
+    () => {
+      // The head is not a stable attribute of a run: a push moves the PR's head
+      // between the post and this step, and a re-run recomputes the reviewed
+      // head from a later attempt. Two revisions of this guard keyed on it and
+      // both re-opened the #9342 contradiction through one of those doors. What
+      // the guard proves now is narrower and stable — a bot review of this PR
+      // submitted while this run was alive — so a review on ANY head inside the
+      // window silences the comment.
+      for (const useInJobStep of [false, true]) {
+        const r = runFallbackStep('default', {
+          useInJobStep,
+          prHead: 'NEWSHA',
+          runCreated: RUN_CREATED,
+          runStartedAttempt: RUN_RESTARTED,
+          reviews: reviewFixture(
+            'qwen-code-ci-bot',
+            'OLDSHA',
+            AFTER,
+            COMPOSED_REVIEW_BODIES[0],
+          ),
+        });
+        expect(r.status, String(useInJobStep)).toBe(0);
+        expect(r.posted, String(useInJobStep)).toBe('');
+        expect(r.summary, String(useInJobStep)).toContain(
+          'a bot review of this PR was submitted after this run was created',
+        );
+      }
+    },
+  );
+
+  it('carries no cross-job head wiring to drift', () => {
+    // An earlier revision published review-pr's reviewed head as a job output
+    // and read it here. The guard no longer keys on the head at all, so the
+    // wiring is gone rather than left as an untested chain whose silent
+    // breakage would restore the fresh-head comparison.
+    expect(doc.jobs['review-pr'].outputs).toBeUndefined();
+    expect(step.env.REVIEWED_HEAD_SHA).toBeUndefined();
+    expect(step.run).not.toContain('REVIEWED_HEAD_SHA');
+    expect(inJobStep.run).not.toContain('commit_id ==');
+    expect(step.run).not.toContain('commit_id ==');
   });
 
   it('in-job step dedupes on a fallback comment this run already has', () => {

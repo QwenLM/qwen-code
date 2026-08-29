@@ -85,6 +85,7 @@ export default defineConfig(({ command }) => ({
     proxy: {
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
+      '/mcp-app-sandbox': { ...daemonProxy, bypass: undefined },
       // Daemon status report; scoped to the exact route the dashboard uses (a
       // bare `/daemon` prefix would proxy unrelated `/daemon/*` paths). Without
       // it the SPA fallback answers with index.html and the dialog fails JSON
@@ -117,6 +118,9 @@ export default defineConfig(({ command }) => ({
       // `client/voice/*` source modules (e.g. `/voice/voiceModels.ts`), which
       // vite must serve, and blanks the page.
       '/voice/stream': { ...daemonProxy, ws: true },
+      // Interactive terminal WebSocket (`/terminal`); `ws: true` forwards the
+      // HTTP upgrade to the daemon, same as `/voice/stream`.
+      '/terminal': { ...daemonProxy, ws: true },
     },
   },
 }));

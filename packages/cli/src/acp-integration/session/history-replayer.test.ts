@@ -18,6 +18,10 @@ import {
   HistoryReplayer,
   MISSING_TOOL_RESULT_MESSAGE,
 } from './history-replayer.js';
+import {
+  collectHistoryReplayUpdates,
+  createReplayCumulativeUsage,
+} from './history-replay-page.js';
 import type { SessionContext } from './types.js';
 import { ChatRecordingService } from '@qwen-code/qwen-code-core';
 import type {
@@ -400,6 +404,61 @@ describe('HistoryReplayer', () => {
         activeRecordId: record.uuid,
         activeRecordTimestamp: record.timestamp,
       });
+    });
+
+    it('does not fail a skipped ask_user_question dangling call', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      };
+
+      await replayer.replay([record], undefined, {
+        skipFinalizeCallIds: new Set(['call-auq']),
+      });
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+      ]);
+    });
+
+    it('keeps a dangling call in flight when finalizeDangling is false', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-inflight',
+                name: 'run_shell_command',
+                args: { command: 'sleep 10' },
+              },
+            },
+          ],
+        },
+      };
+
+      await replayer.replay([record], undefined, { finalizeDangling: false });
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+      ]);
+      expect(replayer.getPendingToolCalls()).toEqual([
+        expect.objectContaining({ callId: 'call-inflight' }),
+      ]);
     });
 
     it('should carry dangling function calls across replay pages', async () => {
@@ -1110,6 +1169,24 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).not.toHaveBeenCalled();
     });
 
+    it('skips session_model system records', async () => {
+      const systemRecord: ChatRecord = {
+        uuid: 'system-uuid',
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'session_model',
+        cwd: '/test',
+        version: '1.0.0',
+        systemPayload: { modelId: 'qwen3-coder-plus', authType: 'openai' },
+      };
+
+      await replayer.replay([systemRecord]);
+
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
     it('preserves slash-command provenance when replaying results', async () => {
       const systemRecord: ChatRecord = {
         uuid: 'system-uuid',
@@ -1487,5 +1564,80 @@ describe('HistoryReplayer', () => {
         assistantRecord.timestamp,
       );
     });
+  });
+});
+
+describe('collectHistoryReplayUpdates restore skip', () => {
+  const AUQ_ARGS = {
+    questions: [
+      {
+        question: 'Which approach?',
+        header: 'Approach',
+        options: [
+          { label: 'Polling', description: 'Poll the API' },
+          { label: 'Webhook', description: 'Use a webhook' },
+        ],
+      },
+    ],
+  };
+
+  const danglingRecord = (): ChatRecord => ({
+    uuid: 'assistant-auq',
+    parentUuid: 'user-uuid',
+    sessionId: 'test-session',
+    timestamp: new Date().toISOString(),
+    type: 'assistant',
+    cwd: '/test',
+    version: '1.0.0',
+    message: {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'call-auq',
+            name: 'ask_user_question',
+            args: AUQ_ARGS,
+          },
+        },
+      ],
+    },
+  });
+
+  it('skips finalize from the transcript tail when chat is not initialized', async () => {
+    const config = {
+      getRestoreAskUserQuestion: () => true,
+      getLlmClient: () => ({ isInitialized: () => false }),
+    } as unknown as Config;
+
+    const replay = await collectHistoryReplayUpdates({
+      sessionId: 'test-session',
+      config,
+      records: [danglingRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(replay.updates.map((update) => update.sessionUpdate)).toEqual([
+      'tool_call',
+    ]);
+  });
+
+  it('finalizes when restore skip is suppressed', async () => {
+    const config = {
+      getRestoreAskUserQuestion: () => true,
+      getLlmClient: () => ({ isInitialized: () => false }),
+    } as unknown as Config;
+
+    const replay = await collectHistoryReplayUpdates({
+      sessionId: 'test-session',
+      config,
+      records: [danglingRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      suppressRestoreAskUserQuestion: true,
+    });
+
+    expect(replay.updates.map((update) => update.sessionUpdate)).toEqual([
+      'tool_call',
+      'tool_call_update',
+    ]);
   });
 });

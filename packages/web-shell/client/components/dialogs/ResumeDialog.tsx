@@ -5,6 +5,7 @@ import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
+import { sessionMatchesGitQuery } from '../sidebar/sessionSearch';
 import { useScopedSessions } from '../../hooks/useScopedSessions';
 
 interface ResumeDialogProps {
@@ -43,7 +44,8 @@ export function ResumeDialog({
         const q = filterQuery.toLowerCase();
         return (
           (s.displayName || '').toLowerCase().includes(q) ||
-          s.sessionId.toLowerCase().includes(q)
+          s.sessionId.toLowerCase().includes(q) ||
+          sessionMatchesGitQuery(s, q)
         );
       })
     : sessions;

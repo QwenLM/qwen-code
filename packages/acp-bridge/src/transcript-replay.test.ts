@@ -24,6 +24,7 @@ const GOAL: GoalRecord = {
   evidenceCursor: { recordId: 'record-0' },
   turnCount: 4,
   activeTimeMs: 2000,
+  tokensUsed: 0,
   createdAt: 100,
   updatedAt: 200,
   lastReason: 'continuing',
@@ -89,14 +90,30 @@ describe('createTranscriptReplayMachine', () => {
     ).toEqual([]);
   });
 
+  it('replays user-initiated Goal controls as user messages', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-create', 'create', GOAL),
+    );
+
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: `/goal ${GOAL.objective}` },
+      _meta: {
+        source: 'goal_control',
+        'qwen.session.recordId': 'goal-create',
+      },
+    });
+  });
+
   it('projects goal_state through v2-first metadata', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
       goalStateRecord('goal-create', 'create', GOAL),
     );
 
-    expect(projected).toHaveLength(1);
-    expect(projected[0]?._meta).toMatchObject({
+    expect(projected).toHaveLength(2);
+    expect(projected[1]?._meta).toMatchObject({
       goalState: { v: 2, goal: GOAL, activity: 'idle' },
       goalStatus: { kind: 'set', condition: GOAL.objective },
       'qwen.session.recordId': 'goal-create',
@@ -115,7 +132,7 @@ describe('createTranscriptReplayMachine', () => {
       goalStateRecord('goal-clear', 'clear', null),
     );
 
-    expect(projected[0]?._meta).toMatchObject({
+    expect(projected[1]?._meta).toMatchObject({
       goalState: { v: 2, goal: null, activity: 'idle' },
       goalStatus: { kind: 'cleared', condition: GOAL.objective },
       'qwen.session.recordId': 'goal-clear',
@@ -182,12 +199,13 @@ describe('createTranscriptReplayMachine', () => {
 
     expect(
       updates(machine, goalStateRecord('goal-create', 'create', GOAL)),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
 
     const turned: GoalRecord = {
       ...GOAL,
       turnCount: GOAL.turnCount + 1,
       activeTimeMs: 2100,
+      tokensUsed: 0,
       updatedAt: 300,
     };
     expect(
@@ -210,6 +228,7 @@ describe('createTranscriptReplayMachine', () => {
         ],
       },
       activeTimeMs: 2500,
+      tokensUsed: 0,
       updatedAt: 400,
     };
     expect(
@@ -233,6 +252,7 @@ describe('createTranscriptReplayMachine', () => {
     const recommitted: GoalRecord = {
       ...rejected,
       activeTimeMs: 2900,
+      tokensUsed: 0,
       updatedAt: 500,
     };
     expect(
@@ -256,6 +276,7 @@ describe('createTranscriptReplayMachine', () => {
       ...GOAL,
       turnCount: GOAL.turnCount + 1,
       activeTimeMs: 2100,
+      tokensUsed: 0,
       updatedAt: 300,
     };
     updates(first, goalStateRecord('goal-turn', 'turn_finished', turned));
@@ -263,6 +284,7 @@ describe('createTranscriptReplayMachine', () => {
       ...turned,
       lastReason: 'More work remains',
       activeTimeMs: 2200,
+      tokensUsed: 0,
       updatedAt: 310,
     };
     expect(
@@ -282,6 +304,7 @@ describe('createTranscriptReplayMachine', () => {
     const recommitted: GoalRecord = {
       ...rejected,
       activeTimeMs: 2300,
+      tokensUsed: 0,
       updatedAt: 320,
     };
     expect(
@@ -302,12 +325,13 @@ describe('createTranscriptReplayMachine', () => {
 
     expect(
       updates(machine, goalStateRecord('goal-create', 'create', GOAL)),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
 
     const turnedOnce: GoalRecord = {
       ...GOAL,
       turnCount: GOAL.turnCount + 1,
       activeTimeMs: 2100,
+      tokensUsed: 0,
       updatedAt: 300,
     };
     expect(
@@ -321,6 +345,7 @@ describe('createTranscriptReplayMachine', () => {
       ...turnedOnce,
       lastReason: 'More work remains',
       activeTimeMs: 2200,
+      tokensUsed: 0,
       updatedAt: 310,
     };
     expect(
@@ -334,6 +359,7 @@ describe('createTranscriptReplayMachine', () => {
       ...rejectedOnce,
       turnCount: GOAL.turnCount + 2,
       activeTimeMs: 2300,
+      tokensUsed: 0,
       updatedAt: 320,
     };
     expect(
@@ -348,6 +374,7 @@ describe('createTranscriptReplayMachine', () => {
     const rejectedTwice: GoalRecord = {
       ...turnedTwice,
       activeTimeMs: 2400,
+      tokensUsed: 0,
       updatedAt: 330,
     };
     expect(
@@ -360,6 +387,7 @@ describe('createTranscriptReplayMachine', () => {
     const recommitted: GoalRecord = {
       ...rejectedTwice,
       activeTimeMs: 2500,
+      tokensUsed: 0,
       updatedAt: 340,
     };
     expect(
@@ -585,7 +613,7 @@ describe('createTranscriptReplayMachine', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
 
-    it('replays daemon media references without embedding base64', () => {
+    it('replays daemon attachment references without embedding base64', () => {
       const projected = updates(
         createTranscriptReplayMachine(),
         record('user-media-ref', 'user', {
@@ -593,10 +621,10 @@ describe('createTranscriptReplayMachine', () => {
           systemPayload: {
             displayText: 'describe this',
             hookContext: '',
-            mediaReferences: [
+            attachmentReferences: [
               {
                 type: 'image',
-                mediaId: 'media-1',
+                attachmentId: 'media-1',
                 mimeType: 'image/png',
                 size: 3,
               },
@@ -614,9 +642,52 @@ describe('createTranscriptReplayMachine', () => {
           sessionUpdate: 'user_message_chunk',
           content: {
             type: 'image',
-            mediaId: 'media-1',
+            attachmentId: 'media-1',
             mimeType: 'image/png',
             size: 3,
+          },
+        },
+      ]);
+    });
+
+    it('replays file attachment references for hydration and preview', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-file-ref', 'user', {
+          message: {
+            role: 'user',
+            parts: [{ text: 'check\n\n@attachment:///notes.json' }],
+          },
+          systemPayload: {
+            displayText: 'check\n\n@attachment:///notes.json',
+            hookContext: '',
+            attachmentReferences: [
+              {
+                type: 'resource',
+                attachmentId: 'notes.json',
+                mimeType: 'application/json',
+                size: 6,
+              },
+            ],
+          },
+        }),
+      );
+
+      expect(projected).toMatchObject([
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'text',
+            text: 'check',
+          },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'resource',
+            attachmentId: 'notes.json',
+            mimeType: 'application/json',
+            size: 6,
           },
         },
       ]);
@@ -905,7 +976,7 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
-  it('replays media references from a mid-turn user record', () => {
+  it('replays attachment references from a mid-turn user record', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
       record('mid-turn-media', 'user', {
@@ -913,10 +984,10 @@ describe('createTranscriptReplayMachine', () => {
         message: { role: 'user', parts: [{ text: 'inspect image' }] },
         systemPayload: {
           displayText: 'inspect image',
-          mediaReferences: [
+          attachmentReferences: [
             {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 3,
             },
@@ -938,7 +1009,7 @@ describe('createTranscriptReplayMachine', () => {
         sessionUpdate: 'user_message_chunk',
         content: {
           type: 'image',
-          mediaId: 'media-1',
+          attachmentId: 'media-1',
           mimeType: 'image/png',
           size: 3,
         },
@@ -961,10 +1032,10 @@ describe('createTranscriptReplayMachine', () => {
         },
         systemPayload: {
           displayText: '',
-          mediaReferences: [
+          attachmentReferences: [
             {
               type: 'image',
-              mediaId: 'media-only',
+              attachmentId: 'media-only',
               mimeType: 'image/png',
               size: 3,
             },
@@ -978,7 +1049,7 @@ describe('createTranscriptReplayMachine', () => {
         sessionUpdate: 'user_message_chunk',
         content: {
           type: 'image',
-          mediaId: 'media-only',
+          attachmentId: 'media-only',
           mimeType: 'image/png',
           size: 3,
         },
@@ -1077,6 +1148,93 @@ describe('createTranscriptReplayMachine', () => {
       }),
     );
     expect([...machine.finalize()]).toEqual([]);
+  });
+
+  it('skips finalize for selected ask_user_question call ids', () => {
+    const machine = createTranscriptReplayMachine({
+      skipFinalizeCallIds: new Set(['call-auq']),
+    });
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+            {
+              functionCall: {
+                id: 'call-bash',
+                name: 'run_shell_command',
+                args: { command: 'ls' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    const finalized = [...machine.finalize()].map((item) => item.update);
+    expect(finalized).toHaveLength(1);
+    expect(finalized[0]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-bash',
+      status: 'failed',
+    });
+    expect(machine.snapshot().pendingToolCalls).toEqual([
+      expect.objectContaining({ callId: 'call-auq' }),
+    ]);
+  });
+
+  it('matches the skip set against raw transcript ids after dedup renames', () => {
+    const machine = createTranscriptReplayMachine({
+      skipFinalizeCallIds: new Set(['call-auq']),
+    });
+    // Two dangling calls with the SAME transcript id: the second is renamed
+    // to `call-auq:2`, but the skip set (derived from chat history) holds
+    // the raw id, so both must stay pending.
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      }),
+    );
+    updates(
+      machine,
+      record('assistant-2', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    expect([...machine.finalize()]).toEqual([]);
+    expect(machine.snapshot().pendingToolCalls).toHaveLength(2);
   });
 
   it('correlates an id-less result only to one same-name pending call', () => {
