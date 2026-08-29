@@ -5516,7 +5516,6 @@ export const MessageList = memo(
         hasOlderHistory,
         generateContent,
         headerOffset,
-        hasOlderHistory,
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
