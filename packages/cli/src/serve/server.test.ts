@@ -70,6 +70,7 @@ import {
   SERVE_CAPABILITY_REGISTRY,
   type ServeProtocolVersion,
 } from './capabilities.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import type {
   CancelNotification,
   PromptRequest,
@@ -779,6 +780,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_display_name',
   'scratch_workspace_registration',
   'workspace_runtime_removal',
+  'native_directory_picker',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
   'workspace_qualified_memory',
@@ -3248,6 +3250,24 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'native_directory_picker') {
+          expect(predicate({ nativeDirectoryPickerAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({ nativeDirectoryPickerAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              nativeDirectoryPickerAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_trust_hot_reload') {
           expect(predicate({ workspaceTrustHotReloadAvailable: true })).toBe(
             true,
@@ -4187,6 +4207,9 @@ describe('createServeApp', () => {
             sessionGenerationAvailable: true,
             workspaceGenerationAvailable: true,
             acpHttpEnabled: true,
+            // Mirror the server.ts probe so the expectation matches on both
+            // GUI and headless hosts.
+            nativeDirectoryPickerAvailable: isNativeDirectoryPickerAvailable(),
           }),
         );
         expect(res.body.modelServices).toEqual([]);
@@ -4198,6 +4221,30 @@ describe('createServeApp', () => {
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
       }
+    });
+
+    it('forwards the native directory picker probe result to capabilities', async () => {
+      // M5 witness (#9406): the envelope mirror above calls the same probe
+      // as the product path, so on a headless host both sides say "tag
+      // absent" even when server.ts stops wiring the flag. Inject the probe
+      // result instead so the wiring is assertable on every host.
+      const enabled = await request(
+        createServeApp(baseOpts, undefined, {
+          nativeDirectoryPickerAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(enabled.body.features).toContain('native_directory_picker');
+
+      const disabled = await request(
+        createServeApp(baseOpts, undefined, {
+          nativeDirectoryPickerAvailable: false,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(disabled.body.features).not.toContain('native_directory_picker');
     });
 
     it('omits artifact persistence when the durable sink is unavailable', async () => {
