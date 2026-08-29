@@ -81,6 +81,28 @@ function resolvePackageVersion(): string {
 }
 
 /**
+ * The published package carries an exact copy beside the compiled server. The
+ * source-tree fallback keeps tests and direct TypeScript execution tied to the
+ * same canonical bundled skill instead of maintaining a second instruction.
+ */
+function resolveComputerUseInstructions(): string {
+  for (const candidate of [
+    new URL('./computer-use-skill.md', import.meta.url),
+    new URL(
+      '../../core/src/skills/bundled/computer-use/SKILL.md',
+      import.meta.url,
+    ),
+  ]) {
+    try {
+      return readFileSync(candidate, 'utf8');
+    } catch {
+      // Try the other supported layout.
+    }
+  }
+  throw new Error('the canonical Computer Use skill is unavailable');
+}
+
+/**
  * Builds an McpServer exposing the three node_repl tools backed by a single
  * shared kernel manager. Call `dispose()` on the returned handle (or close the
  * server) to tear down the kernel.
@@ -97,10 +119,13 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
     readableRoots: context.readableRoots,
   });
 
-  const server = new McpServer({
-    name: 'node-repl',
-    version: resolvePackageVersion(),
-  });
+  const server = new McpServer(
+    {
+      name: 'node-repl',
+      version: resolvePackageVersion(),
+    },
+    { instructions: resolveComputerUseInstructions() },
+  );
 
   server.registerTool(
     'node_repl',

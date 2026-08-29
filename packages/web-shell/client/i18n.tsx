@@ -54,6 +54,20 @@ const EN: Messages = {
   'branchPicker.createdBranch': (v) => `Created branch ${v?.branch ?? ''}`,
   'branchPicker.pushSuccess': 'Pushed successfully',
   'branchPicker.pullSuccess': 'Updated successfully',
+  'branchPicker.hint.upToDate': 'Up to date',
+  'branchPicker.hint.noUpstream': 'No upstream',
+  'branchPicker.hint.upstreamGone': 'Upstream gone',
+  'branchPicker.hint.behindDirty': (v) =>
+    `↓${v?.count ?? 0} · uncommitted changes`,
+  'branchPicker.hint.setsUpstream': 'Sets upstream on push',
+  'branchPicker.hint.aheadBehind': (v) =>
+    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · update first`,
+  'branchPicker.hint.nothingToPush': 'Nothing to push',
+  'branchPicker.hint.noChanges': 'No changes',
+  'branchPicker.hint.changes': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'change' : 'changes'}`,
+  'branchPicker.hint.changesUntracked': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'change' : 'changes'} (${v?.untracked ?? 0} untracked)`,
   'gitCommit.title': 'Commit',
   'gitCommit.messagePlaceholder': 'Commit message (⌘/Ctrl+Enter to commit)',
   'gitCommit.generating': 'Generating commit message…',
@@ -559,6 +573,21 @@ const EN: Messages = {
   'composer.dropChoice.upload': 'Upload to workspace',
   'composer.dropChoice.reference': 'Attach to message',
   'composer.dropChoice.moreFiles': (v) => `and ${v?.count ?? 0} more files`,
+  'composerAdd.trigger': 'Add to message',
+  'composerAdd.emptyState': 'No add actions are available here',
+  'composerAdd.noResults': 'No results',
+  'composerAdd.loadError': 'Failed to load results',
+  'composerAdd.unavailable': 'Unavailable',
+  'composerAdd.file.label': 'Add file',
+  'composerAdd.file.attachDisabled': 'Message attachments are unavailable',
+  'composerAdd.file.uploadDisabled': 'Workspace upload is unavailable',
+  'composerAdd.referenceFile.label': 'Reference file',
+  'composerAdd.referenceFile.searchPlaceholder': 'Search workspace files',
+  'composerAdd.extensions.label': 'Extensions',
+  'composerAdd.extensions.empty': 'No extensions are enabled',
+  'composerAdd.mcp.label': 'MCP',
+  'composerAdd.mcp.empty': 'No MCP servers are available',
+  'composerAdd.skills.label': 'Skills',
   'at.category.mcpResources': 'MCP resources',
   'at.category.mcpResources.description': 'Reference MCP server resources',
   'at.menu': 'Reference menu',
@@ -584,7 +613,7 @@ const EN: Messages = {
   'common.previous': 'previous',
   'common.expand': 'Expand',
   'common.collapse': 'Collapse',
-  'common.refresh': 'refresh',
+  'common.refresh': 'Refresh',
   'common.search': 'Search',
   'common.valid': 'valid',
   'common.clients': (v) => `${v?.count ?? 0} clients`,
@@ -1254,6 +1283,13 @@ const EN: Messages = {
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
+  'terminal.title': 'Terminal',
+  'terminal.open': 'Open a terminal',
+  'terminal.notice.exited': (v) =>
+    `Process exited with code ${v?.exitCode ?? '?'}`,
+  'terminal.notice.error': (v) => `Error: ${v?.message ?? ''}`,
+  'terminal.notice.unknownError': 'Unknown error',
+  'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -1382,6 +1418,8 @@ const EN: Messages = {
   'sidebar.unarchive': 'Restore',
   'sidebar.moreActions': 'More actions',
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
+  'sidebar.archiveRunningDisabled':
+    'A running session cannot be archived; archiving would end its turn',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.archivedEmpty': 'No archived sessions.',
   'sidebar.archiveFailed': 'Failed to archive session',
@@ -1398,10 +1436,14 @@ const EN: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.waitingForApproval': 'Waiting for approval',
+  'sidebar.waitingForApprovalShort': 'Approval',
   'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
+  'sidebar.sessionPrStateMerged': 'Merged',
+  'sidebar.sessionPrStateClosed': 'Closed',
   'sidebar.userInputNeeded': 'User input needed',
+  'sidebar.userInputNeededShort': 'Input',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
   'sidebar.unpin': 'Unpin',
@@ -2386,6 +2428,11 @@ const EN: Messages = {
   'skills.notToggleable': 'This skill cannot be enabled or disabled.',
   'skills.run': 'Reference skill',
   'skills.search': 'Search skills…',
+  'skills.settingUpdated': 'Workspace setting updated.',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace setting updated. Effective Skill availability did not change.',
+  'skills.settingUnchanged':
+    'Skill already has the requested workspace setting; no setting was changed.',
   'skills.status': 'Status',
   'skills.status.disabled': 'disabled',
   'skills.status.enabled': 'enabled',
@@ -2656,11 +2703,11 @@ const EN: Messages = {
   'toolGroup.summary.ranAgents': (v) =>
     `Ran ${v?.count ?? 0} agent${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.editedFiles': (v) =>
-    `Edited ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
+    `Edited files ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.ranCommands': (v) =>
     `Ran ${v?.count ?? 0} command${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.readFiles': (v) =>
-    `Read ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
+    `Read files ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.searched': (v) =>
     `Searched ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.updatedTodos': (v) =>
@@ -2936,6 +2983,9 @@ const EN: Messages = {
     'Messages in the same group or topic share one conversation; best for collaboration.',
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
+  'channels.editor.field.shared.multiSession': 'Named tasks',
+  'channels.editor.field.shared.multiSession.description':
+    'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
   'channels.editor.policy.pairing.title': 'Pairing',
   'channels.editor.policy.pairing.description':
     'People receive a pairing code and can chat after you approve them.',
@@ -3042,6 +3092,10 @@ const EN: Messages = {
   'settings.localControl.maySleep': 'This Mac may sleep',
   'settings.localControl.urlRedacted':
     'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
+  'localControl.open': 'Mobile access',
+  'localControl.disabledHint':
+    'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
+  'localControl.openSettings': 'Open Settings',
   'settings.models.title': 'Models',
   'settings.models.add': '+ Add Model',
   'settings.models.setCurrent': 'Set current',
@@ -3119,6 +3173,18 @@ const ZH: Messages = {
   'branchPicker.createdBranch': (v) => `已创建分支 ${v?.branch ?? ''}`,
   'branchPicker.pushSuccess': '推送成功',
   'branchPicker.pullSuccess': '更新成功',
+  'branchPicker.hint.upToDate': '已是最新',
+  'branchPicker.hint.noUpstream': '无上游分支',
+  'branchPicker.hint.upstreamGone': '上游分支已不存在',
+  'branchPicker.hint.behindDirty': (v) => `↓${v?.count ?? 0} · 有未提交更改`,
+  'branchPicker.hint.setsUpstream': '推送时设置上游',
+  'branchPicker.hint.aheadBehind': (v) =>
+    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · 请先更新`,
+  'branchPicker.hint.nothingToPush': '无待推送',
+  'branchPicker.hint.noChanges': '无更改',
+  'branchPicker.hint.changes': (v) => `${v?.count ?? 0} 处更改`,
+  'branchPicker.hint.changesUntracked': (v) =>
+    `${v?.count ?? 0} 处更改（${v?.untracked ?? 0} 未跟踪）`,
   'gitCommit.title': '提交',
   'gitCommit.messagePlaceholder': '提交信息（⌘/Ctrl+Enter 提交）',
   'gitCommit.generating': '正在生成提交信息…',
@@ -3668,6 +3734,21 @@ const ZH: Messages = {
   'composer.dropChoice.upload': '上传到工作区',
   'composer.dropChoice.reference': '添加为附件',
   'composer.dropChoice.moreFiles': (v) => `另有 ${v?.count ?? 0} 个文件`,
+  'composerAdd.trigger': '添加到消息',
+  'composerAdd.emptyState': '此处没有可用的添加操作',
+  'composerAdd.noResults': '没有结果',
+  'composerAdd.loadError': '加载失败',
+  'composerAdd.unavailable': '不可用',
+  'composerAdd.file.label': '添加文件',
+  'composerAdd.file.attachDisabled': '当前无法添加消息附件',
+  'composerAdd.file.uploadDisabled': '当前工作区不可上传',
+  'composerAdd.referenceFile.label': '引用文件',
+  'composerAdd.referenceFile.searchPlaceholder': '搜索工作区文件',
+  'composerAdd.extensions.label': '扩展',
+  'composerAdd.extensions.empty': '没有已启用的扩展',
+  'composerAdd.mcp.label': 'MCP',
+  'composerAdd.mcp.empty': '没有可用的 MCP 服务',
+  'composerAdd.skills.label': '技能',
   'at.category.mcpResources': 'MCP 资源',
   'at.category.mcpResources.description': '引用 MCP server 资源',
   'at.menu': '引用菜单',
@@ -4315,6 +4396,12 @@ const ZH: Messages = {
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
+  'terminal.title': '终端',
+  'terminal.open': '打开终端',
+  'terminal.notice.exited': (v) => `进程已退出，退出码 ${v?.exitCode ?? '?'}`,
+  'terminal.notice.error': (v) => `错误：${v?.message ?? ''}`,
+  'terminal.notice.unknownError': '未知错误',
+  'terminal.notice.reconnecting': '连接已断开，正在重连…',
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -4433,6 +4520,8 @@ const ZH: Messages = {
   'sidebar.unarchive': '恢复',
   'sidebar.moreActions': '更多操作',
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
+  'sidebar.archiveRunningDisabled':
+    '不能归档运行中的会话，归档会终止其当前回合',
   'sidebar.archivedTitle': '已归档',
   'sidebar.archivedEmpty': '没有已归档的会话。',
   'sidebar.archiveFailed': '归档会话失败',
@@ -4449,10 +4538,14 @@ const ZH: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.waitingForApproval': '等待批准',
+  'sidebar.waitingForApprovalShort': '待批准',
   'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
+  'sidebar.sessionPrStateMerged': '已合入',
+  'sidebar.sessionPrStateClosed': '已关闭',
   'sidebar.userInputNeeded': '需要用户输入',
+  'sidebar.userInputNeededShort': '需输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
   'sidebar.unpin': '取消置顶',
@@ -5350,6 +5443,10 @@ const ZH: Messages = {
   'skills.notToggleable': '此 Skill 不支持启用或禁用。',
   'skills.run': '引用 skill',
   'skills.search': '搜索 Skills…',
+  'skills.settingUpdated': 'Workspace 设置已更新。',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace 设置已更新，Skill 的实际可用状态未改变。',
+  'skills.settingUnchanged': 'Skill 已处于请求的 Workspace 设置，无需更改。',
   'skills.status': '状态',
   'skills.status.disabled': '已禁用',
   'skills.status.enabled': '已启用',
@@ -5605,9 +5702,9 @@ const ZH: Messages = {
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.summary.ranAgents': (v) => `已运行 ${v?.count ?? 0} 个智能体`,
-  'toolGroup.summary.editedFiles': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
+  'toolGroup.summary.editedFiles': (v) => `已编辑文件 ${v?.count ?? 0} 次`,
   'toolGroup.summary.ranCommands': (v) => `已运行 ${v?.count ?? 0} 条命令`,
-  'toolGroup.summary.readFiles': (v) => `已读取 ${v?.count ?? 0} 个文件`,
+  'toolGroup.summary.readFiles': (v) => `已读取文件 ${v?.count ?? 0} 次`,
   'toolGroup.summary.searched': (v) => `已搜索 ${v?.count ?? 0} 次`,
   'toolGroup.summary.updatedTodos': (v) =>
     Number(v?.count ?? 0) > 1
@@ -5866,6 +5963,9 @@ const ZH: Messages = {
     '同一群聊或话题进入同一个对话，适合群内协作。',
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
+  'channels.editor.field.shared.multiSession': '命名任务',
+  'channels.editor.field.shared.multiSession.description':
+    '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
   'channels.editor.policy.pairing.title': '配对模式',
   'channels.editor.policy.pairing.description':
     '用户会收到配对码，经您批准后才能开始对话。',
@@ -5967,6 +6067,10 @@ const ZH: Messages = {
   'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
   'settings.localControl.urlRedacted':
     '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
+  'localControl.open': '手机访问',
+  'localControl.disabledHint':
+    '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
+  'localControl.openSettings': '打开设置',
   'settings.models.title': '模型',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',

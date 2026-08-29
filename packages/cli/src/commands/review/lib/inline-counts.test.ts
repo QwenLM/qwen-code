@@ -11,7 +11,12 @@ import {
   severityOf,
   stripSeverityPrefix,
   unmarkedComments,
+  readClaimHead,
 } from './inline-counts.js';
+import {
+  FINDING_BASELINES,
+  FINDING_DIRECTIONS,
+} from '@qwen-code/qwen-code-core';
 
 describe('stripSeverityPrefix — the attribution-off posted shape', () => {
   it('strips both markers, with the whitespace the counter tolerates', () => {
@@ -121,5 +126,41 @@ describe('severityOf — one acceptance set with the strip', () => {
   it('still refuses a body with no marker after the residue', () => {
     expect(severityOf({ body: '<!-- x -->prose' })).toBe(null);
     expect(unmarkedComments([{ body: '<!-- x -->prose' }])).toEqual([0]);
+  });
+});
+
+describe('readClaimHead — the claim head slot (#10291)', () => {
+  it('tokenises every axis word the core lists define, before or after the id', () => {
+    // Built from the core vocabulary, so a value added there cannot stop
+    // the head scan at an unknown bracket and hide the id behind it.
+    for (const word of [...FINDING_DIRECTIONS, ...FINDING_BASELINES]) {
+      expect(readClaimHead(`[${word}] R1-2: x`).id).toBe('R1-2');
+      expect(readClaimHead(`R1-2: [${word}] x`)).toMatchObject({
+        id: 'R1-2',
+        axes: [word],
+        title: 'x',
+        stripped: 'R1-2: x',
+      });
+    }
+    // An unknown bracket is where the slot ends: it is prose.
+    expect(readClaimHead('[new-direction] R7-2: title')).toMatchObject({
+      axes: [],
+      title: '[new-direction] R7-2: title',
+    });
+  });
+
+  it('reads the marking anywhere in the slot past the id, and only past an id', () => {
+    const between = readClaimHead(
+      'R3-2: [probe] (fix-induced) the fix opened a gap',
+    );
+    expect(between).toMatchObject({
+      id: 'R3-2',
+      fixInduced: true,
+      source: 'probe',
+      title: 'the fix opened a gap',
+      claim: '[probe] the fix opened a gap',
+    });
+    expect(readClaimHead('(fix-induced) no id here').fixInduced).toBe(false);
+    expect(readClaimHead('R3-2: (fix-induced) x').claim).toBe('x');
   });
 });

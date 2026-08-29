@@ -96,6 +96,29 @@ describe('mapReasoningControls', () => {
       efforts: [],
     });
   });
+
+  it('maps mandatory reasoning without inventing Thinking off', () => {
+    expect(
+      mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
+          _meta: {
+            'qwenCode/reasoning': {
+              defaultEffort: 'xhigh',
+              thinkingMandatory: true,
+            },
+          },
+        },
+      ]),
+    ).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+      canDisable: false,
+    });
+  });
 });
 
 describe('mapProviderStatus reasoning preview', () => {

@@ -23,7 +23,11 @@ export interface SessionPr {
   number: number;
   url: string;
   createdAt: string;
+  /** Snapshot at last write/refresh; refreshed by the daemon timer. */
+  state?: SessionPrState;
 }
+
+export type SessionPrState = 'open' | 'merged' | 'closed';
 
 /** Bound on the persisted PR list; oldest bindings are dropped beyond it. */
 export const SESSION_PR_LIST_LIMIT = 10;
@@ -61,7 +65,11 @@ function isValidSessionPr(value: unknown): value is SessionPr {
     // The url is interpolated into a stderr audit line by the bridge —
     // control characters would forge log lines.
     !hasControlCharacter(v['url']) &&
-    typeof v['createdAt'] === 'string'
+    typeof v['createdAt'] === 'string' &&
+    (v['state'] === undefined ||
+      v['state'] === 'open' ||
+      v['state'] === 'merged' ||
+      v['state'] === 'closed')
   );
 }
 
@@ -142,40 +150,138 @@ export function mergeSessionPrLists(
     .slice(-SESSION_PR_LIST_LIMIT);
 }
 
-// Serializes read-modify-write cycles per sidecar path: concurrent bindings
+// Serializes read-modify-write cycles per sidecar path: concurrent mutations
 // for the same session must not interleave (read [] → read [] → write [A] →
 // write [B] would silently drop A). A failed predecessor must not block
-// later bindings.
-const upsertQueue = new Map<string, Promise<unknown>>();
+// later mutations.
+const mutationQueue = new Map<string, Promise<unknown>>();
 
-/**
- * Insert or refresh a binding (matched by PR number) and persist the list,
- * keeping at most {@link SESSION_PR_LIST_LIMIT} latest entries. A re-bound
- * number moves to the end (latest) with a fresh createdAt.
- */
-export function upsertSessionPr(
+function enqueuePrMutation<T>(
   filePath: string,
-  pr: { number: number; url: string },
-): Promise<SessionPr[]> {
-  const run = async (): Promise<SessionPr[]> => {
-    const existing = (await readSessionPrs(filePath)) ?? [];
-    const rest = existing.filter((entry) => entry.number !== pr.number);
-    const next = [
-      ...rest,
-      { number: pr.number, url: pr.url, createdAt: new Date().toISOString() },
-    ].slice(-SESSION_PR_LIST_LIMIT);
-    await writeSessionPrs(filePath, next);
-    return next;
-  };
-  const previous = upsertQueue.get(filePath) ?? Promise.resolve();
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = mutationQueue.get(filePath) ?? Promise.resolve();
   const next = previous.catch(() => undefined).then(run);
-  upsertQueue.set(filePath, next);
+  mutationQueue.set(filePath, next);
   // The cleanup chain must absorb `next`'s rejection too — a derived
   // finally/catch promise would otherwise reject unhandled whenever the
   // queued write fails, even though every caller awaits `next` itself.
   const cleanup = (): void => {
-    if (upsertQueue.get(filePath) === next) upsertQueue.delete(filePath);
+    if (mutationQueue.get(filePath) === next) mutationQueue.delete(filePath);
   };
   void next.then(cleanup, cleanup);
   return next;
+}
+
+/**
+ * Canonical form of a binding url for same-target comparison: host/path
+ * case, trailing slashes, query, and fragment never change which PR a url
+ * names (GitHub hosts and repo paths are case-insensitive; query variants
+ * are cache-busters), while the repository path does — a same-numbered PR
+ * of a different repository is a different PR.
+ */
+export function canonicalSessionPrUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`
+      .toLowerCase()
+      .replace(/\/+$/, '');
+  } catch {
+    return url.toLowerCase().replace(/\/+$/, '');
+  }
+}
+
+/**
+ * Insert or refresh a binding (matched by PR number) and persist the list,
+ * keeping at most {@link SESSION_PR_LIST_LIMIT} latest entries. A re-bound
+ * number moves to the end (latest) with a fresh createdAt. An omitted
+ * `state` preserves the existing entry's state when the re-bind targets the
+ * same PR (same canonical url) — a different repository's same-numbered PR
+ * is a different PR and must not inherit its state.
+ */
+export function upsertSessionPr(
+  filePath: string,
+  pr: { number: number; url: string; state?: SessionPrState },
+): Promise<SessionPr[]> {
+  return enqueuePrMutation(filePath, async () => {
+    const existing = (await readSessionPrs(filePath)) ?? [];
+    const known = existing.find(
+      (entry) =>
+        entry.number === pr.number &&
+        canonicalSessionPrUrl(entry.url) === canonicalSessionPrUrl(pr.url),
+    );
+    const rest = existing.filter((entry) => entry.number !== pr.number);
+    const next = [
+      ...rest,
+      {
+        number: pr.number,
+        url: pr.url,
+        createdAt: new Date().toISOString(),
+        ...((pr.state ?? known?.state)
+          ? { state: (pr.state ?? known?.state) as SessionPrState }
+          : {}),
+      },
+    ].slice(-SESSION_PR_LIST_LIMIT);
+    await writeSessionPrs(filePath, next);
+    return next;
+  });
+}
+
+/**
+ * Rewrites bound PR states in place — order and createdAt are preserved, so
+ * a refresh sweep never reshuffles the badge's "latest" entry. A fetched
+ * state applies only when its url matches the entry's: the map is keyed by
+ * number, but a binding may point at any repository, and a same-numbered PR
+ * of a different repo is a different PR. Returns the number of entries
+ * rewritten; 0 when the sidecar is absent/invalid or nothing changed (no
+ * write then). `assertCanCommit` runs inside the mutation queue right
+ * before the irreversible write commit; a throw aborts the write.
+ */
+export function updateSessionPrStates(
+  filePath: string,
+  states: ReadonlyMap<number, { state: SessionPrState; url: string }>,
+  options: { assertCanCommit?: () => void } = {},
+): Promise<number> {
+  return enqueuePrMutation(filePath, async () => {
+    const existing = await readSessionPrs(filePath);
+    if (!existing) return 0;
+    let changed = 0;
+    const next = existing.map((entry) => {
+      const fetched = states.get(entry.number);
+      if (
+        fetched === undefined ||
+        canonicalSessionPrUrl(fetched.url) !==
+          canonicalSessionPrUrl(entry.url) ||
+        fetched.state === entry.state
+      ) {
+        return entry;
+      }
+      changed += 1;
+      return { ...entry, state: fetched.state };
+    });
+    if (changed === 0) return 0;
+    await writeSessionPrs(filePath, next, options);
+    return changed;
+  });
+}
+
+/**
+ * Replace the sidecar with a precomputed list atomically with respect to
+ * concurrent mutations: the planner runs inside the mutation queue against
+ * the freshest list, so a plan-then-write cycle cannot clobber a binding
+ * that lands between the caller's read and write. The planner returns the
+ * replacement list, or null to leave the file untouched. Resolves with the
+ * persisted list, or null when nothing changed.
+ */
+export function replaceSessionPrs(
+  filePath: string,
+  plan: (existing: SessionPr[]) => SessionPr[] | null,
+): Promise<SessionPr[] | null> {
+  return enqueuePrMutation(filePath, async () => {
+    const existing = (await readSessionPrs(filePath)) ?? [];
+    const next = plan(existing);
+    if (next === null) return null;
+    await writeSessionPrs(filePath, next);
+    return next;
+  });
 }

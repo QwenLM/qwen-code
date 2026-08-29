@@ -16,7 +16,7 @@ export const HEADLESS_YOLO_NO_SANDBOX_WARNING =
  * configured, we're already inside a sandbox, approval mode is not YOLO, or
  * the user explicitly suppressed the notice.
  *
- * The call site (gemini.tsx) is responsible for gating on
+ * The call site (llm.tsx) is responsible for gating on
  * `!config.isInteractive()` — this helper deliberately ignores interactivity
  * so it stays pure and unit-testable.
  *
@@ -36,7 +36,7 @@ export function getHeadlessYoloSafetyWarning(
   // `SANDBOX` is set by the sandbox transport itself: macOS seatbelt sets
   // it to `sandbox-exec`, Docker/Podman to the container name (e.g.
   // `qwen-code-sandbox`). Match the rest of the codebase
-  // (sandboxConfig.ts, gemini.tsx, Footer.tsx, prompts.ts, …) which all
+  // (sandboxConfig.ts, llm.tsx, Footer.tsx, prompts.ts, …) which all
   // treat any non-empty value as "inside a sandbox". A strict 1/true
   // check here misfires inside real sandboxes, where the helper would
   // wrongly emit a "no sandbox" warning despite the run being contained.
