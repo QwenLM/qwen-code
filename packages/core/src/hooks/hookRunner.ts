@@ -801,16 +801,20 @@ export class HookRunner {
         ...hookConfig.env,
       };
 
+      const useVerbatimArguments =
+        process.platform === 'win32' && shellConfig.shell === 'cmd';
       const child = spawn(
         shellConfig.executable,
-        [...shellConfig.argsPrefix, command],
+        [
+          ...shellConfig.argsPrefix,
+          useVerbatimArguments ? `"${command}"` : command,
+        ],
         {
           env,
           cwd: input.cwd,
           stdio: ['pipe', 'pipe', 'pipe'],
           shell: false,
-          windowsVerbatimArguments:
-            process.platform === 'win32' && shellConfig.shell === 'cmd',
+          windowsVerbatimArguments: useVerbatimArguments,
           // Own a process group so cancellation can signal the entire tree.
           detached: process.platform !== 'win32',
         },
@@ -1056,12 +1060,6 @@ export class HookRunner {
     shellType: ShellType,
   ): string {
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
-    // Bash already expands QWEN/GEMINI/CLAUDE_PROJECT_DIR from the child
-    // environment. Leave its command text untouched so placeholders in
-    // comments, quoted strings, and shell assignments retain native semantics.
-    if (shellType === 'bash') {
-      return command;
-    }
     const escapedCwd = escapeShellArg(input.cwd, shellType);
     return command.replace(
       /\$(?:QWEN|GEMINI|CLAUDE)_PROJECT_DIR(?![0-9A-Za-z_\p{L}\p{N}])/gu,

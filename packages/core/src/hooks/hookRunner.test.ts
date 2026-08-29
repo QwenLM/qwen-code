@@ -946,13 +946,13 @@ describe('HookRunner', () => {
       expect(command).not.toContain('$QWEN_PROJECT_DIR');
     });
 
-    it('leaves bash placeholders to the child environment', async () => {
+    it('escapes bash placeholders and preserves identifier boundaries', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
 
       const hookConfig: HookConfig = {
         type: HookType.Command,
-        command: '# note $QWEN_PROJECT_DIR\necho $QWEN_PROJECT_DIRS',
+        command: 'echo $QWEN_PROJECT_DIR $QWEN_PROJECT_DIRS',
         source: HooksConfigSource.Project,
         shell: 'bash',
       };
@@ -965,7 +965,7 @@ describe('HookRunner', () => {
 
       const spawnCall = mockSpawn.mock.calls[0];
       expect(spawnCall[1][spawnCall[1].length - 1]).toBe(
-        '# note $QWEN_PROJECT_DIR\necho $QWEN_PROJECT_DIRS',
+        'echo /test/project $QWEN_PROJECT_DIRS',
       );
     });
 
@@ -1063,6 +1063,7 @@ describe('HookRunner', () => {
         type: HookType.Command,
         command: 'echo hello',
         source: HooksConfigSource.Project,
+        shell: 'powershell',
       };
       const input = createMockInput({ cwd: '/test/project' });
 
