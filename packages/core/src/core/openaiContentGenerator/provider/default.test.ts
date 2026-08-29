@@ -37,6 +37,16 @@ vi.mock('openai', () => ({
   })),
 }));
 
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('../../../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
+
 vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
   buildRuntimeFetchOptions: vi.fn(),
 }));
@@ -447,6 +457,122 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(originalRequest).toEqual(originalRequestCopy);
       // Result should be a different object
       expect(result).not.toBe(originalRequest);
+    });
+
+    it('clamps a configured max effort to xhigh for a generic endpoint', () => {
+      const originalRequest = {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        reasoning: { effort: 'max' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(
+        originalRequest,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+    });
+
+    it('leaves an accepted effort tier untouched', () => {
+      const originalRequest = {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        reasoning: { effort: 'xhigh' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(
+        originalRequest,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+    });
+
+    it('keeps an unrecognized effort string as-is rather than rewriting it', () => {
+      const originalRequest = {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        reasoning: { effort: 'ludicrous' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(
+        originalRequest,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'ludicrous' });
+    });
+
+    it('warns once however many requests the same provider clamps', () => {
+      mockDebugLogger.warn.mockClear();
+      const req = {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        reasoning: { effort: 'max' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      provider.buildRequest(req, 'first');
+      provider.buildRequest(req, 'second');
+
+      expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('answers the ceiling for the request model, not the configured one', () => {
+      const result = provider.buildRequest(
+        {
+          model: 'some-other-model',
+          messages: [{ role: 'user', content: 'Hello' }],
+          reasoning: { effort: 'max' },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+    });
+
+    it('leaves a samplingParams reasoning object verbatim', () => {
+      // The pipeline hands samplingParams keys straight to the wire and skips
+      // the reasoning injection, so this object is the user's own value.
+      const providerWithSampling = new DefaultOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          samplingParams: { reasoning: { effort: 'max' } },
+        } as unknown as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = providerWithSampling.buildRequest(
+        {
+          model: 'gpt-5.4',
+          messages: [{ role: 'user', content: 'Hello' }],
+          reasoning: { effort: 'max' },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'max' });
+    });
+
+    it('lets an extra_body reasoning override ship verbatim', () => {
+      const providerWithOverride = new DefaultOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          extra_body: { reasoning: { effort: 'max' } },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = providerWithOverride.buildRequest(
+        {
+          model: 'gpt-5.4',
+          messages: [{ role: 'user', content: 'Hello' }],
+          reasoning: { effort: 'max' },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'max' });
     });
 
     it('should merge extra_body into the request', () => {

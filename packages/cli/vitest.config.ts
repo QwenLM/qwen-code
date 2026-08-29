@@ -11,6 +11,10 @@ import path from 'node:path';
 export default defineConfig({
   resolve: {
     alias: {
+      '@qwen-code/qwen-code-core/subSessionConstants': path.resolve(
+        __dirname,
+        '../core/src/tools/sub-session-constants.ts',
+      ),
       '@qwen-code/qwen-code-core/goalWire': path.resolve(
         __dirname,
         '../core/src/goals/goal-wire.ts',
@@ -85,6 +89,10 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/bridgeOptions.ts',
       ),
+      '@qwen-code/acp-bridge/promptLedger': path.resolve(
+        __dirname,
+        '../acp-bridge/src/prompt-ledger.ts',
+      ),
       '@qwen-code/acp-bridge/bridgeTypes': path.resolve(
         __dirname,
         '../acp-bridge/src/bridgeTypes.ts',
@@ -158,8 +166,29 @@ export default defineConfig({
       junit: 'junit.xml',
     },
     setupFiles: ['./test-setup.ts'],
+    // Fail fast with an actionable message when workspace dist/ output or
+    // generated files are missing (fresh clone, new worktree, deep clean).
+    // See scripts/vitest-global-setup.js and issue #9149.
+    // Resolved against this config file (not vitest's root/cwd) so the guard
+    // also loads when vitest is launched from elsewhere with --config.
+    globalSetup: path.resolve(
+      __dirname,
+      '../../scripts/vitest-global-setup.js',
+    ),
+    // The worker->main `onTaskUpdate` RPC runs on a 60s budget; under the
+    // resource pressure of the Windows/macOS runners a stall longer than that
+    // surfaces as an unhandled error and exits an all-green run red
+    // (observed deterministic for this suite on the Windows lane). Test
+    // failures still fail the run; only unhandled errors stop being fatal,
+    // and only off Linux — the ubuntu lane and Linux local runs keep the
+    // unhandled-error signal.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {
-      enabled: true,
+      // CI consumes coverage only from the ubuntu lane (the upload and the
+      // coverage comment both pin coverage-reports-*-ubuntu-latest), and the
+      // report generation adds end-of-run main-thread work on the smaller
+      // Windows/macOS runners; skip it there. Local runs keep coverage.
+      enabled: !process.env.CI || process.platform === 'linux',
       provider: 'v8',
       reportsDirectory: './coverage',
       include: ['src/**/*'],

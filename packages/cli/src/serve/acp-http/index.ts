@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
@@ -17,11 +16,20 @@ import {
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import {
+  singleTokenCredentials,
+  type ListenerScopedCredentials,
+} from '../local-control/credentials.js';
+import { listenerIdentityOfSocket } from '../local-control/listener-identity.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
-import { AcpDispatcher, type LiveSessionIsolation } from './dispatch.js';
+import {
+  AcpDispatcher,
+  type LegacyStandaloneSessionRestorer,
+  type LiveSessionIsolation,
+} from './dispatch.js';
 import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 import type {
   WorkspaceRegistry,
@@ -390,6 +398,13 @@ export interface MountAcpHttpOptions {
   /** Bearer token for WS auth (WS bypasses Express middleware). */
   token?: string;
   /**
+   * Listener-scoped credentials. Supersedes `token` when set: the LAN listener
+   * attached by Local Control accepts a different credential than the primary
+   * one, which a single token cannot express. Falls back to `token` so callers
+   * that predate Local Control keep working unchanged.
+   */
+  credentials?: ListenerScopedCredentials;
+  /**
    * Parsed `--allow-origin` allowlist. The WS CSRF check (CSWSH defence)
    * rejects non-loopback origins; origins in this allowlist are also accepted,
    * so a browser extension (`chrome-extension://<id>`) can open the reverse
@@ -472,6 +487,7 @@ export interface MountAcpHttpOptions {
     req: IncomingMessage,
   ) => void;
   liveSessionIsolation?: LiveSessionIsolation;
+  standaloneSessionService?: LegacyStandaloneSessionRestorer;
 }
 
 /**
@@ -482,6 +498,8 @@ export interface MountAcpHttpOptions {
  */
 export interface ExtraWsRoute {
   path: string;
+  /** The route resolves its own workspace lifecycle instead of using primary. */
+  bypassPrimaryDrain?: boolean;
   onConnection: (ws: WebSocket, req: IncomingMessage) => void;
 }
 
@@ -590,6 +608,12 @@ export interface AcpHttpHandle {
   disposeWorkspace(workspaceId: string): void;
   /** Attach HTTP server post-listen to enable WebSocket upgrade. */
   attachServer(server: import('node:http').Server): void;
+  /**
+   * Stop serving upgrades on `server` and close the sockets already upgraded
+   * off it. Used when Local Control's LAN listener goes away; the primary
+   * listener is detached by `dispose()` instead.
+   */
+  detachServer(server: import('node:http').Server): void;
 }
 
 function runtimeEffectiveEnv(
@@ -1355,6 +1379,9 @@ export function mountAcpHttp(
         sessionRuntimeBaseDir: rt.sessionRuntimeBaseDir,
         workspaceId: rt.workspaceId,
       }),
+      rt.provenance === 'live-conversation'
+        ? opts.standaloneSessionService
+        : undefined,
     );
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
@@ -1492,10 +1519,25 @@ export function mountAcpHttp(
   let upgradeListener:
     | ((req: IncomingMessage, socket: Duplex, head: Buffer) => void)
     | undefined;
-  let upgradeServer: import('node:http').Server | undefined;
+  // A Set, not a single server: while Local Control is on, the same app is
+  // served by both the primary listener and the LAN listener, and each needs
+  // its own `'upgrade'` registration. The `ExtraWsRoute` invariant is
+  // unchanged — still exactly ONE listener per server, and still this one.
+  const upgradeServers = new Set<import('node:http').Server>();
+  const upgradeCredentials =
+    opts.credentials ?? singleTokenCredentials(opts.token);
 
   function setupWebSocket(httpServer: import('node:http').Server): void {
-    if (disposed || wss) return;
+    if (disposed || upgradeServers.has(httpServer)) return;
+    if (wss) {
+      // The `WebSocketServer` is `noServer: true` and therefore server-
+      // agnostic, so a second listener reuses it rather than building a
+      // parallel one — which would give the LAN its own client set, its own
+      // `maxPayload`, and its own shutdown path to get wrong.
+      upgradeServers.add(httpServer);
+      httpServer.on('upgrade', upgradeListener!);
+      return;
+    }
     wss = new WebSocketServer({
       noServer: true,
       maxPayload: 10 * 1024 * 1024,
@@ -1515,10 +1557,7 @@ export function mountAcpHttp(
         return false;
       },
     });
-    upgradeServer = httpServer;
-    const expectedTokenHash = opts.token
-      ? createHash('sha256').update(opts.token).digest()
-      : undefined;
+    upgradeServers.add(httpServer);
 
     upgradeListener = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
       if (disposed) {
@@ -1573,14 +1612,30 @@ export function mountAcpHttp(
       }
 
       const fromLoopback = isLoopbackSocket(socket);
+      const upgradeListenerIdentity = listenerIdentityOfSocket(socket);
+      const host = (req.headers['host'] ?? '').toLowerCase();
 
       // Host allowlist: mirror REST surface's hostAllowlist middleware
       // (auth.ts:196). Prevents DNS-rebinding attacks where a malicious
       // domain resolves to 127.0.0.1 and the browser sends the
       // attacker's Host header. Match the full host:port string like
       // the REST middleware does; extract port from the socket.
-      if (fromLoopback) {
-        const host = (req.headers['host'] ?? '').toLowerCase();
+      if (upgradeListenerIdentity.kind === 'local-control') {
+        const authority = upgradeListenerIdentity.authority;
+        const browserHost =
+          upgradeListenerIdentity.origin === undefined
+            ? undefined
+            : new URL(upgradeListenerIdentity.origin).host.toLowerCase();
+        if (
+          authority === undefined ||
+          (host !== authority && host !== browserHost)
+        ) {
+          logReject(`host-not-allowed ${host || '(missing)'}`);
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+      } else if (fromLoopback) {
         const allowed = new Set([
           `localhost:${localPort}`,
           `127.0.0.1:${localPort}`,
@@ -1620,7 +1675,10 @@ export function mountAcpHttp(
           const isAllowlistedOrigin =
             opts.allowedOrigins !== undefined &&
             opts.allowedOrigins.origins.has(origin.toLowerCase());
-          if (!isLoopbackOrigin && !isAllowlistedOrigin) {
+          const isListenerOrigin =
+            upgradeListenerIdentity.kind === 'local-control' &&
+            upgradeListenerIdentity.origin === origin.toLowerCase();
+          if (!isLoopbackOrigin && !isAllowlistedOrigin && !isListenerOrigin) {
             logReject(`origin-not-allowed ${origin}`);
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
@@ -1636,19 +1694,20 @@ export function mountAcpHttp(
 
       // Auth: WS bypasses Express middleware. Same posture as REST:
       // loopback without token = allow; non-loopback/token-mismatch = reject.
-      if (opts.token) {
+      //
+      // Scoped to the listener the upgrade arrived on, exactly as the REST
+      // gate is: an upgrade reaching the LAN listener must carry the pairing
+      // credential, and the runtime token does not satisfy it. Without this
+      // the subprotocol path would be a way around the scoping that
+      // `bearerAuth` enforces for plain HTTP.
+      if (!upgradeCredentials.isOpen(upgradeListenerIdentity)) {
         // Accept the token from `Authorization` (non-browser clients) or the
         // `qwen-bearer.*` subprotocol (browsers, which can't set Authorization
         // on a WebSocket). Hash-compare in constant time, same posture as REST.
-        const credentials = extractUpgradeBearer(req);
-        const actual = credentials
-          ? createHash('sha256').update(credentials).digest()
-          : undefined;
+        const presented = extractUpgradeBearer(req);
         if (
-          !actual ||
-          !expectedTokenHash ||
-          actual.length !== expectedTokenHash.length ||
-          !timingSafeEqual(expectedTokenHash, actual)
+          !presented ||
+          !upgradeCredentials.verify(presented, upgradeListenerIdentity)
         ) {
           logReject('auth-mismatch');
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -1795,7 +1854,7 @@ export function mountAcpHttp(
         activeMount = resolvedMount;
       }
 
-      if (activeMount.draining) {
+      if (extraRoute?.bypassPrimaryDrain !== true && activeMount.draining) {
         logReject(`workspace-draining ${activeMount.routeLabel}`);
         socket.write(
           'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n\r\n',
@@ -2387,10 +2446,12 @@ export function mountAcpHttp(
     dispose: () => {
       if (disposed) return;
       disposed = true;
-      if (upgradeServer && upgradeListener) {
-        upgradeServer.removeListener('upgrade', upgradeListener);
+      if (upgradeListener) {
+        for (const server of upgradeServers) {
+          server.removeListener('upgrade', upgradeListener);
+        }
+        upgradeServers.clear();
         upgradeListener = undefined;
-        upgradeServer = undefined;
       }
       registry.dispose();
       opts.workspaceRememberLane.dispose();
@@ -2537,6 +2598,25 @@ export function mountAcpHttp(
     },
     attachServer(server: import('node:http').Server) {
       setupWebSocket(server);
+    },
+    detachServer(server: import('node:http').Server) {
+      if (!upgradeServers.delete(server)) return;
+      if (upgradeListener) server.removeListener('upgrade', upgradeListener);
+      // Closing the listener does not close sockets already upgraded off it.
+      // Local Control's disable must actually cut the phone off — leaving a
+      // live ACP socket open would mean the pairing token is revoked but the
+      // session it opened continues, which is the opposite of what the user
+      // asked for. 1001 "going away" is the honest code: the endpoint is
+      // disappearing, and clients treat it as non-retryable.
+      if (!wss) return;
+      for (const client of wss.clients) {
+        const clientSocket = (
+          client as unknown as { _socket?: { server?: unknown } }
+        )._socket;
+        if (clientSocket?.server === server) {
+          client.terminate();
+        }
+      }
     },
   };
 }

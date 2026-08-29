@@ -7,28 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildDiffPlan } from './diff-plan.js';
 import { buildPlanReport, stringifyPlanReport } from './report.js';
-
-/** A diff adding `n` lines to `path`, shaped so the planner can cut it. */
-function addFile(path: string, n: number): string {
-  const body: string[] = [];
-  while (body.length < n) {
-    body.push(`+function f${body.length}() {`);
-    for (let k = 0; k < 8 && body.length < n; k++) {
-      body.push(`+  const x = ${k};`);
-    }
-    body.push('+}');
-    body.push('+');
-  }
-  body.length = n;
-  return [
-    `diff --git a/${path} b/${path}`,
-    '--- /dev/null',
-    `+++ b/${path}`,
-    `@@ -0,0 +1,${n} @@`,
-    ...body,
-    '',
-  ].join('\n');
-}
+import { makeDiff } from './test-utils.js';
 
 /** A diff that edits an existing file: `ctx` context lines then `add` new ones. */
 function editFile(path: string, ctx: number, add: number): string {
@@ -73,7 +52,7 @@ describe('buildPlanReport', () => {
 
   it('treats a null resolver as "no tree to read", so nothing is heavy', () => {
     // `plan-diff` has a bare diff file and no ref. It must not guess.
-    const plan = buildDiffPlan(addFile('src/big.ts', 2000), 400);
+    const plan = buildDiffPlan(makeDiff('src/big.ts', 2000), 400);
     const report = buildPlanReport(plan, null, {});
     expect(report.files[0].fileLines).toBe(0);
     expect(report.files[0].preLines).toBe(0);
@@ -101,8 +80,25 @@ describe('buildPlanReport', () => {
     expect(report.files[0].heavy).toBe(false);
   });
 
+  it('carries the wrapper signal through — the 1e roster gate reads the report, not the diff', () => {
+    // All three capture commands spread `buildPlanReport`, so the field the
+    // diff parser computed rides into every plan the roster can read.
+    expect(
+      buildPlanReport(buildDiffPlan(editFile('src/a.ts', 3, 2), 400), null, {})
+        .wrapperSignal,
+    ).toBe(false);
+    expect(
+      buildPlanReport(
+        buildDiffPlan(makeDiff('src/caching-layer.ts', 20), 400),
+        null,
+        {},
+      ).wrapperSignal,
+    ).toBe(true);
+  });
+
   it('emits addedRanges only on heavy files', () => {
-    const diff = editFile('src/heavy.ts', 3, 900) + addFile('src/light.ts', 20);
+    const diff =
+      editFile('src/heavy.ts', 3, 900) + makeDiff('src/light.ts', 20);
     const report = buildPlanReport(
       buildDiffPlan(diff, 400),
       (p) => (p === 'src/heavy.ts' ? 6000 : 30),
@@ -151,7 +147,7 @@ describe('buildPlanReport', () => {
 
   it('withholds the diff range from files no invariant agent will read', () => {
     const report = buildPlanReport(
-      buildDiffPlan(addFile('src/a.ts', 20), 400),
+      buildDiffPlan(makeDiff('src/a.ts', 20), 400),
       () => 30,
       {},
     );
@@ -161,10 +157,10 @@ describe('buildPlanReport', () => {
 
   it('carries the per-kind topology counts through unchanged', () => {
     const diff =
-      addFile('src/a.ts', 10) +
-      addFile('src/a.test.ts', 20) +
-      addFile('docs/g.md', 30) +
-      addFile('package-lock.json', 40);
+      makeDiff('src/a.ts', 10) +
+      makeDiff('src/a.test.ts', 20) +
+      makeDiff('docs/g.md', 30) +
+      makeDiff('package-lock.json', 40);
     const plan = buildDiffPlan(diff, 400);
     const report = buildPlanReport(plan, () => 100, {});
     expect(report.srcDiffLines).toBe(plan.srcDiffLines);
@@ -177,7 +173,8 @@ describe('buildPlanReport', () => {
 
 describe('stringifyPlanReport', () => {
   it('round-trips: the collapsed text parses back to the same object', () => {
-    const diff = editFile('src/heavy.ts', 3, 900) + addFile('src/light.ts', 20);
+    const diff =
+      editFile('src/heavy.ts', 3, 900) + makeDiff('src/light.ts', 20);
     const report = buildPlanReport(
       buildDiffPlan(diff, 400),
       (p) => (p === 'src/heavy.ts' ? 6000 : 30),

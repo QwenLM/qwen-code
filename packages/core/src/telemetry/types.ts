@@ -209,7 +209,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     // placeholder constant so consumers still see the call happened —
     // duration, success, decision metrics are preserved — but the
     // payload itself doesn't ride along. The same constant is used by
-    // `redactStructuredOutputArgsForRecording` in `core/geminiChat.ts`
+    // `redactStructuredOutputArgsForRecording` in `core/llm-chat.ts`
     // for the on-disk JSONL surface so neither side can silently drift.
     this.function_args =
       call.request.name === ToolNames.STRUCTURED_OUTPUT
@@ -838,7 +838,7 @@ export class ProtocolTagSanitizedEvent implements BaseTelemetryEvent {
  * Phase 4b — HTTP-status retry telemetry. Emitted by `retryWithBackoff` (via
  * the `onRetry` callback opt-in) for HTTP 429 / 5xx retries at LLM call sites.
  *
- * Distinct from {@link ContentRetryEvent}, which is emitted by `geminiChat`'s
+ * Distinct from {@link ContentRetryEvent}, which is emitted by `llmChat`'s
  * for-loop for `InvalidStreamError` retries that use
  * `INVALID_STREAM_RETRY_CONFIG`, not `retryWithBackoff`. A single user prompt
  * may fire BOTH event types; sum across event types to count total retries per
@@ -1521,7 +1521,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
     | 'already_running'
     | 'queued'
     | 'memory_tool'
-    | 'memory_pressure';
+    | 'memory_pressure'
+    | 'session_mismatch';
   patches_count: number;
   touched_topics: string;
   duration_ms: number;
@@ -1533,7 +1534,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
       | 'already_running'
       | 'queued'
       | 'memory_tool'
-      | 'memory_pressure';
+      | 'memory_pressure'
+      | 'session_mismatch';
     patches_count: number;
     touched_topics: string[];
     duration_ms: number;
@@ -1604,6 +1606,15 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
   }
 }
 
+/**
+ * Delivery stage, orthogonal to `strategy`. `phase` says *when* a result
+ * reached the model — `fast` is the deterministic result injected on the
+ * initial turn when the model selector had not settled inside the initial
+ * budget, `refined` is the model-selected result. `strategy` separately says
+ * *how* the documents were chosen. Both dimensions are needed: a `fast`
+ * delivery is always `heuristic`, but a `refined` delivery may be `model` or,
+ * when the selector failed, `heuristic`.
+ */
 export type MemoryRecallDeliveryPhase = 'fast' | 'refined';
 export type MemoryRecallDeliveryPoint = 'initial' | 'tool_result' | 'discarded';
 export type MemoryRecallDiscardReason =
@@ -1612,7 +1623,9 @@ export type MemoryRecallDiscardReason =
   | 'reset'
   | 'abort'
   | 'shutdown'
-  | 'no_relevant_results';
+  | 'no_relevant_results'
+  /** Every document the refined result selected was already delivered by the fast phase. */
+  | 'already_delivered';
 
 export class MemoryRecallDeliveryEvent implements BaseTelemetryEvent {
   'event.name': 'qwen-code.memory.recall.delivery';

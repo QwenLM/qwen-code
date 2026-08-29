@@ -13,11 +13,12 @@ import {
   useSkills,
   useWorkspace,
   type DaemonWorkspaceSkillStatus,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import {
   filterSkills,
   preserveSkillSelection,
+  skillExtensionLabel,
   type SkillLevelFilter,
   type SkillStatusFilter,
 } from './skills-manager-logic';
@@ -173,8 +174,9 @@ export function SkillsManagerPage({
     remove,
   } = useSkills({ autoLoad: true });
   const canToggleSkills =
-    workspace.capabilities?.features.includes('workspace_skill_toggle') ===
-    true;
+    workspace.capabilities?.features.includes(
+      'workspace_skill_settings_toggle',
+    ) === true;
   const canManageSkills =
     workspace.capabilities?.features.includes('workspace_skill_manage') ===
     true;
@@ -182,9 +184,6 @@ export function SkillsManagerPage({
   const [levelFilter, setLevelFilter] = useState<SkillLevelFilter>('all');
   const [statusFilter, setStatusFilter] =
     useState<SkillStatusFilter>('enabled');
-  const [statusOverrides, setStatusOverrides] = useState<
-    Record<string, 'ok' | 'disabled'>
-  >({});
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [busySkill, setBusySkill] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
@@ -195,14 +194,7 @@ export function SkillsManagerPage({
     text: string;
     error: boolean;
   } | null>(null);
-  const displayedSkills = useMemo(
-    () =>
-      skills.map((skill) => ({
-        ...skill,
-        status: statusOverrides[skill.name] ?? skill.status,
-      })),
-    [skills, statusOverrides],
-  );
+  const displayedSkills = skills;
   const selectedSkill = useMemo(
     () => displayedSkills.find((skill) => skill.name === selectedName),
     [displayedSkills, selectedName],
@@ -231,20 +223,6 @@ export function SkillsManagerPage({
   }, [displayedSkills]);
 
   useEffect(() => {
-    setStatusOverrides((current) => {
-      const next = { ...current };
-      let changed = false;
-      for (const skill of skills) {
-        if (next[skill.name] === skill.status) {
-          delete next[skill.name];
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
-  }, [skills]);
-
-  useEffect(() => {
     embedded?.onDetailChange(Boolean(selectedSkill));
   }, [embedded, selectedSkill]);
 
@@ -253,15 +231,21 @@ export function SkillsManagerPage({
     setBusySkill(skill.name);
     setNotice(null);
     try {
-      await setEnabled(skill.name, enabled);
-      setStatusOverrides((current) => ({
-        ...current,
-        [skill.name]: enabled ? 'ok' : 'disabled',
-      }));
-      await reload();
+      const result = await setEnabled(skill.name, enabled);
+      const refreshed = await reload();
+      const refreshedSkill = refreshed?.skills.find(
+        (item) => item.name.toLowerCase() === skill.name.toLowerCase(),
+      );
+      const expectedStatus = enabled ? 'ok' : 'disabled';
       setNotice({
         skillName: skill.name,
-        text: t(enabled ? 'skills.enabled' : 'skills.disabled'),
+        text: !result.changed
+          ? t('skills.settingUnchanged')
+          : !refreshedSkill
+            ? t('skills.settingUpdated')
+            : refreshedSkill.status === expectedStatus
+              ? t(enabled ? 'skills.enabled' : 'skills.disabled')
+              : t('skills.settingUpdatedAvailabilityUnchanged'),
         error: false,
       });
     } catch (toggleError) {
@@ -434,17 +418,11 @@ export function SkillsManagerPage({
               >
                 <DropdownMenuGroup>
                   <DropdownMenuItem
-                    disabled={
-                      busySkill !== null ||
-                      !canToggleSkills ||
-                      selectedSkill.userInvocable === false
-                    }
+                    disabled={busySkill !== null || !canToggleSkills}
                     title={
                       !canToggleSkills
                         ? t('skills.toggleUnsupported')
-                        : selectedSkill.userInvocable === false
-                          ? t('skills.notToggleable')
-                          : undefined
+                        : undefined
                     }
                     onSelect={() => void toggleSkill(selectedSkill)}
                   >
@@ -517,7 +495,7 @@ export function SkillsManagerPage({
               />
               <DetailField
                 label={t('skills.extension')}
-                value={selectedSkill.extensionName || '-'}
+                value={skillExtensionLabel(selectedSkill)}
               />
               {selectedSkill.hint ? (
                 <div className="sm:col-span-2">

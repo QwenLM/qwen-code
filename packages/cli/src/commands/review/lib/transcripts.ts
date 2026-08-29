@@ -253,6 +253,31 @@ function rangeOf(args: Record<string, unknown>): [number, number] | null {
 }
 
 /**
+ * Do these serialized tool-call args name the EXACT `path`?
+ *
+ * The comparison is against the whole JSON string value — `JSON.stringify`
+ * carries the closing quote — so a `${path}.bak`, or any longer path holding
+ * this one as a prefix, is NOT credited. Every certification atom that asks
+ * "did the agent name this file" routes here: the diff-read half in
+ * `parseTranscript` below, and the brief / findings atoms in
+ * `certification.ts`. One copy, so a fix to the match semantics
+ * (normalisation, escaping, a stricter compare) reaches the whole bar at once
+ * rather than half of it.
+ *
+ * NOT `namesPath` in `findings.ts`: that one matches a path mentioned in
+ * PROSE on a name boundary, so it credits `rm /plan/chunk-3.brief.md` for
+ * naming the brief. Crediting an agent for deleting a file it never opened is
+ * precisely what this predicate must not do, which is why the two keep
+ * separate names.
+ */
+export function serializedArgsNamePath(
+  serializedArgs: string,
+  path: string,
+): boolean {
+  return serializedArgs.includes(JSON.stringify(path));
+}
+
+/**
  * Parse one transcript. Returns null for a file that is not one.
  *
  * `diffPath` is what makes a call "a read of the diff" rather than "a call". Pass
@@ -342,10 +367,8 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
       // to open; a tool *result* that quotes it (a grep over `.qwen/tmp`, this
       // file in a diff) says nothing about what the agent opened.
       const args = (fc.args ?? {}) as Record<string, unknown>;
-      // Match the path as a whole JSON string value, quotes included: a bare
-      // substring credits `…/diff.txt.bak` for `…/diff.txt`.
       const namedTheDiff = diffPath
-        ? JSON.stringify(args).includes(JSON.stringify(diffPath))
+        ? serializedArgsNamePath(JSON.stringify(args), diffPath)
         : false;
       const pending: Pending = {
         namedTheDiff,

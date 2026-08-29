@@ -6,13 +6,34 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AgentEventType } from '../../runtime/agent-events.js';
 import { AgentStatus } from '../../runtime/agent-types.js';
 import { TeamCoordinationHarness } from './coordination-harness.js';
 import type { FakeAgent } from './fake-agent.js';
-import { createTask, listTasks } from '../tasks.js';
+import { createTask, listTasks, updateTask, getTask } from '../tasks.js';
 import { sendStructuredMessage, readInbox, getInboxPath } from '../mailbox.js';
+import { formatAgentId } from '../teamHelpers.js';
+import { runWithTeammateIdentity } from '../identity.js';
+import { TeamEventType } from '../team-events.js';
+import { TaskUpdateTool } from '../../../tools/task-update.js';
+import type { TaskUpdateParams } from '../../../tools/task-update.js';
+import type { Config } from '../../../config/config.js';
+
+const { mockSendStructuredMessage, mockWriteMessage, realMailbox } = vi.hoisted(
+  () => ({
+    mockSendStructuredMessage: vi.fn(),
+    mockWriteMessage: vi.fn(),
+    realMailbox: {
+      sendStructuredMessage: undefined as
+        | typeof import('../mailbox.js').sendStructuredMessage
+        | undefined,
+      writeMessage: undefined as
+        | typeof import('../mailbox.js').writeMessage
+        | undefined,
+    },
+  }),
+);
 
 // Mock Storage so all file I/O uses the harness's temp dir.
 vi.mock('../../../config/storage.js', async (importOriginal) => {
@@ -31,6 +52,19 @@ vi.mock('../../../config/storage.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../mailbox.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../mailbox.js')>();
+  realMailbox.sendStructuredMessage = original.sendStructuredMessage;
+  realMailbox.writeMessage = original.writeMessage;
+  mockSendStructuredMessage.mockImplementation(original.sendStructuredMessage);
+  mockWriteMessage.mockImplementation(original.writeMessage);
+  return {
+    ...original,
+    sendStructuredMessage: mockSendStructuredMessage,
+    writeMessage: mockWriteMessage,
+  };
+});
+
 import { Storage } from '../../../config/storage.js';
 
 function setMockDir(dir: string): void {
@@ -39,6 +73,39 @@ function setMockDir(dir: string): void {
       __setMockGlobalDir: (d: string) => void;
     }
   ).__setMockGlobalDir(dir);
+}
+
+function gateNextMailboxWrite<TArgs extends unknown[]>(
+  mailboxWrite: {
+    mockImplementationOnce(
+      implementation: (...args: TArgs) => Promise<void>,
+    ): unknown;
+  },
+  options: {
+    delegate?: (...args: TArgs) => Promise<void>;
+    rejectWith?: Error;
+  } = {},
+): {
+  started: Promise<void>;
+  release: () => void;
+} {
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  mailboxWrite.mockImplementationOnce(async (...args: TArgs) => {
+    markStarted();
+    await gate;
+    if (options.rejectWith) {
+      throw options.rejectWith;
+    }
+    await options.delegate?.(...args);
+  });
+  return { started, release };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
@@ -66,6 +133,15 @@ function expectTeamMessage(
 
 describe('TeamCoordinationHarness', () => {
   let harness: TeamCoordinationHarness | undefined;
+
+  beforeEach(() => {
+    mockSendStructuredMessage.mockReset();
+    mockWriteMessage.mockReset();
+    mockSendStructuredMessage.mockImplementation(
+      realMailbox.sendStructuredMessage!,
+    );
+    mockWriteMessage.mockImplementation(realMailbox.writeMessage!);
+  });
 
   afterEach(async () => {
     if (harness) {
@@ -339,6 +415,506 @@ describe('TeamCoordinationHarness', () => {
     });
   });
 
+  // ─── Manual assignment dispatch (#9282) ────────────────────
+
+  // A manually assigned task is owned + in_progress, so the auto-claim
+  // path (pending + unowned only) can never deliver it: without a direct
+  // dispatch the leader's task_update persists "success" and the task
+  // sits undelivered. These tests drive the REAL leader TaskUpdateTool
+  // against the harness's live TeamManager.
+  describe('manual task assignment dispatch (#9282)', () => {
+    const leaderConfig = (h: TeamCoordinationHarness) =>
+      ({
+        getTeamContext: () => ({ teamName: h.teamName }),
+        getTeamManager: () => h.teamManager,
+        getApprovalMode: () => 'default',
+      }) as unknown as Config;
+
+    const leaderAssign = (
+      h: TeamCoordinationHarness,
+      params: TaskUpdateParams,
+    ) =>
+      new TaskUpdateTool(leaderConfig(h))
+        .build(params)
+        .execute(new AbortController().signal);
+
+    it('delivers one task prompt to the assigned idle owner', async () => {
+      const h = await createHarness();
+      // Reserve the task as in_progress BEFORE alice exists so auto-claim
+      // cannot consume it — the issue's deterministic repro shape.
+      const task = await createTask(h.teamName, {
+        subject: 'Fix bug',
+        description: 'Fix the login bug',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      expect(result.error).toBeUndefined();
+
+      await h.waitForMessages('alice', 1);
+      const msgs = h.getAgent('alice').getReceivedMessages();
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0]).toContain(`task #${task.id}`);
+      expect(msgs[0]).toContain('Fix the login bug');
+      // And the persisted owner is the assignee, not the deliverer.
+      expect((await getTask(h.teamName, task.id))?.owner).toBe('alice');
+    });
+
+    it('delivers the prompt when an owned pending task is moved to in_progress', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Reserved work',
+        description: 'Reserved for alice',
+      });
+      // Owned pending: auto-claim skips owned tasks, so this cannot be
+      // consumed before the leader activates it. The tool requires an
+      // explicit owner on the in_progress transition, so the leader
+      // re-states it — the owner is UNCHANGED, which means only the
+      // status-change branch can trigger the dispatch here.
+      await updateTask(h.teamName, task.id, { owner: 'alice' });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      expect(result.error).toBeUndefined();
+
+      await h.waitForMessages('alice', 1);
+      const msgs = h.getAgent('alice').getReceivedMessages();
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0]).toContain('Reserved for alice');
+    });
+
+    it('re-dispatches to the new owner when an in_progress task is reassigned', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Reassign me',
+        description: 'Moving owners',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+      await h.spawnTeammate('bob', { onMessage: () => {} });
+
+      await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      await h.waitForMessages('alice', 1);
+
+      const reassign = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'bob',
+      });
+      expect(reassign.error).toBeUndefined();
+      await h.waitForMessages('bob', 1);
+
+      expect(h.getAgent('bob').getReceivedMessages()).toHaveLength(1);
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(1);
+      expect((await getTask(h.teamName, task.id))?.owner).toBe('bob');
+    });
+
+    it('does not re-dispatch when the same owner and status are re-asserted', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Once only',
+        description: 'One prompt per assignment',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      await h.waitForMessages('alice', 1);
+
+      // The exact same call again: no second prompt.
+      await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(1);
+    });
+
+    it('does not prompt a teammate for their own claim', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Self claim',
+        description: 'Alice claims this herself',
+      });
+      await updateTask(h.teamName, task.id, { owner: 'alice' });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      const result = await runWithTeammateIdentity(
+        {
+          agentName: 'alice',
+          teamName: h.teamName,
+          agentId: formatAgentId('alice', h.teamName),
+          isTeamLead: false,
+        },
+        () =>
+          new TaskUpdateTool(leaderConfig(h))
+            .build({ taskId: task.id, status: 'in_progress' })
+            .execute(new AbortController().signal),
+      );
+      expect(result.error).toBeUndefined();
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
+      expect((await getTask(h.teamName, task.id))?.status).toBe('in_progress');
+    });
+
+    it('rejects assigning to a teammate that does not exist', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'No ghost delivery',
+        description: 'Must not persist a dead end',
+      });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'ghost',
+      });
+      expect(result.error).toBeDefined();
+      expect(String(result.llmContent)).toContain('ghost');
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.status).toBe('pending');
+      expect(reloaded?.owner).toBeUndefined();
+    });
+
+    it('rejects owner names that sanitize to empty', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Invalid owner',
+        description: 'Do not clear owner by accident',
+      });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: '!!!',
+      });
+      expect(result.error).toBeDefined();
+      expect(String(result.llmContent)).toContain('owner must include');
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.status).toBe('pending');
+      expect(reloaded?.owner).toBeUndefined();
+    });
+
+    it('rejects dispatching a task while it is blocked', async () => {
+      const h = await createHarness();
+      const blocker = await createTask(h.teamName, {
+        subject: 'Blocker',
+        description: 'Finish first',
+      });
+      // Reserve the blocker as owned BEFORE alice exists so the idle
+      // auto-claim scan cannot consume it (it is the only unblocked,
+      // claimable task here) and race a prompt into her inbox — the
+      // received-messages assertion below must measure only the blocked
+      // assignment path. The blocked task itself stays unowned so the
+      // owner assertion still holds, and stays blocked so auto-claim
+      // skips it via blockedBy.
+      await updateTask(h.teamName, blocker.id, { owner: 'leader' });
+      const task = await createTask(h.teamName, {
+        subject: 'Blocked',
+        description: 'Wait for blocker',
+      });
+      await updateTask(h.teamName, task.id, { addBlockedBy: [blocker.id] });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      expect(result.error).toBeDefined();
+      expect(String(result.llmContent)).toContain('blocked by');
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.status).toBe('pending');
+      expect(reloaded?.owner).toBeUndefined();
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
+    });
+
+    it('rejects an assignment that adds the blocker in the same call', async () => {
+      const h = await createHarness();
+      const blocker = await createTask(h.teamName, {
+        subject: 'Blocker',
+        description: 'Finish first',
+      });
+      // Reserve the blocker as owned BEFORE alice exists so auto-claim
+      // cannot consume it and race a prompt into her inbox.
+      await updateTask(h.teamName, blocker.id, { owner: 'leader' });
+      const task = await createTask(h.teamName, {
+        subject: 'Blocked same-call',
+        description: 'Edge added by the assignment itself',
+      });
+      // Same reservation for the task under test.
+      await updateTask(h.teamName, task.id, { owner: 'leader' });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      // The edge is not persisted yet when the gate runs, so the gate
+      // must merge this call's addBlockedBy into its view — deleting
+      // that merge loop ships green against every other blocked test.
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+        addBlockedBy: [blocker.id],
+      });
+      expect(result.error).toBeDefined();
+      expect(String(result.llmContent)).toContain('blocked by');
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.status).toBe('pending');
+      // Owner stays at the reservation value: the refusal happens
+      // before the write.
+      expect(reloaded?.owner).toBe('leader');
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
+    });
+
+    it('rejects assigning to a teammate whose shutdown is pending', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'No dying delivery',
+        description: 'Shutdown beats assignment',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+      h.teamManager.markShutdownRequested('alice');
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      expect(result.error).toBeDefined();
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.status).toBe('in_progress');
+      expect(reloaded?.owner).toBe('leader');
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
+    });
+
+    it('allows editing an already-dispatched task during owner shutdown', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Already dispatched',
+        description: 'Edit only',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+      h.teamManager.markShutdownRequested('alice');
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        owner: 'alice',
+        subject: 'Edited subject',
+      });
+      expect(result.error).toBeUndefined();
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.subject).toBe('Edited subject');
+      expect(reloaded?.owner).toBe('alice');
+    });
+
+    it('canonicalizes display-name owners before persisting and dispatching', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Display name',
+        description: 'Use canonical owner identity',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      await h.spawnTeammate('Alice', { onMessage: () => {} });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'Alice',
+      });
+      expect(result.error).toBeUndefined();
+
+      await h.waitForMessages('alice', 1);
+      expect((await getTask(h.teamName, task.id))?.owner).toBe('alice');
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(1);
+    });
+
+    it('does not re-dispatch a legacy raw-spelled owner on a metadata-only edit', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Legacy owner',
+        description: 'Persisted before owner canonicalization',
+      });
+      // Persist the owner in its pre-canonical raw spelling, as task
+      // files written before the normalization landed do. Reserve the
+      // task as owned in_progress BEFORE alice exists so auto-claim
+      // cannot consume it.
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'Alice',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        description: 'metadata-only tweak',
+      });
+      expect(result.error).toBeUndefined();
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(h.getAgent('alice').getReceivedMessages()).toHaveLength(0);
+      expect((await getTask(h.teamName, task.id))?.owner).toBe('Alice');
+    });
+
+    it('lets the leader take a task into its own session', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Leader self-assign',
+        description: 'The leader owns the loop itself',
+      });
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      expect(result.error).toBeUndefined();
+
+      const reloaded = await getTask(h.teamName, task.id);
+      expect(reloaded?.status).toBe('in_progress');
+      expect(reloaded?.owner).toBe('leader');
+    });
+
+    it('still validates a new owner when only the owner changes on an in_progress task', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Owned by leader',
+        description: 'Gate must fall back to the persisted status',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+
+      // No status param: the dispatch gate must fall back to the
+      // persisted in_progress status and still validate the owner.
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        owner: 'ghost',
+      });
+      expect(result.error).toBeDefined();
+      expect(String(result.llmContent)).toContain('ghost');
+      expect((await getTask(h.teamName, task.id))?.owner).toBe('leader');
+    });
+
+    it('rejects assigning to a teammate that already terminated', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'No terminal delivery',
+        description: 'Terminated agents cannot receive work',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      const alice = await h.spawnTeammate('alice', { onMessage: () => {} });
+      alice.abort();
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      expect(result.error).toBeDefined();
+      expect(String(result.llmContent)).toContain('no longer active');
+      expect((await getTask(h.teamName, task.id))?.owner).toBe('leader');
+    });
+
+    it('does not reject completion that restates a shutdown-pending owner', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Finish during shutdown',
+        description: 'Completion does not dispatch',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      await h.spawnTeammate('alice', { onMessage: () => {} });
+      h.teamManager.markShutdownRequested('alice');
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'completed',
+        owner: 'alice',
+      });
+      expect(result.error).toBeUndefined();
+      expect((await getTask(h.teamName, task.id))?.status).toBe('completed');
+    });
+
+    it('queues the assignment prompt for a busy owner', async () => {
+      const h = await createHarness();
+      const task = await createTask(h.teamName, {
+        subject: 'Busy owner',
+        description: 'Queue this while busy',
+      });
+      await updateTask(h.teamName, task.id, {
+        status: 'in_progress',
+        owner: 'leader',
+      });
+      const alice = await h.spawnTeammate('alice', {
+        onMessage: () => 'stay_running',
+      });
+      alice.enqueueMessage('already busy');
+      await alice.waitForStatus(AgentStatus.RUNNING);
+
+      const result = await leaderAssign(h, {
+        taskId: task.id,
+        status: 'in_progress',
+        owner: 'alice',
+      });
+      expect(result.error).toBeUndefined();
+
+      expect(alice.getReceivedMessages()).toHaveLength(1);
+      alice.goIdle();
+      await h.waitForMessages('alice', 2);
+      expect(alice.getReceivedMessages()[1]).toContain('Queue this while busy');
+    });
+  });
+
   // ─── 3. Message priority ───────────────────────────────────
 
   describe('message priority', () => {
@@ -410,6 +986,891 @@ describe('TeamCoordinationHarness', () => {
 
       await h.teamManager.requestShutdown('worker');
       await h.waitForStatus('worker', AgentStatus.COMPLETED);
+    });
+
+    it('delivers every shutdown consumed by one idle flush exactly once', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      await h.teamManager.sendMessage('target', 'stay busy', 'leader');
+      await h.waitForMessages('target', 1);
+
+      await h.teamManager.requestShutdown('target');
+      await h.teamManager.requestShutdown('target');
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+
+      target.goIdle();
+      await h.waitForMessages('target', 2);
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: first request',
+        'target',
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+
+      target.goIdle();
+      await vi.waitFor(
+        () => {
+          expect(target.getReceivedMessages()).toHaveLength(3);
+        },
+        { timeout: 250 },
+      );
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: second request',
+        'target',
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+
+      target.goIdle();
+      await (
+        h.teamManager as unknown as {
+          flushNextMessage(agentId: string, agentName: string): Promise<void>;
+        }
+      ).flushNextMessage(target.agentId, target.agentName);
+      expect(target.getReceivedMessages()).toHaveLength(3);
+    });
+
+    it('does not gate a teammate when the shutdown mailbox write fails', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      const mailboxError = new Error('EIO: mailbox write failed');
+      mockSendStructuredMessage.mockRejectedValueOnce(mailboxError);
+
+      await expect(h.teamManager.requestShutdown('target')).rejects.toBe(
+        mailboxError,
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+
+      await createTask(h.teamName, {
+        subject: 'After failed shutdown',
+        description: 'Should still be claimable',
+      });
+      await h.waitForMessages('target', 1);
+      expect(target.getReceivedMessages()[0]).toContain(
+        'After failed shutdown',
+      );
+    });
+
+    it('does not clear a test-only shutdown marker when a mailbox write fails', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      h.teamManager.markShutdownRequested('target');
+      const mailboxError = new Error('EIO: mailbox write failed');
+      mockSendStructuredMessage.mockRejectedValueOnce(mailboxError);
+
+      await expect(h.teamManager.requestShutdown('target')).rejects.toBe(
+        mailboxError,
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+    });
+
+    it('keeps markShutdownRequested idempotent until one response settles', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      h.teamManager.markShutdownRequested('target');
+      h.teamManager.markShutdownRequested('target');
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: marker resolved',
+        'target',
+      );
+
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
+    it('does not restore a marker after a failed shutdown request is rejected', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      h.teamManager.markShutdownRequested('target');
+
+      const mailboxError = new Error('EIO: mailbox write failed');
+      const write = gateNextMailboxWrite(mockSendStructuredMessage, {
+        rejectWith: mailboxError,
+      });
+
+      const shutdown = h.teamManager.requestShutdown('target');
+      const shutdownRejection = shutdown.catch((error: unknown) => error);
+      await write.started;
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: still working',
+        'target',
+      );
+
+      write.release();
+      expect(await shutdownRejection).toBe(mailboxError);
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
+    it('closure audit keeps a later delivered request after an older rejection', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      await h.teamManager.requestShutdown('target');
+
+      const nextRequestError = new Error('EIO: next mailbox write failed');
+      const retryWrite = gateNextMailboxWrite(mockSendStructuredMessage, {
+        delegate: realMailbox.sendStructuredMessage!,
+      });
+      const nextRequestWrite = gateNextMailboxWrite(mockSendStructuredMessage, {
+        rejectWith: nextRequestError,
+      });
+
+      const retry = h.teamManager.requestShutdown('target');
+      await retryWrite.started;
+
+      const rejectionWrite = gateNextMailboxWrite(mockWriteMessage);
+      const rejection = h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: retry later',
+        'target',
+      );
+      await rejectionWrite.started;
+
+      const nextRequest = h.teamManager.requestShutdown('target');
+      const nextRequestRejection = nextRequest.catch((error: unknown) => error);
+      await nextRequestWrite.started;
+
+      retryWrite.release();
+      await retry;
+      nextRequestWrite.release();
+      expect(await nextRequestRejection).toBe(nextRequestError);
+      rejectionWrite.release();
+      await rejection;
+
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: delivered retry resolved',
+        'target',
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
+    it('closure audit does not restore a resolved marker after a real request fails', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      h.teamManager.markShutdownRequested('target');
+
+      const responseWrite = gateNextMailboxWrite(mockWriteMessage);
+      const markerResponse = h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: keep working',
+        'target',
+      );
+      await responseWrite.started;
+
+      const requestError = new Error('EIO: real mailbox write failed');
+      const requestWrite = gateNextMailboxWrite(mockSendStructuredMessage, {
+        rejectWith: requestError,
+      });
+      const request = h.teamManager.requestShutdown('target');
+      const requestRejection = request.catch((error: unknown) => error);
+      await requestWrite.started;
+
+      responseWrite.release();
+      await markerResponse;
+      requestWrite.release();
+      expect(await requestRejection).toBe(requestError);
+
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
+    it('restores a reserved request when the leader mailbox write fails', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      await h.teamManager.requestShutdown('target');
+      const responseError = new Error('EIO: leader mailbox write failed');
+      mockWriteMessage.mockRejectedValueOnce(responseError);
+
+      await expect(
+        h.teamManager.sendMessage(
+          'leader',
+          'shutdown_rejected: retry response',
+          'target',
+        ),
+      ).rejects.toBe(responseError);
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: response delivered',
+        'target',
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
+    it('lets a backup approval consume the token when the first reservation fails', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      await h.teamManager.requestShutdown('target');
+
+      const firstResponseError = new Error('EIO: first response write failed');
+      const firstWrite = gateNextMailboxWrite(mockWriteMessage, {
+        rejectWith: firstResponseError,
+      });
+      const backupWrite = gateNextMailboxWrite(mockWriteMessage, {
+        delegate: realMailbox.writeMessage!,
+      });
+
+      const firstResponse = h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: first response',
+        'target',
+      );
+      const firstResponseRejection = firstResponse.catch(
+        (error: unknown) => error,
+      );
+      await firstWrite.started;
+
+      const backupResponse = h.teamManager.sendMessage(
+        'leader',
+        'shutdown_approved',
+        'target',
+      );
+      await backupWrite.started;
+
+      firstWrite.release();
+      expect(await firstResponseRejection).toBe(firstResponseError);
+      expect(target.getStatus()).not.toBe(AgentStatus.CANCELLED);
+
+      backupWrite.release();
+      await backupResponse;
+      expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
+    });
+
+    it('does not let a duplicate successful response consume a later token', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      await h.teamManager.requestShutdown('target');
+
+      const firstWrite = gateNextMailboxWrite(mockWriteMessage, {
+        delegate: realMailbox.writeMessage!,
+      });
+
+      const firstResponse = h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: first response',
+        'target',
+      );
+      await firstWrite.started;
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: backup response',
+        'target',
+      );
+      await h.teamManager.requestShutdown('target');
+
+      firstWrite.release();
+      await firstResponse;
+
+      const responses = (await readInbox(h.teamName, 'leader')).filter(
+        (message) =>
+          message.text === 'shutdown_rejected: first response' ||
+          message.text === 'shutdown_rejected: backup response',
+      );
+      expect(responses).toHaveLength(2);
+      expect(
+        responses.every((message) => message.type === 'shutdown_rejected'),
+      ).toBe(true);
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: later request',
+        'target',
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
+    it('stays gated between duplicate response settlements', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      await h.teamManager.requestShutdown('target');
+
+      const firstWrite = gateNextMailboxWrite(mockWriteMessage, {
+        delegate: realMailbox.writeMessage!,
+      });
+      const firstResponse = h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: first response',
+        'target',
+      );
+      await firstWrite.started;
+
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: duplicate response',
+        'target',
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+
+      firstWrite.release();
+      await firstResponse;
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
+    it('reserves separate tokens for two concurrent responses when available', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      await h.teamManager.requestShutdown('target');
+      await h.teamManager.requestShutdown('target');
+
+      const firstWrite = gateNextMailboxWrite(mockWriteMessage);
+      const secondWrite = gateNextMailboxWrite(mockWriteMessage);
+
+      const firstResponse = h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: first token',
+        'target',
+      );
+      await firstWrite.started;
+      const secondResponse = h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: second token',
+        'target',
+      );
+      await secondWrite.started;
+
+      secondWrite.release();
+      await secondResponse;
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+
+      firstWrite.release();
+      await firstResponse;
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
+    it('consumes a reserved request immediately after the mailbox write succeeds', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      await h.teamManager.requestShutdown('target');
+      const eventError = new Error('message listener failed');
+      h.teamManager.getEventEmitter().on(TeamEventType.MESSAGE_SENT, () => {
+        throw eventError;
+      });
+
+      await expect(
+        h.teamManager.sendMessage(
+          'leader',
+          'shutdown_rejected: mailbox already persisted this response',
+          'target',
+        ),
+      ).rejects.toBe(eventError);
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
+    it('aborts an approved teammate when the message listener throws', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      await h.teamManager.requestShutdown('target');
+      const eventError = new Error('message listener failed');
+      h.teamManager.getEventEmitter().on(TeamEventType.MESSAGE_SENT, () => {
+        throw eventError;
+      });
+
+      await expect(
+        h.teamManager.sendMessage('leader', 'shutdown_approved', 'target'),
+      ).rejects.toBe(eventError);
+      expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
+    });
+
+    it('does not classify a response while only a request write is in flight', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      const requestError = new Error('EIO: request was not delivered');
+      const requestWrite = gateNextMailboxWrite(mockSendStructuredMessage, {
+        rejectWith: requestError,
+      });
+
+      const request = h.teamManager.requestShutdown('target');
+      const requestRejection = request.catch((error: unknown) => error);
+      await requestWrite.started;
+      await h.teamManager.sendMessage('leader', 'shutdown_approved', 'target');
+      expect(target.getStatus()).not.toBe(AgentStatus.CANCELLED);
+
+      requestWrite.release();
+      expect(await requestRejection).toBe(requestError);
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
+    it('keeps a successful shutdown pending when a retry write fails', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      await h.teamManager.requestShutdown('target');
+      const mailboxError = new Error('EIO: retry mailbox write failed');
+      mockSendStructuredMessage.mockRejectedValueOnce(mailboxError);
+
+      await expect(h.teamManager.requestShutdown('target')).rejects.toBe(
+        mailboxError,
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+    });
+
+    it('keeps a concurrent shutdown pending when another write fails', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      const firstWrite = gateNextMailboxWrite(mockSendStructuredMessage);
+      mockSendStructuredMessage.mockRejectedValueOnce(
+        new Error('EIO: concurrent mailbox write failed'),
+      );
+
+      const firstShutdown = h.teamManager.requestShutdown('target');
+      await firstWrite.started;
+      await expect(h.teamManager.requestShutdown('target')).rejects.toThrow(
+        'EIO: concurrent mailbox write failed',
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+
+      firstWrite.release();
+      await firstShutdown;
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+    });
+
+    it('keeps shutdown state for a write delivered after a response', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      await h.teamManager.requestShutdown('target');
+
+      const write = gateNextMailboxWrite(mockSendStructuredMessage);
+
+      const concurrentShutdown = h.teamManager.requestShutdown('target');
+      await write.started;
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: still working',
+        'target',
+      );
+
+      write.release();
+      await concurrentShutdown;
+
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+    });
+
+    it('preserves a new shutdown request after an earlier request is resolved', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      await h.teamManager.requestShutdown('target');
+
+      const oldWrite = gateNextMailboxWrite(mockSendStructuredMessage);
+
+      const oldShutdown = h.teamManager.requestShutdown('target');
+      await oldWrite.started;
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: still working',
+        'target',
+      );
+
+      await h.teamManager.requestShutdown('target');
+      oldWrite.release();
+      await oldShutdown;
+
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+    });
+
+    it('clears failed writes after the reserved request is resolved', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      await h.teamManager.requestShutdown('target');
+
+      const oldWriteError = new Error('EIO: old mailbox write failed');
+      const oldWrite = gateNextMailboxWrite(mockSendStructuredMessage, {
+        rejectWith: oldWriteError,
+      });
+
+      const oldShutdown = h.teamManager.requestShutdown('target');
+      const oldShutdownRejection = oldShutdown.catch((error: unknown) => error);
+      await oldWrite.started;
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: still working',
+        'target',
+      );
+
+      const newWriteError = new Error('EIO: new mailbox write failed');
+      mockSendStructuredMessage.mockRejectedValueOnce(newWriteError);
+      await expect(h.teamManager.requestShutdown('target')).rejects.toBe(
+        newWriteError,
+      );
+
+      oldWrite.release();
+      expect(await oldShutdownRejection).toBe(oldWriteError);
+
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
+    it('keeps a retry delivered after another request fails', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      await h.teamManager.sendMessage('target', 'stay busy', 'leader');
+      await h.waitForMessages('target', 1);
+
+      await h.teamManager.requestShutdown('target');
+
+      const retryWrite = gateNextMailboxWrite(mockSendStructuredMessage, {
+        delegate: realMailbox.sendStructuredMessage!,
+      });
+
+      const retry = h.teamManager.requestShutdown('target');
+      await retryWrite.started;
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: still working',
+        'target',
+      );
+
+      const newWriteError = new Error('EIO: new mailbox write failed');
+      mockSendStructuredMessage.mockRejectedValueOnce(newWriteError);
+      await expect(h.teamManager.requestShutdown('target')).rejects.toBe(
+        newWriteError,
+      );
+
+      retryWrite.release();
+      await retry;
+
+      expect(
+        (await readInbox(h.teamName, 'target')).some(
+          (message) => message.type === 'shutdown_request' && !message.read,
+        ),
+      ).toBe(true);
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+      await h.teamManager.sendMessage('leader', 'shutdown_approved', 'target');
+      expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
+    });
+
+    it.each(['real', 'marker'] as const)(
+      'reserves current %s ownership while a blocked retry is delivered',
+      async (currentKind) => {
+        const h = await createHarness();
+        const target = await h.spawnTeammate('target', {
+          onMessage: () => {},
+        });
+
+        await h.teamManager.requestShutdown('target');
+
+        const retryWrite = gateNextMailboxWrite(mockSendStructuredMessage);
+
+        const retry = h.teamManager.requestShutdown('target');
+        await retryWrite.started;
+        await h.teamManager.sendMessage(
+          'leader',
+          'shutdown_rejected: still working',
+          'target',
+        );
+
+        if (currentKind === 'real') {
+          await h.teamManager.requestShutdown('target');
+        } else {
+          h.teamManager.markShutdownRequested('target');
+        }
+
+        const responseWrite = gateNextMailboxWrite(mockWriteMessage);
+
+        const approval = h.teamManager.sendMessage(
+          'leader',
+          'shutdown_approved',
+          'target',
+        );
+        await responseWrite.started;
+        retryWrite.release();
+        await retry;
+        responseWrite.release();
+        await approval;
+
+        expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
+      },
+    );
+
+    it('accepts approval for a retry delivered after an earlier rejection', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      await h.teamManager.requestShutdown('target');
+
+      const retryWrite = gateNextMailboxWrite(mockSendStructuredMessage);
+
+      const retry = h.teamManager.requestShutdown('target');
+      await retryWrite.started;
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: still working',
+        'target',
+      );
+
+      retryWrite.release();
+      await retry;
+      await h.teamManager.sendMessage('leader', 'shutdown_approved', 'target');
+
+      expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
+    });
+
+    it('a duplicate reserved approval does not abort after a later request is delivered', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      await h.teamManager.requestShutdown('target');
+
+      const oldResponseWrite = gateNextMailboxWrite(mockWriteMessage);
+
+      const oldApproval = h.teamManager.sendMessage(
+        'leader',
+        'shutdown_approved',
+        'target',
+      );
+      await oldResponseWrite.started;
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: continue working',
+        'target',
+      );
+      await h.teamManager.requestShutdown('target');
+
+      oldResponseWrite.release();
+      await oldApproval;
+
+      expect(target.getStatus()).not.toBe(AgentStatus.CANCELLED);
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+    });
+
+    it('a reserved rejection leaves a later delivered request outstanding', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      await h.teamManager.requestShutdown('target');
+
+      const oldResponseWrite = gateNextMailboxWrite(mockWriteMessage);
+
+      const oldRejection = h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: old request',
+        'target',
+      );
+      await oldResponseWrite.started;
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: resolve old request',
+        'target',
+      );
+      await h.teamManager.requestShutdown('target');
+
+      oldResponseWrite.release();
+      await oldRejection;
+
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+    });
+
+    it.each(['shutdown_approved', 'shutdown_rejected: old request'])(
+      'settles a reserved real response while a marker is added: %s',
+      async (oldResponse) => {
+        const h = await createHarness();
+        const target = await h.spawnTeammate('target', {
+          onMessage: () => {},
+        });
+        await h.teamManager.requestShutdown('target');
+
+        const oldResponseWrite = gateNextMailboxWrite(mockWriteMessage);
+
+        const staleResponse = h.teamManager.sendMessage(
+          'leader',
+          oldResponse,
+          'target',
+        );
+        await oldResponseWrite.started;
+        h.teamManager.markShutdownRequested('target');
+
+        oldResponseWrite.release();
+        await staleResponse;
+
+        if (oldResponse === 'shutdown_approved') {
+          expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
+        } else {
+          expect(h.teamManager.validateTaskOwner('target')).toEqual(
+            expect.stringContaining('shutdown is already pending'),
+          );
+          expect(target.getStatus()).not.toBe(AgentStatus.CANCELLED);
+        }
+      },
+    );
+
+    it.each(['shutdown_approved', 'shutdown_rejected: old marker'])(
+      'settles a reserved marker response while a real request is delivered: %s',
+      async (oldResponse) => {
+        const h = await createHarness();
+        const target = await h.spawnTeammate('target', {
+          onMessage: () => {},
+        });
+        h.teamManager.markShutdownRequested('target');
+
+        const oldResponseWrite = gateNextMailboxWrite(mockWriteMessage);
+
+        const staleResponse = h.teamManager.sendMessage(
+          'leader',
+          oldResponse,
+          'target',
+        );
+        await oldResponseWrite.started;
+        await h.teamManager.requestShutdown('target');
+
+        oldResponseWrite.release();
+        await staleResponse;
+
+        if (oldResponse === 'shutdown_approved') {
+          expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
+        } else {
+          expect(h.teamManager.validateTaskOwner('target')).toEqual(
+            expect.stringContaining('shutdown is already pending'),
+          );
+          expect(target.getStatus()).not.toBe(AgentStatus.CANCELLED);
+        }
+      },
+    );
+
+    it.each(['shutdown_approved', 'shutdown_rejected: old marker'])(
+      'settles a reserved marker response while the marker is refreshed: %s',
+      async (oldResponse) => {
+        const h = await createHarness();
+        const target = await h.spawnTeammate('target', {
+          onMessage: () => {},
+        });
+        h.teamManager.markShutdownRequested('target');
+
+        const oldResponseWrite = gateNextMailboxWrite(mockWriteMessage);
+
+        const staleResponse = h.teamManager.sendMessage(
+          'leader',
+          oldResponse,
+          'target',
+        );
+        await oldResponseWrite.started;
+        await h.teamManager.sendMessage(
+          'leader',
+          'shutdown_rejected: clear old marker',
+          'target',
+        );
+        h.teamManager.markShutdownRequested('target');
+
+        oldResponseWrite.release();
+        await staleResponse;
+
+        expect(h.teamManager.validateTaskOwner('target')).toEqual(
+          expect.stringContaining('shutdown is already pending'),
+        );
+        expect(target.getStatus()).not.toBe(AgentStatus.CANCELLED);
+      },
+    );
+
+    it('gates task assignment while the shutdown mailbox write is pending', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      const write = gateNextMailboxWrite(mockSendStructuredMessage);
+
+      const shutdown = h.teamManager.requestShutdown('target');
+      await write.started;
+      const task = await createTask(h.teamName, {
+        subject: 'During pending shutdown',
+        description: 'Must remain unassigned',
+      });
+      await (
+        h.teamManager as unknown as {
+          scanIdleAgentsForTasks(): Promise<void>;
+        }
+      ).scanIdleAgentsForTasks();
+
+      const pending = await getTask(h.teamName, task.id);
+      expect(pending?.status).toBe('pending');
+      expect(pending?.owner).toBeUndefined();
+      expect(target.getReceivedMessages()).toHaveLength(0);
+
+      write.release();
+      await shutdown;
     });
 
     it('shutdown_approved from the requested teammate aborts them', async () => {
@@ -587,6 +2048,33 @@ describe('TeamCoordinationHarness', () => {
       expect(w2.getReceivedMessages()).toEqual([]);
       expect(w3.getReceivedMessages()).toHaveLength(1);
       expectTeamMessage(w3.getReceivedMessages()[0], 'w2', 'hello all');
+    });
+
+    it('reports zero failures when every delivery lands (#10072)', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('w1');
+      await h.spawnTeammate('w2');
+
+      // Recipients: w2 (member) + leader inbox.
+      const result = await h.teamManager.broadcast('hello all', 'w1');
+
+      expect(result).toEqual({ total: 2, failedRecipients: [] });
+      await h.waitForMessages('w2', 1);
+    });
+
+    it('reports the recipients whose delivery was rejected (#10072)', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('w1');
+      const w2 = await h.spawnTeammate('w2');
+
+      // w2 terminates between the member snapshot and the send: its
+      // queue is dropped, so its delivery rejects while the leader
+      // inbox write still lands.
+      await w2.shutdown();
+
+      const result = await h.teamManager.broadcast('status update', 'w1');
+
+      expect(result).toEqual({ total: 2, failedRecipients: ['w2'] });
     });
   });
 

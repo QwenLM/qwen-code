@@ -188,8 +188,11 @@ async function readExistingRecord(
         ? fsConstants.O_RDONLY
         : fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
     );
-  } catch {
-    throw new LiveDiscoveryStateError();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new LiveDiscoveryStateError(error);
+    }
+    throw error;
   }
   try {
     const handleStat = await handle.stat();
@@ -206,11 +209,12 @@ async function readExistingRecord(
     ) {
       throw new LiveDiscoveryStateError();
     }
+    const serialized = await handle.readFile('utf8');
     let parsed: unknown;
     try {
-      parsed = JSON.parse(await handle.readFile('utf8'));
-    } catch {
-      throw new LiveDiscoveryStateError();
+      parsed = JSON.parse(serialized);
+    } catch (error) {
+      throw new LiveDiscoveryStateError(error);
     }
     if (
       typeof parsed !== 'object' ||

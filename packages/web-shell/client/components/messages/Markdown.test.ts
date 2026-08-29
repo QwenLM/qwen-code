@@ -32,6 +32,29 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+function renderMd(content: string): HTMLDivElement {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  act(() => {
+    root.render(
+      createElement(
+        I18nProvider,
+        { language: 'en' },
+        createElement(Markdown, { content }),
+      ),
+    );
+  });
+  (container as HTMLDivElement & { __unmount: () => void }).__unmount = () =>
+    act(() => root.unmount());
+  return container as HTMLDivElement;
+}
+
+function cleanup(container: HTMLDivElement) {
+  (container as HTMLDivElement & { __unmount: () => void }).__unmount();
+  container.remove();
+}
+
 describe('isSafeHref', () => {
   it('allows https URLs', () => {
     expect(isSafeHref('https://example.com')).toBe(true);
@@ -149,24 +172,6 @@ describe('markdownUrlTransform', () => {
 });
 
 describe('qwen-session:// links', () => {
-  function renderMd(content: string): HTMLDivElement {
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    act(() => {
-      root.render(
-        createElement(
-          I18nProvider,
-          { language: 'en' },
-          createElement(Markdown, { content }),
-        ),
-      );
-    });
-    (container as HTMLDivElement & { __unmount: () => void }).__unmount = () =>
-      act(() => root.unmount());
-    return container as HTMLDivElement;
-  }
-
   it('survives react-markdown url sanitization and becomes a button', () => {
     // Without `urlTransform`, react-markdown rewrites every non-http(s)/mailto
     // href to '' before `components.a` runs, so the interception branch never
@@ -1322,6 +1327,44 @@ describe('Markdown custom code block rendering', () => {
     });
     container.remove();
   });
+
+  it('applies transformMarkdown to a large streaming response', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const rawContent = `raw prefix ${'streaming text '.repeat(3_000)}`;
+    const transformMarkdown = vi.fn((content: string) =>
+      content.replace('raw prefix', 'transformed prefix'),
+    );
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { transformMarkdown } } },
+          createElement(Markdown, {
+            content: rawContent,
+            source: 'assistant',
+            isStreaming: true,
+          }),
+        ),
+      );
+    });
+
+    expect(
+      container.querySelector('[data-markdown-streaming-plain-text="true"]'),
+    ).not.toBeNull();
+    expect(transformMarkdown).toHaveBeenCalledWith(rawContent, {
+      source: 'assistant',
+    });
+    expect(container.textContent).toContain('transformed prefix');
+    expect(container.textContent).not.toContain('raw prefix');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
 });
 
 describe('Markdown code highlighting while streaming', () => {
@@ -1588,24 +1631,6 @@ describe('Markdown streaming throttle', () => {
 describe('external links in the desktop shell', () => {
   type TauriWindow = { __TAURI__?: { core?: { invoke?: unknown } } };
 
-  function renderMd(content: string): HTMLDivElement {
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    act(() => {
-      root.render(
-        createElement(
-          I18nProvider,
-          { language: 'en' },
-          createElement(Markdown, { content }),
-        ),
-      );
-    });
-    (container as HTMLDivElement & { __unmount: () => void }).__unmount = () =>
-      act(() => root.unmount());
-    return container as HTMLDivElement;
-  }
-
   function clickLink(container: HTMLElement): MouseEvent {
     const event = new MouseEvent('click', {
       bubbles: true,
@@ -1697,5 +1722,71 @@ describe('external links in the desktop shell', () => {
     openSpy.mockRestore();
     (c as HTMLDivElement & { __unmount: () => void }).__unmount();
     c.remove();
+  });
+});
+
+describe('Markdown CJK emphasis', () => {
+  // CommonMark flanking rules reject emphasis delimiters adjacent to CJK
+  // punctuation (commonmark/commonmark-spec#650); the registered CJK-friendly
+  // remark plugin relaxes that so assistant answers can bold quoted terms.
+
+  it('bolds emphasis starting with ASCII quotes after a CJK character', () => {
+    const c = renderMd('这是**"示例"文本**。');
+    const strong = c.querySelector('strong');
+    expect(strong?.textContent).toBe('"示例"文本');
+    expect(c.textContent).not.toContain('**');
+    cleanup(c);
+  });
+
+  it('bolds emphasis starting with fullwidth quotes after a CJK character', () => {
+    const c = renderMd('这是**“示例”文本**。');
+    const strong = c.querySelector('strong');
+    expect(strong?.textContent).toBe('“示例”文本');
+    expect(c.textContent).not.toContain('**');
+    cleanup(c);
+  });
+
+  it('bolds emphasis closed by a CJK full stop', () => {
+    const c = renderMd('**示例句子。**后续文本。');
+    const strong = c.querySelector('strong');
+    expect(strong?.textContent).toBe('示例句子。');
+    expect(c.textContent).not.toContain('**');
+    cleanup(c);
+  });
+
+  it('keeps plain English emphasis unchanged', () => {
+    const c = renderMd('This is **important**.');
+    const strong = c.querySelector('strong');
+    expect(strong?.textContent).toBe('important');
+    expect(c.textContent).not.toContain('**');
+    cleanup(c);
+  });
+
+  it('keeps CJK bold when a host supplies custom remark plugins', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(
+            WebShellCustomizationProvider,
+            { value: { markdown: { remarkPlugins: [] } } },
+            createElement(Markdown, {
+              content: '这是**"示例"文本**。',
+              source: 'assistant',
+            }),
+          ),
+        ),
+      );
+    });
+    (container as HTMLDivElement & { __unmount: () => void }).__unmount = () =>
+      act(() => root.unmount());
+    const strong = container.querySelector('strong');
+    expect(strong?.textContent).toBe('"示例"文本');
+    expect(container.textContent).not.toContain('**');
+    cleanup(container);
   });
 });

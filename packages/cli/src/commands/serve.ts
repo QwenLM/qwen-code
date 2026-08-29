@@ -5,8 +5,6 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
-import { randomBytes } from 'node:crypto';
-import { networkInterfaces } from 'node:os';
 import type { ServeChannelSelection } from '../serve/types.js';
 import type { RunHandle } from '../serve/run-qwen-serve.js';
 import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
@@ -38,7 +36,6 @@ import {
   MEMORY_PROJECT_SCOPES,
   openBrowserSecurely,
   parsePositiveIntegerEnv,
-  sleepInhibitor,
   shouldLaunchBrowser,
   type MemoryProjectScope,
 } from '@qwen-code/qwen-code-core';
@@ -49,8 +46,8 @@ import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarning
  * Pause the current async function indefinitely. Used after the daemon
  * listener is up so yargs `parse()` never resolves — if it did, the
  * top-level CLI would fall through to the interactive (TUI) entry point
- * in `gemini.tsx`. SIGINT / SIGTERM in `runQwenServe` is the sole exit
- * route.
+ * in `llm.tsx`. SIGINT / SIGTERM / SIGHUP in `runQwenServe` is the sole
+ * exit route.
  */
 function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
@@ -58,57 +55,75 @@ function blockForever(): Promise<never> {
 
 const DEFAULT_SERVE_HOSTNAME = '127.0.0.1';
 
-export function localControlUrls(
-  baseUrl: string,
-  token: string,
-  interfaces = networkInterfaces(),
-): Array<{ interfaceName: string; url: string }> {
-  const urls: Array<{ interfaceName: string; url: string }> = [];
-  for (const [interfaceName, addresses] of Object.entries(interfaces).sort()) {
-    for (const address of addresses ?? []) {
-      if (address.family !== 'IPv4' || address.internal) {
-        continue;
-      }
-      const target = new URL(baseUrl);
-      target.hostname = address.address;
-      target.hash = `token=${encodeURIComponent(token)}`;
-      urls.push({ interfaceName, url: target.toString() });
-    }
-  }
-  return urls;
-}
-
-async function showLocalControlPairing(
+/**
+ * Turn Local Control on through the daemon and print the pairing QR.
+ *
+ * The flag no longer implements Local Control — it calls the same service the
+ * Web Shell and the desktop menu item drive. It is a caller now, not a second
+ * implementation, which is why `--local-control` composes with `--token` and
+ * `--allow-origin`: the LAN listener gets its own credential and origin.
+ */
+async function startLocalControl(
   handle: RunHandle,
-  urls: Array<{ interfaceName: string; url: string }>,
+  address: string | undefined,
 ): Promise<void> {
   await handle.runtimeReady;
-  if (!handle.webShellMounted || !handle.resolvedToken) {
-    throw new Error('Local Control requires the authenticated Web Shell.');
+  if (!handle.webShellMounted) {
+    throw new Error('Local Control requires the Web Shell.');
+  }
+  const service = handle.getLocalControl();
+  if (!service) {
+    throw new Error('Local Control is unavailable on this daemon.');
+  }
+  let status;
+  try {
+    status = await service.enable(address ? { address } : {});
+  } catch (err) {
+    // The service reports ambiguity to its caller rather than picking for
+    // them; in a terminal the way to answer is a flag, which only this caller
+    // knows about.
+    if (
+      err instanceof Error &&
+      (err as { code?: string }).code === 'ambiguous_lan_interface'
+    ) {
+      throw new Error(`${err.message}. Pass --local-control-address <ip>.`);
+    }
+    throw err;
+  }
+  if (!status.url) {
+    throw new Error('Local Control did not return a pairing URL.');
   }
   const { default: qrcode } = (await import('qrcode-terminal')) as {
     default: typeof import('qrcode-terminal');
   };
   qrcode.setErrorLevel('Q');
   writeStdoutLine(
-    '\nLocal Control is on. Scan a QR code from the same network:',
+    '\nLocal Control is on. Scan this QR code from the same network:',
   );
-  for (const entry of urls) {
-    writeStdoutLine(`\n${entry.interfaceName}: ${entry.url}`);
-    qrcode.generate(entry.url, { small: true }, (code) => {
-      writeStdoutLine(code.trimEnd());
-    });
-  }
+  writeStdoutLine(`\n${status.interfaceName}: ${status.url}`);
+  qrcode.generate(status.url, { small: true }, (code) => {
+    writeStdoutLine(code.trimEnd());
+  });
   writeStdoutLine(
-    '\nKeep this terminal open. Restart after changing networks. Sleep inhibition is best effort. Traffic is encrypted only when --tls-cert and --tls-key are set. Press Ctrl+C to turn Local Control off.',
+    '\nKeep this terminal open. ' +
+      (status.sleepInhibited
+        ? 'Sleep is inhibited while this session is active. '
+        : 'Sleep inhibition is unavailable here, so the host may sleep. ') +
+      (status.encrypted
+        ? 'Traffic is encrypted.'
+        : 'Traffic is unencrypted — use it only on a network you trust.') +
+      ' Turn Local Control off from the Web Shell Settings card, or press ' +
+      'Ctrl+C to exit the daemon.',
   );
 }
 
 /**
  * Open the Web Shell in a browser once the daemon is listening. Extracted from
  * the `serve` handler so it is unit-testable. Best-effort:
- *  - gated on `--open`, the UI actually being mounted (`webShellMounted`), and
- *    `shouldLaunchBrowser()` (false in CI / SSH / headless);
+ *  - gated on `--open` and the UI actually being mounted
+ *    (`webShellMounted`); bare `--open` remains a no-op when
+ *    `shouldLaunchBrowser()` is false, while `--open-with-auth` prints a
+ *    manual URL instead;
  *  - wildcard bind hosts (`0.0.0.0` / `[::]`) are rewritten to loopback so the
  *    URL is client-addressable;
  *  - the token rides in the URL fragment (`#token=`), which is never sent to
@@ -127,8 +142,11 @@ export async function maybeOpenWebShellBrowser(
     runtimeReady?: Promise<void>;
   },
   open: boolean,
+  manualFallbackWhenIneligible = false,
 ): Promise<void> {
-  if (!open || !handle.webShellMounted || !shouldLaunchBrowser()) return;
+  if (!open || !handle.webShellMounted) return;
+  const shouldLaunch = shouldLaunchBrowser();
+  if (!shouldLaunch && !manualFallbackWhenIneligible) return;
   try {
     await handle.runtimeReady;
   } catch (runtimeErr) {
@@ -139,14 +157,24 @@ export async function maybeOpenWebShellBrowser(
     );
     return;
   }
+  let target: URL | undefined;
   try {
-    const target = new URL(handle.url);
+    target = new URL(handle.url);
     // Node's URL returns the IPv6 wildcard as `[::]` (bracketed), never `::`.
     if (target.hostname === '0.0.0.0' || target.hostname === '[::]') {
       target.hostname = '127.0.0.1';
     }
     if (handle.resolvedToken) {
       target.hash = `token=${encodeURIComponent(handle.resolvedToken)}`;
+    }
+    if (!shouldLaunch) {
+      writeStderrLine(
+        'Browser launch is not available in this environment. ' +
+          `Please open this URL manually: ${target.toString()}`,
+      );
+      return;
+    }
+    if (handle.resolvedToken) {
       writeStderrLine(
         'qwen serve: --open passes the token in the browser launch command ' +
           '(visible via `ps` / /proc); on a multi-user host open the URL manually instead.',
@@ -154,8 +182,12 @@ export async function maybeOpenWebShellBrowser(
     }
     await openBrowserSecurely(target.toString());
   } catch (browserErr) {
+    const manualUrl =
+      manualFallbackWhenIneligible && target
+        ? `. Please open this URL manually: ${target.toString()}`
+        : '';
     writeStderrLine(
-      `qwen serve: failed to open browser: ${browserErr instanceof Error ? browserErr.message : String(browserErr)}`,
+      `qwen serve: failed to open browser: ${browserErr instanceof Error ? browserErr.message : String(browserErr)}${manualUrl}`,
     );
   }
 }
@@ -180,7 +212,9 @@ interface ServeArgs {
   'tls-key'?: string;
   web: boolean;
   open: boolean;
+  'open-with-auth': boolean;
   'local-control': boolean;
+  'local-control-address'?: string;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -209,6 +243,7 @@ interface ServeArgs {
   'rate-limit-read'?: number;
   'rate-limit-window-ms'?: number;
   experimentalLsp?: boolean;
+  restoreAskUserQuestion?: boolean;
   channel?: string[];
 }
 
@@ -323,6 +358,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Forward the experimental LSP opt-in to spawned agent sessions.',
       })
+      .option('restore-ask-user-question', {
+        type: 'boolean',
+        default: false,
+        description:
+          'On session load/resume, re-hang a trailing unanswered ask_user_question instead of synthesizing a failed tool result.',
+      })
       .option('channel', {
         type: 'string',
         array: true,
@@ -341,38 +382,46 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Open the Web Shell in a browser once the daemon is listening. With a token configured, the launch URL (token included) is handed to the browser launcher and is visible in the process list, so prefer opening the URL manually on multi-user hosts. No-op with --no-web, when the UI assets are absent, or in headless/CI/SSH environments.',
       })
+      .option('open-with-auth', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Open the Web Shell with bearer authentication on loopback. Reuse --token or QWEN_SERVER_TOKEN, or generate a temporary 256-bit token and deliver it in the URL fragment. In headless environments, print the fragment URL for manual opening.',
+      })
       .option('local-control', {
         type: 'boolean',
         default: false,
         description:
-          'Share the Web Shell on the local IPv4 network with a fresh token, terminal QR code, and best-effort sleep inhibition. Press Ctrl+C to turn it off.',
+          'Share the Web Shell on the local IPv4 network with its own revocable pairing token, terminal QR code, and best-effort sleep inhibition. Ctrl+C turns it off by ending the whole daemon; the Web Shell Settings card turns it off while the daemon keeps running.',
+      })
+      .option('local-control-address', {
+        type: 'string',
+        description:
+          'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
       })
       .check((argv) => {
-        if (argv['local-control'] === true && argv.token !== undefined) {
-          throw new Error('Local Control generates its own token.');
-        }
-        if (
-          argv['local-control'] === true &&
-          argv['allow-origin'] !== undefined
-        ) {
-          throw new Error('Local Control manages its browser origins.');
-        }
+        // A wildcard or LAN primary bind already owns the port Local Control
+        // needs on its selected address. Token and Origin settings remain
+        // independent because the second listener owns those.
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }
         if (
           argv['local-control'] === true &&
-          (!Number.isInteger(argv['port']) ||
-            argv['port'] < 1 ||
-            argv['port'] > 65535)
-        ) {
-          throw new Error('Local Control requires a fixed port.');
-        }
-        if (
-          argv['local-control'] === true &&
           argv.hostname !== DEFAULT_SERVE_HOSTNAME
         ) {
-          throw new Error('Local Control manages its hostname.');
+          throw new Error(
+            `Local Control requires --hostname ${DEFAULT_SERVE_HOSTNAME}.`,
+          );
+        }
+        if (
+          argv['local-control'] !== true &&
+          argv['local-control-address'] !== undefined
+        ) {
+          throw new Error('--local-control-address requires --local-control.');
+        }
+        if (argv['local-control-address'] === '') {
+          throw new Error('--local-control-address must not be empty.');
         }
         return true;
       })
@@ -562,9 +611,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('permission-response-timeout-ms', {
         type: 'number',
         description:
-          'Wall-clock timeout for a single human permission / ' +
-          'ask_user_question response in daemon (ACP) mode (ms). ' +
-          '0 = disabled (wait forever). Default: 300000 (5 min).',
+          'Wall-clock timeout for a human permission / ask_user_question ' +
+          'response in daemon (ACP) mode (ms). ' +
+          '0 or unset = disabled (wait indefinitely). Default: 0.',
       })
       .option('external-tool-guard-mode', {
         choices: ['off', 'required'] as const,
@@ -788,30 +837,17 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     const externalToolGuardToken =
       process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV] ?? '';
     delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
+    const openWithAuth = argv['open-with-auth'];
+    const open = argv.open || openWithAuth;
 
     // Lazy-load the slim serve runner so the yargs fallback path does not pull
     // the public serve barrel, which also exports REST/ACP runtime modules.
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
-      const localControlToken = argv['local-control']
-        ? randomBytes(32).toString('base64url')
-        : undefined;
-      const localControlPairing = localControlToken
-        ? localControlUrls(
-            `${argv['tls-cert'] ? 'https' : 'http'}://0.0.0.0:${argv.port}/`,
-            localControlToken,
-          )
-        : [];
-      if (argv['local-control'] && localControlPairing.length === 0) {
-        throw new Error(
-          'Local Control could not find a non-loopback IPv4 address.',
-        );
-      }
-      const handle = await runQwenServe({
+      const serveOptions = {
         port: argv.port,
-        strictPort: argv['local-control'],
-        hostname: argv['local-control'] ? '0.0.0.0' : argv.hostname,
-        token: localControlToken ?? argv.token,
+        hostname: argv.hostname,
+        token: argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
         ...(argv['max-total-sessions'] !== undefined
@@ -844,19 +880,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(memoryBudgetMb !== undefined ? { memoryBudgetMb } : {}),
         memoryPressureMode: argv['memory-pressure-mode'],
         childHeapMode: argv['child-heap-mode'],
-        ...(argv['local-control']
-          ? {
-              allowOrigins: localControlPairing
-                .map(({ url }) => new URL(url).origin)
-                .concat(
-                  new URL(
-                    `${argv['tls-cert'] ? 'https' : 'http'}://127.0.0.1:${argv.port}`,
-                  ).origin,
-                ),
-            }
-          : argv['allow-origin'] && argv['allow-origin'].length > 0
-            ? { allowOrigins: argv['allow-origin'] }
-            : {}),
+        // No Local Control special case: the service registers and removes the
+        // LAN origin itself while a session is live.
+        ...(argv['allow-origin'] && argv['allow-origin'].length > 0
+          ? { allowOrigins: argv['allow-origin'] }
+          : {}),
         ...(argv['prompt-deadline-ms'] !== undefined
           ? { promptDeadlineMs: argv['prompt-deadline-ms'] }
           : {}),
@@ -906,20 +934,32 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
         ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
         ...(argv.experimentalLsp === true ? { experimentalLsp: true } : {}),
+        ...(argv.restoreAskUserQuestion === true
+          ? { restoreAskUserQuestion: true }
+          : {}),
         ...(channelSelection !== undefined ? { channelSelection } : {}),
-      });
+      } satisfies Parameters<typeof runQwenServe>[0];
+      if (openWithAuth) {
+        const { applyOpenWithAuth } = await import(
+          '../serve/open-with-auth.js'
+        );
+        applyOpenWithAuth(serveOptions);
+      }
+      const handle = await runQwenServe(serveOptions);
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).
       if (argv['local-control']) {
         try {
-          await showLocalControlPairing(handle, localControlPairing);
-          sleepInhibitor.acquire('Qwen Code Local Control is active');
+          // Sleep inhibition moved into the service: it is held for as long as
+          // the LAN listener is up and released when it goes down, rather than
+          // for the lifetime of the process regardless.
+          await startLocalControl(handle, argv['local-control-address']);
         } catch (err) {
           await handle.close().catch(() => undefined);
           throw err;
         }
       }
-      await maybeOpenWebShellBrowser(handle, argv.open);
+      await maybeOpenWebShellBrowser(handle, open, openWithAuth);
     } catch (err) {
       writeStderrLine(
         `qwen serve: ${err instanceof Error ? err.message : String(err)}`,

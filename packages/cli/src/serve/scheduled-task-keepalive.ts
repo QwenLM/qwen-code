@@ -5,11 +5,11 @@
  */
 
 /**
- * Keeps scheduled-task-owned sessions resident against the bridge's idle
+ * Keeps sessions bound to scheduled tasks resident against the bridge's idle
  * reaper.
  *
  * A durable task created through the Web Shell management page is bound to a
- * dedicated session and fires ONLY inside it (its transcript is the task's run
+ * session and fires ONLY inside it (its transcript is the task's run
  * history). For that to keep happening the session must stay loaded so its
  * in-child scheduler ticks — but a session with no client / SSE subscriber is
  * closed by the bridge's idle reaper after the idle timeout, which would
@@ -50,7 +50,9 @@ const log = createDebugLogger('SCHED_KEEPALIVE');
  * unbound, or a duplicate of one already collected. The heartbeat pass and the
  * boot rehydrate share this so the "which sessions to keep resident" filter lives
  * in exactly one place and can't drift between them. */
-function collectBoundSessionIds(tasks: readonly DurableCronTask[]): string[] {
+export function collectBoundSessionIds(
+  tasks: readonly DurableCronTask[],
+): string[] {
   const seen = new Set<string>();
   const ids: string[] = [];
   for (const task of tasks) {
@@ -91,6 +93,11 @@ export interface KeepaliveBridge {
     sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
+  /** Advance the in-memory session-catalog revision after a successful
+   * persisted removal driven by keepalive cleanup. Optional so existing
+   * structural test fakes stay source-compatible; the production bridge
+   * always provides it. */
+  markSessionCatalogChanged?(): void;
   updateSessionMetadata(
     sessionId: string,
     metadata: { displayName?: string },
@@ -108,14 +115,14 @@ const MAX_REVIVE_BACKOFF_MS = 30 * 60_000;
 
 /**
  * Bind unbound durable tasks to dedicated sessions, and rename bound
- * sessions that don't yet have the ⏰ prefix. The cron_create tool leaves
+ * task-owned sessions that have not yet been named. The cron_create tool leaves
  * durable tasks unbound so they stay pickable by any lock owner (CLI/ACP
  * /headless). In daemon mode this keepalive mints a dedicated session per
  * task and names it — binding is a daemon-only concern.
  *
- * For unbound tasks: mints a dedicated session, names it `⏰ prompt`,
+ * For unbound tasks: mints a dedicated session, names it after the prompt,
  * writes sessionId to disk.
- * For bound tasks without ⏰ name: renames the session to `⏰ prompt`.
+ * For task-owned bound tasks not yet named: renames the session after the prompt.
  *
  * A Set tracks renamed sessions so we don't call updateSessionMetadata
  * every tick. Best-effort — failures are logged and retried next tick.
@@ -139,6 +146,7 @@ async function bindAndNameSessions(
   const needsName = tasks.filter(
     (t) =>
       t.sessionId &&
+      t.sessionOwnedByTask !== false &&
       t.enabled !== false &&
       !taskHasLegacyCondition(t) &&
       !renamed.has(t.sessionId),
@@ -274,9 +282,10 @@ export function startScheduledTaskKeepalive(
     opts.cleanupSession ??
     (async (sessionId: string) => {
       await bridge.closeSession(sessionId);
-      await new SessionService(boundWorkspace, {
+      const removed = await new SessionService(boundWorkspace, {
         runtimeBaseDir: opts.runtimeBaseDir,
       }).removeSession(sessionId);
+      if (removed) bridge.markSessionCatalogChanged?.();
     });
 
   // Per-session revive state: `nextAttemptAt` gates retries after failures so a
@@ -296,7 +305,7 @@ export function startScheduledTaskKeepalive(
   // until the raw spawn settles.
   const binding = new Set<string>();
 
-  // Tracks sessions the keepalive has already named with ⏰ prefix,
+  // Tracks sessions the keepalive has already named,
   // so updateSessionMetadata isn't called every tick.
   const renamed = new Set<string>();
 
@@ -492,7 +501,7 @@ export interface RehydrateResult {
 }
 
 /**
- * Reloads every scheduled-task-owned session at daemon startup so its in-child
+ * Reloads every scheduled-task-bound session at daemon startup so its in-child
  * scheduler re-arms after a restart — nothing rehydrates sessions on boot
  * otherwise, so a bound task would sit dormant (its bound session dead, and the
  * lock owner deliberately never fires a bound task) until something loaded it.

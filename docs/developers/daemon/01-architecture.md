@@ -154,7 +154,7 @@ sequenceDiagram
     participant CH as ACP child
 
     C->>MW: POST /session/:id/prompt<br/>Authorization: Bearer …<br/>X-Qwen-Client-Id: …
-    MW->>MW: denyBrowserOriginCors
+    MW->>MW: allowOriginCors (mutable allowlist; unmatched Origin -> 403)
     MW->>MW: hostAllowlist (DNS rebinding guard)
     MW->>MW: access-log hook
     MW->>MW: bearerAuth (constant-time compare)
