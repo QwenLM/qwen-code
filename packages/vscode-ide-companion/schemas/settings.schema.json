@@ -184,11 +184,6 @@
           "type": "string",
           "default": "auto"
         },
-        "dynamicCommandTranslation": {
-          "description": "Enable AI translation for dynamic slash command descriptions. When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.",
-          "type": "boolean",
-          "default": false
-        },
         "terminalBell": {
           "description": "Play terminal bell sound when response completes or needs approval.",
           "type": "boolean",
@@ -1564,7 +1559,7 @@
           }
         },
         "crossSessionMessaging": {
-          "description": "Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on both opens this session to peer messages and makes it discoverable to others.",
+          "description": "Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on opens this session to peer messages, makes it discoverable to others, and lets its model address them from send_message.",
           "type": "boolean",
           "default": false
         },

@@ -27,7 +27,7 @@ import {
   useWorkspaceActions,
   type DaemonScheduledTask,
   type DaemonScheduledTaskRun,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonExtensionEntry,
   DaemonWorkspaceCapability,

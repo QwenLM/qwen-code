@@ -13,12 +13,12 @@ import { WebViewContent } from './WebViewContent.js';
 const envMock = vi.hoisted(() => ({ language: 'en' }));
 
 vi.mock('vscode', () => ({
+  env: envMock,
   Uri: {
     joinPath: vi.fn((_base: unknown, ...parts: string[]) => ({
       fsPath: `/ext/${parts.join('/')}`,
     })),
   },
-  env: envMock,
 }));
 
 /**
@@ -26,9 +26,15 @@ vi.mock('vscode', () => ({
  */
 function createMockWebview() {
   return {
-    asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
-      toString: () => `https://webview/${uri.fsPath}`,
-    })),
+    asWebviewUri: vi.fn((uri: { fsPath: string }) => {
+      const toString = () => `https://webview/${uri.fsPath}`;
+      return {
+        toString,
+        with: ({ query }: { query?: string } = {}) => ({
+          toString: () => (query ? `${toString()}?${query}` : toString()),
+        }),
+      };
+    }),
     cspSource: 'https://csp.source',
   };
 }
@@ -101,6 +107,18 @@ describe('WebViewContent', () => {
     expect(html).toContain('font-src data:;');
   });
 
+  it('fills the VS Code webview without inherited body padding', () => {
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain('html, body, #root {');
+    expect(html).toContain('height: 100%;');
+    expect(html).toContain('margin: 0;');
+    expect(html).toContain('padding: 0;');
+    expect(html).toContain('box-sizing: border-box;');
+    expect(html).toContain('#root {\n      display: flex;');
+  });
+
   it('does not set data-web-shell-transcript on the body', () => {
     const webview = createMockWebview();
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
@@ -108,17 +126,19 @@ describe('WebViewContent', () => {
     expect(html).not.toContain('data-web-shell-transcript');
   });
 
-  it('injects vscode.env.language into html lang attribute (zh-CN)', () => {
-    envMock.language = 'zh-CN';
+  it('injects the VS Code locale into the html lang attribute', () => {
+    envMock.language = 'zh-cn';
     const webview = createMockWebview();
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
-    expect(html).toContain('<html lang="zh-CN">');
+
+    expect(html).toContain('<html lang="zh-cn">');
   });
 
-  it('injects vscode.env.language into html lang attribute (en)', () => {
-    envMock.language = 'en';
+  it('falls back to en when the VS Code locale is empty', () => {
+    envMock.language = '';
     const webview = createMockWebview();
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
     expect(html).toContain('<html lang="en">');
   });
 
