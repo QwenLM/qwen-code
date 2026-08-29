@@ -1539,10 +1539,13 @@ export function createDaemonSessionActions({
         persistStableClientId(nextSession.clientId, nextSession.sessionId);
         sessionRef.current = nextSession;
         skipNextCleanupDetachSessionRef.current = nextSession;
-        const createdSessionContext = targetSessionContext ?? {
-          kind: 'workspace' as const,
-          cwd: nextSession.workspaceCwd,
-        };
+        const createdSessionContext =
+          targetSessionContext?.kind === 'standalone'
+            ? targetSessionContext
+            : {
+                kind: 'workspace' as const,
+                cwd: nextSession.workspaceCwd,
+              };
         setConnection((current) => {
           const base =
             createdSessionContext.kind === 'workspace'

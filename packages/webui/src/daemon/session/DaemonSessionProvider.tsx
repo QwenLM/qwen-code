@@ -1333,6 +1333,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let standaloneCreateAttempted = false;
       let productContextFailure = false;
       let hasCurrentSessionActivePrompt = () => false;
+      if (
+        activeSessionContextRef.current?.kind === 'standalone' &&
+        !restoreSessionId &&
+        !reconnectSessionId &&
+        !shouldCreateFreshSession &&
+        connectionRef.current.standaloneSession?.creationRecovery
+      ) {
+        return;
+      }
       // Set when the user explicitly deletes the session (server
       // publishes session_closed with reason 'client_close').
       // Reconnecting would auto-create a new session, undoing the
@@ -1481,25 +1490,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               !shouldCreateFreshSession
             ) {
               if (!workspaceScoped) {
-                setConnection((current) => ({
-                  ...current,
-                  status: 'connected',
-                  sessionContext: effectSessionContext,
-                  workspaceCwd: undefined,
-                  standaloneSession: undefined,
-                  gitBranch: undefined,
-                  gitStatus: undefined,
-                  commands: undefined,
-                  skills: undefined,
-                  models: undefined,
-                  currentModel: undefined,
-                  currentMode: undefined,
-                  contextWindow: undefined,
-                  providers: undefined,
-                  capabilities: caps,
-                  error: undefined,
-                  errorStatus: undefined,
-                }));
+                setConnection((current) =>
+                  current.standaloneSession?.creationRecovery
+                    ? current
+                    : {
+                        ...clearNonWorkspaceSessionState(current),
+                        status: 'connected',
+                        sessionContext: effectSessionContext,
+                        workspaceCwd: undefined,
+                        standaloneSession: undefined,
+                        gitBranch: undefined,
+                        gitStatus: undefined,
+                        commands: undefined,
+                        skills: undefined,
+                        models: undefined,
+                        currentModel: undefined,
+                        currentMode: undefined,
+                        contextWindow: undefined,
+                        providers: undefined,
+                        capabilities: caps,
+                        error: undefined,
+                        errorStatus: undefined,
+                      },
+                );
                 return;
               }
               // Fetch skills alongside providers so skill-backed slash
@@ -1981,7 +1994,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             pendingLoad?.sessionId === activeSession.sessionId &&
             restoreSessionContextMatches(
               pendingLoad.sessionContext,
-              activeProductSessionContext,
+              activeSessionContextRef.current,
             )
               ? pendingLoad
               : undefined;
@@ -3274,10 +3287,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
           if (standaloneCreateAttempted) {
             standaloneCreateAttempted = false;
+            manualSessionClearRef.current = true;
             const outcomeUnknown =
               error instanceof DaemonStandaloneCreationOutcomeUnknownError;
             setConnection((current) => ({
-              ...current,
+              ...getConnectionAfterSessionClear(
+                current,
+                current.sessionId,
+                false,
+              ),
               status: 'error',
               ...(outcomeUnknown ? { sessionId: error.sessionId } : {}),
               sessionContext: { kind: 'standalone' },
@@ -3776,7 +3794,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           setConnection((current) =>
             current.sessionId === session.sessionId
               ? {
-                  ...clearNonWorkspaceSessionState(current),
+                  ...(authFailure || missingSession
+                    ? clearNonWorkspaceSessionState(current)
+                    : current),
                   status: authFailure ? 'error' : 'disconnected',
                   error: effectiveMessage,
                   errorStatus: resolveConnectionErrorStatus(
@@ -3915,8 +3935,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ...(approvalMode !== undefined ? { approvalMode } : {}),
           });
         },
-        getDefaultSessionContext: () =>
-          resolvedSessionContextRef.current ?? activeSessionContextRef.current,
+        getDefaultSessionContext: () => resolvedSessionContextRef.current,
         getConnection: () => connectionRef.current,
         addNotice,
         setConnection,

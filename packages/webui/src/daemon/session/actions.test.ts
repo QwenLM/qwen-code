@@ -464,6 +464,25 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('publishes the daemon-reported workspace after detached create', async () => {
+    const nextSession = createMockSession('session-b');
+    nextSession.workspaceCwd = '/private/canonical-workspace';
+    const { actions, getConnection } = createActionsHarness({
+      connection: { status: 'connected' },
+      createDetachedSession: vi.fn(async () => nextSession),
+    });
+
+    await actions.createSession({ workspaceCwd: '/workspace-alias' });
+
+    expect(getConnection()).toMatchObject({
+      sessionContext: {
+        kind: 'workspace',
+        cwd: '/private/canonical-workspace',
+      },
+      workspaceCwd: '/private/canonical-workspace',
+    });
+  });
+
   it('uses the standalone create path without a workspace fallback', async () => {
     const nextSession = createMockSession('standalone-b');
     Object.assign(nextSession, {
@@ -554,8 +573,14 @@ describe('createDaemonSessionActions', () => {
     });
 
     await expect(
-      actions.createSession({ sessionContext: { kind: 'standalone' } }),
+      actions.createSession({
+        sessionContext: { kind: 'standalone' },
+        approvalMode: 'yolo',
+      }),
     ).resolves.toBe(standaloneRecord);
+    expect(createDetachedStandaloneSession).toHaveBeenCalledWith({
+      approvalMode: 'yolo',
+    });
     expect(activeSession.client.createOrAttachSession).not.toHaveBeenCalled();
     expect(getConnection()).toEqual(connection);
   });
@@ -766,26 +791,31 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection()).toEqual(connection);
   });
 
-  it('rejects workspace-only create options for standalone sessions', async () => {
-    const createDetachedSession = vi.fn();
-    const createDetachedStandaloneSession = vi.fn();
-    const { actions } = createActionsHarness({
-      connection: {
-        status: 'connected',
-        sessionContext: { kind: 'standalone' },
-      },
-      createDetachedSession,
-      createDetachedStandaloneSession,
-    });
+  it.each([
+    { sourceType: 'default' },
+    { worktree: { slug: 'feature' } },
+    { branch: { name: 'feature' } },
+  ])(
+    'rejects workspace-only create options for standalone sessions: $sourceType$worktree.slug$branch.name',
+    async (workspaceOnlyOption) => {
+      const createDetachedSession = vi.fn();
+      const createDetachedStandaloneSession = vi.fn();
+      const { actions } = createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionContext: { kind: 'standalone' },
+        },
+        createDetachedSession,
+        createDetachedStandaloneSession,
+      });
 
-    await expect(
-      actions.createSession({ sourceType: 'default' }),
-    ).rejects.toThrow(
-      'Standalone session creation does not support sourceType, worktree, or branch options',
-    );
-    expect(createDetachedSession).not.toHaveBeenCalled();
-    expect(createDetachedStandaloneSession).not.toHaveBeenCalled();
-  });
+      await expect(actions.createSession(workspaceOnlyOption)).rejects.toThrow(
+        'Standalone session creation does not support sourceType, worktree, or branch options',
+      );
+      expect(createDetachedSession).not.toHaveBeenCalled();
+      expect(createDetachedStandaloneSession).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not apply the generic create timeout to standalone create', async () => {
     vi.useFakeTimers();
@@ -818,6 +848,28 @@ describe('createDaemonSessionActions', () => {
       expect(settled).toBe(false);
       deferred.resolve(nextSession as unknown as DaemonSessionClient);
       await expect(pending).resolves.toBe(nextSession);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('applies the generic create timeout to workspace create', async () => {
+    vi.useFakeTimers();
+    try {
+      const deferred = createDeferred<DaemonSessionClient>();
+      const { actions } = createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        },
+        createDetachedSession: vi.fn(() => deferred.promise),
+      });
+
+      const pending = actions.createSession();
+      await Promise.all([
+        expect(pending).rejects.toThrow('Create session timed out'),
+        vi.advanceTimersByTimeAsync(30_000),
+      ]);
     } finally {
       vi.useRealTimers();
     }
@@ -1058,6 +1110,36 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection().currentModel).toBeUndefined();
     expect(getConnection().currentMode).toBeUndefined();
     expect(getConnection().contextWindow).toBeUndefined();
+  });
+
+  it('drops stale previews when switching between Live sessions', () => {
+    const existingSession = createMockSession('live-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'live-a',
+        sessionContext: { kind: 'live' },
+        commands: [commandInfo('live-command')],
+        skills: ['live-skill'],
+        models: [{ id: 'live-model', label: 'Live model' }],
+        currentModel: 'live-model',
+      },
+      session: existingSession,
+    });
+
+    void actions
+      .loadSession('live-b', { sessionContext: { kind: 'live' } })
+      .catch(() => undefined);
+
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'live-b',
+      sessionContext: { kind: 'live' },
+    });
+    expect(getConnection().commands).toBeUndefined();
+    expect(getConnection().skills).toBeUndefined();
+    expect(getConnection().models).toBeUndefined();
+    expect(getConnection().currentModel).toBeUndefined();
   });
 
   it('drops standalone previews when switching to a workspace target', () => {

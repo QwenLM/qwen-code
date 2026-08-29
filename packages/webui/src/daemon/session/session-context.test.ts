@@ -190,6 +190,23 @@ describe('session context', () => {
         modelServices: [],
         workspaces: [
           {
+            id: 7,
+            cwd: '/conversations',
+            primary: false,
+            trusted: true,
+            kind: 'live',
+          } as unknown as DaemonWorkspaceCapability,
+        ],
+      }),
+    ).toThrow('not uniquely trusted');
+    expect(() =>
+      resolveLiveSessionWorkspaceCwd({
+        v: 1,
+        mode: 'native',
+        features: ['multi_workspace_sessions'],
+        modelServices: [],
+        workspaces: [
+          {
             id: 'live',
             cwd: '/conversations',
             trusted: true,
@@ -302,6 +319,38 @@ describe('session context', () => {
         workspaces: [],
       } as unknown as Parameters<typeof resolveLiveSessionWorkspaceCwd>[0]),
     ).toThrow('does not advertise multi-workspace session routing');
+    expect(() =>
+      resolveLiveSessionWorkspaceCwd({
+        v: 1,
+        mode: 'native',
+        features: ['multi_workspace_sessions'],
+        modelServices: [],
+        workspaces: { live: '/conversations' },
+      } as unknown as Parameters<typeof resolveLiveSessionWorkspaceCwd>[0]),
+    ).toThrow('does not advertise a Live session runtime');
+    expect(
+      resolveLiveSessionWorkspaceCwd({
+        v: 1,
+        mode: 'native',
+        features: ['multi_workspace_sessions'],
+        modelServices: [],
+        workspaces: [
+          {
+            id: 'live',
+            cwd: '/conversations',
+            primary: false,
+            trusted: true,
+            kind: 'live',
+          },
+          {
+            id: 'other',
+            cwd: 7,
+            primary: false,
+            trusted: true,
+          } as unknown as DaemonWorkspaceCapability,
+        ],
+      }),
+    ).toBe('/conversations');
   });
 
   it('builds stable keys and reads structured daemon error codes', () => {

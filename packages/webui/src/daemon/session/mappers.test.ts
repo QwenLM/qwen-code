@@ -959,6 +959,21 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next).toBe(current);
   });
 
+  it('ignores git branch changes for Live sessions', () => {
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      sessionContext: { kind: 'live' },
+    };
+
+    const next = applyEvent(current, {
+      v: 1,
+      type: 'git_branch_changed',
+      data: { branch: 'internal-runtime-branch' },
+    });
+
+    expect(next).toBe(current);
+  });
+
   it('stores the enriched git status pushed for the current workspace', () => {
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },
@@ -1012,6 +1027,25 @@ describe('updateConnectionFromDaemonEvent', () => {
       v: 1,
       type: 'git_status_changed',
       data: { v: 2, branch: 'main', staged: 3 },
+    });
+
+    expect(next).toBe(current);
+  });
+
+  it('ignores git status pushes for Live sessions', () => {
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      sessionContext: { kind: 'live' },
+    };
+
+    const next = applyEvent(current, {
+      v: 1,
+      type: 'git_status_changed',
+      data: {
+        v: 2,
+        branch: 'internal-runtime-branch',
+        staged: 1,
+      },
     });
 
     expect(next).toBe(current);
