@@ -271,24 +271,26 @@ interface PermissionDiffPreview {
 function permissionDiffPreview(
   block: Extract<DaemonTranscriptBlock, { kind: 'permission' }>,
 ): PermissionDiffPreview | undefined {
-  // Trust the SDK's hardened matcher (createDaemonToolPreview): only an
-  // authoritative file_diff preview may drive the native diff. Mining
-  // model-controlled toolCall args here diverged from the daemon's
-  // classification and could present unapproved arguments as the proposed
-  // edit on the very surface the user approves or denies on.
-  if (block.preview.kind !== 'file_diff') {
-    return undefined;
+  const toolCall = block.toolCall;
+  if (!toolCall || typeof toolCall !== 'object') return undefined;
+  const content = (toolCall as { content?: unknown }).content;
+  if (!Array.isArray(content)) return undefined;
+  for (const item of content) {
+    if (!item || typeof item !== 'object') continue;
+    const diff = item as Record<string, unknown>;
+    if (
+      diff.type === 'diff' &&
+      typeof diff.path === 'string' &&
+      (typeof diff.oldText === 'string' || typeof diff.newText === 'string')
+    ) {
+      return {
+        path: diff.path,
+        oldText: typeof diff.oldText === 'string' ? diff.oldText : '',
+        newText: typeof diff.newText === 'string' ? diff.newText : '',
+      };
+    }
   }
-  const { path, oldText, newText } = block.preview;
-  if (
-    typeof path !== 'string' ||
-    (oldText === undefined && newText === undefined)
-  ) {
-    return undefined;
-  }
-  // Write/create previews legitimately omit oldText; the diff editor opens
-  // them against an empty old side.
-  return { path, oldText: oldText ?? '', newText: newText ?? '' };
+  return undefined;
 }
 
 export function EmbeddedApp() {

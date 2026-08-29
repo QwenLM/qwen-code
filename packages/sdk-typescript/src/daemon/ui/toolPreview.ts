@@ -30,9 +30,6 @@ export function createDaemonToolPreview(
     return { kind: 'generic', ...(summary ? { summary } : {}) };
   }
 
-  const contentDiff = detectToolCallContentDiff(input);
-  if (contentDiff) return contentDiff;
-
   if (isRecord(input)) {
     const nestedInput = input['rawInput'] ?? input['input'] ?? input['args'];
     if (nestedInput !== undefined && nestedInput !== input) {
@@ -110,27 +107,6 @@ export function createDaemonToolPreview(
 
   const summary = opts.title ?? opts.toolName ?? opts.toolKind;
   return { kind: 'generic', ...(summary ? { summary } : {}) };
-}
-
-function detectToolCallContentDiff(
-  input: unknown,
-): DaemonToolPreview | undefined {
-  if (!isRecord(input) || !Array.isArray(input['content'])) return undefined;
-  for (const item of input['content']) {
-    if (!isRecord(item) || item['type'] !== 'diff') continue;
-    const path = getFirstString(item, ['path']);
-    const oldText = item['oldText'];
-    const newText = item['newText'];
-    if (path && (typeof oldText === 'string' || typeof newText === 'string')) {
-      return {
-        kind: 'file_diff',
-        path,
-        ...(typeof oldText === 'string' ? { oldText } : {}),
-        ...(typeof newText === 'string' ? { newText } : {}),
-      };
-    }
-  }
-  return undefined;
 }
 
 /**
