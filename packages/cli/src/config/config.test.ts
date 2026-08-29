@@ -3087,6 +3087,33 @@ describe('loadCliConfig', () => {
     expect(config.getSessionId()).toBe(sessionId.toLowerCase());
   });
 
+  it('skips the occupancy check for a daemon-generated sessionId', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    // A failing occupancy scan (EACCES/EMFILE/EIO fail closed) must not
+    // reject an internally generated fresh UUID on the id-less creation hot
+    // path — the check exists for caller-chosen ids only.
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockRejectedValue(
+      new Error('EACCES: chats/archive unreadable'),
+    );
+
+    const config = await loadCliConfig(
+      {},
+      { sessionId, sessionIdGenerated: true } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(config.getSessionId()).toBe(sessionId);
+    expect(
+      mockSessionServiceInstance.findSessionIdIgnoringCase,
+    ).not.toHaveBeenCalled();
+  });
+
   it('should use internal sandbox session ID without treating it as a new session', async () => {
     const sessionId = '123e4567-e89b-12d3-a456-426614174000';
     vi.stubEnv('SANDBOX', 'sandbox-exec');

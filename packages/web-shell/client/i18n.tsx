@@ -3092,6 +3092,10 @@ const EN: Messages = {
   'settings.localControl.maySleep': 'This Mac may sleep',
   'settings.localControl.urlRedacted':
     'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
+  'localControl.open': 'Mobile access',
+  'localControl.disabledHint':
+    'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
+  'localControl.openSettings': 'Open Settings',
   'settings.models.title': 'Models',
   'settings.models.add': '+ Add Model',
   'settings.models.setCurrent': 'Set current',
@@ -6062,6 +6066,10 @@ const ZH: Messages = {
   'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
   'settings.localControl.urlRedacted':
     '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
+  'localControl.open': '手机访问',
+  'localControl.disabledHint':
+    '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
+  'localControl.openSettings': '打开设置',
   'settings.models.title': '模型',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',
