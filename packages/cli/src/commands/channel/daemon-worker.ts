@@ -604,9 +604,7 @@ export async function runChannelDaemonWorker(
     for (const { name, config } of parsed) {
       createdRouter.setChannelScope(name, config.sessionScope);
       createdRouter.setChannelLoopsEnabled(name, !config.multiSession);
-      if (config['webhooks']) {
-        createdRouter.setChannelApprovalMode(name, config.approvalMode);
-      }
+      createdRouter.setChannelApprovalMode(name, config.approvalMode);
     }
     const restoredRoutes = createdRouter.restoreRoutes();
     writeStdoutLine(
