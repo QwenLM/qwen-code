@@ -65,6 +65,129 @@
   text-align: left;
 }
 
+.scheduledTaskBubble {
+  width: min(680px, 100%);
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 82%, var(--background));
+}
+
+.scheduledTaskRun {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.scheduledTaskHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.scheduledTaskIcon {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary);
+}
+
+.scheduledTaskIcon svg {
+  width: 17px;
+  height: 17px;
+  stroke-width: 1.7;
+}
+
+.scheduledTaskHeading {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.scheduledTaskEyebrow {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.scheduledTaskName {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduledTaskMeta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.scheduledTaskMetaItem {
+  display: inline-flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.scheduledTaskMetaItem code,
+.scheduledTaskMetaItem time {
+  overflow: hidden;
+  color: var(--foreground);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduledTaskBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.scheduledTaskId {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.scheduledTaskId code {
+  color: inherit;
+  font-family: var(--font-mono, monospace);
+  overflow-wrap: anywhere;
+}
+
+.scheduledTaskPrompt {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--foreground);
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .sendFailure {
   display: flex;
   align-items: center;

@@ -16,6 +16,21 @@ import {
 import type { ModelManagementProps } from './ModelManagementSection';
 import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
 
+// The Daemon category renders LocalControlSettingsCard, which reads the
+// workspace connection from context; stub it so the category can be
+// rendered without a DaemonWorkspaceProvider.
+vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+  return {
+    ...actual,
+    useWorkspace: () => ({
+      baseUrl: 'http://127.0.0.1:8080/',
+      token: 'test-token',
+    }),
+  };
+});
+
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -155,6 +170,7 @@ function renderPanel(
   overrides: Partial<{
     onSubDialog: (key: string, scope: 'workspace' | 'user') => void;
     modelManagement: ModelManagementProps;
+    initialCategory: string;
   }> = {},
 ): HTMLElement {
   return render(
@@ -162,6 +178,7 @@ function renderPanel(
       <SettingsMessage
         settingsState={state}
         embedded
+        initialCategory={overrides.initialCategory}
         onLanguageChange={noop}
         onThemeChange={noop}
         onSubDialog={overrides.onSubDialog ?? noop}
@@ -196,6 +213,124 @@ function switchButton(container: HTMLElement): HTMLButtonElement {
   if (!el) throw new Error('boolean switch not found');
   return el;
 }
+
+describe('SettingsMessage initialCategory', () => {
+  function daemonSetting(): DaemonSettingDescriptor {
+    return {
+      key: 'daemon.testFlag',
+      type: 'boolean',
+      label: 'Daemon Flag',
+      category: 'Daemon',
+      requiresRestart: false,
+      default: false,
+      values: { effective: false },
+    };
+  }
+
+  function activeCategoryButton(container: HTMLElement): HTMLButtonElement {
+    const el = container.querySelector<HTMLButtonElement>(
+      'button[aria-current="page"]',
+    );
+    if (!el) throw new Error('active category button not found');
+    return el;
+  }
+
+  it('selects the requested category on open', async () => {
+    // The Daemon category's Local Control card fetches status on mount.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        text: () => Promise.resolve(JSON.stringify({ active: false })),
+      }),
+    );
+    const container = renderPanel(
+      makeState([boolSetting(), daemonSetting()], vi.fn()),
+      { initialCategory: 'Daemon' },
+    );
+    // Flush the card's status fetch under act so it doesn't warn.
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(activeCategoryButton(container).textContent).toContain('Daemon');
+    vi.unstubAllGlobals();
+  });
+
+  it('falls back to the first category without an initialCategory', () => {
+    const container = renderPanel(
+      makeState([boolSetting(), daemonSetting()], vi.fn()),
+    );
+
+    expect(activeCategoryButton(container).textContent).toContain('General');
+  });
+
+  it('falls back to the first category for an unknown initialCategory', () => {
+    const container = renderPanel(
+      makeState([boolSetting(), daemonSetting()], vi.fn()),
+      { initialCategory: 'NoSuchCategory' },
+    );
+
+    expect(activeCategoryButton(container).textContent).toContain('General');
+  });
+
+  it('does not force the deep-linked category again after a manual switch', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        text: () => Promise.resolve(JSON.stringify({ active: false })),
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderWith = (state: SettingsMessageSettingsState) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <SettingsMessage
+              settingsState={state}
+              embedded
+              initialCategory="Daemon"
+              onLanguageChange={noop}
+              onThemeChange={noop}
+              onSubDialog={noop}
+              chatWidthMode="1000"
+              onChatWidthModeChange={noop}
+            />
+          </I18nProvider>,
+        );
+      });
+
+    renderWith(makeState([boolSetting(), daemonSetting()], vi.fn()));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(activeCategoryButton(container).textContent).toContain('Daemon');
+
+    // The user manually switches to General.
+    const generalButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((el) => el.textContent?.includes('General'));
+    if (!generalButton) throw new Error('General category button not found');
+    act(() => {
+      generalButton.click();
+    });
+    expect(activeCategoryButton(container).textContent).toContain('General');
+
+    // A re-render with a fresh settings identity (re-running the deep-link
+    // effect) must not override the manual choice.
+    renderWith(makeState([boolSetting(), daemonSetting()], vi.fn()));
+    expect(activeCategoryButton(container).textContent).toContain('General');
+    vi.unstubAllGlobals();
+  });
+});
 
 describe('SettingsMessage user-scope editing', () => {
   it('persists a boolean toggle to the user scope from the User tab', async () => {

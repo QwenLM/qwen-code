@@ -20,7 +20,7 @@ import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { InputFormat } from '../output/types.js';
+import { resolveInteractionMode } from '../core/prompts.js';
 
 const debugLogger = createDebugLogger('ASK_USER_QUESTION');
 
@@ -172,20 +172,41 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
   }
 
   /**
+   * Whether a host is present that can put the questions in front of the
+   * user. ACP hosts (VSCode extension, Zed, stream-json clients) run in
+   * non-interactive mode but still collect answers through the
+   * confirmation channel.
+   */
+  private canCollectAnswers(): boolean {
+    return resolveInteractionMode(this._config) !== 'headless';
+  }
+
+  /**
    * ask_user_question always requires user confirmation so the user can
    * provide answers. In non-interactive mode without ACP support, we skip
    * confirmation (and subsequently skip execution).
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const isAcpMode =
-      this._config.getExperimentalZedIntegration() ||
-      this._config.getInputFormat() === InputFormat.STREAM_JSON;
-
-    if (!this._config.isInteractive() && !isAcpMode) {
+    if (!this.canCollectAnswers()) {
       // Non-interactive + no ACP: skip entirely
       return 'allow';
     }
     return 'ask';
+  }
+
+  /**
+   * The confirmation dialog IS this tool: the answers are collected through
+   * `onConfirm`, so an approval that skips the dialog does not "allow" the
+   * tool, it silently answers "declined" on the user's behalf. Permission
+   * rules and automatic approval modes must therefore never satisfy it —
+   * a bare `ask_user_question` allow rule (a skill's `allowedTools` grant,
+   * `permissions.allow`, an "always allow" answer) would otherwise override
+   * the 'ask' default at L4 and the scheduler would run the tool with no
+   * dialog ever shown. Headless runs stay as they were: nothing can prompt
+   * there, and `execute()` reports that instead.
+   */
+  override requiresUserInteraction(): boolean {
+    return this.canCollectAnswers();
   }
 
   override async getConfirmationDetails(
@@ -222,14 +243,8 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     try {
-      // Check if we're in a mode that supports user interaction
-      // ACP mode (VSCode extension, etc.) uses non-interactive mode but can still collect user input
-      const isAcpMode =
-        this._config.getExperimentalZedIntegration() ||
-        this._config.getInputFormat() === InputFormat.STREAM_JSON;
-
       // In non-interactive mode without ACP support, we cannot collect user input
-      if (!this._config.isInteractive() && !isAcpMode) {
+      if (!this.canCollectAnswers()) {
         const errorMessage =
           'Cannot ask user questions in non-interactive mode without ACP support. Please run in interactive mode or enable ACP mode to use this tool.';
         return {
