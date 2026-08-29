@@ -146,11 +146,19 @@ function inTreeGitDir(root: string): string | null {
  * The exclusion is lexical — a symlink planted at an excluded directory
  * redirects every side-file write through it into a physical path no
  * pathspec matches, so the capture would report the review's own
- * bookkeeping (or an attacker's content) as fix edits. Refuse, the way
+ * bookkeeping (or an attacker's content) as fix edits. The command's own
+ * side paths are refused the same way: the directory check lstats only the
+ * PREFIXES of the excluded directories, so a link planted at the
+ * deterministic `--out` name itself would redirect the write — or, in
+ * `--since` mode, the baseline read — through it. Refuse, the way
  * `releaseWorktree` refuses a redirected ancestor: the failure direction
- * stops the run, it never contaminates it.
+ * stops the run, it never contaminates it. Overwriting an existing REGULAR
+ * side file stays allowed — Step 6B re-runs with the same name every round.
  */
-function assertNoRedirectedExcludes(root: string): void {
+function assertNoRedirectedExcludes(
+  root: string,
+  sidePaths: ReadonlyArray<string | undefined>,
+): void {
   const targets = new Set<string>();
   for (const chain of [join('.qwen', 'tmp'), inTreeGitDir(root) ?? '']) {
     let acc = '';
@@ -171,6 +179,21 @@ function assertNoRedirectedExcludes(root: string): void {
       throw new Error(
         `fix-delta: excluded directory ${rel} is a symlink; refusing to ` +
           'write side files outside the exclusion.',
+      );
+    }
+  }
+  for (const p of sidePaths) {
+    if (p === undefined) continue;
+    let link = false;
+    try {
+      link = lstatSync(resolve(p)).isSymbolicLink();
+    } catch {
+      continue;
+    }
+    if (link) {
+      throw new Error(
+        `fix-delta: side path ${p} is a symlink; refusing to write through ` +
+          'the redirect.',
       );
     }
   }
@@ -491,6 +514,9 @@ const DOT_GIT = Buffer.from('.git');
 /** The `ls-files -s` mode of a gitlink, plus the space after it. */
 const GITLINK_MODE_PREFIX = Buffer.from('160000 ');
 
+/** The `ls-files -s` mode of a symlink, plus the space after it. */
+const SYMLINK_MODE_PREFIX = Buffer.from('120000 ');
+
 /**
  * Decode a raw path for reporting: UTF-8 when the bytes ARE UTF-8 (the
  * everyday case), latin1 otherwise — a byte-preserving reading, so a name
@@ -734,6 +760,44 @@ function probeNestedRepo(
 }
 
 /**
+ * A path named by a status entry or by the index that may be a symlink
+ * reaching a repository: the link itself is what `add -A` records, so an
+ * edit through it into that repository is invisible the same way a
+ * gitlink's interior is. The exclusion checks key on the link's own name
+ * AND on the resolved target, and only a directory that carries a git dir
+ * is probed — the class this model names.
+ */
+function probeLinkedRepo(
+  rootBuf: Buffer,
+  rel: Buffer,
+  root: string,
+  gitDirRel: string | null,
+  state: {
+    dirty: Set<string>;
+    unresolved: Set<string>;
+    seen: Set<string>;
+  },
+): void {
+  const abs = joinBytes(rootBuf, rel);
+  let isLink = false;
+  try {
+    isLink = lstatSync(abs).isSymbolicLink();
+  } catch {
+    return;
+  }
+  if (!isLink) return;
+  if (relPathExcluded(rel, gitDirRel)) return;
+  try {
+    if (!statSync(abs).isDirectory()) return;
+  } catch {
+    return;
+  }
+  if (linkTargetExcluded(abs, root, gitDirRel)) return;
+  if (!existsSync(joinBytes(abs, DOT_GIT))) return;
+  probeNestedRepo(abs, rel, state);
+}
+
+/**
  * Paths holding edits a superproject tree cannot record: submodule checkouts
  * and nested git repositories. Either enters the tree as its gitlink alone —
  * an edit inside that is not committed there moves no gitlink, so both
@@ -771,10 +835,11 @@ function probeNestedRepo(
  *   interior edit out of the baseline into a false all-clear.
  *
  * Discovery never rests on the status alone: the probe also scans the
- * index's own mode-160000 gitlinks (`ls-files -s`), because
- * assume-unchanged / skip-worktree bits can keep a dirty submodule out of
- * the status ENTRIES altogether — an entrance that silences the blind spot
- * the model exists to name.
+ * index's own mode-160000 gitlinks and mode-120000 symlinks
+ * (`ls-files -s`), because assume-unchanged / skip-worktree bits can keep
+ * a dirty submodule out of the status ENTRIES altogether and an unchanged
+ * tracked link emits no entry of its own — entrances that silence the
+ * blind spot the model exists to name.
  *
  * The status runs with `-z` and is parsed as raw bytes: entries are
  * NUL-terminated and paths unquoted, and the rendered form C-quotes any name
@@ -861,23 +926,7 @@ function probeBlindSpotState(
         continue;
       }
       // Slashless: a plain file, or a symlink that may reach a repository.
-      let isLink = false;
-      try {
-        isLink = lstatSync(joinBytes(rootBuf, rel)).isSymbolicLink();
-      } catch {
-        continue;
-      }
-      if (!isLink) continue;
-      if (relPathExcluded(rel, gitDirRel)) continue;
-      const abs = joinBytes(rootBuf, rel);
-      try {
-        if (!statSync(abs).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-      if (linkTargetExcluded(abs, root, gitDirRel)) continue;
-      if (!existsSync(joinBytes(abs, DOT_GIT))) continue;
-      probeNestedRepo(abs, rel, state);
+      probeLinkedRepo(rootBuf, rel, root, gitDirRel, state);
       continue;
     }
     const fields = entry.toString('utf8').split(' ');
@@ -902,24 +951,43 @@ function probeBlindSpotState(
   // skip-worktree bits on an interior file hide the dirt from the inner
   // status AND from this outer v2 status alike — the submodule emits no
   // entry, the probe above never runs, and the command prints the bare
-  // all-clear while the edit is on disk. Every mode-160000 gitlink the
-  // index records is a candidate blind spot regardless of what status
-  // says about it; `seen` keeps a status-discovered one from a second
-  // probe.
+  // all-clear while the edit is on disk. Every mode-160000 gitlink and
+  // mode-120000 symlink the index records is a candidate blind spot
+  // regardless of what status says about it — an unchanged tracked link
+  // emits no entry of its own; `seen` keeps a status-discovered one from
+  // a second probe.
   const indexEntries = gitRaw('-C', root, 'ls-files', '-s', '-z');
   for (const entry of splitNul(indexEntries)) {
-    if (!entry.subarray(0, 7).equals(GITLINK_MODE_PREFIX)) continue;
-    // `160000 <hash> <stage>\t<path>`: modes, hashes and the stage are
+    const gitlink = entry.subarray(0, 7).equals(GITLINK_MODE_PREFIX);
+    if (!gitlink && !entry.subarray(0, 7).equals(SYMLINK_MODE_PREFIX)) {
+      continue;
+    }
+    // `<mode> <hash> <stage>\t<path>`: modes, hashes and the stage are
     // ASCII, so the first tab byte ends the fields exactly.
     const tab = entry.indexOf(0x09);
     if (tab === -1) continue;
     const rel = entry.subarray(tab + 1);
     if (relPathExcluded(rel, gitDirRel)) continue;
     const abs = joinBytes(rootBuf, rel);
+    if (!gitlink) {
+      probeLinkedRepo(rootBuf, rel, root, gitDirRel, state);
+      continue;
+    }
     // A gitlink whose checkout does not exist (a fresh clone that never
     // ran `submodule update --init`) holds no content an edit could hide
-    // in; probing it answered 'failed' and over-warned on every run.
-    if (!existsSync(joinBytes(abs, DOT_GIT))) continue;
+    // in; probing it answered 'failed' and over-warned on every run. A
+    // checkout that EXISTS without its git dir is a dead gitlink: `add -A`
+    // still records only the gitlink and no status entry names it, so an
+    // edit inside would leave no record in this model — disclose it as
+    // unresolved rather than skip it. The inner probe alone cannot answer
+    // the state: with the git dir gone, `git -C <checkout> status` walks
+    // UP into this repository and reports the superproject, not the
+    // checkout.
+    if (!existsSync(abs)) continue;
+    if (!existsSync(joinBytes(abs, DOT_GIT))) {
+      unresolved.add(decodePath(rel));
+      continue;
+    }
     probeNestedRepo(abs, rel, state);
   }
   return { dirty: [...dirty], unresolved: [...unresolved] };
@@ -997,7 +1065,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
     );
   }
   const root = git('rev-parse', '--show-toplevel');
-  assertNoRedirectedExcludes(root);
+  assertNoRedirectedExcludes(root, [args.out, args.since]);
   // The command's own `--out` (and, in `--since` mode, the `--since` file
   // itself) are side files of THIS run exactly like the review's families:
   // captured by the next snapshot and entering the hunks as bookkeeping

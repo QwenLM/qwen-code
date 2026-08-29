@@ -87,6 +87,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -1221,6 +1222,42 @@ describe('fix-delta', () => {
     ).toThrow(/excluded directory .* is a symlink/);
   });
 
+  it('refuses a symlink planted at a side path instead of writing through it', () => {
+    // The directory guard lstats only the PREFIXES of the excluded
+    // directories: the command's own deterministic side path — Step 6B
+    // re-runs with the same `--out` name every round, and the tree author
+    // knows it — is the tree author's to plant. A tracked link at exactly
+    // that name redirects the write through it, truncating whatever it
+    // points at outside everything this command is supposed to touch.
+    const victim = join(out, 'victim.txt');
+    writeFileSync(victim, 'sentinel — must survive\n');
+    const sidePath = join(
+      repo,
+      '.qwen',
+      'tmp',
+      'qwen-review-t-fix-snapshot.json',
+    );
+    runFixDelta({ snapshot: true, since: undefined, out: sidePath });
+    // The re-run premise the refusal must not break: overwriting an
+    // existing REGULAR file at the same deterministic name keeps working.
+    runFixDelta({ snapshot: true, since: undefined, out: sidePath });
+    rmSync(sidePath);
+    symlinkSync(victim, sidePath);
+    expect(() =>
+      runFixDelta({ snapshot: true, since: undefined, out: sidePath }),
+    ).toThrow(/side path .* is a symlink; refusing to write through/);
+    expect(readFileSync(victim, 'utf8')).toBe('sentinel — must survive\n');
+
+    // The `--since` file is a side path the same way: a redirected read
+    // hands the audit a fabricated baseline.
+    rmSync(sidePath);
+    const linkPath = join(out, 'fake-snapshot.json');
+    symlinkSync(victim, linkPath);
+    expect(() =>
+      runFixDelta({ snapshot: false, since: linkPath, out: hunksFile() }),
+    ).toThrow(/side path .* is a symlink; refusing to write through/);
+  });
+
   // POSIX-only: the raw-0xFF directory name cannot exist on NTFS (Buffer
   // paths are utf8-coerced before reaching the filesystem APIs), and the
   // byte-exact setup channel is /bin/sh.
@@ -1299,6 +1336,43 @@ describe('fix-delta', () => {
       const lines = stderr();
       expect(
         lines.some((l) => /\blinkrepo\b/.test(l) && l.includes('cannot see')),
+      ).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  it('names a TRACKED symlink to a repository edited through the link', () => {
+    // Committed before the snapshot, an unchanged link emits no status
+    // entry — status-only discovery printed the bare all-clear while the
+    // edit was on disk. The index scan admits mode-120000 entries next to
+    // the gitlinks and applies the same exclusion checks before probing.
+    const target = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-linktgt-')),
+    );
+    try {
+      gitAt(target, 'init', '-q', '-b', 'main');
+      gitAt(target, 'config', 'user.email', 't@t.t');
+      gitAt(target, 'config', 'user.name', 't');
+      writeFileSync(join(target, 'f.txt'), 'inside\n');
+      gitAt(target, 'add', '-A');
+      gitAt(target, 'commit', '-qm', 'init');
+      symlinkSync(target, join(repo, 'vendor'));
+      git('add', '-A');
+      git('commit', '-qm', 'commit the link');
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      writeFileSync(join(target, 'f.txt'), 'the fix — through the link\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(
+        lines.some((l) => /\bvendor\b/.test(l) && l.includes('cannot see')),
       ).toBe(true);
       expect(
         lines.some((l) =>
@@ -1941,6 +2015,63 @@ describe('fix-delta', () => {
         ).toBe(false);
         gitAt(join(repo, 'sub'), 'update-index', `--no-${bit}`, 'f.txt');
       }
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('discloses a dead gitlink whose checkout lost its git dir', () => {
+    // A mode-160000 gitlink whose checkout directory still exists but whose
+    // `.git` is gone emits no status entry, and `add -A` still records only
+    // the gitlink — the old guard skipped it, printing the bare all-clear
+    // while the edit was on disk. The state lands in the unresolved
+    // disclosure instead.
+    const subSrc = plantCommittedSubmodule();
+    try {
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      renameSync(join(repo, 'sub', '.git'), join(repo, 'sub', '.git-x'));
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'after — the hidden fix\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(
+        lines.some(
+          (l) =>
+            /\bsub\b/.test(l) &&
+            l.includes('cannot see') &&
+            l.includes('could not resolve'),
+        ),
+      ).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the all-clear for a gitlink whose checkout was never created', () => {
+    // The fresh-clone arm the dead-gitlink disclosure must not touch: the
+    // index records the gitlink but the checkout directory does not exist
+    // (a clone that never ran `submodule update --init`). It holds nothing
+    // an edit could hide in; probing it answered 'failed' and over-warned
+    // on every run.
+    const subSrc = plantCommittedSubmodule();
+    try {
+      rmSync(join(repo, 'sub'), { recursive: true, force: true });
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(lines.some((l) => l.includes('cannot see'))).toBe(false);
+      expect(lines.some((l) => l.includes('could not resolve'))).toBe(false);
+      expect(lines.at(-1)).toContain(
+        'the tree is unchanged since the snapshot',
+      );
     } finally {
       rmSync(subSrc, { recursive: true, force: true });
     }
