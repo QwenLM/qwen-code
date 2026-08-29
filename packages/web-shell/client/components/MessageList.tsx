@@ -5513,6 +5513,7 @@ export const MessageList = memo(
         onInsightReportOpen,
         onEditUserMessage,
         editableUserTurn,
+        hasOlderHistory,
         generateContent,
         headerOffset,
         hasOlderHistory,
