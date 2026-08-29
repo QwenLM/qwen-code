@@ -627,6 +627,8 @@ describe('Server Config (config.ts)', () => {
         }).getEffectiveToolMode(),
       ).toBe(ToolMode.CodeModeOnly);
     });
+  });
+
   it('does not replace the global debug fallback during daemon Config creation or rotation', async () => {
     const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
     const previousSessionIdEnv = process.env['QWEN_CODE_SESSION_ID'];
