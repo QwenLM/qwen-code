@@ -633,6 +633,21 @@ export class LoadedSettings {
     return previous;
   }
 
+  persistInMemoryMigrations(): void {
+    for (const scope of this.migratedInMemoryScopes) {
+      const file = this.forScope(scope);
+      const written = updateSettingsFilePreservingFormat(
+        file.path,
+        file.originalSettings,
+        true,
+      );
+      if (!written) {
+        throw new Error(`Failed to persist migrated settings: ${file.path}`);
+      }
+    }
+    this.migratedInMemoryScopes.clear();
+  }
+
   reloadScopeFromDisk(scope: SettingScope): void {
     const file = this.forScope(scope);
     try {

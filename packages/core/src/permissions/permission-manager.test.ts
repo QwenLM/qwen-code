@@ -1772,6 +1772,31 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
+    it('keeps an AUTO override stripped when the base mode is default', async () => {
+      const manager = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash'], approvalMode: 'default' }),
+      );
+      manager.initialize();
+      manager.stripDangerousRulesForAutoMode();
+
+      manager.reloadForProjectChange();
+
+      expect(manager.getStrippedDangerousRules()).toBeDefined();
+      expect(
+        await manager.evaluate({
+          toolName: 'run_shell_command',
+          command: 'rm -rf /tmp/project-output',
+        }),
+      ).not.toBe('allow');
+      manager.restoreDangerousRules();
+      expect(
+        await manager.evaluate({
+          toolName: 'run_shell_command',
+          command: 'rm -rf /tmp/project-output',
+        }),
+      ).toBe('allow');
+    });
+
     it('matches a legacy truncated MCP permission alias', async () => {
       const rawName = `mcp__server__${'x'.repeat(80)}`;
       const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);

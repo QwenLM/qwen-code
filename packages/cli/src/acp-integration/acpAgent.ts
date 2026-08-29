@@ -192,7 +192,7 @@ import {
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
-import type { Stats } from 'node:fs';
+import { realpathSync, type Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -3392,6 +3392,7 @@ class QwenAgent implements Agent {
   >();
   private readonly pendingConfigCleanup = new Map<string, Set<Config>>();
   private readonly initializingConfigs = new Set<Config>();
+  private pendingSessionConfigCreations = 0;
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
   /** Set once the daemon negotiates active-work reporting; one per channel. */
@@ -12416,6 +12417,7 @@ class QwenAgent implements Agent {
       sessionId ?? (sessionIdGenerated ? randomUUID() : undefined);
     const debugSessionId =
       effectiveSessionId ?? inheritedSessionId ?? 'transcript-replay';
+    this.pendingSessionConfigCreations++;
     try {
       this.assertManagedSessionAdmission();
       return await sessionIdContext.run(debugSessionId, () =>
@@ -12454,6 +12456,8 @@ class QwenAgent implements Agent {
       throw sessionId && restoreOptions
         ? mapSessionRestoreRequestError(error, sessionId)
         : error;
+    } finally {
+      this.pendingSessionConfigCreations--;
     }
   }
 
@@ -12592,7 +12596,11 @@ class QwenAgent implements Agent {
         // This child hosts every session on its channel and spawned tools
         // inherit `process.env`, so a per-session `/cd` may only rewrite
         // the process environment while no sibling session is live.
-        ownsProcessEnvironment: () => this.sessions.size <= 1,
+        ownsProcessEnvironment: () =>
+          this.sessions.size +
+            this.initializingConfigs.size +
+            this.pendingSessionConfigCreations <=
+          1,
         ...(provisionalWorkspace
           ? { provisionalWorkspace: true as const }
           : {}),
@@ -12806,10 +12814,17 @@ class QwenAgent implements Agent {
     // The stored directory is normalized (`path.resolve` at construction,
     // realpath on `/cd`); the host-supplied param is not, so a trailing
     // slash or `..` spelling must not fall through to the global list.
-    const requested = path.resolve(cwd);
+    const canonicalize = (value: string): string => {
+      try {
+        return realpathSync(value);
+      } catch {
+        return path.resolve(value);
+      }
+    };
+    const requested = canonicalize(cwd);
     for (const session of this.sessions.values()) {
       const config = session.getConfig();
-      if (path.resolve(config.getWorkingDir()) === requested) {
+      if (canonicalize(config.getWorkingDir()) === requested) {
         return config.getContextFileNames();
       }
     }

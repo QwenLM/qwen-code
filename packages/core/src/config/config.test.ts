@@ -7991,7 +7991,10 @@ describe('Server Config (config.ts)', () => {
     const targetPersistence = vi.fn();
     const prepare = vi.fn().mockResolvedValue({
       config: preparedRuntime({
-        agents: { maxParallelAgents: 3 },
+        agents: {
+          maxParallelAgents: 3,
+          maxParallelAgentsByModel: { 'weak-model': 1 },
+        },
         worktree: { symlinkDirectories: ['target-node_modules'] },
         onPersistPermissionRule: targetPersistence,
       }),
@@ -8015,6 +8018,19 @@ describe('Server Config (config.ts)', () => {
     expect(
       config.getBackgroundTaskRegistry().getMaxConcurrentBackgroundAgents(),
     ).toBe(3);
+    config.getBackgroundTaskRegistry().register({
+      agentId: 'weak-agent',
+      description: 'weak agent',
+      model: 'weak-model',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: '/tmp/weak-agent.jsonl',
+    });
+    expect(
+      config.getBackgroundTaskRegistry().canStartBackgroundAgent('weak-model'),
+    ).toBe(false);
     expect(config.getWorktreeSymlinkDirectories()).toEqual([
       'target-node_modules',
     ]);
@@ -8153,10 +8169,20 @@ describe('Server Config (config.ts)', () => {
     });
     await config.initialize({ skipGeminiInitialization: true });
     await config.waitForMcpReady();
-    const summary = 'Session ending. 1 active loop cancelled:\n  - [j1] loop';
-    vi.spyOn(config.getCronScheduler(), 'getExitSummary').mockReturnValue(
-      summary,
-    );
+    const scheduler = config.getCronScheduler();
+    scheduler.create('* * * * *', 'loop', true);
+    const summary = scheduler.getExitSummary();
+    expect(summary).not.toBeNull();
+    const stderrWrite = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.spyOn(
+      config as unknown as {
+        refreshCurrentRuntimeStatus: (workDir: string) => Promise<void>;
+      },
+      'refreshCurrentRuntimeStatus',
+    ).mockImplementation(async () => {
+      const cleanupSummary = scheduler.getExitSummary();
+      if (cleanupSummary) process.stderr.write(`${cleanupSummary}\n`);
+    });
 
     const result = await relocateWithRuntime(
       config,
@@ -8164,6 +8190,7 @@ describe('Server Config (config.ts)', () => {
     );
 
     expect(result.cronExitSummary).toBe(summary);
+    expect(stderrWrite).not.toHaveBeenCalled();
   });
 
   it('relocateWorkingDirectory rolls back the prepared runtime when the ACP realpath check fails', async () => {

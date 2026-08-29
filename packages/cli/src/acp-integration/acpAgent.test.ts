@@ -3454,7 +3454,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await vi.waitFor(() =>
       expect(vi.mocked(loadCliConfig)).toHaveBeenCalledTimes(1),
     );
+    const sessionAHostPolicy = vi.mocked(loadCliConfig).mock.calls[0]?.[9];
+    expect(sessionAHostPolicy?.ownsProcessEnvironment?.()).toBe(true);
     await agent.newSession({ cwd: '/workspace-b', mcpServers: [] });
+    const sessionBHostPolicy = vi.mocked(loadCliConfig).mock.calls[1]?.[9];
+    expect(sessionAHostPolicy?.ownsProcessEnvironment?.()).toBe(false);
+    expect(sessionBHostPolicy?.ownsProcessEnvironment?.()).toBe(false);
     releaseSessionA();
     await sessionAPromise;
 
@@ -12279,6 +12284,35 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         autoMemoryDir: '/tmp/qwen-memory-scoped-test/.qwen/memory',
       },
     });
+    const realDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-memory-real-'),
+    );
+    const linkedDir = `${realDir}-link`;
+    await fs.symlink(realDir, linkedDir, 'dir');
+    try {
+      (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+        'scoped-session',
+        {
+          getConfig: () => ({
+            getWorkingDir: () => realDir,
+            getContextFileNames: () => ['CONTEXT.md'],
+          }),
+        },
+      );
+      await expect(
+        agent.extMethod('qwen/settings/getMemoryPaths', {
+          cwd: linkedDir,
+          projectRoot: linkedDir,
+        }),
+      ).resolves.toMatchObject({
+        paths: {
+          projectMemoryFile: path.join(linkedDir, 'CONTEXT.md'),
+        },
+      });
+    } finally {
+      await fs.unlink(linkedDir);
+      await fs.rm(realDir, { recursive: true, force: true });
+    }
     (agent as unknown as { sessions: Map<string, unknown> }).sessions.delete(
       'scoped-session',
     );

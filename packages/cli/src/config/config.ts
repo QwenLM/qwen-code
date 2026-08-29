@@ -1022,23 +1022,24 @@ function resolveModelFallbacks(
  */
 function resolveWebSearchSettings(
   settings: Settings,
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): WebSearchSettings | undefined {
   const webSearch = settings.tools?.webSearch;
   // A set-but-empty env var is "unset", not an override: dotenv templates and
   // CI wrappers export empty values, which must not clobber a valid
   // settings.json config (same rule as WEB_SEARCH_BASE_URL below).
-  const envEnabled = process.env['ENABLE_WEB_SEARCH']?.trim() || undefined;
+  const envEnabled = env['ENABLE_WEB_SEARCH']?.trim() || undefined;
   const enabled =
     envEnabled !== undefined ? isTruthy(envEnabled) : webSearch?.enabled;
-  const model = process.env['WEB_SEARCH_MODEL']?.trim() || webSearch?.model;
-  const envExtractor = process.env['WEB_SEARCH_EXTRACTOR']?.trim() || undefined;
+  const model = env['WEB_SEARCH_MODEL']?.trim() || webSearch?.model;
+  const envExtractor = env['WEB_SEARCH_EXTRACTOR']?.trim() || undefined;
   const webExtractor =
     envExtractor !== undefined
       ? isTruthy(envExtractor)
       : webSearch?.webExtractor;
-  const baseUrl = process.env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
+  const baseUrl = env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
   const apiKeyEnv = baseUrl
-    ? process.env['WEB_SEARCH_API_KEY']?.trim()
+    ? env['WEB_SEARCH_API_KEY']?.trim()
       ? 'WEB_SEARCH_API_KEY'
       : 'DASHSCOPE_API_KEY'
     : undefined;
@@ -1486,7 +1487,11 @@ export function createProjectRuntimeReloader(
             skipWorkspaceSettings: safeMode,
             workspaceTrusted: trustedFolder,
           });
-      const effectiveTrust = trustedFolder ?? nextSettings.isTrusted;
+      const effectiveTrust =
+        trustedFolder ??
+        (bareMode
+          ? (isWorkspaceTrusted(nextSettings.merged)?.isTrusted ?? true)
+          : nextSettings.isTrusted);
       // The target project's environment as `reloadEnvironment` would leave
       // it: keys the previous project's env files contributed are dropped
       // before the target's files and `settings.env` overlay the process
@@ -1643,7 +1648,7 @@ export function createProjectRuntimeReloader(
           webSearch:
             bareMode || safeMode
               ? undefined
-              : resolveWebSearchSettings(runtimeSettings),
+              : resolveWebSearchSettings(runtimeSettings, targetEnvironment),
           imageModel: runtimeSettings.imageModel || undefined,
           allowedHttpHookUrls:
             bareMode || safeMode
@@ -1800,6 +1805,7 @@ export function createProjectRuntimeReloader(
           if (committed) return;
           resumeWatching = await settingsWatcher?.pauseWorkspaceWatching?.();
           try {
+            nextSettings.persistInMemoryMigrations();
             previousSettings = loadedSettings.replaceWith(nextSettings);
             committed = true;
           } catch (error) {

@@ -282,6 +282,7 @@ export class PermissionManager {
   }
 
   reloadForProjectChange(): void {
+    const wasStripped = this.strippedAllowRules !== undefined;
     if (this.strippedAllowRules?.session.length) {
       this.sessionRules.allow = [
         ...this.sessionRules.allow,
@@ -293,6 +294,9 @@ export class PermissionManager {
     // `initialize()` re-derives the `tools.eager` allowlist unconditionally
     // (array → active list, anything else → null), so it needs no reset.
     this.initialize();
+    if (wasStripped && !this.strippedAllowRules) {
+      this.stripDangerousRulesForAutoMode();
+    }
   }
 
   // ---------------------------------------------------------------------------

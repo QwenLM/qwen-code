@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApprovalMode, Storage } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, SettingScope, Storage } from '@qwen-code/qwen-code-core';
 import { createProjectRuntimeReloader, parseArguments } from './config.js';
 import type { CliArgs, ProjectRuntimeHostPolicy } from './config.js';
 import {
@@ -31,7 +31,13 @@ describe('createProjectRuntimeReloader', () => {
   let projectB: string;
   let previousQwenHome: string | undefined;
   let argv: CliArgs;
-  const ENV_KEYS = ['A_KEY', 'B_TOKEN', 'QWEN_DISABLED_SLASH_COMMANDS'];
+  const ENV_KEYS = [
+    'A_KEY',
+    'B_TOKEN',
+    'QWEN_DISABLED_SLASH_COMMANDS',
+    'WEB_SEARCH_API_KEY',
+    'WEB_SEARCH_BASE_URL',
+  ];
 
   const writeProject = (
     dir: string,
@@ -211,6 +217,61 @@ describe('createProjectRuntimeReloader', () => {
 
     expect(prepared.config.disabledSlashCommands).toEqual(['deploy']);
     expect(process.env['QWEN_DISABLED_SLASH_COMMANDS']).toBe('auth');
+  });
+
+  it('resolves web search from the target project environment', async () => {
+    writeProject(
+      projectA,
+      {},
+      'WEB_SEARCH_BASE_URL=https://a.example/search\n',
+    );
+    writeProject(
+      projectB,
+      {},
+      'WEB_SEARCH_BASE_URL=https://b.example/search\nWEB_SEARCH_API_KEY=key-b\n',
+    );
+    const prepared = await makeReloader(startupSettings(), {
+      hostPolicy: { ownsProcessEnvironment: () => false },
+    }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
+
+    expect(prepared.config.webSearch).toMatchObject({
+      baseUrl: 'https://b.example/search',
+      apiKeyEnv: 'WEB_SEARCH_API_KEY',
+    });
+    expect(process.env['WEB_SEARCH_BASE_URL']).toBe('https://a.example/search');
+  });
+
+  it('keeps a bare session trusted after relocation', async () => {
+    const prepared = await makeReloader(createMinimalSettings(), {
+      bareMode: true,
+    }).prepare(projectB, undefined, ApprovalMode.DEFAULT, projectA);
+
+    expect(prepared.config.trustedFolder).toBe(true);
+  });
+
+  it('persists read-only migrations when relocation commits', async () => {
+    writeProject(projectA, {});
+    writeProject(projectB, { theme: 'dark' });
+    const settingsPath = new Storage(projectB).getWorkspaceSettingsPath();
+    const loaded = startupSettings();
+    const prepared = await makeReloader(loaded).prepare(
+      projectB,
+      true,
+      ApprovalMode.DEFAULT,
+      projectA,
+    );
+
+    expect(JSON.parse(fs.readFileSync(settingsPath, 'utf8'))).toEqual({
+      theme: 'dark',
+    });
+    await prepared.commit();
+    loaded.setValue(SettingScope.Workspace, 'ui.theme', 'light');
+    loaded.reloadScopeFromDisk(SettingScope.Workspace);
+
+    expect(loaded.merged.ui?.theme).toBe('light');
+    expect(
+      JSON.parse(fs.readFileSync(settingsPath, 'utf8')),
+    ).not.toHaveProperty('theme');
   });
 
   it('keeps a bare session on minimal settings instead of loading the user files', async () => {
@@ -395,6 +456,7 @@ describe('createProjectRuntimeReloader', () => {
     writeProject(projectB, {});
     const loaded = startupSettings();
     const resume = vi.fn();
+    const emit = vi.spyOn(appEvents, 'emit');
     const prepared = await makeReloader(loaded, {
       settingsWatcher: { pauseWorkspaceWatching: async () => resume },
     }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
@@ -404,6 +466,7 @@ describe('createProjectRuntimeReloader', () => {
     await prepared.complete();
     await prepared.complete();
     expect(resume).toHaveBeenCalledOnce();
+    expect(emit).toHaveBeenCalledWith(AppEvent.McpPendingApprovalChanged);
     expect(loaded.workspace.path).toBe(
       new Storage(projectB).getWorkspaceSettingsPath(),
     );
