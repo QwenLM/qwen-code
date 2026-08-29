@@ -321,9 +321,11 @@ export function EmbeddedApp() {
   const latestSubmittedPromptRef = useRef<{
     sessionId: string;
     prompt: string;
-  }>();
+  } | undefined>(undefined);
   const sessionSwitchStartedAtRef = useRef(0);
-  const sessionSwitchTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const sessionSwitchTimerRef = useRef<
+    ReturnType<typeof setTimeout> | undefined
+  >(undefined);
   const historyButtonRef = useRef<HTMLButtonElement>(null);
   const shellRef = useRef<WebShellApi | null>(null);
   const composerRef = useRef<WebShellComposerApi | null>(null);
