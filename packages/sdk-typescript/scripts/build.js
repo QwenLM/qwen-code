@@ -316,7 +316,10 @@ await esbuild.build({
   treeShaking: true,
 });
 
-// Build serve-bridge CLI bin entry
+// Build serve-bridge CLI bin entry.
+// No hashbang `banner` here: esbuild already carries the entry point's own
+// `#!/usr/bin/env node` into the output, so a banner would emit a SECOND one on
+// line 2 — which esbuild accepts and node rejects.
 await esbuild.build({
   entryPoints: [join(rootDir, 'src', 'daemon-mcp', 'serve-bridge', 'bin.ts')],
   bundle: true,
@@ -326,8 +329,10 @@ await esbuild.build({
   outfile: join(rootDir, 'dist', 'daemon-mcp', 'serve-bridge', 'bin.js'),
   external: ['@modelcontextprotocol/sdk'],
   sourcemap: false,
-  banner: { js: '#!/usr/bin/env node' },
 });
+assertExecutableBin(
+  join(rootDir, 'dist', 'daemon-mcp', 'serve-bridge', 'bin.js'),
+);
 
 // Copy LICENSE from root directory to dist
 const licenseSource = join(rootDir, '..', '..', 'LICENSE');
@@ -337,6 +342,27 @@ if (existsSync(licenseSource)) {
     cpSync(licenseSource, licenseTarget);
   } catch (error) {
     console.warn('Could not copy LICENSE:', error.message);
+  }
+}
+
+/**
+ * A published `bin` must be startable. Assert the built entry begins with a
+ * hashbang and that node can actually parse it: a duplicated hashbang (from a
+ * `banner` stacked on the entry point's own) leaves line 2 as `#!/usr/bin/env
+ * node`, which is a `SyntaxError` through both `node <file>` and the shebang —
+ * a break the type checker, the unit tests and the byte budgets all miss.
+ */
+function assertExecutableBin(filePath) {
+  const firstLine = readFileSync(filePath, 'utf8').split('\n', 1)[0];
+  if (!firstLine.startsWith('#!')) {
+    throw new Error(`Bin ${filePath} must start with a hashbang line`);
+  }
+  try {
+    execSync(`node --check ${JSON.stringify(filePath)}`, { stdio: 'pipe' });
+  } catch (error) {
+    throw new Error(
+      `Bin ${filePath} does not parse: ${String(error.stderr ?? error.message).trim()}`,
+    );
   }
 }
 
