@@ -88,7 +88,9 @@ export function WorkspaceOverview({
   compact = false,
 }: WorkspaceOverviewProps) {
   const { t } = useI18n();
-  if (items.length === 0) return null;
+  // No snapshot yet means the first round is still in flight; an absent
+  // facet inside a snapshot is what "unavailable" describes.
+  if (items.length === 0 || overview === undefined) return null;
   return (
     <div
       className={cx(styles.chips, compact && styles.chipsCompact)}

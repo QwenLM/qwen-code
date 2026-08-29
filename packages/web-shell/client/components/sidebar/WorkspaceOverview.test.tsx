@@ -49,7 +49,7 @@ const snapshot: WorkspaceOverviewSnapshot = {
   skills: { initialized: true, total: 12, enabled: 11 },
   extensions: { total: 4, active: 4 },
   channels: { configured: 2, connected: 2, failed: 0 },
-  context: { initialized: false, fileCount: 0, ruleCount: 0 },
+  context: { initialized: true, fileCount: 2, ruleCount: 5 },
   fetchedAt: 1,
 };
 
@@ -67,8 +67,18 @@ describe('formatOverviewValue', () => {
     expect(formatOverviewValue(snapshot, 'skills')).toBe('11');
     expect(formatOverviewValue(snapshot, 'extensions')).toBe('4');
     expect(formatOverviewValue(snapshot, 'channels')).toBe('2/2');
+    // Context shows the file count, never the rule count or their sum.
+    expect(formatOverviewValue(snapshot, 'context')).toBe('2');
     // The daemon reads context files itself: no files is a known zero.
-    expect(formatOverviewValue(snapshot, 'context')).toBe('0');
+    expect(
+      formatOverviewValue(
+        {
+          context: { initialized: false, fileCount: 0, ruleCount: 0 },
+          fetchedAt: 1,
+        },
+        'context',
+      ),
+    ).toBe('0');
     // A runtime facet that has not reported is unknown, never "0".
     expect(
       formatOverviewValue(
@@ -86,6 +96,39 @@ describe('formatOverviewValue', () => {
       ),
     ).toBeUndefined();
     expect(formatOverviewValue(undefined, 'mcp')).toBeUndefined();
+  });
+
+  it('counts MCP against enabled servers only', () => {
+    expect(
+      formatOverviewValue(
+        {
+          mcp: {
+            initialized: true,
+            configured: 2,
+            connected: 0,
+            failed: 0,
+            disabled: 2,
+          },
+          fetchedAt: 1,
+        },
+        'mcp',
+      ),
+    ).toBe('0');
+    expect(
+      formatOverviewValue(
+        {
+          mcp: {
+            initialized: true,
+            configured: 4,
+            connected: 2,
+            failed: 1,
+            disabled: 1,
+          },
+          fetchedAt: 1,
+        },
+        'mcp',
+      ),
+    ).toBe('2/3');
   });
 
   it('shows the active/total split only when they differ', () => {
@@ -111,9 +154,9 @@ describe('WorkspaceOverview', () => {
       'MCP: 3 of 4 connected, 1 failed',
     );
     expect(chip('skills').textContent).toBe('Skills11');
-    expect(chip('context').textContent).toBe('Context0');
+    expect(chip('context').textContent).toBe('Context2');
     expect(chip('context').getAttribute('title')).toBe(
-      'Context: 0 context files, 0 rules',
+      'Context: 2 context files, 5 rules',
     );
     expect(container.querySelector('[role="list"]')).not.toBeNull();
   });
@@ -186,6 +229,16 @@ describe('WorkspaceOverview', () => {
       'Context: unavailable on this daemon',
     );
     expect(chip('mcp').getAttribute('title')).toBe('MCP: not initialized yet');
+  });
+
+  it('renders nothing until the first snapshot lands', async () => {
+    await render(
+      <WorkspaceOverview
+        overview={undefined}
+        items={['mcp', 'extensions', 'context']}
+      />,
+    );
+    expect(container.innerHTML).toBe('');
   });
 
   it('renders nothing for an empty item list', async () => {

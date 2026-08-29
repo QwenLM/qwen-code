@@ -220,6 +220,20 @@ describe('summarizeMcp', () => {
     };
     expect(overviewFacetHasIssue(stillDiscovering, 'mcp')).toBe(false);
 
+    // While discovery is still running, a not-yet-connected but healthy
+    // server is neither failed nor an issue.
+    const spinningUp = summarizeMcp(
+      mcpStatus({
+        discoveryState: 'in_progress',
+        servers: [server({ mcpStatus: 'disconnected', status: 'ok' })],
+      }),
+    );
+    expect(spinningUp.failed).toBe(0);
+    expect(spinningUp.connected).toBe(0);
+    expect(
+      overviewFacetHasIssue({ mcp: spinningUp, fetchedAt: 1 }, 'mcp'),
+    ).toBe(false);
+
     const disabledOnly: WorkspaceOverviewSnapshot = {
       mcp: summarizeMcp(mcpStatus({ servers: [server({ disabled: true })] })),
       fetchedAt: 1,

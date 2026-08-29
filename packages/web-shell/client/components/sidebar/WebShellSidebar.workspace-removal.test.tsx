@@ -130,6 +130,10 @@ const {
       client: {
         workspaceByCwd: vi.fn(() => ({
           listWorkspaceSessions,
+          // The header actions poll git; answer as a non-git workspace.
+          workspaceGit: vi
+            .fn()
+            .mockResolvedValue({ v: 2, workspaceCwd: '', branch: null }),
           listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
           workspaceChannelTypes: vi.fn().mockResolvedValue([]),
           workspaceChannels: vi
@@ -2959,7 +2963,13 @@ describe('WebShellSidebar workspace removal', () => {
   });
 
   it('never offers removal on the primary workspace menu', () => {
-    renderSidebar();
+    // Even if a daemon reported the bound workspace as removable, the row
+    // must not offer to remove the runtime the connection lives in.
+    renderSidebar({
+      workspaces: capabilities.workspaces.map((entry) =>
+        entry.id === 'primary' ? { ...entry, removable: true } : entry,
+      ),
+    });
 
     const trigger = workspaceAction('/tmp/project');
     expect(trigger).toBeDefined();
@@ -3170,7 +3180,21 @@ describe('WebShellSidebar workspace removal', () => {
       }),
     }));
     const onNewWorktreeSession = vi.fn();
-    renderSidebar({ onOpenGitDiff: vi.fn(), onNewWorktreeSession });
+    renderSidebar({
+      onOpenGitDiff: vi.fn(),
+      onNewWorktreeSession,
+      workspaces: [
+        ...capabilities.workspaces,
+        // Trusted and removable, but not a git repository.
+        {
+          id: 'plain',
+          cwd: '/tmp/plain',
+          primary: false,
+          trusted: true,
+          removable: true,
+        },
+      ],
+    });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -3183,6 +3207,14 @@ describe('WebShellSidebar workspace removal', () => {
     act(() => click(worktree!));
     expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/other');
     act(() => click(workspaceAction('/tmp/project')!));
+    expect(menuItemLabels()).toContain('New task');
+    expect(menuItemLabels()).not.toContain('New worktree task');
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    // A trusted secondary workspace without a branch gets no worktree entry
+    // either — the gate is the branch, not the primary flag.
+    act(() => click(workspaceAction('/tmp/plain')!));
     expect(menuItemLabels()).toContain('New task');
     expect(menuItemLabels()).not.toContain('New worktree task');
   });

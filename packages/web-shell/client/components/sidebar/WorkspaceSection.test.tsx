@@ -11,6 +11,7 @@ import type {
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import gitStyles from '../ChatEditor.module.css';
+import type { WorkspaceSessionStats } from './workspaceOverviewModel';
 
 const {
   workspaceGit,
@@ -135,6 +136,11 @@ function renderSection(
     sessionLiveStateEnabled: boolean;
     overviewEnabled: boolean;
     renderHeader: (expanded: boolean) => ReactNode;
+    headerActions: (
+      visible: boolean,
+      context: { overview: unknown; gitBranch: string | null | undefined },
+    ) => ReactNode;
+    sessionStats: WorkspaceSessionStats | null;
   }> = {},
 ): void {
   act(() => {
@@ -165,6 +171,8 @@ function renderSection(
           onOpenGitDiff={overrides.onOpenGitDiff}
           overviewEnabled={overrides.overviewEnabled}
           renderHeader={overrides.renderHeader}
+          headerActions={overrides.headerActions}
+          sessionStats={overrides.sessionStats}
         />
       </I18nProvider>,
     );
@@ -1350,5 +1358,63 @@ describe('WorkspaceSection counts across a source switch', () => {
     });
     await flush();
     expect(counts()?.textContent).toBe('1');
+  });
+});
+
+describe('WorkspaceSection overview gates', () => {
+  it('never asks an untrusted workspace for facets', async () => {
+    const client = makeOverviewClient();
+    renderSection({
+      client,
+      workspace: untrustedWorkspace,
+      expanded: true,
+      overviewEnabled: true,
+    });
+    await flush();
+    expect(client.workspaceMcp).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-web-shell-workspace-overview]'),
+    ).toBeNull();
+  });
+
+  it('polls git for the header actions even without a diff handler', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+    });
+    const headerActions = vi.fn(() => null);
+    renderSection({ client: makeOverviewClient(), headerActions });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalled();
+    const branches = headerActions.mock.calls.map(
+      ([, context]) => context.gitBranch,
+    );
+    expect(branches).toContain('main');
+    // The chip itself still needs the diff handler.
+    expect(gitChip()).toBeNull();
+  });
+
+  it('shows no counts while parent-owned stats are loading', async () => {
+    const client = makeOverviewClient();
+    const counts = () =>
+      container.querySelector<HTMLElement>('[class*="headerCounts"]');
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      sessionStats: { total: 4, running: 1, attention: 0, truncated: false },
+    });
+    await flush();
+    expect(counts()?.textContent).toBe('14');
+    // A source switch: the sidebar has no page for the new source yet.
+    renderSection({
+      client,
+      expanded: true,
+      overviewEnabled: true,
+      sessionStats: null,
+    });
+    await flush();
+    expect(counts()).toBeNull();
   });
 });

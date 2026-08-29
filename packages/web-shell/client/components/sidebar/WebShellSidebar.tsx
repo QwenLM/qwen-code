@@ -5543,7 +5543,9 @@ export function WebShellSidebar({
                           overviewItems={workspaceOverviewItems}
                           compact={footerTight}
                           sessionStats={
-                            ws.primary ? primarySessionStats : undefined
+                            ws.primary
+                              ? (primarySessionStats ?? null)
+                              : undefined
                           }
                           headerActions={(visible, { overview, gitBranch }) => {
                             if (

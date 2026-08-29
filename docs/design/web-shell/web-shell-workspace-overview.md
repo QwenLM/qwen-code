@@ -44,7 +44,9 @@ context files (count). Hooks are available but off by default.
 - Below the sidebar's tight width the chips drop their text labels.
 - Extensions, channels and context files are daemon-side facets. When they
   are unknown the daemon lacks the route or the fetch failed, so their tooltip
-  says "unavailable on this daemon" rather than "not initialized yet".
+  says "unavailable on this daemon" rather than "not initialized yet". The
+  chip row itself appears only once the first fetch round has landed, so a
+  round still in flight never reads as a missing route.
 - Chips are read-only. Opening a management page is a menu action, so the
   chips never take the button role and their accessible names cannot collide
   with the navigation buttons that share the same words.

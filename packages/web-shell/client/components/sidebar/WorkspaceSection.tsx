@@ -147,9 +147,11 @@ interface WorkspaceSectionProps {
   /**
    * Session counts for the header. The primary workspace's sessions are
    * listed by the sidebar itself, so it passes them in; other workspaces
-   * count their own catalog page.
+   * count their own catalog page. `null` means the parent owns the counts
+   * but has no page yet (a source switch in flight): show none rather than
+   * the previous source's numbers.
    */
-  sessionStats?: WorkspaceSessionStats;
+  sessionStats?: WorkspaceSessionStats | null;
   onRenameGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
   onDeleteGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
   renameGroupLabel?: string;
@@ -418,7 +420,10 @@ export function WorkspaceSection({
   // Undefined when `cwd` is not a real path (synthetic fallback workspace), so
   // the poll — which qualifies the route with the cwd — is skipped entirely.
   const gitPollCwd = isAbsolutePath(workspace.cwd) ? workspace.cwd : undefined;
-  const gitStatusEnabled = Boolean(onOpenGitDiff);
+  // The poll feeds the header chip (needs the diff handler) and the header
+  // actions' git-gated entries (a worktree task needs a branch), so it runs
+  // when either consumer is wired.
+  const gitStatusEnabled = Boolean(onOpenGitDiff) || Boolean(headerActions);
 
   // Log a poll failure only on the success→failure transition, not on every
   // 60s/focus tick, so an unreachable workspace doesn't spam a long-lived tab.
@@ -448,8 +453,8 @@ export function WorkspaceSection({
   // The git chip lives in the always-visible folder header, so it polls
   // independently of session expansion: on mount/trust, on window focus, and on
   // a visibility-gated 60s tick (the daemon recomputes the working-tree summary
-  // per call, so the cadence stays gentle). Skipped entirely when no diff
-  // handler is wired, since the chip — its only consumer — would not render.
+  // per call, so the cadence stays gentle). Skipped entirely when neither
+  // consumer — the chip nor the header actions — is wired.
   useEffect(() => {
     if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) {
       setGitStatus(undefined);
@@ -507,9 +512,10 @@ export function WorkspaceSection({
   useEffect(() => {
     if (liveStats) setRetainedStats(liveStats);
   }, [liveStats]);
-  const stats = overviewEnabled
-    ? (liveStats ?? (sessionsActive ? undefined : retainedStats))
-    : undefined;
+  const stats =
+    overviewEnabled && sessionStats !== null
+      ? (liveStats ?? (sessionsActive ? undefined : retainedStats))
+      : undefined;
 
   const visibleSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
