@@ -20,7 +20,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
 import { buildCommandLoaders } from './services/command-loaders.js';
-import { skillMatchesSettingName } from './config/skill-settings.js';
+import { skillCommandMatchesSettingName } from './config/skill-settings.js';
 import { recordAutoSkillCommandUsage } from './services/SkillCommandLoader.js';
 import {
   type CommandContext,
@@ -428,11 +428,12 @@ export const handleSlashCommand = async (
     kind?: CommandKind;
     extensionName?: string;
     altNames?: readonly string[];
+    skillDetail?: { name: string };
   }) =>
     disabledNameSet.has(cmd.name.toLowerCase()) ||
     (cmd.altNames ?? []).some((a) => disabledNameSet.has(a.toLowerCase())) ||
     (cmd.kind === CommandKind.SKILL &&
-      skillMatchesSettingName(cmd, disabledNameSet));
+      skillCommandMatchesSettingName(cmd, disabledNameSet));
 
   // Load the full command set (unfiltered by the denylist) so that the
   // fallback existence check below can distinguish a disabled command from a

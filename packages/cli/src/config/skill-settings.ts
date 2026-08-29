@@ -71,6 +71,34 @@ export function skillMatchesSettingName(
   return skillSettingKeys(skill).some((key) => names.has(key));
 }
 
+/**
+ * `skillMatchesSettingName` for a slash command whose name may have been
+ * rewritten by `CommandService`'s collision suffixing (#9408).
+ *
+ * The denylist runs after that rename, so `cmd.name` can be `demo:chat1` while
+ * the skill's own registry identity is still `demo:chat`. Deriving the legacy
+ * bare key from the renamed form yields `chat1`, which no setting was ever
+ * written under, and a `skills.disabled` or `slashCommands.disabled` entry for
+ * the name the user actually sees silently stops applying. `skillDetail.name`
+ * carries the pre-rename identity, so it is the thing to match on.
+ */
+export function skillCommandMatchesSettingName(
+  cmd: {
+    name: string;
+    extensionName?: string;
+    skillDetail?: { name: string };
+  },
+  names: ReadonlySet<string>,
+): boolean {
+  return skillMatchesSettingName(
+    {
+      name: cmd.skillDetail?.name ?? cmd.name,
+      extensionName: cmd.extensionName,
+    },
+    names,
+  );
+}
+
 export function lookupSkillDisablement(
   skill: { name: string; extensionName?: string },
   disablements: ReadonlyMap<string, SkillDisablement>,

@@ -9,7 +9,7 @@ import { CommandKind } from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { filterCommandsForMode } from './commandUtils.js';
-import { skillMatchesSettingName } from '../config/skill-settings.js';
+import { skillCommandMatchesSettingName } from '../config/skill-settings.js';
 
 const debugLogger = createDebugLogger('CLI_COMMANDS');
 
@@ -121,7 +121,7 @@ export class CommandService {
           const matchesPrimary =
             normalizedDisabled.has(name.toLowerCase()) ||
             (cmd.kind === CommandKind.SKILL &&
-              skillMatchesSettingName(cmd, normalizedDisabled));
+              skillCommandMatchesSettingName(cmd, normalizedDisabled));
           const matchesAlias = (cmd.altNames ?? []).some((a) =>
             normalizedDisabled.has(a.toLowerCase()),
           );

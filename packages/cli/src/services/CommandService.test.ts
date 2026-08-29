@@ -850,4 +850,36 @@ describe('CommandService', () => {
       expect(names).toContain('demo:chat1');
     });
   });
+
+  describe('denylist against a suffix-renamed skill', () => {
+    it('removes the suffixed skill when the entry is the pre-rename bare name (#9408 R3-2)', async () => {
+      // A file command claims `demo:chat` through the existing `:`-joined path
+      // naming, so the colliding extension skill is suffixed to `demo:chat1`
+      // before the denylist runs. The operator's entry is the bare spelling
+      // this matcher exists to keep working, and it must still reach the skill.
+      const fileCommand = createMockCommand('demo:chat', CommandKind.FILE);
+      const extensionSkill = {
+        ...createMockCommand('demo:chat', CommandKind.SKILL),
+        extensionName: 'demo',
+        skillDetail: {
+          name: 'demo:chat',
+          level: 'extension',
+          extensionName: 'demo',
+        },
+      };
+
+      const service = await CommandService.create(
+        [
+          new MockCommandLoader([fileCommand]),
+          new MockCommandLoader([extensionSkill]),
+        ],
+        new AbortController().signal,
+        new Set(['chat']),
+      );
+
+      expect(
+        service.getCommands().filter((cmd) => cmd.kind === CommandKind.SKILL),
+      ).toHaveLength(0);
+    });
+  });
 });
