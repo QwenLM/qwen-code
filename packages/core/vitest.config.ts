@@ -35,14 +35,10 @@ export default defineConfig({
     outputFile: {
       junit: 'junit.xml',
     },
-    // The worker->main `onTaskUpdate` RPC runs on a 60s budget; under the
-    // resource pressure of the Windows/macOS runners a stall longer than that
-    // surfaces as an unhandled error and exits an all-green run red (same
-    // failure class the cli and scripts suites hit on these lanes). Test
-    // failures still fail the run; only unhandled errors stop being fatal,
-    // and only off Linux — the ubuntu lane and Linux local runs keep the
-    // unhandled-error signal.
-    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors:
+      process.platform !== 'linux' ||
+      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
     coverage: {
       // CI consumes coverage only from the ubuntu lane (the upload and the
       // coverage comment both pin coverage-reports-*-ubuntu-latest), and the

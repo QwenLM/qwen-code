@@ -38,6 +38,10 @@ export default defineConfig({
     },
     testTimeout: testTimeoutMs,
     hookTimeout: 10000,
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors:
+      process.platform !== 'linux' ||
+      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
   },
   resolve: {
     alias: {

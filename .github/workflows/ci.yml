@@ -604,6 +604,10 @@ jobs:
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         env:
+          # The unit suites' vitest configs read this to exempt self-hosted
+          # pool runs from RPC-stall unhandled errors (#10488), mirroring
+          # integration-tests/vitest.config.ts.
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'

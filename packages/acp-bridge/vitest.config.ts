@@ -31,6 +31,10 @@ export default defineConfig({
   test: {
     reporters: ['default'],
     silent: true,
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors:
+      process.platform !== 'linux' ||
+      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
     coverage: {
       enabled: false,
       provider: 'v8',

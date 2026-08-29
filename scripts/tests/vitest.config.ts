@@ -42,13 +42,9 @@ export default defineConfig({
     // the host cores, which is what every other suite in this repository
     // uses.
     //
-    // The long fake-timer suites here stall a worker's event loop long
-    // enough for vitest's worker->main `onTaskUpdate` RPC to hit its 60s
-    // timeout and surface as an unhandled error — with every test in the
-    // suite green, yet the run exiting 1 (observed deterministic on the
-    // macOS runners). Test failures still fail the run; only unhandled
-    // errors stop being fatal, and only off Linux — the ubuntu lane and
-    // Linux local runs keep the unhandled-error signal.
-    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors:
+      process.platform !== 'linux' ||
+      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
   },
 });
