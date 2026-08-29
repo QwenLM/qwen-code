@@ -261,14 +261,10 @@ class DaemonSessionClientTest {
         CountDownLatch cancelReceived = new CountDownLatch(1);
         server.createContext("/session/session-1/cancel", exchange -> {
             cancelReceived.countDown();
-            exchange.getResponseHeaders().set("Connection", "close");
-            exchange.sendResponseHeaders(204, -1);
-            exchange.close();
+            sendNoContent(exchange, 204);
         });
-        server.createContext("/session/session-1/detach",
-                noContentAndCloseConnection());
-        server.createContext("/session/session-2/detach",
-                noContentAndCloseConnection());
+        server.createContext("/session/session-1/detach", noContent());
+        server.createContext("/session/session-2/detach", noContent());
 
         try (DaemonClient daemon = newClient();
                 DaemonSessionClient first = daemon.createSession()) {
@@ -312,8 +308,7 @@ class DaemonSessionClientTest {
             detachedClient.set(exchange.getRequestHeaders()
                     .getFirst("X-Qwen-Client-Id"));
             detachReceived.countDown();
-            exchange.sendResponseHeaders(204, -1);
-            exchange.close();
+            sendNoContent(exchange, 204);
         });
 
         DaemonClient daemon = newClient();
@@ -631,8 +626,7 @@ class DaemonSessionClientTest {
             } else if (attempt == 2) {
                 exchange.getResponseHeaders().set("Content-Type",
                         "text/event-stream");
-                exchange.sendResponseHeaders(200, -1);
-                exchange.close();
+                sendNoContent(exchange, 200);
             } else {
                 sendSse(exchange, terminalEvent(1));
             }
@@ -1068,10 +1062,8 @@ class DaemonSessionClientTest {
         server.createContext("/session/session-1/prompt", exchange ->
                 sendJson(exchange, 202,
                         "{\"promptId\":\"prompt-1\",\"lastEventId\":0}"));
-        server.createContext("/session/session-1/events", exchange -> {
-            exchange.sendResponseHeaders(204, -1);
-            exchange.close();
-        });
+        server.createContext("/session/session-1/events", exchange ->
+                sendNoContent(exchange, 204));
         server.createContext("/session/session-1/detach", noContent());
 
         try (DaemonClient daemon = newClient();
@@ -1217,8 +1209,7 @@ class DaemonSessionClientTest {
         });
         server.createContext("/session/session-1/cancel", exchange -> {
             cancels.incrementAndGet();
-            exchange.sendResponseHeaders(204, -1);
-            exchange.close();
+            sendNoContent(exchange, 204);
         });
         server.createContext("/session/session-1/detach", noContent());
 
@@ -1629,8 +1620,7 @@ class DaemonSessionClientTest {
         server.createContext("/session/session-1", exchange -> {
             if ("DELETE".equals(exchange.getRequestMethod())) {
                 deletes.incrementAndGet();
-                exchange.sendResponseHeaders(204, -1);
-                exchange.close();
+                sendNoContent(exchange, 204);
                 return;
             }
             sendJson(exchange, 404, "{}");
@@ -1908,8 +1898,7 @@ class DaemonSessionClientTest {
                 sendSse(exchange, terminalEvent(1)));
         server.createContext("/session/session-1/detach", exchange -> {
             detaches.incrementAndGet();
-            exchange.sendResponseHeaders(204, -1);
-            exchange.close();
+            sendNoContent(exchange, 204);
         });
 
         try (DaemonClient daemon = newClient()) {
@@ -2277,8 +2266,7 @@ class DaemonSessionClientTest {
                     sendSse(exchange, terminalEventForSession(1, sessionId)));
             server.createContext("/session/" + sessionId + "/cancel", exchange -> {
                 mutationRequests.incrementAndGet();
-                exchange.sendResponseHeaders(204, -1);
-                exchange.close();
+                sendNoContent(exchange, 204);
             });
             server.createContext("/session/" + sessionId + "/heartbeat", exchange -> {
                 mutationRequests.incrementAndGet();
@@ -2295,8 +2283,7 @@ class DaemonSessionClientTest {
                 detachingSession.compareAndSet(null, sessionId);
                 detachStarted.countDown();
                 await(releaseDetach);
-                exchange.sendResponseHeaders(204, -1);
-                exchange.close();
+                sendNoContent(exchange, 204);
             });
         }
 
@@ -2946,18 +2933,24 @@ class DaemonSessionClientTest {
     }
 
     private static HttpHandler noContent() {
-        return exchange -> {
-            exchange.sendResponseHeaders(204, -1);
-            exchange.close();
-        };
+        return exchange -> sendNoContent(exchange, 204);
     }
 
-    private static HttpHandler noContentAndCloseConnection() {
-        return exchange -> {
-            exchange.getResponseHeaders().set("Connection", "close");
-            exchange.sendResponseHeaders(204, -1);
-            exchange.close();
-        };
+    /**
+     * Sends a body-less response and ends the connection with it. On Java 11
+     * the JDK's own HTTP server drops the connection after a response that
+     * carries no body, while the Java 11 HttpClient keeps that same connection
+     * in its pool; whichever request reuses it next reads EOF before any
+     * response byte and fails with "HTTP/1.1 header parser received no bytes".
+     * Marking these responses non-persistent keeps the client from pooling a
+     * connection the fixture is about to drop. Newer JDKs do this in neither
+     * role, and neither does the daemon the fixture stands in for.
+     */
+    private static void sendNoContent(HttpExchange exchange, int status)
+            throws IOException {
+        exchange.getResponseHeaders().set("Connection", "close");
+        exchange.sendResponseHeaders(status, -1);
+        exchange.close();
     }
 
     private static void sendJson(HttpExchange exchange, int status, String body)
