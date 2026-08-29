@@ -33479,65 +33479,70 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
     });
 
-    it('does not count a failed Guard compression or block later automatic work', async () => {
-      rebuildSessionWithGuard();
-      installPendingTodoTool();
-      queuePendingTodoThenNaturalStops();
-      const noCompression = {
-        originalTokenCount: 50,
-        newTokenCount: 50,
-        compressionStatus: core.CompressionStatus.NOOP,
-      };
-      mockLlmClient.tryCompressChat
-        .mockResolvedValueOnce(noCompression)
-        .mockResolvedValueOnce(noCompression)
-        .mockResolvedValueOnce({
-          originalTokenCount: 120,
-          newTokenCount: 120,
-          compressionStatus:
-            core.CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
-        })
-        .mockResolvedValue(noCompression);
+    it.each([
+      core.CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+      core.CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+    ])(
+      'does not count a failed Guard compression status %s or block later automatic work',
+      async (compressionStatus) => {
+        rebuildSessionWithGuard();
+        installPendingTodoTool();
+        queuePendingTodoThenNaturalStops();
+        const noCompression = {
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        };
+        mockLlmClient.tryCompressChat
+          .mockResolvedValueOnce(noCompression)
+          .mockResolvedValueOnce(noCompression)
+          .mockResolvedValueOnce({
+            originalTokenCount: 120,
+            newTokenCount: 120,
+            compressionStatus,
+          })
+          .mockResolvedValue(noCompression);
 
-      await runGuardPrompt();
+        await runGuardPrompt();
 
-      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
-      expect(
-        vi
-          .mocked(mockClient.sessionUpdate)
-          .mock.calls.some(
-            ([params]) =>
-              params.update.sessionUpdate === 'agent_message_chunk' &&
-              params.update._meta?.['source'] === 'todo_stop_guard',
-          ),
-      ).toBe(false);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.some(
+              ([params]) =>
+                params.update.sessionUpdate === 'agent_message_chunk' &&
+                params.update._meta?.['source'] === 'todo_stop_guard',
+            ),
+        ).toBe(false);
 
-      const callback =
-        mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
-          -1,
-        )?.[0] as (
-          displayText: string,
-          modelText: string,
-          meta: { agentId: string; status: string },
-        ) => void;
-      callback('independent background done', '<task-notification />', {
-        agentId: 'after-guard-compression-failure',
-        status: 'completed',
-      });
+        const callback =
+          mockBackgroundTaskRegistry.setNotificationCallback.mock.calls.at(
+            -1,
+          )?.[0] as (
+            displayText: string,
+            modelText: string,
+            meta: { agentId: string; status: string },
+          ) => void;
+        callback('independent background done', '<task-notification />', {
+          agentId: 'after-guard-compression-failure',
+          status: 'completed',
+        });
 
-      await vi.waitFor(() => {
-        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
-      });
-      expect(
-        vi
-          .mocked(mockClient.sessionUpdate)
-          .mock.calls.some(
-            ([params]) =>
-              params.update.sessionUpdate === 'agent_message_chunk' &&
-              params.update._meta?.['source'] === 'todo_stop_guard',
-          ),
-      ).toBe(false);
-    });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        });
+        expect(
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.some(
+              ([params]) =>
+                params.update.sessionUpdate === 'agent_message_chunk' &&
+                params.update._meta?.['source'] === 'todo_stop_guard',
+            ),
+        ).toBe(false);
+      },
+    );
 
     it('keeps external Stop hook continuation when Guard compression throws', async () => {
       rebuildSessionWithGuard();
