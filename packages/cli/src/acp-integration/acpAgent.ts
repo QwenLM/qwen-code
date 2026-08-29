@@ -227,6 +227,7 @@ import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js'
 import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
 import {
   getConversationDirectoryName,
+  hasVerifiableInode,
   isSameConversationPath,
 } from '../utils/conversation-directory-identity.js';
 import type { ApprovalModeValue } from './session/types.js';
@@ -3198,15 +3199,11 @@ function isOwnerOnlyDirectory(stats: Stats): boolean {
   return (stats.mode & 0o077) === 0;
 }
 
-function hasVerifiableManagedInode(inode: number): boolean {
-  return Number.isSafeInteger(inode) && inode > 0;
-}
-
 function hasExpectedManagedDirectoryIdentity(
   stats: Stats,
   expected: { device: number; inode: number },
 ): boolean {
-  const inodeVerifiable = hasVerifiableManagedInode(stats.ino);
+  const inodeVerifiable = hasVerifiableInode(stats.ino);
   return (
     stats.dev === expected.device &&
     inodeVerifiable === (expected.inode !== 0) &&
@@ -3215,8 +3212,8 @@ function hasExpectedManagedDirectoryIdentity(
 }
 
 function isSameManagedDirectoryIdentity(left: Stats, right: Stats): boolean {
-  const leftVerifiable = hasVerifiableManagedInode(left.ino);
-  const rightVerifiable = hasVerifiableManagedInode(right.ino);
+  const leftVerifiable = hasVerifiableInode(left.ino);
+  const rightVerifiable = hasVerifiableInode(right.ino);
   return (
     left.dev === right.dev &&
     leftVerifiable === rightVerifiable &&

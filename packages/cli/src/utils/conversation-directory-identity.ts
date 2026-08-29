@@ -15,12 +15,17 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
  * FAT/exFAT and some SMB-style filesystems report `Stats.ino === 0`, while
  * Windows can expose file IDs that exceed JavaScript's safe integer range.
  * Neither value can be compared as an exact identity proof.
+ *
+ * This predicate is the shared semantics for every conversation-identity
+ * check in this package (deletion journal, ACP managed relocation): import
+ * it, do not restate it.
  */
-function hasVerifiableInode(ino: number): boolean {
+export function hasVerifiableInode(ino: number): boolean {
   return Number.isSafeInteger(ino) && ino > 0;
 }
 
-function normalizedInode(ino: number): number {
+/** The inode value to store: the input when verifiable, else 0. */
+export function normalizedInode(ino: number): number {
   return hasVerifiableInode(ino) ? ino : 0;
 }
 
