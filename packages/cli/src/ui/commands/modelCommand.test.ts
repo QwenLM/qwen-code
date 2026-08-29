@@ -32,10 +32,11 @@ function createMockSettings(
 ): Partial<LoadedSettings> {
   return {
     merged: {},
-    user: { settings: user },
-    workspace: { settings: {} },
+    user: { settings: user, originalSettings: structuredClone(user) },
+    workspace: { settings: {}, originalSettings: {} },
     isTrusted: false,
     setValue,
+    recomputeMerged: vi.fn(),
   } as unknown as Partial<LoadedSettings>;
 }
 

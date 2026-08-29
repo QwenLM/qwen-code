@@ -10,8 +10,9 @@ import type {
   Config,
   SessionRestoreProjection,
 } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../config/settings.js';
 import {
-  applyRestoredSessionModel,
+  applyRestoredSessionModel as applyRestoredSessionModelWithSettings,
   recordDaemonSessionModel,
   recordDaemonSessionModelFromConfig,
   restoreSessionModelThenAuthenticate,
@@ -40,6 +41,16 @@ function resolvedWhen(baseUrl: string) {
   return vi.fn((_auth: string, _model: string, url?: string) =>
     url === baseUrl ? { id: _model } : undefined,
   );
+}
+
+const emptySettings = { merged: {} } as LoadedSettings;
+
+function applyRestoredSessionModel(
+  config: Config,
+  projection: SessionRestoreProjection | undefined,
+  settings = emptySettings,
+): Promise<void> {
+  return applyRestoredSessionModelWithSettings(config, projection, settings);
 }
 
 describe('session-model-persistence', () => {
@@ -148,6 +159,44 @@ describe('session-model-persistence', () => {
       'qwen3-coder-plus',
       { baseUrl: 'https://example.test/v1' },
     );
+  });
+
+  it('clears an incompatible live effort after restoring a toggle-only model', async () => {
+    let routeIdentity = 'qwen3.8-max@route';
+    const setReasoningEffort = vi.fn();
+    const config = {
+      getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+      getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+      getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getModelRouteIdentity: vi.fn(() => routeIdentity),
+      getReasoningPreference: vi.fn().mockReturnValue('ultra'),
+      setReasoningEffort,
+      disableReasoning: vi.fn(),
+      switchModel: vi.fn().mockImplementation(async () => {
+        routeIdentity = 'qwen3.7-max@route';
+      }),
+    } as unknown as Config;
+    const setValue = vi.fn();
+    const settings = {
+      merged: { model: { reasoningEffort: 'ultra' } },
+      setValue,
+    } as unknown as LoadedSettings;
+
+    await applyRestoredSessionModel(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'qwen3.7-max',
+          authType: AuthType.USE_OPENAI,
+        },
+      }),
+      settings,
+    );
+
+    expect(setReasoningEffort).toHaveBeenCalledWith(undefined);
+    expect(setValue).not.toHaveBeenCalled();
   });
 
   it('falls back to the last assistant model when no session_model exists', async () => {
@@ -532,6 +581,7 @@ describe('session-model-persistence', () => {
         },
       }),
       authenticate,
+      emptySettings,
     );
 
     expect(authenticate).toHaveBeenCalledTimes(2);
@@ -547,6 +597,55 @@ describe('session-model-persistence', () => {
       'settings-default',
       undefined,
     );
+  });
+
+  it('restores the live effort when authentication rolls back the restored model', async () => {
+    let currentAuth: string | undefined = AuthType.USE_OPENAI;
+    let currentModel = 'qwen3.8-max';
+    let reasoningPreference: false | string | undefined = 'ultra';
+    const setReasoningEffort = vi.fn((effort: string | undefined) => {
+      reasoningPreference = effort;
+    });
+    const switchModel = vi.fn(
+      async (authType: string, modelId: string): Promise<void> => {
+        currentAuth = authType;
+        currentModel = modelId;
+      },
+    );
+    const authenticate = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('oauth expired'))
+      .mockResolvedValueOnce(undefined);
+    const config = {
+      getModel: vi.fn(() => currentModel),
+      getAuthType: vi.fn(() => currentAuth),
+      getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getReasoningPreference: vi.fn(() => reasoningPreference),
+      setReasoningEffort,
+      disableReasoning: vi.fn(() => {
+        reasoningPreference = false;
+      }),
+      switchModel,
+    } as unknown as Config;
+
+    await restoreSessionModelThenAuthenticate(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'qwen3.7-max',
+          authType: AuthType.QWEN_OAUTH,
+        },
+      }),
+      authenticate,
+      { merged: { model: { reasoningEffort: 'ultra' } } } as LoadedSettings,
+    );
+
+    expect(setReasoningEffort).toHaveBeenNthCalledWith(1, undefined);
+    expect(setReasoningEffort).toHaveBeenNthCalledWith(2, 'ultra');
+    expect(reasoningPreference).toBe('ultra');
   });
 
   it('does not retry authentication when restore did not change the live model', async () => {
@@ -570,6 +669,7 @@ describe('session-model-persistence', () => {
           lastAssistantModel: 'qwen3-coder-plus',
         }),
         authenticate,
+        emptySettings,
       ),
     ).rejects.toThrow('auth required');
 
@@ -618,6 +718,7 @@ describe('session-model-persistence', () => {
         },
       }),
       authenticate,
+      emptySettings,
     );
 
     expect(authenticate).toHaveBeenCalledTimes(2);
@@ -674,6 +775,7 @@ describe('session-model-persistence', () => {
         },
       }),
       authenticate,
+      emptySettings,
     );
 
     expect(authenticate).toHaveBeenCalledTimes(2);
@@ -737,6 +839,7 @@ describe('session-model-persistence', () => {
         },
       }),
       authenticate,
+      emptySettings,
     );
 
     expect(authenticate).toHaveBeenCalledTimes(2);
@@ -788,6 +891,7 @@ describe('session-model-persistence', () => {
           },
         }),
         authenticate,
+        emptySettings,
       ),
     ).rejects.toThrow('settings auth failed');
 
@@ -834,6 +938,7 @@ describe('session-model-persistence', () => {
           },
         }),
         authenticate,
+        emptySettings,
       ),
     ).rejects.toThrow('oauth expired');
 

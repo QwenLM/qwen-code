@@ -55,9 +55,10 @@ const renderComponent = (
   const mockSettings = {
     isTrusted: true,
     merged: {},
-    user: { settings: {} },
-    workspace: { settings: {} },
+    user: { settings: {}, originalSettings: {} },
+    workspace: { settings: {}, originalSettings: {} },
     setValue: vi.fn(),
+    recomputeMerged: vi.fn(),
     ...(settingsValue ?? {}),
   } as unknown as LoadedSettings;
 
@@ -528,6 +529,7 @@ describe('<ModelDialog />', () => {
       {
         user: {
           settings: { model: { reasoningEffort: 'ultra' } },
+          originalSettings: { model: { reasoningEffort: 'ultra' } },
         },
       } as unknown as Partial<LoadedSettings>,
     );

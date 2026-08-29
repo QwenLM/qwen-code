@@ -96,6 +96,14 @@ const { mockPreloadContentGenerator } = vi.hoisted(() => ({
   mockPreloadContentGenerator: vi.fn().mockResolvedValue(undefined),
 }));
 
+const { mockClearIncompatibleReasoningEffortForModel } = vi.hoisted(() => ({
+  mockClearIncompatibleReasoningEffortForModel: vi.fn(),
+}));
+vi.mock('../config/reasoning-effort-persistence.js', () => ({
+  clearIncompatibleReasoningEffortForModel:
+    mockClearIncompatibleReasoningEffortForModel,
+}));
+
 const { mockAddDaemonRequestAttribute } = vi.hoisted(() => ({
   mockAddDaemonRequestAttribute: vi.fn(),
 }));
@@ -23772,6 +23780,85 @@ describe('sessionLanguage multi-session propagation', () => {
       {},
     );
     expect(cfg.refreshAuth).toHaveBeenCalledWith('openai');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('clears an incompatible live effort after a workspace-reload model switch', async () => {
+    let mergedSettings: Record<string, unknown> = {
+      model: { name: 'qwen3.8-max', reasoningEffort: 'ultra' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(() => {
+        mergedSettings = {
+          model: { name: 'qwen3.7-max', reasoningEffort: 'ultra' },
+        };
+      }),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    let model = 'qwen3.8-max';
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-model-reload'),
+      getAuthType: vi.fn().mockReturnValue('openai'),
+      getModel: vi.fn(() => model),
+      getModelRouteIdentity: vi.fn(() => `${model}@route`),
+      getReasoningPreference: vi.fn().mockReturnValue('ultra'),
+      setReasoningEffort: vi.fn(),
+      disableReasoning: vi.fn(),
+      switchModel: vi.fn().mockImplementation(async (_auth, nextModel) => {
+        model = nextModel as string;
+      }),
+      getContentGeneratorConfig: vi.fn(() => ({ model })),
+    });
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-model-reload'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+
+    expect(mockClearIncompatibleReasoningEffortForModel).toHaveBeenCalledWith(
+      cfg,
+      settings,
+      'qwen3.7-max',
+      false,
+      'qwen3.8-max@route',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

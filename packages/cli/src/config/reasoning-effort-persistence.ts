@@ -5,6 +5,7 @@
  */
 
 import {
+  createDebugLogger,
   isBuiltInReasoningEffort,
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
@@ -12,7 +13,12 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { getWritableScopes } from './modelProvidersScope.js';
 import { SettingScope, type LoadedSettings } from './settings.js';
-import { settingExistsInScope } from './settingsUtils.js';
+import {
+  deleteNestedPropertySafe,
+  settingExistsInScope,
+} from './settingsUtils.js';
+
+const debugLogger = createDebugLogger('REASONING_EFFORT_PERSISTENCE');
 
 export function clearIncompatibleReasoningEffortForModel(
   config: Config,
@@ -21,13 +27,13 @@ export function clearIncompatibleReasoningEffortForModel(
   persistSettings = true,
   previousModelRouteIdentity?: string,
 ): boolean {
-  const preference = config.getReasoningPreference();
+  const preference = config.getReasoningPreference?.();
   if (isTieredEffortWireModel(modelId)) {
     return false;
   }
   if (
     previousModelRouteIdentity !== undefined &&
-    previousModelRouteIdentity === config.getModelRouteIdentity()
+    previousModelRouteIdentity === config.getModelRouteIdentity?.()
   ) {
     return false;
   }
@@ -72,10 +78,34 @@ export function clearIncompatibleReasoningEffortForModel(
     );
   });
 
+  let clearedScopeCount = 0;
   for (const scope of incompatibleScopes) {
-    settings.setValue(scope, 'model.reasoningEffort', undefined, undefined, {
-      throwOnWriteFailure: true,
-    });
+    try {
+      settings.setValue(scope, 'model.reasoningEffort', undefined, undefined, {
+        throwOnWriteFailure: true,
+      });
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to clear ${scope} model.reasoningEffort after model switch: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      continue;
+    }
+    const settingsFile =
+      scope === SettingScope.Workspace ? settings.workspace : settings.user;
+    deleteNestedPropertySafe(
+      settingsFile.settings as Record<string, unknown>,
+      'model.reasoningEffort',
+    );
+    deleteNestedPropertySafe(
+      settingsFile.originalSettings as Record<string, unknown>,
+      'model.reasoningEffort',
+    );
+    clearedScopeCount++;
+  }
+  if (clearedScopeCount > 0) {
+    settings.recomputeMerged();
   }
   if (hasIncompatibleLivePreference) {
     resetLivePreference();

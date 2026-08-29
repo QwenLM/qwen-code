@@ -4609,6 +4609,42 @@ describe('Session', () => {
       expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith(undefined);
     });
 
+    it('persists the model selection when effort cleanup cannot be saved', async () => {
+      mockSettings.user.settings = {
+        model: { reasoningEffort: 'ultra' },
+      };
+      vi.mocked(mockConfig.getReasoningPreference).mockReturnValue('ultra');
+      vi.mocked(mockSettings.setValue).mockImplementation((_scope, key) => {
+        if (key === 'model.reasoningEffort') {
+          throw new Error('EACCES');
+        }
+      });
+
+      await expect(
+        session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `qwen3.7-max(${AuthType.USE_OPENAI})`,
+        }),
+      ).resolves.toBeDefined();
+
+      expect(mockConfig.setReasoningEffort).toHaveBeenCalledWith(undefined);
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'qwen3.7-max',
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.baseUrl',
+        '',
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'security.auth.selectedType',
+        AuthType.USE_OPENAI,
+      );
+    });
+
     it('clears persisted opaque effort when switching the default to a non-Qwen model', async () => {
       mockSettings.user.settings = {
         model: { reasoningEffort: 'vendor.ultra' },

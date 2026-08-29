@@ -4,9 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { SettingScope, type LoadedSettings } from './settings.js';
+import { LoadedSettings, SettingScope } from './settings.js';
 import { clearIncompatibleReasoningEffortForModel } from './reasoning-effort-persistence.js';
 
 function makeSettings({
@@ -23,40 +26,49 @@ function makeSettings({
   workspace?: Record<string, unknown>;
 } = {}): { settings: LoadedSettings; setValue: ReturnType<typeof vi.fn> } {
   const files = {
-    system: { settings: system },
-    systemDefaults: { settings: systemDefaults },
-    user: { settings: user },
-    workspace: { settings: workspace },
+    system: { settings: system, originalSettings: structuredClone(system) },
+    systemDefaults: {
+      settings: systemDefaults,
+      originalSettings: structuredClone(systemDefaults),
+    },
+    user: { settings: user, originalSettings: structuredClone(user) },
+    workspace: {
+      settings: workspace,
+      originalSettings: structuredClone(workspace),
+    },
   };
-  const readEffort = (value: Record<string, unknown>) =>
-    (value['model'] as { reasoningEffort?: unknown } | undefined)
-      ?.reasoningEffort;
   const setValue = vi.fn((scope: SettingScope, key: string, value: unknown) => {
     if (key !== 'model.reasoningEffort') return;
     const target = scope === SettingScope.Workspace ? workspace : user;
     const model = (target['model'] ??= {}) as Record<string, unknown>;
-    if (value === undefined) {
-      delete model['reasoningEffort'];
-    } else {
-      model['reasoningEffort'] = value;
-    }
+    model['reasoningEffort'] = value;
   });
   return {
     settings: {
       isTrusted,
       ...files,
       get merged() {
-        const effort = [
-          readEffort(system),
-          ...(isTrusted ? [readEffort(workspace)] : []),
-          readEffort(user),
-          readEffort(systemDefaults),
-        ].find((value) => value !== undefined);
-        return effort === undefined
-          ? {}
-          : { model: { reasoningEffort: effort } };
+        let ownsEffort = false;
+        let effort: unknown;
+        for (const source of [
+          systemDefaults,
+          user,
+          ...(isTrusted ? [workspace] : []),
+          system,
+        ]) {
+          const model = source['model'] as Record<string, unknown> | undefined;
+          if (
+            model &&
+            Object.prototype.hasOwnProperty.call(model, 'reasoningEffort')
+          ) {
+            ownsEffort = true;
+            effort = model['reasoningEffort'];
+          }
+        }
+        return ownsEffort ? { model: { reasoningEffort: effort } } : {};
       },
       setValue,
+      recomputeMerged: vi.fn(),
     } as unknown as LoadedSettings,
     setValue,
   };
@@ -196,6 +208,114 @@ describe('clearIncompatibleReasoningEffortForModel', () => {
     ).toBe(true);
     expect(setValue).not.toHaveBeenCalled();
     expect(setReasoningEffort).toHaveBeenCalledWith('high');
+  });
+
+  it('reveals a lower-scope tier after clearing a higher-scope opaque effort', async () => {
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-reasoning-cleanup-'),
+    );
+    const userPath = path.join(tempDir, 'user.json');
+    const workspacePath = path.join(tempDir, 'workspace.json');
+    const user = { model: { reasoningEffort: 'high' } };
+    const workspace = { model: { reasoningEffort: 'Vendor.Ultra' } };
+    await fs.writeFile(userPath, JSON.stringify(user));
+    await fs.writeFile(workspacePath, JSON.stringify(workspace));
+    const settings = new LoadedSettings(
+      {
+        path: path.join(tempDir, 'system.json'),
+        settings: {},
+        originalSettings: {},
+      },
+      {
+        path: path.join(tempDir, 'system-defaults.json'),
+        settings: {},
+        originalSettings: {},
+      },
+      {
+        path: userPath,
+        settings: structuredClone(user),
+        originalSettings: structuredClone(user),
+      },
+      {
+        path: workspacePath,
+        settings: structuredClone(workspace),
+        originalSettings: structuredClone(workspace),
+      },
+      true,
+      new Set(),
+    );
+    const { config, setReasoningEffort } = makeConfig(
+      'Vendor.Ultra',
+      'glm-5.2@target-route',
+    );
+
+    try {
+      expect(
+        clearIncompatibleReasoningEffortForModel(
+          config,
+          settings,
+          'glm-5.2',
+          true,
+          'previous-model@route',
+        ),
+      ).toBe(true);
+      expect(settings.merged.model?.reasoningEffort).toBe('high');
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          settings.workspace.settings.model ?? {},
+          'reasoningEffort',
+        ),
+      ).toBe(false);
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          settings.workspace.originalSettings.model ?? {},
+          'reasoningEffort',
+        ),
+      ).toBe(false);
+      expect(setReasoningEffort).toHaveBeenCalledWith('high');
+      expect(JSON.parse(await fs.readFile(workspacePath, 'utf8'))).toEqual({
+        model: {},
+      });
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reveals a lower-scope disabled preference after clearing a higher-scope tier', () => {
+    const { settings } = makeSettings({
+      user: { model: { reasoningEffort: 'none' } },
+      workspace: { model: { reasoningEffort: 'high' } },
+    });
+    const { config, disableReasoning } = makeConfig(
+      'high',
+      'qwen3.7-max@target-route',
+    );
+
+    expect(
+      clearIncompatibleReasoningEffortForModel(
+        config,
+        settings,
+        'qwen3.7-max',
+        true,
+        'qwen3.8-max@previous-route',
+      ),
+    ).toBe(true);
+    expect(disableReasoning).toHaveBeenCalledOnce();
+  });
+
+  it('still clears the live preference when a persisted cleanup write fails', () => {
+    const { settings, setValue } = makeSettings({
+      user: { model: { reasoningEffort: 'ultra' } },
+    });
+    setValue.mockImplementationOnce(() => {
+      throw new Error('EACCES');
+    });
+    const { config, setReasoningEffort } = makeConfig('ultra');
+
+    expect(
+      clearIncompatibleReasoningEffortForModel(config, settings, 'qwen3.7-max'),
+    ).toBe(true);
+    expect(setReasoningEffort).toHaveBeenCalledWith(undefined);
   });
 
   it('preserves an opaque preference when the resolved model route did not change', () => {

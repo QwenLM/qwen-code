@@ -228,6 +228,7 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
+import { clearIncompatibleReasoningEffortForModel } from '../config/reasoning-effort-persistence.js';
 import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
 import {
   getConversationDirectoryName,
@@ -5038,8 +5039,12 @@ class QwenAgent implements Agent {
       try {
         if (!provisionalStandalone) {
           await profiler.time('restore_session_model', () =>
-            restoreSessionModelThenAuthenticate(config, projection, () =>
-              profiler.time('auth', () => this.ensureAuthenticated(config)),
+            restoreSessionModelThenAuthenticate(
+              config,
+              projection,
+              () =>
+                profiler.time('auth', () => this.ensureAuthenticated(config)),
+              settings,
             ),
           );
           profiler.timeSync('file_system_setup', () =>
@@ -5060,6 +5065,7 @@ class QwenAgent implements Agent {
                           profiler.time('auth', () =>
                             this.ensureAuthenticated(config),
                           ),
+                        settings,
                       ),
                     ),
                 }
@@ -5391,8 +5397,12 @@ class QwenAgent implements Agent {
       try {
         if (!provisionalStandalone) {
           await profiler.time('restore_session_model', () =>
-            restoreSessionModelThenAuthenticate(config, projection, () =>
-              profiler.time('auth', () => this.ensureAuthenticated(config)),
+            restoreSessionModelThenAuthenticate(
+              config,
+              projection,
+              () =>
+                profiler.time('auth', () => this.ensureAuthenticated(config)),
+              settings,
             ),
           );
           profiler.timeSync('file_system_setup', () =>
@@ -5413,6 +5423,7 @@ class QwenAgent implements Agent {
                           profiler.time('auth', () =>
                             this.ensureAuthenticated(config),
                           ),
+                        settings,
                       ),
                     ),
                 }
@@ -12069,7 +12080,16 @@ class QwenAgent implements Agent {
               authType
             ) {
               try {
+                const previousModelRouteIdentity =
+                  config.getModelRouteIdentity?.();
                 await config.switchModel(authType, newModelName);
+                clearIncompatibleReasoningEffortForModel(
+                  config,
+                  this.settings,
+                  config.getContentGeneratorConfig?.()?.model ?? newModelName,
+                  false,
+                  previousModelRouteIdentity,
+                );
               } catch (err) {
                 debugLogger.warn(
                   `reload: switchModel failed for session ${id}: ${err}`,

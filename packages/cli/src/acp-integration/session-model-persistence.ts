@@ -13,6 +13,8 @@ import {
   type SessionModelRecordPayload,
   type SessionRestoreProjection,
 } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../config/settings.js';
+import { clearIncompatibleReasoningEffortForModel } from '../config/reasoning-effort-persistence.js';
 
 const debugLogger = createDebugLogger('SESSION_MODEL');
 const AUTH_TYPES = new Set<string>(Object.values(AuthType));
@@ -122,6 +124,7 @@ function recordedRouteMatches(
 export async function applyRestoredSessionModel(
   config: Config,
   projection: SessionRestoreProjection | undefined,
+  settings: LoadedSettings,
 ): Promise<void> {
   const recorded = projection?.runtime.recording.sessionModel;
   const fallbackModel = projection?.runtime.recording.lastAssistantModel;
@@ -187,7 +190,15 @@ export async function applyRestoredSessionModel(
         }
       : undefined;
   try {
+    const previousModelRouteIdentity = config.getModelRouteIdentity?.();
     await config.switchModel(authType, switchModelId, switchOptions);
+    clearIncompatibleReasoningEffortForModel(
+      config,
+      settings,
+      targetModel,
+      false,
+      previousModelRouteIdentity,
+    );
   } catch (error) {
     debugLogger.warn(
       `restore session model failed (${targetModel}/${authType}): ${
@@ -201,12 +212,14 @@ export async function restoreSessionModelThenAuthenticate(
   config: Config,
   projection: SessionRestoreProjection | undefined,
   authenticate: () => Promise<void>,
+  settings: LoadedSettings,
 ): Promise<void> {
   const originalAuth = liveAuthType(config);
   const originalModel = config.getModel();
   const originalBaseUrl = config.getCurrentModelRegistryBaseUrl?.();
   const originalRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
-  await applyRestoredSessionModel(config, projection);
+  const originalReasoningPreference = config.getReasoningPreference?.();
+  await applyRestoredSessionModel(config, projection, settings);
   try {
     await authenticate();
   } catch (error) {
@@ -245,6 +258,11 @@ export async function restoreSessionModelThenAuthenticate(
       );
     } catch {
       throw error;
+    }
+    if (originalReasoningPreference === false) {
+      config.disableReasoning();
+    } else if (typeof originalReasoningPreference === 'string') {
+      config.setReasoningEffort(originalReasoningPreference);
     }
     await authenticate();
   }
