@@ -266,7 +266,6 @@ export type WebShellSidebarSessionActionItem =
 /** Subset of action items that have working inline (hover-button) handlers. */
 export type WebShellSidebarSessionInlineActionItem =
   | 'pin'
-  | 'archive'
   | 'rename'
   | 'export'
   | 'delete';
@@ -279,7 +278,8 @@ export interface WebShellSidebarSessionActionsOptions {
    * archive stays in the dropdown so a stray click on the hover slot cannot
    * archive a session.
    * Only items that also pass their built-in visibility condition are rendered.
-   * Only items with working inline handlers are accepted (details/group are dropdown-only).
+   * Only items with working inline handlers are accepted
+   * (details/group/archive are dropdown-only).
    */
   inlineItems?: readonly WebShellSidebarSessionInlineActionItem[];
 }
@@ -350,9 +350,8 @@ interface WebShellSidebarProps {
   onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
-   * Whether to offer the Session Overview entry point. Gated to large screens
-   * by the app: below that there is no room to make managing several sessions
-   * side by side worthwhile.
+   * Whether to offer the Session Overview entry point. The table handles
+   * narrow widths, so the entry point can be offered at every viewport size.
    */
   canOpenSessionsOverview?: boolean;
   onOpenSplitView: () => void;
@@ -4013,13 +4012,12 @@ export function WebShellSidebar({
       const showDelete = canShowDeleteSession(session);
       const inlineActionCount =
         Number(showPin && inlineActionItems.has('pin')) +
-        Number(showArchive && inlineActionItems.has('archive')) +
         Number(showRename && inlineActionItems.has('rename')) +
         Number(showExport && inlineActionItems.has('export')) +
         Number(showDelete && inlineActionItems.has('delete'));
       const showMoreActions =
         (showPin && !inlineActionItems.has('pin')) ||
-        (showArchive && !inlineActionItems.has('archive')) ||
+        showArchive ||
         (showRename && !inlineActionItems.has('rename')) ||
         canOrganizeSession(session, 'group') ||
         (showExport && !inlineActionItems.has('export')) ||
@@ -4155,20 +4153,6 @@ export function WebShellSidebar({
                           onClick: () => handleTogglePin(session),
                         },
                         {
-                          key: 'archive',
-                          icon: <ArchiveIcon size={16} strokeWidth={1.2} />,
-                          label: t('sidebar.archive'),
-                          disabled: busy || isCurrent || running,
-                          title: isCurrent
-                            ? t('sidebar.archiveCurrentDisabled')
-                            : running
-                              ? t('sidebar.archiveRunningDisabled')
-                              : t('sidebar.archive'),
-                          visible:
-                            showArchive && inlineActionItems.has('archive'),
-                          onClick: () => handleArchive(session),
-                        },
-                        {
                           key: 'rename',
                           icon: <PencilIcon size={16} strokeWidth={1.2} />,
                           label: t('sidebar.rename'),
@@ -4263,23 +4247,22 @@ export function WebShellSidebar({
                                   : t('sidebar.pin')}
                               </DropdownMenuItem>
                             )}
-                            {showArchive &&
-                              !inlineActionItems.has('archive') && (
-                                <DropdownMenuItem
-                                  disabled={busy || isCurrent || running}
-                                  title={
-                                    isCurrent
-                                      ? t('sidebar.archiveCurrentDisabled')
-                                      : running
-                                        ? t('sidebar.archiveRunningDisabled')
-                                        : undefined
-                                  }
-                                  onSelect={() => handleArchive(session)}
-                                >
-                                  <ArchiveIcon />
-                                  {t('sidebar.archive')}
-                                </DropdownMenuItem>
-                              )}
+                            {showArchive && (
+                              <DropdownMenuItem
+                                disabled={busy || isCurrent || running}
+                                title={
+                                  isCurrent
+                                    ? t('sidebar.archiveCurrentDisabled')
+                                    : running
+                                      ? t('sidebar.archiveRunningDisabled')
+                                      : undefined
+                                }
+                                onSelect={() => handleArchive(session)}
+                              >
+                                <ArchiveIcon />
+                                {t('sidebar.archive')}
+                              </DropdownMenuItem>
+                            )}
                             {showRename && !inlineActionItems.has('rename') && (
                               <DropdownMenuItem
                                 disabled={busy}
