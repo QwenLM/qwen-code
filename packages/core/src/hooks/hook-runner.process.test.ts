@@ -5,7 +5,14 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -666,6 +673,106 @@ setInterval(() => {}, 1000);
       }
     }, 10_000);
 
+    it.each([0, 124])(
+      'preserves a natural exit %s within the final supervisor poll interval',
+      async (exitCode) => {
+        const tempDir = await mkdtemp(
+          join(tmpdir(), 'qwen-hook-deadline-race-'),
+        );
+        let hookPid: number | undefined;
+        let observedNaturalCompletion = false;
+
+        try {
+          const sleepDurations = [0.17, 0.18, 0.19, 0.2, 0.21, 0.18, 0.19, 0.2];
+          for (const [attempt, sleepDuration] of sleepDurations.entries()) {
+            const attemptDir = join(tempDir, String(attempt));
+            await mkdir(attemptDir, { recursive: true });
+            const hookPidPath = join(attemptDir, 'hook.pid');
+            const readyPath = join(attemptDir, 'hook.ready');
+            const completedPath = join(attemptDir, 'hook.completed');
+            const termPath = join(attemptDir, 'hook.term');
+            hookPid = undefined;
+            let hookGoneAt = Number.POSITIVE_INFINITY;
+            let resultAt = Number.NEGATIVE_INFINITY;
+            const runner = new HookRunner();
+            const resultPromise = runner.executeHook(
+              {
+                type: HookType.Command,
+                command: `trap 'printf term > ${JSON.stringify(termPath)}; exit 143' TERM; printf '%s' "$$" > ${JSON.stringify(hookPidPath)}; : > ${JSON.stringify(readyPath)}; sleep ${sleepDuration}; : > ${JSON.stringify(completedPath)}; exit ${exitCode}`,
+                source: HooksConfigSource.Project,
+                shell: 'bash',
+                timeout: 290,
+              },
+              HookEventName.SessionDelete,
+              {
+                session_id: 'surviving-deadline-race-test',
+                transcript_path: join(attemptDir, 'transcript.jsonl'),
+                cwd: attemptDir,
+                hook_event_name: HookEventName.SessionDelete,
+                timestamp: new Date().toISOString(),
+              },
+            );
+
+            await waitFor(async () => {
+              hookPid = await readPid(hookPidPath);
+              return (
+                hookPid !== undefined &&
+                (await readFile(readyPath, 'utf8').catch(() => undefined)) !==
+                  undefined
+              );
+            }, 5000);
+            const readyAt = Date.now();
+            const hookGonePromise = waitFor(
+              () => !isRunning(hookPid as number),
+              5000,
+            ).then(() => {
+              hookGoneAt = Date.now();
+            });
+            const observedResultPromise = resultPromise.then((result) => {
+              resultAt = Date.now();
+              return result;
+            });
+            const [result] = await Promise.all([
+              observedResultPromise,
+              hookGonePromise,
+            ]);
+            const completed =
+              (await readFile(completedPath, 'utf8').catch(() => undefined)) !==
+              undefined;
+            const terminated =
+              (await readFile(termPath, 'utf8').catch(() => undefined)) !==
+              undefined;
+            if (
+              completed &&
+              !terminated &&
+              hookGoneAt >= readyAt + 180 &&
+              hookGoneAt <= resultAt
+            ) {
+              observedNaturalCompletion = true;
+              expect(result).toMatchObject({
+                success: exitCode === 0,
+                exitCode,
+              });
+              expect(result.error).toBeUndefined();
+              break;
+            }
+          }
+
+          expect(observedNaturalCompletion).toBe(true);
+        } finally {
+          if (hookPid && isRunning(hookPid)) {
+            try {
+              process.kill(-hookPid, 'SIGKILL');
+            } catch {
+              // Already gone.
+            }
+          }
+          await rm(tempDir, { recursive: true, force: true });
+        }
+      },
+      15_000,
+    );
+
     it('isolates the supervisor from hook NODE_OPTIONS', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-node-options-'));
       const preloadPath = join(tempDir, 'preload.cjs');
@@ -896,7 +1003,7 @@ setInterval(() => {}, 1000);
             command,
             source: HooksConfigSource.Project,
             shell: 'bash',
-            timeout: 300,
+            timeout: 1000,
           },
           HookEventName.SessionDelete,
           input,
@@ -906,7 +1013,7 @@ setInterval(() => {}, 1000);
         expect(descendantPid).toBeDefined();
         expect(result).toMatchObject({
           success: false,
-          error: { message: 'Hook timed out after 300ms' },
+          error: { message: 'Hook timed out after 1000ms' },
         });
         await waitFor(() => !isRunning(descendantPid as number), 3000);
       } finally {
@@ -1029,5 +1136,137 @@ writeFileSync(process.argv[2], JSON.stringify({ bytes: Buffer.byteLength(input),
         await rm(tempDir, { recursive: true, force: true });
       }
     }, 10_000);
+  },
+);
+
+describe.skipIf(process.platform !== 'win32')(
+  'HookRunner surviving hook supervisor on Windows',
+  () => {
+    const quotePowerShellArg = (value: string) =>
+      `'${value.replaceAll("'", "''")}'`;
+    const getWindowsParentPid = (pid: number): number | undefined => {
+      const result = spawnSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-Command',
+          `(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = ${pid}").ParentProcessId`,
+        ],
+        { encoding: 'utf8', windowsHide: true },
+      );
+      const parentPid = Number.parseInt(result.stdout?.trim() ?? '', 10);
+      return result.status === 0 &&
+        Number.isSafeInteger(parentPid) &&
+        parentPid > 0
+        ? parentPid
+        : undefined;
+    };
+
+    it('keeps the real supervisor alive and taskkills the hook tree on timeout', async () => {
+      const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-windows-'));
+      const fixturePath = join(tempDir, 'hook.mjs');
+      const descendantPath = join(tempDir, 'descendant.mjs');
+      const hookRootPidPath = join(tempDir, 'hook-root.pid');
+      const fixturePidPath = join(tempDir, 'fixture.pid');
+      const descendantPidPath = join(tempDir, 'descendant.pid');
+      const readyPath = join(tempDir, 'descendant.ready');
+      let supervisorPid: number | undefined;
+      let hookRootPid: number | undefined;
+      let fixturePid: number | undefined;
+      let descendantPid: number | undefined;
+
+      try {
+        await writeFile(
+          fixturePath,
+          `import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+
+writeFileSync(process.argv[2], String(process.ppid));
+writeFileSync(process.argv[3], String(process.pid));
+const descendant = spawn(process.execPath, [process.argv[4], process.argv[5], process.argv[6]], { stdio: 'ignore', windowsHide: true });
+writeFileSync(process.argv[5], String(descendant.pid));
+setInterval(() => {}, 1000);
+`,
+        );
+        await writeFile(
+          descendantPath,
+          `import { writeFileSync } from 'node:fs';
+
+writeFileSync(process.argv[3], 'ready');
+setInterval(() => {}, 1000);
+`,
+        );
+        const command = [
+          '&',
+          quotePowerShellArg(process.execPath),
+          quotePowerShellArg(fixturePath),
+          quotePowerShellArg(hookRootPidPath),
+          quotePowerShellArg(fixturePidPath),
+          quotePowerShellArg(descendantPath),
+          quotePowerShellArg(descendantPidPath),
+          quotePowerShellArg(readyPath),
+        ].join(' ');
+        const runner = new HookRunner();
+        const resultPromise = runner.executeHook(
+          {
+            type: HookType.Command,
+            command,
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+            timeout: 10_000,
+          },
+          HookEventName.MessageDisplay,
+          {
+            session_id: 'surviving-windows-test',
+            transcript_path: join(tempDir, 'transcript.jsonl'),
+            cwd: tempDir,
+            hook_event_name: HookEventName.MessageDisplay,
+            timestamp: new Date().toISOString(),
+          },
+        );
+
+        await waitFor(async () => {
+          hookRootPid = await readPid(hookRootPidPath);
+          fixturePid = await readPid(fixturePidPath);
+          descendantPid = await readPid(descendantPidPath);
+          return (
+            hookRootPid !== undefined &&
+            fixturePid !== undefined &&
+            descendantPid !== undefined &&
+            (await readFile(readyPath, 'utf8').catch(() => '')) === 'ready'
+          );
+        }, 7500);
+        supervisorPid = getWindowsParentPid(hookRootPid as number);
+        expect(supervisorPid).toBeDefined();
+        expect(supervisorPid).not.toBe(process.pid);
+        expect(isRunning(supervisorPid as number)).toBe(true);
+
+        const result = await resultPromise;
+        expect(result.error?.message).toBe('Hook timed out after 10000ms');
+        await waitFor(
+          () =>
+            !isRunning(supervisorPid as number) &&
+            !isRunning(hookRootPid as number) &&
+            !isRunning(fixturePid as number) &&
+            !isRunning(descendantPid as number),
+          5000,
+        );
+      } finally {
+        const taskkill = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+        for (const pid of [
+          supervisorPid,
+          hookRootPid,
+          fixturePid,
+          descendantPid,
+        ]) {
+          if (pid && isRunning(pid)) {
+            spawnSync(taskkill, ['/f', '/t', '/pid', String(pid)], {
+              windowsHide: true,
+            });
+          }
+        }
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    }, 20_000);
   },
 );

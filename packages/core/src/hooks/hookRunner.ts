@@ -55,6 +55,12 @@ const HOOK_PROCESS_GROUP_POLL_MS = 50;
 const HOOK_CHILD_CLOSE_WAIT_MS = 1000;
 const WINDOWS_TASKKILL_TIMEOUT_MS = 2000;
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+const WINDOWS_TASKKILL_ARGS_PREFIX = ['/f', '/t', '/pid'] as const;
+const SURVIVING_HOOK_LOADER_ENV_VARS = [
+  'NODE_OPTIONS',
+  'LD_PRELOAD',
+  'DYLD_INSERT_LIBRARIES',
+] as const;
 const SURVIVING_HOOK_TIMEOUT_EXIT_CODE = 124;
 const SURVIVING_HOOK_SUPERVISOR_GRACE_MS =
   HOOK_TERMINATE_GRACE_MS + HOOK_PROCESS_GROUP_POLL_MS * 2;
@@ -73,13 +79,13 @@ const [
   graceValue,
   executable,
   argsValue,
-  nodeOptionsValue,
+  loaderEnvValue,
 ] =
   process.argv.slice(1);
 const timeout = Number(timeoutValue);
 const grace = Number(graceValue);
 const args = JSON.parse(argsValue);
-const originalNodeOptions = JSON.parse(nodeOptionsValue);
+const originalLoaderEnv = JSON.parse(loaderEnvValue);
 const pollInterval = ${HOOK_PROCESS_GROUP_POLL_MS};
 const timeoutExitCode = ${SURVIVING_HOOK_TIMEOUT_EXIT_CODE};
 const signalExitCode = 143;
@@ -138,36 +144,50 @@ const waitForGroupExit = async () => {
   return !groupAlive();
 };
 
+const forceKillDirectHook = () => {
+  if (hook.exitCode !== null) return false;
+  try {
+    return hook.kill('SIGKILL');
+  } catch {
+    return false;
+  }
+};
+
 const terminateWindowsTree = () =>
   new Promise((resolve) => {
-    if (!hook?.pid) {
-      resolve();
+    if (!hook?.pid || hook.exitCode !== null) {
+      resolve(false);
       return;
     }
     const taskkill = ${JSON.stringify(WINDOWS_TASKKILL)};
-    execFile(
-      taskkill,
-      ['/f', '/t', '/pid', String(hook.pid)],
-      { windowsHide: true, timeout: ${WINDOWS_TASKKILL_TIMEOUT_MS} },
-      () => {
-        try {
-          hook.kill('SIGKILL');
-        } catch {}
-        resolve();
-      },
-    );
+    try {
+      execFile(
+        taskkill,
+        [...${JSON.stringify(WINDOWS_TASKKILL_ARGS_PREFIX)}, String(hook.pid)],
+        { windowsHide: true, timeout: ${WINDOWS_TASKKILL_TIMEOUT_MS} },
+        (error) => {
+          if (error) {
+            resolve(forceKillDirectHook());
+            return;
+          }
+          resolve(true);
+        },
+      );
+    } catch {
+      resolve(forceKillDirectHook());
+    }
   });
 
 const terminate = () => {
   if (terminationPromise) return terminationPromise;
   terminationPromise = (async () => {
     if (process.platform === 'win32') {
-      await terminateWindowsTree();
-      return;
+      return terminateWindowsTree();
     }
-    if (!signalGroup('SIGTERM')) return;
-    if (await waitForGroupExit()) return;
+    if (!signalGroup('SIGTERM')) return false;
+    if (await waitForGroupExit()) return true;
     signalGroup('SIGKILL');
+    return true;
   })();
   return terminationPromise;
 };
@@ -195,10 +215,12 @@ let inputFd;
 try {
   inputFd = openSync(inputPath, 'r');
   const hookEnv = { ...process.env };
-  if (originalNodeOptions === null) {
-    delete hookEnv.NODE_OPTIONS;
-  } else {
-    hookEnv.NODE_OPTIONS = originalNodeOptions;
+  for (const name of ${JSON.stringify(SURVIVING_HOOK_LOADER_ENV_VARS)}) {
+    if (Object.hasOwn(originalLoaderEnv, name)) {
+      hookEnv[name] = originalLoaderEnv[name];
+    } else {
+      delete hookEnv[name];
+    }
   }
   hook = spawn(executable, args, {
     cwd: process.cwd(),
@@ -239,10 +261,27 @@ pollHandle = setInterval(() => {
   }
 }, pollInterval);
 
-timeoutHandle = setTimeout(() => {
+const handleTimeout = () => {
+  if (finished || terminationExitCode !== undefined) return;
+  if (rootClosed && !groupAlive()) {
+    exit(rootExitCode, 'completed');
+    return;
+  }
   terminationExitCode = timeoutExitCode;
-  void terminate().then(() => exit(terminationExitCode, 'timed_out'));
-}, timeout);
+  void terminate().then((terminated) => {
+    if (finished) return;
+    if (!terminated) {
+      terminationExitCode = undefined;
+      if (rootClosed && !groupAlive()) {
+        exit(rootExitCode, 'completed');
+      }
+      return;
+    }
+    exit(timeoutExitCode, 'timed_out');
+  });
+};
+
+timeoutHandle = setTimeout(() => setImmediate(handleTimeout), timeout);
 `;
 
 const activePosixHookProcesses = new Set<ChildProcess>();
@@ -419,7 +458,7 @@ async function terminateWindowsHookProcessTree(
     try {
       execFile(
         WINDOWS_TASKKILL,
-        ['/f', '/t', '/pid', pid.toString()],
+        [...WINDOWS_TASKKILL_ARGS_PREFIX, pid.toString()],
         {
           windowsHide: true,
           timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
@@ -549,6 +588,19 @@ export class HookRunner {
         outcome: 'cancelled',
         error: new Error(`Hook execution cancelled (aborted): ${hookId}`),
         duration: 0,
+      };
+    }
+
+    if (
+      hookConfig.timeout !== undefined &&
+      (!Number.isFinite(hookConfig.timeout) || hookConfig.timeout <= 0)
+    ) {
+      return {
+        hookConfig,
+        eventName,
+        success: false,
+        error: new Error('Hook timeout must be a positive finite number'),
+        duration: Date.now() - startTime,
       };
     }
 
@@ -1098,7 +1150,14 @@ export class HookRunner {
       if (survivesParentExit) {
         parentIndependentInputPath = createSurvivingHookInputFile(input);
         const supervisorEnv = { ...env };
-        delete supervisorEnv['NODE_OPTIONS'];
+        const hookLoaderEnv: Record<string, string> = {};
+        for (const name of SURVIVING_HOOK_LOADER_ENV_VARS) {
+          const value = supervisorEnv[name];
+          if (value !== undefined) {
+            hookLoaderEnv[name] = value;
+          }
+          delete supervisorEnv[name];
+        }
         try {
           child = spawn(
             process.execPath,
@@ -1106,12 +1165,13 @@ export class HookRunner {
               '--input-type=commonjs',
               '--eval',
               SURVIVING_HOOK_SUPERVISOR_SOURCE,
+              '--',
               parentIndependentInputPath,
               String(timeout),
               String(HOOK_TERMINATE_GRACE_MS),
               shellConfig.executable,
               JSON.stringify([...shellConfig.argsPrefix, command]),
-              JSON.stringify(env['NODE_OPTIONS'] ?? null),
+              JSON.stringify(hookLoaderEnv),
             ],
             {
               env: supervisorEnv,

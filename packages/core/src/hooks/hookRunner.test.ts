@@ -5,9 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { access } from 'node:fs/promises';
 import { HookRunner } from './hookRunner.js';
 import {
   HookEventName,
@@ -148,6 +146,26 @@ describe('HookRunner', () => {
   };
 
   describe('executeHook', () => {
+    it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+      'rejects invalid timeout %s before dispatch',
+      async (timeout) => {
+        const result = await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            timeout,
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+
+        expect(result.error?.message).toBe(
+          'Hook timeout must be a positive finite number',
+        );
+        expect(mockSpawn).not.toHaveBeenCalled();
+      },
+    );
+
     it('should return error when hook command is missing', async () => {
       const hookConfig: HookConfig = {
         type: HookType.Command,
@@ -1128,7 +1146,9 @@ describe('HookRunner', () => {
         expect(mockSpawn).toHaveBeenCalledTimes(2);
         for (const call of mockSpawn.mock.calls) {
           expect(call[0]).toBe(process.execPath);
-          expect(call[1]).toContain('--eval');
+          const evalIndex = call[1].indexOf('--eval');
+          expect(evalIndex).toBeGreaterThanOrEqual(0);
+          expect(call[1][evalIndex + 2]).toBe('--');
           expect(call[2].stdio).toEqual(['ignore', 'ignore', 'ignore', 'pipe']);
           expect(call[2].detached).toBe(true);
         }
@@ -1139,30 +1159,65 @@ describe('HookRunner', () => {
     );
 
     it('removes staged input when the supervisor spawn throws', async () => {
-      const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-spawn-error-'));
-      const originalTmpDir = process.env['TMPDIR'];
-      process.env['TMPDIR'] = tempDir;
-      mockSpawn.mockImplementation(() => {
+      let stagedInputPath: string | undefined;
+      mockSpawn.mockImplementation((_executable, args: string[]) => {
+        stagedInputPath = args[args.indexOf('--') + 1];
         throw new Error('spawn failed');
       });
 
-      try {
-        const result = await hookRunner.executeHook(
-          hookConfig,
-          HookEventName.SessionDelete,
-          createMockInput({ hook_event_name: HookEventName.SessionDelete }),
-        );
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.SessionDelete,
+        createMockInput({ hook_event_name: HookEventName.SessionDelete }),
+      );
 
-        expect(result.error?.message).toBe('spawn failed');
-        expect(await readdir(tempDir)).toEqual([]);
-      } finally {
-        if (originalTmpDir === undefined) {
-          delete process.env['TMPDIR'];
-        } else {
-          process.env['TMPDIR'] = originalTmpDir;
-        }
-        await rm(tempDir, { recursive: true, force: true });
-      }
+      expect(result.error?.message).toBe('spawn failed');
+      expect(stagedInputPath).toBeDefined();
+      await expect(access(stagedInputPath as string)).rejects.toThrow();
+    });
+
+    it('removes staged input when the supervisor closes before unlinking', async () => {
+      const supervisor = createControllableMockProcess();
+      mockSpawn.mockReturnValue(supervisor);
+
+      const resultPromise = hookRunner.executeHook(
+        hookConfig,
+        HookEventName.SessionDelete,
+        createMockInput({ hook_event_name: HookEventName.SessionDelete }),
+      );
+      const args = mockSpawn.mock.calls[0][1] as string[];
+      const stagedInputPath = args[args.indexOf('--') + 1];
+      await expect(access(stagedInputPath)).resolves.toBeUndefined();
+
+      supervisor.emit('close', 1);
+      const result = await resultPromise;
+
+      expect(result).toMatchObject({ success: false, exitCode: 1 });
+      await expect(access(stagedInputPath)).rejects.toThrow();
+    });
+
+    it('isolates the supervisor from loader variables passed to the hook', async () => {
+      mockSpawn.mockReturnValue(createMockProcess());
+      const loaderEnv = {
+        NODE_OPTIONS: '--require=/hook/preload.cjs',
+        LD_PRELOAD: '/hook/preload.so',
+        DYLD_INSERT_LIBRARIES: '/hook/preload.dylib',
+      };
+
+      await hookRunner.executeHook(
+        { ...hookConfig, env: loaderEnv },
+        HookEventName.StopFailure,
+        createMockInput({ hook_event_name: HookEventName.StopFailure }),
+      );
+
+      const args = mockSpawn.mock.calls[0][1] as string[];
+      const options = mockSpawn.mock.calls[0][2] as {
+        env: NodeJS.ProcessEnv;
+      };
+      expect(options.env).not.toHaveProperty('NODE_OPTIONS');
+      expect(options.env).not.toHaveProperty('LD_PRELOAD');
+      expect(options.env).not.toHaveProperty('DYLD_INSERT_LIBRARIES');
+      expect(JSON.parse(args.at(-1) as string)).toEqual(loaderEnv);
     });
 
     it('keeps output capture for process-scoped async hooks', async () => {
