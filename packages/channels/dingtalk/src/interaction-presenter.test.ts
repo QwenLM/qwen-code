@@ -321,7 +321,7 @@ describe('DingtalkInteractionPresenter', () => {
   it('escapes markdown-sensitive sender names in card attribution', async () => {
     const { client, presenter } = createHarness();
     presenter.registerRun('run-1', 'owner-1', target, 'session-1', {
-      senderName: '衍_星#1 (ops)',
+      senderName: '衍_星#1:ops (oncall)',
     });
     presenter.appendOutput(segment('segment-1'), 'final answer');
 
@@ -332,8 +332,8 @@ describe('DingtalkInteractionPresenter', () => {
       .mock.calls.map(([request]) => request.cardParamMap)
       .find((payload) => payload.flowStatus === 3);
     expect(terminalPayload).toMatchObject({
-      content: '@衍\\_星\\#1 \\(ops\\)\n\nfinal answer',
-      copy_content: '@衍\\_星\\#1 \\(ops\\)\n\nfinal answer',
+      content: '@衍\\_星\\#1:ops \\(oncall\\)\n\nfinal answer',
+      copy_content: '@衍\\_星\\#1:ops \\(oncall\\)\n\nfinal answer',
     });
   });
 

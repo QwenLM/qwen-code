@@ -52,13 +52,17 @@ export interface DingtalkCardSender {
   senderName: string;
 }
 
+function escapeSenderMarkdownText(text: string): string {
+  return text.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
+}
+
 function formatSenderPrefixes(sender: DingtalkCardSender): {
   senderPrefix: string;
   senderRawPrefix: string;
 } {
   const senderName = sanitizeSenderName(sender.senderName);
   return {
-    senderPrefix: `@${escapeDingTalkMarkdown(senderName)}`,
+    senderPrefix: `@${escapeSenderMarkdownText(senderName)}`,
     senderRawPrefix: `@${senderName}`,
   };
 }
