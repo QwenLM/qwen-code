@@ -4667,7 +4667,7 @@ async function retireAgentViewWorkerPids(
   const tokenDigest = await clearAgentViewWorkerPids(sessionId, options);
   rememberRetiredInitialPromptTokenDigest(sessionId, tokenDigest, options);
   const state = await readAgentViewSessionState(sessionId, options);
-  if (state?.initialPromptPending !== true) {
+  if (state !== undefined && state.initialPromptPending !== true) {
     forgetRetiredInitialPromptTokenDigest(sessionId, options);
   }
 }

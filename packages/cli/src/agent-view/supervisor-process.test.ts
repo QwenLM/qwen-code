@@ -425,7 +425,7 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
-  it('does not replay the initial prompt after a late working event follows exit', async () => {
+  it('does not replay after a fail-soft retirement read and late working event', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
     );
@@ -463,6 +463,27 @@ describe('Agent View supervisor process helpers', () => {
       readAgentViewSessionState(result.sessionId, { globalDir }),
     ).resolves.toMatchObject({ initialPromptPending: true });
 
+    const readState = supervisorStore.readAgentViewSessionState;
+    const clearWorkerPids = supervisorStore.clearAgentViewWorkerPids;
+    let failNextStateRead = false;
+    let injectedUnknownState = false;
+    const clearSpy = vi
+      .spyOn(supervisorStore, 'clearAgentViewWorkerPids')
+      .mockImplementation(async (...args) => {
+        const tokenDigest = await clearWorkerPids(...args);
+        failNextStateRead = true;
+        return tokenDigest;
+      });
+    const readSpy = vi
+      .spyOn(supervisorStore, 'readAgentViewSessionState')
+      .mockImplementation(async (...args) => {
+        if (failNextStateRead) {
+          failNextStateRead = false;
+          injectedUnknownState = true;
+          return undefined;
+        }
+        return readState(...args);
+      });
     hosts[0]?.resolveExit(1);
     await waitForSessionState(
       result.sessionId,
@@ -474,6 +495,9 @@ describe('Agent View supervisor process helpers', () => {
       globalDir,
       (worker) => worker?.tokenDigest === undefined,
     );
+    readSpy.mockRestore();
+    clearSpy.mockRestore();
+    expect(injectedUnknownState).toBe(true);
 
     await expect(
       callAgentViewSupervisor(socketPath, 'workerEvent', {
