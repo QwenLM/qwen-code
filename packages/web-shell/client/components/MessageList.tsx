@@ -509,7 +509,8 @@ function updateCompactStreamingThinkingTail(
   return result;
 }
 
-export function groupParallelAgents(messages: Message[]): DisplayItem[] {
+export function groupParallelAgents(sourceMessages: Message[]): DisplayItem[] {
+  const messages = normalizeTerminalBackgroundAgentTools(sourceMessages);
   const items: DisplayItem[] = [];
   let i = 0;
   while (i < messages.length) {
@@ -794,7 +795,6 @@ function collectFinalAssistantTurnIds(
   }
 
   const turnIdByAssistantId = new Map<string, string>();
-  const completedAgentCallIds = completedBackgroundAgentCallIds(items);
   for (let k = 0; k < userIdxs.length; k++) {
     const start = userIdxs[k];
     const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
@@ -809,7 +809,7 @@ function collectFinalAssistantTurnIds(
     // whether it is the latest turn or the user has moved on to a newer one.
     if (
       gateBackgroundAgentStatus &&
-      turnHasActiveBackgroundAgent(items, start, end, completedAgentCallIds)
+      turnHasActiveBackgroundAgent(items, start, end)
     ) {
       continue;
     }
@@ -1668,16 +1668,13 @@ function turnHasActiveBackgroundAgent(
   items: readonly DisplayItem[],
   start: number,
   end: number,
-  completedAgentCallIds = completedBackgroundAgentCallIds(items),
 ): boolean {
   return someTurnToolCall(
     items,
     start,
     end,
     (tool) =>
-      isBackgroundSubAgentToolCall(tool) &&
-      isActiveToolStatus(tool.status) &&
-      !completedAgentCallIds.has(tool.callId),
+      isBackgroundSubAgentToolCall(tool) && isActiveToolStatus(tool.status),
   );
 }
 
@@ -1723,9 +1720,12 @@ function backgroundAgentCallIds(item: DisplayItem): string[] {
   return [];
 }
 
-function backgroundAgentCompletionForMessage(
-  message: Message,
-): { callId?: string } | null {
+function backgroundAgentCompletionForMessage(message: Message): {
+  callId?: string;
+  toolStatus: 'completed' | 'failed';
+  cancelled?: boolean;
+  endTime?: number;
+} | null {
   if (
     message.role !== 'system' ||
     message.source !== 'background_notification'
@@ -1739,33 +1739,96 @@ function backgroundAgentCompletionForMessage(
       .startsWith('background agent ') === true;
   const data = message.data;
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
-    return identifiesAgent ? {} : null;
+    return identifiesAgent
+      ? {
+          toolStatus: 'completed',
+          ...(message.timestamp !== undefined
+            ? { endTime: message.timestamp }
+            : {}),
+        }
+      : null;
   }
-  const { kind, toolUseId } = data as {
+  const { kind, toolUseId, status } = data as {
     kind?: unknown;
     toolUseId?: unknown;
+    status?: unknown;
   };
   if (kind !== 'agent' && !(kind === undefined && identifiesAgent)) return null;
-  return typeof toolUseId === 'string' ? { callId: toolUseId } : {};
+  if (
+    status !== undefined &&
+    status !== 'completed' &&
+    status !== 'failed' &&
+    status !== 'cancelled' &&
+    status !== 'canceled'
+  ) {
+    return null;
+  }
+  return {
+    ...(typeof toolUseId === 'string' ? { callId: toolUseId } : {}),
+    toolStatus: status === 'failed' ? 'failed' : 'completed',
+    ...(status === 'cancelled' || status === 'canceled'
+      ? { cancelled: true }
+      : {}),
+    ...(message.timestamp !== undefined ? { endTime: message.timestamp } : {}),
+  };
 }
 
 function backgroundAgentCompletion(
   item: DisplayItem,
-): { callId?: string } | null {
+): ReturnType<typeof backgroundAgentCompletionForMessage> {
   return item.type === 'message'
     ? backgroundAgentCompletionForMessage(item.message)
     : null;
 }
 
-function completedBackgroundAgentCallIds(
-  items: readonly DisplayItem[],
-): ReadonlySet<string> {
-  const callIds = new Set<string>();
-  for (const item of items) {
-    const callId = backgroundAgentCompletion(item)?.callId;
-    if (callId) callIds.add(callId);
+function normalizeTerminalBackgroundAgentTools(messages: Message[]): Message[] {
+  const updates = new Map<
+    string,
+    NonNullable<ReturnType<typeof backgroundAgentCompletionForMessage>>
+  >();
+  for (const message of messages) {
+    const completion = backgroundAgentCompletionForMessage(message);
+    if (completion?.callId) updates.set(completion.callId, completion);
   }
-  return callIds;
+  if (updates.size === 0) return messages;
+
+  let changed = false;
+  const normalized = messages.map((message) => {
+    if (message.role !== 'tool_group') return message;
+    let toolsChanged = false;
+    const tools = message.tools.map((tool) => {
+      const update = updates.get(tool.callId);
+      if (
+        !update ||
+        !isBackgroundSubAgentToolCall(tool) ||
+        !isActiveToolStatus(tool.status)
+      ) {
+        return tool;
+      }
+      toolsChanged = true;
+      return {
+        ...tool,
+        status: update.toolStatus,
+        ...(update.endTime !== undefined ? { endTime: update.endTime } : {}),
+        ...(update.cancelled
+          ? {
+              rawOutput: {
+                ...(typeof tool.rawOutput === 'object' &&
+                tool.rawOutput !== null &&
+                !Array.isArray(tool.rawOutput)
+                  ? tool.rawOutput
+                  : {}),
+                status: 'cancelled',
+              },
+            }
+          : {}),
+      };
+    });
+    if (!toolsChanged) return message;
+    changed = true;
+    return { ...message, tools };
+  });
+  return changed ? normalized : messages;
 }
 
 interface BackgroundAgentSummaryState {

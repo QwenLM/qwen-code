@@ -2839,7 +2839,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       { customization: { renderAssistantTurnFooter } },
     );
 
-    expect(assistantActions(c, 'report')).toBe('false');
+    expect(assistantActions(c, 'report')).not.toBe('true');
     expect(assistantActions(c, 'final-supplement')).toBe('true');
     expect(renderAssistantTurnFooter.mock.calls.map(([info]) => info)).toEqual(
       expect.arrayContaining([
@@ -2862,6 +2862,37 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(
       c.querySelectorAll('[data-testid="assistant-turn-footer"]'),
     ).toHaveLength(1);
+  });
+
+  it('releases the latest turn after matched delayed agent notifications', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([userMsg('u1'), firstAgent, secondAgent, asstMsg('a1')]);
+
+    expect(assistantActions(c, 'a1')).toBe('false');
+
+    const staleFirstAgent = agentMsg('agent-1');
+    const staleSecondAgent = agentMsg('agent-2');
+    staleFirstAgent.tools[0]!.status = 'pending';
+    staleSecondAgent.tools[0]!.status = 'pending';
+    rerenderMessages(c, [
+      userMsg('u1'),
+      staleFirstAgent,
+      staleSecondAgent,
+      asstMsg('a1'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+    ]);
+
+    expect(assistantActions(c, 'a1')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'a1')).toBe('true');
+    expect(parallelAgentsSummary(c)?.textContent).toContain('2/2 done');
   });
 
   it('does not release an older turn for another agent completion', () => {
