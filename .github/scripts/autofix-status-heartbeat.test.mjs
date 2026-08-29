@@ -354,7 +354,13 @@ describe('autofix-status-heartbeat loop', () => {
   // shows up as uncaughtException-style asynchronous activity in node:test.
   function awaitExit(child, timeoutMs) {
     return new Promise((resolve) => {
+      let budgetExpired = false;
       const timer = setTimeout(async () => {
+        // Once the budget fires this arm owns the resolution: killLoop's
+        // session-empty wait yields the event loop, libuv reaps the killed
+        // child, and a 'close'-first resolve(null) would mask the
+        // never-self-exited regression the sentinel exists to name.
+        budgetExpired = true;
         await killLoop(child);
         resolve('timeout');
       }, timeoutMs);
@@ -363,7 +369,7 @@ describe('autofix-status-heartbeat loop', () => {
       // under event-loop contention (R17-2, reproduced under full load).
       child.on('close', (code) => {
         clearTimeout(timer);
-        resolve(code);
+        if (!budgetExpired) resolve(code);
       });
     });
   }
@@ -1133,6 +1139,49 @@ describe('autofix-status-heartbeat loop', () => {
       // The incident's failing call, immediately after the kill: with no
       // surviving writer it cannot throw ENOTEMPTY.
       rmSync(gh.records, { recursive: true });
+    },
+  );
+
+  it(
+    'the awaitExit budget kill empties the loop session and resolves the timeout sentinel',
+    {
+      skip: haveSessionKillTools
+        ? false
+        : 'requires coreutils timeout + procps pkill/pgrep',
+    },
+    async () => {
+      // Every other awaitExit call site gets a numeric code inside the
+      // budget, so the timer arm runs in no green test: a stalled tick
+      // (GH_SLEEP_SECONDS holds gh in flight) cannot self-exit within the
+      // budget and drives it here. The assertions pin both halves of that
+      // arm — the session kill (killGroup alone leaves the mid-tick
+      // `timeout … gh` subtree alive, re-shipping run 33223243920's
+      // ENOTEMPTY) and the sentinel (a self-exit regression must fail as
+      // "received 'timeout'", not the killed child's null code).
+      const dir = freshTmp();
+      const gh = fakeGhBin(dir);
+      const { env } = loopEnv(dir, gh, { GH_SLEEP_SECONDS: '15' });
+      const child = startLoop(env);
+      const pid = child.pid;
+      try {
+        const inFlight = await waitFor(
+          () => readCalls(gh.records).length >= 1,
+          8000,
+        );
+        assert.ok(inFlight, 'the slow gh must put a tick in flight');
+        const result = await awaitExit(child, 250);
+        assert.equal(
+          result,
+          'timeout',
+          'a budget overrun must resolve the timeout sentinel',
+        );
+        assert.ok(
+          spawnSync('pgrep', ['-s', String(pid)]).status !== 0,
+          'the budget kill must empty the loop session before cleanup',
+        );
+      } finally {
+        await killLoop(child);
+      }
     },
   );
 
