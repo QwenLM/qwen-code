@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
@@ -51,6 +52,7 @@ afterEach(() => {
 describe('start_sandbox', () => {
   it('passes child environment variables into a container sandbox', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.stubEnv('QWEN_CODE_WARNINGS_FILE', '/tmp/qwen-code-warnings-test.txt');
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
     vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
       String(filePath),
@@ -88,6 +90,13 @@ describe('start_sandbox', () => {
       '--env',
       PRIVATE_ACP_CAPABILITY_ENV,
     ]);
+    const warningsFlagIndex = args.indexOf(
+      'QWEN_CODE_WARNINGS_FILE=/tmp/qwen-code-warnings-test.txt',
+    );
+    expect(args.slice(warningsFlagIndex - 1, warningsFlagIndex + 1)).toEqual([
+      '--env',
+      'QWEN_CODE_WARNINGS_FILE=/tmp/qwen-code-warnings-test.txt',
+    ]);
     expect(options).toEqual(
       expect.objectContaining({
         env: expect.objectContaining({
@@ -95,6 +104,94 @@ describe('start_sandbox', () => {
         }),
       }),
     );
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
+  it('omits the warnings file environment variable when it is unset', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.stubEnv('QWEN_CODE_WARNINGS_FILE', '');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js'],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    expect(
+      args.filter((arg) => arg.startsWith('QWEN_CODE_WARNINGS_FILE=')),
+    ).toEqual([]);
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
+  it('translates the warnings file path before forwarding it on Windows', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.stubEnv(
+      'QWEN_CODE_WARNINGS_FILE',
+      'C:\\Users\\test\\Temp\\qwen-code-warnings-test.txt',
+    );
+    vi.spyOn(os, 'platform').mockReturnValue('win32');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js'],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    const warningsFlagIndex = args.indexOf(
+      'QWEN_CODE_WARNINGS_FILE=/c/Users/test/Temp/qwen-code-warnings-test.txt',
+    );
+    expect(args.slice(warningsFlagIndex - 1, warningsFlagIndex + 1)).toEqual([
+      '--env',
+      'QWEN_CODE_WARNINGS_FILE=/c/Users/test/Temp/qwen-code-warnings-test.txt',
+    ]);
 
     child.emit('close', 0);
     await expect(result).resolves.toBe(0);

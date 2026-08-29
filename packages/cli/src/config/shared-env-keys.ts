@@ -32,6 +32,9 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_RUNTIME_DIR',
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
+  // This points to a host temp file that carries build warnings. A project
+  // `.env` must not redirect it to an arbitrary file to read or delete.
+  'QWEN_CODE_WARNINGS_FILE',
   // Runtime attribution markers are stamped by trusted launchers. A project
   // `.env` must not spoof client channel telemetry.
   QWEN_CODE_SERVE_ENV,
