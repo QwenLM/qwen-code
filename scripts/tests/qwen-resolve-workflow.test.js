@@ -7,6 +7,7 @@
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -841,6 +842,7 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
   const authorizeJob = job(workflow, 'authorize');
   const prepareStep = step(resolveJob, 'Prepare pull request branch');
   const reportStep = step(resolveJob, 'Report result');
+  const authorizeStep = step(authorizeJob, 'Check principal write permission');
 
   // The replay functions, dedented out of the `run: |-` block so a real git
   // fixture can exercise them exactly as the runner will.
@@ -879,7 +881,7 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
   // on branch qwen-resolve/pr-1 holding the agent's resolution of a.txt (the
   // conflicted file) merged on top of the ORIGINAL head; and a contributor
   // clone that can move the head. Returns the paths and the original head SHA.
-  function makeFixture() {
+  function makeFixture(resolveWith = 'edit') {
     const root = mkdtempSync(path.join(tmpdir(), 'qwen-resolve-replay-'));
     const origin = path.join(root, 'origin.git');
     const contributor = path.join(root, 'contributor');
@@ -931,8 +933,13 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
       cwd: runner,
       env: gitEnv,
     });
-    writeFileSync(path.join(runner, 'a.txt'), 'resolved by agent\n');
-    git(runner, 'add', 'a.txt');
+    if (resolveWith === 'delete') {
+      // Deleting the conflicted file IS the agent's resolution of it.
+      git(runner, 'rm', '-q', '--', 'a.txt');
+    } else {
+      writeFileSync(path.join(runner, 'a.txt'), 'resolved by agent\n');
+      git(runner, 'add', 'a.txt');
+    }
     git(runner, 'commit', '-q', '-m', 'fix: resolve merge conflicts with main');
     const resolvedCommit = git(runner, 'rev-parse', 'HEAD');
     return { root, origin, contributor, runner, originalHead, resolvedCommit };
@@ -1173,7 +1180,7 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
     // where resolving is cheapest. The automatic review lane keeps its gate.
     expect(prepareStep).not.toContain('is draft.');
     expect(prepareStep).not.toContain('isDraft');
-    expect(job(workflow, 'delayed-review') || workflow).toContain('is draft.');
+    expect(job(workflow, 'delay-automatic-review')).toContain('is draft.');
   });
 
   it('retries a transient permission-API error before denying, and still fails closed', () => {
@@ -1181,12 +1188,358 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
       'failed transiently (attempt ${attempt} of 3)',
     );
     expect(authorizeJob).toContain('No server is currently available');
+    // The strings above stay put if the loop itself regresses: the bound,
+    // the backoff, and the retry branch are pinned by the behavioural tests
+    // below, and their YAML anchors here.
+    expect(authorizeJob).toContain('[ "$attempt" -lt 3 ]');
+    expect(authorizeJob).toContain('sleep $((attempt * 5))');
     // After the retries the original fail-closed denial is unchanged.
     expect(authorizeJob).toContain(
       '::error::Permission API call failed for ${principal}: ${api_error}',
     );
     expect(authorizeJob).toContain(
       'echo "should_review=false" >> "$GITHUB_OUTPUT"',
+    );
+  });
+
+  // --- classify_push_failure: order pin + behaviour against real push logs ---
+
+  it('tests the lease-decline signature before the permission patterns', () => {
+    // git echoes the destination branch into the push log; the permission
+    // patterns are substrings of plausible branch names, the moved patterns
+    // are server phrases a branch name cannot contain. Order is the guard.
+    const scope = reportStep.indexOf("push_fail_reason='workflow_scope'");
+    const moved = reportStep.indexOf("push_fail_reason='moved'");
+    const permission = reportStep.indexOf("push_fail_reason='permission'");
+    expect(scope).toBeGreaterThan(-1);
+    expect(scope).toBeLessThan(moved);
+    expect(moved).toBeLessThan(permission);
+  });
+
+  function classifyFunction() {
+    const start = reportStep.indexOf('classify_push_failure() {');
+    const endMarker = '\n          }';
+    const end = reportStep.indexOf(endMarker, start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return reportStep
+      .slice(start, end + endMarker.length)
+      .replace(/^ {10}/gm, '');
+  }
+
+  function classifyLog(lines) {
+    const dir = mkdtempSync(path.join(tmpdir(), 'qwen-classify-'));
+    try {
+      const pushLog = path.join(dir, 'push.log');
+      writeFileSync(pushLog, `${lines.join('\n')}\n`);
+      const result = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -euo pipefail',
+            classifyFunction(),
+            'classify_push_failure',
+            'printf "reason=%s\\n" "$push_fail_reason"',
+          ].join('\n'),
+        ],
+        { encoding: 'utf8', env: { ...process.env, push_log: pushLog } },
+      );
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      return result.stdout.match(/^reason=(.*)$/m)?.[1];
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const staleInfoLog = (branch) => [
+    'To github.com:contributor/repo.git',
+    ` ! [remote rejected] HEAD -> ${branch} (stale info)`,
+    "error: failed to push some refs to 'github.com/contributor/repo.git'",
+  ];
+
+  it('classifies a moved head by its lease decline even when the branch name echoes a permission substring', () => {
+    expect(classifyLog(staleInfoLog('feature'))).toBe('moved');
+    expect(classifyLog(staleInfoLog('fix/permission-prompt'))).toBe('moved');
+    expect(classifyLog(staleInfoLog('fix-403-error'))).toBe('moved');
+    // Genuine access problems still classify as permission, the workflow-scope
+    // arm keeps its priority over both, and unknown failures stay 'other'.
+    expect(
+      classifyLog([
+        "fatal: unable to access 'https://github.com/contributor/repo.git/': The requested URL returned error: 403",
+      ]),
+    ).toBe('permission');
+    expect(
+      classifyLog([
+        'remote: refusing to allow an OAuth App to create or update workflow `.github/workflows/ci.yml` without `workflow` scope',
+      ]),
+    ).toBe('workflow_scope');
+    expect(classifyLog(['error: something else entirely'])).toBe('other');
+  });
+
+  it('re-classifies from the current push log when the replay push fails for a new reason', () => {
+    // After a failed replay push, classify_push_failure runs a second time;
+    // the reported reason must come from the second push's log, not the stale
+    // 'moved' from the first.
+    const dir = mkdtempSync(path.join(tmpdir(), 'qwen-classify-'));
+    try {
+      const pushLog = path.join(dir, 'push.log');
+      writeFileSync(pushLog, `${staleInfoLog('feature').join('\n')}\n`);
+      const result = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -euo pipefail',
+            classifyFunction(),
+            'classify_push_failure',
+            'printf "first=%s\\n" "$push_fail_reason"',
+            'printf "%s\\n" "$SECOND_LOG" > "$push_log"',
+            'classify_push_failure',
+            'printf "second=%s\\n" "$push_fail_reason"',
+          ].join('\n'),
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            push_log: pushLog,
+            SECOND_LOG:
+              "fatal: unable to access 'https://github.com/contributor/repo.git/': The requested URL returned error: 403",
+          },
+        },
+      );
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout).toContain('first=moved');
+      expect(result.stdout).toContain('second=permission');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('says in the replay comment what the run artifact does and does not describe', () => {
+    // The artifact's pr.diff is computed before the replay runs; the pushed
+    // tree is the replay. The comment must say so, and must not claim files
+    // were taken from the agent's merge when the replay merged clean.
+    const armStart = reportStep.indexOf('elif [ -n "$replayed_on" ]; then');
+    expect(armStart).toBeGreaterThan(-1);
+    const arm = reportStep.slice(
+      armStart,
+      reportStep.indexOf('\n                else', armStart),
+    );
+    expect(arm).toContain('the resolution was replayed on top of it');
+    expect(arm).toContain(
+      'files still conflicting that the new commits did not touch',
+    );
+    expect(arm).toContain(
+      'describes the original resolution it was replayed from',
+    );
+  });
+
+  // --- replay fixtures: the empty-merge give-up and deletion resolutions ---
+
+  // The contributor merges the base into their PR branch while the agent
+  // runs; the replay's re-merge of the base then changes nothing, so the
+  // lane must give up cleanly instead of committing an unchanged tree.
+  function mergeMainIntoHead(fixture) {
+    git(fixture.contributor, 'checkout', '-q', 'feature');
+    const merge = spawnSync('git', ['merge', '--no-edit', 'main'], {
+      cwd: fixture.contributor,
+      env: gitEnv,
+      encoding: 'utf8',
+    });
+    // a.txt still conflicts between feature and main; the contributor keeps
+    // their side and completes the merge themselves.
+    expect(merge.status).not.toBe(0);
+    writeFileSync(
+      path.join(fixture.contributor, 'a.txt'),
+      'feature side, merged by the contributor\n',
+    );
+    git(fixture.contributor, 'add', 'a.txt');
+    git(fixture.contributor, 'commit', '-q', '--no-edit');
+    git(
+      fixture.contributor,
+      'push',
+      '-q',
+      'origin',
+      'feature:refs/pull/1/head',
+    );
+    return git(fixture.contributor, 'rev-parse', 'HEAD');
+  }
+
+  it('gives up cleanly when the new head already merged the base itself', () => {
+    const fixture = makeFixture();
+    try {
+      const newHead = mergeMainIntoHead(fixture);
+      expect(newHead).not.toBe(fixture.originalHead);
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('1');
+      expect(out.stdout).toContain('changes nothing');
+      expect(out.HEAD_SHA).toBe(fixture.originalHead);
+      expect(out.replayed_on).toBe('');
+      expect(out.branch).toBe('qwen-resolve/pr-1');
+      expect(out.head).toBe(fixture.resolvedCommit);
+      expect(out.status).toBe('');
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('replays a resolution that deleted the conflicted file', () => {
+    const fixture = makeFixture('delete');
+    try {
+      const newHead = moveHead(
+        fixture,
+        'b.txt',
+        'b changed after the agent started\n',
+      );
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('0');
+      expect(out.HEAD_SHA).toBe(newHead);
+      expect(out.replayed_on).toBe(newHead);
+      // The agent's version of a.txt IS its deletion: the pushed tree must
+      // not have the file back, and the scope guard still holds.
+      expect(existsSync(path.join(fixture.runner, 'a.txt'))).toBe(false);
+      expect(
+        git(fixture.runner, 'ls-tree', '--name-only', out.head),
+      ).not.toContain('a.txt');
+      expect(
+        git(fixture.runner, 'diff', '--name-only', newHead, out.head)
+          .split('\n')
+          .sort(),
+      ).toEqual(['a.txt', 'c.txt']);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  // --- authorize retry loop: behaviour against a scripted gh ---
+
+  function authorizeRetryBlock() {
+    const start = authorizeStep.indexOf('api_error_file="$(mktemp)"');
+    const endMarker = '\n          esac';
+    const end = authorizeStep.indexOf(endMarker, start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return authorizeStep
+      .slice(start, end + endMarker.length)
+      .replace(/^ {10}/gm, '');
+  }
+
+  function runAuthorizeRetry(plan) {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-authorize-retry-'));
+    try {
+      const binDir = path.join(tempDir, 'bin');
+      mkdirSync(binDir);
+      const planFile = path.join(tempDir, 'plan.txt');
+      const callLog = path.join(tempDir, 'calls.log');
+      const sleepLog = path.join(tempDir, 'sleeps.log');
+      const outputFile = path.join(tempDir, 'output');
+      const summaryFile = path.join(tempDir, 'summary');
+      writeFileSync(planFile, `${plan.join('\n')}\n`);
+      writeFileSync(callLog, '');
+      writeFileSync(sleepLog, '');
+      writeFileSync(outputFile, '');
+      writeFileSync(summaryFile, '');
+      writeFileSync(
+        path.join(binDir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'set -euo pipefail',
+          'printf "%s\\n" "$*" >> "$AUTHORIZE_CALL_LOG"',
+          'n="$(cat "$AUTHORIZE_CALL_COUNT" 2>/dev/null || echo 0)"',
+          'n=$((n + 1))',
+          'printf "%s\\n" "$n" > "$AUTHORIZE_CALL_COUNT"',
+          'line="$(sed -n "${n}p" "$AUTHORIZE_PLAN_FILE")"',
+          'case "$line" in',
+          '  ok:*) printf "%s\\n" "${line#ok:}" ;;',
+          '  fail:*) printf "%s\\n" "${line#fail:}" >&2; exit 1 ;;',
+          'esac',
+        ].join('\n'),
+      );
+      chmodSync(path.join(binDir, 'gh'), 0o755);
+      const result = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -euo pipefail',
+            'sleep() { printf "%s\\n" "$1" >> "$AUTHORIZE_SLEEP_LOG"; }',
+            'principal=commenter',
+            'GITHUB_REPOSITORY=owner/repo',
+            authorizeRetryBlock(),
+          ].join('\n'),
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+            AUTHORIZE_PLAN_FILE: planFile,
+            AUTHORIZE_CALL_COUNT: path.join(tempDir, 'count'),
+            AUTHORIZE_CALL_LOG: callLog,
+            AUTHORIZE_SLEEP_LOG: sleepLog,
+            GITHUB_OUTPUT: outputFile,
+            GITHUB_STEP_SUMMARY: summaryFile,
+          },
+        },
+      );
+      return {
+        ...result,
+        output: readFileSync(outputFile, 'utf8'),
+        summary: readFileSync(summaryFile, 'utf8'),
+        calls: readFileSync(callLog, 'utf8').split('\n').filter(Boolean),
+        sleeps: readFileSync(sleepLog, 'utf8').split('\n').filter(Boolean),
+      };
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  const TRANSIENT_503 = 'fail:HTTP 503: No server is currently available';
+
+  it('retries a transient permission-API error twice, then allows the writer', () => {
+    const out = runAuthorizeRetry([TRANSIENT_503, TRANSIENT_503, 'ok:write']);
+    expect(out.status, out.stdout + out.stderr).toBe(0);
+    expect(out.output).toContain('should_review=true');
+    expect(out.calls).toHaveLength(3);
+    for (const call of out.calls) {
+      expect(call).toBe(
+        'api repos/owner/repo/collaborators/commenter/permission --jq .permission',
+      );
+    }
+    expect(out.sleeps).toEqual(['5', '10']);
+    expect(out.stdout).toContain('failed transiently (attempt 1 of 3)');
+    expect(out.stdout).toContain('failed transiently (attempt 2 of 3)');
+  });
+
+  it('denies after three transient failures — fail closed', () => {
+    const out = runAuthorizeRetry([
+      TRANSIENT_503,
+      TRANSIENT_503,
+      TRANSIENT_503,
+    ]);
+    expect(out.status, out.stdout + out.stderr).toBe(0);
+    expect(out.output).toContain('should_review=false');
+    expect(out.output).not.toContain('should_review=true');
+    expect(out.calls).toHaveLength(3);
+    expect(out.stdout).toContain(
+      '::error::Permission API call failed for commenter',
+    );
+    expect(out.summary).toContain(
+      'Failed to check permission for commenter (API error:',
+    );
+  });
+
+  it('denies a non-transient permission-API error on the first attempt', () => {
+    const out = runAuthorizeRetry(['fail:HTTP 404: Not Found']);
+    expect(out.status, out.stdout + out.stderr).toBe(0);
+    expect(out.output).toContain('should_review=false');
+    expect(out.output).not.toContain('should_review=true');
+    expect(out.calls).toHaveLength(1);
+    expect(out.sleeps).toEqual([]);
+    expect(out.summary).toContain(
+      'Failed to check permission for commenter (API error:',
     );
   });
 });

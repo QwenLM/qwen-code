@@ -2930,16 +2930,21 @@ jobs:
           #    in git's `! [remote rejected] HEAD -> <branch>` echo could trip
           #    (e.g. a branch named `fix-workflow-scope`), producing a comment
           #    that tells maintainers to grant the bot the workflow scope.
-          # 2. permission — 403, or a 404 "not found" (GitHub hides repos a token
+          # 2. moved — the head branch advanced, so force-with-lease declined.
+          #    Tested BEFORE permission: git echoes the destination ref into
+          #    the same log (`HEAD -> <branch> (stale info)`), so a branch
+          #    named e.g. fix/permission-prompt or fix-403-error would match a
+          #    permission substring and the replay would never run. A genuine
+          #    permission denial never carries a lease-decline phrase.
+          # 3. permission — 403, or a 404 "not found" (GitHub hides repos a token
           #    can't see) which is an access problem in practice.
-          # 3. moved — the head branch advanced, so force-with-lease declined.
           classify_push_failure() {
             if grep -qiE 'refusing to allow.*workflow' "$push_log"; then
               push_fail_reason='workflow_scope'
-            elif grep -qiE '403|permission|not authorized|forbidden|protected branch|cannot be updated|not found|does not exist' "$push_log"; then
-              push_fail_reason='permission'
             elif grep -qiE 'stale info|force-with-lease|non-fast-forward|fetch first' "$push_log"; then
               push_fail_reason='moved'
+            elif grep -qiE '403|permission|not authorized|forbidden|protected branch|cannot be updated|not found|does not exist' "$push_log"; then
+              push_fail_reason='permission'
             else
               push_fail_reason='other'
             fi
@@ -2977,7 +2982,13 @@ jobs:
             if ! git merge --no-commit --no-ff "origin/${BASE_REF}" > /dev/null 2>&1; then
               while IFS= read -r -d '' file; do
                 if git diff --quiet "$HEAD_SHA" "$new_sha" -- "$file"; then
-                  git checkout "$resolved_commit" -- "$file" || { replay_give_up "could not take the agent's version of ${file}."; return 1; }
+                  # A deletion IS the agent's version of the file: checkout
+                  # fails on a path absent from the resolved commit.
+                  if git cat-file -e "${resolved_commit}:${file}" 2>/dev/null; then
+                    git checkout "$resolved_commit" -- "$file" || { replay_give_up "could not take the agent's version of ${file}."; return 1; }
+                  else
+                    git rm -q -- "$file" || { replay_give_up "could not take the agent's deletion of ${file}."; return 1; }
+                  fi
                 else
                   replay_give_up "${file} still conflicts and the new head changed it since ${HEAD_SHA}."
                   return 1
@@ -3064,7 +3075,7 @@ jobs:
                 elif [ "$DRY_RUN" = "true" ]; then
                   echo "Qwen Code resolved the merge conflicts in dry-run mode. No branch update was pushed."
                 elif [ -n "$replayed_on" ]; then
-                  echo "Qwen Code resolved the merge conflicts and pushed the branch update. The head branch moved to \`${replayed_on}\` while the conflicts were being resolved; the resolution was replayed on top of it — only files the new commits did not touch were taken from the agent's merge — re-checked, and then pushed."
+                  echo "Qwen Code resolved the merge conflicts and pushed the branch update. The head branch moved to \`${replayed_on}\` while the conflicts were being resolved; the resolution was replayed on top of it — files still conflicting that the new commits did not touch were taken from the agent's merge — re-checked, and then pushed. The pushed branch is that replay; the \`qwen-resolve-pr-${PR_NUMBER}\` run artifact describes the original resolution it was replayed from, not the pushed tree."
                 else
                   echo "Qwen Code resolved the merge conflicts and pushed the branch update."
                 fi
