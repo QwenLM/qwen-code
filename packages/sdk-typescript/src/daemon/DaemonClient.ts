@@ -1827,22 +1827,21 @@ export class DaemonClient {
     } = {},
     clientId?: string,
   ): Promise<DaemonWorkspaceFile> {
-    const url = new URL(`${this.baseUrl}/file`);
-    url.searchParams.set('path', filePath);
+    const query = new URLSearchParams({ path: filePath });
     if (opts.maxBytes !== undefined) {
-      url.searchParams.set('maxBytes', String(opts.maxBytes));
+      query.set('maxBytes', String(opts.maxBytes));
     }
     if (opts.line !== undefined) {
-      url.searchParams.set('line', String(opts.line));
+      query.set('line', String(opts.line));
     }
     if (opts.limit !== undefined) {
-      url.searchParams.set('limit', String(opts.limit));
+      query.set('limit', String(opts.limit));
     }
     if (opts.cursor !== undefined) {
-      url.searchParams.set('cursor', opts.cursor);
+      query.set('cursor', opts.cursor);
     }
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/file?${query.toString()}`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /file');
@@ -1874,10 +1873,9 @@ export class DaemonClient {
   }
 
   async fileStat(filePath: string): Promise<unknown> {
-    const url = new URL(`${this.baseUrl}/stat`);
-    url.searchParams.set('path', filePath);
+    const query = new URLSearchParams({ path: filePath });
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/stat?${query.toString()}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /stat');
@@ -1887,10 +1885,9 @@ export class DaemonClient {
   }
 
   async dirList(dirPath: string): Promise<unknown> {
-    const url = new URL(`${this.baseUrl}/list`);
-    url.searchParams.set('path', dirPath);
+    const query = new URLSearchParams({ path: dirPath });
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/list?${query.toString()}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /list');
@@ -1904,10 +1901,9 @@ export class DaemonClient {
    * pick a path outside any registered workspace (e.g. "Add workspace").
    */
   async workspacePathSuggestions(prefix: string): Promise<unknown> {
-    const url = new URL(`${this.baseUrl}/workspace-path-suggestions`);
-    url.searchParams.set('prefix', prefix);
+    const query = new URLSearchParams({ prefix });
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/workspace-path-suggestions?${query.toString()}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) {
@@ -1932,10 +1928,9 @@ export class DaemonClient {
   }
 
   async glob(pattern: string): Promise<unknown> {
-    const url = new URL(`${this.baseUrl}/glob`);
-    url.searchParams.set('pattern', pattern);
+    const query = new URLSearchParams({ pattern });
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/glob?${query.toString()}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /glob');
@@ -1999,9 +1994,8 @@ export class DaemonClient {
     req: DaemonWorkspaceFileUploadRequest,
     clientId?: string,
   ): Promise<DaemonWorkspaceFileUploadResult> {
-    const target = new URL(`${this.baseUrl}${uploadPath}`);
-    target.searchParams.set('path', req.path);
-    const url = target.toString();
+    const query = new URLSearchParams({ path: req.path });
+    const url = `${this.baseUrl}${uploadPath}?${query.toString()}`;
     const headers = this.headers(
       { 'Content-Type': 'application/octet-stream' },
       clientId,
@@ -2216,6 +2210,15 @@ export class DaemonClient {
     content: string,
     opts: DaemonWorkspaceMemoryRememberOptions = {},
   ): Promise<DaemonWorkspaceMemoryRememberTask> {
+    if (opts.scope) {
+      // An old daemon silently ignores `scope` and auto-routes the write;
+      // pre-flight so the degradation is a loud capability error instead.
+      await this.requireCapability(
+        opts.scope === 'project'
+          ? 'workspace_memory_remember_project_scope'
+          : 'workspace_memory_remember_user_scope',
+      );
+    }
     return await this.jsonRequest<DaemonWorkspaceMemoryRememberTask>(
       WORKSPACE_MEMORY_REMEMBER_PATH,
       `POST ${WORKSPACE_MEMORY_REMEMBER_PATH}`,
@@ -2224,6 +2227,7 @@ export class DaemonClient {
         body: {
           content,
           contextMode: opts.contextMode ?? 'workspace',
+          ...(opts.scope ? { scope: opts.scope } : {}),
         },
         clientId: opts.clientId,
       },
@@ -2245,12 +2249,20 @@ export class DaemonClient {
     query: string,
     opts: DaemonWorkspaceMemoryForgetOptions = {},
   ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    if (opts.scope) {
+      // Without the tag an old daemon runs an UNSCOPED forget that can
+      // delete entries from both stores — pre-flight instead of degrading.
+      await this.requireCapability('workspace_memory_forget_scope');
+    }
     return await this.jsonRequest<DaemonWorkspaceMemoryForgetTask>(
       WORKSPACE_MEMORY_FORGET_PATH,
       `POST ${WORKSPACE_MEMORY_FORGET_PATH}`,
       {
         method: 'POST',
-        body: { query },
+        body: {
+          query,
+          ...(opts.scope ? { scope: opts.scope } : {}),
+        },
         clientId: opts.clientId,
       },
     );
@@ -3916,11 +3928,12 @@ export class DaemonClient {
   }
 
   /**
-   * Toggle a user-invocable skill in workspace `skills.disabled` settings.
+   * Update workspace Skill settings by name without requiring a loaded Skill.
    * Active ACP sessions refresh their skill validation and command lists before
    * the response returns; `activation` reports deferred or partial refreshes.
    *
-   * Pre-flight `caps.features.includes('workspace_skill_toggle')` before calling.
+   * Pre-flight
+   * `caps.features.includes('workspace_skill_settings_toggle')` before calling.
    */
   async setWorkspaceSkillEnabled(
     skillName: string,
@@ -3950,10 +3963,11 @@ export class DaemonClient {
   }
 
   /**
-   * Toggle up to 100 user-invocable skills and return every target outcome.
+   * Update workspace Skill settings for up to 100 names in one write.
    *
    * Pre-flight
-   * `caps.features.includes('workspace_skill_batch_toggle')` before calling.
+   * `caps.features.includes('workspace_skill_settings_batch_toggle')` before
+   * calling.
    */
   async setWorkspaceSkillsEnabled(
     skillNames: readonly string[],

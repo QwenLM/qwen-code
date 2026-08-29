@@ -62,6 +62,7 @@ import {
   type AutoMemoryForgetMatch,
   type AutoMemoryForgetResult,
   type AutoMemoryForgetSelectionResult,
+  type AutoMemoryStorageScope,
 } from './forget.js';
 import {
   resolveRelevantAutoMemoryPromptForQuery,
@@ -1416,6 +1417,7 @@ export class MemoryManager {
       config?: Config;
       limit?: number;
       abortSignal?: AbortSignal;
+      scope?: AutoMemoryStorageScope;
     } = {},
   ): Promise<AutoMemoryForgetSelectionResult> {
     return selectManagedAutoMemoryForgetCandidates(projectRoot, query, options);
@@ -1435,7 +1437,11 @@ export class MemoryManager {
   forget(
     projectRoot: string,
     query: string,
-    options: { config?: Config; abortSignal?: AbortSignal } = {},
+    options: {
+      config?: Config;
+      abortSignal?: AbortSignal;
+      scope?: AutoMemoryStorageScope;
+    } = {},
     now?: Date,
   ): Promise<AutoMemoryForgetResult> {
     return forgetManagedAutoMemoryEntries(projectRoot, query, options, now);

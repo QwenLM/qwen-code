@@ -22,6 +22,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   BranchWhilePromptActiveError,
   BridgeChannelQuarantinedError,
+  BridgeTimeoutError,
   CancelSentinelCollisionError,
   CdWhilePromptActiveError,
   InvalidClientIdError,
@@ -213,6 +214,18 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof BridgeTimeoutError && err.label === 'newSession') {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.set('Retry-After', String(restoreRetryAfterSeconds(err.timeoutMs)));
+    res.status(504).json({
+      error: err.message,
+      code: 'init_timeout',
+      errorKind: 'init_timeout',
+      retryable: true,
+      timeoutMs: err.timeoutMs,
+    });
+    return;
+  }
   if (err instanceof BridgeChannelQuarantinedError) {
     recordExpectedBridgeError(err, ctx, daemonLog);
     // Quarantine lasts until the channel drains, which is strictly longer than
@@ -292,9 +305,7 @@ export function sendBridgeError(
   }
   const skillError = mapWorkspaceSkillToggleError(err);
   if (skillError) {
-    res
-      .status(skillError.code === 'skill_not_found' ? 404 : 409)
-      .json(skillError);
+    res.status(404).json(skillError);
     return;
   }
   if (err instanceof InvalidSessionTranscriptCursorError) {
