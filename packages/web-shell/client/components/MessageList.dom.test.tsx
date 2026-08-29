@@ -6624,6 +6624,24 @@ describe('user message edit affordance (issue #10385)', () => {
     expect(c.querySelector('[data-testid="edit-u5"]')).not.toBeNull();
   });
 
+  it('re-offers editing when historyPaginationError flips without a message identity change', () => {
+    const onEditUserMessage = vi.fn();
+    const messages = [userMsg('u4'), asstMsg('a4'), userMsg('u5')];
+    const c = mount(messages, undefined, {
+      historyPaginationError: true,
+      onEditUserMessage,
+    });
+    expect(c.querySelector('[data-testid="edit-u5"]')).toBeNull();
+    // A successful retry of the failed load-older page clears the flag
+    // while the messages array keeps its identity; the render callback
+    // must not hold the stale flag value.
+    rerenderMessages(c, messages, {
+      historyPaginationError: false,
+      onEditUserMessage,
+    });
+    expect(c.querySelector('[data-testid="edit-u5"]')).not.toBeNull();
+  });
+
   it('does not count user_shell echoes when numbering user turns', () => {
     const onEditUserMessage = vi.fn();
     const c = mount(
