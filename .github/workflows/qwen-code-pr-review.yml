@@ -2711,11 +2711,40 @@ jobs:
           # value keeps a writable GITHUB_TOKEN out of the workspace as defense in
           # depth, mirroring the no-token contract of the agent step above.
           GITHUB_TOKEN: ''
+          # The agent step above runs --yolo without a sandbox and can append
+          # arbitrary KEY=VALUE pairs to $GITHUB_ENV; the runner exports them to
+          # every later step. Pin the execution-hijack ones to empty HERE: bash
+          # sources BASH_ENV and the loader honours LD_* at process startup,
+          # before any line of the run body can unset them.
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
           BASE_REF: '${{ steps.prepare.outputs.base_ref }}'
           HEAD_FETCH_REF: '${{ steps.prepare.outputs.head_fetch_ref }}'
           RESOLVE_OUTCOME: '${{ steps.resolve_conflicts.outcome }}'
         run: |-
           set -euo pipefail
+
+          # SECURITY: this step runs AFTER the prompt-injectable agent step, on a
+          # workspace that step wrote — it must not trust inherited runner state.
+          # A planted PATH shim could falsify every check below, and git config
+          # planted on host, global or LOCAL scope reaches the credentialed push
+          # in 'Report result' (a url rewrite redirects the token URL, hooks run
+          # with it in argv). Pin PATH, ignore host/global config, and remove the
+          # local .git/config — the agent writes the workspace and that file is
+          # the highest-precedence scope, so GIT_CONFIG_GLOBAL=/dev/null alone
+          # does not cover it. Every git call below uses explicit refs, so
+          # nothing legitimate is lost. Full rationale → qwen-autofix.md#af-014.
+          PATH=/usr/bin:/bin
+          unset GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
+            GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR GIT_WORK_TREE \
+            GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+            GIT_SHALLOW_FILE GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
+          export GIT_CONFIG_COUNT=0
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_GLOBAL=/dev/null
+          rm -f .git/config
 
           # The agent step runs under always(); if it failed at the infrastructure
           # level (API timeout, model quota, action crash) the branch is unmodified
@@ -2864,6 +2893,12 @@ jobs:
       - name: 'Report result'
         if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
         env:
+          # The BASH_ENV/LD_* pins mirror 'Resolution check': the agent step can
+          # plant them through $GITHUB_ENV, and they execute at process startup.
+          BASH_ENV: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
           GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           PUSH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           PR_NUMBER: '${{ steps.resolve.outputs.pr_number }}'
@@ -2879,6 +2914,28 @@ jobs:
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
+
+          # SECURITY: this step runs AFTER the prompt-injectable agent step and
+          # carries the push token — it must not execute or route through
+          # anything that step can plant. The BASH_ENV/LD_* startup channels are
+          # pinned empty in the step env above; here: resolve binaries through a
+          # pinned PATH, drop git's env channels and every config scope (a url
+          # rewrite redirects the token URL, hooks run with it in argv), and the
+          # proxy/gh vars that could route the push or the PAT comment to a
+          # listener. Full rationale → qwen-autofix.md#af-014.
+          PATH=/usr/bin:/bin
+          unset GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
+            GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR GIT_WORK_TREE \
+            GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+            GIT_SHALLOW_FILE GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND \
+            HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY NO_PROXY \
+            GH_HOST GH_ENTERPRISE_TOKEN GH_CONFIG_DIR
+          export GIT_CONFIG_COUNT=0
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_GLOBAL=/dev/null
+          rm -f .git/config
+
           push_failed=false
 
           # Budget for one agent-written section of the comment. The old 2000
@@ -2925,11 +2982,15 @@ jobs:
             # SECURITY: the push token carries the `workflow` scope, so a conflict
             # the agent resolves inside a .github/workflows/** file is pushed to the
             # (possibly fork) head branch and then runs in that repo's Actions. This
-            # is bounded by the no-token sandboxed agent, the scope guard (only
-            # base-changed files), and write+ maintainer authorization, and it lands
-            # in the contributor's own CI context — not this repo's.
+            # is bounded by the no-token agent, the scope guard (only base-changed
+            # files), and write+ maintainer authorization, and it lands in the
+            # contributor's own CI context — not this repo's. The push must also not
+            # inherit state the agent can plant: the scrub at the top of this step
+            # pins PATH and removes every git config scope, and git runs hookless
+            # below, so a prompt-injected agent cannot redirect or hook the step
+            # that carries the token.
             push_log="${WORKDIR}/push.log"
-            if git push \
+            if git -c core.hooksPath=/dev/null push --no-verify \
               --force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}" \
               "https://x-access-token:${PUSH_TOKEN}@github.com/${HEAD_REPO}.git" \
               "HEAD:refs/heads/${HEAD_REF}" 2> "$push_log"; then

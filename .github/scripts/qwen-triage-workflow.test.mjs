@@ -347,6 +347,20 @@ describe('qwen-issue-followup-bot.yml: agent settings', () => {
       'tools.sandbox must stay false — the ECS pool has no container runtime',
     );
   });
+
+  it('pins the CLI version instead of following `latest`', () => {
+    // The action installs the CLI from npm at run time; `latest` couples every
+    // scheduled run to the release pipeline of the moment — on 2026-08-15 the
+    // dist-tag pointed at an unresolvable 0.21.12 and every consumer following
+    // it died on `npm error notarget`. resolve-pr pins for the same reason;
+    // this must not be the one sibling that keeps following the tag.
+    const version = followupStep.with?.qwen_cli_version;
+    assert.match(
+      String(version),
+      /^\d+\.\d+\.\d+$/,
+      'qwen_cli_version must be an exact semver, not a dist-tag',
+    );
+  });
 });
 
 describe('qwen-triage: fork-PR runner routing', () => {

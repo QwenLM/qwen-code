@@ -811,6 +811,48 @@ describe('qwen resolve workflow', () => {
     expect(agentStep).not.toContain('CI_DEV_BOT_PAT');
   });
 
+  it('hardens the post-agent steps against state the agent can plant', () => {
+    // The agent step runs --yolo without a sandbox BEFORE these steps in the
+    // same job: anything it appends to $GITHUB_ENV reaches every later step,
+    // and it writes the workspace. 'Resolution check' must not be falsifiable
+    // by planted shims or config, and the credentialed push in 'Report result'
+    // must not inherit an executable or routable channel to the token.
+    const verifyStep = step(resolveJob, 'Resolution check');
+    const reportStep = step(resolveJob, 'Report result');
+
+    for (const postAgentStep of [verifyStep, reportStep]) {
+      // BASH_ENV and LD_* execute at process startup, before any body line
+      // runs — pin them empty at the step boundary, not merely unset in the
+      // body.
+      expect(postAgentStep).toContain("BASH_ENV: ''");
+      expect(postAgentStep).toContain("LD_PRELOAD: ''");
+      expect(postAgentStep).toContain("LD_AUDIT: ''");
+      expect(postAgentStep).toContain("LD_LIBRARY_PATH: ''");
+      // A planted PATH shim must not resolve git for the guard or the push.
+      expect(postAgentStep).toContain('PATH=/usr/bin:/bin');
+      // Host and global config are agent-reachable runner surfaces (url
+      // rewrites redirect the token URL); GIT_CONFIG_COUNT injects config
+      // through env. None of it may reach the git calls.
+      expect(postAgentStep).toContain('export GIT_CONFIG_SYSTEM=/dev/null');
+      expect(postAgentStep).toContain('export GIT_CONFIG_GLOBAL=/dev/null');
+      expect(postAgentStep).toContain('export GIT_CONFIG_COUNT=0');
+      // The LOCAL .git/config is the highest-precedence scope and the agent
+      // writes the workspace — hooks, filters, includes and url rewrites
+      // planted there survive GIT_CONFIG_GLOBAL=/dev/null, so it is removed.
+      expect(postAgentStep).toContain('rm -f .git/config');
+    }
+
+    // The credentialed push itself: hookless and verify-less, so a planted
+    // pre-push hook never receives the token URL.
+    expect(reportStep).toContain(
+      'git -c core.hooksPath=/dev/null push --no-verify',
+    );
+    // Proxy and gh-host vars could route the push or the PAT comment to a
+    // listener; they must be dropped from the inherited environment.
+    expect(reportStep).toContain('HTTP_PROXY HTTPS_PROXY');
+    expect(reportStep).toContain('GH_HOST GH_ENTERPRISE_TOKEN GH_CONFIG_DIR');
+  });
+
   it('pins the CLI version and bounds the agent step', () => {
     const agentStep = resolveJob.slice(
       resolveJob.indexOf("- name: 'Resolve conflicts'"),
@@ -829,36 +871,89 @@ describe('qwen resolve workflow', () => {
       resolveJob.indexOf("- name: 'Report result'"),
     );
     expect(reportStep).toContain(`AGENT_TIMEOUT_MINUTES: '${stepTimeout[1]}'`);
-    expect(Number(stepTimeout[1])).toBeLessThan(120);
+    // Read the ceiling instead of duplicating it as a literal: if the job's
+    // timeout-minutes drops to or below the step's, the job-level timeout
+    // cancels the whole job on a hung agent — the always()-gated 'Resolution
+    // check' and 'Report result' never start, so the failure posts neither
+    // failure_kind=infra nor a "not a verdict" comment.
+    const jobTimeout = resolveJob.match(/^ {4}timeout-minutes: (\d+)$/m);
+    expect(jobTimeout).not.toBeNull();
+    expect(Number(stepTimeout[1])).toBeLessThan(Number(jobTimeout[1]));
   });
 
   it('reports an agent that never ran as an infrastructure failure, not a verdict', () => {
     // outcome != success on the agent step means no resolution was attempted
     // (install/model/infra error, step timeout, cancellation). The comment
     // must say so and must not invite a re-run, which repeats the failure.
-    expect(resolveJob).toContain(
-      'echo "failure_kind=infra" >> "$GITHUB_OUTPUT"',
-    );
-    expect(resolveJob).toContain(
+    const verifyStep = step(resolveJob, 'Resolution check');
+    const reportStep = step(resolveJob, 'Report result');
+    expect(reportStep).toContain(
       "FAILURE_KIND: '${{ steps.verify.outputs.failure_kind }}'",
     );
-    expect(resolveJob).toContain(
+    expect(reportStep).toContain(
       "RESOLVE_OUTCOME: '${{ steps.resolve_conflicts.outcome }}'",
     );
-    const infraIdx = resolveJob.indexOf(
+
+    // The failure_kind=infra write is pinned to the never-ran block of
+    // 'Resolution check' — moving it into the failure.md branch is the exact
+    // regression this branch exists to stop (an infrastructure failure would
+    // then post the generic verdict wording and invite re-runs).
+    const neverRanStart = verifyStep.indexOf(
+      'if [ "$RESOLVE_OUTCOME" != "success" ]; then',
+    );
+    expect(neverRanStart).toBeGreaterThan(-1);
+    const neverRanArm = verifyStep.slice(
+      neverRanStart,
+      verifyStep.indexOf('exit 1', neverRanStart),
+    );
+    expect(neverRanArm).toContain(
+      'echo "failure_kind=infra" >> "$GITHUB_OUTPUT"',
+    );
+    const failureMdStart = verifyStep.indexOf(
+      'if [ -s "${WORKDIR}/failure.md" ]; then',
+    );
+    expect(failureMdStart).toBeGreaterThan(-1);
+    const failureMdArm = verifyStep.slice(
+      failureMdStart,
+      verifyStep.indexOf('exit 1', failureMdStart),
+    );
+    expect(failureMdArm).not.toContain('failure_kind=infra');
+
+    // Pin the branch CONDITION literal, then slice the two arms of the `*)`
+    // case so a transposition of the bodies fails — unordered toContain kept
+    // both texts present in either arm.
+    const infraCond = 'if [ "$FAILURE_KIND" = "infra" ]; then';
+    const infraStart = reportStep.indexOf(infraCond);
+    expect(infraStart).toBeGreaterThan(-1);
+    const infraArm = reportStep.slice(
+      infraStart,
+      reportStep.indexOf('else', infraStart),
+    );
+    expect(infraArm).toContain(
       'Qwen Code could not run conflict resolution on this PR',
     );
-    expect(infraIdx).toBeGreaterThan(-1);
-    const infraLine = resolveJob.slice(
-      infraIdx,
-      resolveJob.indexOf('\n', infraIdx),
+    expect(infraArm).toContain('This is not a verdict on the conflict');
+    // The timeout rides as the env interpolation: hardcoding the number in
+    // the message lets the pair drift when the step timeout changes.
+    expect(infraArm).toContain('${AGENT_TIMEOUT_MINUTES}-minute timeout');
+    expect(infraArm).not.toContain('Re-run /resolve');
+    expect(infraArm).not.toContain(
+      'Qwen Code attempted to resolve merge conflicts',
     );
-    expect(infraLine).toContain('This is not a verdict on the conflict');
-    expect(infraLine).not.toContain('Re-run /resolve');
-    // The generic wording survives for the cases where the agent did run.
-    expect(resolveJob).toContain(
+    const elseStart = reportStep.indexOf('else', infraStart);
+    expect(elseStart).toBeGreaterThan(-1);
+    // Line-anchored end on the `*)` case terminator: the else arm nests its
+    // own if/fi (the file-append loop), so a bare fi search truncates early.
+    const elseEnd = reportStep.slice(elseStart).search(/\n\s*;;/);
+    expect(elseEnd).toBeGreaterThan(-1);
+    const elseArm = reportStep.slice(elseStart, elseStart + elseEnd);
+    // Symmetric pin: the generic wording lives in the else arm only.
+    expect(elseArm).toContain(
       'Qwen Code attempted to resolve merge conflicts but the run did not complete successfully.',
     );
+    expect(elseArm).toContain('Check the [workflow run](');
+    expect(elseArm).not.toContain('could not run conflict resolution');
+    expect(elseArm).not.toContain('This is not a verdict');
   });
 
   it('supports dry-run and workflow_dispatch', () => {
