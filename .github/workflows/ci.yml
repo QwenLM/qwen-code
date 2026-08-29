@@ -662,14 +662,7 @@ jobs:
               trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
             fi
           fi
-          (
-            while true; do
-              sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]"
-              echo "$sample"
-              echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true
-              sleep 10
-            done
-          ) &
+          ( while true; do sample="DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]"; echo "$sample"; echo "$sample" >> "$DISK_SAMPLES" 2>/dev/null || true; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
           npm run test:ci
