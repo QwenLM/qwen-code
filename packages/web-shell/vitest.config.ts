@@ -5,6 +5,10 @@ export default defineConfig({
   root: 'client',
   resolve: {
     alias: {
+      '@qwen-code/web-shell/daemon-react-sdk': resolve(
+        __dirname,
+        './client/daemon-react-sdk.ts',
+      ),
       '@': resolve(__dirname, './client'),
     },
   },
