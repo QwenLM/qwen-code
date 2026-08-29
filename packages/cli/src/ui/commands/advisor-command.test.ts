@@ -183,6 +183,18 @@ describe('advisorCommand', () => {
     expect(setAdvisorModel).not.toHaveBeenCalled();
   });
 
+  it('does not persist a model when the Advisor tool is disabled', async () => {
+    setAdvisorModel.mockResolvedValueOnce(false);
+
+    const result = await advisorCommand.action!(mockContext, 'advisor-model');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+    });
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
   it('should return error when focus exceeds max length', async () => {
     const result = await advisorCommand.action!(
       mockContext,

@@ -173,8 +173,15 @@ async function setAdvisorModel(
     }
   }
 
+  const applied = await config.setAdvisorModel(model);
+  if (applied === false) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t('Advisor configuration is unavailable.'),
+    };
+  }
   settings.setValue(SettingScope.User, 'advisorModel', model ?? '');
-  await config.setAdvisorModel(model);
   return {
     type: 'message',
     messageType: 'info',

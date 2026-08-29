@@ -4641,8 +4641,10 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(registry.unregisterTool).mockClear();
       vi.mocked(registry.registerTool).mockClear();
 
-      await config.setAdvisorModel('advisor-model');
+      const applied = await config.setAdvisorModel('advisor-model');
 
+      expect(applied).toBe(false);
+      expect(config.getAdvisorModel()).toBeUndefined();
       expect(registry.unregisterTool).not.toHaveBeenCalled();
       expect(registry.registerTool).not.toHaveBeenCalled();
     });

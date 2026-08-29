@@ -878,13 +878,18 @@ export function ModelDialog({
           setErrorMessage(t('Selected Advisor model is unavailable.'));
           return;
         }
-        settings.setValue(SettingScope.User, 'advisorModel', advisorModel);
         selectionInFlightRef.current = true;
+        let applied: boolean | undefined;
         try {
-          await config.setAdvisorModel(advisorModel);
+          applied = await config.setAdvisorModel(advisorModel);
         } finally {
           selectionInFlightRef.current = false;
         }
+        if (applied === false) {
+          setErrorMessage(t('Advisor configuration is unavailable.'));
+          return;
+        }
+        settings.setValue(SettingScope.User, 'advisorModel', advisorModel);
         reportAuxiliaryModelSelection({
           type: 'success',
           text: t('Advisor set to {{model}}', { model: advisorModel }),

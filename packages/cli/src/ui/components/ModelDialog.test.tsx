@@ -203,6 +203,32 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalled();
   });
 
+  it('does not persist an Advisor model when the tool is disabled', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(false);
+    const { mockSettings, props } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'executor-model'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'advisor-model',
+            label: 'Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        setAdvisorModel,
+      },
+      { merged: {} },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    await select.onSelect(`${AuthType.USE_OPENAI}::advisor-model`);
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
   it('does not default to Off when the configured Advisor model is unavailable', async () => {
     const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
     const { mockSettings } = renderComponent(

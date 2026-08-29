@@ -4890,14 +4890,20 @@ export class Config {
     return this.advisorModel;
   }
 
-  async setAdvisorModel(model: string | undefined): Promise<void> {
-    this.advisorModel = normalizeAdvisorModel(model);
+  async setAdvisorModel(model: string | undefined): Promise<boolean> {
+    const normalizedModel = normalizeAdvisorModel(model);
+    if (normalizedModel && this.getDisabledTools().has(ToolNames.ADVISOR)) {
+      return false;
+    }
+
+    this.advisorModel = normalizedModel;
     if (!this.initialized || !this.toolRegistry) {
-      return;
+      return true;
     }
 
     await this.syncAdvisorToolRegistration(this.toolRegistry);
     await this.llmClient?.setTools();
+    return true;
   }
 
   /**
