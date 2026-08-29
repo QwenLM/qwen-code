@@ -182,7 +182,16 @@ jobs:
           # inside the runner workspace (a symlinked leaf was healed, a symlinked
           # runner workspace refused), so the recursive chmod cannot escape it.
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
-          find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          # The ladder above heals everything the runner uid owns, so a
+          # failing rm points at leftovers owned outside it — typically a
+          # root-owned directory a containerized pool job left behind,
+          # which this step cannot chown, chmod, or unlink without
+          # passwordless sudo. Stay fail-closed, but die on a named
+          # prerequisite instead of a bare rm line no oncall can act on.
+          if ! find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; then
+            echo "::error::wipe failed: could not remove every leftover under ${WS}; a previous pool job likely left root-owned entries — remove them or grant the runner uid passwordless sudo (sudo -n)"
+            exit 1
+          fi
           # Later steps must not read pool-persistent Git, npm, Docker, or
           # gh state. A fresh directory avoids an unbounded scrub denylist
           # and stale lock files before checkout runs.
@@ -999,6 +1008,14 @@ jobs:
     # "Release Failed" issue and dispatching autofix would chase a release
     # that did not fail. Genuine publish failures — including the guard's
     # fail-closed probe errors — still notify.
+    #
+    # The four pool-routed jobs also notify on 'cancelled': an empty or
+    # offline ecs-qwen pool leaves them queued and unclaimed, and a job
+    # cancelled from the queue reports 'cancelled', not 'failure' — without
+    # the extra clauses that pre-claim pool outage would produce no failure
+    # issue, no autofix dispatch, and no alert. publish stays failure-only:
+    # it runs on hosted capacity that is never left unclaimed, so a
+    # cancelled publish is a deliberate abort, not a release failure.
     if: |-
       ${{
         always() &&
@@ -1008,9 +1025,13 @@ jobs:
         ) &&
         (
           needs.prepare.result == 'failure' ||
+          needs.prepare.result == 'cancelled' ||
           needs.quality.result == 'failure' ||
+          needs.quality.result == 'cancelled' ||
           needs.integration_none.result == 'failure' ||
+          needs.integration_none.result == 'cancelled' ||
           needs.integration_docker.result == 'failure' ||
+          needs.integration_docker.result == 'cancelled' ||
           (
             needs.publish.result == 'failure' &&
             needs.publish.outputs.version_refusal != 'true'
@@ -1046,7 +1067,7 @@ jobs:
               "publish:${PUBLISH_RESULT}"; do
               name="${job%%:*}"
               result="${job#*:}"
-              if [[ "${result}" == "failure" ]]; then
+              if [[ "${result}" == "failure" || "${result}" == "cancelled" ]]; then
                 printf -- '- %s\n' "${name}"
               fi
             done

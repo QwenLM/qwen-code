@@ -29,6 +29,19 @@ const hasGnuRealpath =
   spawnSync('realpath', ['-m', '-s', '--', '/'], { stdio: 'ignore' }).status ===
     0;
 
+// The behavioural wipe suite must say WHY it skips: the workflow's own
+// RUNNER_UID check anticipates root-registered pool members, where this
+// suite — the strongest coverage of the wipe — would otherwise vanish from
+// the report without explanation. Root cannot observe the permission
+// failures the fixtures rely on, so skipping is correct; silence is not.
+const wipeSkipReason = !hasGnuRealpath
+  ? 'GNU realpath -m/-s is unavailable on this host'
+  : process.getuid?.() === 0
+    ? 'running as root; the wipe fixtures need an unprivileged uid'
+    : process.platform === 'win32'
+      ? 'the wipe guards are POSIX shell only'
+      : '';
+
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
 const releaseYaml = parse(workflow);
 const cuaReleaseWorkflow = readFileSync(
@@ -266,7 +279,16 @@ fi
 # inside the runner workspace (a symlinked leaf was healed, a symlinked
 # runner workspace refused), so the recursive chmod cannot escape it.
 chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
-find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+# The ladder above heals everything the runner uid owns, so a
+# failing rm points at leftovers owned outside it — typically a
+# root-owned directory a containerized pool job left behind,
+# which this step cannot chown, chmod, or unlink without
+# passwordless sudo. Stay fail-closed, but die on a named
+# prerequisite instead of a bare rm line no oncall can act on.
+if ! find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; then
+  echo "::error::wipe failed: could not remove every leftover under \${WS}; a previous pool job likely left root-owned entries — remove them or grant the runner uid passwordless sudo (sudo -n)"
+  exit 1
+fi
 # Later steps must not read pool-persistent Git, npm, Docker, or
 # gh state. A fresh directory avoids an unbounded scrub denylist
 # and stale lock files before checkout runs.
@@ -342,9 +364,26 @@ describe('release workflow', () => {
     expect(canonicalWipe).not.toMatch(/(?:^|\s)(?:ps|kill|pkill)\s/m);
   });
 
-  it.skipIf(
-    !hasGnuRealpath || process.getuid?.() === 0 || process.platform === 'win32',
-  )('executes the workspace wipe against guard branches', () => {
+  it('names the recovery when the wipe cannot remove a leftover', () => {
+    // The ownership ladder heals everything the runner uid owns, so a
+    // failing rm means leftovers owned outside it — the incident shape is
+    // a root-owned directory a containerized pool job left behind, which
+    // the step cannot chown, chmod, or unlink without passwordless sudo.
+    // The step must stay fail-closed, but die on a named prerequisite
+    // instead of a bare rm line no oncall can act on. Pin the whole arm on
+    // the shared constant so it reaches all five copies through the
+    // anchor: the behaviour is unreachable in this suite by design — it
+    // runs unprivileged, and only a root-built fixture can make rm fail
+    // after the ladder healed.
+    expect(canonicalWipe).toMatch(
+      /^if ! find "\$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- \{\} \+; then\n {2}echo "::error::wipe failed: could not remove every leftover under \$\{WS\}; a previous pool job likely left root-owned entries — remove them or grant the runner uid passwordless sudo \(sudo -n\)"\n {2}exit 1\nfi$/m,
+    );
+  });
+
+  const wipeSuiteTitle = `executes the workspace wipe against guard branches${
+    wipeSkipReason === '' ? '' : ` [skipped: ${wipeSkipReason}]`
+  }`;
+  it.skipIf(wipeSkipReason !== '')(wipeSuiteTitle, () => {
     const wipeScript = canonicalWipe;
 
     const runWipe = (envOverrides, { preCreateWorkspace } = {}) => {
@@ -1083,6 +1122,33 @@ describe('release workflow', () => {
     );
     expect(workflow).toMatch(
       /needs\.publish\.result == 'failure' &&\n {12}needs\.publish\.outputs\.version_refusal != 'true'/,
+    );
+  });
+
+  it('notifies when pool jobs are cancelled before any runner claims them', () => {
+    // An empty or offline ecs-qwen pool leaves the pool-routed jobs queued
+    // and unclaimed, and a job cancelled from the queue reports
+    // 'cancelled', not 'failure' — without these clauses the pre-claim
+    // pool outage this lane is most exposed to would produce no failure
+    // issue, no autofix dispatch, and no alert. Mirrors the sibling
+    // notifier's gate (release-vscode-companion.yml's report-failure).
+    const gate = String(releaseYaml.jobs.notify_failure.if);
+    for (const id of [
+      'prepare',
+      'quality',
+      'integration_none',
+      'integration_docker',
+    ]) {
+      expect(gate, id).toContain(`needs.${id}.result == 'failure'`);
+      expect(gate, id).toContain(`needs.${id}.result == 'cancelled'`);
+    }
+    // publish runs on hosted capacity that is never left unclaimed, so a
+    // cancelled publish is a deliberate abort, not a release failure.
+    expect(gate).not.toContain("needs.publish.result == 'cancelled'");
+    // The issue body must list the cancelled jobs too, or an all-cancelled
+    // outage would file "Failed job(s): - unknown".
+    expect(releaseYaml.jobs.notify_failure.steps[0].run).toContain(
+      'if [[ "${result}" == "failure" || "${result}" == "cancelled" ]]; then',
     );
   });
 
