@@ -57,7 +57,7 @@ const TEST_TOKEN = 'test-token';
 const TEST_AUTHORIZATION = `Bearer ${TEST_TOKEN}`;
 const LIVE_COLD_LOAD_ID = '550e8400-e29b-41d4-a716-446655440101';
 const LIVE_COLD_RESUME_ID = '550e8400-e29b-41d4-a716-446655440102';
-const LIVE_PROJECTLESS_TASK_ID = '550e8400-e29b-41d4-a716-446655440103';
+const LIVE_PROJECTLESS_TASK_ID = '750e8400-e29b-71d4-a716-446655440103';
 const LIVE_ACTIVE_LOAD_ID = '550e8400-e29b-41d4-a716-446655440104';
 const LIVE_ACTIVE_RESUME_ID = '550e8400-e29b-41d4-a716-446655440105';
 const LIVE_COLD_REJECTED_ID = '550e8400-e29b-41d4-a716-446655440106';
@@ -304,7 +304,13 @@ async function writeLifecycleFixture(input: {
       sessionId: input.sessionId,
       cwd: SECONDARY_CWD,
       timestamp: '2026-07-08T00:00:00.000Z',
-      prompt: 'orphan lifecycle fixture',
+      // Unique per session id: the qualified and unqualified rows share this
+      // fixture and, for the unarchive case, land in the same project one
+      // after the other. An identical prompt would derive an identical
+      // display name, tripping the (correct, separately tested) unarchive
+      // title-collision guard and appending an unrelated custom_title
+      // record that this test's byte-exact comparison doesn't expect.
+      prompt: `orphan lifecycle fixture ${input.sessionId}`,
       mtime: new Date('2026-07-08T00:00:00.000Z'),
       parentSessionId: '00000000-0000-4000-8000-000000000000',
     });

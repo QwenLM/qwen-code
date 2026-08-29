@@ -34,6 +34,11 @@ import {
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
 import { resolveRequestTimeout } from '../openaiContentGenerator/constants.js';
+import {
+  resolveStreamIdleTimeoutMs,
+  resolveStreamMaxLifetimeMs,
+  withStreamGuards,
+} from '../stream-guards.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
@@ -300,6 +305,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
   private effortClampWarned = false;
   private budgetDropWarned = false;
   private temperatureDropWarned = false;
+  // Stream watchdog tuning, resolved once (config field > env > default) so
+  // the env read + any invalid-value warning happen per generator, not per
+  // streaming request. Same guards the OpenAI pipeline applies — the two
+  // wires must not differ on whether a stalled stream is recoverable
+  // (issue #9005 finding 4).
+  private readonly streamIdleTimeoutMs: number;
+  private readonly streamMaxLifetimeMs: number;
 
   constructor(
     private contentGeneratorConfig: ContentGeneratorConfig,
@@ -355,6 +367,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
       contentGeneratorConfig.schemaCompliance,
       contentGeneratorConfig.enableCacheControl,
     );
+
+    this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(
+      contentGeneratorConfig,
+    );
+    this.streamMaxLifetimeMs = resolveStreamMaxLifetimeMs(
+      contentGeneratorConfig,
+    );
   }
 
   async generateContent(
@@ -385,7 +404,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       perRequestAc?.abort();
     }
 
-    return this.converter.convertAnthropicResponseToGemini(response);
+    return this.converter.convertAnthropicResponseToLlm(response);
   }
 
   async generateContentStream(
@@ -425,10 +444,36 @@ export class AnthropicContentGenerator implements ContentGenerator {
       throw redactProxyError(error);
     }
 
+    // Two guards wrap the stream, identical to the OpenAI pipeline (the SDK
+    // `timeout` only bounds connect + first response). The inactivity
+    // watchdog aborts + surfaces a retryable ETIMEDOUT after `idleMs` of no
+    // events; the lifetime cap covers what the watchdog cannot — a drip-fed
+    // stream (e.g. long runs of low-content `thinking_delta` frames) resets
+    // the idle timer forever while never completing (issue #8597), so it
+    // aborts once `maxLifetimeMs` of accumulated upstream-wait has passed.
+    // `<= 0` disables each guard. Issue #9005 finding 4.
+    const idleMs = this.streamIdleTimeoutMs;
+    const maxLifetimeMs = this.streamMaxLifetimeMs;
+    const guardedStream =
+      idleMs > 0 || maxLifetimeMs > 0
+        ? withStreamGuards(
+            stream,
+            idleMs,
+            maxLifetimeMs,
+            () => perRequestAc.abort(),
+            request.config?.abortSignal,
+          )
+        : stream;
+
     const inner = this.processStreamWithEmptyFallback(
-      this.redactStreamErrors(stream),
+      this.redactStreamErrors(guardedStream),
       anthropicRequest,
-      perRequestAc.signal,
+      // The empty-stream fallback probe needs a signal that is still live
+      // after the source stream drains. The shared stream guard aborts
+      // `perRequestAc` in its `finally` the moment the source drains — which
+      // happens before the probe runs — so pass the caller's signal instead;
+      // the probe derives its own short-lived child from it.
+      request.config?.abortSignal,
       headers,
       telemetryAttempt,
     );
@@ -746,7 +791,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const cacheRetentionByBlock =
       this.contentGeneratorConfig.cacheRetentionByBlock;
 
-    const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
+    const { system, messages } = this.converter.convertLlmRequestToAnthropic(
       request,
       {
         // DeepSeek normalization and injection run together. Proxy-hosted
@@ -777,15 +822,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     );
 
     const tools = request.config?.tools
-      ? await this.converter.convertGeminiToolsToAnthropic(
-          request.config.tools,
-          {
-            enableCacheControl,
-            useGlobalCacheScope,
-            cacheRetention,
-            cacheRetentionByBlock,
-          },
-        )
+      ? await this.converter.convertLlmToolsToAnthropic(request.config.tools, {
+          enableCacheControl,
+          useGlobalCacheScope,
+          cacheRetention,
+          cacheRetentionByBlock,
+        })
       : undefined;
 
     // Map Gemini-style toolConfig.functionCallingConfig.mode to Anthropic's
@@ -1299,7 +1341,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
             typeof name === 'string' &&
             name.length > 0
           ) {
-            const chunk = this.buildGeminiChunk(
+            const chunk = this.buildLlmChunk(
               undefined,
               messageId,
               model,
@@ -1320,7 +1362,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
           if (deltaType === 'text_delta') {
             const text = 'text' in event.delta ? event.delta.text : '';
             if (text) {
-              const chunk = this.buildGeminiChunk(
+              const chunk = this.buildLlmChunk(
                 { text },
                 messageId,
                 model,
@@ -1334,7 +1376,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
             const thinking =
               (event.delta as { thinking?: string }).thinking || '';
             if (thinking) {
-              const chunk = this.buildGeminiChunk(
+              const chunk = this.buildLlmChunk(
                 { text: thinking, thought: true },
                 messageId,
                 model,
@@ -1349,7 +1391,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
               (event.delta as { signature?: string }).signature || '';
             if (signature) {
               blockState.signature += signature;
-              const chunk = this.buildGeminiChunk(
+              const chunk = this.buildLlmChunk(
                 { thought: true, thoughtSignature: signature },
                 messageId,
                 model,
@@ -1383,7 +1425,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 hasNonObjectToolCall = true;
               }
             } else {
-              const chunk = this.buildGeminiChunk(
+              const chunk = this.buildLlmChunk(
                 {
                   functionCall: {
                     id: blockState.id,
@@ -1489,7 +1531,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
           if (finishReason || event.usage) {
             messageStartUsagePending = false;
-            const chunk = this.buildGeminiChunk(
+            const chunk = this.buildLlmChunk(
               undefined,
               messageId,
               model,
@@ -1518,7 +1560,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
             cacheCreationTokensReported
           ) {
             messageStartUsagePending = false;
-            const chunk = this.buildGeminiChunk(
+            const chunk = this.buildLlmChunk(
               undefined,
               messageId,
               model,
@@ -1550,7 +1592,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (upstreamStreamFailed) {
       const upstreamErrorClassification =
         classifyRetryError(upstreamStreamError);
-      // Match GeminiChat's replay boundary: only known mid-SSE socket cuts
+      // Match LlmChat's replay boundary: only known mid-SSE socket cuts
       // may release an already closed batch before the error is propagated.
       if (
         isRetryableStreamTransportError(upstreamErrorClassification) &&
@@ -1623,6 +1665,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
     );
 
     let response: Message;
+    // Derive a fresh short-lived child for the probe from the caller's signal.
+    // Reusing the per-request controller is wrong here: the shared stream guard
+    // already aborted it when the source drained (its `finally` cleanup), and
+    // passing an already-aborted signal makes the SDK reject immediately with
+    // a spurious AbortError instead of surfacing the provider's real error
+    // (e.g. a 402 credit-balance response). A child of the caller's signal
+    // keeps the probe cancellable by the user while ignoring the drain abort,
+    // and aborting it once the probe settles releases the SDK's abort listener.
+    const probeAc = createChildAbortController(abortSignal);
     try {
       runtimeDiagnostics.recordAnthropicWireRequest(fallbackRequest);
       const fallbackAttempt = reportAnthropicFollowingRequest(
@@ -1630,17 +1681,19 @@ export class AnthropicContentGenerator implements ContentGenerator {
         telemetryAttempt,
       );
       response = (await this.client.messages.create(fallbackRequest, {
-        signal: abortSignal,
+        signal: probeAc.signal,
         ...(headers ? { headers } : {}),
       })) as Message;
       reportAnthropicResponse(fallbackAttempt, response);
-      yield this.converter.convertAnthropicResponseToGemini(response);
+      yield this.converter.convertAnthropicResponseToLlm(response);
     } catch (error) {
       throw redactProxyError(error);
+    } finally {
+      probeAc.abort();
     }
   }
 
-  private buildGeminiChunk(
+  private buildLlmChunk(
     part?: {
       text?: string;
       thought?: boolean;
@@ -1661,7 +1714,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const candidateParts = part ? [part as unknown as Part] : [];
     const mappedFinishReason =
       finishReason !== undefined
-        ? this.converter.mapAnthropicFinishReasonToGemini(finishReason)
+        ? this.converter.mapAnthropicFinishReasonToLlm(finishReason)
         : undefined;
     response.candidates = [
       {

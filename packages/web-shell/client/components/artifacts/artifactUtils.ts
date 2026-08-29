@@ -2,7 +2,7 @@ import type {
   DaemonSessionArtifact,
   DaemonWorkspaceFileBytes,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonWorkspaceActions } from '@qwen-code/web-shell/daemon-react-sdk';
 
 export function artifactKindLabel(
   kind: string,
@@ -122,6 +122,19 @@ function pathExtension(workspacePath?: string): string {
   const name = (workspacePath ?? '').split(/[/\\]/).pop() ?? '';
   const dot = name.lastIndexOf('.');
   return dot >= 0 ? name.slice(dot).toLowerCase() : '';
+}
+
+// Mirrors WORKSPACE_CONTENT_SHA256_METADATA_KEY in the core package, which the
+// Web Shell client cannot import.
+const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
+
+export function getArtifactFreshnessKey(
+  artifact: Pick<DaemonSessionArtifact, 'status' | 'updatedAt' | 'metadata'>,
+): string {
+  const workspaceHash =
+    artifact.metadata?.[WORKSPACE_CONTENT_SHA256_METADATA_KEY];
+  const hash = typeof workspaceHash === 'string' ? workspaceHash : '';
+  return `${artifact.status}:${artifact.updatedAt}:${hash}`;
 }
 
 export function getArtifactTypeLabel(artifact: DaemonSessionArtifact): string {
