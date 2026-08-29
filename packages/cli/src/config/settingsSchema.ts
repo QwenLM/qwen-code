@@ -1764,7 +1764,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: undefined as number | undefined,
             description:
-              'Maximum inactivity between streamed chunks for OpenAI-compatible models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.',
+              'Maximum inactivity between streamed chunks for OpenAI-compatible and Anthropic models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.',
             minimum: 0,
             maximum: 2_147_483_647,
             parentKey: 'generationConfig',

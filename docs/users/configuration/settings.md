@@ -230,9 +230,9 @@ These settings are read from operator scopes only (User, System, and SystemDefau
 
 `timeout` is the per-request timeout in milliseconds (default `120000`). Set it to `0` to disable the request timeout — matching the `QWEN_STREAM_IDLE_TIMEOUT_MS=0` convention — rather than aborting the request. It can also be set via the `QWEN_CODE_API_TIMEOUT_MS` environment variable. This is distinct from the two stream guards below.
 
-**stream guards (OpenAI-compatible providers only):**
+**stream guards (OpenAI-compatible and Anthropic providers):**
 
-Two guards bound a streaming response, each accepting `0` to disable. Neither is implemented by the Anthropic/Gemini generators, which leave the drip-fed shape below unbounded.
+Two guards bound a streaming response, each accepting `0` to disable. The Gemini generator does not implement them, which leaves the drip-fed shape below unbounded for Gemini models.
 
 - `streamIdleTimeoutMs` (default `240000`) bounds inactivity _between_ streamed chunks: a stream that goes silent for this long is aborted as a retryable `ETIMEDOUT`. For provider-backed models, set it under the matching `modelProviders[providerId][].generationConfig`; for runtime models, use `model.generationConfig`. An explicit model value takes precedence over `QWEN_STREAM_IDLE_TIMEOUT_MS`, and `0` disables the idle guard.
 - `QWEN_STREAM_MAX_LIFETIME_MS` (default `900000`) caps the _total_ upstream-wait time of one streaming response regardless of chunk flow — the bound a drip-fed stream that never completes cannot reset.
