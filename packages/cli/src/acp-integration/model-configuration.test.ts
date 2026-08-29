@@ -9,6 +9,8 @@ import {
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
   getModelConfiguration,
+  isReasoningSelectionSupported,
+  resolvePersistedReasoningConfigState,
 } from './model-configuration.js';
 
 describe('model configuration manifest', () => {
@@ -56,7 +58,7 @@ describe('model configuration manifest', () => {
   });
 
   it.each(['high', 'max'] as const)(
-    'presents inherited %s as the qwen3.8-max xhigh alias',
+    'falls back from stale %s to the qwen3.8-max model default',
     (effort) => {
       expect(
         buildModelReasoningConfigOption('qwen3.8-max', { effort }),
@@ -66,7 +68,6 @@ describe('model configuration manifest', () => {
 
   it.each([
     undefined,
-    'qwen3.7-plus',
     'qwen3.8-max-preview',
     'qwen3.8-max-latest',
     'qwen3.8-max-2026-08-12',
@@ -75,6 +76,31 @@ describe('model configuration manifest', () => {
   ])('does not project a tiered welcome preview for %s', (modelId) => {
     expect(buildModelReasoningConfigPreview(modelId)).toBeUndefined();
   });
+
+  it('projects toggle-only reasoning on Welcome without effort tiers', () => {
+    expect(buildModelReasoningConfigPreview('qwen3.7-plus')).toEqual([
+      buildModelReasoningConfigOption('qwen3.7-plus'),
+    ]);
+  });
+
+  it.each([
+    ['qwen3.8-max', 'low', false, true],
+    ['qwen3.8-max', 'max', false, false],
+    ['qwen3.8-max', 'none', false, true],
+    ['qwen3.8-max', 'none', true, false],
+    ['qwen3.7-plus', 'default', false, true],
+    ['qwen3.7-plus', 'none', false, true],
+    ['qwen3.7-plus', 'low', false, false],
+    ['qwen-plus', 'max', false, false],
+    ['claude-opus-4-6', 'max', false, true],
+  ] as const)(
+    'validates %s selection %s with mandatory=%s',
+    (modelId, selection, thinkingMandatory, supported) => {
+      expect(
+        isReasoningSelectionSupported(modelId, selection, thinkingMandatory),
+      ).toBe(supported);
+    },
+  );
 
   it('wraps the stable default option for workspace preview', () => {
     expect(buildModelReasoningConfigPreview('qwen3.8-max')).toEqual([
@@ -93,6 +119,20 @@ describe('model configuration manifest', () => {
       }),
     ]);
   });
+
+  it.each([
+    ['qwen3.8-max', 'medium', false, { enabled: true, effort: 'medium' }],
+    ['qwen3.8-max', 'none', false, { enabled: false }],
+    ['qwen3.8-max', 'max', false, {}],
+    ['qwen3.8-max', 'none', true, {}],
+  ] as const)(
+    'projects persisted %s selection %s with mandatory=%s',
+    (modelId, selection, mandatory, expected) => {
+      expect(
+        resolvePersistedReasoningConfigState(modelId, selection, mandatory),
+      ).toEqual({ ...expected, thinkingMandatory: mandatory });
+    },
+  );
 
   it.each([
     'qwen3.5-plus',

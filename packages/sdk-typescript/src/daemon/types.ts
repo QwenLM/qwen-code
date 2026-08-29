@@ -2805,8 +2805,18 @@ export interface SetModelResult {
 }
 
 /** Returned from `POST /session/:id/config-option`. */
+export type ReasoningSelection =
+  | 'none'
+  | 'default'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
+
 export interface DaemonSessionConfigOptionResult {
   configOptions: unknown[];
+  persisted: boolean;
 }
 
 /** Returned from `POST /session/:id/language`. */

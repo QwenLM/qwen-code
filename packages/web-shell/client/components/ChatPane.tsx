@@ -28,6 +28,7 @@ import {
   type DaemonSessionArtifact,
   type DaemonSessionMonitorTaskStatus,
   type DaemonWorkspaceCapability,
+  type ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../adapters/types';
 import { SubagentDetailsProvider } from '../subagentDetailsContext';
@@ -1136,9 +1137,9 @@ export function ChatPane({
     [actions, reportError],
   );
   const handleSelectReasoningEffort = useCallback(
-    (value: string) =>
+    (value: ReasoningSelection) =>
       actions
-        .setReasoningEffort(value)
+        .setReasoningEffort(value, { persist: true })
         .catch((error: unknown) =>
           reportError(error, t('reasoning.updateFailed')),
         ),

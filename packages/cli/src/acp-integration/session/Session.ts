@@ -313,8 +313,22 @@ import {
   resolveAcpModelOption,
 } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  getPersistScopeForModelSelection,
+  getWritableScopes,
+} from '../../config/modelProvidersScope.js';
+import {
+  deleteNestedPropertySafe,
+  settingExistsInScope,
+} from '../../config/settingsUtils.js';
 import { recordDaemonSessionModel } from '../session-model-persistence.js';
+import {
+  applyReasoningSelection,
+  isReasoningSelectionSupported,
+  parseReasoningSelection,
+  REASONING_EFFORT_DEFAULT,
+  type ReasoningSelection,
+} from '../model-configuration.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildExtensionMentionContext,
@@ -9660,6 +9674,13 @@ export class Session implements SessionContext {
     const isRuntime =
       resolvedRoute?.isRuntime ??
       rawModelId.startsWith(RUNTIME_SNAPSHOT_PREFIX);
+    const persistDefault =
+      !this.requiresManagedConversationBinding &&
+      (options.persistDefault ?? true);
+    this.reconcileReasoningSelection(effectiveModelId, {
+      persist: !this.requiresManagedConversationBinding,
+      allowReasoning: !isRuntime && !rawModelId.startsWith(ACP_ROUTE_ID_PREFIX),
+    });
     void recordDaemonSessionModel(this.config, {
       modelId: isRuntime
         ? (resolvedRoute?.modelId ?? parsed.modelId)
@@ -9703,9 +9724,6 @@ export class Session implements SessionContext {
         debugLogger.debug('model-update extNotification failed', error);
       });
 
-    const persistDefault =
-      !this.requiresManagedConversationBinding &&
-      (options.persistDefault ?? true);
     if (persistDefault) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
       this.settings.setValue(
@@ -9740,6 +9758,92 @@ export class Session implements SessionContext {
         },
       },
     };
+  }
+
+  persistReasoningSelection(selection: ReasoningSelection): boolean {
+    if (this.requiresManagedConversationBinding) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Reasoning selection cannot be persisted for this session',
+      );
+    }
+
+    const key = 'model.reasoningEffort';
+    const persistScope = getPersistScopeForModelSelection(this.settings);
+    this.clearPersistedReasoningSelection(
+      selection === REASONING_EFFORT_DEFAULT ? undefined : persistScope,
+    );
+    if (selection !== REASONING_EFFORT_DEFAULT) {
+      try {
+        this.settings.setValue(persistScope, key, selection, undefined, {
+          throwOnWriteFailure: true,
+        });
+      } catch (error) {
+        this.settings.reloadScopeFromDisk(persistScope);
+        throw error;
+      }
+    }
+    return true;
+  }
+
+  private reconcileReasoningSelection(
+    modelId: string,
+    options: { persist: boolean; allowReasoning: boolean },
+  ): void {
+    const rawSelection = this.settings.merged.model?.reasoningEffort;
+    if (rawSelection === undefined) return;
+
+    const selection = parseReasoningSelection(rawSelection);
+    const thinkingMandatory =
+      this.config.getContentGeneratorConfig?.()?.thinkingMandatory === true;
+    const supported =
+      selection !== undefined &&
+      options.allowReasoning &&
+      isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+    const mustClear =
+      selection === undefined ||
+      selection === REASONING_EFFORT_DEFAULT ||
+      !supported;
+
+    if (mustClear) {
+      if (options.persist) this.clearPersistedReasoningSelection();
+      applyReasoningSelection(this.config, REASONING_EFFORT_DEFAULT);
+      return;
+    }
+    applyReasoningSelection(this.config, selection);
+  }
+
+  private clearPersistedReasoningSelection(except?: SettingScope): void {
+    const key = 'model.reasoningEffort';
+    let changed = false;
+    for (const scope of getWritableScopes(this.settings)) {
+      if (scope === except) continue;
+      const settingsFile =
+        scope === SettingScope.Workspace
+          ? this.settings.workspace
+          : this.settings.user;
+      if (!settingExistsInScope(key, settingsFile.settings)) continue;
+      try {
+        this.settings.setValue(scope, key, undefined, undefined, {
+          throwOnWriteFailure: true,
+        });
+      } catch (error) {
+        this.settings.reloadScopeFromDisk(scope);
+        throw error;
+      }
+      deleteNestedPropertySafe(
+        settingsFile.settings as Record<string, unknown>,
+        key,
+      );
+      if (settingsFile.originalSettings) {
+        deleteNestedPropertySafe(
+          settingsFile.originalSettings as Record<string, unknown>,
+          key,
+        );
+      }
+      changed = true;
+    }
+    if (changed) this.settings.recomputeMerged();
   }
 
   /**

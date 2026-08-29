@@ -14565,7 +14565,7 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
-  it('does not restore a stale welcome disable after mandatory reasoning clears it', async () => {
+  it('clears a stale welcome disable after reasoning becomes mandatory', async () => {
     const reasoningPreview = (canDisable: boolean) => ({
       enabled: true,
       effort: 'xhigh',
@@ -14632,7 +14632,10 @@ describe('App session callbacks', () => {
         expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
       });
     });
-    expect(mockSessionActions.setReasoningEffort).not.toHaveBeenCalled();
+    expect(mockSessionActions.setReasoningEffort).toHaveBeenCalledWith(
+      'default',
+      { persist: true },
+    );
   });
 
   it('commits the first prompt after creating its session', async () => {

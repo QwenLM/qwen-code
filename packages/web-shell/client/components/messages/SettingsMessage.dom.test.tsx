@@ -553,6 +553,28 @@ describe('SettingsMessage user-scope editing', () => {
     expect(container.textContent).not.toContain('Compact Mode');
   });
 
+  it('keeps model.reasoningEffort out of the generic settings panel', () => {
+    const setValue = vi.fn(() =>
+      Promise.resolve({} as DaemonSettingUpdateResult),
+    );
+    const reasoningEffort: DaemonSettingDescriptor = {
+      key: 'model.reasoningEffort',
+      type: 'enum',
+      label: 'Reasoning Effort',
+      category: 'Model',
+      requiresRestart: false,
+      default: undefined,
+      options: [{ value: 'none', label: 'None' }],
+      values: { effective: undefined },
+    };
+    const container = renderPanel(
+      makeState([boolSetting(), reasoningEffort], setValue),
+    );
+
+    expect(container.textContent).toContain('Test Flag');
+    expect(container.textContent).not.toContain('Reasoning Effort');
+  });
+
   it('renders the model-management block inside the Model category', () => {
     const setValue = vi.fn(() =>
       Promise.resolve({} as DaemonSettingUpdateResult),

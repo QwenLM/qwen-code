@@ -95,7 +95,6 @@ import {
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
-  applyReasoningEffort,
   REASONING_EFFORT_TIERS,
   addDaemonRequestAttribute,
   extractDaemonTraceContext,
@@ -261,9 +260,15 @@ import {
   type ChildHeapProbe,
 } from './child-heap-probe.js';
 import {
+  applyReasoningSelection,
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
   getModelConfiguration,
+  isReasoningSelectionSupported,
+  PERSIST_REASONING_SELECTION_META_KEY,
+  parseReasoningSelection,
+  resolvePersistedReasoningConfigState,
+  REASONING_SELECTION_PERSISTED_META_KEY,
   REASONING_EFFORT_DEFAULT,
   REASONING_EFFORT_NAMES,
   REASONING_EFFORT_NONE,
@@ -5596,6 +5601,7 @@ class QwenAgent implements Agent {
     }
 
     return this.runInSessionContext(session, async () => {
+      let reasoningSelectionPersisted = false;
       switch (configId) {
         case 'mode': {
           await this.setSessionMode({
@@ -5615,71 +5621,84 @@ class QwenAgent implements Agent {
           break;
         }
         case 'reasoning_effort': {
-          const generation = session.getConfig().getContentGeneratorConfig();
-          const thinkingMandatory = generation.thinkingMandatory === true;
-          const modelReasoning = this.getModelReasoningConfiguration(
-            session.getConfig(),
+          const config = session.getConfig();
+          const generation = config.getContentGeneratorConfig();
+          const option = this.buildConfigOptions(config).find(
+            (candidate) => candidate.id === 'reasoning_effort',
           );
-          if (modelReasoning) {
-            const effortValues = modelReasoning.toggleOnly
-              ? undefined
-              : modelReasoning.efforts;
-            const selected =
-              value === REASONING_EFFORT_NONE && !thinkingMandatory
-                ? REASONING_EFFORT_NONE
-                : modelReasoning.toggleOnly
-                  ? value === REASONING_EFFORT_DEFAULT
-                    ? REASONING_EFFORT_DEFAULT
-                    : undefined
-                  : effortValues?.find((effort) => effort === value);
-            if (!selected) {
-              const choices = [
-                ...(thinkingMandatory ? [] : [REASONING_EFFORT_NONE]),
-                ...(effortValues ?? [REASONING_EFFORT_DEFAULT]),
-              ];
-              throw RequestError.invalidParams(
-                undefined,
-                `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
-              );
-            }
-            if (!modelReasoning.toggleOnly) {
-              for (const source of ['extra_body', 'samplingParams'] as const) {
-                const layer = generation[source];
-                if (!layer) continue;
-                const next = { ...layer };
-                delete next['enable_thinking'];
-                delete next['reasoning_effort'];
-                delete next['thinking_budget'];
-                generation[source] = next;
-              }
-            }
-            if (selected === REASONING_EFFORT_NONE) {
-              generation.reasoning = false;
-            } else if (selected === REASONING_EFFORT_DEFAULT) {
-              generation.reasoning = undefined;
-            } else {
-              const current = generation.reasoning;
-              generation.reasoning = {
-                ...(current || {}),
-                effort: selected,
-              };
-            }
-            break;
-          }
-          const effort =
-            value === REASONING_EFFORT_DEFAULT
-              ? undefined
-              : REASONING_EFFORT_TIERS.find((tier) => tier === value);
-          if (value !== REASONING_EFFORT_DEFAULT && effort === undefined) {
+          const modelReasoning = this.getModelReasoningConfiguration(config);
+          const selected = parseReasoningSelection(value);
+          const choices =
+            option?.options.flatMap((choice) =>
+              'value' in choice
+                ? [choice.value]
+                : choice.options.map((nested) => nested.value),
+            ) ?? [];
+          const supported =
+            option !== undefined &&
+            selected !== undefined &&
+            (selected === REASONING_EFFORT_DEFAULT ||
+              choices.includes(selected));
+          if (!supported || !selected) {
+            const allowedChoices = modelReasoning
+              ? choices
+              : [
+                  REASONING_EFFORT_DEFAULT,
+                  ...choices.filter(
+                    (choice) => choice !== REASONING_EFFORT_DEFAULT,
+                  ),
+                ];
             throw RequestError.invalidParams(
               undefined,
-              `Unknown reasoning effort: ${value}. Choose one of: ${REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+              option
+                ? `Unknown reasoning effort: ${String(value)}. Choose one of: ${allowedChoices.join(', ')}`
+                : 'Reasoning is not supported by the current model',
             );
           }
-          if (!applyReasoningEffort(session.getConfig(), effort)) {
+
+          const persist =
+            params._meta?.[PERSIST_REASONING_SELECTION_META_KEY] === true;
+          if (persist) {
+            reasoningSelectionPersisted =
+              session.persistReasoningSelection(selected);
+          }
+          if (
+            selected !== REASONING_EFFORT_NONE &&
+            selected !== REASONING_EFFORT_DEFAULT &&
+            modelReasoning &&
+            !modelReasoning.toggleOnly
+          ) {
+            for (const source of ['extra_body', 'samplingParams'] as const) {
+              const layer = generation[source];
+              if (!layer) continue;
+              const next = { ...layer };
+              delete next['enable_thinking'];
+              delete next['reasoning_effort'];
+              delete next['thinking_budget'];
+              generation[source] = next;
+            }
+          }
+          applyReasoningSelection(config, selected);
+          if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
+            config.setReasoningEffort?.(
+              selected === REASONING_EFFORT_DEFAULT ? undefined : selected,
+            );
+          }
+          const confirmedOption = this.buildConfigOptions(config).find(
+            (candidate) => candidate.id === 'reasoning_effort',
+          );
+          const confirmedValue = confirmedOption?.currentValue;
+          const confirmed =
+            selected === REASONING_EFFORT_DEFAULT
+              ? confirmedValue !== undefined &&
+                confirmedValue !== REASONING_EFFORT_NONE
+              : confirmedValue === selected;
+          if (!confirmed) {
             throw RequestError.invalidParams(
               undefined,
-              'Reasoning effort cannot be applied while thinking is disabled',
+              modelReasoning
+                ? `Reasoning selection was not applied: ${selected}`
+                : 'Reasoning effort cannot be applied while thinking is disabled',
             );
           }
           break;
@@ -5693,6 +5712,13 @@ class QwenAgent implements Agent {
 
       return {
         configOptions: this.buildConfigOptions(session.getConfig()),
+        ...(reasoningSelectionPersisted
+          ? {
+              _meta: {
+                [REASONING_SELECTION_PERSISTED_META_KEY]: true,
+              },
+            }
+          : {}),
       };
     });
   }
@@ -6920,14 +6946,18 @@ class QwenAgent implements Agent {
         const configOptions =
           model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
             ? undefined
-            : buildModelReasoningConfigPreview(model.id, {
-                thinkingMandatory:
+            : buildModelReasoningConfigPreview(
+                model.id,
+                resolvePersistedReasoningConfigState(
+                  model.id,
+                  this.settings.merged.model?.reasoningEffort,
                   config.getResolvedModelConfig?.(
                     model.authType,
                     model.id,
                     model.registryBaseUrl ?? model.baseUrl,
                   )?.generationConfig.thinkingMandatory === true,
-              });
+                ),
+              );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -13036,6 +13066,17 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
+    if (
+      activeRuntimeSnapshot ||
+      currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
+      !isReasoningSelectionSupported(
+        rawCurrentModelId,
+        REASONING_EFFORT_DEFAULT,
+      )
+    ) {
+      return [modeConfigOption, modelConfigOption];
+    }
+
     const generation = config.getContentGeneratorConfig();
     const modelReasoning = this.getModelReasoningConfiguration(
       config,
@@ -13092,6 +13133,7 @@ class QwenAgent implements Agent {
     const reasoningEnabled =
       generation.reasoning !== false &&
       (!reasoningOverride || !overrideDisablesReasoning);
+    const canDisableReasoning = generation.thinkingMandatory !== true;
     const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
       ? buildModelReasoningConfigOption(rawCurrentModelId, {
           enabled: reasoningEnabled,
@@ -13104,8 +13146,20 @@ class QwenAgent implements Agent {
       description: 'How hard reasoning-capable models should think',
       category: 'thought_level',
       type: 'select' as const,
-      currentValue: currentModelEffort ?? REASONING_EFFORT_DEFAULT,
+      currentValue:
+        generation.reasoning === false && canDisableReasoning
+          ? REASONING_EFFORT_NONE
+          : (currentModelEffort ?? REASONING_EFFORT_DEFAULT),
       options: [
+        ...(canDisableReasoning
+          ? [
+              {
+                value: REASONING_EFFORT_NONE,
+                name: 'Thinking off',
+                description: 'Disable thinking for this session',
+              },
+            ]
+          : []),
         {
           value: REASONING_EFFORT_DEFAULT,
           name: 'Default',

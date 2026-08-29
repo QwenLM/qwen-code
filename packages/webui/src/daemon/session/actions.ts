@@ -1089,7 +1089,7 @@ export function createDaemonSessionActions({
       }
     },
 
-    async setReasoningEffort(value) {
+    async setReasoningEffort(value, opts) {
       const actionToken = ++reasoningActionToken;
       const sourceModel = getConnection().currentModel;
       const sourceModelGeneration = modelMutationGeneration;
@@ -1103,19 +1103,19 @@ export function createDaemonSessionActions({
         const result = await withActionTimeout(
           trackSessionConfigMutation(
             session,
-            session.setConfigOption('reasoning_effort', value),
+            session.setConfigOption('reasoning_effort', value, opts),
           ),
           'Set reasoning effort timed out',
         );
-        const nextReasoning = mapReasoningControls(
-          result.configOptions,
-          getConnection().reasoning?.effort,
-        );
+        const nextReasoning = mapReasoningControls(result.configOptions);
         const confirmed =
           value === 'none'
             ? nextReasoning?.enabled === false
-            : nextReasoning?.enabled === true && nextReasoning.effort === value;
-        if (!confirmed) {
+            : value === 'default'
+              ? nextReasoning?.enabled === true
+              : nextReasoning?.enabled === true &&
+                nextReasoning.effort === value;
+        if (!confirmed || (opts?.persist && result.persisted !== true)) {
           throw new Error(
             `Daemon did not confirm reasoning effort ${JSON.stringify(value)}`,
           );
@@ -1564,10 +1564,7 @@ export function createDaemonSessionActions({
               getModeFromSessionContext(context) ?? current.currentMode,
             currentModel:
               getModelFromSessionContext(context) ?? current.currentModel,
-            reasoning: mapSessionContextReasoning(
-              context,
-              current.reasoning?.effort,
-            ),
+            reasoning: mapSessionContextReasoning(context),
           };
         });
         return context;

@@ -2444,10 +2444,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               currentMode: currentMode ?? current.currentMode,
               reasoning:
                 configSnapshotCurrent && context !== undefined
-                  ? mapSessionContextReasoning(
-                      context,
-                      current.reasoning?.effort,
-                    )
+                  ? mapSessionContextReasoning(context)
                   : current.reasoning,
               displayName:
                 getSessionDisplayName(activeSession.state) ??

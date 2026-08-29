@@ -32,6 +32,7 @@ import {
   type DaemonSessionActions,
   type DaemonSessionNotice,
   type DaemonSessionOwnerSnapshot,
+  type DaemonReasoningControls,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
 import {
@@ -53,6 +54,7 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
   GoalSnapshotV2,
+  ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
@@ -1205,9 +1207,34 @@ type SessionActionsWithCreate = {
 
 type PendingReasoningIntent = {
   modelId: string;
-  value: string;
-  effort: string;
+  value: ReasoningSelection;
 };
+
+type ReasoningEffortSelection = Exclude<ReasoningSelection, 'none' | 'default'>;
+
+function isReasoningEffortSelection(
+  value: ReasoningSelection,
+): value is ReasoningEffortSelection {
+  return value !== 'none' && value !== 'default';
+}
+
+function getReasoningSelection(
+  reasoning: DaemonReasoningControls,
+): ReasoningSelection {
+  if (!reasoning.enabled) return 'none';
+  return isReasoningEffortSelection(reasoning.effort)
+    ? reasoning.effort
+    : 'default';
+}
+
+function reasoningPreviewSupports(
+  reasoning: DaemonReasoningControls,
+  value: ReasoningSelection,
+): boolean {
+  if (value === 'none') return reasoning.canDisable !== false;
+  if (value === 'default') return true;
+  return reasoning.efforts.includes(value);
+}
 
 const emptyComposerApi: WebShellComposerApi = {
   insertText: () => {},
@@ -6116,9 +6143,7 @@ export function App({
         reasoningIntent &&
         reasoningIntent.modelId === modelId &&
         reasoningPreview &&
-        (reasoningIntent.value === 'none'
-          ? reasoningPreview.canDisable !== false
-          : reasoningPreview.efforts.includes(reasoningIntent.value))
+        reasoningPreviewSupports(reasoningPreview, reasoningIntent.value)
           ? reasoningIntent.value
           : undefined;
       const modeId =
@@ -6640,7 +6665,10 @@ export function App({
       pendingReasoningIntent.value === 'none' &&
       welcomeReasoningPreview?.canDisable === false
     ) {
-      setPendingReasoningIntent(undefined);
+      setPendingReasoningIntent({
+        modelId: currentModel,
+        value: 'default',
+      });
     }
   }, [
     currentModel,
@@ -6651,9 +6679,10 @@ export function App({
   const validPendingReasoningIntent =
     pendingReasoningIntent?.modelId === currentModel &&
     welcomeReasoningPreview &&
-    (pendingReasoningIntent.value === 'none'
-      ? welcomeReasoningPreview.canDisable !== false
-      : welcomeReasoningPreview.efforts.includes(pendingReasoningIntent.value))
+    reasoningPreviewSupports(
+      welcomeReasoningPreview,
+      pendingReasoningIntent.value,
+    )
       ? pendingReasoningIntent
       : undefined;
   const displayedReasoning = hasAuthoritativeReasoningContext
@@ -6665,8 +6694,12 @@ export function App({
             ? validPendingReasoningIntent.value !== 'none'
             : welcomeReasoningPreview.enabled,
           effort:
-            validPendingReasoningIntent?.effort ??
-            welcomeReasoningPreview.effort,
+            validPendingReasoningIntent &&
+            isReasoningEffortSelection(validPendingReasoningIntent.value)
+              ? validPendingReasoningIntent.value
+              : validPendingReasoningIntent
+                ? (welcomeReasoningPreview.defaultEffort ?? 'default')
+                : welcomeReasoningPreview.effort,
         }
       : undefined;
   // The workspace the Changes dialog reads — the same active workspace the
@@ -11300,6 +11333,30 @@ export function App({
     (modelId: string) => {
       if (sessionWriteBlocked) return;
       if (!connectionRef.current.sessionId) {
+        const models = connectionRef.current.models;
+        const reasoningIntent = pendingReasoningIntentRef.current;
+        const sourceReasoningPreview = models?.find(
+          (model) => model.id === currentModelRef.current,
+        )?.reasoningPreview;
+        const sourceReasoningSelection =
+          reasoningIntent?.value ??
+          (sourceReasoningPreview
+            ? getReasoningSelection(sourceReasoningPreview)
+            : undefined);
+        const reasoningPreview = models?.find(
+          (model) => model.id === modelId,
+        )?.reasoningPreview;
+        const keepReasoningIntent =
+          sourceReasoningSelection &&
+          reasoningPreview &&
+          reasoningPreviewSupports(reasoningPreview, sourceReasoningSelection);
+        setPendingReasoningIntent(
+          reasoningIntent && keepReasoningIntent
+            ? { modelId, value: reasoningIntent.value }
+            : sourceReasoningSelection && !keepReasoningIntent
+              ? { modelId, value: 'default' }
+              : undefined,
+        );
         setPendingModel(modelId);
         return;
       }
@@ -11341,18 +11398,19 @@ export function App({
       sessionActions,
       sessionOwnerGuard,
       setPendingModel,
+      setPendingReasoningIntent,
       store,
       t,
     ],
   );
 
   const handleReasoningEffort = useCallback(
-    (value: string) => {
+    (value: ReasoningSelection) => {
       if (sessionWriteBlocked || !connectionRef.current.sessionId) {
         return Promise.resolve();
       }
       return sessionActions
-        .setReasoningEffort(value)
+        .setReasoningEffort(value, { persist: true })
         .catch((error: unknown) =>
           reportError(error, t('reasoning.updateFailed')),
         );
@@ -11361,7 +11419,7 @@ export function App({
   );
 
   const handleWelcomeReasoningEffort = useCallback(
-    (value: string) => {
+    (value: ReasoningSelection) => {
       const activeConnection = connectionRef.current;
       if (
         sessionWriteBlockedRef.current ||
@@ -11375,23 +11433,17 @@ export function App({
         (model) => model.id === modelId,
       )?.reasoningPreview;
       if (!preview) return;
-      const previous = pendingReasoningIntentRef.current;
       if (value === 'none') {
         if (preview.canDisable === false) return;
-        const previousEffort =
-          previous?.modelId === modelId &&
-          preview.efforts.includes(previous.effort)
-            ? previous.effort
-            : preview.effort;
-        setPendingReasoningIntent({
-          modelId,
-          value,
-          effort: previousEffort,
-        });
+        setPendingReasoningIntent({ modelId, value });
+        return;
+      }
+      if (value === 'default') {
+        setPendingReasoningIntent({ modelId, value });
         return;
       }
       if (!preview.efforts.includes(value)) return;
-      setPendingReasoningIntent({ modelId, value, effort: value });
+      setPendingReasoningIntent({ modelId, value });
     },
     [setPendingReasoningIntent],
   );

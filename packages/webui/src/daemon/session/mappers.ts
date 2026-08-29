@@ -14,6 +14,7 @@ import type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
   GoalSnapshotV2,
+  ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonCommandInfo,
@@ -22,6 +23,40 @@ import type {
   DaemonReasoningControls,
   DaemonTokenUsage,
 } from './types.js';
+
+type ReasoningEffortSelection = Exclude<ReasoningSelection, 'none' | 'default'>;
+
+const REASONING_SELECTIONS = new Set<ReasoningSelection>([
+  'none',
+  'default',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]);
+
+const REASONING_EFFORT_DEFAULT: ReasoningSelection = 'default';
+
+function parseReasoningSelection(
+  value: string | undefined,
+): ReasoningSelection | undefined {
+  return value && REASONING_SELECTIONS.has(value as ReasoningSelection)
+    ? (value as ReasoningSelection)
+    : undefined;
+}
+
+function isReasoningEffortSelection(
+  value: string | undefined,
+): value is ReasoningEffortSelection {
+  return (
+    value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'xhigh' ||
+    value === 'max'
+  );
+}
 
 export function mapProviderStatus(
   status: DaemonWorkspaceProvidersStatus | undefined,
@@ -137,7 +172,6 @@ export function mapSessionContextModels(
 
 export function mapReasoningControls(
   configOptions: unknown,
-  fallbackEffort?: string,
 ): DaemonReasoningControls | undefined {
   if (!Array.isArray(configOptions)) return undefined;
   const option = configOptions
@@ -146,46 +180,55 @@ export function mapReasoningControls(
   const rawOptions = option?.['options'];
   if (!option || !Array.isArray(rawOptions)) return undefined;
   const values = rawOptions.flatMap((item) => {
-    const value = getString(getRecord(item), 'value');
+    const value = parseReasoningSelection(getString(getRecord(item), 'value'));
     return value ? [value] : [];
   });
   const meta = getRecord(option['_meta']);
   const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
   const thinkingMandatory = reasoningMeta?.['thinkingMandatory'] === true;
   if (!thinkingMandatory && !values.includes('none')) return undefined;
-  const currentValue = getString(option, 'currentValue');
+  const currentValue = parseReasoningSelection(
+    getString(option, 'currentValue'),
+  );
   if (!currentValue || !values.includes(currentValue)) return undefined;
   if (thinkingMandatory && currentValue === 'none') return undefined;
-  const selectableValues = values.filter((value) => value !== 'none');
-  if (selectableValues.length === 0) return undefined;
+  const effortValues = values.filter(isReasoningEffortSelection);
   if (reasoningMeta?.['toggleOnly'] === true) {
+    if (!values.includes('default')) return undefined;
     return {
       enabled: currentValue !== 'none',
-      effort: selectableValues[0]!,
+      effort: 'default',
       efforts: [],
       ...(thinkingMandatory ? { canDisable: false } : {}),
     };
   }
-  const efforts = selectableValues;
-  const defaultEffort = getString(reasoningMeta, 'defaultEffort');
+  if (effortValues.length === 0) return undefined;
+  const rawDefaultEffort = parseReasoningSelection(
+    getString(reasoningMeta, 'defaultEffort'),
+  );
+  const defaultEffort =
+    isReasoningEffortSelection(rawDefaultEffort) &&
+    effortValues.includes(rawDefaultEffort)
+      ? rawDefaultEffort
+      : undefined;
   const effort =
-    [currentValue, fallbackEffort, defaultEffort].find(
-      (value): value is string =>
-        typeof value === 'string' && efforts.includes(value),
-    ) ?? efforts[0]!;
+    isReasoningEffortSelection(currentValue) &&
+    effortValues.includes(currentValue)
+      ? currentValue
+      : (defaultEffort ?? REASONING_EFFORT_DEFAULT);
   return {
     enabled: currentValue !== 'none',
     effort,
-    efforts,
+    efforts: effortValues,
+    ...(defaultEffort ? { defaultEffort } : {}),
     ...(thinkingMandatory ? { canDisable: false } : {}),
   };
 }
 
 export function mapSessionContextReasoning(
   status: DaemonSessionContextStatus | undefined,
-  fallbackEffort?: string,
 ): DaemonReasoningControls | undefined {
-  return mapReasoningControls(status?.state?.configOptions, fallbackEffort);
+  return mapReasoningControls(status?.state?.configOptions);
 }
 
 export function mapSupportedCommands(

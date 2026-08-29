@@ -20274,7 +20274,10 @@ describe('createServeApp', () => {
         },
       ];
       const bridge = fakeBridge({
-        setConfigOptionImpl: async () => ({ configOptions }),
+        setConfigOptionImpl: async () => ({
+          configOptions,
+          _meta: { 'qwenCode/reasoningSelectionPersisted': true },
+        }),
       });
       const app = createServeApp(baseOpts, undefined, { bridge });
 
@@ -20285,10 +20288,59 @@ describe('createServeApp', () => {
           sessionId: 'spoofed-B',
           configId: 'reasoning_effort',
           value: 'medium',
+          persist: true,
         });
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ configOptions });
+      expect(res.body).toEqual({ configOptions, persisted: true });
+      expect(bridge.setConfigOptionCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          req: {
+            sessionId: 'session-A',
+            configId: 'reasoning_effort',
+            value: 'medium',
+            _meta: { 'qwenCode/persistReasoningSelection': true },
+          },
+        },
+      ]);
+    });
+
+    it('rejects a non-boolean persist option', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          configId: 'reasoning_effort',
+          value: 'medium',
+          persist: 'yes',
+        });
+
+      expect(res.status).toBe(400);
+      expect(bridge.setConfigOptionCalls).toHaveLength(0);
+    });
+
+    it('does not trust persistence metadata when persist is omitted', async () => {
+      const configOptions = [{ id: 'reasoning_effort' }];
+      const bridge = fakeBridge({
+        setConfigOptionImpl: async () => ({ configOptions }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          configId: 'reasoning_effort',
+          value: 'medium',
+          _meta: { 'qwenCode/persistReasoningSelection': true },
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ configOptions, persisted: false });
       expect(bridge.setConfigOptionCalls).toEqual([
         {
           sessionId: 'session-A',

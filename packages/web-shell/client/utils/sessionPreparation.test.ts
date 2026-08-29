@@ -92,7 +92,9 @@ describe('createAndAttachSessionForPrompt', () => {
     });
 
     expect(order).toEqual(['create', 'attach', 'model', 'reasoning']);
-    expect(actions.setReasoningEffort).toHaveBeenCalledWith('medium');
+    expect(actions.setReasoningEffort).toHaveBeenCalledWith('medium', {
+      persist: true,
+    });
   });
 
   it('releases and clears the session when an explicit reasoning effort cannot be applied', async () => {

@@ -1605,7 +1605,12 @@ async function handleDaemonRoute(
     if (action === 'config-option') {
       const configId = readStringField(body, 'configId');
       const value = readStringField(body, 'value');
-      if (configId !== 'reasoning_effort' || !value) {
+      const persist = getRecordValue(body, 'persist');
+      if (
+        configId !== 'reasoning_effort' ||
+        !value ||
+        (persist !== undefined && typeof persist !== 'boolean')
+      ) {
         await badRequest(route, 'Invalid config-option request.');
         return;
       }
@@ -1618,23 +1623,37 @@ async function handleDaemonRoute(
       const allowedValues = isRecord(reasoningOption)
         ? reasoningOption['options']
         : undefined;
+      const reasoningMeta = isRecord(reasoningOption)
+        ? getRecordValue(reasoningOption, '_meta')
+        : undefined;
+      const qwenReasoningMeta = isRecord(reasoningMeta)
+        ? getRecordValue(reasoningMeta, 'qwenCode/reasoning')
+        : undefined;
+      const defaultEffort = isRecord(qwenReasoningMeta)
+        ? readStringField(qwenReasoningMeta, 'defaultEffort')
+        : undefined;
+      const selectedValue =
+        value === 'default' && defaultEffort ? defaultEffort : value;
       if (
         !Array.isArray(allowedValues) ||
-        !allowedValues.some(
-          (option) =>
-            isRecord(option) && readStringField(option, 'value') === value,
-        )
+        ((value !== 'default' || !defaultEffort) &&
+          !allowedValues.some((option) => {
+            return (
+              isRecord(option) &&
+              readStringField(option, 'value') === selectedValue
+            );
+          }))
       ) {
         await badRequest(route, 'Unsupported config-option value.');
         return;
       }
       const configOptions = currentConfigOptions.map((option) =>
         isRecord(option) && option['id'] === configId
-          ? { ...option, currentValue: value }
+          ? { ...option, currentValue: selectedValue }
           : option,
       );
       scenario.state.configOptions = configOptions;
-      await json(route, { configOptions });
+      await json(route, { configOptions, persisted: persist === true });
       return;
     }
     if (action === 'approval-mode') {

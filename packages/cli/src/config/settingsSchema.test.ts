@@ -65,6 +65,23 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('accepts none but never stores the default reasoning command', () => {
+      const options =
+        getSettingsSchema().model.properties.reasoningEffort.options;
+
+      expect(options?.map((option) => option.value)).toEqual([
+        'none',
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
+      expect(options).not.toContainEqual(
+        expect.objectContaining({ value: 'default' }),
+      );
+    });
+
     it('should have correct structure for each setting', () => {
       Object.entries(getSettingsSchema()).forEach(([_key, definition]) => {
         expect(definition).toHaveProperty('type');

@@ -2,7 +2,11 @@
 
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonWorkspaceGitStatus,
+  ReasoningSelection,
+} from '@qwen-code/sdk/daemon';
+import type { DaemonReasoningControls } from '@qwen-code/webui/daemon-react-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   WebShellCustomizationProvider,
@@ -11,7 +15,7 @@ import {
   type WebShellComposerTag,
   type WebShellCustomization,
 } from '../customization';
-import { I18nProvider } from '../i18n';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
 import type {
   MobileComposerBackend,
   SlashMenuState,
@@ -395,6 +399,9 @@ interface ChatEditorRenderProps {
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
   skills?: Array<{ name: string; description: string }>;
+  language?: WebShellLanguage;
+  reasoning?: DaemonReasoningControls;
+  onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
 }
 
 function renderChatEditorInto(
@@ -409,6 +416,7 @@ function renderChatEditorInto(
     customization,
     renderComposerTagTooltip,
     onComposerTagClick,
+    language = 'en',
     ...chatEditorProps
   } = props;
   if (composerTags) {
@@ -431,7 +439,7 @@ function renderChatEditorInto(
             onComposerTagClick,
           }}
         >
-          <I18nProvider language="en">
+          <I18nProvider language={language}>
             <ChatEditor
               onSubmit={() => undefined}
               commands={[]}
@@ -1661,6 +1669,76 @@ describe('ChatEditor toolbar popovers', () => {
     act(() => options[0]?.click());
 
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
+  });
+
+  it('localizes every fixed effort tier after a runtime language change', () => {
+    const props: ChatEditorRenderProps = {
+      visibleToolbarActions: ['model'],
+      currentModel: 'reasoning-model',
+      availableModels: [{ id: 'reasoning-model', label: 'Reasoning Model' }],
+      reasoning: {
+        enabled: true,
+        effort: 'max',
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+    };
+    const container = renderChatEditor(props);
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    let controls = document.querySelector('[data-web-shell-model-reasoning]');
+    expect(controls?.textContent).toContain('High');
+    expect(controls?.textContent).toContain('Max');
+    expect(controls?.textContent).not.toContain('reasoning.effort.');
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    rerenderChatEditor(container, { ...props, language: 'zh-CN' });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')
+        ?.click();
+    });
+    controls = document.querySelector('[data-web-shell-model-reasoning]');
+    expect(controls?.textContent).toContain('高');
+    expect(controls?.textContent).toContain('最高');
+    expect(controls?.textContent).not.toContain('High');
+    expect(controls?.textContent).not.toContain('reasoning.effort.');
+  });
+
+  it('renders an unknown provider default as Thinking without a Default effort', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: 'reasoning-model',
+      availableModels: [{ id: 'reasoning-model', label: 'Reasoning Model' }],
+      reasoning: {
+        enabled: true,
+        effort: 'default',
+        efforts: ['low', 'max'],
+      },
+    });
+
+    const modelButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(modelButton?.textContent).toContain('Thinking');
+    expect(modelButton?.textContent).not.toContain('Default');
+    expect(modelButton?.textContent).not.toContain('reasoning.effort.');
+
+    act(() => modelButton?.click());
+    const controls = document.querySelector('[data-web-shell-model-reasoning]');
+    expect(controls?.textContent).not.toContain('Default');
+    expect(
+      Array.from(
+        controls?.querySelectorAll('[data-web-shell-effort]') ?? [],
+      ).every((button) => button.getAttribute('aria-pressed') === 'false'),
+    ).toBe(true);
   });
 
   it('displays the model label instead of an opaque route id', () => {

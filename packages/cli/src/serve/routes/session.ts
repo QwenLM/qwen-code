@@ -136,6 +136,10 @@ import {
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import {
+  PERSIST_REASONING_SELECTION_META_KEY,
+  REASONING_SELECTION_PERSISTED_META_KEY,
+} from '../../acp-integration/model-configuration.js';
+import {
   formatGenerationSse,
   GENERATION_HEARTBEAT_MS,
   writeGenerationSseChunk,
@@ -6742,6 +6746,7 @@ export function registerSessionRoutes(
         const body = safeBody(req);
         const configId = body['configId'];
         const value = body['value'];
+        const persist = body['persist'];
         if (configId !== 'reasoning_effort') {
           res.status(400).json({
             error: '`configId` must be reasoning_effort',
@@ -6754,11 +6759,32 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (persist !== undefined && typeof persist !== 'boolean') {
+          res.status(400).json({
+            error: '`persist` must be a boolean when provided',
+          });
+          return;
+        }
         const response = await runtime.bridge.setSessionConfigOption(
           sessionId,
-          { sessionId, configId, value },
+          {
+            sessionId,
+            configId,
+            value,
+            ...(persist === true
+              ? {
+                  _meta: {
+                    [PERSIST_REASONING_SELECTION_META_KEY]: true,
+                  },
+                }
+              : {}),
+          },
         );
-        res.status(200).json(response);
+        res.status(200).json({
+          configOptions: response.configOptions,
+          persisted:
+            response._meta?.[REASONING_SELECTION_PERSISTED_META_KEY] === true,
+        });
       },
     ),
   );

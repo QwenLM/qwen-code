@@ -2,6 +2,7 @@ import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
 } from '@qwen-code/webui/daemon-react-sdk';
+import type { ReasoningSelection } from '@qwen-code/sdk/daemon';
 import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
 
 const SESSION_CREATED_CALLBACK_TIMEOUT_MS = 30_000;
@@ -22,7 +23,10 @@ type PromptSessionActions = {
   clearSession: () => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<unknown>;
-  setReasoningEffort: (value: string) => Promise<void>;
+  setReasoningEffort: (
+    value: ReasoningSelection,
+    opts?: { persist?: boolean },
+  ) => Promise<void>;
 };
 
 export function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
@@ -44,7 +48,7 @@ export async function createAndAttachSessionForPrompt({
 }: {
   sessionActions: PromptSessionActions;
   modelId?: string;
-  reasoningEffort?: string;
+  reasoningEffort?: ReasoningSelection;
   modeId?: string;
   workspaceCwd?: string;
   worktree?: { slug?: string };
@@ -133,7 +137,9 @@ export async function createAndAttachSessionForPrompt({
     }
     if (reasoningEffort) {
       preparationStep = 'set reasoning effort';
-      await sessionActions.setReasoningEffort(reasoningEffort);
+      await sessionActions.setReasoningEffort(reasoningEffort, {
+        persist: true,
+      });
     }
   } catch (error) {
     warn(`[WebShell] failed to ${preparationStep}:`, error);
