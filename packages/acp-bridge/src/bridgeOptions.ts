@@ -652,6 +652,10 @@ export interface CreateSubSessionInfo {
   model?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
+  /** Optional immutable creator attribution for the fresh session. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
   /**
    * The calling session's id. REQUIRED, and authenticated against the
    * connection's owned sessions before it reaches the host — it keys the

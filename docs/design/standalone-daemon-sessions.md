@@ -1213,32 +1213,59 @@ Estimated size: 300-500 production lines and 450-800 test lines.
 Exit criterion: consumers use the complete lifecycle without constructing
 routes or supplying internal cwd.
 
-### PR5: Explicit WebUI context
+### PR5: Explicit WebShell session context
 
-Suggested title: `feat(webui): Add explicit daemon session contexts`
+Suggested title: `feat(web-shell): Add explicit daemon session contexts`
 
-Dependency: PR4. [PR #8882](https://github.com/QwenLM/qwen-code/pull/8882) is
-merged; re-audit its final API and extend its transaction rather than
-duplicating it.
+Dependency: PR4. PR5 targets the current `main` ownership boundary: WebShell
+continues to consume the daemon React provider from `@qwen-code/webui`, so the
+provider changes land there and WebShell-facing types remain exported through
+the existing `daemon-react-sdk` entry. The later WebShell cutover can carry the
+same files by rename; it is not a prerequisite.
 
-- Add `standalone | workspace { cwd } | live` to connection and transition
-  state.
-- Classify from persisted source plus validated ownership, never cwd/runtime
-  kind alone.
-- Atomically commit or roll back client, transcript, internal cwd, product
-  context, warnings, and deferred intent.
-- Accept legacy `workspaceCwd` only at the workspace compatibility boundary,
-  normalize it immediately, and reject conflicts. It never selects standalone.
-- Add directory-recreated/missing/compromised and outcome-unknown notice state.
+- Add `standalone | workspace { cwd } | live` to provider props, connection
+  state, and transition state. Use a distinct `sessionContext` name because
+  `connection.context` already stores model context-window status.
+- Classify from an explicit requested context plus the authoritative restore
+  path. Standalone uses the dedicated capability-gated SDK methods. Workspace
+  uses its exact ordinary runtime cwd. Live resolves exactly one trusted
+  capability-advertised Live runtime and then relies on the daemon's persisted
+  source and ownership validation. Source strings or cwd alone never select a
+  product context.
+- Follow the loading-skeleton switching model restored by
+  [PR #9129](https://github.com/QwenLM/qwen-code/pull/9129): publish the target
+  context, clear the old transcript, and keep the failed target visible with an
+  explicit error. Do not restore the transaction or roll back to the previous
+  conversation. A generation guard prevents a superseded completion from
+  publishing its client, transcript, warnings, or context.
+- Accept legacy `workspaceCwd` only at one compatibility boundary, normalize it
+  immediately to `{ kind: 'workspace', cwd }`, and reject conflicts with an
+  explicit context. It never selects standalone or Live. Existing callers that
+  provide neither field retain the current primary-workspace behavior.
+- Keep daemon-internal routing cwd private. `connection.workspaceCwd` remains a
+  product workspace only and is absent for standalone and Live sessions.
+  Standalone working-directory state and outcome-unknown recovery remain in
+  target-scoped standalone connection state.
+- Skip workspace providers, Git, preheat, and workspace event invalidation for
+  standalone and Live contexts. Session-scoped commands, model context, Goal,
+  transcript, prompt, and permission behavior remain shared.
+- Standalone creation awaits the SDK operation directly so the SDK can complete
+  its single exact recovery lookup. It is never wrapped in the provider's
+  shorter generic action timeout and is never retried automatically.
 
-Verification covers all #8882 failure and supersession cases plus cross-context
-switching, capability absence, legacy source, outcome recovery, warning
-rollback, and no-primary-fallback.
+Verification covers normalization conflicts, exact workspace/standalone/Live
+dispatch, cross-context switching, capability absence, ambiguous Live runtime,
+legacy callers, reconnect and reload, outcome recovery, target-scoped directory
+warnings, supersession, and no-primary-fallback.
 
-Estimated size: 350-650 production lines and 650-1,100 test lines.
+Audited implementation footprint: approximately 910 added production lines and
+1,250 added test lines. Most production churn is the explicit routing,
+transition, reconnect, and target-scoped error handling inside the existing
+provider rather than new abstraction surface.
 
-Exit criterion: WebUI represents and switches all contexts explicitly while
-existing visible WebShell behavior remains unchanged.
+Exit criterion: the daemon React provider represents and switches all contexts
+explicitly without changing visible WebShell entry points. PR6 owns global New
+Chat, Recents, lifecycle controls, deep links, and project-control visibility.
 
 ### PR6: WebShell product UI
 
@@ -1278,15 +1305,15 @@ flowchart LR
     PR1 --> PR2["PR2 standalone core"]
     PR2 --> PR3["PR3 complete daemon API"]
     PR3 --> PR4["PR4 SDK"]
-    PR4 --> PR5["PR5 WebUI context"]
-    T["PR #8882 transactional switching"] --> PR5
+    PR4 --> PR5["PR5 WebShell session context"]
+    S["PR #9129 loading-skeleton switching"] --> PR5
     PR5 --> PR6["PR6 WebShell"]
 ```
 
-PR0 through PR6 are the required feature sequence. PR5 builds on the final API
-merged by PR #8882. PR #8874 (workspace uploads) and PR #8817 (fork/move
-foundations) are follow-up dependencies rather than MVP blockers. No capability
-is advertised before PR3.
+PR0 through PR6 are the required feature sequence. PR5 builds on the
+loading-skeleton switching model restored by PR #9129. PR #8874 (workspace
+uploads) and PR #8817 (fork/move foundations) are follow-up dependencies rather
+than MVP blockers. No capability is advertised before PR3.
 
 Expected total implementation size is approximately 3,800-6,170 production
 lines plus 7,600-11,800 test lines. The companion document is excluded from

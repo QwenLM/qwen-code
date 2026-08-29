@@ -510,6 +510,17 @@ function coveredWithLedger(prev: Record<string, unknown>): string {
   return p;
 }
 
+/**
+ * The raw `rec` array inside the body's ledger marker. `parseLedger` is
+ * deliberately blind to it (write-only telemetry for the workflow consumer),
+ * so the tests read the serialized JSON exactly the way that consumer does.
+ */
+function markerRec(body: string): string[] | undefined {
+  const m = /<!-- qwen-review-ledger (.*?) -->/.exec(body);
+  if (!m) return undefined;
+  return (JSON.parse(m[1]) as { rec?: string[] }).rec;
+}
+
 /** Agents given the diff, that never opened it — and said so at length. */
 function idlePlan(): string {
   transcript('a1', goodPrompt(1), {
@@ -2088,6 +2099,150 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
       '20 Suggestion-level finding(s) this review confirmed',
     );
     expect(atCap.body).not.toContain('…and');
+  });
+});
+
+describe('composeReview — pre-verify carried-ledger dedup disclosure (#10105)', () => {
+  // The disclosure is deterministic: it reads the report `dedup-candidates`
+  // wrote beside the plan, bound to the plan diff's hash — the same freshness
+  // key as the script-lint gate, but non-capping: absent or stale renders
+  // nothing, because nothing is owed.
+  const PR = 8255;
+  function planWithReport(over: Record<string, unknown> = {}): string {
+    const p = coveredPlan(['verify', 'reverse-audit'], { prNumber: PR });
+    writeFileSync(
+      join(dirname(p), `qwen-review-pr-${PR}-ledger-dedup.json`),
+      JSON.stringify({
+        v: 1,
+        diffHash: DIFF_HASH,
+        sources: { ledger: { round: 3, findings: 2 }, artifact: null },
+        kept: [],
+        dropped: [
+          dropEntry('R3-2'),
+          dropEntry('R3-2'),
+          dropEntry('D5-1'),
+          dropEntry('not-an-id'),
+        ],
+        droppedCount: 4,
+        note: '',
+        ...over,
+      }),
+    );
+    return p;
+  }
+  const dropEntry = (matchedId: string) => ({
+    file: 'src/a.ts',
+    line: 42,
+    title: 'a re-derived claim',
+    severity: 'Suggestion',
+    matchedId,
+    matchedTitle: 'the carried claim',
+    via: 'posted',
+  });
+
+  // Not base(): its planPath default runs coveredPlan() again on the same
+  // path and would overwrite the pr-numbered plan the report name derives
+  // from (same trap the Chinese-fold duplicate test names).
+  function input(
+    planPath: string,
+    over: Partial<ComposeReviewInput> = {},
+  ): ComposeReviewInput {
+    return {
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      ...over,
+    };
+  }
+
+  it('renders the set-aside count with the validated ids only', () => {
+    const r = composeReview(input(planWithReport()));
+    // Beside the disclosure, "No issues found" would be a lie — the
+    // reviewers derived those candidates; the round set them aside.
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('No blocking issues. LGTM!');
+    expect(r.body).not.toContain('No issues found');
+    expect(r.body).toContain(
+      "4 candidate finding(s) this round's reviewers re-derived matched entries already carried on this PR and were set aside before verification (R3-2 ×2, D5-1)",
+    );
+    // The shapeless id is counted but never quoted — the titles stay in the
+    // report; only ids the two shape tests vouch for reach the posted body.
+    expect(r.body).not.toContain('not-an-id');
+    // Not low signal: the reviewers DID report findings — this round set
+    // them aside as carried. The fixture's srcDiffLines already exceed the
+    // threshold, so the carve-out is the only thing keeping the false
+    // "none of the N review agents reported a finding" claim out of the
+    // verdict line, the composed JSON and the archived report.
+    expect(r.lowSignal).toBeNull();
+  });
+
+  it('caps the quoted ids at twelve and names the overflow count', () => {
+    const drops = Array.from({ length: 14 }, (_, i) =>
+      dropEntry(`R3-${i + 1}`),
+    );
+    const r = composeReview(
+      input(planWithReport({ dropped: drops, droppedCount: drops.length })),
+    );
+    expect(r.body).toContain(
+      '(R3-1, R3-2, R3-3, R3-4, R3-5, R3-6, R3-7, R3-8, R3-9, R3-10, R3-11, R3-12, +2 more)',
+    );
+    expect(r.body).not.toContain('R3-13');
+    // Exactly at the cap there is no overflow suffix — no ", +0 more".
+    const atCap = drops.slice(0, 12);
+    const r2 = composeReview(
+      input(planWithReport({ dropped: atCap, droppedCount: atCap.length })),
+    );
+    expect(r2.body).toContain(
+      '(R3-1, R3-2, R3-3, R3-4, R3-5, R3-6, R3-7, R3-8, R3-9, R3-10, R3-11, R3-12)',
+    );
+    expect(r2.body).not.toContain('more)');
+  });
+
+  it('a dedup-only APPROVE keeps its paragraph break before the disclosure', () => {
+    const r = composeReview(input(planWithReport()));
+    // The separator ternary's dedup arm is the only thing standing between
+    // the verdict sentence and a wall-of-text weld on this branch.
+    expect(r.body).toContain(
+      'No blocking issues. LGTM! ✅\n\n4 candidate finding(s)',
+    );
+  });
+
+  it('the set-aside disclosure trims on its own rank, never as the deferral list', () => {
+    // A round that set candidates aside, has zero posture deferrals (an
+    // all-Critical shape), and overflows the body budget: every trim
+    // surface keys on the rank that went, so the notice must name the
+    // disclosure itself — not a "deferred-findings list" that does not
+    // exist — and the archived `bodyTrim.deferralList` pointer must stay
+    // false. The blocker is far past the budget, so the body lands on the
+    // truncation path, exactly the shape the round-1 probe measured.
+    const r = composeReview(
+      input(planWithReport(), { bodyCriticals: ['B'.repeat(60_000)] }),
+    );
+    expect(r.body.length).toBeLessThanOrEqual(65536);
+    expect(r.body).toContain('the carried-ledger dedup disclosure did not fit');
+    expect(r.body).not.toContain('the deferred-findings list');
+    expect(r.bodyTrim.deferralList).toBe(false);
+    expect(r.bodyTrim.sections).toBeGreaterThan(0);
+  });
+
+  it('renders on a blocking event too — the drop happened either way', () => {
+    const r = composeReview(input(planWithReport(), { criticalsInline: 1 }));
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('set aside before verification');
+  });
+
+  it('renders nothing off a stale report — its diffHash is another round’s', () => {
+    const r = composeReview(
+      input(planWithReport({ diffHash: 'another-diff' })),
+    );
+    expect(r.body).not.toContain('set aside before verification');
+  });
+
+  it('renders nothing when no report exists', () => {
+    const r = composeReview(base({}));
+    expect(r.body).not.toContain('set aside before verification');
   });
 });
 
@@ -13095,6 +13250,35 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(r.body).not.toContain('Convergence:');
     expect(r.recommendations).toBeUndefined();
+    expect(markerRec(r.body)).toBeUndefined();
+  });
+
+  it('republishes the matched codes in the ledger marker, off the same derivation (#10107)', () => {
+    // The marker is the one surface an OUTSIDE consumer can reach — the
+    // takeover loop reads the posted review body, not the composed result —
+    // and the codes it carries must be the SAME set the result carries and
+    // the paragraph renders from, or the loop would wire actions to a round
+    // the human-readable half does not describe.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 1,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    const codes = (r.recommendations ?? []).map((x) => x.code);
+    expect(codes.length).toBeGreaterThan(0);
+    expect(markerRec(r.body)).toEqual(codes);
   });
 
   it('discloses a posture that is engaged in name and not in effect', () => {
