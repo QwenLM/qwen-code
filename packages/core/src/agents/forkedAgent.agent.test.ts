@@ -1132,7 +1132,16 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (parent as any).toolRegistry = parentRegistry;
 
-    const scopedPm = { id: 'scoped-pm-marker' } as never;
+    // Production memory-scoped overrides implement the full registration
+    // surface (MemoryScopedPermissionManager in memory-scoped-agent-config.ts
+    // picks getToolRegistrationStatus): createToolRegistry's registerLazy
+    // resolves the PM through getPermissionManager() and consults it at
+    // registration time (#10075), so the stub must answer that call or the
+    // bare-mode factories are skipped and ensureTool resolves undefined.
+    const scopedPm = {
+      id: 'scoped-pm-marker',
+      getToolRegistrationStatus: async () => 'registered' as const,
+    } as never;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const scopedConfig = Object.create(parent) as any;
     scopedConfig.getPermissionManager = () => scopedPm;
