@@ -30,8 +30,6 @@ import { ICON } from '../constants.js';
 import { toOriginalKey } from './key-map.js';
 import { C } from './theme.js';
 
-const SESSION_START = Date.now();
-
 /** Close the dialog on a raw Escape, like the other dialog hosts. */
 function useEscToClose(onClose: () => void, enabled: boolean) {
   const renderer = useRenderer();
@@ -119,10 +117,13 @@ export function OpenTuiStatsDialog(props: {
     }
   });
 
-  const metrics = uiTelemetryService.getMetrics();
+  const sessionId = config?.getSessionId?.();
+  const metrics = sessionId
+    ? uiTelemetryService.getMetricsForSession(sessionId)
+    : uiTelemetryService.getMetrics();
   const computed = computeSessionStats(metrics);
-  const sessionId = config?.getSessionId?.() ?? 'n/a';
-  const wallDuration = Date.now() - SESSION_START;
+  const wallDuration =
+    Date.now() - uiTelemetryService.getSessionStartTime().getTime();
 
   let totalInput = 0;
   let totalOutput = 0;
@@ -229,7 +230,7 @@ export function OpenTuiStatsDialog(props: {
       ) : (
         <box flexDirection="column">
           <Row label="Session ID:">
-            <text fg={C.text}>{sessionId}</text>
+            <text fg={C.text}>{sessionId ?? 'n/a'}</text>
           </Row>
 
           <SectionTitle>Interaction Summary</SectionTitle>

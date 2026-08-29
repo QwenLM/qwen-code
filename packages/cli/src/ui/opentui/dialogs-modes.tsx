@@ -107,7 +107,7 @@ const Shell = ({
 
 const MODE_DESC: Record<string, string> = {
   default: 'Prompt for each tool',
-  auto_edit: 'Auto-approve edits',
+  'auto-edit': 'Auto-approve edits',
   auto: 'Full auto, safer rules',
   yolo: 'Auto-approve everything',
   plan: 'Plan only, no execution',

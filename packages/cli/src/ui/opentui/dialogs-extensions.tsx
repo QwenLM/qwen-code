@@ -297,14 +297,16 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
         return;
       }
       if (action === 'mark-update') {
-        void Promise.resolve(onDetailAction?.(currentRow, 'mark-update')).then(
-          (state) => {
+        void Promise.resolve(onDetailAction?.(currentRow, 'mark-update'))
+          .then((state) => {
             if (state) setCheckedUpdateState(state);
-          },
-        );
+          })
+          .catch(() => {});
         return;
       }
-      onDetailAction?.(currentRow, action);
+      void Promise.resolve(onDetailAction?.(currentRow, action)).catch(
+        () => {},
+      );
     },
   });
 
@@ -338,7 +340,10 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     resyncKey: view,
     focused: view === 'scope-select',
     onSelect: (scope) => {
-      if (currentRow) onDetailAction?.(currentRow, 'change-scope', scope);
+      if (currentRow)
+        void Promise.resolve(
+          onDetailAction?.(currentRow, 'change-scope', scope),
+        ).catch(() => {});
       setView('detail');
     },
   });
@@ -356,7 +361,10 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
       if (view === 'uninstall-confirm') {
         // y/Enter confirms (ink UninstallConfirmStep), n backs out.
         if (original.sequence === 'y' || name === 'return') {
-          if (currentRow) onDetailAction?.(currentRow, 'uninstall');
+          if (currentRow)
+            void Promise.resolve(
+              onDetailAction?.(currentRow, 'uninstall'),
+            ).catch(() => {});
           setView('list');
         } else if (original.sequence === 'n') {
           setView('detail');

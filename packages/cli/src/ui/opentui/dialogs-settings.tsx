@@ -107,8 +107,10 @@ export interface SettingsListItem {
 }
 
 /** The settings rows, sourced from the same schema as the ink dialog. */
-export function buildSettingsListItems(): SettingsListItem[] {
-  return getDialogSettingKeys().map((key) => {
+export function buildSettingsListItems(options?: {
+  excludeWorkspaceRestricted?: boolean;
+}): SettingsListItem[] {
+  return getDialogSettingKeys(options).map((key) => {
     const definition = getSettingDefinition(key);
     return {
       key,
@@ -317,7 +319,9 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
     setScrollOffset(0);
   }, [searchQuery]);
 
-  const allItems = buildSettingsListItems();
+  const allItems = buildSettingsListItems({
+    excludeWorkspaceRestricted: selectedScope === SettingScope.Workspace,
+  });
   const items = filterSettingsItems(allItems, searchQuery, (key) =>
     getScopeMessageForSetting(key, selectedScope, settings),
   );

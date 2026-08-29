@@ -157,6 +157,7 @@ export function OpenTuiEditorDialog({ settings, onClose, notify }: P) {
     const item = scopeItems[idx];
     if (!item) return;
     setScope(item.value);
+    setSel(scopeIndexOf(item.value));
   };
   const applyScope = () => {
     const item = scopeItems[scopeSel];

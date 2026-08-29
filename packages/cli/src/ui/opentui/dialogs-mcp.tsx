@@ -353,8 +353,11 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
   const navigateBack = () =>
     setNavigationStack((prev) => (prev.length <= 1 ? prev : prev.slice(0, -1)));
 
-  const flatServers = servers;
   const groupedServers = groupMcpServersBySource(servers);
+  // Derive the flat navigation list from the grouped render order, not the
+  // raw prop order: groupMcpServersBySource reorders by source (user first),
+  // so indexing the raw prop would open a different server than highlighted.
+  const flatServers = groupedServers.flatMap((group) => group.servers);
   const serverTools = selectedServer
     ? (getServerTools?.(selectedServer) ?? [])
     : [];
