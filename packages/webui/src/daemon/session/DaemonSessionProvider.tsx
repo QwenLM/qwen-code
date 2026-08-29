@@ -291,13 +291,13 @@ function findReplayActivePromptId(
 ): string | undefined {
   let activePromptId: string | undefined;
   for (const event of events) {
-    if (isPendingPromptEvent(event)) continue;
     const promptId = eventPromptId(event);
     if (!promptId) continue;
     if (event.type === 'turn_complete' || event.type === 'turn_error') {
       if (activePromptId === promptId) activePromptId = undefined;
       continue;
     }
+    if (isPendingPromptEvent(event)) continue;
     // Keep the first unresolved prompt. Later events can describe queued
     // prompts while the restored turn is still running and must not steal its
     // terminal correlation.
@@ -2407,6 +2407,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 restoredActivePrompt
               ) {
                 settleRestoredActivePrompt();
+                if (!hasSessionActivePrompt()) setPromptStatus('idle');
               }
               if (!activePromptSettled && !restoredPromptSettled) continue;
               const settlement = promptSettledFromTurnEvent(

@@ -12257,7 +12257,11 @@ describe('DaemonSessionProvider', () => {
             v: 1,
             type: 'turn_complete',
             promptId: 'prompt-1',
-            data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+            data: {
+              sessionId: firstSession.sessionId,
+              promptId: 'prompt-1',
+              stopReason: 'end_turn',
+            },
           },
         ],
         liveJournal: [],
@@ -12267,7 +12271,9 @@ describe('DaemonSessionProvider', () => {
     sdkMocks.sessions.push(firstSession, reloadedSession);
 
     const settlements: DaemonPromptSettledEvent[] = [];
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
     function Harness() {
+      promptStatus = useDaemonPromptStatus();
       useDaemonPromptSettled((event) => settlements.push(event));
       return null;
     }
@@ -12291,6 +12297,7 @@ describe('DaemonSessionProvider', () => {
         transcriptComplete: true,
       }),
     ]);
+    expect(promptStatus).toBe('idle');
   });
 
   it('fails closed when an idle reload lacks the restored prompt terminal', async () => {
@@ -12396,32 +12403,52 @@ describe('DaemonSessionProvider', () => {
           {
             id: 11,
             v: 1,
+            type: 'session_update',
+            promptId: 'prompt-finished',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'finished answer' },
+              },
+            },
+          },
+          {
+            id: 12,
+            v: 1,
             type: 'turn_complete',
             promptId: 'prompt-finished',
-            data: { promptId: 'prompt-finished', stopReason: 'end_turn' },
+            data: {
+              sessionId: firstSession.sessionId,
+              promptId: 'prompt-finished',
+              stopReason: 'end_turn',
+            },
+          },
+          {
+            id: 13,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-successor',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'successor answer' },
+              },
+            },
           },
         ],
         liveJournal: [],
       },
       events: async function* successorEvents() {
         yield {
-          id: 12,
-          v: 1,
-          type: 'session_update',
-          promptId: 'prompt-successor',
-          data: {
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: 'successor answer' },
-            },
-          },
-        } satisfies DaemonEvent;
-        yield {
-          id: 13,
+          id: 14,
           v: 1,
           type: 'turn_complete',
           promptId: 'prompt-successor',
-          data: { promptId: 'prompt-successor', stopReason: 'end_turn' },
+          data: {
+            sessionId: firstSession.sessionId,
+            promptId: 'prompt-successor',
+            stopReason: 'end_turn',
+          },
         } satisfies DaemonEvent;
         successorCompleted.resolve();
       },
