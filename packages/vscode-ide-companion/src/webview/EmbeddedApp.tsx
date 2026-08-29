@@ -1359,11 +1359,15 @@ export function EmbeddedApp() {
           cycleModeOnTab
           onUserMessageEditRequest={(turnIndex, content) => {
             const queuedPrompt = latestSubmittedPromptRef.current;
-            const editsQueuedPrompt =
-              queuedPrompt?.sessionId === runtime.sessionId &&
-              queuedPrompt.prompt !== content;
-            const editContent = editsQueuedPrompt
-              ? queuedPrompt.prompt
+            const queuedPromptForEdit =
+              queuedPrompt &&
+              queuedPrompt.sessionId === runtime.sessionId &&
+              queuedPrompt.prompt !== content
+                ? queuedPrompt
+                : undefined;
+            const editsQueuedPrompt = queuedPromptForEdit !== undefined;
+            const editContent = queuedPromptForEdit
+              ? queuedPromptForEdit.prompt
               : content;
             composerRef.current?.clear({ text: true, tags: true });
             composerRef.current?.setText(editContent);
