@@ -223,6 +223,10 @@ export function getAuthTypeFromEnv(
     return AuthType.USE_VERTEX_AI;
   }
 
+  if (env['GOOGLE_CLOUD_PROJECT'] && env['GOOGLE_MODEL']) {
+    return AuthType.USE_VERTEX_AI;
+  }
+
   if (
     env['ANTHROPIC_API_KEY'] &&
     env['ANTHROPIC_MODEL'] &&

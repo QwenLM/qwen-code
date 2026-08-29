@@ -41,6 +41,7 @@ import {
   discoverPrompts,
   discoverResources,
   getAllMCPServerStatuses,
+  getMCPServerLastError,
   getMcpOAuthDialogInstruction,
   getMCPServerStatus,
   hasNetworkTransport,
@@ -2137,6 +2138,52 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
     });
 
+    it('discoverAndReturn records the discovery failure cause in the status registry (issue #9944)', async () => {
+      // Same carrier as connect()'s catch: a server whose connect()
+      // succeeds but discovery fails (up-but-empty) reaches
+      // discoverAndReturn()'s catch, which the manager swallows for
+      // best-effort discovery. `qwen mcp reconnect` relies on
+      // `getMCPServerLastError` to print the cause — the status enum alone
+      // only says DISCONNECTED.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({ prompts: [] }),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const client = new McpClient(
+        'discovery-cause-server',
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      await expect(
+        client.discoverAndReturn(cfgWithResources()),
+      ).rejects.toThrow('No prompts, tools, or resources found on the server.');
+
+      expect(getMCPServerLastError('discovery-cause-server')).toBe(
+        'No prompts, tools, or resources found on the server.',
+      );
+
+      removeMCPServerStatus('discovery-cause-server');
+    });
+
     it('keeps a server with only app-visible tools connected', async () => {
       mockAppOnlyMcpServer();
       const client = new McpClient(
@@ -3562,6 +3609,13 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
       // The entry must remain absent — no resurrection.
       expect(getAllMCPServerStatuses().has('racy-server')).toBe(false);
+      // Same invariant for the failure-cause map: the status write is
+      // suppressed by the `isDisconnecting` guard, and the lastError record
+      // in connect()'s catch must be gated the same way — otherwise the
+      // doomed in-flight connect resurrects an orphan cause entry that
+      // `removeMCPServerStatus` already dropped (persisting until process
+      // exit and misattributing to a later re-added incarnation).
+      expect(getMCPServerLastError('racy-server')).toBeUndefined();
     });
 
     it('disconnect() propagates DISCONNECTED to the global registry', async () => {
@@ -3613,6 +3667,189 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
       // Cleanup the registry entry so this test doesn't leak.
       removeMCPServerStatus('healthy-server');
+    });
+
+    it('disconnect() terminates a Streamable HTTP session before closing the transport (issue #9944)', async () => {
+      // The SDK's `transport.close()` only tears down local state; the
+      // server-side session stays alive unless we send the spec's DELETE
+      // (`terminateSession()`). An abandoned session keeps occupying
+      // single-session servers, which then reject every later `initialize`
+      // with "Server already initialized".
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      const callOrder: string[] = [];
+      const mockedTransport = {
+        terminateSession: vi.fn().mockImplementation(async () => {
+          callOrder.push('terminateSession');
+        }),
+        close: vi.fn().mockImplementation(async () => {
+          callOrder.push('close');
+        }),
+      };
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        mockedTransport as unknown as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const client = new McpClient(
+        'http-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        { getDirectories: () => [] } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await client.connect();
+      await client.disconnect();
+
+      expect(mockedTransport.terminateSession).toHaveBeenCalledTimes(1);
+      // Termination must happen while the transport can still send
+      // requests — i.e. before `close()` aborts it.
+      expect(callOrder).toEqual(['terminateSession', 'close']);
+
+      removeMCPServerStatus('http-server');
+    });
+
+    it('disconnect() swallows session-termination failures (issue #9944)', async () => {
+      // A dead server must not block teardown: the DELETE fails, but
+      // disconnect still completes and closes the transport.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      const mockedTransport = {
+        terminateSession: vi.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        mockedTransport as unknown as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const client = new McpClient(
+        'dead-http-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        { getDirectories: () => [] } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await client.connect();
+      await expect(client.disconnect()).resolves.toBeUndefined();
+      expect(mockedTransport.close).toHaveBeenCalledTimes(1);
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+
+      removeMCPServerStatus('dead-http-server');
+    });
+
+    it('disconnect() does not hang when terminateSession never responds (issue #9944)', async () => {
+      // A live-but-unresponsive server (TCP open, never answers the DELETE)
+      // must not block teardown: the SDK's `terminateSession()` has no
+      // timeout of its own and the transport's abort controller is only
+      // aborted by `close()` — which runs after the await. `disconnect()`
+      // therefore bounds the call and proceeds to `close()`, which aborts
+      // the still-in-flight request.
+      vi.useFakeTimers();
+      try {
+        const mockedClient = {
+          connect: vi.fn(),
+          registerCapabilities: vi.fn(),
+          setRequestHandler: vi.fn(),
+          close: vi.fn(),
+          getInstructions: vi.fn(),
+        };
+        vi.mocked(ClientLib.Client).mockReturnValue(
+          mockedClient as unknown as ClientLib.Client,
+        );
+        const mockedTransport = {
+          terminateSession: vi.fn(() => new Promise<void>(() => {})), // never settles
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+        vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+          mockedTransport as unknown as SdkClientStdioLib.StdioClientTransport,
+        );
+
+        const client = new McpClient(
+          'unresponsive-http-server',
+          { command: 'test-command' },
+          {} as ToolRegistry,
+          {} as PromptRegistry,
+          { getDirectories: () => [] } as unknown as WorkspaceContext,
+          false,
+        );
+
+        await client.connect();
+        const disconnected = client.disconnect();
+        // The bounded wait fires, and teardown completes even though the
+        // DELETE never got an answer.
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(disconnected).resolves.toBeUndefined();
+        expect(mockedTransport.close).toHaveBeenCalledTimes(1);
+        expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+
+        removeMCPServerStatus('unresponsive-http-server');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('records the connect failure cause in the status registry (issue #9944)', async () => {
+      // Discovery is best-effort and swallows connect errors (the manager's
+      // catch logs them via debugLogger only), so the status enum alone
+      // cannot tell a consumer WHY a server is not CONNECTED. connect() must
+      // record the cause so `qwen mcp reconnect` can print it.
+      const mockedClient = {
+        connect: vi
+          .fn()
+          .mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:3939')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn().mockResolvedValue(undefined),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
+
+      const client = new McpClient(
+        'cause-recording-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        { getDirectories: () => [] } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await expect(client.connect()).rejects.toThrow(
+        'connect ECONNREFUSED 127.0.0.1:3939',
+      );
+      expect(getMCPServerLastError('cause-recording-server')).toBe(
+        'connect ECONNREFUSED 127.0.0.1:3939',
+      );
+
+      // A recovered connection clears the stale cause.
+      mockedClient.connect.mockResolvedValue(undefined);
+      await client.connect();
+      expect(getMCPServerLastError('cause-recording-server')).toBeUndefined();
+
+      removeMCPServerStatus('cause-recording-server');
     });
   });
 

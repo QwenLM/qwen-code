@@ -77,9 +77,11 @@ const {
   };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
   return {
     ...actual,
     useWorkspace: () => ({
@@ -927,7 +929,11 @@ describe('GitDialog', () => {
     await flush();
 
     expect(updateSessionMetadata).toHaveBeenCalledWith('sess-1', {
-      pr: { number: 99, url: 'https://github.com/o/r/pull/99' },
+      pr: {
+        number: 99,
+        url: 'https://github.com/o/r/pull/99',
+        state: 'open',
+      },
     });
   });
 
@@ -1005,7 +1011,11 @@ describe('GitDialog', () => {
     await flush();
 
     expect(updateSessionMetadata).toHaveBeenCalledWith('sess-1', {
-      pr: { number: 99, url: 'https://github.com/o/r/pull/99' },
+      pr: {
+        number: 99,
+        url: 'https://github.com/o/r/pull/99',
+        state: 'open',
+      },
     });
     // The binding failure is a warning only — the created PR status stays.
     expect(document.body.textContent).toContain('#99');
@@ -1107,7 +1117,11 @@ describe('GitDialog', () => {
     await flush();
 
     expect(updateSessionMetadata).toHaveBeenCalledWith('sess-fresh', {
-      pr: { number: 99, url: 'https://github.com/o/r/pull/99' },
+      pr: {
+        number: 99,
+        url: 'https://github.com/o/r/pull/99',
+        state: 'open',
+      },
     });
   });
 });

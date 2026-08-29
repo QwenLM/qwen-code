@@ -8,7 +8,12 @@ import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
+import type { ToolRegistry } from './tool-registry.js';
+import { ToolNames } from './tool-names.js';
 import { escapeXml } from '../utils/xml.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL');
 
 /**
  * Builds the LLM-facing content string when a skill body is injected.
@@ -270,13 +275,14 @@ ${escapeXml(entry.description)}
  * auto-approved for the rest of the session instead of prompting. This is an
  * additive grant only — it never hides or restricts the tools the model sees.
  *
- * Caveat under an active `permissions.allow` registry allowlist (#9827): the
- * grant flips the runtime permission predicate, but it can never REGISTER a
- * tool that the startup allowlist skipped at registration — the registry is
- * built once in `Config.initialize`, so such a tool still fails
- * TOOL_NOT_REGISTERED until the rule is added to settings `permissions.allow`
- * and the session restarts. `PermissionManager.addSessionAllowRule` logs this
- * caveat on the first such grant.
+ * Caveat under an active `settings.tools.eager` allowlist (#9827): the grant
+ * flips the runtime permission predicate, but it can never promote a deferred
+ * tool into the eager model request — the registry is built once in
+ * `Config.initialize`, so such a tool stays deferred (still registered and
+ * loadable via `tool_search`). An eager-by-default tool omitted by
+ * `tools.eager` needs its name added plus a restart; a tool deferred by
+ * default needs `tools.visible` instead. `permissions.allow` itself never
+ * gates registration (#10075).
  *
  * No-ops when there is no permission manager or nothing to grant.
  */
@@ -289,5 +295,31 @@ export function applySkillAllowedTools(
   }
   for (const rule of allowedTools) {
     permissionManager.addSessionAllowRule(rule);
+  }
+}
+
+/**
+ * Conservatively drop ALL loaded-skill tracking after a destructive
+ * history rewrite (compaction, truncation, orphan stripping). The rewrite
+ * may have removed a skill body; the dedup guard must not leave that
+ * skill permanently unreloadable behind "already loaded in context".
+ * Over-clearing is the safe direction: a still-resident body costs at
+ * most one duplicate injection on the next invoke, while a stale entry
+ * makes the body unrecoverable until session restart.
+ *
+ * Duck-typed (mirroring `clearCommand`'s existing `clearLoadedSkills`
+ * call) so history-rewrite sites don't need a runtime import of the
+ * SkillTool class.
+ */
+export function clearLoadedSkillTracking(
+  toolRegistry: ToolRegistry | undefined,
+  logTag: string,
+): void {
+  const tool = toolRegistry?.getTool(ToolNames.SKILL);
+  if (tool && 'clearLoadedSkills' in tool) {
+    (tool as { clearLoadedSkills(): void }).clearLoadedSkills();
+    debugLogger.debug(
+      `[SKILL_TRACKING] conservatively cleared loaded-skill tracking after ${logTag}`,
+    );
   }
 }

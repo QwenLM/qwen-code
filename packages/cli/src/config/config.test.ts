@@ -535,7 +535,7 @@ describe('parseArguments', () => {
   it('rejects --json-schema combined with --input-format stream-json', async () => {
     // The "first valid structured_output call ends the session"
     // contract is incompatible with the long-lived stream-json input
-    // protocol. Also load-bearing: gemini.tsx's
+    // protocol. Also load-bearing: llm.tsx's
     // `process.exit(process.exitCode ?? 0)` plumbing in the stream-json
     // branch explicitly relies on this rejection holding. Pair with
     // --output-format stream-json because input/output formats must
@@ -1183,15 +1183,12 @@ describe('loadCliConfig', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {};
-    const setGeminiMdFilenameSpy = vi.spyOn(
-      ServerConfig,
-      'setGeminiMdFilename',
-    );
+    const setMemoryFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledTimes(1);
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith([
+    expect(setMemoryFilenameSpy).toHaveBeenCalledTimes(1);
+    expect(setMemoryFilenameSpy).toHaveBeenCalledWith([
       ServerConfig.DEFAULT_CONTEXT_FILENAME,
       ServerConfig.AGENT_CONTEXT_FILENAME,
     ]);
@@ -1284,15 +1281,12 @@ describe('loadCliConfig', () => {
         fileName: 'CUSTOM_AGENTS.md',
       },
     };
-    const setGeminiMdFilenameSpy = vi.spyOn(
-      ServerConfig,
-      'setGeminiMdFilename',
-    );
+    const setMemoryFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledTimes(1);
-    expect(setGeminiMdFilenameSpy).toHaveBeenCalledWith('CUSTOM_AGENTS.md');
+    expect(setMemoryFilenameSpy).toHaveBeenCalledTimes(1);
+    expect(setMemoryFilenameSpy).toHaveBeenCalledWith('CUSTOM_AGENTS.md');
   });
 
   it('should propagate stream-json formats to config', async () => {
@@ -2076,6 +2070,33 @@ describe('loadCliConfig', () => {
     expect(config.getSessionId()).toBe(sessionId.toLowerCase());
   });
 
+  it('skips the occupancy check for a daemon-generated sessionId', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    // A failing occupancy scan (EACCES/EMFILE/EIO fail closed) must not
+    // reject an internally generated fresh UUID on the id-less creation hot
+    // path — the check exists for caller-chosen ids only.
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockRejectedValue(
+      new Error('EACCES: chats/archive unreadable'),
+    );
+
+    const config = await loadCliConfig(
+      {},
+      { sessionId, sessionIdGenerated: true } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(config.getSessionId()).toBe(sessionId);
+    expect(
+      mockSessionServiceInstance.findSessionIdIgnoringCase,
+    ).not.toHaveBeenCalled();
+  });
+
   it('should use internal sandbox session ID without treating it as a new session', async () => {
     const sessionId = '123e4567-e89b-12d3-a456-426614174000';
     vi.stubEnv('SANDBOX', 'sandbox-exec');
@@ -2114,9 +2135,9 @@ describe('loadCliConfig', () => {
     const settings: Settings = {};
     const defaultContextFiles = ['QWEN.md', 'AGENTS.md'];
     const getAllSpy = vi
-      .spyOn(ServerConfig, 'getAllGeminiMdFilenames')
+      .spyOn(ServerConfig, 'getAllMemoryFilenames')
       .mockReturnValue(defaultContextFiles);
-    const setFilenameSpy = vi.spyOn(ServerConfig, 'setGeminiMdFilename');
+    const setFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
@@ -2128,8 +2149,8 @@ describe('loadCliConfig', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = { context: { fileName: 'CUSTOM_CONTEXT.md' } };
-    const getAllSpy = vi.spyOn(ServerConfig, 'getAllGeminiMdFilenames');
-    const setFilenameSpy = vi.spyOn(ServerConfig, 'setGeminiMdFilename');
+    const getAllSpy = vi.spyOn(ServerConfig, 'getAllMemoryFilenames');
+    const setFilenameSpy = vi.spyOn(ServerConfig, 'setMemoryFilename');
 
     await loadCliConfig(settings, argv);
 
@@ -3709,6 +3730,48 @@ describe('loadCliConfig with includeDirectories', () => {
     );
   });
 
+  it('ignores ambient roots and LSP for a host-managed provisional workspace', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-lsp',
+      '--include-directories',
+      path.resolve(path.sep, 'cli', 'path1'),
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      context: {
+        includeDirectories: [path.resolve(path.sep, 'settings', 'path1')],
+        loadFromIncludeDirectories: true,
+      },
+    };
+
+    await loadCliConfig(
+      settings,
+      argv,
+      mockCwd,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { provisionalWorkspace: true },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        targetDir: mockCwd,
+        provisionalWorkspace: true,
+        includeDirectories: [],
+        loadMemoryFromIncludeDirectories: false,
+        lsp: { enabled: false },
+      }),
+    );
+    expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
   it('should ignore implicit startup context inputs in bare mode', async () => {
     const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
     const cliPath = path.resolve(path.sep, 'cli', 'path1');
@@ -4052,7 +4115,7 @@ describe('loadCliConfig safe mode', () => {
   });
 });
 
-describe('loadCliConfig registry allowlist wiring (#9827)', () => {
+describe('loadCliConfig tools.eager wiring (#9827, #10075)', () => {
   const originalArgv = process.argv;
 
   beforeEach(() => {
@@ -4070,7 +4133,59 @@ describe('loadCliConfig registry allowlist wiring (#9827)', () => {
     vi.restoreAllMocks();
   });
 
-  it('passes settings.permissions.allow as the registry allowlist', async () => {
+  it('passes settings.tools.eager as the eager tool allowlist', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: ['ReadFile', 'Shell'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getEagerTools()).toEqual(['ReadFile', 'Shell']);
+  });
+
+  it('keeps an explicitly empty tools.eager list active', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: [],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    // `[]` is an active allowlist naming nothing (defer everything), unlike
+    // `tools.core`, where an empty list is treated as unset.
+    expect(config.getEagerTools()).toEqual([]);
+  });
+
+  it('warns when normalization drops tools.eager entries (#10075)', async () => {
+    // Normalization strips empty/non-string entries before
+    // PermissionManager.initialize() sees them, and the collapsed list is
+    // still the ACTIVE defer-everything allowlist — the drop must leave a
+    // signal instead of silently demoting the whole toolset.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        eager: [''],
+      },
+    };
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('tools.eager: ignoring 1 unusable entry'),
+    );
+    // The collapse to the active-but-empty allowlist is deliberate
+    // (fail-closed); only the silence was the bug.
+    expect(config.getEagerTools()).toEqual([]);
+    warnSpy.mockRestore();
+  });
+
+  it('does not treat permissions.allow as the eager allowlist', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
@@ -4080,61 +4195,46 @@ describe('loadCliConfig registry allowlist wiring (#9827)', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    expect(config.getRegistryAllowList()).toEqual(['ReadFile', 'Shell']);
+    // Pure auto-approval grant (#10075) — the eager surface is driven
+    // solely by tools.eager and stays unrestricted here.
+    expect(config.getPermissionsAllow()).toContain('ReadFile');
+    expect(config.getEagerTools()).toBeUndefined();
   });
 
-  it('does not treat --allowed-tools as a registry allowlist', async () => {
+  it('does not treat --allowed-tools as the eager allowlist', async () => {
     process.argv = ['node', 'script.js', '--allowed-tools', 'ReadFile'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
 
-    // Auto-approval grant only — the full toolset stays registered
+    // Auto-approval grant only — the eager surface stays unrestricted.
     expect(config.getPermissionsAllow()).toContain('ReadFile');
-    expect(config.getRegistryAllowList()).toEqual([]);
+    expect(config.getEagerTools()).toBeUndefined();
   });
 
-  it('does not treat the legacy tools.allowed key as a registry allowlist', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
-    const settings: Settings = {
-      tools: {
-        allowed: ['ShellTool'],
-      },
-    };
-    const config = await loadCliConfig(settings, argv, undefined, []);
-
-    expect(config.getPermissionsAllow()).toContain('ShellTool');
-    expect(config.getRegistryAllowList()).toEqual([]);
-  });
-
-  it('strips the registry allowlist in safe mode', async () => {
+  it('strips tools.eager in safe mode', async () => {
     process.argv = ['node', 'script.js', '--safe-mode'];
     const argv = await parseArguments();
     const settings: Settings = {
-      permissions: {
-        allow: ['ReadFile'],
+      tools: {
+        eager: ['ReadFile'],
       },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    expect(config.getRegistryAllowList()).toEqual([]);
+    expect(config.getEagerTools()).toBeUndefined();
   });
 
-  it('strips the registry allowlist in bare mode', async () => {
-    // Mirror of the safe-mode test: bare mode drops settings
-    // `permissions.allow` from the merged allow rules, so an allowlist
-    // activated from the same settings would run with zero in-force
-    // membership rules and strip the bare registry's minimal toolset.
+  it('strips tools.eager in bare mode', async () => {
     process.argv = ['node', 'script.js', '--bare'];
     const argv = await parseArguments();
     const settings: Settings = {
-      permissions: {
-        allow: ['ReadFile'],
+      tools: {
+        eager: ['ReadFile'],
       },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
 
-    expect(config.getRegistryAllowList()).toEqual([]);
+    expect(config.getEagerTools()).toBeUndefined();
   });
 });
 

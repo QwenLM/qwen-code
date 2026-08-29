@@ -1006,7 +1006,7 @@ export class QwenLogger {
   }
 
   // Phase 4b — HTTP-status retry from retryWithBackoff (429/5xx). Distinct from
-  // logContentRetryEvent which is fired by geminiChat's content-recovery loop.
+  // logContentRetryEvent which is fired by llmChat's content-recovery loop.
   logApiRetryEvent(event: ApiRetryEvent): void {
     const rumEvent = this.createActionEvent('misc', 'api_retry', {
       properties: {

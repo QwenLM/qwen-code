@@ -506,9 +506,11 @@ Coding Plan model configurations are versioned. When Qwen Code detects a newer v
 
 - Replace the existing Coding Plan model configurations with the latest versions
 - Preserve any custom model configurations you've added manually
-- Automatically switch to the first model in the updated configuration
+- Leave your selected model unchanged; if it is no longer in the updated
+  configuration, use `/model` to choose a new one
 
-The update process ensures you always have access to the latest model configurations and features without manual intervention.
+The update process refreshes the model configurations and features without
+changing your selected model.
 
 ### Manual Configuration (Advanced)
 

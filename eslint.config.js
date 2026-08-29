@@ -19,6 +19,7 @@ import noCoreRootBarrelImport from './eslint-rules/no-core-root-barrel-import.js
 import noUtilsUpwardImport from './eslint-rules/no-utils-upward-import.js';
 import noCoreUtilsUpwardImport from './eslint-rules/no-core-utils-upward-import.js';
 import { legacyFilenames } from './eslint.legacy-filenames.mjs';
+import noConfigObjectCreate from './eslint-rules/no-config-object-create.js';
 
 // General syntax restrictions applied to every TS/TSX source file. Hoisted so
 // surface-specific overrides (flat config keeps only the last
@@ -301,6 +302,12 @@ export default tseslint.config(
     },
   },
   {
+    files: ['packages/web-shell/client/daemon/**/*.{ts,tsx}'],
+    rules: {
+      'no-console': ['error', { allow: ['debug', 'warn', 'error'] }],
+    },
+  },
+  {
     files: [
       'packages/web-shell/client/**/*.test.{ts,tsx}',
       'packages/web-shell/client/test/**/*.{ts,tsx}',
@@ -333,6 +340,27 @@ export default tseslint.config(
     },
     rules: {
       'no-console': 'off',
+    },
+  },
+  {
+    files: ['packages/core/src/**/*.ts'],
+    ignores: [
+      'packages/core/src/config/config.ts',
+      '**/*.test.ts',
+      '**/*.spec.ts',
+      '**/__tests__/**',
+      '**/generated/**',
+      '**/*.generated.ts',
+    ],
+    plugins: {
+      'qwen-code': {
+        rules: {
+          'no-config-object-create': noConfigObjectCreate,
+        },
+      },
+    },
+    rules: {
+      'qwen-code/no-config-object-create': 'error',
     },
   },
   {
@@ -395,6 +423,8 @@ export default tseslint.config(
       'docs/**/*.mjs',
       // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
       'packages/cli/src/serve/cdp-tunnel/acceptance/**/*.mjs',
+      // Desktop-shell skill helper scripts also run with `node`.
+      'packages/desktop-shell/.agents/skills/**/scripts/**/*.mjs',
     ],
     languageOptions: {
       globals: {
@@ -444,6 +474,26 @@ export default tseslint.config(
       globals: {
         ...globals.browser,
       },
+    },
+  },
+
+  // The VS Code companion renders through @qwen-code/web-shell; the legacy
+  // @qwen-code/webui surface must not re-enter the extension bundle.
+  {
+    files: ['packages/vscode-ide-companion/src/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@qwen-code/webui', '@qwen-code/webui/*'],
+              message:
+                'vscode-ide-companion must render through @qwen-code/web-shell; do not re-introduce @qwen-code/webui.',
+            },
+          ],
+        },
+      ],
     },
   },
 
