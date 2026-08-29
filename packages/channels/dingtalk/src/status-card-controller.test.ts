@@ -213,6 +213,23 @@ describe('StatusCardController', () => {
     ).toEqual(['second', 'third']);
   });
 
+  it('does not re-arm a flush after writing the latest content', async () => {
+    vi.useFakeTimers();
+    const { controller } = createHarness();
+    controller.replace(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+
+    controller.replace(segment(), target, 'second');
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(
+      tracking(controller).recordsBySegment.get('segment-1'),
+    ).toMatchObject({
+      hasPendingWrite: false,
+      flushTimer: undefined,
+    });
+  });
+
   it('hides streamed image paths in status snapshots', async () => {
     vi.useFakeTimers();
     const { client, controller } = createHarness();
