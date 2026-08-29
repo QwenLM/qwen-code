@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planDiffCommand } from './plan-diff.js';
 import { chunksCoverDiff } from './lib/diff-plan.js';
-import { seedParseArgs } from './lib/test-utils.js';
+import { makeDiff, seedParseArgs } from './lib/test-utils.js';
 import { DEADLINE_ENV } from './lib/deadline.js';
 
 let dir: string;
@@ -42,30 +42,6 @@ afterEach(() => {
   process.chdir(cwd);
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
-
-/**
- * A diff adding `n` lines to a new file, shaped like real source: top-level
- * declarations separated by blank lines, so the planner has somewhere to cut.
- */
-function makeDiff(path: string, n: number): string {
-  const body: string[] = [];
-  while (body.length < n) {
-    body.push(`+function f${body.length}() {`);
-    for (let k = 0; k < 8 && body.length < n; k++)
-      body.push(`+  const x = ${k};`);
-    body.push('+}');
-    body.push('+');
-  }
-  body.length = n;
-  return [
-    `diff --git a/${path} b/${path}`,
-    '--- /dev/null',
-    `+++ b/${path}`,
-    `@@ -0,0 +1,${n} @@`,
-    ...body,
-    '',
-  ].join('\n');
-}
 
 describe('plan-diff — the round cap the handler actually records', () => {
   // The capture handlers are where the two machine facts enter a plan, and

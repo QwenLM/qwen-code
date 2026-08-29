@@ -17,8 +17,12 @@ import {
   DEFAULT_MAX_AGENTS_PER_RUN,
   resolveMaxAgentsPerRun,
   resolveConcurrencyLimit,
+  resolveSubagentMaxTurns,
+  resolveSubagentMaxTimeMinutes,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
 } from './workflow-orchestrator.js';
-import type { Config } from '../../config/config.js';
+import type { ApprovalMode, Config } from '../../config/config.js';
 import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import { WorkflowRunRegistry } from '../workflow-run-registry.js';
@@ -30,7 +34,7 @@ import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 // reset between cases. Without this, the module-level `created` array
 // accumulated across tests, so a later test could pass by coincidence.
 //
-// FIX-C8 (TST-2-I2): record the full 9-arg signature of AgentHeadless.create
+// FIX-C8 (TST-2-I2): record the full signature of AgentHeadless.create
 // and the (ctx, signal?) shape of execute so any drift between the production
 // call site and the real AgentHeadless surface becomes a test failure.
 const {
@@ -50,6 +54,8 @@ const {
     runConfig?: { max_turns?: number; max_time_minutes?: number };
     toolConfig?: { tools?: string[]; disallowedTools?: string[] };
     agentId?: string | null;
+    taskName?: string;
+    subagentId?: string;
   }>,
   nextFinalText: { value: undefined as string | undefined },
   // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
@@ -127,6 +133,36 @@ vi.mock('../../services/gitWorktreeService.js', async (importOriginal) => {
   };
 });
 
+// `workingDir` resolution (shared with AgentTool's `working_dir`) is unit
+// tested in `agents/worktree-pin.test.ts` against a mocked GitWorktreeService.
+// Here it is a seam: these tests assert what the ORCHESTRATOR does with the
+// resolver's verdict — routes off the fast path, rebinds the runtime context,
+// surfaces the refusal — not whether git considers a directory registered.
+const pinStub = vi.hoisted(() => ({
+  resolve: {
+    value: undefined as ((workingDir: string) => Promise<unknown>) | undefined,
+  },
+  seenLabels: [] as string[],
+}));
+
+vi.mock('../worktree-pin.js', () => ({
+  resolveExternalWorktreeDir: async (
+    _config: unknown,
+    workingDir: string,
+    label = 'working_dir',
+  ) => {
+    pinStub.seenLabels.push(label);
+    return (
+      (await pinStub.resolve.value?.(workingDir)) ?? {
+        path: `/fake/repo/${workingDir}`,
+        branch: 'pr-7',
+        slug: workingDir,
+        repoRoot: '/fake/repo',
+      }
+    );
+  },
+}));
+
 vi.mock('./agent-headless.js', () => ({
   AgentHeadless: {
     create: async (
@@ -143,6 +179,8 @@ vi.mock('./agent-headless.js', () => ({
       _eventEmitter?: unknown,
       _hooks?: unknown,
       _runtimeView?: unknown,
+      taskName?: string,
+      subagentId?: string,
     ) => ({
       execute: async (
         ctx: { get: (k: string) => unknown },
@@ -158,6 +196,8 @@ vi.mock('./agent-headless.js', () => ({
           runConfig,
           toolConfig,
           agentId: getCurrentAgentId(),
+          taskName,
+          subagentId,
         });
         if (
           !promptConfig.systemPrompt?.includes('subagent spawned by a workflow')
@@ -417,6 +457,238 @@ describe('WorkflowOrchestrator', () => {
     });
   });
 
+  it('records dependency tails across sequential, parallel, and pipeline dispatches', async () => {
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `mock:${prompt}`,
+    );
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        phase('Inspect');
+        await agent('inspect', { label: 'inspect' });
+        phase('Review');
+        await parallel([
+          () => agent('correctness', { label: 'correctness' }),
+          () => agent('architecture', { label: 'architecture' }),
+        ]);
+        phase('Fix');
+        await pipeline(
+          ['a', 'b'],
+          (_prev, item) => agent('verify ' + item, { label: 'verify-' + item }),
+          (_prev, item) => agent('fix ' + item, { label: 'fix-' + item }),
+        );
+      `,
+      args: undefined,
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const ids = new Map(queued.map((event) => [event.label, event.id]));
+    const dependencies = (label: string) =>
+      queued
+        .find((event) => event.label === label)!
+        .dependsOn.map((id) => queued.find((event) => event.id === id)!.label);
+
+    expect(dependencies('inspect')).toEqual([]);
+    expect(dependencies('correctness')).toEqual(['inspect']);
+    expect(dependencies('architecture')).toEqual(['inspect']);
+    expect(dependencies('verify-a')).toEqual(['correctness', 'architecture']);
+    expect(dependencies('verify-b')).toEqual(['correctness', 'architecture']);
+    expect(dependencies('fix-a')).toEqual(['verify-a']);
+    expect(dependencies('fix-b')).toEqual(['verify-b']);
+    expect(new Set(ids.values()).size).toBe(7);
+  });
+
+  it.each(['parallel', 'pipeline'] as const)(
+    'preserves newer parent dependencies when an un-awaited %s settles',
+    async (kind) => {
+      const queued: Array<{
+        id: string;
+        label?: string;
+        dependsOn: string[];
+      }> = [];
+      const orchestrator = new WorkflowOrchestrator(
+        async (prompt) => `${prompt}-done`,
+      );
+      const fanout =
+        kind === 'parallel'
+          ? `parallel([() => agent('fanout', { label: 'fanout' })])`
+          : `pipeline([0], () => agent('fanout', { label: 'fanout' }))`;
+
+      await orchestrator.run({
+        script: `
+          const pending = ${fanout};
+          await agent('parent', { label: 'parent' });
+          await pending;
+          await agent('joined', { label: 'joined' });
+        `,
+        args: undefined,
+        scheduler: new WorkflowDispatchScheduler(2),
+        emitter: {
+          dispatchQueued: (event) => queued.push(event),
+        },
+      });
+
+      const labelsById = new Map(
+        queued.map((event) => [event.id, event.label]),
+      );
+      const joined = queued.find((event) => event.label === 'joined');
+      expect(joined?.dependsOn.map((id) => labelsById.get(id)).sort()).toEqual([
+        'fanout',
+        'parent',
+      ]);
+    },
+  );
+
+  it('emits queued, started, and settled lifecycle events for one dispatch', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'done');
+    const events: string[] = [];
+
+    await orchestrator.run({
+      script: `await agent('inspect', { label: 'scope' });`,
+      args: undefined,
+      emitter: {
+        dispatchQueued: ({ id, label }) => events.push(`queued:${id}:${label}`),
+        dispatchStarted: (id) => events.push(`started:${id}`),
+        dispatchSettled: (id, error) =>
+          events.push(`settled:${id}:${error ?? 'ok'}`),
+      },
+    });
+
+    expect(events).toHaveLength(3);
+    const dispatchId = events[0]!.split(':')[1];
+    expect(events).toEqual([
+      `queued:${dispatchId}:scope`,
+      `started:${dispatchId}`,
+      `settled:${dispatchId}:ok`,
+    ]);
+  });
+
+  it('passes the recorded dispatch id into the production dispatch boundary', async () => {
+    const receivedIds: Array<string | undefined> = [];
+    const orchestrator = new WorkflowOrchestrator(
+      async (_prompt, _opts, dispatchId) => {
+        receivedIds.push(dispatchId);
+        return 'done';
+      },
+    );
+
+    await orchestrator.run({
+      script: `await agent('inspect', { label: 'scope' });`,
+      args: undefined,
+    });
+
+    expect(receivedIds).toEqual(['dispatch-1']);
+  });
+
+  it('preserves the dependency tail across empty parallel helpers', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'done');
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        await agent('before', { label: 'before' });
+        await parallel([]);
+        await agent('after parallel', { label: 'after-parallel' });
+        await pipeline([], () => agent('unused'));
+        await agent('after pipeline', { label: 'after-pipeline' });
+      `,
+      args: undefined,
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const labelById = new Map(
+      queued.map((event) => [event.id, event.label ?? event.id]),
+    );
+    const dependsOn = (label: string) =>
+      queued
+        .find((event) => event.label === label)!
+        .dependsOn.map((id) => labelById.get(id));
+
+    expect(dependsOn('after-parallel')).toEqual(['before']);
+    expect(dependsOn('after-pipeline')).toEqual(['after-parallel']);
+  });
+
+  it('does not re-inject inherited tails from a fan-out branch that never dispatches', async () => {
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `${prompt}`,
+    );
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        await agent('a', { label: 'a' });
+        const pending = parallel([
+          () => agent('b', { label: 'b' }),
+          () => 42,
+        ]);
+        await agent('m', { label: 'm' });
+        await pending;
+        await agent('z', { label: 'z' });
+      `,
+      args: undefined,
+      scheduler: new WorkflowDispatchScheduler(2),
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const labelsById = new Map(queued.map((event) => [event.id, event.label]));
+    const dependsOn = (label: string) =>
+      queued
+        .find((event) => event.label === label)!
+        .dependsOn.map((id) => labelsById.get(id))
+        .sort();
+
+    expect(dependsOn('b')).toEqual(['a']);
+    expect(dependsOn('m')).toEqual(['a']);
+    // The no-dispatch branch must not re-inject the ancestor 'a' edge.
+    expect(dependsOn('z')).toEqual(['b', 'm']);
+  });
+
+  it('keeps inherited tails when no fan-out branch issues a dispatch', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'done');
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        await agent('before', { label: 'before' });
+        await parallel([() => 1, () => 2]);
+        await agent('after', { label: 'after' });
+      `,
+      args: undefined,
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const labelById = new Map(
+      queued.map((event) => [event.id, event.label ?? event.id]),
+    );
+    const after = queued.find((event) => event.label === 'after');
+    expect(after?.dependsOn.map((id) => labelById.get(id))).toEqual(['before']);
+  });
+
   it('emitter subscriber errors do not break the run (defensive try/catch)', async () => {
     const orchestrator = new WorkflowOrchestrator(
       async (prompt) => `mock:${prompt}`,
@@ -437,6 +709,15 @@ describe('WorkflowOrchestrator', () => {
       },
       logAppended: () => {
         throw new Error('log-subscriber-boom');
+      },
+      dispatchQueued: () => {
+        throw new Error('queued-subscriber-boom');
+      },
+      dispatchStarted: () => {
+        throw new Error('started-subscriber-boom');
+      },
+      dispatchSettled: () => {
+        throw new Error('settled-subscriber-boom');
       },
     };
     const outcome = await orchestrator.run({
@@ -813,9 +1094,13 @@ describe('WorkflowOrchestrator', () => {
     const orchestrator = new WorkflowOrchestrator(() =>
       Promise.reject(new Error('nested-boom')),
     );
+    const appendedLogs: string[] = [];
     const outcome = await orchestrator.run({
       script: `return 'parent:' + (await workflow('child'));`,
       args: undefined,
+      emitter: {
+        logAppended: (line) => appendedLogs.push(line),
+      },
       resolveSavedWorkflow: async () => ({
         // The fire-and-forget dispatch fails but the nested script
         // still completes — the only trace of the failure is the
@@ -827,6 +1112,9 @@ describe('WorkflowOrchestrator', () => {
     expect(outcome.logs).toContain(
       'dispatch failed (result not consumed): nested-boom',
     );
+    expect(appendedLogs).toEqual([
+      'dispatch failed (result not consumed): nested-boom',
+    ]);
   });
 
   it('keeps a nested agent result behind the shared pause gate', async () => {
@@ -1735,6 +2023,8 @@ describe('createProductionDispatch', () => {
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
     expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    expect(created[0]!.taskName).toBe('hello');
+    expect(created[0]!.subagentId).toBe(created[0]!.agentId);
   });
 
   it('does not suppress env bootstrap with an empty initial history', async () => {
@@ -1800,24 +2090,31 @@ describe('createProductionDispatch', () => {
         signal?.addEventListener('abort', () => resolve(), { once: true });
       });
     };
-    const installed: AgentEventEmitter[] = [];
+    const installed: Array<{
+      emitter: AgentEventEmitter;
+      dispatchId?: string;
+    }> = [];
     const cleaned: AgentEventEmitter[] = [];
     const dispatch = createProductionDispatch(
       fakeConfig(),
       undefined,
       undefined,
-      (emitter) => {
-        installed.push(emitter);
+      (emitter, dispatchId) => {
+        installed.push({ emitter, dispatchId });
         return () => cleaned.push(emitter);
       },
     );
 
-    await expect(dispatch('hello', { label: 'h1', stallMs: 5 })).resolves.toBe(
-      'headless-said:hello',
-    );
+    await expect(
+      dispatch('hello', { label: 'h1', stallMs: 5 }, 'dispatch-1'),
+    ).resolves.toBe('headless-said:hello');
     expect(installed).toHaveLength(2);
-    expect(installed[0]).not.toBe(installed[1]);
-    expect(cleaned).toEqual(installed);
+    expect(installed[0]?.emitter).not.toBe(installed[1]?.emitter);
+    expect(installed.map(({ dispatchId }) => dispatchId)).toEqual([
+      'dispatch-1',
+      'dispatch-1',
+    ]);
+    expect(cleaned).toEqual(installed.map(({ emitter }) => emitter));
   });
 
   it('bubbles a production subagent approval through the run registry and resumes after ProceedOnce', async () => {
@@ -1898,14 +2195,57 @@ describe('createProductionDispatch', () => {
   });
 
   // T11 (PR #4732 R1): subagents must be bounded so a single agent() call
-  // cannot loop the model indefinitely.
+  // cannot loop the model indefinitely. The dispatch site resolves both
+  // bounds from process.env, so delete the two knobs for this test — an
+  // operator shell exporting them must not flip this hermetic assertion.
   it('passes bounded runConfig (max_turns + max_time_minutes)', async () => {
-    const dispatch = createProductionDispatch(fakeConfig());
-    await dispatch('hello', { label: 'h1' });
-    expect(created[0]!.runConfig).toEqual({
-      max_turns: 50,
-      max_time_minutes: 10,
-    });
+    const prevTurns = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    const prevMinutes = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    try {
+      const dispatch = createProductionDispatch(fakeConfig());
+      await dispatch('hello', { label: 'h1' });
+      // Literal anchors, not the DEFAULT_* constants: an edit of the
+      // constant must fail this assertion, not move it along.
+      expect(created[0]!.runConfig).toEqual({
+        max_turns: 50,
+        max_time_minutes: 10,
+      });
+    } finally {
+      if (prevTurns === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = prevTurns;
+      if (prevMinutes === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
+    }
+  });
+
+  // Resolver-level tests cannot catch a revert at the dispatch site: in a
+  // clean env the DEFAULT_* constants and the resolvers produce identical
+  // numbers, so the wiring test above stays green either way. Stub the env
+  // so the dispatched runConfig itself proves the resolver is wired in.
+  it('fast-path dispatch honors the env-tunable subagent bounds', async () => {
+    const prevTurns = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    const prevMinutes = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = '120';
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = '45';
+    try {
+      const dispatch = createProductionDispatch(fakeConfig());
+      await dispatch('hello', { label: 'h1' });
+      expect(created[0]!.runConfig).toEqual({
+        max_turns: 120,
+        max_time_minutes: 45,
+      });
+    } finally {
+      if (prevTurns === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = prevTurns;
+      if (prevMinutes === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
+    }
   });
 
   // T11: disallow SendMessage plus tools that break workflow return/cleanup
@@ -2128,7 +2468,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         args: undefined,
       });
       // 50 thunks >> window, so the window fully fills: peak === cap.
-      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
   });
@@ -2201,7 +2541,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         );`,
         args: undefined,
       });
-      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
 
@@ -2449,16 +2789,78 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       ).toBe(9999);
     });
 
-    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [1,16]', () => {
+    // A build-and-test agent, or an analysis of a 2 000-line file, exceeds
+    // 50 turns / 10 minutes routinely — and under GOAL-terminal semantics
+    // being cut off shows up as a `null` element, i.e. an agent that
+    // silently went missing. Both bounds are operator-tunable, on the same
+    // contract as the agent cap.
+    it('per-subagent bounds default, honor an override, and clamp', () => {
+      expect(resolveSubagentMaxTurns({})).toBe(
+        DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+      );
+      expect(resolveSubagentMaxTimeMinutes({})).toBe(
+        DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+      );
+      expect(
+        resolveSubagentMaxTurns({ QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: '120' }),
+      ).toBe(120);
+      expect(
+        resolveSubagentMaxTimeMinutes({
+          QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: '45',
+        }),
+      ).toBe(45);
+      // Literal anchors for the hard ceilings — comparing against the
+      // HARD_* constants would assert them against themselves.
+      expect(
+        resolveSubagentMaxTurns({
+          QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: '999999',
+        }),
+      ).toBe(500);
+      expect(
+        resolveSubagentMaxTimeMinutes({
+          QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: '999999',
+        }),
+      ).toBe(100);
+    });
+
+    it('per-subagent bounds reject non-decimal-integer overrides', () => {
+      for (const raw of ['0', 'abc', '2.5', '0x10', '1e3']) {
+        expect(
+          resolveSubagentMaxTurns({ QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: raw }),
+        ).toBe(DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS);
+        expect(
+          resolveSubagentMaxTimeMinutes({
+            QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: raw,
+          }),
+        ).toBe(DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES);
+      }
+    });
+
+    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [2,16]', () => {
       expect(
         resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '4' }),
       ).toBe(4);
-      // invalid → cpu-derived default, always within [1, 16]
+      // invalid → cpu-derived default, always within [2, 16]
       const fallback = resolveConcurrencyLimit({
         QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '-1',
       });
-      expect(fallback).toBeGreaterThanOrEqual(1);
+      expect(fallback).toBeGreaterThanOrEqual(2);
       expect(fallback).toBeLessThanOrEqual(16);
+    });
+
+    // The default reads `availableParallelism()`, which honours the CPU
+    // affinity mask and container limits, where `os.cpus()` reports the
+    // host and can return an empty array. The floor is 2, not 1: a window
+    // of 1 turns every `parallel()` into a sequence on a small machine.
+    it('resolveConcurrencyLimit derives the default from availableParallelism, floored at 2', () => {
+      const at = (parallelism: number) =>
+        resolveConcurrencyLimit({}, () => parallelism);
+      expect(at(0)).toBe(2);
+      expect(at(1)).toBe(2);
+      expect(at(3)).toBe(2);
+      expect(at(6)).toBe(4);
+      expect(at(18)).toBe(16);
+      expect(at(64)).toBe(16);
     });
 
     // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must
@@ -2516,6 +2918,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const { GitWorktreeService } = await import(
       '../../services/gitWorktreeService.js'
     );
+    pinStub.resolve.value = undefined;
+    pinStub.seenLabels.length = 0;
     worktreeStubs.instances.length = 0;
     vi.mocked(GitWorktreeService).mockImplementation(() => {
       const stub = worktreeStubs.makeStub();
@@ -2527,7 +2931,15 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   type StubSubagentCall = {
     config: { name?: string; model?: string; disallowedTools?: string[] };
     runtimeContextSame: boolean;
-    options?: { runConfigOverrides?: unknown };
+    /** What the subagent's Config answers for "where am I?". */
+    runtimeTargetDir?: string;
+    runtimeIgnoreFiles?: string;
+    runtimeContext: Config;
+    options?: {
+      runConfigOverrides?: unknown;
+      taskName?: string;
+      subagentId?: string;
+    };
     eventEmitterAttached: boolean;
     executeAgentId?: string | null;
   };
@@ -2580,10 +2992,20 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
       getToolRegistry: () => fakeRegistry,
+      // Derived dispatch contexts layer an approval profile over the
+      // worktree profile; the derivation snapshots the base mode through
+      // these methods.
+      getApprovalMode: () => 'default' as ApprovalMode,
+      isTrustedFolder: () => true,
       // P3 R2 self-review: isolation:'worktree' provisioning reads
       // these methods. Provide deterministic returns so the tests can
       // drive GitWorktreeService stubs without re-deriving cwd.
       getTargetDir: () => '/fake/repo',
+      getFileFilteringOptions: () => ({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+        customIgnoreFiles: ['.cursorignore'],
+      }),
       getSessionId: () => 'sess_fake_test_id',
       getProjectRoot: () => opts.transcriptDir ?? '/fake/repo',
       getCliVersion: () => '9.9.9',
@@ -2600,12 +3022,26 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             disallowedTools?: string[];
           },
           runtimeContext: Config,
-          options?: { eventEmitter?: unknown; runConfigOverrides?: unknown },
+          options?: {
+            eventEmitter?: unknown;
+            runConfigOverrides?: unknown;
+            taskName?: string;
+            subagentId?: string;
+          },
         ) => {
           const call: StubSubagentCall = {
             config: subagentConfig,
             runtimeContextSame: runtimeContext === cfg,
-            options: { runConfigOverrides: options?.runConfigOverrides },
+            runtimeTargetDir: runtimeContext.getTargetDir(),
+            runtimeIgnoreFiles: runtimeContext
+              .getFileService?.()
+              .getQwenIgnoreFileNamesDisplay(),
+            runtimeContext,
+            options: {
+              runConfigOverrides: options?.runConfigOverrides,
+              taskName: options?.taskName,
+              subagentId: options?.subagentId,
+            },
             eventEmitterAttached: options?.eventEmitter !== undefined,
           };
           calls.push(call);
@@ -2704,6 +3140,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
     expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    expect(calls[0].options?.taskName).toBe('find foo');
+    expect(calls[0].options?.subagentId).toBe(calls[0].executeAgentId);
     // Workflow floor [AskUserQuestion, SendMessage, Monitor, EnterPlanMode,
     // ExitPlanMode, Agent] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
@@ -3079,6 +3517,37 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     await dispatch('hi', { model: 'qwen3-max' });
     // No agentType → ephemeral default config built, then opts.model applied.
     expect(calls[0].config.model).toBe('qwen3-max');
+  });
+
+  // Same wiring guard as the fast-path sibling above, for the override
+  // dispatch site: with a clean env the resolvers and the DEFAULT_*
+  // constants are indistinguishable, so only a stubbed env proves the
+  // runConfigOverrides handed to createAgentHeadless come from the
+  // resolvers.
+  it('override-path dispatch honors the env-tunable subagent bounds', async () => {
+    const prevTurns = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    const prevMinutes = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = '120';
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = '45';
+    try {
+      const helper = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+      await createProductionDispatch(helper.config)('hi', {
+        model: 'qwen3-max',
+      });
+      expect(helper.calls[0]!.options?.runConfigOverrides).toEqual({
+        max_turns: 120,
+        max_time_minutes: 45,
+      });
+    } finally {
+      if (prevTurns === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = prevTurns;
+      if (prevMinutes === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
+    }
   });
 
   it("isolation:'remote' throws upstream-aligned 'not available' error", async () => {
@@ -3628,6 +4097,169 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(helper.disposed).toBeGreaterThanOrEqual(1);
   });
 
+  // ─── workingDir: pin to a caller-owned worktree ─────────────────
+
+  // The fast path hands `config` to AgentHeadless untouched and has no way
+  // to rebind a directory, so a `workingDir` that reached it would be
+  // silently dropped and the agent would run in the parent working tree —
+  // the exact failure the option exists to prevent.
+  it('workingDir forces the override path even with no agentType/model/schema', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'pinned', terminateMode: 'GOAL' }),
+    });
+    created.length = 0;
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', {
+        workingDir: '.qwen/tmp/review-pr-7',
+      }),
+    ).resolves.toBe('pinned');
+
+    // Went through SubagentManager, not the fast path's AgentHeadless.create.
+    expect(helper.calls).toHaveLength(1);
+    expect(created).toHaveLength(0);
+  });
+
+  it('workingDir rebinds the subagent runtime context to the pinned directory', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'pinned', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', {
+      workingDir: '.qwen/tmp/review-pr-7',
+    });
+
+    // The subagent's Config answers with the pinned directory, not the
+    // parent's '/fake/repo' — that rebind is what makes its file, shell and
+    // search tools resolve inside the worktree.
+    expect(helper.calls[0]!.runtimeTargetDir).toBe(
+      '/fake/repo/.qwen/tmp/review-pr-7',
+    );
+    expect(helper.calls[0]!.runtimeContextSame).toBe(false);
+    expect(helper.calls[0]!.runtimeIgnoreFiles).toContain('.cursorignore');
+  });
+
+  it('workingDir rejects invalid values before dispatch', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', { workingDir: '' }),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  it('workingDir rejects whitespace-only values at the entrance', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', { workingDir: '  ' }),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  // The sandbox gate names this contradiction too, but it reads the raw opts
+  // BEFORE the JSON revival — an enumerable getter can withhold `isolation`
+  // during validation and surface it at stringify time. The orchestrator sees
+  // the revived plain object, so its refusal is the one that cannot be
+  // evaded; without it, isolation would silently win and workingDir would be
+  // dropped — the opposite of AgentTool's documented working_dir-wins rule.
+  it('workingDir + isolation throws instead of letting one silently win', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', {
+        workingDir: '.qwen/tmp/review-pr-7',
+        isolation: 'worktree',
+      }),
+    ).rejects.toThrow(/incompatible options/);
+    expect(helper.calls).toHaveLength(0);
+    expect(worktreeStubs.instances).toHaveLength(0);
+  });
+
+  // A refused pin must abort the dispatch, not fall through to an agent
+  // running in the parent tree — the failure mode the pin exists to prevent.
+  it('workingDir surfaces the resolver refusal and dispatches nothing', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    pinStub.resolve.value = async () => ({
+      error: 'workingDir "x" is not a registered linked worktree.',
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', {
+        workingDir: 'not-a-worktree',
+      }),
+    ).rejects.toThrow(
+      /agent\(\{workingDir: "not-a-worktree"\}\).*not a registered linked worktree/,
+    );
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  it('workingDir scrubs control characters from resolver errors', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    pinStub.resolve.value = async () => ({
+      error: 'refused\r\nforged\u0000line',
+    });
+
+    let error: unknown;
+    try {
+      await createProductionDispatch(helper.config)('hi', {
+        workingDir: 'not-a-worktree',
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\r');
+    expect((error as Error).message).not.toContain('\n');
+    expect((error as Error).message).not.toContain('\u0000');
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  // Same threat on the other interpolated half: the refusal echoes the
+  // model-authored `workingDir` itself, and `JSON.stringify` escapes only
+  // C0 (U+0000-U+001F), so DEL and the C1 range (incl. NEL U+0085) reach
+  // the message raw unless the echo is sanitized too.
+  it('workingDir refusal scrubs control characters from the echoed workingDir', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    pinStub.resolve.value = async () => ({
+      error: 'not a registered linked worktree.',
+    });
+
+    let error: unknown;
+    try {
+      await createProductionDispatch(helper.config)('hi', {
+        workingDir: 'x\u0085forged\u007fline',
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\u0085');
+    expect((error as Error).message).not.toContain('\u007f');
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  // The resolver names the offending parameter in its errors; a workflow
+  // script never wrote `working_dir`, so it must be told the opt's own name.
+  it('names the workflow opt, not the tool parameter, when resolving', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', { workingDir: 'wt' });
+    expect(pinStub.seenLabels).toEqual(['workingDir']);
+  });
+
   // ─── isolation:'worktree' provision error branches ──────────────
   // R2 self-review (test-1, [critical]): each provisionWorkflowWorktree
   // error branch had no unit test. Coverage came only from the real-
@@ -3840,6 +4472,28 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls[0].config.model).toBe('qwen3-max');
     // Default-clean stub auto-removes; no suffix expected.
     expect(String(result)).not.toMatch(/worktree preserved/);
+    expect(calls[0].runtimeContextSame).toBe(false);
+    expect(calls[0].runtimeContext.getTargetDir()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getCwd()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getWorkingDir()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getProjectRoot()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    // The approval profile layered over the worktree context inherits the
+    // worktree rebinding through the prototype chain. The fake worktree
+    // path does not exist on disk, so assert the rebinding's presence
+    // rather than its resolved directories.
+    expect(calls[0].runtimeContext.getWorkspaceContext()).toBeDefined();
+    expect(
+      calls[0].runtimeContext.getFileService().getQwenIgnoreFileNamesDisplay(),
+    ).toBe('.qwenignore, .cursorignore');
+    expect(config.getTargetDir()).toBe('/fake/repo');
   });
 
   it("schema + isolation:'worktree': structured payload returned, worktree info logged", async () => {

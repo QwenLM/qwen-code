@@ -4,8 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+
+// The real fs, wrapped so the claim-write fault below is injectable
+// under ANY uid: a permission-based stimulus does not fault for root
+// (root ignores 0o555 mode bits), and ESM namespace objects are not
+// configurable for vi.spyOn — the wrapper keeps every other export the
+// real function (#9272).
+const fsFault = vi.hoisted(() => ({ failClaimWrite: false }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const mock = {
+    ...actual,
+    writeFileSync: (...args: Parameters<typeof actual.writeFileSync>) => {
+      if (fsFault.failClaimWrite) {
+        const err = new Error('EACCES') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return actual.writeFileSync(...args);
+    },
+  };
+  return { ...mock, default: mock };
+});
 import {
+  existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -27,7 +51,9 @@ import {
   TOOL_CONCURRENCY_ENV,
   budgetStopEntry,
   budgetStopEntryZh,
+  claimRetirementDegradeNote,
   clearBudgetStop,
+  clearRoundStamps,
   expectedAdmissionSeconds,
   expectedRoundSeconds,
   readBudgetStop,
@@ -251,6 +277,96 @@ describe('the round-cost estimate — measured when it can be', () => {
     stampRound(p, 1, NOW_MS - 100);
     stampRound(p, 1, NOW_MS);
     expect(readRoundStamps(p)).toEqual([{ round: 1, atMs: NOW_MS - 100 }]);
+  });
+
+  it('claimRetirementDegradeNote claims once per round, per run (#9272)', () => {
+    // The per-chunk builds of a round are separate CLI processes, so the
+    // claim lives on disk beside the stamps: first claim prints, later
+    // builds of the same round stay silent, a different round speaks, and
+    // a NEW run (the plan re-captured at the same path) re-arms the note —
+    // the retry's channel must not be silenced by the killed run's claim.
+    const p = plan();
+    expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+    expect(claimRetirementDegradeNote(p, 3)).toBe(false);
+    expect(claimRetirementDegradeNote(p, 4)).toBe(true);
+    const later = new Date(Date.now() + 3_600_000);
+    utimesSync(p, later, later);
+    expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+  });
+
+  it('claimRetirementDegradeNote fences on the STRICT plan mtime — a claim seconds before a re-capture is stale (#9272)', () => {
+    // The slack-adjusted epoch would re-admit the dead run's claim here:
+    // the claim lands, the retry re-captures the plan one second later,
+    // and the retried run's NOTE must still print.
+    const p = plan();
+    expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+    const oneSecondLater = new Date(Date.now() + 1_000);
+    utimesSync(p, oneSecondLater, oneSecondLater);
+    expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+  });
+
+  it('claimRetirementDegradeNote fails OPEN when the record dir is uncreatable — silence is the only wrong answer (#9272)', () => {
+    // The record path exists as a REGULAR FILE: the recursive mkdir
+    // throws EEXIST — which is not a claim — and the note must still
+    // print, or a dead record path swallows the degrade NOTE on every
+    // round. Filesystem shape faults for every uid; a permission-based
+    // stimulus (chmod 0o555) does not fault at all for a uid-0 run,
+    // where root ignores the mode bits and the test passes through the
+    // success path (#9272).
+    const p = plan();
+    writeFileSync(promptRecordDir(p), 'a file where the record dir goes');
+    expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+  });
+
+  it('claimRetirementDegradeNote fails OPEN when the claim write faults — for any uid (#9272)', () => {
+    // The `wx` create's catch must read ONLY EEXIST as "claimed": an
+    // EACCES fault on the write reports printable, or the degrade NOTE
+    // is swallowed exactly when the filesystem is the thing that's
+    // broken. The stimulus is an injected throw, not permission bits —
+    // under uid 0 root ignores a 0o555 dir and the write succeeds,
+    // leaving the catch branch this test exists to pin unexercised. The
+    // claim file's ABSENCE proves the fault actually ran, so this
+    // cannot pass vacuously through the success path.
+    const p = plan();
+    const claim = join(
+      promptRecordDir(p),
+      'retirement-degrade-note-round-3.json',
+    );
+    fsFault.failClaimWrite = true;
+    try {
+      expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+      expect(existsSync(claim)).toBe(false);
+    } finally {
+      fsFault.failClaimWrite = false;
+    }
+  });
+
+  it('claimRetirementDegradeNote reclaims a non-file occupant and a stale claim (#9272)', () => {
+    // The fence keys on SHAPE and the claim's own `atMs` vs the plan
+    // epoch, not the occupant's mtime — filesystem mtimes are not
+    // reliable across runners (#9272 CI). A directory at the claim path
+    // is never a claim and is removed so the claim lands; a readable
+    // claim older than the epoch belongs to the killed run and is
+    // reclaimed. Both land a real claim, so the dedup then holds.
+    const p = plan();
+    const dir = promptRecordDir(p);
+    mkdirSync(dir, { recursive: true });
+    // A directory occupant is removed and the claim lands.
+    mkdirSync(join(dir, 'retirement-degrade-note-round-3.json'));
+    expect(claimRetirementDegradeNote(p, 3)).toBe(true);
+    expect(claimRetirementDegradeNote(p, 3)).toBe(false);
+    // A stale claim FILE (atMs older than the plan epoch) is reclaimed.
+    writeFileSync(
+      join(dir, 'retirement-degrade-note-round-4.json'),
+      JSON.stringify({ round: 4, atMs: 1 }),
+    );
+    expect(claimRetirementDegradeNote(p, 4)).toBe(true);
+    expect(claimRetirementDegradeNote(p, 4)).toBe(false);
+    // A corrupt claim FILE is not a claim either — reclaimed, not
+    // EEXIST-silenced (#9272 torn-write).
+    writeFileSync(join(dir, 'retirement-degrade-note-round-5.json'), '{');
+    expect(claimRetirementDegradeNote(p, 5)).toBe(true);
+    expect(claimRetirementDegradeNote(p, 5)).toBe(false);
   });
 
   it('ignores stamps older than the plan — a previous run of the same PR', () => {
@@ -557,6 +673,16 @@ describe('the budget-stop marker — the deterministic half of the disclosure', 
     // retention's eye — still sees it, shape and all.
     expect(readBudgetStop(p)).toBeNull();
     expect(readBudgetStopUnfenced(p)?.cause).toBe('round-cap');
+    // "Nothing else" includes the shape gate (#9259 — it was pinned only
+    // by absence): an object without a string `entry` or a numeric
+    // `atMs` cannot prove it is a stop marker and reads as none.
+    const stopFile = join(promptRecordDir(p), 'budget-stop.json');
+    writeFileSync(stopFile, JSON.stringify({ cause: 'round-cap', entry: 'x' }));
+    expect(readBudgetStopUnfenced(p)).toBeNull();
+    writeFileSync(stopFile, JSON.stringify({ cause: 'round-cap', atMs: 42 }));
+    expect(readBudgetStopUnfenced(p)).toBeNull();
+    writeFileSync(stopFile, 'not json');
+    expect(readBudgetStopUnfenced(p)).toBeNull();
   });
 
   it('the dedup phrase travels with the entry it identifies', () => {
@@ -884,5 +1010,32 @@ describe('verifyBudgetExhausted — the compose floor the verifier answers to', 
       composeFloorSeconds: DEFAULT_COMPOSE_FLOOR_SECONDS,
     });
     expect(msg).toContain('0 minute(s) remain');
+  });
+});
+
+describe('clearRoundStamps — the resume hygiene', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function plan(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'deadline-clear-'));
+    dirs.push(dir);
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, '{}');
+    backdatePlan(p);
+    return p;
+  }
+
+  it('removes the stamps so the gate falls back to its constant', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 2_400_000);
+    expect(expectedRoundSeconds(p, 2, NOW_MS)).toBe(2400);
+    clearRoundStamps(p);
+    expect(expectedRoundSeconds(p, 2, NOW_MS)).toBe(DEFAULT_ROUND_SECONDS);
+  });
+
+  it('is silent when there is nothing to remove', () => {
+    expect(() => clearRoundStamps(plan())).not.toThrow();
   });
 });

@@ -25,6 +25,7 @@ import {
   type WorkspacePackage,
 } from './workspaces.js';
 import { resolveTestScope, type TestScope } from './workspace-scope.js';
+import { DEFAULT_WHOLE_CALL_BUDGET_S } from './build-budget.js';
 import type { ReviewToolchainAdapter, ToolchainRunArgs } from './toolchain.js';
 
 /**
@@ -62,6 +63,21 @@ function buildCommand(dir: string): string {
 function testCommand(dir: string): string {
   return dir === '.' ? 'npm test' : `npm test --workspace=${shellArg(dir)}`;
 }
+/**
+ * The one grammar `testCommand` above emits. Exported for the `--resume`
+ * shape gate: a continuation re-executes report-stored `test[].command`
+ * strings verbatim under `shell: true`, and the run-identity check pins a
+ * report to this run's TREE, not to this program's authorship — a report
+ * edited in place keeps its identity. Anything outside the emitter's own
+ * grammar is therefore refused before it can be re-run — and `test-delta`
+ * imports this same predicate for the report commands it re-runs: one
+ * grammar, beside the emitter, for every site that hands a stored command
+ * to a shell, so a grammar change cannot silently diverge the two gates.
+ * The character class covers every workspace dir this repo shape produces;
+ * a dir exotic enough to fall outside it costs that report its resume (a
+ * named refusal, pointing at a fresh run), never a verbatim re-execution.
+ */
+export const TEST_COMMAND_RE = /^npm test(?: --workspace="[\w@./-]+")?$/;
 
 /**
  * Workspace packages the compiler said it could not resolve.
@@ -92,18 +108,403 @@ export function unresolvedWorkspaceDeps(
   return [...found];
 }
 
+/** Did this command exit cleanly? A timeout's exitCode is null, not 0. */
+const succeeded = (r: CommandResult): boolean => r.exitCode === 0;
+
+/**
+ * The sentence a report must open with when the install exited non-zero and
+ * left a usable tree anyway.
+ *
+ * Shared, because a CONTINUATION owes it too and the first cut of `--resume`
+ * dropped it: the merged note replaced the previous one wholesale, so a report
+ * carrying `install.exitCode: 1` arrived at the agent with nothing telling it
+ * that failure is infrastructure — and the brief's standing rule is to
+ * correlate failures with the diff. The structured field alone was already
+ * judged insufficient here (that is why the fresh path prepends this on every
+ * return); a continuation is not the place to start relying on it.
+ */
+function installFailureFraming(install: CommandResult | null): string {
+  if (!install || install.exitCode === 0) return '';
+  return (
+    `\`${install.command}\` exited ${install.exitCode} but left a usable ` +
+    '`node_modules`, so the run went ahead. ' +
+    'The install failure is an environment/infrastructure result — report it as ' +
+    'informational, never as a Critical, and never against this PR. '
+  );
+}
+
+/**
+ * Continue a previous call's run: the suites it could not reach, and the ones
+ * it killed on a deadline its budget had shortened.
+ *
+ * Install and build are NOT re-run. That is the whole point of a continuation —
+ * the tree the previous call installed and compiled is still there, and paying
+ * for it again inside a second 600s ceiling would leave no room for the suites
+ * this call exists to run. It also means a continuation cannot repair a tree
+ * the previous call left half-built, which is why it refuses that case below
+ * rather than running suites against artifacts that were never compiled.
+ */
+function resumeNpmToolchain(
+  args: ToolchainRunArgs,
+  previous: BuildTestReport,
+): BuildTestReport {
+  const { root, exec } = args;
+  const perCommandMs = args.timeout * 1000;
+  const callBudgetMs =
+    (args.budget ?? Math.max(args.timeout, DEFAULT_WHOLE_CALL_BUDGET_S)) * 1000;
+  const runStarted = Date.now();
+  const remainingMs = (): number => callBudgetMs - (Date.now() - runStarted);
+
+  const withNote = (note: string): BuildTestReport => ({
+    ...previous,
+    note: previous.note ? `${previous.note} ${note}` : note,
+  });
+
+  if (previous.toolchain !== 'npm') {
+    return withNote(
+      'Nothing to resume: the run being continued did not scope an npm ' +
+        'toolchain, so it never had suites to leave unrun.',
+    );
+  }
+  if (previous.notBuilt?.length) {
+    // A suite against artifacts that were never compiled manufactures failures
+    // the diff did not cause — the exact cascade the build phase's own budget
+    // stop exists to prevent. A continuation skips the build, so it cannot
+    // clear this; say so instead of pretending.
+    return withNote(
+      `Cannot resume the suites: the run being continued left ` +
+        `${previous.notBuilt.join(', ')} unbuilt, and a suite run against ` +
+        `packages that were never compiled measures nothing about the diff. ` +
+        `Re-run build-test without --resume.`,
+    );
+  }
+
+  // Three kinds of unfinished work, in the order that spends the budget best:
+  // the suites a shortened deadline killed first (they are the expensive ones,
+  // and they now get a full deadline), then the AFFECTED suites the budget
+  // never reached, then the dependents. The affected-first partition is the
+  // fresh path's own invariant re-applied — "the changed workspace's own
+  // suite is the highest-value one and must be unstarvable" — and the resume
+  // path used to drop it: `notRun` is stored in scope (alphabetical) order,
+  // so across a chain of continuations every alphabetical dependent could
+  // take a full deadline while the changed workspace's suite was ordered
+  // last into the budget's worst tail, every round, until the continuation
+  // cap ended the chain with the one suite the diff changed never run.
+  const retryCommands = previous.test
+    .filter((t) => t.clamped)
+    .map((t) => t.command);
+  const affectedSet = new Set(previous.affected);
+  const pendingDirs = [...(previous.testScope?.notRun ?? [])];
+  const orderedPending = [
+    ...pendingDirs.filter((d) => affectedSet.has(d)),
+    ...pendingDirs.filter((d) => !affectedSet.has(d)),
+  ];
+  const work: Array<{ command: string; dir: string | null }> = [
+    ...retryCommands.map((command) => ({ command, dir: null })),
+    ...orderedPending.map((dir) => ({ command: testCommand(dir), dir })),
+  ];
+  if (work.length === 0) {
+    // "Every suite ran" and "no suite ever ran" both reach here with nothing
+    // to do, and they are opposite facts. A run that ended before its test
+    // phase — a failed install, the disk-space gate, a budget spent during the
+    // build, or a deliberate --build-only probe — carries neither a test scope
+    // nor any test result, and a continuation cannot manufacture one: the
+    // scope it would run is computed by the phase that never happened. Saying
+    // it reached every suite would be this PR's own Chinese-placeholder defect
+    // in English — prose asserting the opposite of the evidence beside it.
+    //
+    // But the SAME shape also belongs to a run that finished: a single-root
+    // package with no test script completes with `test: []` and no scope,
+    // and calling that "ended before its test phase" was self-contradictory
+    // beside its own carried note ("defines no test script, so no tests
+    // ran") — and its re-run advice re-derived the same zero-suite answer at
+    // the price of a full fresh install+build. The split is structural:
+    // `buildOnly` marks the deliberate probe, `ok: false` marks the runs
+    // that died early (failed install, disk gate, budget in the build);
+    // an `ok: true` non-probe with no scope and no results ran to
+    // completion and simply had nothing to run. The third signal,
+    // `endedBeforeTests`, covers the shape the other two cannot: a
+    // single-root run whose budget fell below the attempt floor before the
+    // first suite — build green (`ok: true`), no probe, no scope — where
+    // only the fresh path's own stamp knows the phase ran nothing it was
+    // supposed to run.
+    const neverTested = previous.test.length === 0 && !previous.testScope;
+    const endedEarly =
+      neverTested &&
+      (previous.buildOnly === true ||
+        previous.ok === false ||
+        previous.endedBeforeTests === true);
+    return withNote(
+      endedEarly
+        ? 'Nothing to resume: the run being continued ended before its test ' +
+            'phase, so it left no scope to continue — no suite ran. Re-run ' +
+            'build-test without --resume.'
+        : neverTested
+          ? 'Nothing to resume: the run being continued completed with no ' +
+            'suite to run.'
+          : 'Nothing to resume: the run being continued reached every suite ' +
+            'in scope.',
+    );
+  }
+
+  const ranDirs: string[] = [];
+  const fresh: CommandResult[] = [];
+  const stillPending: string[] = [];
+  /** Retries the budget never reached — they carry no dir, so `notRun` cannot
+   *  hold them, and the first cut dropped them from the accounting entirely. */
+  const unattemptedRetries: string[] = [];
+  for (let i = 0; i < work.length; i++) {
+    const { command, dir } = work[i];
+    const remaining = remainingMs();
+    if (remaining < BUDGET_MIN_ATTEMPT_MS) {
+      // Same floor the first call uses: below it an attempt cannot boot npm,
+      // and a fake timeout is worse than an honest "still to run".
+      //
+      // Both kinds of unfinished work are counted here. `notRun` is a list of
+      // WORKSPACES, so a retry — which is a command, not a dir — cannot go in
+      // it; dropping it on that technicality left a suite that is neither run
+      // nor named, and a caveat that miscounted what was left.
+      for (const left of work.slice(i)) {
+        if (left.dir !== null) stillPending.push(left.dir);
+        else unattemptedRetries.push(left.command);
+      }
+      break;
+    }
+    const deadline = Math.min(perCommandMs, remaining);
+    const r = exec(command, root, deadline);
+    const clamped = r.timedOut && deadline < perCommandMs;
+    fresh.push(clamped ? { ...r, clamped: true } : r);
+    if (dir !== null) ranDirs.push(dir);
+  }
+
+  // A retried command REPLACES its provisional entry: two entries for one
+  // command would double-count in every consumer that walks `test[]` — the
+  // failing-file attribution above all — and the older of the two is a result
+  // this call exists to supersede.
+  const replaced = new Map(
+    fresh
+      .filter((r) => retryCommands.includes(r.command))
+      .map((r) => [r.command, r]),
+  );
+  const mergedTest = [
+    ...previous.test.map((t) => replaced.get(t.command) ?? t),
+    ...fresh.filter((r) => !replaced.has(r.command)),
+  ];
+
+  const ranSet = new Set(ranDirs);
+  const prevScope = previous.testScope;
+  /** Suites this call left provisional: killed again on a shortened deadline,
+   *  or never reached. They are what makes a further continuation worth it. */
+  const stillClamped = mergedTest
+    .filter((t) => t.clamped)
+    .map((t) => t.command);
+  let testScope: TestScope | undefined;
+  if (prevScope) {
+    // The caveat is REWRITTEN, not appended to, for the same staleness reason
+    // the note is: the previous call's budget-stop clause names suites as
+    // "still to run" that this call just ran, and the dimension brief tells
+    // the agent "caveat present ⇒ scope may be incomplete — quote it". The
+    // LIVE limitation survives verbatim, a fresh clause is written only while
+    // work actually remains, and a chain that finishes with no live
+    // limitation ends with the caveat ABSENT — the field's own contract for
+    // "the run covers everything the diff can break".
+    //
+    // STRUCTURAL, not parsed: the fresh path records the scope's own caveat
+    // in `liveCaveat`, and this path carries that string through untouched.
+    // Both parsing attempts before it lost: an unanchored phrase match read a
+    // PR-authored FILENAME as a machine clause, and the anchored fix still
+    // fell to a workspace DIR whose name embeds the segment separator plus
+    // the clause grammar — the skipped/unmapped producers interpolate dir
+    // lists mid-segment with their honest tail after the list, so the
+    // fabricated boundary retired the live limitation's tail with the fake
+    // clause. Nothing content-matches an opaque carry-through.
+    //
+    // No parse remains at all. `liveCaveat` present means "the machine
+    // appended clauses, and this is the caveat without them"; absent means
+    // the fresh path appended nothing, so the whole caveat is live. Both
+    // read structurally; neither can be talked out of a limitation by a
+    // PR-authored name.
+    const liveCaveat =
+      prevScope.liveCaveat !== undefined
+        ? prevScope.liveCaveat
+        : (prevScope.caveat ?? '');
+    const liveSegments = liveCaveat === '' ? [] : [liveCaveat];
+    const outstanding = [...stillPending, ...unattemptedRetries];
+    if (outstanding.length > 0) {
+      // The machine clause this call appends. It is REPLACED whole on the
+      // next resume — everything outside `liveCaveat` is machine text and is
+      // rebuilt, never content-matched — so its internal punctuation carries
+      // no structural meaning anymore; it stays one plain clause for the
+      // reader, not for any parser.
+      liveSegments.push(
+        `a --resume call ran ${ranDirs.length + replaced.size} more ` +
+          `command(s), ${outstanding.length} still to run: ` +
+          outstanding.join(', '),
+      );
+    }
+    // NOT an else: a resume can leave BOTH unattempted work and suites
+    // killed again on a shortened deadline, and an else-if kept the
+    // provisional half out of the caveat exactly then — the brief quotes
+    // the caveat as the live limitation, so a reader of it alone
+    // under-counted the work left. An unattempted retry is already named
+    // by the still-to-run segment above; naming its stale clamped entry
+    // here too would claim it was "killed" on a deadline this call never
+    // gave it, so the provisional segment lists only commands the
+    // still-to-run segment does not.
+    const provisionalOnly = stillClamped.filter(
+      (c) => !outstanding.includes(c),
+    );
+    if (provisionalOnly.length > 0) {
+      liveSegments.push(
+        `a --resume call left ${provisionalOnly.length} command(s) ` +
+          `provisional (killed on a budget-shortened deadline): ` +
+          `${provisionalOnly.join(', ')}`,
+      );
+    }
+    const caveat = liveSegments.join('; ');
+    testScope = {
+      workspaces: [...prevScope.workspaces, ...ranDirs].filter(
+        (d) => !stillPending.includes(d) || ranSet.has(d),
+      ),
+      ...(stillPending.length > 0 ? { notRun: stillPending } : {}),
+      ...(caveat ? { caveat } : {}),
+      // Carried forward so the NEXT continuation is structural too.
+      liveCaveat,
+    };
+  }
+
+  const timedOut = [
+    ...previous.timedOut.filter((c) => !replaced.has(c)),
+    ...fresh.filter((r) => r.timedOut).map((r) => r.command),
+  ];
+  const merged: BuildTestReport = {
+    ...previous,
+    test: mergedTest,
+    // Recomputed, not inherited: the previous `false` may have been nothing
+    // but the clamped timeout this call just replaced with a pass.
+    ok: previous.build.every(succeeded) && mergedTest.every(succeeded),
+    // Recomputed for the same staleness reason: the stamp claims the test
+    // phase ENTERED and ran nothing, which any suite in `mergedTest`
+    // falsifies. A continuation that ran none keeps it — the claim still
+    // holds then. JSON.stringify drops the undefined key.
+    endedBeforeTests:
+      mergedTest.length === 0 ? previous.endedBeforeTests : undefined,
+    timedOut,
+    // REPLACED, not appended. The note being continued says things that were
+    // true when it was written and are not now — "the whole-call budget was
+    // spent with 4 suite(s) still to run" reads as this run's verdict, and an
+    // agent trusts the prose it is handed. The structured fields (`install`,
+    // `build`, `notBuilt`, `testScope`) carry everything the old note
+    // summarised; this one describes the run as it now stands.
+    // The caveat splice mirrors the fresh path: the brief reads the note,
+    // and a scope limitation absent from it is a limitation the agent never
+    // quotes.
+    note:
+      resumedNote(
+        previous,
+        mergedTest,
+        timedOut,
+        [...stillPending, ...unattemptedRetries],
+        stillClamped,
+      ) + (testScope?.caveat ? ` Caveat: ${testScope.caveat}.` : ''),
+    ...(testScope ? { testScope } : {}),
+  };
+  return merged;
+}
+
+/** The merged report's one-line story, rewritten for the continued run. */
+function resumedNote(
+  previous: BuildTestReport,
+  test: CommandResult[],
+  timedOut: string[],
+  stillPending: string[],
+  stillClamped: string[],
+): string {
+  // Build failures count too: the merged `ok` reads previous.build, and a
+  // note that says "everything passed" beside a carried build failure is the
+  // prose-contradicts-evidence shape this branch keeps paying for.
+  const failures = [
+    ...previous.build.filter((r) => !succeeded(r) && !r.timedOut),
+    ...test.filter((r) => !succeeded(r) && !r.timedOut),
+  ];
+  const parts = [
+    // The install framing rides through the merge. A continuation that drops
+    // it hands the agent `install.exitCode: 1` with no reading of it, against
+    // a brief whose standing rule is to correlate failures with the diff.
+    installFailureFraming(previous.install) +
+      `Continued from a previous build-test call (install and build reused: ` +
+      `${previous.build.length} build command(s) already ran).`,
+  ];
+  if (failures.length > 0) {
+    parts.push(
+      `${failures.length} command(s) failed. Correlate each error with the ` +
+        `diff: a failure in a file the PR changed is a Critical; one in a file ` +
+        `it did not touch is pre-existing.`,
+    );
+  }
+  if (timedOut.length > 0) {
+    parts.push(
+      `${timedOut.length} command(s) ran out of time — infrastructure, not a ` +
+        `defect in the diff.`,
+    );
+  }
+  // "Every suite has now run" is a claim, and two things can falsify it: a
+  // suite this call never reached, and one it reached and killed AGAIN on a
+  // deadline its own budget shortened. The first cut counted only the first,
+  // so a re-clamped retry — the ordinary outcome when a 401s suite is admitted
+  // with 169s left — was reported as a completed run holding a provisional
+  // result. An agent trusting that prose stops resuming, and a suite the diff
+  // may have broken keeps a timeout as its final verdict.
+  if (stillPending.length > 0) {
+    parts.push(
+      `The budget was spent with ${stillPending.length} command(s) still to ` +
+        `run — not run: ${stillPending.join(', ')}. Resume again to reach them.`,
+    );
+  }
+  // An unattempted retry rides BOTH lists — its command is still-to-run, and
+  // its stale clamped entry survives in the merged test[] — and two
+  // additive-looking clauses both naming it made one command read as two or
+  // three against the MAX_RESUME_CALLS budget. Worse, this clause claims the
+  // command was "killed on a deadline the budget shortened", which is false
+  // for a retry this call never started. So the provisional clause names
+  // only commands the still-to-run clause does not; a command in both is
+  // fully described by "not run".
+  const provisionalOnly = stillClamped.filter((c) => !stillPending.includes(c));
+  if (provisionalOnly.length > 0) {
+    parts.push(
+      `${provisionalOnly.length} command(s) are still provisional — killed ` +
+        `on a deadline the budget shortened, not on their own: ` +
+        `${provisionalOnly.join(', ')}. Resume again to give them a full one.`,
+    );
+  }
+  if (stillPending.length === 0 && stillClamped.length === 0) {
+    parts.push(
+      failures.length === 0 && timedOut.length === 0
+        ? 'Every suite in scope has now run, and everything passed.'
+        : 'Every suite in scope has now run.',
+    );
+  }
+  return parts.join(' ');
+}
+
 function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
+  if (args.previous) return resumeNpmToolchain(args, args.previous);
   const { root, changedFiles: changed, exec } = args;
   const perCommandMs = args.timeout * 1000;
   // The whole-call wall-clock budget for the call, in milliseconds — measured
   // from the TOP of the run, so install and build time count against it. The
-  // default keeps 30s of headroom under the 600-second tool timeout the brief
-  // welds onto the call: the clock outside starts before node does, and the
-  // report write must still fit. The floor is one command deadline: a tiny
-  // --timeout must not turn the headroom into a negative budget that starves
-  // every suite.
+  // default is what the shell tool's hard 600s ceiling leaves usable: the clock
+  // outside starts before node does, and the report write must still fit. The
+  // floor is one command deadline: a tiny --timeout must not turn the headroom
+  // into a negative budget that starves every suite.
+  //
+  // It no longer derives from `--timeout` (it was `2 × timeout − 30`). That
+  // arithmetic equalled the ceiling only while the timeout was 300s, so raising
+  // the deadline to fit a real suite would have pushed the derived budget PAST
+  // the ceiling — a call the outer kill was guaranteed to discard. The budget
+  // belongs to the ceiling; the deadline belongs to the slowest command.
   const callBudgetMs =
-    (args.budget ?? Math.max(args.timeout, args.timeout * 2 - 30)) * 1000;
+    (args.budget ?? Math.max(args.timeout, DEFAULT_WHOLE_CALL_BUDGET_S)) * 1000;
   const runStarted = Date.now();
   /** Budget left for the whole call; every phase spends from it. */
   const remainingMs = (): number => callBudgetMs - (Date.now() - runStarted);
@@ -231,6 +632,10 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       build: [],
       test: [],
       ...(testScope ? { testScope } : {}),
+      // The probe stamp rides EVERY producer path: this return already
+      // branches on args.buildOnly for its note, and a probe report without
+      // the stamp lost its probe answer on --resume.
+      ...(args.buildOnly ? { buildOnly: true } : {}),
       ok: true,
       timedOut: [],
       note: args.buildOnly
@@ -287,6 +692,11 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     ok: true,
     timedOut: [],
     note: '',
+    // Stamped structurally, not narrated: `--resume` on a report with no
+    // tests and no scope needs to tell a deliberate probe apart from a
+    // completed zero-suite run, and the note is prose an agent must never
+    // have to parse.
+    ...(args.buildOnly ? { buildOnly: true } : {}),
   };
 
   // The install. It lives here, not in the orchestrator, because nothing before
@@ -388,6 +798,9 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       installCmd,
       root,
       Math.min(perCommandMs, remainingMs()),
+      // The one command that needs the registry. Everything else this adapter
+      // runs is offline under the sandbox policy — see `containerCommand`.
+      'install',
     );
     results.install = install;
     if (install.timedOut) results.timedOut.push(install.command);
@@ -428,14 +841,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // and without the framing the agent can file the install failure as an
   // additional Critical against the PR.
   const frameInstallFailure = (): void => {
-    if (results.install && results.install.exitCode !== 0) {
-      results.note =
-        `\`${results.install.command}\` exited ${results.install.exitCode} but left a usable ` +
-        '`node_modules`, so the run went ahead. ' +
-        'The install failure is an environment/infrastructure result — report it as ' +
-        'informational, never as a Critical, and never against this PR. ' +
-        results.note;
-    }
+    results.note = installFailureFraming(results.install) + results.note;
   };
 
   // The same preflight before the build phase, at a lower floor. A warm tree
@@ -659,12 +1065,32 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       notRun.push(...runnableDirs.slice(i));
       break;
     }
-    const r = exec(testCommand(dir), root, Math.min(perCommandMs, remaining));
-    results.test.push(r);
+    // A suite still gets whatever remains — a partial attempt is signal where
+    // a never-attempted suite is none, and the tail of the budget has nowhere
+    // better to go. What changes is what a kill at that boundary MEANS: a
+    // suite that died on a deadline the budget shortened was not too slow,
+    // it was started too late, and `--resume` re-runs it with a full one.
+    // Measured on PR #9113: `npm test --workspace="packages/cli"` (real cost
+    // 401s) was admitted with 286s of its 300s deadline and killed, and
+    // nothing downstream could tell that from a suite that genuinely hangs.
+    const deadline = Math.min(perCommandMs, remaining);
+    const r = exec(testCommand(dir), root, deadline);
+    const clamped = r.timedOut && deadline < perCommandMs;
+    results.test.push(clamped ? { ...r, clamped: true } : r);
     if (r.timedOut) results.timedOut.push(r.command);
     if (r.exitCode !== 0) results.ok = false;
   }
 
+  // The test phase ran NOTHING and left work behind: stamp it. A single-root
+  // run in this state writes no testScope and keeps ok: true (the build
+  // passed), so the stamp is the only structural evidence separating "ended
+  // before its test phase" from "completed with no suite to run" — the
+  // resume split reads it, and without it a --resume certified the one
+  // existing suite as finished (multi-root runs carry the same fact in
+  // testScope.notRun; the stamp is simply the phase-level truth either way).
+  if (results.test.length === 0 && notRun.length > 0) {
+    results.endedBeforeTests = true;
+  }
   // A budget stop is STRUCTURAL, not just prose: `testScope.workspaces` is
   // documented (and quoted by the agent's brief) as exactly the suites that
   // ran, so the trimmed suites leave it, and `notRun` names them. Sorted, so
@@ -692,8 +1118,15 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       caveat: testScope.caveat
         ? `${testScope.caveat}; ${partialNote}`
         : partialNote,
+      // The machine-readable half: the scope's own caveat, without the
+      // budget clause just appended — what a continuation carries through
+      // untouched instead of re-parsing the joined prose (see TestScope).
+      liveCaveat: testScope.caveat ?? '',
     };
   }
+  // No partialNote: nothing machine-appended, so `liveCaveat` is deliberately
+  // NOT recorded — its absence tells a continuation the whole caveat is live,
+  // and a clean report stays exactly the shape it always was.
 
   // The scope was executed — only now may the report carry it. Every return
   // between the initializer and here ran zero test commands and must not

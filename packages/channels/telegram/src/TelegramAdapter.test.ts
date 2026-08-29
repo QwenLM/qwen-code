@@ -22,6 +22,18 @@ type TestTelegramMessage = {
 type TestTelegramEntity = { type: string; offset: number; length: number };
 
 class TestTelegramChannel extends TelegramChannel {
+  readonly inboundPreparations: Array<{
+    envelope: Envelope;
+    prepare: () => Promise<boolean | void>;
+  }> = [];
+
+  protected override async prepareThenHandleInbound(
+    envelope: Envelope,
+    prepare: () => Promise<boolean | void>,
+  ): Promise<void> {
+    this.inboundPreparations.push({ envelope, prepare });
+  }
+
   beginTyping(chatId: string): void {
     this.onPromptStart(chatId);
   }
@@ -124,6 +136,7 @@ function installFakeBot(channel: TelegramChannel): {
   token: string;
   api: {
     getMe: ReturnType<typeof vi.fn>;
+    getFile: ReturnType<typeof vi.fn>;
     setMyCommands: ReturnType<typeof vi.fn>;
     sendChatAction: ReturnType<typeof vi.fn>;
     sendMessage: ReturnType<typeof vi.fn>;
@@ -136,6 +149,7 @@ function installFakeBot(channel: TelegramChannel): {
     token: 'token',
     api: {
       getMe: vi.fn().mockResolvedValue({ id: 123, username: 'qwen_bot' }),
+      getFile: vi.fn().mockRejectedValue(new Error('download unavailable')),
       setMyCommands: vi.fn().mockResolvedValue(true),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(undefined),
@@ -345,6 +359,36 @@ describe('TelegramChannel', () => {
     expect(stderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('Failed to register bot commands'),
     );
+  });
+
+  it('enters inbound routing before downloading a photo', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    await channel.connect();
+    const photoHandler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:photo',
+    )?.[1] as ((context: unknown) => Promise<void>) | undefined;
+    expect(photoHandler).toBeDefined();
+
+    await photoHandler?.({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'private' },
+        photo: [{ file_id: 'photo-1' }],
+      },
+      api: bot.api,
+      reply: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(channel.inboundPreparations).toHaveLength(1);
+    expect(bot.api.getFile).not.toHaveBeenCalled();
+    const prepare = channel.inboundPreparations[0]?.prepare;
+    expect(prepare).toEqual(expect.any(Function));
+    await prepare?.();
+    expect(bot.api.getFile).toHaveBeenCalledWith('photo-1');
   });
 
   it('handles /start locally', async () => {

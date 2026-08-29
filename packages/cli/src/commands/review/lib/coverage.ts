@@ -68,6 +68,11 @@ import {
   recordedPromptPath,
 } from './prompt-record.js';
 import {
+  declaresOwnUncoverable,
+  openedBrief,
+  readFindingsPointer,
+} from './certification.js';
+import {
   requiredAgents,
   type RequiredAgent,
   type RosterPlan,
@@ -281,7 +286,7 @@ const DIGEST_WINDOW_MS = 5000;
 export const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
 
 /** The chunk this agent owns, when it was launched to own one. */
-function assignedChunk(rec: AgentRecord): number | null {
+export function assignedChunk(rec: AgentRecord): number | null {
   const m = CHUNK_RE.exec(rec.launchPrompt);
   return m ? Number(m[1]) : null;
 }
@@ -295,7 +300,10 @@ function assignedChunk(rec: AgentRecord): number | null {
  * recoverable from the harness's own copy of its launch prompt, in either
  * topology, without the agent having to claim anything afterwards.
  */
-function pointedAt(prompt: string, plan: Plan): Array<[number, number]> {
+export function pointedAt(
+  prompt: string,
+  plan: { chunks: Array<{ id: number; startLine: number; endLine: number }> },
+): Array<[number, number]> {
   const out: Array<[number, number]> = [];
   const re = /offset\s*[=:]\s*(\d+)\s*,\s*limit\s*[=:]\s*(\d+)/gi;
   for (const m of prompt.matchAll(re)) {
@@ -345,8 +353,6 @@ function merge(ranges: Array<[number, number]>): Array<[number, number]> {
   return out;
 }
 
-const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
-
 /** The exact rebuild flags for one required agent — operator-facing (stderr). */
 function selectorOf(req: RequiredAgent): string {
   if (req.role === 'chunk') return `--chunk ${req.chunk}`;
@@ -385,7 +391,13 @@ function publicRoleLabelZh(req: RequiredAgent): string | undefined {
   return req.file ? `${base}（${req.file}）` : base;
 }
 
-/** Something a reader can act on. `agentName` is `general-purpose` for all of them. */
+/**
+ * Something a reader can act on. `agentName` is the launched subagent type,
+ * so it is uniformly uninformative here but not a fixed string: `review-agent`
+ * on runs since the review skill switched types, `general-purpose` on records
+ * written before it. Do not match on either value — the identity line below is
+ * what names an agent.
+ */
 function label(rec: AgentRecord, chunk: number | null): string {
   if (chunk !== null) return `chunk ${chunk}`;
   // The identity line names the agent wherever it sits: launchers prepend
@@ -442,16 +454,10 @@ export function coverageFromTranscripts(
   const unopenedAgents: string[] = [];
   const rewrittenPrompts: string[] = [];
   const driftedLaunches: string[] = [];
-  // Did this record's agent open the brief recorded under `key`? Compared as a
-  // whole JSON string value (`successfulCallArgs` are serialized args), so a
-  // `${brief}.bak` cannot be credited for the brief — the same trap
-  // `parseTranscript` avoids for the diff path. Used by the verbatim-drift
-  // rescue in both the chunk loop and the roster walk, and by the roster's
-  // matching seed below.
-  const openedBriefOf = (rec: AgentRecord, key: string): boolean => {
-    const needle = JSON.stringify(briefPath(planPath, key));
-    return rec.successfulCallArgs.some((a) => a.includes(needle));
-  };
+  // Used by the verbatim-drift rescue in both the chunk loop and the roster
+  // walk, and by the roster's matching seed below.
+  const openedBriefOf = (rec: AgentRecord, key: string): boolean =>
+    openedBrief(rec, planPath, key);
   const disclosures: CoverageFromTranscripts['disclosures'] = [];
   // The one source for both registers: the structural entry feeds the posted
   // body (compose-review), and the returned prose feeds the stderr arrays —
@@ -549,7 +555,6 @@ export function coverageFromTranscripts(
       const b = builtOf(key);
       if (b === undefined) continue;
       if (!wasDeliveredVerbatim(rec.launchPrompt, b)) continue;
-      const needle = JSON.stringify(briefPath(planPath, key));
       if (
         records.some(
           (r) =>
@@ -558,7 +563,7 @@ export function coverageFromTranscripts(
             // Same return requirement as the chunk branch above.
             r.returned &&
             wasDeliveredVerbatim(r.launchPrompt, b) &&
-            r.successfulCallArgs.some((a) => a.includes(needle)),
+            openedBrief(r, planPath, key),
         )
       ) {
         return true;
@@ -626,14 +631,13 @@ export function coverageFromTranscripts(
       const b = builtOf(key);
       if (b === undefined) continue;
       if (!wasDeliveredVerbatim(rec.launchPrompt, b)) continue;
-      const needle = JSON.stringify(briefPath(planPath, key));
       if (
         records.some(
           (r) =>
             r !== rec &&
             r.returned &&
             wasDeliveredVerbatim(r.launchPrompt, b) &&
-            r.successfulCallArgs.some((a) => a.includes(needle)) &&
+            openedBrief(r, planPath, key) &&
             gapsOf(r).length === 0,
         )
       ) {
@@ -787,8 +791,7 @@ export function coverageFromTranscripts(
     const ranges = merge([...told, ...rec.diffReads]);
     if (ranges.length === 0) continue;
 
-    const u = UNCOVERABLE_RE.exec(rec.finalText);
-    if (u && chunk !== null && Number(u[1]) === chunk) {
+    if (chunk !== null && declaresOwnUncoverable(rec, chunk)) {
       // The same supersession guard the sibling flags carry. Without it a
       // stale declaration — a prior attempt's agent on a resumed run, or a
       // relaunched agent's first try — permanently deletes live coverage
@@ -802,11 +805,9 @@ export function coverageFromTranscripts(
       // other — the chunk lands in `missingChunks`, whose remediation
       // relaunches an agent that re-declares, forever. `gapsSuperseded`
       // below excludes same-shape records for exactly this reason.
-      const redeclares = (r: AgentRecord): boolean => {
-        const ru = UNCOVERABLE_RE.exec(r.finalText);
-        return ru !== null && Number(ru[1]) === chunk;
-      };
-      if (!chunkSatisfied(chunk, rec, (r) => !redeclares(r))) {
+      if (
+        !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk))
+      ) {
         uncoverable.add(chunk);
       }
       continue;
@@ -1032,19 +1033,13 @@ export function coverageFromTranscripts(
     // Every role, territory agents included. Their brief is where the severity
     // definitions, the paging rule, the uncoverable rule and the project rules live.
     const brief = briefPath(planPath, req.key);
-    // The brief as a whole JSON string value (`successfulCallArgs` are already
-    // serialized args): a bare substring would credit `${brief}.bak` for the brief,
-    // the same trap `parseTranscript` avoids for the diff path.
     // The ASSIGNED transcript must have opened this requirement's brief. The
     // matching SEEDS on brief-opening edges, but maximizing satisfied
     // requirements can displace an opened match onto an unopened edge — so an
     // unread flag here describes this assignment, not an impossibility. That is
     // the right trade: missing-role claims stay provable, and an unread brief
     // still caps.
-    const opened = pick.successfulCallArgs.some((a) =>
-      a.includes(JSON.stringify(brief)),
-    );
-    if (!opened) {
+    if (!openedBrief(pick, planPath, req.key)) {
       // The brief PATH is the operator's — it names the file to make the agent
       // open. The author's copy drops it: a filesystem path in a posted PR
       // body is the same register leak as a chunk id.
@@ -1085,18 +1080,11 @@ export function coverageFromTranscripts(
     // A record whose own return declares ITS OWN chunk unreachable did not
     // review it; counting it as recovered would have the body announce work
     // "counted as reviewed" beside the gap that same record disclosed. The
-    // veto is chunk-scoped like the walk's: applied raw it also matches a
-    // QUOTATION, and a recovered whole-diff auditor legitimately quotes the
-    // declarations it audited.
-    const declaredUnc = UNCOVERABLE_RE.exec(r.finalText);
-    if (declaredUnc !== null) {
-      const own = assignedChunk(r);
-      if (own !== null && Number(declaredUnc[1]) === own) return false;
-      if (own === null && r.diffToolCalls > 0 && assignedChunk(r) === null) {
-        // A whole-diff record quoting a declaration is not declaring.
-      }
-    }
+    // veto is chunk-scoped like the walk's: a recovered whole-diff auditor
+    // legitimately quotes the declarations it audited, and a quotation is
+    // not a declaration.
     const c = assignedChunk(r);
+    if (declaresOwnUncoverable(r, c)) return false;
     if (c !== null) {
       const b = builtOf(`chunk-${c}`);
       return (
@@ -1589,24 +1577,15 @@ export function verificationGaps(
     // replaced: the floor proves the findings file was OPENED (one successful
     // read_file of the path — no other tool's args count), not that it was
     // paged to completion — `read_file` truncates, so a first-page-only read
-    // still leaves a matching `fNeedle`.
+    // still leaves a matching serialized pointer (the needle built inside `readFindingsPointer`).
     // The old `wasDeliveredVerbatim` required the whole list in the delivered
     // prompt; the pointer proves delivery of the pointer line, not receipt of
     // the whole list. Accepted: the brief now orders the full read, and a
     // verifier that under-reads surfaces in the verdicts it gets wrong.
-    const needle = JSON.stringify(briefPath(planPath, key));
-    const opened = (r: AgentRecord) =>
-      r.successfulCallArgs.some((a) => a.includes(needle));
+    const opened = (r: AgentRecord) => openedBrief(r, planPath, key);
     const findingsPointer = findingsPointerOf(b);
-    const readTheFindings = (r: AgentRecord) => {
-      if (findingsPointer === null) return true;
-      const fNeedle = JSON.stringify(findingsPointer);
-      // Successful read_file calls ONLY: every tool serializes its args, and
-      // a `search_file_content` or a `list_directory` over the record dir
-      // names the path without reading a line of it. The floor certifies
-      // that the list was OPENED, and a mention is not an open.
-      return r.successfulReadFileArgs.some((a) => a.includes(fNeedle));
-    };
+    const readTheFindings = (r: AgentRecord) =>
+      readFindingsPointer(r, findingsPointer);
     const gotTheBuiltPrompt = records.filter((r) =>
       wasDeliveredVerbatim(r.launchPrompt, b),
     );

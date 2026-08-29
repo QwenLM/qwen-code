@@ -19,8 +19,8 @@ import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { runRipgrep, type RipgrepRunResult } from '../utils/ripgrepUtils.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
-import type { FileFilteringOptions } from '../config/constants.js';
-import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
+import type { FileFilteringOptions } from '../utils/file-filtering-options.js';
+import { DEFAULT_FILE_FILTERING_OPTIONS } from '../utils/file-filtering-options.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {

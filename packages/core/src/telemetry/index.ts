@@ -203,7 +203,9 @@ export {
   captureDaemonTelemetryContext,
   createDaemonBridgeTelemetry,
   emitDaemonLog,
+  extractDaemonHttpTraceContext,
   extractDaemonTraceContext,
+  extractInboundTraceId,
   hashDaemonWorkspace,
   injectDaemonTraceContext,
   recordDaemonError,
@@ -213,6 +215,7 @@ export {
   withDaemonRequestSpan,
   withDaemonSpan,
   type DaemonBridgeTelemetryMetrics,
+  type DaemonRequestSpanOptions,
 } from './daemon-tracing.js';
 export {
   initializeDaemonMetrics,

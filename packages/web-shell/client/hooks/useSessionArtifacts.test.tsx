@@ -38,7 +38,7 @@ const sdkMock = vi.hoisted(() => ({
   artifactsVersion: 0,
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useActions: () => sdkMock.actions,
   useConnection: () => sdkMock.connection,
   usePromptStatus: () => sdkMock.promptStatus,
@@ -315,6 +315,28 @@ describe('useSessionArtifacts', () => {
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'recovered-artifact',
     ]);
+  });
+
+  it('keeps the empty artifacts reference stable while a load has not established an owner', async () => {
+    // A session whose artifact load fails (e.g. a subagent session without an
+    // artifacts endpoint) never sets `loadedOwnerRef`, so the hook must hand
+    // back one stable empty array. A fresh literal per render changes
+    // `artifacts` identity on every render, which re-runs consumer effects
+    // that depend on it and cascades into an infinite update loop.
+    const load = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts.mockReturnValueOnce(load.promise);
+
+    await renderHookHost();
+    await act(async () => {
+      load.reject(new Error('Failed to fetch'));
+      await load.promise.catch(() => undefined);
+    });
+    expect(latestState?.artifacts).toEqual([]);
+
+    const firstReference = latestState?.artifacts;
+    await rerenderHookHost();
+    await rerenderHookHost();
+    expect(latestState?.artifacts).toBe(firstReference);
   });
 
   it('ignores loading cleanup from superseded artifact refresh failures', async () => {

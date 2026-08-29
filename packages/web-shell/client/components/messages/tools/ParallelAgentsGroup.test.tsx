@@ -1224,6 +1224,48 @@ describe('ParallelAgentsGroup activity rendering', () => {
     }
   });
 
+  it('keeps the pending-approval row inert while siblings stay clickable', () => {
+    const approval: PermissionRequest = {
+      id: 'approval',
+      toolCallId: 'a1',
+      content: [],
+      options: [],
+    };
+    const { container } = renderManagedGroup(
+      [
+        agent({ callId: 'a1', status: 'pending' }),
+        agent({ callId: 'a2', status: 'completed' }),
+      ],
+      { autoManageExpansion: true, pendingApproval: approval },
+    );
+
+    const pendingRow = container.querySelector(
+      'div[aria-disabled="true"]',
+    ) as HTMLElement;
+    // R2-5: the inert placeholder keeps the status so the dot keeps its
+    // active color instead of falling back to the muted default.
+    expect(pendingRow).not.toBeNull();
+    expect(pendingRow.getAttribute('data-agent-status')).toBe('active');
+    // R2-6: the pending row must not advertise a running agent.
+    expect(
+      pendingRow
+        .querySelector('[class*="rowStatus"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('pending');
+    // The pending row is a plain div: no button, no click affordance.
+    expect(
+      container.querySelector('button[data-agent-status="active"]'),
+    ).toBeNull();
+    expect(pendingRow.tagName).toBe('DIV');
+
+    // The sibling whose approval is not pending stays fully interactive.
+    const sibling = container.querySelector(
+      'button[data-agent-status="completed"]',
+    ) as HTMLButtonElement;
+    expect(sibling).not.toBeNull();
+    expect(sibling.hasAttribute('aria-disabled')).toBe(false);
+  });
+
   it('hands focus to the summary when the automatic exit starts under a focused row', () => {
     vi.useFakeTimers();
     try {

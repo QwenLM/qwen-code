@@ -16,6 +16,15 @@ import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import type { UIActions } from '../contexts/UIActionsContext.js';
 
+const discoverProviderModelsMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(null),
+);
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  discoverProviderModels: discoverProviderModelsMock,
+}));
+
 type UIStateOverrides = Partial<UIState> & Partial<UIState['auth']>;
 
 type UIActionsOverrides = Partial<UIActions> & Partial<UIActions['auth']>;
@@ -139,6 +148,18 @@ const waitForSelectedOption = async (
   await vi.waitFor(
     () => {
       expectSelectedOption(lastFrame(), label);
+    },
+    { timeout: WAIT_FOR_TIMEOUT },
+  );
+};
+
+const waitForText = async (
+  lastFrame: () => string | undefined,
+  expectedText: string,
+) => {
+  await vi.waitFor(
+    () => {
+      expect(lastFrame()).toContain(expectedText);
     },
     { timeout: WAIT_FOR_TIMEOUT },
   );
@@ -1103,6 +1124,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'Grok (xAI) API Key');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'MiniMax API Key');
       await pressEnterAndWaitFor(
         stdin,
@@ -1249,6 +1271,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         lastFrame,
         'Alibaba ModelStudio · Step 3/3 · Model IDs',
       );
+      await waitForText(lastFrame, 'Enter model IDs directly');
       stdin.write('\r');
       await vi.waitFor(
         () => {
@@ -1329,6 +1352,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         lastFrame,
         'Alibaba ModelStudio · Step 3/3 · Model IDs',
       );
+      await waitForText(lastFrame, 'Enter model IDs directly');
 
       // The Model IDs input is pre-filled with the saved custom model id
       // (which only exists in settings, never among the built-in defaults).

@@ -420,6 +420,86 @@ describe('owned workspace runtime publication', () => {
   });
 });
 
+describe('owned Conversations runtime quarantine', () => {
+  it('drains and disposes the internal runtime without persistence or rollback', async () => {
+    const runtime = makeRuntime('/owned-live', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const registry = createMockRegistry([runtime]);
+    const runtimeRemoval = createRemovalController();
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.quarantineOwnedRuntime(runtime),
+    ).resolves.toBeUndefined();
+
+    expect(registry.beginDrain).toHaveBeenCalledWith(runtime);
+    expect(runtimeRemoval.beginDrain).toHaveBeenCalledWith(runtime);
+    expect(registry.commitDrain).toHaveBeenCalledWith(runtime);
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+    expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(registry.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(runtimeRemoval.cancelDrain).not.toHaveBeenCalled();
+    expect(registry.cancelDrain).not.toHaveBeenCalled();
+    expect(
+      registry.getManagedByWorkspaceId(runtime.workspaceId),
+    ).toBeUndefined();
+  });
+
+  it('keeps the runtime draining when disposal cannot be proven', async () => {
+    const runtime = makeRuntime('/owned-live', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const registry = createMockRegistry([runtime]);
+    const runtimeRemoval = createRemovalController();
+    vi.mocked(runtimeRemoval.disposeRuntime).mockRejectedValueOnce(
+      new Error('dispose failed'),
+    );
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      runtimeRemoval,
+    });
+
+    await expect(handle.quarantineOwnedRuntime(runtime)).rejects.toThrow(
+      'Failed to quarantine the Conversations runtime',
+    );
+
+    expect(runtimeRemoval.completeDrain).not.toHaveBeenCalled();
+    expect(registry.completeDrain).not.toHaveBeenCalled();
+    expect(runtimeRemoval.cancelDrain).not.toHaveBeenCalled();
+    expect(registry.cancelDrain).not.toHaveBeenCalled();
+    expect(registry.getByWorkspaceId(runtime.workspaceId)).toBeUndefined();
+    expect(registry.getManagedByWorkspaceId(runtime.workspaceId)).toBe(runtime);
+  });
+
+  it('rejects non-Conversations runtimes before touching drain state', async () => {
+    const runtime = makeRuntime('/ordinary', {
+      provenance: 'existing',
+      removable: true,
+    });
+    const registry = createMockRegistry([runtime]);
+    const runtimeRemoval = createRemovalController();
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      runtimeRemoval,
+    });
+
+    await expect(handle.quarantineOwnedRuntime(runtime)).rejects.toThrow(
+      'Only the owned Conversations runtime may be quarantined',
+    );
+    expect(registry.beginDrain).not.toHaveBeenCalled();
+    expect(runtimeRemoval.beginDrain).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /workspaces', () => {
   beforeEach(() => {
     vi.clearAllMocks();

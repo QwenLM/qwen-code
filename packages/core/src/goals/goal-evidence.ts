@@ -19,7 +19,16 @@ import {
   projectUserTranscriptForDisplay,
 } from '../utils/transcript-records.js';
 
+// Previews are cut to a character count while building — cheap, and it bounds
+// the work — but the catalog budget they feed is denominated in bytes, so the
+// guarantee has to be too. In UTF-8 the two units differ by up to 4x: 240 CJK
+// characters are 720 bytes, so a full 32-claim checkpoint of Chinese evidence
+// serialized to ~29kB against a 24kB catalog and marked the window truncated
+// before a single new record was even scanned — which switched compaction off
+// permanently. `capPreviewBytes` is what actually holds the bound; the
+// character slices below only keep the intermediate strings small.
 const CATALOG_PREVIEW_LIMIT = 240;
+const CATALOG_PREVIEW_BYTE_LIMIT = 240;
 const CATALOG_ENTRY_LIMIT = 100;
 const CATALOG_BYTE_LIMIT = 24_000;
 const CATALOG_LINEAGE_LIMIT = 16;
@@ -131,6 +140,7 @@ export type InvalidGoalEvidenceReferenceCode =
   | 'wrong_turn_lineage'
   | 'catalog_truncated'
   | 'immediate_blocker_external_evidence_required'
+  | 'infeasible_blocker_external_fact_required'
   | 'immediate_blocker_newer_evidence_required'
   | 'repeated_blocker_turn_coverage';
 
@@ -263,6 +273,7 @@ export class GoalEvidenceRecordIndexAccumulator {
         this.lastPartPreviewValues,
       ).trim();
     }
+    preview = capPreviewBytes(preview, CATALOG_PREVIEW_BYTE_LIMIT);
     const catalogEntry =
       this.provenance && this.parsedGoalContext && preview
         ? {
@@ -462,11 +473,18 @@ export class GoalEvidenceCheckpointAccumulator {
       catalogBytes += entryBytes;
     }
     this.truncated = truncated;
+    // A truncated window is the case that most needs compressing, not the one
+    // that should skip it: the budget is already full, and the newest evidence
+    // that did fit is exactly what a checkpoint would fold into claims. Gating
+    // compaction on `!truncated` meant the one state compaction exists to
+    // resolve was the one state it refused to run in, and the Goal was stopped
+    // instead. Compress whatever the window did capture; the older evidence
+    // left behind is already covered by the previous checkpoint's claims.
     this.shouldCheckpoint =
-      !truncated &&
       this.candidateUuids.length > 0 &&
-      (this.checkpointEntries.length + this.candidateUuids.length >=
-        CHECKPOINT_ENTRY_THRESHOLD ||
+      (truncated ||
+        this.checkpointEntries.length + this.candidateUuids.length >=
+          CHECKPOINT_ENTRY_THRESHOLD ||
         catalogBytes >= CHECKPOINT_BYTE_THRESHOLD);
   }
 
@@ -873,9 +891,24 @@ function validateBlockerCoverage(
 ): void {
   if (proposal.status !== 'blocked') return;
 
+  // Infeasibility is a claim about the world, so it is held to external
+  // facts only: user input can authorise stopping, but it cannot make an
+  // objective impossible, and assistant prose saying so is exactly the
+  // "I think this can't be done" exit this kind must not become.
+  if (
+    proposal.blockerKind === 'infeasible' &&
+    !citedRecords.some(({ proofKind }) => proofKind === 'external_fact')
+  ) {
+    throw new InvalidGoalEvidenceReferenceError(
+      'infeasible_blocker_external_fact_required',
+      'An infeasible blocker requires cited external tool evidence of the fact that makes the objective unsatisfiable.',
+    );
+  }
+
   if (
     proposal.blockerKind === 'authority' ||
-    proposal.blockerKind === 'external'
+    proposal.blockerKind === 'external' ||
+    proposal.blockerKind === 'infeasible'
   ) {
     if (
       !citedRecords.some(
@@ -942,7 +975,10 @@ function checkpointCatalogEntries(
     uuid: claim.id,
     provenance: 'goal_checkpoint',
     turnId: `checkpoint:${checkpoint.checkpointId}`,
-    preview: claim.claim.slice(0, CATALOG_PREVIEW_LIMIT),
+    preview: capPreviewBytes(
+      claim.claim.slice(0, CATALOG_PREVIEW_LIMIT),
+      CATALOG_PREVIEW_BYTE_LIMIT,
+    ),
     proofKind: claim.proofKind,
   }));
 }
@@ -1049,6 +1085,24 @@ function legacySafeProvenance(
   return undefined;
 }
 
+/**
+ * Cut `value` to at most `limit` UTF-8 bytes without splitting a code point.
+ */
+export function capPreviewBytes(value: string, limit: number): string {
+  if (Buffer.byteLength(value, 'utf8') <= limit) {
+    return value;
+  }
+  let byteLength = 0;
+  let cutoff = 0;
+  for (const codePoint of value) {
+    const codePointBytes = Buffer.byteLength(codePoint, 'utf8');
+    if (byteLength + codePointBytes > limit) break;
+    byteLength += codePointBytes;
+    cutoff += codePoint.length;
+  }
+  return value.slice(0, cutoff);
+}
+
 function capCheckpointContent(content: string): string {
   if (Buffer.byteLength(content, 'utf8') <= CHECKPOINT_CONTENT_BYTE_LIMIT) {
     return content;
@@ -1101,7 +1155,10 @@ function evidencePreview(
       ? projectUserTranscriptForDisplay(record)
       : undefined;
   if (projection?.displayText !== undefined) {
-    return projection.displayText.slice(0, CATALOG_PREVIEW_LIMIT).trim();
+    return capPreviewBytes(
+      projection.displayText.slice(0, CATALOG_PREVIEW_LIMIT).trim(),
+      CATALOG_PREVIEW_BYTE_LIMIT,
+    );
   }
   let preview = '';
   const append = (value: string) => {
@@ -1121,7 +1178,7 @@ function evidencePreview(
     }
     if (preview.length >= CATALOG_PREVIEW_LIMIT) break;
   }
-  return preview.trim();
+  return capPreviewBytes(preview.trim(), CATALOG_PREVIEW_BYTE_LIMIT);
 }
 
 function renderToolResponse(functionResponse: {
