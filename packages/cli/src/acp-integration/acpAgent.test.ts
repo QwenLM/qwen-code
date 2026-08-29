@@ -14,6 +14,7 @@ import {
   afterAll,
   type MockInstance,
 } from 'vitest';
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -5414,7 +5415,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             ino: inode,
             isDirectory: () => stats.isDirectory(),
             isSymbolicLink: () => stats.isSymbolicLink(),
-          } as fs.Stats;
+          } as Stats;
         }) as unknown as typeof fs.lstat);
         try {
           const expectation = await managedConversationExpectation(
