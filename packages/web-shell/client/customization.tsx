@@ -166,6 +166,8 @@ export interface ChatHeaderRenderInfo {
   onRightPanelOpenChange: (open: boolean) => void;
   /** Opens token usage for the current session, when available. */
   onOpenTokenUsage?: () => void;
+  /** Opens Settings deep-linked to Local Control (Daemon category). */
+  onOpenLocalControlSettings?: () => void;
 }
 
 /**

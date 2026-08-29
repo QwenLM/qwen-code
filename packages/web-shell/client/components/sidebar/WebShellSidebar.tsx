@@ -140,6 +140,10 @@ const SESSION_MENU_PORTAL_STYLE: CSSProperties = {
 const GROUP_MENU_MARGIN = 8;
 const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
 const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
+// Mirrors `SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX` in acp-bridge/session-source.ts
+// (the client cannot import that package). Per-run scheduled task children keep
+// the `default` source type so they list with ordinary conversations.
+const SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX = 'scheduled_task_run:';
 
 type SidebarSessionSource = 'default' | 'channel';
 
@@ -152,6 +156,15 @@ function matchesSessionSource(
     return session.sourceType === undefined || session.sourceType === 'default';
   }
   return true;
+}
+
+function isScheduledTaskSession(session: DaemonSessionSummary): boolean {
+  return (
+    session.sourceType === 'scheduled_task' ||
+    (session.sourceType === 'default' &&
+      session.sourceId?.startsWith(SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX) ===
+        true)
+  );
 }
 
 function getSessionIdentity(
@@ -266,7 +279,6 @@ export type WebShellSidebarSessionActionItem =
 /** Subset of action items that have working inline (hover-button) handlers. */
 export type WebShellSidebarSessionInlineActionItem =
   | 'pin'
-  | 'archive'
   | 'rename'
   | 'export'
   | 'delete';
@@ -279,7 +291,8 @@ export interface WebShellSidebarSessionActionsOptions {
    * archive stays in the dropdown so a stray click on the hover slot cannot
    * archive a session.
    * Only items that also pass their built-in visibility condition are rendered.
-   * Only items with working inline handlers are accepted (details/group are dropdown-only).
+   * Only items with working inline handlers are accepted
+   * (details/group/archive are dropdown-only).
    */
   inlineItems?: readonly WebShellSidebarSessionInlineActionItem[];
 }
@@ -350,9 +363,8 @@ interface WebShellSidebarProps {
   onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
-   * Whether to offer the Session Overview entry point. Gated to large screens
-   * by the app: below that there is no room to make managing several sessions
-   * side by side worthwhile.
+   * Whether to offer the Session Overview entry point. The table handles
+   * narrow widths, so the entry point can be offered at every viewport size.
    */
   canOpenSessionsOverview?: boolean;
   onOpenSplitView: () => void;
@@ -3831,6 +3843,9 @@ export function WebShellSidebar({
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
       ) : null;
+      const scheduledTaskIcon = isScheduledTaskSession(session) ? (
+        <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
+      ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       const withDetails = (row: ReactElement) => (
         <Fragment key={sessionIdentity}>
@@ -3876,6 +3891,17 @@ export function WebShellSidebar({
               measureSessionTitleScroll(event.currentTarget)
             }
           >
+            {scheduledTaskIcon && (
+              <span className={styles.sessionStatusSlot}>
+                <span
+                  className={styles.sessionSourceIcon}
+                  data-web-shell-scheduled-task-session
+                  title={t('sidebar.scheduledTasks')}
+                >
+                  {scheduledTaskIcon}
+                </span>
+              </span>
+            )}
             {isEditing ? (
               <form
                 className={styles.renameForm}
@@ -4013,13 +4039,12 @@ export function WebShellSidebar({
       const showDelete = canShowDeleteSession(session);
       const inlineActionCount =
         Number(showPin && inlineActionItems.has('pin')) +
-        Number(showArchive && inlineActionItems.has('archive')) +
         Number(showRename && inlineActionItems.has('rename')) +
         Number(showExport && inlineActionItems.has('export')) +
         Number(showDelete && inlineActionItems.has('delete'));
       const showMoreActions =
         (showPin && !inlineActionItems.has('pin')) ||
-        (showArchive && !inlineActionItems.has('archive')) ||
+        showArchive ||
         (showRename && !inlineActionItems.has('rename')) ||
         canOrganizeSession(session, 'group') ||
         (showExport && !inlineActionItems.has('export')) ||
@@ -4054,8 +4079,24 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
+            {scheduledTaskIcon ? (
+              <span
+                className={styles.sessionSourceIcon}
+                data-web-shell-scheduled-task-session
+                title={t('sidebar.scheduledTasks')}
+              >
+                {scheduledTaskIcon}
+              </span>
+            ) : null}
             {completedUnread ? (
-              <span className={styles.sessionStatusDot} aria-hidden="true" />
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  Boolean(scheduledTaskIcon) && styles.sessionStatusDotOverlay,
+                )}
+                data-web-shell-session-completed-unread
+                aria-hidden="true"
+              />
             ) : null}
           </span>
           {isEditing && canRenameSession(session) ? (
@@ -4155,20 +4196,6 @@ export function WebShellSidebar({
                           onClick: () => handleTogglePin(session),
                         },
                         {
-                          key: 'archive',
-                          icon: <ArchiveIcon size={16} strokeWidth={1.2} />,
-                          label: t('sidebar.archive'),
-                          disabled: busy || isCurrent || running,
-                          title: isCurrent
-                            ? t('sidebar.archiveCurrentDisabled')
-                            : running
-                              ? t('sidebar.archiveRunningDisabled')
-                              : t('sidebar.archive'),
-                          visible:
-                            showArchive && inlineActionItems.has('archive'),
-                          onClick: () => handleArchive(session),
-                        },
-                        {
                           key: 'rename',
                           icon: <PencilIcon size={16} strokeWidth={1.2} />,
                           label: t('sidebar.rename'),
@@ -4263,23 +4290,22 @@ export function WebShellSidebar({
                                   : t('sidebar.pin')}
                               </DropdownMenuItem>
                             )}
-                            {showArchive &&
-                              !inlineActionItems.has('archive') && (
-                                <DropdownMenuItem
-                                  disabled={busy || isCurrent || running}
-                                  title={
-                                    isCurrent
-                                      ? t('sidebar.archiveCurrentDisabled')
-                                      : running
-                                        ? t('sidebar.archiveRunningDisabled')
-                                        : undefined
-                                  }
-                                  onSelect={() => handleArchive(session)}
-                                >
-                                  <ArchiveIcon />
-                                  {t('sidebar.archive')}
-                                </DropdownMenuItem>
-                              )}
+                            {showArchive && (
+                              <DropdownMenuItem
+                                disabled={busy || isCurrent || running}
+                                title={
+                                  isCurrent
+                                    ? t('sidebar.archiveCurrentDisabled')
+                                    : running
+                                      ? t('sidebar.archiveRunningDisabled')
+                                      : undefined
+                                }
+                                onSelect={() => handleArchive(session)}
+                              >
+                                <ArchiveIcon />
+                                {t('sidebar.archive')}
+                              </DropdownMenuItem>
+                            )}
                             {showRename && !inlineActionItems.has('rename') && (
                               <DropdownMenuItem
                                 disabled={busy}
