@@ -7,6 +7,7 @@
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -264,7 +265,8 @@ describe('qwen resolve workflow', () => {
   });
 
   it('truncates an over-long report visibly, on a character boundary', () => {
-    const helper = resolveJob.match(
+    // The report is composed in the publish job.
+    const helper = job(workflow, 'publish-resolution').match(
       /(SUMMARY_MAX_BYTES=\d+\n[\s\S]*?append_safe_file\(\) \{[\s\S]*?\n {10}\})/,
     )?.[1];
     expect(helper).toBeTruthy();
@@ -672,6 +674,9 @@ describe('qwen resolve workflow', () => {
     nextJob === -1
       ? workflow.slice(resolveJobStart)
       : workflow.slice(resolveJobStart, resolveJobStart + 1 + nextJob);
+  // The credentialed half of /resolve — verification, push, result comment —
+  // lives in its own job on a runner that never executed the agent.
+  const publishJob = job(workflow, 'publish-resolution');
   const reviewJob = job(workflow, 'review-pr');
   const delayAutomaticReviewJob = job(workflow, 'delay-automatic-review');
   const authorizeJob = job(workflow, 'authorize');
@@ -728,24 +733,28 @@ describe('qwen resolve workflow', () => {
     expect(authorizeStep).not.toContain('principal="$PR_AUTHOR"');
   });
 
-  it('keeps the authorization and scope guards on resolve-pr', () => {
-    // /resolve must require write+ permission before any credentialed push.
+  it('keeps the authorization and scope guards on the /resolve lane', () => {
+    // /resolve must require write+ permission before any credentialed push;
+    // the publish job inherits that gate through `needs`.
     expect(resolveJob).toContain(
       "needs.authorize.outputs.should_review == 'true'",
     );
+    expect(publishJob).toContain("needs: ['resolve-pr']");
     // Fork PRs are supported: the head is fetched through refs/pull/N/head and
     // the resolved branch is pushed back to the PR's head repository.
     expect(resolveJob).toContain('refs/pull/${PR_NUMBER}/head');
-    expect(resolveJob).toContain('github.com/${HEAD_REPO}.git');
+    expect(publishJob).toContain('refs/pull/${PR_NUMBER}/head');
+    expect(publishJob).toContain('github.com/${HEAD_REPO}.git');
     // Out-of-scope edits (prompt-injection symptom) fail closed.
-    expect(resolveJob).toContain(
+    expect(publishJob).toContain(
       'Agent modified files outside the conflict set',
     );
-    // The push only happens through the credentialed publish step, SHA-pinned:
+    // The push only happens through the credentialed publish job, SHA-pinned:
     // the bare flag would allow any force-push regardless of the remote's current
     // state, defeating the concurrent-update guard.
-    expect(resolveJob).toContain('--force-with-lease="refs/heads/');
-    expect(resolveJob).toContain(':${HEAD_SHA}"');
+    expect(publishJob).toContain('--force-with-lease="refs/heads/');
+    expect(publishJob).toContain(':${HEAD_SHA}"');
+    expect(resolveJob).not.toContain('--force-with-lease');
   });
 
   it('fetches the PR head into a collision-free local ref', () => {
@@ -758,35 +767,46 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).not.toContain(
       '+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/${head_ref}',
     );
-    expect(resolveJob).toContain('HEAD_FETCH_REF:');
-    expect(resolveJob).toContain(
+    // The publish job fetches the same ref from GitHub for itself and then
+    // points it at the head the agent resolved FROM, so the guards compare
+    // against that commit rather than a head that moved meanwhile.
+    expect(publishJob).toContain('HEAD_FETCH_REF:');
+    expect(publishJob).toContain(
+      'git fetch origin "+refs/pull/${PR_NUMBER}/head:${HEAD_FETCH_REF}"',
+    );
+    expect(publishJob).toContain(
+      'git update-ref "$HEAD_FETCH_REF" "$HEAD_SHA"',
+    );
+    expect(publishJob).toContain(
       'git diff --name-only -z --diff-filter=ACMRT "$HEAD_FETCH_REF" HEAD',
     );
   });
 
-  it('keeps the verification-gate failure checks on resolve-pr', () => {
+  it('keeps the verification-gate failure checks on the publish job', () => {
     // These guard against prompt-injection symptoms; a future edit that drops
     // any of them from the credentialed conflict-resolution path must fail here.
-    expect(resolveJob).toContain(
+    expect(publishJob).toContain(
       'Leftover conflict markers found after resolution',
     );
-    expect(resolveJob).toContain('Branch still has merge conflicts with');
-    expect(resolveJob).toContain('The top commit is a default merge commit');
-    expect(resolveJob).toContain(
+    expect(publishJob).toContain('Branch still has merge conflicts with');
+    expect(publishJob).toContain('The top commit is a default merge commit');
+    expect(publishJob).toContain(
       'Branch unchanged and no no-action.md was written',
     );
-    expect(resolveJob).toContain(
+    expect(publishJob).toContain(
       'The conflict-resolution agent step did not succeed',
     );
-    expect(resolveJob).toContain('address-summary.md is missing');
-    expect(resolveJob).toContain('Unresolved index conflicts remain');
+    expect(publishJob).toContain('address-summary.md is missing');
+    expect(publishJob).toContain('Unresolved index conflicts remain');
   });
 
-  it('pins the core security controls on resolve-pr', () => {
-    // Checkout must not persist GITHUB_TOKEN into .git/config.
+  it('pins the core security controls on the /resolve lane', () => {
+    // Checkout must not persist GITHUB_TOKEN into .git/config, in either job.
     expect(resolveJob).toContain('persist-credentials: false');
+    expect(publishJob).toContain('persist-credentials: false');
+    expect(publishJob).not.toContain('persist-credentials: true');
     // The resolution check carries no writable GitHub token (defense in depth).
-    expect(resolveJob).toContain("GITHUB_TOKEN: ''");
+    expect(publishJob).toContain("GITHUB_TOKEN: ''");
     // The agent runs WITHOUT the container sandbox — measured, not assumed:
     // the first day `sandbox: true` took effect (#9252, 2026-08-16) /resolve
     // went from 84% pushed to 0 of 81, dying on a missing versioned image or
@@ -797,102 +817,131 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).not.toContain('"sandbox": true');
     // Concurrent /resolve runs must not interleave on the credentialed push.
     expect(resolveJob).toContain('cancel-in-progress: false');
+    expect(publishJob).toContain('cancel-in-progress: false');
   });
 
-  it('runs the agent without any GitHub credentials', () => {
+  it('runs the agent without any GitHub credentials, and nothing credentialed after it', () => {
+    const agentStart = resolveJob.indexOf("- name: 'Resolve conflicts'");
     const agentStep = resolveJob.slice(
-      resolveJob.indexOf("- name: 'Resolve conflicts'"),
-      resolveJob.indexOf("- name: 'Resolution check'"),
+      agentStart,
+      resolveJob.indexOf("- name: 'Package resolution'"),
     );
     expect(agentStep.length).toBeGreaterThan(0);
     expect(agentStep).not.toContain('GH_TOKEN');
     expect(agentStep).not.toContain('GITHUB_TOKEN');
     expect(agentStep).not.toContain('CI_BOT_PAT');
     expect(agentStep).not.toContain('CI_DEV_BOT_PAT');
+    // Once the agent has run, no step of its job may carry a secret: the
+    // runner is agent-written (config, hooks, refs, PATH, the real
+    // $GITHUB_ENV, live processes), and an in-job scrub cannot enumerate
+    // every entrance. 'Report skipped request' is the one exception, and it
+    // runs only when the agent did not (decision != run).
+    const afterAgent = resolveJob.slice(
+      resolveJob.indexOf("- name: 'Package resolution'"),
+    );
+    const skipStart = afterAgent.indexOf("- name: 'Report skipped request'");
+    expect(skipStart).toBeGreaterThan(-1);
+    expect(afterAgent.slice(0, skipStart)).not.toContain('secrets.');
+    const skipStep = step(resolveJob, 'Report skipped request');
+    expect(skipStep).toContain("steps.prepare.outputs.decision == 'skip'");
+    expect(skipStep).not.toContain("decision == 'run'");
   });
 
-  it('hardens the post-agent steps against state the agent can plant', () => {
-    // The agent step runs --yolo without a sandbox BEFORE these steps in the
-    // same job: anything it appends to $GITHUB_ENV reaches every later step,
-    // and it writes the workspace. 'Resolution check' must not be falsifiable
-    // by planted shims or config, and the credentialed push in 'Report result'
-    // must not inherit an executable or routable channel to the token.
-    const verifyStep = step(resolveJob, 'Resolution check');
-    const reportStep = step(resolveJob, 'Report result');
-    const showStep = step(resolveJob, 'Show run artifacts');
-
-    for (const postAgentStep of [verifyStep, reportStep, showStep]) {
-      // BASH_ENV and LD_* execute at process startup, before any body line
-      // runs — pin them empty at the step boundary, not merely unset in the
-      // body.
-      expect(postAgentStep).toContain("BASH_ENV: ''");
-      expect(postAgentStep).toContain("LD_PRELOAD: ''");
-      expect(postAgentStep).toContain("LD_AUDIT: ''");
-      expect(postAgentStep).toContain("LD_LIBRARY_PATH: ''");
-      // A planted PATH shim must not resolve git for the guard or the push,
-      // and a planted PATH prepend must not stand in for the step shell.
-      expect(postAgentStep).toContain('PATH=/usr/bin:/bin');
-      expect(postAgentStep).toContain(
-        "shell: '/bin/bash --noprofile --norc -eo pipefail {0}'",
+  it('publishes from a job whose runner never executed the agent', () => {
+    // The structural containment: the agent runs --yolo without a sandbox and
+    // can leave anything behind on its runner — config scopes, hooks, moved
+    // refs, PATH shims, appends to the real $GITHUB_ENV, a detached process
+    // reading /proc. An in-job denylist could not be closed (review rounds
+    // 2–5 on #10428 each demonstrated the next entrance), so the credentialed
+    // half runs on a fresh runner and takes from the agent job only a verified
+    // git bundle and the report files.
+    expect(publishJob.length).toBeGreaterThan(0);
+    expect(publishJob).toContain("needs: ['resolve-pr']");
+    expect(publishJob).toContain(
+      'if: "${{ always() && needs.resolve-pr.outputs.decision == \'run\' }}"',
+    );
+    // The token-bearing step lives in the publish job, and that job runs no
+    // agent: no `id: 'resolve_conflicts'`, no qwen invocation.
+    expect(publishJob).toContain('x-access-token:${PUSH_TOKEN}');
+    expect(resolveJob).not.toContain('x-access-token:');
+    expect(resolveJob).not.toContain('PUSH_TOKEN');
+    expect(publishJob).not.toContain("id: 'resolve_conflicts'");
+    expect(publishJob).not.toContain('qwen \\');
+    expect(publishJob).not.toContain('Install Qwen CLI');
+    // Its checkout is fresh and its refs come from GitHub, not from the
+    // agent's checkout: base and head are fetched again, and the guards
+    // compare against the head the agent resolved from.
+    expect(step(publishJob, 'Checkout base branch')).toContain(
+      'persist-credentials: false',
+    );
+    const verifyStep = step(publishJob, 'Resolution check');
+    expect(verifyStep).toContain(
+      'git fetch origin "+refs/pull/${PR_NUMBER}/head:${HEAD_FETCH_REF}" "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"',
+    );
+    expect(verifyStep).toContain(
+      "HEAD_SHA: '${{ needs.resolve-pr.outputs.head_sha }}'",
+    );
+    expect(verifyStep).toContain(
+      'git update-ref "$HEAD_FETCH_REF" "$HEAD_SHA"',
+    );
+    // The resolution is admitted as objects only: a bundle that must verify
+    // against the head fetched from GitHub and descend from the head the
+    // agent resolved from; absence means the agent changed nothing.
+    expect(verifyStep).toContain('git bundle verify "$bundle"');
+    expect(verifyStep).toContain(
+      'git fetch "$bundle" "+${resolution_ref}:${resolution_ref}"',
+    );
+    expect(verifyStep).toContain(
+      'git merge-base --is-ancestor "$HEAD_SHA" HEAD',
+    );
+    expect(verifyStep.indexOf('git bundle verify')).toBeLessThan(
+      verifyStep.indexOf('git fetch "$bundle"'),
+    );
+    expect(verifyStep.indexOf('git merge-base --is-ancestor')).toBeLessThan(
+      verifyStep.indexOf('git ls-files -u'),
+    );
+    // A missing artifact (agent job cancelled or crashed before packaging)
+    // is reported as an infrastructure failure, not silently.
+    expect(verifyStep).toContain('uploaded no run artifact');
+    expect(step(publishJob, 'Download run artifacts')).toContain(
+      'continue-on-error: true',
+    );
+    // The two halves agree on the artifact name and the bundle's shape.
+    const packageStep = step(resolveJob, 'Package resolution');
+    expect(packageStep).toContain(
+      'git bundle create "${WORKDIR}/resolution.bundle" "${HEAD_SHA}..refs/heads/qwen-resolve/pr-${PR_NUMBER}"',
+    );
+    expect(step(resolveJob, 'Upload run artifacts')).toContain(
+      "name: 'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}'",
+    );
+    expect(step(publishJob, 'Download run artifacts')).toContain(
+      "name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}'",
+    );
+    expect(step(publishJob, 'Download run artifacts')).toContain(
+      "path: '/tmp/qwen-resolve'",
+    );
+    expect(publishJob).toContain("WORKDIR: '/tmp/qwen-resolve'");
+    // The verdict on the agent step crosses the job boundary as a job output.
+    expect(resolveJob).toContain(
+      "agent_outcome: '${{ steps.resolve_conflicts.outcome }}'",
+    );
+    expect(verifyStep).toContain(
+      "RESOLVE_OUTCOME: '${{ needs.resolve-pr.outputs.agent_outcome }}'",
+    );
+    // Both jobs hold the head-write lock: the push is what it serialises.
+    for (const text of [resolveJob, publishJob]) {
+      expect(text).toContain(
+        "group: 'qwen-pr-head-write-${{ github.event.issue.number || github.event.inputs.pr_number }}'",
       );
-      // Host and global config are agent-reachable runner surfaces (url
-      // rewrites redirect the token URL); GIT_CONFIG_COUNT injects config
-      // through env. None of it may reach the git calls.
-      expect(postAgentStep).toContain('export GIT_CONFIG_SYSTEM=/dev/null');
-      expect(postAgentStep).toContain('export GIT_CONFIG_GLOBAL=/dev/null');
-      expect(postAgentStep).toContain('export GIT_CONFIG_COUNT=0');
-      // GIT_CONFIG_PARAMETERS injects config that survives GIT_CONFIG_COUNT=0
-      // and the /dev/null scopes; GIT_EXTERNAL_DIFF and GIT_EXEC_PATH are
-      // exec channels a content diff can hit. All three steps must drop the
-      // whole list — the comment claims a 'same scrub', so pin it.
-      expect(postAgentStep).toContain('unset GIT_CONFIG_PARAMETERS');
-      // The scrub must execute BEFORE each step's first git/gh use —
-      // relocating it below them re-exposes the checks and the push to
-      // planted state, the exact regression this PR exists to stop.
-      expect(postAgentStep.indexOf('PATH=/usr/bin:/bin')).toBeGreaterThan(-1);
     }
-    expect(verifyStep.indexOf('PATH=/usr/bin:/bin')).toBeLessThan(
-      verifyStep.indexOf('git ls-files -u'),
-    );
-    expect(reportStep.indexOf('PATH=/usr/bin:/bin')).toBeLessThan(
-      reportStep.indexOf('push --no-verify'),
-    );
-    expect(reportStep.indexOf('PATH=/usr/bin:/bin')).toBeLessThan(
-      reportStep.indexOf('gh pr comment'),
-    );
-
-    for (const postAgentStep of [verifyStep, reportStep]) {
-      // The LOCAL .git/config is the highest-precedence scope and the agent
-      // writes the workspace — hooks, filters, includes and url rewrites
-      // planted there survive GIT_CONFIG_GLOBAL=/dev/null, so it is removed.
-      expect(postAgentStep).toContain('rm -f .git/config');
-      // A gitfile-replaced .git (`gitdir: <path>`) makes that rm a no-op and
-      // lets a url.*.insteadOf rewrite the push URL with the token in the
-      // request path — refuse it before any check and before the push.
-      expect(postAgentStep).toContain('[ ! -d .git ]');
-    }
-    expect(verifyStep.indexOf('[ ! -d .git ]')).toBeLessThan(
-      verifyStep.indexOf('git ls-files -u'),
-    );
-    expect(reportStep.indexOf('[ ! -d .git ]')).toBeLessThan(
-      reportStep.indexOf('push --no-verify'),
-    );
-
-    // The credentialed push itself: hookless and verify-less, so a planted
-    // pre-push hook never receives the token URL.
-    expect(reportStep).toContain(
-      'git -c core.hooksPath=/dev/null push --no-verify',
-    );
-    // Proxy and gh-host vars could route the push or the PAT comment to a
-    // listener; they must be dropped from the inherited environment.
-    expect(reportStep).toContain('HTTP_PROXY HTTPS_PROXY');
-    expect(reportStep).toContain('GH_HOST GH_ENTERPRISE_TOKEN GH_CONFIG_DIR');
+    // The push itself is verify-less, so a hook could never receive the URL.
+    expect(step(publishJob, 'Report result')).toContain('git push --no-verify');
   });
 
   it('pins the CLI version and bounds the agent step', () => {
     const agentStep = resolveJob.slice(
       resolveJob.indexOf("- name: 'Resolve conflicts'"),
-      resolveJob.indexOf("- name: 'Resolution check'"),
+      resolveJob.indexOf("- name: 'Package resolution'"),
     );
     // `latest` ties every run to the npm release pipeline of the moment: the
     // 2026-08-15 dist-tag pointed at an unresolvable 0.21.12 and 14 runs died
@@ -919,7 +968,14 @@ describe('qwen resolve workflow', () => {
     // swallowing it (`exit 0`, a trailing `|| true`) would let a crashed or
     // turn-capped agent report success and misroute the comment.
     expect(agentStep).toContain('status=$?');
-    expect(agentStep).toMatch(/exit "\$status"\s*$/);
+    // `exit "$status"` must be the last command of the run block: only
+    // comments and blank lines may follow it (the next step's YAML comment).
+    const exitAt = agentStep.lastIndexOf('exit "$status"');
+    expect(exitAt).toBeGreaterThan(-1);
+    const tail = agentStep.slice(exitAt + 'exit "$status"'.length).split('\n');
+    expect(tail.every((l) => l.trim() === '' || l.trim().startsWith('#'))).toBe(
+      true,
+    );
     // The decoys only mask the invocation's env; the real runner command
     // files stay agent-discoverable and are truncated on every exit path.
     for (const file of [
@@ -937,9 +993,7 @@ describe('qwen resolve workflow', () => {
     // and the number quoted in the failure comment must agree.
     const stepTimeout = agentStep.match(/^\s+timeout-minutes: (\d+)$/m);
     expect(stepTimeout).not.toBeNull();
-    const reportStep = resolveJob.slice(
-      resolveJob.indexOf("- name: 'Report result'"),
-    );
+    const reportStep = step(publishJob, 'Report result');
     expect(reportStep).toContain(`AGENT_TIMEOUT_MINUTES: '${stepTimeout[1]}'`);
     expect(Number(timeoutCmd[1])).toBeLessThan(Number(stepTimeout[1]) * 60);
     // Read the ceiling instead of duplicating it as a literal: if the job's
@@ -956,13 +1010,13 @@ describe('qwen resolve workflow', () => {
     // outcome != success on the agent step means no resolution was attempted
     // (install/model/infra error, step timeout, cancellation). The comment
     // must say so and must not invite a re-run, which repeats the failure.
-    const verifyStep = step(resolveJob, 'Resolution check');
-    const reportStep = step(resolveJob, 'Report result');
+    const verifyStep = step(publishJob, 'Resolution check');
+    const reportStep = step(publishJob, 'Report result');
     expect(reportStep).toContain(
       "FAILURE_KIND: '${{ steps.verify.outputs.failure_kind }}'",
     );
     expect(reportStep).toContain(
-      "RESOLVE_OUTCOME: '${{ steps.resolve_conflicts.outcome }}'",
+      "RESOLVE_OUTCOME: '${{ needs.resolve-pr.outputs.agent_outcome }}'",
     );
 
     // The failure_kind=infra write is pinned to the never-ran block of
@@ -1027,6 +1081,264 @@ describe('qwen resolve workflow', () => {
     expect(elseArm).not.toContain('This is not a verdict');
   });
 
+  it('packages the resolution in the agent job and verifies it on a fresh runner', () => {
+    // Drives the real run blocks — 'Package resolution' from resolve-pr and
+    // 'Resolution check' from publish-resolution — against a bare origin, an
+    // agent-side clone and a fresh publish-side clone, the way the two
+    // runners see them. The publish side never reads the agent's checkout.
+    const runBlock = (section, name) => {
+      const text = step(section, name);
+      const start =
+        text.indexOf('\n        run: |-\n') + '\n        run: |-\n'.length;
+      expect(start).toBeGreaterThan('\n        run: |-\n'.length - 1);
+      return text.slice(start).replace(/^ {10}/gm, '');
+    };
+    const packageBlock = runBlock(resolveJob, 'Package resolution');
+    const verifyBlock = runBlock(publishJob, 'Resolution check');
+    expect(packageBlock).not.toContain('${{');
+    expect(verifyBlock).not.toContain('${{');
+
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'fixture',
+      GIT_AUTHOR_EMAIL: 'fixture@example.com',
+      GIT_COMMITTER_NAME: 'fixture',
+      GIT_COMMITTER_EMAIL: 'fixture@example.com',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+    };
+    const git = (cwd, ...args) => {
+      const r = spawnSync('git', args, { cwd, env: gitEnv, encoding: 'utf8' });
+      if (r.status !== 0) {
+        throw new Error(
+          `git ${args.join(' ')} in ${cwd}:\n${r.stdout}\n${r.stderr}`,
+        );
+      }
+      return r.stdout.trim();
+    };
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-resolve-split-'));
+    try {
+      // Origin: main and a PR head that conflict on a.txt; main also adds c.txt.
+      const origin = path.join(root, 'origin.git');
+      const seed = path.join(root, 'seed');
+      git(root, 'init', '-q', '--bare', origin);
+      git(root, 'init', '-q', '-b', 'main', seed);
+      writeFileSync(path.join(seed, 'a.txt'), 'shared\n');
+      git(seed, 'add', '.');
+      git(seed, 'commit', '-q', '-m', 'chore: seed');
+      git(seed, 'checkout', '-q', '-b', 'feature');
+      writeFileSync(path.join(seed, 'a.txt'), 'feature side\n');
+      git(seed, 'commit', '-q', '-am', 'feat: feature');
+      const headSha = git(seed, 'rev-parse', 'HEAD');
+      git(seed, 'checkout', '-q', 'main');
+      writeFileSync(path.join(seed, 'a.txt'), 'main side\n');
+      writeFileSync(path.join(seed, 'c.txt'), 'from main\n');
+      git(seed, 'add', '.');
+      git(seed, 'commit', '-q', '-m', 'feat: main');
+      git(seed, 'remote', 'add', 'origin', origin);
+      git(seed, 'push', '-q', 'origin', 'main', 'feature:refs/pull/1/head');
+
+      // Agent side: the checkout the agent resolved in, plus its WORKDIR.
+      const agent = path.join(root, 'agent');
+      git(root, 'clone', '-q', origin, agent);
+      git(
+        agent,
+        'fetch',
+        '-q',
+        'origin',
+        '+refs/pull/1/head:refs/remotes/origin/qwen-resolve/pr-1/head',
+      );
+      git(
+        agent,
+        'checkout',
+        '-q',
+        '-B',
+        'qwen-resolve/pr-1',
+        'refs/remotes/origin/qwen-resolve/pr-1/head',
+      );
+      spawnSync('git', ['merge', '--no-commit', 'origin/main'], {
+        cwd: agent,
+        env: gitEnv,
+      });
+      const resolveWith = (extraFile) => {
+        writeFileSync(path.join(agent, 'a.txt'), 'resolved by agent\n');
+        git(agent, 'add', 'a.txt');
+        if (extraFile) {
+          writeFileSync(path.join(agent, extraFile), 'planted\n');
+          git(agent, 'add', extraFile);
+        }
+        git(
+          agent,
+          'commit',
+          '-q',
+          '-m',
+          'fix: resolve merge conflicts with main',
+        );
+      };
+      resolveWith(null);
+      const resolvedSha = git(agent, 'rev-parse', 'HEAD');
+
+      const pkg = (workdir, extraEnv = {}) => {
+        rmSync(workdir, { recursive: true, force: true });
+        mkdirSync(workdir, { recursive: true });
+        const r = spawnSync('bash', ['-c', packageBlock], {
+          cwd: agent,
+          env: {
+            ...gitEnv,
+            WORKDIR: workdir,
+            HEAD_SHA: headSha,
+            PR_NUMBER: '1',
+            ...extraEnv,
+          },
+          encoding: 'utf8',
+        });
+        return r;
+      };
+      const verify = (workdir, extraEnv = {}) => {
+        const publish = path.join(
+          root,
+          `publish-${Math.random().toString(36).slice(2)}`,
+        );
+        git(root, 'clone', '-q', origin, publish);
+        const out = path.join(publish, 'outputs.txt');
+        writeFileSync(out, '');
+        const r = spawnSync('bash', ['-c', verifyBlock], {
+          cwd: publish,
+          env: {
+            ...gitEnv,
+            WORKDIR: workdir,
+            PR_NUMBER: '1',
+            BASE_REF: 'main',
+            HEAD_FETCH_REF: 'refs/remotes/origin/qwen-resolve/pr-1/head',
+            HEAD_SHA: headSha,
+            RESOLVE_OUTCOME: 'success',
+            GITHUB_OUTPUT: out,
+            ...extraEnv,
+          },
+          encoding: 'utf8',
+        });
+        return { ...r, outputs: readFileSync(out, 'utf8'), publish };
+      };
+
+      // (a) The happy path: the bundle imports, descends from the head, and
+      // every structural check passes on the publish side.
+      const w1 = path.join(root, 'w1');
+      const p1 = pkg(w1);
+      expect(p1.status, p1.stdout + p1.stderr).toBe(0);
+      expect(existsSync(path.join(w1, 'resolution.bundle'))).toBe(true);
+      writeFileSync(path.join(w1, 'address-summary.md'), 'summary\n');
+      const v1 = verify(w1);
+      expect(v1.status, v1.stdout + v1.stderr).toBe(0);
+      expect(v1.outputs).toContain('outcome=fixed');
+      expect(git(v1.publish, 'rev-parse', 'HEAD')).toBe(resolvedSha);
+      expect(
+        git(
+          v1.publish,
+          'rev-parse',
+          'refs/remotes/origin/qwen-resolve/pr-1/head',
+        ),
+      ).toBe(headSha);
+
+      // (b) A bundle whose commit does not descend from the head the agent
+      // resolved from — built on main alone, as a prompt-injected agent that
+      // abandoned the PR branch would produce — is refused before any
+      // content check runs.
+      const w2 = path.join(root, 'w2');
+      mkdirSync(w2, { recursive: true });
+      git(agent, 'checkout', '-q', '-B', 'stray', 'origin/main');
+      writeFileSync(path.join(agent, 'a.txt'), 'stray\n');
+      git(agent, 'commit', '-q', '-am', 'fix: stray');
+      git(agent, 'update-ref', 'refs/heads/qwen-resolve/pr-1', 'stray');
+      git(
+        agent,
+        'bundle',
+        'create',
+        path.join(w2, 'resolution.bundle'),
+        `${headSha}..refs/heads/qwen-resolve/pr-1`,
+      );
+      writeFileSync(path.join(w2, 'address-summary.md'), 'summary\n');
+      const v2 = verify(w2);
+      expect(v2.status).toBe(1);
+      expect(v2.stdout).toContain('does not descend from the PR head');
+      expect(v2.outputs).toContain('outcome=failed');
+      expect(v2.outputs).not.toContain('outcome=fixed');
+      git(agent, 'checkout', '-q', 'qwen-resolve/pr-1');
+      git(agent, 'reset', '-q', '--hard', resolvedSha);
+
+      // (b2) A bundle whose prerequisite the publish runner has never seen
+      // (an agent-local commit) fails `git bundle verify` outright.
+      const w2b = path.join(root, 'w2b');
+      mkdirSync(w2b, { recursive: true });
+      git(agent, 'checkout', '-q', '-B', 'local-only', headSha);
+      writeFileSync(path.join(agent, 'z.txt'), 'local\n');
+      git(agent, 'add', 'z.txt');
+      git(agent, 'commit', '-q', '-m', 'chore: local only');
+      const localOnly = git(agent, 'rev-parse', 'HEAD');
+      writeFileSync(path.join(agent, 'a.txt'), 'on local\n');
+      git(agent, 'commit', '-q', '-am', 'fix: on local');
+      git(agent, 'update-ref', 'refs/heads/qwen-resolve/pr-1', 'local-only');
+      git(
+        agent,
+        'bundle',
+        'create',
+        path.join(w2b, 'resolution.bundle'),
+        `${localOnly}..refs/heads/qwen-resolve/pr-1`,
+      );
+      const v2b = verify(w2b);
+      expect(v2b.status).toBe(1);
+      expect(v2b.stdout).toContain('does not verify against the PR head');
+      expect(v2b.outputs).toContain('outcome=failed');
+      git(agent, 'checkout', '-q', '-B', 'qwen-resolve/pr-1', resolvedSha);
+
+      // (c) No bundle (the agent changed nothing) plus no-action.md → noop.
+      const w3 = path.join(root, 'w3');
+      const p3 = pkg(w3, { HEAD_SHA: resolvedSha });
+      expect(p3.status).toBe(0);
+      expect(p3.stdout).toContain('branch unchanged');
+      expect(existsSync(path.join(w3, 'resolution.bundle'))).toBe(false);
+      writeFileSync(path.join(w3, 'no-action.md'), 'nothing to do\n');
+      // A no-op is only accepted when the head really merges cleanly: verify
+      // against a base the head does not conflict with (the merge-tree check
+      // runs first and refuses a no-action.md on a still-conflicting head).
+      git(seed, 'push', '-q', 'origin', `${headSha}:refs/heads/base2`);
+      const v3 = verify(w3, { BASE_REF: 'base2' });
+      expect(v3.status, v3.stdout + v3.stderr).toBe(0);
+      expect(v3.outputs).toContain('outcome=noop');
+      const v3c = verify(w3);
+      expect(v3c.status).toBe(1);
+      expect(v3c.stdout).toContain(
+        'Branch still has merge conflicts with main',
+      );
+
+      // (d) No artifact at all (agent job died before packaging) → an
+      // infrastructure failure, never a silent job failure.
+      const v4 = verify(path.join(root, 'missing'));
+      expect(v4.status).toBe(1);
+      expect(v4.outputs).toContain('outcome=failed');
+      expect(v4.outputs).toContain('failure_kind=infra');
+
+      // (e) The scope guard still bites on the imported bundle: an extra file
+      // outside the base-changed set travels in the bundle and is refused.
+      git(agent, 'reset', '-q', '--hard', headSha);
+      spawnSync('git', ['merge', '--no-commit', 'origin/main'], {
+        cwd: agent,
+        env: gitEnv,
+      });
+      resolveWith('planted.txt');
+      const w5 = path.join(root, 'w5');
+      pkg(w5);
+      writeFileSync(path.join(w5, 'address-summary.md'), 'summary\n');
+      const v5 = verify(w5);
+      expect(v5.status).toBe(1);
+      expect(v5.stdout).toContain(
+        'Agent modified files outside the conflict set',
+      );
+      expect(v5.outputs).toContain('outcome=failed');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('supports dry-run and workflow_dispatch', () => {
     expect(workflow).toContain('github.event.inputs.dry_run');
     expect(workflow).toContain('in dry-run mode');
@@ -1039,10 +1351,10 @@ describe('qwen resolve workflow', () => {
     // changes; a token without the `workflow` scope is rejected, and that gets its
     // own actionable reason. A 403 (maintainer-edits off / org-owned fork / PAT
     // lacking push) and a stale force-with-lease are reported differently too.
-    expect(resolveJob).toContain("push_fail_reason='workflow_scope'");
-    expect(resolveJob).toContain('grant that scope to the push bot');
-    expect(resolveJob).toContain("push_fail_reason='permission'");
-    expect(resolveJob).toContain("push_fail_reason='moved'");
-    expect(resolveJob).toContain('Allow edits by maintainers');
+    expect(publishJob).toContain("push_fail_reason='workflow_scope'");
+    expect(publishJob).toContain('grant that scope to the push bot');
+    expect(publishJob).toContain("push_fail_reason='permission'");
+    expect(publishJob).toContain("push_fail_reason='moved'");
+    expect(publishJob).toContain('Allow edits by maintainers');
   });
 });

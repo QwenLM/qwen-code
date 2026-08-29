@@ -410,89 +410,154 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     }
   });
 
-  it('hardens every step that runs after the agent', () => {
+  it('keeps every credential out of the agent job once the agent has run', () => {
+    // Structural containment: the agent runs --yolo without a sandbox and
+    // can leave anything on its runner (config scopes, hooks, moved refs,
+    // PATH shims, the real $GITHUB_ENV, a detached process reading /proc).
+    // Rather than chase each entrance with a scrub, nothing credentialed
+    // runs on that runner after the agent: the push and the result comment
+    // live in `publish-resolution`, whose runner never executed the agent.
     const steps = resolvePrJob.steps;
     const agentIdx = steps.findIndex((s) => s.id === 'resolve_conflicts');
-    const later = steps.slice(agentIdx + 1).filter((s) => s.run);
-    assert.ok(later.length >= 3, 'expected the post-agent run steps');
-    for (const s of later) {
+    assert.ok(agentIdx > -1);
+    const secretRef = (v) =>
+      typeof v === 'string' && v.includes('${{ secrets.');
+    for (const s of steps.slice(agentIdx + 1)) {
       if (s.name === 'Report skipped request') {
-        // Only runs when the agent did not (decision != run).
+        // The one exception: it runs only when the agent did NOT run.
+        assert.ok(
+          String(s.if).includes("steps.prepare.outputs.decision == 'skip'") &&
+            !String(s.if).includes("decision == 'run'"),
+          'Report skipped request must be gated on the agent not having run',
+        );
         continue;
       }
-      for (const line of [
-        'PATH=/usr/bin:/bin',
-        'unset GIT_CONFIG_PARAMETERS',
-        'export GIT_CONFIG_COUNT=0',
-        'export GIT_CONFIG_SYSTEM=/dev/null',
-        'export GIT_CONFIG_GLOBAL=/dev/null',
-        'git() { command git -c core.hooksPath=/dev/null -c core.fsmonitor= -c credential.helper= "$@"; }',
-      ]) {
+      for (const [key, value] of Object.entries(s.env ?? {})) {
         assert.ok(
-          s.run.includes(line),
-          `post-agent step '${s.name}' must open with the hardened tool environment: missing ${line}`,
+          !secretRef(value),
+          `'${s.name}' runs after the agent and must not carry a secret (${key})`,
         );
       }
-      // BASH_ENV/LD_* execute at process startup, before any body line runs —
-      // every post-agent run step pins them empty at the step boundary.
-      for (const key of [
-        'BASH_ENV',
-        'LD_PRELOAD',
-        'LD_AUDIT',
-        'LD_LIBRARY_PATH',
-      ]) {
-        assert.equal(s.env?.[key], '', `'${s.name}' must pin ${key} empty`);
+      for (const [key, value] of Object.entries(s.with ?? {})) {
+        assert.ok(
+          !secretRef(value),
+          `'${s.name}' runs after the agent and must not carry a secret (${key})`,
+        );
       }
-      // A planted $GITHUB_PATH prepend hijacks the runner's shell lookup for
-      // every later step; pin the interpreter absolutely so no shim can stand
-      // in for it (the truncation in the agent step closes the same channel
-      // at the source).
-      assert.match(
-        String(s.shell),
-        /^\/bin\/bash/,
-        `'${s.name}' must pin an absolute shell`,
-      );
     }
-    // The workspace's own .git/config is the highest-precedence scope and the
-    // agent writes the workspace: it is removed before any check runs. A
-    // gitfile-replaced .git would make the rm a no-op and let a
-    // url.*.insteadOf rewrite the push URL — both guarded steps refuse it.
-    const verify = steps.find((s) => s.id === 'verify');
-    assert.ok(verify.run.includes('rm -f .git/config'));
-    const verifyGuard = verify.run.indexOf('[ ! -d .git ]');
+    // What crosses the job boundary is a bundle and report files, verified
+    // on the other side; the verdict on the agent step crosses as an output.
+    const packageStep = steps.find((s) => s.name === 'Package resolution');
+    assert.ok(packageStep, 'resolve-pr must package the resolution');
     assert.ok(
-      verifyGuard > -1,
-      'verify must refuse a gitfile-replaced .git directory',
+      packageStep.run.includes(
+        'git bundle create "${WORKDIR}/resolution.bundle" "${HEAD_SHA}..refs/heads/qwen-resolve/pr-${PR_NUMBER}"',
+      ),
     );
-    assert.ok(
-      verifyGuard < verify.run.indexOf('git ls-files -u'),
-      'the .git directory guard must run before the first git use',
+    assert.equal(
+      resolvePrJob.outputs.agent_outcome,
+      '${{ steps.resolve_conflicts.outcome }}',
     );
-    const report = steps.find((s) => s.name === 'Report result');
-    assert.ok(report.run.includes('rm -f .git/config'));
-    const reportGuard = report.run.indexOf('[ ! -d .git ]');
-    assert.ok(
-      reportGuard > -1,
-      'report must re-assert the .git directory guard before the push',
+    assert.equal(
+      resolvePrJob.outputs.decision,
+      '${{ steps.prepare.outputs.decision }}',
     );
-    assert.ok(
-      reportGuard < report.run.indexOf('push --no-verify'),
-      'the .git directory guard must run before the credentialed push',
-    );
-    assert.ok(report.run.includes('export GH_CONFIG_DIR'));
-    assert.ok(report.run.includes('push --no-verify'));
   });
 
-  it('keeps resolve-pr on an ephemeral hosted runner', () => {
-    // This job merges the base branch and force-pushes to the PR head; a fresh
-    // runner is the cheapest guarantee that nothing from an earlier attempt
-    // is carried into the credentialed push. (It used to be pinned for docker
-    // as well; the agent no longer runs sandboxed, so that half is moot.)
+  it('publishes from a job that never ran the agent, from GitHub-fetched refs and a verified bundle', () => {
+    const publish = prReviewDoc.jobs['publish-resolution'];
+    assert.ok(publish, 'publish-resolution must exist');
+    assert.deepEqual(publish.needs, ['resolve-pr']);
     assert.equal(
-      resolvePrJob['runs-on'],
-      'ubuntu-latest',
-      'resolve-pr must stay on an ephemeral hosted runner',
+      publish.if,
+      "${{ always() && needs.resolve-pr.outputs.decision == 'run' }}",
     );
+    assert.equal(publish['runs-on'], 'ubuntu-latest');
+    assert.deepEqual(publish.permissions, { contents: 'read' });
+    // The push lock is held here too: the push is what it serialises.
+    assert.equal(
+      publish.concurrency.group,
+      resolvePrJob.concurrency.group,
+    );
+    assert.equal(publish.concurrency['cancel-in-progress'], false);
+    // No agent here, and the token-bearing step is here and nowhere else.
+    assert.ok(publish.steps.every((s) => s.id !== 'resolve_conflicts'));
+    assert.ok(publish.steps.every((s) => !(s.run ?? '').includes('qwen ')));
+    const report = publish.steps.find((s) => s.name === 'Report result');
+    assert.equal(report.env.PUSH_TOKEN, '${{ secrets.CI_DEV_BOT_PAT }}');
+    assert.ok(report.run.includes('x-access-token:${PUSH_TOKEN}'));
+    assert.ok(
+      resolvePrJob.steps.every(
+        (s) => !(s.run ?? '').includes('x-access-token:'),
+      ),
+    );
+    // Fresh checkout, refs from GitHub, compared against the head the agent
+    // resolved from; the resolution enters only as a verified bundle that
+    // must descend from that head.
+    const checkout = publish.steps.find((s) =>
+      s.uses?.startsWith('actions/checkout@'),
+    );
+    assert.equal(checkout.with['persist-credentials'], false);
+    const verify = publish.steps.find((s) => s.id === 'verify');
+    assert.equal(
+      verify.env.HEAD_SHA,
+      '${{ needs.resolve-pr.outputs.head_sha }}',
+    );
+    assert.equal(
+      verify.env.RESOLVE_OUTCOME,
+      '${{ needs.resolve-pr.outputs.agent_outcome }}',
+    );
+    for (const line of [
+      'git fetch origin "+refs/pull/${PR_NUMBER}/head:${HEAD_FETCH_REF}"',
+      'git update-ref "$HEAD_FETCH_REF" "$HEAD_SHA"',
+      'git bundle verify "$bundle"',
+      'git merge-base --is-ancestor "$HEAD_SHA" HEAD',
+    ]) {
+      assert.ok(verify.run.includes(line), `verify must contain: ${line}`);
+    }
+    assert.ok(
+      verify.run.indexOf('git bundle verify') <
+        verify.run.indexOf('git fetch "$bundle"'),
+      'the bundle must verify before it is fetched',
+    );
+    assert.ok(
+      verify.run.indexOf('git merge-base --is-ancestor') <
+        verify.run.indexOf('git ls-files -u'),
+      'lineage must be checked before any content check',
+    );
+    // The artifact is the same one the agent job uploads; its absence is an
+    // infrastructure failure, not a silent job failure.
+    const download = publish.steps.find((s) =>
+      s.uses?.startsWith('actions/download-artifact@'),
+    );
+    assert.equal(download['continue-on-error'], true);
+    assert.equal(
+      download.with.name,
+      "qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}",
+    );
+    const upload = resolvePrJob.steps.find((s) =>
+      s.uses?.startsWith('actions/upload-artifact@'),
+    );
+    assert.equal(
+      upload.with.name,
+      "qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}",
+    );
+    assert.ok(verify.run.includes('failure_kind=infra'));
+    assert.ok(verify.run.includes('uploaded no run artifact'));
+  });
+
+  it('keeps both /resolve jobs on ephemeral hosted runners', () => {
+    // resolve-pr runs an unsandboxed agent; publish-resolution force-pushes
+    // to the PR head with a PAT. A fresh runner for each is the cheapest
+    // guarantee that nothing from an earlier attempt — or from the other
+    // job — is carried into either.
+    for (const name of ['resolve-pr', 'publish-resolution']) {
+      assert.equal(
+        prReviewDoc.jobs[name]['runs-on'],
+        'ubuntu-latest',
+        `${name} must stay on an ephemeral hosted runner`,
+      );
+    }
   });
 });
 
