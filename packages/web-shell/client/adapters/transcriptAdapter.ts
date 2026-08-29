@@ -1,4 +1,4 @@
-import type { DaemonTranscriptBlock } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonTranscriptBlock } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   ContentBlock,
   PermissionRequest,
@@ -33,6 +33,9 @@ export function extractPendingPermission(
       typeof metaRecord?.['toolName'] === 'string'
         ? metaRecord['toolName']
         : undefined;
+    const todoApproval = getRecord(metaRecord?.['qwenTodoApproval']);
+    const planId = getString(todoApproval, 'planId');
+    const sourceCallId = getString(todoApproval, 'sourceCallId');
     return {
       id: perm.requestId,
       sessionId: perm.sessionId,
@@ -40,6 +43,7 @@ export function extractPendingPermission(
       title: perm.title,
       toolKind,
       toolName,
+      ...(planId && sourceCallId ? { todoPlan: { planId, sourceCallId } } : {}),
       content: getPermissionContent(toolCallRecord, perm.title),
       options: perm.options.map((opt) => ({
         id: opt.optionId,
@@ -100,6 +104,14 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
     return undefined;
   }
   return value as Record<string, unknown>;
+}
+
+function getString(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const value = record?.[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 function getPermissionOptionKind(

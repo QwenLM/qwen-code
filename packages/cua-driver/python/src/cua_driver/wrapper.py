@@ -1,10 +1,24 @@
 """Subprocess wrapper for cua-driver binary with stdio passthrough."""
 
 import os
-import sys
 import subprocess
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import IO, Any, Optional
+
+
+def _stdio_with_fileno(stream: Optional[IO[Any]]) -> Optional[IO[Any]]:
+    """Keep a Python stream only when subprocess can use its descriptor."""
+    if stream is None:
+        return None
+    try:
+        descriptor = stream.fileno()
+        if not isinstance(descriptor, int) or descriptor < 0:
+            return None
+        os.fstat(descriptor)
+    except (AttributeError, OSError, OverflowError, TypeError, ValueError):
+        return None
+    return stream
 
 
 def get_binary_path() -> Path:
@@ -16,13 +30,13 @@ def get_binary_path() -> Path:
     Raises:
         FileNotFoundError: If the binary is not found in the package.
     """
-    # Binary is bundled in the package at: cua_driver/bin/cua-driver[.exe]
+    # Binary is bundled in the package at: cua_driver/bin/qwen-cua-driver[.exe]
     package_dir = Path(__file__).parent
 
     if sys.platform == "win32":
-        binary_name = "cua-driver.exe"
+        binary_name = "qwen-cua-driver.exe"
     else:
-        binary_name = "cua-driver"
+        binary_name = "qwen-cua-driver"
 
     binary_path = package_dir / "bin" / binary_name
 
@@ -54,13 +68,22 @@ def run_cua_driver(args: Optional[list[str]] = None) -> int:
 
     binary_path = get_binary_path()
 
+    # Let the binary's consent-aware first-run registration distinguish a
+    # bundled Python installation from an installer-script installation. Do
+    # not overwrite an explicit bounded channel inherited from `update` or a
+    # test harness. The Rust binary owns validation, consent, identity, and
+    # per-version deduplication.
+    child_env = os.environ.copy()
+    child_env.setdefault("CUA_DRIVER_INSTALL_CHANNEL", "python_package")
+
     try:
         # Run with direct stdio inheritance - no buffering, no capturing
         result = subprocess.run(
             [str(binary_path), *args],
-            stdin=sys.stdin,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
+            stdin=_stdio_with_fileno(sys.stdin),
+            stdout=_stdio_with_fileno(sys.stdout),
+            stderr=_stdio_with_fileno(sys.stderr),
+            env=child_env,
         )
         return result.returncode
     except KeyboardInterrupt:

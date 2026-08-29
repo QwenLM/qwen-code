@@ -17,6 +17,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
+import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '../..');
 
@@ -28,35 +30,22 @@ function readWorkflow(relativePath) {
   return readFileSync(path.join(root, relativePath), 'utf8');
 }
 
-function getWorkflowJob(workflow, jobName) {
-  const marker = `  ${jobName}:`;
-  const start = workflow.indexOf(marker);
-  expect(start).toBeGreaterThanOrEqual(0);
-
-  const afterMarker = workflow.slice(start + marker.length);
-  const nextJob = afterMarker.match(/\n {2}[a-zA-Z0-9_-]+:\n/);
-
-  return workflow.slice(
-    start,
-    nextJob ? start + marker.length + nextJob.index : undefined,
-  );
-}
-
-function getWorkflowStep(job, stepName) {
-  const marker = `      - name: '${stepName}'`;
-  const start = job.indexOf(marker);
-  expect(start).toBeGreaterThanOrEqual(0);
-
-  const afterMarker = job.slice(start + marker.length);
-  const nextStep = afterMarker.match(/\n {6}- name: /);
-
-  return job.slice(
-    start,
-    nextStep ? start + marker.length + nextStep.index : undefined,
-  );
-}
-
 describe('package scripts', () => {
+  it('does not couple Node REPL to Qwen release versions', () => {
+    const versionScript = readFileSync(
+      path.join(root, 'scripts/version.js'),
+      'utf8',
+    );
+
+    expect(versionScript).toContain(
+      'const workspacesToExclude = [\n' +
+        "  '@qwen-code/sdk',\n" +
+        "  '@qwen-code/mobile-mcp',\n" +
+        "  '@qwen-code/node-repl-mcp',\n" +
+        '];',
+    );
+  });
+
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
     const packageJson = readPackageJson();
 
@@ -66,6 +55,17 @@ describe('package scripts', () => {
     expect(packageJson.scripts.preflight).toContain(
       'npm run check:serve-fast-path-bundle',
     );
+  });
+
+  it('limits SDK integration tests through the forks pool', () => {
+    const packageJson = readPackageJson();
+
+    expect(packageJson.scripts['test:integration:sdk:sandbox:none']).toContain(
+      '--poolOptions.forks.maxForks 2',
+    );
+    expect(
+      packageJson.scripts['test:integration:sdk:sandbox:docker'],
+    ).toContain('--poolOptions.forks.maxForks 2');
   });
 
   it('cleans package build artifacts before checking the serve fast path bundle', () => {
@@ -90,7 +90,7 @@ describe('package scripts', () => {
     expect(packageJson.scripts['test:release']).toBe(
       [
         'cross-env NODE_OPTIONS="--max-old-space-size=3072"',
-        'npm run test:ci --workspaces --if-present --parallel -- --coverage.enabled=false',
+        'npm run test:ci --workspaces --if-present -- --coverage.enabled=false',
         '&& npm run test:scripts',
       ].join(' '),
     );
@@ -117,11 +117,11 @@ describe('package scripts', () => {
       if (process.platform === 'win32') {
         writeFileSync(
           path.join(binDir, 'husky.cmd'),
-          '@echo husky >> "%PREPARE_LOG_FILE%"\r\n',
+          '@echo(husky>>"%PREPARE_LOG_FILE%"\r\n',
         );
         writeFileSync(
           path.join(binDir, 'npm.cmd'),
-          '@echo npm %* >> "%PREPARE_LOG_FILE%"\r\n',
+          '@echo(npm %*>>"%PREPARE_LOG_FILE%"\r\n',
         );
       } else {
         writeFileSync(
@@ -172,11 +172,11 @@ describe('package scripts', () => {
       if (process.platform === 'win32') {
         writeFileSync(
           path.join(binDir, 'husky.cmd'),
-          '@echo husky >> "%PREPARE_LOG_FILE%"\r\n',
+          '@echo(husky>>"%PREPARE_LOG_FILE%"\r\n',
         );
         writeFileSync(
           path.join(binDir, 'npm.cmd'),
-          '@echo npm %* >> "%PREPARE_LOG_FILE%"\r\n',
+          '@echo(npm %*>>"%PREPARE_LOG_FILE%"\r\n',
         );
       } else {
         writeFileSync(
@@ -271,12 +271,12 @@ describe('package scripts', () => {
       if (process.platform === 'win32') {
         writeFileSync(
           path.join(binDir, 'husky.cmd'),
-          '@echo husky >> "%PREPARE_LOG_FILE%"\r\n',
+          '@echo(husky>>"%PREPARE_LOG_FILE%"\r\n',
         );
         writeFileSync(
           path.join(binDir, 'npm.cmd'),
           [
-            '@echo npm %* >> "%PREPARE_LOG_FILE%"',
+            '@echo(npm %*>>"%PREPARE_LOG_FILE%"',
             '@if "%1 %2"=="run build" exit /b 7',
             '@exit /b 0',
             '',
@@ -417,14 +417,23 @@ describe('package scripts', () => {
 
   it('skips release install-time prepare and builds before publish bundling', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
+    expect(workflow.slice(0, workflow.indexOf('jobs:'))).not.toContain(
+      'CI_BOT_PAT',
+    );
     const installSteps =
       workflow.match(
-        / {6}- name: 'Install Dependencies'[\s\S]*? {10}npm ci --no-audit --progress=false/g,
+        / {6}- name: 'Install Dependencies'[\s\S]*?(?=\n {6}- name: '|\n {4}[A-Za-z0-9_-]+:|$)/g,
       ) || [];
 
-    expect(installSteps.length).toBeGreaterThanOrEqual(5);
+    expect(installSteps.length).toBe(5);
     for (const installStep of installSteps) {
-      expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
+      expect(installStep).toContain(
+        'npm ci --ignore-scripts --no-audit --progress=false',
+      );
+      expect(installStep).toContain('npm run postinstall');
+      expect(installStep).toContain('npm run generate');
+      expect(installStep).not.toContain('QWEN_SKIP_PREPARE');
+      expect(installStep).not.toContain('CI_BOT_PAT');
     }
 
     for (const jobName of ['integration_none', 'integration_docker']) {
@@ -434,6 +443,10 @@ describe('package scripts', () => {
     }
 
     const publishJob = getWorkflowJob(workflow, 'publish');
+    expect(publishJob.slice(0, publishJob.indexOf('steps:'))).not.toContain(
+      'CI_BOT_PAT',
+    );
+    const checkoutStep = getWorkflowStep(publishJob, 'Checkout');
     const gitConfigStep = getWorkflowStep(publishJob, 'Configure Git User');
     const commitStep = getWorkflowStep(
       publishJob,
@@ -444,9 +457,21 @@ describe('package scripts', () => {
       'Build Bundle and Prepare Package',
     );
 
+    expect(checkoutStep).toContain('persist-credentials: false');
     expect(gitConfigStep).toContain('git config core.hooksPath .husky');
     expect(publishJob.indexOf(gitConfigStep)).toBeLessThan(
       publishJob.indexOf(commitStep),
+    );
+    expect(commitStep).toContain("CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'");
+    expect(commitStep).toContain('export GH_TOKEN="${CI_BOT_PAT}"');
+    expect(commitStep).toContain('gh auth setup-git');
+    const exportTokenIdx = commitStep.indexOf(
+      'export GH_TOKEN="${CI_BOT_PAT}"',
+    );
+    const setupGitIdx = commitStep.indexOf('gh auth setup-git', exportTokenIdx);
+    expect(setupGitIdx).toBeGreaterThan(exportTokenIdx);
+    expect(setupGitIdx).toBeLessThan(
+      commitStep.indexOf('git push --force --set-upstream'),
     );
     expect(buildStep).toContain('npm run build\n          npm run bundle');
   });
@@ -474,7 +499,9 @@ describe('package scripts', () => {
       );
       expect(publishStep).toContain('already published; skipping');
       expect(publishStep).toContain('exit 0');
-      expect(publishStep).toContain('npm publish "${PUBLISH_ARGS[@]}"');
+      expect(publishStep).toContain(
+        'npm publish --provenance "${PUBLISH_ARGS[@]}"',
+      );
     }
 
     // The channel loop must wrap each iteration in a subshell so that
@@ -489,6 +516,68 @@ describe('package scripts', () => {
     expect(channelStep).toContain(
       'Every channel package was already published; nothing shipped',
     );
+  });
+
+  it('meets npm trusted publishing requirements', () => {
+    for (const [workflowPath, jobName, publishStepName] of [
+      [
+        '.github/workflows/release.yml',
+        'publish',
+        'Publish @qwen-code/audio-capture',
+      ],
+      [
+        '.github/workflows/release-sdk.yml',
+        'release-sdk',
+        'Publish @qwen-code/sdk',
+      ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-sdk',
+        'Publish immutable SDK tarball',
+      ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-node-repl',
+        'Publish immutable Node REPL tarball',
+      ],
+      ['.github/workflows/cd-mobile-mcp.yml', 'build-and-publish', 'Publish'],
+    ]) {
+      const publishJob = getWorkflowJob(readWorkflow(workflowPath), jobName);
+      const installStep = getWorkflowStep(publishJob, 'Install npm 11');
+      const publishStep = getWorkflowStep(publishJob, publishStepName);
+      expect(installStep).toContain('npm install --global npm@11.19.0');
+      expect(publishJob).toContain("id-token: 'write'");
+      expect(publishStep).toContain('--provenance');
+      expect(publishJob).toContain("name: 'production-release'");
+      expect(publishJob.indexOf(installStep)).toBeLessThan(
+        publishJob.indexOf(publishStep),
+      );
+    }
+
+    for (const packageDirectory of [
+      'packages/audio-capture',
+      'packages/cli',
+      'packages/channels/base',
+      'packages/channels/dingtalk',
+      'packages/channels/dws',
+      'packages/channels/feishu',
+      'packages/channels/github',
+      'packages/channels/qqbot',
+      'packages/channels/telegram',
+      'packages/channels/wecom',
+      'packages/channels/weixin',
+      'packages/cua-driver/typescript',
+      'packages/mobile-mcp',
+      'packages/node-repl',
+      'packages/sdk-typescript',
+    ]) {
+      const packageJson = JSON.parse(
+        readFileSync(path.join(root, packageDirectory, 'package.json'), 'utf8'),
+      );
+      expect(packageJson.repository?.url?.replace(/^git\+/, '')).toBe(
+        'https://github.com/QwenLM/qwen-code.git',
+      );
+    }
   });
 
   it('fast-tracks trusted autofix issue triggers before LLM assessment', () => {
@@ -520,18 +609,25 @@ describe('package scripts', () => {
   it('skips autofix install-time prepare without disabling dependency scripts', () => {
     const workflow = readWorkflow('.github/workflows/qwen-autofix.yml');
 
-    for (const jobName of ['issue-autofix', 'review-address']) {
+    // review-address restores the shared build-cli bundle instead of
+    // compiling, so its install step is npm ci only; the other two jobs
+    // still build from sources. Husky hooks are re-armed after the
+    // prepare-skip only where git commits happen (build-cli never commits).
+    for (const [jobName, stepName, armsHooks] of [
+      ['issue-autofix', 'Install dependencies and build', true],
+      ['build-cli', 'Install dependencies and build', false],
+      ['review-address', 'Install dependencies', true],
+    ]) {
       const job = getWorkflowJob(workflow, jobName);
-      const installStep = getWorkflowStep(
-        job,
-        'Install dependencies and build',
-      );
+      const installStep = getWorkflowStep(job, stepName);
 
       expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
       expect(installStep).toContain(
         'npm ci --prefer-offline --no-audit --progress=false',
       );
-      expect(installStep).toContain('git config core.hooksPath .husky');
+      if (armsHooks) {
+        expect(installStep).toContain('git config core.hooksPath .husky');
+      }
       expect(installStep).not.toContain('--ignore-scripts');
     }
   });
@@ -564,7 +660,7 @@ describe('package scripts', () => {
     }
 
     expect(getWorkflowStep(reviewJob, 'Verification gate')).toContain(
-      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
     );
   });
 });

@@ -107,9 +107,12 @@ describe('comment attachment guard workflow', () => {
   // its own checks. So the only unsafe direction is skipping a scan that
   // should have run, and every ambiguity must resolve toward running.
   describe('job-level gate', () => {
+    const startIdx = workflow.indexOf('  remove-suspicious-attachments:');
+    // Search from the job start: a file-global indexOf would silently change
+    // the slice's meaning if a job were ever added above this one.
     const gate = workflow.slice(
-      workflow.indexOf('  remove-suspicious-attachments:'),
-      workflow.indexOf("runs-on: 'ubuntu-latest'"),
+      startIdx,
+      workflow.indexOf('runs-on:', startIdx),
     );
 
     it('gates on association and sender before a runner is allocated', () => {

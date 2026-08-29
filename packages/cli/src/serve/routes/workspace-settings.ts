@@ -20,7 +20,8 @@ import {
   getNestedProperty,
   getSettingDefinition,
   validateSettingValue,
-} from '../../utils/settingsUtils.js';
+  WORKSPACE_RESTRICTED_SETTING_KEYS,
+} from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
@@ -55,6 +56,13 @@ const WEB_SHELL_SETTINGS = new Set([
   'voiceModel',
   'mcpServers',
 ]);
+
+const LIVE_WEB_SHELL_SETTINGS = [
+  'experimental.liveVoice.enabled',
+  'experimental.liveVoice.shortcut',
+] as const;
+
+const LIVE_MANAGED_SETTINGS = new Set<string>(LIVE_WEB_SHELL_SETTINGS);
 
 // The primary /workspace/settings route may write the global user scope
 // (~/.qwen/settings.json). The trust-gated workspace-qualified route stays
@@ -95,7 +103,38 @@ interface SettingsResponse {
 
 const SECURITY_SENSITIVE_SETTINGS = new Set(['tools.approvalMode']);
 
-function getAllowedKeys(): Set<string> {
+/**
+ * Refuse a workspace-scope write of a setting the merge strips anyway.
+ *
+ * R8-1: `stripWorkspaceRestrictedSettings` drops these before every merge, so
+ * persisting one at workspace scope writes a committable dead entry into the
+ * repo's `.qwen/settings.json` and answers 200 + `requiresRestart: true` while
+ * the feature never turns on — GET then reports `workspace: true` beside
+ * `effective: false`, and the warnings channel carries only `corrupted`, so the
+ * client never learns the write was inert. `tools.workflowsEnabled` is the
+ * first restricted key with `showInDialog: true`, which is what puts it in
+ * `getAllowedKeys()` and made this reachable. The TUI dialog already filters
+ * these; this is the same trap one layer over.
+ *
+ * User scope is untouched — that scope honors the key.
+ *
+ * Returns true when the request was answered and the caller must stop.
+ */
+function rejectWorkspaceRestrictedWrite(
+  res: Response,
+  scope: string,
+  key: string,
+): boolean {
+  if (scope !== 'workspace' || !WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key))
+    return false;
+  res.status(400).json({
+    error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
+    code: 'workspace_restricted_setting',
+  });
+  return true;
+}
+
+function getAllowedKeys(includeLiveVoice = false): Set<string> {
   const keys = new Set(
     getDialogSettingKeys().filter(
       (k) => !TUI_ONLY_SETTINGS.has(k) && !SECURITY_SENSITIVE_SETTINGS.has(k),
@@ -103,6 +142,9 @@ function getAllowedKeys(): Set<string> {
   );
   for (const key of WEB_SHELL_SETTINGS) {
     keys.add(key);
+  }
+  if (includeLiveVoice) {
+    for (const key of LIVE_WEB_SHELL_SETTINGS) keys.add(key);
   }
   return keys;
 }
@@ -117,13 +159,12 @@ function buildSettingsResponse(
     skipWorkspaceSettings: !workspaceTrusted,
     workspaceTrusted,
   });
-
   const settings: SettingDescriptor[] = [];
   for (const key of keys) {
     const def = getSettingDefinition(key);
     if (!def) continue;
 
-    const effective = getNestedProperty(
+    const mergedEffective = getNestedProperty(
       loaded.merged as Record<string, unknown>,
       key,
     );
@@ -138,11 +179,16 @@ function buildSettingsResponse(
 
     const publicValue = (value: unknown) =>
       key === 'mcpServers' ? redactMcpServersSetting(value) : value;
+    const effective = LIVE_MANAGED_SETTINGS.has(key)
+      ? (userVal ?? def.default)
+      : (mergedEffective ?? def.default);
     const values: SettingDescriptor['values'] = {
-      effective: publicValue(effective !== undefined ? effective : def.default),
+      effective: publicValue(effective),
     };
     if (userVal !== undefined) values.user = publicValue(userVal);
-    if (wsVal !== undefined) values.workspace = publicValue(wsVal);
+    if (wsVal !== undefined && !LIVE_MANAGED_SETTINGS.has(key)) {
+      values.workspace = publicValue(wsVal);
+    }
 
     settings.push({
       key,
@@ -276,6 +322,7 @@ export interface WorkspaceSettingsRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  includeLiveVoice?: boolean;
 }
 
 export function registerWorkspaceSettingsRoutes(
@@ -291,7 +338,7 @@ export function registerWorkspaceSettingsRoutes(
     parseAndValidateClientId,
   } = deps;
 
-  const allowedKeys = getAllowedKeys();
+  const allowedKeys = getAllowedKeys(deps.includeLiveVoice === true);
 
   app.get('/workspace/settings', (_req: Request, res: Response) => {
     try {
@@ -370,6 +417,16 @@ export function registerWorkspaceSettingsRoutes(
         res.status(400).json({
           error: `Setting "${key}" is not modifiable via this API`,
           code: 'disallowed_key',
+        });
+        return;
+      }
+
+      if (rejectWorkspaceRestrictedWrite(res, scope, key)) return;
+
+      if (LIVE_MANAGED_SETTINGS.has(key)) {
+        res.status(400).json({
+          error: `Setting "${key}" must be changed through the Live setup API`,
+          code: 'live_managed_setting',
         });
         return;
       }
@@ -499,7 +556,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
     invalidateServeFeaturesCache: () => void;
   },
 ): void {
-  const allowedKeys = getAllowedKeys();
+  const allowedKeys = getAllowedKeys(false);
 
   app.get('/workspaces/:workspace/settings', (req: Request, res: Response) => {
     const runtime = resolveWorkspaceRuntimeFromParam(
@@ -573,6 +630,15 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         res.status(400).json({
           error: `Setting "${key}" is not modifiable via this API`,
           code: 'disallowed_key',
+        });
+        return;
+      }
+
+      if (rejectWorkspaceRestrictedWrite(res, scope, key)) return;
+      if (LIVE_MANAGED_SETTINGS.has(key)) {
+        res.status(400).json({
+          error: `Setting "${key}" must be changed through the Live setup API`,
+          code: 'live_managed_setting',
         });
         return;
       }

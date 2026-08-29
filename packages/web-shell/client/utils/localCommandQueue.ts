@@ -17,7 +17,10 @@ import type { PromptImage } from '../adapters/promptTypes';
  *
  * The only call sites that should bypass this and append mid-stream are the
  * deliberate "busy acknowledgement" paths (e.g. clearing a goal while a turn
- * runs), which opt in by calling `append` directly.
+ * runs), which opt in by calling `append` directly. Read-only display
+ * commands (/stats, /about, /context) go through the same helper but ignore
+ * its suppression signal: they skip the echo mid-turn and still run
+ * immediately.
  */
 export interface LocalEchoSink {
   /** Append the command as a local user message (renders inline immediately). */
@@ -29,7 +32,8 @@ export interface LocalEchoSink {
  *
  * @returns `true` if the command was suppressed — the caller must stop and not
  *   run its inline side effects. `false` if it was appended and the caller
- *   should proceed.
+ *   should proceed. Read-only display commands are the deliberate exception:
+ *   they ignore the signal and run mid-turn anyway (see the module docstring).
  */
 export function appendOrDeferLocalUserMessage(
   isStreaming: boolean,

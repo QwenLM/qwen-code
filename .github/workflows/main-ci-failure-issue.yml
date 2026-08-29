@@ -4,8 +4,22 @@ name: 'Main CI Failure Issue'
 
 on:
   workflow_run:
-    workflows: ['E2E Tests', 'SDK Python']
+    # 'Qwen Code CI' is watched for its SCHEDULED run and its post-merge PUSH
+    # run (see the event filter below — the push arm is not name-scoped, so it
+    # covers this workflow too). The nightly is the macOS and Windows lanes'
+    # only trigger outside a pull request, and a lane nobody is told about is a
+    # lane nobody looks at — which is how those two came to stop running. The
+    # push arm covers ci.yml's post-merge lane on `main`, whose whole point is
+    # to surface a regression as it lands; a failure there files an issue with
+    # `type/bug`, `status/ready-for-agent` and `autofix/approved`, so expect
+    # one per red merge, not per red nightly only.
+    workflows: ['E2E Tests', 'SDK Python', 'Qwen Code CI']
     types: ['completed']
+    # Trigger-level branch filter, not only the `if` below: 'Qwen Code CI'
+    # completes on every pull request, and without this each of those would
+    # raise a workflow_run event here just to skip. The job filter still
+    # enforces main — this only keeps the event log honest.
+    branches: ['main']
 
 defaults:
   run:
@@ -18,7 +32,7 @@ jobs:
   # and hands the finished title and body to the privileged job as outputs.
   analyze:
     name: 'Identify the failing tests'
-    if: "${{ github.repository == 'QwenLM/qwen-code' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event == 'push' }}"
+    if: "${{ github.repository == 'QwenLM/qwen-code' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'main' && (github.event.workflow_run.event == 'push' || (github.event.workflow_run.event == 'schedule' && github.event.workflow_run.name == 'Qwen Code CI')) }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     permissions:
@@ -33,7 +47,7 @@ jobs:
       body: '${{ steps.plan.outputs.body }}'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           persist-credentials: false
 
@@ -144,6 +158,9 @@ jobs:
   file_issue:
     name: 'Create autofix issue'
     needs: 'analyze'
+    # Deliberately hosted, NOT the ECS pool: this job reports that CI broke,
+    # and the pool being the REASON CI broke would queue the report behind
+    # the very failure it documents.
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:

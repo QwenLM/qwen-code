@@ -14,7 +14,10 @@ import {
   sessionsPath,
 } from './runtime.js';
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  APPROVAL_MODES: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).APPROVAL_MODES,
   Storage: { getGlobalQwenDir: () => '/tmp/qwen' },
   hashDaemonWorkspace: (workspace: string) =>
     workspace === '/workspace' ? 'workspace-hash' : 'other-hash',
@@ -90,10 +93,10 @@ it('isolates daemon loop stores by workspace hash', () => {
 it('isolates daemon channel state by workspace and safe instance key', () => {
   const stateDir = daemonChannelStateDir('/workspace', 'team/../bot');
 
-  expect(stateDir).toMatch(
+  expect(stateDir.replaceAll(path.sep, '/')).toMatch(
     /^\/tmp\/qwen\/channels\/daemon\/workspace-hash\/instances\/team_\.\._bot-[0-9a-f]{16}$/,
   );
-  expect(stateDir).not.toContain('/../');
+  expect(stateDir.replaceAll(path.sep, '/')).not.toContain('/../');
   expect(daemonChannelStateDir('/workspace', 'team/../bot')).toBe(stateDir);
   expect(daemonChannelStateDir('/workspace', 'team:../bot')).not.toBe(stateDir);
   expect(daemonChannelStateDir('/other', 'team/../bot')).not.toBe(stateDir);

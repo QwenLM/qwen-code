@@ -7,7 +7,7 @@
 import type { Application, Request } from 'express';
 
 /**
- * Allow same-origin requests from the demo page. Browsers send an `Origin`
+ * Allow same-origin requests from the Web Shell. Browsers send an `Origin`
  * header on same-origin POST/fetch calls; the browser-origin wall would reject
  * them. Only loopback origins are matched.
  */

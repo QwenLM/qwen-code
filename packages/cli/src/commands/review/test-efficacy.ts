@@ -51,24 +51,41 @@ import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
-  readdirSync,
   writeFileSync,
   readFileSync,
   rmSync,
   lstatSync,
   existsSync,
-  statSync,
-  symlinkSync,
-  type Stats,
+  realpathSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, isAbsolute, sep } from 'node:path';
+import { dirname, join, isAbsolute, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { probeWorktreePath } from './lib/paths.js';
 // `discardWorktree` moved to `lib/worktree.ts` when `base-tree` needed the same
-// stale-sweep-then-remove step (its rationale lives there, with the helper).
+// stale-sweep-then-remove step (its rationale lives there, with the helper), and
+// `exposeDependencies` followed it when `scratch-tree` needed the same
+// dependency farm for the verifier's own probe tree.
+import { shellQuotePath } from './lib/shell-quote.js';
+import {
+  boxedRunLeftContainer,
+  containerCommand,
+  containerName,
+  containerPathFor,
+  killContainer,
+  mountRootFor,
+  refuseUnsandboxedPhase,
+  reviewSandboxImage,
+  runtimeIsRootless,
+  runtimeClientEnv,
+  sandboxVerdict,
+  type ContainerRuntime,
+} from './lib/sandboxed-exec.js';
 import {
   discardWorktree,
+  exposeDependencies,
+  redirectedAncestor,
+  sanitizedGitEnv,
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
@@ -206,6 +223,61 @@ export function planTestEfficacy(
     probes: revert.length > 0 ? reachable : [],
     revert,
   };
+}
+
+/**
+ * Which of `probes` are committed as mode 120000. Such a test is collected by
+ * vitest THROUGH the link: its imports resolve from the target's realpath,
+ * outside the tree this command mutates, so every verdict it could produce is
+ * about code no mutant touched. The write guards never see it, because the
+ * harness never WRITES a probe file — it only runs them. The COMMITTED mode is
+ * the check rather than an lstat of the checkout: the index a fresh
+ * `worktree add` leaves is the head commit's, and the checkout is what a
+ * relinking probe would have tampered with. A git failure keeps every probe —
+ * the guards still cover the shapes they always did; only the committed mode
+ * is new ground.
+ */
+export function committedSymlinkProbes(
+  tree: string,
+  probes: string[],
+): Set<string> {
+  if (probes.length === 0) return new Set();
+  // `:(literal)` on every pathspec: a probe filename may itself begin with
+  // pathspec MAGIC (`:(literal)x.test.ts` is a legal name a PR can commit), and
+  // git would then parse the name as a directive and match a different blob —
+  // so the symlink this function exists to catch would not be found under the
+  // name the caller holds. The prefix says "the rest is a literal path".
+  const r = spawnSync(
+    'git',
+    [
+      '-c',
+      'core.fsmonitor=',
+      'ls-files',
+      '-s',
+      '-z',
+      '--',
+      ...probes.map((probe) => `:(literal)${probe}`),
+    ],
+    {
+      cwd: tree,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: sanitizedGitEnv(),
+    },
+  );
+  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+    // A pathspec git refuses is not an answer of "no symlinks": the caller
+    // would run every probe it just failed to vet. An empty set is only
+    // honest when git answered.
+    return new Set(probes);
+  }
+  const linked = new Set<string>();
+  for (const rec of r.stdout.split('\0')) {
+    if (!rec.startsWith('120000 ')) continue;
+    const tab = rec.indexOf('\t');
+    if (tab >= 0) linked.add(rec.slice(tab + 1));
+  }
+  return linked;
 }
 
 export type MutantVerdict = 'killed' | 'survived' | 'inconclusive';
@@ -1224,8 +1296,17 @@ interface TestEfficacyArgs {
   now?: () => number;
 }
 
+// Sanitized env on every git spawn below: an exported GIT_DIR redirects
+// repository discovery for ALL of them at once — the head sha read, the probe
+// resets, the revert's checkout — so the mutations would land in whichever
+// repository the environment names while every check against the tree passes
+// silently. The trees this file touches are chosen by the paths it is given.
 function git(cwd: string, ...args: string[]): void {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+  });
   // `git` not on PATH leaves `status` null and `stderr` undefined, which the
   // status check below would report as `failed: ` — an error message with no
   // error in it. The runner spawn already guards this; so does this one now.
@@ -1237,7 +1318,11 @@ function git(cwd: string, ...args: string[]): void {
 
 /** Run git and return trimmed stdout; throws on spawn failure or non-zero. */
 function gitOut(cwd: string, ...args: string[]): string {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+  });
   if (r.error) throw r.error;
   if (r.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
@@ -1258,11 +1343,15 @@ function gitOut(cwd: string, ...args: string[]): string {
  * same up-tree walk Node uses for the probe's own imports, so it also survives
  * non-hoisted layouts.
  */
-export function findVitestBin(worktree: string): string {
-  const req = createRequire(join(worktree, 'noop.js'));
+export function findVitestBin(
+  worktree: string,
+  resolveModule: (specifier: string) => string = createRequire(
+    join(worktree, 'noop.js'),
+  ).resolve,
+): string {
   let pkgPath: string;
   try {
-    pkgPath = req.resolve('vitest/package.json');
+    pkgPath = resolveModule('vitest/package.json');
   } catch (error) {
     // Only a genuine MODULE_NOT_FOUND is "vitest not found". A present vitest
     // whose `exports` no longer exposes `./package.json` throws
@@ -1294,6 +1383,7 @@ function gitCapture(cwd: string, ...args: string[]): string {
     cwd,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    env: sanitizedGitEnv(),
   });
   if (r.error) throw r.error;
   if (r.status !== 0) {
@@ -1308,7 +1398,10 @@ function gitCapture(cwd: string, ...args: string[]): string {
  * not evidence of absence — surface it rather than reading it as "not present".
  */
 function existsAtRev(cwd: string, rev: string, path: string): boolean {
-  const r = spawnSync('git', ['cat-file', '-e', `${rev}:${path}`], { cwd });
+  const r = spawnSync('git', ['cat-file', '-e', `${rev}:${path}`], {
+    cwd,
+    env: sanitizedGitEnv(),
+  });
   if (r.error) throw r.error;
   return r.status === 0;
 }
@@ -1330,7 +1423,38 @@ function existsAtRev(cwd: string, rev: string, path: string): boolean {
  * (`force` rm is already a no-op there), so return quietly.
  */
 export function safeRmWithin(worktree: string, relPath: string): void {
-  const parts = relPath.split(/[/\\]+/).filter((s) => s && s !== '.');
+  // Platform-correct separators, the same split `probeTargetEscapes` makes and
+  // for the same reason: on POSIX a backslash is an ordinary character in a
+  // filename, so splitting on it unconditionally turns ONE committed name —
+  // `\\..\\review-pr-42\\package.json`, a legal POSIX filename — into three
+  // components, two of which `join` then walks UP out of the tree. The write
+  // side took this fix; the delete side is where it costs more.
+  const separators = process.platform === 'win32' ? /[/\\]+/ : /\/+/;
+  const parts = relPath.split(separators).filter((s) => s && s !== '.');
+  // And nothing climbs, however it got spelled. `join` normalises `..` away
+  // silently, which is what made the split above a delete-anywhere primitive
+  // rather than a wrong-path bug.
+  if (parts.includes('..')) {
+    throw new Error(
+      `refusing to delete through a parent reference: ${relPath}`,
+    );
+  }
+  // The ROOT is an ancestor too, and the one this guarantee was missing: a
+  // symlink at the tree root resolves the whole prefix in the kernel, so every
+  // component below it lstats as an ordinary entry and the delete lands
+  // wherever the root points — the shared review worktree, in the shape that
+  // reached this function after a mid-run relink.
+  try {
+    if (lstatSync(worktree).isSymbolicLink()) {
+      throw new Error(
+        `refusing to delete through a symlink: ${relPath} ` +
+          `(the tree root ${worktree} is a symlink)`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('refusing')) throw err;
+    return; // No root to delete within.
+  }
   let cur = worktree;
   for (let i = 0; i < parts.length; i++) {
     cur = join(cur, parts[i]);
@@ -1376,68 +1500,208 @@ export function probeCleanupFailureDetail(
   return `could not remove probe worktree ${probeTree}${why ? `: ${why}` : ''}`;
 }
 
-export function exposeDependencies(
+/**
+ * Put the probe tree's TRACKED files back to the commit, before a run.
+ *
+ * The tree is reused across the baseline, the control, every mutant and every
+ * hunk probe, and what runs in it between those phases is the PR's own test
+ * suite. {@link runProbeSuite} re-links `node_modules` for exactly this
+ * reason; tracked files are the other half of the same state, and the half
+ * that decides verdicts more directly. A suite that rewrites a probe file
+ * after vitest has collected it — so the run it was collected for still scores
+ * green — hands every later run a file of its choosing, and the verdict that
+ * buys is `killed`: "a test catches this", asserted for statements no test
+ * covers. The mirror direction plants a compile error and buys a blanket
+ * `inconclusive`.
+ *
+ * Untracked files go too, because the tracked half alone is a half-measure a
+ * suite can walk around: a `vitest.config.ts` that no zero-config project
+ * commits is untracked, is picked up from the runner's cwd, and decides every
+ * later run's collection. `-fd` and not `-fdx`, so the borrowed `node_modules`
+ * farm and the ignored build output the probes need survive; what an ignored
+ * path can still hide is the same blindness the residue probe discloses.
+ *
+ * Returns null when the tree is as the commit left it, or a reason when it
+ * could not be put back — and an ABSENT `.git` is the second kind, not the
+ * first. It is the one state the tree can never be restored from, `.git` is
+ * an untracked pointer file sitting inside the tree the PR's own suite runs
+ * in, and treating "nothing to restore from" as "nothing to restore" hands a
+ * guest the whole guarantee for one `rm`. Running the restore anyway is not
+ * the alternative: with no `.git`, discovery walks UP and checks the enclosing
+ * repository out into the tree, which is the hazard the residue probe's
+ * identity gate exists for. Refusing is the only answer that is neither.
+ */
+/**
+ * The container argv for one probe-suite run, or null to spawn it directly.
+ *
+ * Same three null cases as `build-test`'s: policy off, no runtime under
+ * `auto`, or a tree that is not under a review temp dir (a `/review` of a
+ * local checkout, where there is no `.qwen/tmp` layout to mount).
+ */
+function probeContainer(
+  command: string,
   probeTree: string,
-  dependencyRoot: string,
-): { linked: number; failed: number } {
-  const done = { linked: 0, failed: 0 };
-  if (probeTree === dependencyRoot) return done;
-  const source = join(dependencyRoot, 'node_modules');
-  const target = join(probeTree, 'node_modules');
-  if (!existsSync(source) || existsSync(target)) return done;
-  mkdirSync(target);
-  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
-  for (const entry of readdirSync(source, { withFileTypes: true })) {
-    if (entry.name === '.vite' || entry.name === '.vite-temp') continue;
-    const sourceEntry = join(source, entry.name);
-    const targetEntry = join(target, entry.name);
-    // Every per-entry step is guarded: this is best-effort, so one locked or
-    // concurrently-unlinked entry must not throw out of the probe run (which
-    // would mark every probe `inconclusive`). What cannot be linked is counted
-    // and disclosed by the caller — never silently dropped.
-    let sourceStats: Stats;
-    try {
-      sourceStats = lstatSync(sourceEntry);
-    } catch {
-      done.failed++;
-      continue;
+): {
+  file: string;
+  args: string[];
+  name: string;
+  runtime: ContainerRuntime;
+} | null {
+  const verdict = sandboxVerdict();
+  if (verdict.kind !== 'container') return null;
+  const tmpDir = mountRootFor(probeTree);
+  if (tmpDir === null) return null;
+  // Canonical, matching the mount — see the twin in `build-test.ts`.
+  const workdir = containerPathFor(probeTree);
+  if (workdir === null) return null;
+  const name = containerName();
+  return {
+    ...containerCommand(command, {
+      cwd: workdir,
+      tmpDir,
+      kind: 'test',
+      name,
+      runtime: verdict.runtime,
+      rootless: runtimeIsRootless(verdict.runtime),
+      image: reviewSandboxImage(),
+    }),
+    name,
+    runtime: verdict.runtime,
+  };
+}
+
+function restoreProbeTreeTracked(probeTree: string): string | null {
+  if (!existsSync(join(probeTree, '.git'))) {
+    return `${probeTree} carries no .git, so there is no commit to put it back to`;
+  }
+  const top = spawnSync(
+    'git',
+    [
+      'rev-parse',
+      '--path-format=absolute',
+      '--show-toplevel',
+      '--git-common-dir',
+      '--git-dir',
+    ],
+    { cwd: probeTree, encoding: 'utf8', env: sanitizedGitEnv() },
+  );
+  if (top.error || top.status !== 0 || typeof top.stdout !== 'string') {
+    return top.error
+      ? top.error.message
+      : (top.stderr ?? '').toString().trim() ||
+          `git rev-parse exited ${top.status}`;
+  }
+  const [toplevel, commonDir, gitDir] = top.stdout.trim().split('\n');
+  try {
+    // The LEAF first. Every comparison below realpaths both sides, so a probe
+    // tree that is itself a symlink into the shared review worktree agrees
+    // with itself all the way down — and the restore's `checkout --force` and
+    // `clean -ffdx` would then run in the tree every other agent is reading.
+    if (lstatSync(probeTree).isSymbolicLink()) {
+      return `${probeTree} is a symlink, so the restore would land wherever it points`;
     }
-    if (sourceStats.isSymbolicLink()) {
-      try {
-        if (!statSync(sourceEntry).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-    } else if (!sourceStats.isDirectory()) {
-      continue;
+    if (realpathSync(toplevel) !== realpathSync(probeTree)) {
+      return `the tree at ${probeTree} is not the root of its own checkout`;
     }
-    if (entry.name.startsWith('@')) {
-      let pkgs: string[];
-      try {
-        mkdirSync(targetEntry);
-        pkgs = readdirSync(sourceEntry);
-      } catch {
-        done.failed++;
-        continue;
+    // `--show-toplevel` prints the directory the `.git` FILE sits in, whatever
+    // that file points at — so a rewritten gitfile naming another repository
+    // passes the check above while the checkout below writes THAT repository's
+    // content into this tree and certifies it. `scratch-tree` gates its own
+    // reset on the admin entry pointing back, and this function is the same
+    // reset one directory over; it now asks the same question — of the shape
+    // that HAS an answer. A probe tree the pipeline built is a linked worktree
+    // and carries its `.git` as a gitfile; a plain checkout has a `.git`
+    // DIRECTORY and no admin entry to round-trip, and demanding one there
+    // would refuse every ordinary repository.
+    if (lstatSync(join(probeTree, '.git')).isFile()) {
+      const backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
+      if (
+        realpathSync(dirname(resolve(gitDir, backpointer))) !==
+        realpathSync(probeTree)
+      ) {
+        return `${probeTree}'s admin entry does not point back at it`;
       }
-      for (const pkg of pkgs) {
-        try {
-          symlinkSync(join(sourceEntry, pkg), join(targetEntry, pkg), linkType);
-          done.linked++;
-        } catch {
-          done.failed++;
-        }
+      // And every ancestor between the tree and the repository it belongs to:
+      // a link above the tree redirects the checkout and the clean together,
+      // while every check here resolves through it and agrees with itself.
+      // Only for a LINKED worktree — a standalone checkout IS the repository
+      // root, so there is nothing between it and the stop point to walk, and
+      // an unbounded walk above it meets the system links (`/var` on macOS)
+      // this bound exists to stay below.
+      const redirected = redirectedAncestor(
+        dirname(resolve(probeTree)),
+        dirname(realpathSync(commonDir)),
+      );
+      if (redirected !== null) {
+        return `${redirected} is a symlink, so the restore would land wherever it points`;
       }
-    } else {
-      try {
-        symlinkSync(sourceEntry, targetEntry, linkType);
-        done.linked++;
-      } catch {
-        done.failed++;
-      }
+    }
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+  // A pathspec checkout runs no hook — but the config that decides that lives
+  // in a tree this code is defending against, so it is emptied here the way
+  // every other checkout in this pipeline empties it. `--` and a pathspec:
+  // this restores FILES and never moves HEAD.
+  // `core.fsmonitor` runs a command on BOTH of these, and the config that sets
+  // it lives in the tree they are cleaning: the residue probe empties it for
+  // exactly this reason and these two spawns were the ones still steerable.
+  const inert = [
+    '-c',
+    'core.hooksPath=/dev/null/no-hooks',
+    '-c',
+    'core.fsmonitor=',
+  ];
+  for (const args of [
+    [...inert, 'checkout', '--force', 'HEAD', '--', '.'],
+    // `-ffdx`, because `-fd` honors the ignore rules — and those belong to the
+    // commit under test, so a plant named to match one of them (a committed
+    // `.gitignore` line and a file to match it) survived every restore. The
+    // one exception is the dependency farm: it is ignored, it is borrowed
+    // rather than built, and it is the only ignored thing in this tree the
+    // probes cannot run without. Everything else ignored — a built `dist`, a
+    // planted config — goes.
+    [...inert, 'clean', '-ffdx', '-e', 'node_modules'],
+  ]) {
+    const r = spawnSync('git', args, {
+      cwd: probeTree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
+    if (r.error) return r.error.message;
+    if (r.status !== 0) {
+      return (
+        (r.stderr ?? '').toString().trim() ||
+        `git ${args[2]} exited ${r.status}`
+      );
     }
   }
-  return done;
+  // `checkout --force` SILENTLY skips a file carrying the skip-worktree bit,
+  // and `clean` never touches a tracked file — so a bit the suite set with
+  // `update-index` leaves its tampered content standing through a restore that
+  // returns "as the commit left it", with `git status` reading empty.
+  // `scratch-tree` documents this shape for the identical reset and refuses on
+  // it; this function did not read the bits at all.
+  const bits = spawnSync(
+    'git',
+    ['-c', 'core.fsmonitor=', 'ls-files', '-v', '-z'],
+    {
+      cwd: probeTree,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: sanitizedGitEnv(),
+    },
+  );
+  if (bits.error || bits.status !== 0 || typeof bits.stdout !== 'string') {
+    return bits.error
+      ? bits.error.message
+      : (bits.stderr ?? '').toString().trim() ||
+          `git ls-files exited ${bits.status}`;
+  }
+  if (bits.stdout.split('\0').some((rec) => /^[a-zS]/.test(rec))) {
+    return 'the index carries skip-worktree or assume-unchanged bits, so the restore cannot have reached every tracked file';
+  }
+  return null;
 }
 
 /**
@@ -1467,20 +1731,80 @@ function runProbeSuite(
     deadlineAt !== undefined
       ? Math.max(1, Math.min(PROBE_RUN_TIMEOUT_MS, deadlineAt - started))
       : PROBE_RUN_TIMEOUT_MS;
-  const exposed = exposeDependencies(probeTree, dependencyRoot);
-  const r = spawnSync(
-    process.execPath,
-    [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
-    {
-      cwd: probeTree,
-      encoding: 'utf8',
-      timeout,
-      // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
-      // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
-      // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
-      maxBuffer: 64 * 1024 * 1024,
-    },
-  );
+  // `rebuild` because this tree is reused across the baseline, the control,
+  // every mutant and the revert probe, and the code running in it is the PR's
+  // own test code: a suite that plants or replaces a module in `node_modules`
+  // would otherwise decide every later run's verdict. Re-linking costs about a
+  // second per run against the budget's minutes.
+  // The farm's link TARGETS must be spelled the way the mount is. The mount and
+  // `--workdir` are canonical (`mountRootFor` realpaths), while
+  // `exposeDependencies` builds targets from the argument it is given — so
+  // under a symlinked ancestor (macOS `/tmp` → `/private/tmp` is the everyday
+  // one) every link dangles INSIDE the container, and the phase reports "every
+  // file was red or collected nothing": a wiring failure published as a
+  // statement about the PR's own suite. Canonicalise what crosses the
+  // boundary, and only there — the direct path keeps the caller's spelling.
+  let farmRoot = dependencyRoot;
+  if (sandboxVerdict().kind === 'container') {
+    try {
+      farmRoot = realpathSync(dependencyRoot);
+    } catch {
+      // Unresolvable: the farm below reports what it could not link.
+    }
+  }
+  const exposed = exposeDependencies(probeTree, farmRoot, {
+    rebuild: true,
+  });
+  // The reviewed repository's own suite, run once per baseline / control /
+  // mutant / hunk probe / revert — the second of the two places a review
+  // executes the code it is reviewing (#9556). Sandboxed it is a container
+  // per run, offline, with an env allowlist instead of this process's own;
+  // unsandboxed it is the direct spawn this has always been, and the caller
+  // has already disclosed that.
+  // `node` off the IMAGE's PATH, not `process.execPath`: the host's interpreter
+  // path (`/usr/bin/node` here, `/opt/hostedtoolcache/…` on a GitHub runner) is
+  // neither mounted nor present in the image, so baking it in exits 127 and
+  // maps every probe — baseline, control, each mutant, each hunk, the revert —
+  // to inconclusive, blaming the runner's output for a wiring error. The vitest
+  // bin path DOES resolve, because it lives under the mounted temp dir.
+  const suite = `node ${shellQuotePath(
+    findVitestBin(dependencyRoot),
+  )} run --reporter=json ${probes.map(shellQuotePath).join(' ')}`;
+  const boxed = probeContainer(suite, probeTree);
+  const r = boxed
+    ? spawnSync(boxed.file, boxed.args, {
+        cwd: probeTree,
+        encoding: 'utf8',
+        timeout,
+        // SIGKILL, not the default SIGTERM, and only on the boxed branch.
+        // `spawnSync` sends its `killSignal` at the deadline and then WAITS for
+        // the child to exit — so an attached runtime client that forwards the
+        // signal and keeps waiting on a workload whose own trap ignores it
+        // never returns, and the `killContainer` below is never reached. That
+        // is what made the round-4 machinery unreachable rather than wrong.
+        // SIGKILL cannot be ignored, so the client dies, the call returns, and
+        // the container is then reaped BY NAME at the daemon — which is where
+        // the deadline had to be enforced all along.
+        killSignal: 'SIGKILL',
+        maxBuffer: 64 * 1024 * 1024,
+        // The RUNTIME CLIENT's environment, minus the daemon-selecting
+        // variables a repository could have shipped in its own `.env` — the
+        // container's own environment is the allowlist in `containerEnv`.
+        env: runtimeClientEnv(),
+      })
+    : spawnSync(
+        process.execPath,
+        [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
+        {
+          cwd: probeTree,
+          encoding: 'utf8',
+          timeout,
+          // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
+          // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
+          // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
+          maxBuffer: 64 * 1024 * 1024,
+        },
+      );
   // `r.error` is set — and `r.status` is null — when the process never ran
   // (vitest entry missing or unresolvable) or was killed (the timeout above
   // fires SIGTERM). Ignoring it reports those as "the runner produced no
@@ -1492,6 +1816,12 @@ function runProbeSuite(
   // SIGTERM", which is a less useful sentence about the same event. The reason
   // tag is derived from the whole result either way, so it does not depend on
   // which message wins.
+  if (boxed && boxedRunLeftContainer(r.status)) {
+    // The deadline killed the CLIENT; the container outlives it — `--rm` fires
+    // only on a self-exit. Reach the daemon before reporting, or a
+    // TERM-ignoring suite keeps this mount writable past the end of the review.
+    killContainer(boxed.runtime, boxed.name);
+  }
   if (r.error)
     throw new ProbeRunFailure(r.error.message, runnerFailureReason(r));
   if (r.signal) {
@@ -1521,7 +1851,9 @@ function runProbeSuite(
  * `join(probeTree, file)` is symlink-safe here the way `safeRmWithin` has to
  * enforce for deletes: the candidate resolved as a blob at the head commit, and
  * one git tree cannot hold both `dir` as a symlink and `dir/file` as a blob, so
- * in a fresh checkout every ancestor is a real directory.)
+ * in a fresh checkout every ancestor is a real directory. The LEAF is a different
+ * story — a PR can commit it as a symlink (mode 120000) — and every write site
+ * below refuses one rather than write through it.)
  *
  * Exported for its tests: the never-delete-a-mismatched-line guard cannot be
  * reached through the command (selection and the probe tree derive from the
@@ -1695,6 +2027,49 @@ function newSideLength(header: string): number {
 }
 
 /**
+ * Whether a probe target resolves OUT of the tree through a symlink — at the
+ * LEAF or at any ANCESTOR. A PR can commit a test or source file as mode
+ * 120000 naming anywhere a relative path reaches — including the shared
+ * review worktree, whose sibling path is predictable — and the probe writes
+ * below would follow the link and land there. Checking the leaf alone is not
+ * enough: `lstat` resolves every intermediate component, so once a directory
+ * in a REUSED probe tree has been relinked by code that ran in it, a leaf
+ * check reports the outside file as ordinary and every later write follows
+ * the link — the same escape class `safeRmWithin` walks ancestors for on the
+ * delete side. Any symlink on the path is refused as inconclusive (or a
+ * control that never ran) rather than written through; a component missing on
+ * disk escapes nothing — the read or write fails on its own.
+ */
+function probeTargetEscapes(probeTree: string, file: string): boolean {
+  // The separator set is platform-dependent: on POSIX a backslash is an
+  // ordinary NAME character, so splitting on it turns `x\\y.test.ts` into two
+  // phantom components, the first `lstat` dies ENOENT, and the catch below
+  // reports "no escape" for a leaf nobody ever looked at.
+  const separators = process.platform === 'win32' ? /[/\\]+/ : /\/+/;
+  const parts = file.split(separators).filter((part) => part && part !== '.');
+  // The ROOT first: replacing the probe tree itself with a symlink defeats
+  // every per-component check at once, because the kernel resolves the prefix
+  // and each component below it lstats as an ordinary entry.
+  let cur = probeTree;
+  try {
+    if (lstatSync(cur).isSymbolicLink()) return true;
+  } catch {
+    return true; // No tree to write into is not a tree to trust.
+  }
+  for (const part of parts) {
+    cur = join(cur, part);
+    let st;
+    try {
+      st = lstatSync(cur);
+    } catch {
+      return false;
+    }
+    if (st.isSymbolicLink()) return true;
+  }
+  return false;
+}
+
+/**
  * Neutralise ONE hunk in the probe tree, run the affected tests, restore.
  *
  * Reverse-applying the hunk's own patch is what makes this attributable: `git
@@ -1716,9 +2091,26 @@ export function runOneHunkProbe(
   probes: string[],
   deadlineAt?: number,
   now: () => number = Date.now,
+  dependencyRoot: string = probeTree,
 ): HunkResult {
   const { patch: _patch, ...meta } = hunk;
   const abs = join(probeTree, hunk.file);
+  if (probeTargetEscapes(probeTree, hunk.file)) {
+    return {
+      ...meta,
+      verdict: 'inconclusive',
+      detail:
+        'the probe target resolves through a symlink — the reverse patch and the restore would follow it out of the probe tree, so nothing was neutralised',
+    };
+  }
+  const stale = restoreProbeTreeTracked(probeTree);
+  if (stale !== null) {
+    return {
+      ...meta,
+      verdict: 'inconclusive',
+      detail: `the probe tree could not be put back to the commit before this run, so an earlier run's writes may still be standing: ${stale}`,
+    };
+  }
   let original: string;
   try {
     original = readFileSync(abs, 'utf8');
@@ -1729,10 +2121,22 @@ export function runOneHunkProbe(
       detail: `the probe tree does not hold ${hunk.file}: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
+  // Re-check at the write itself: the guard above and the apply below are a
+  // check-then-use pair, and the threat this guard exists for has a shell
+  // inside these trees and picks its moment.
+  if (probeTargetEscapes(probeTree, hunk.file)) {
+    return {
+      ...meta,
+      verdict: 'inconclusive',
+      detail:
+        'the probe target was relinked through a symlink before the reverse patch applied — nothing was neutralised',
+    };
+  }
   const applied = spawnSync('git', ['apply', '--reverse', '-'], {
     cwd: probeTree,
     input: hunk.patch,
     encoding: 'utf8',
+    env: sanitizedGitEnv(),
   });
   if (applied.error || applied.status !== 0) {
     // Nothing was changed (git applies a patch atomically), so there is nothing
@@ -1743,27 +2147,57 @@ export function runOneHunkProbe(
       detail: `the hunk could not be reverse-applied, so nothing was neutralised: ${(applied.stderr ?? applied.error?.message ?? '').toString().trim()}`,
     };
   }
-  try {
-    const { perFile } = runProbeSuite(probeTree, probes, deadlineAt, now);
-    const verdict = classifyMutantRun(perFile);
-    const detail =
-      verdict === 'killed'
-        ? 'the suite went red with this hunk reverted — a test covers this change'
-        : verdict === 'survived'
-          ? 'every affected test still PASSED with this hunk reverted — no test in this diff fails when the change is undone'
-          : 'the tree with this hunk reverted produced no clean verdict (likely a compile or import error) — not evidence either way';
-    return { ...meta, verdict, detail };
-  } finally {
-    // Restore by content, not by re-applying the patch forward: a forward apply
-    // can fail on its own and would leave the tree neutralised for every later
-    // probe, turning one bad restore into a run of false survivors. Writing the
-    // saved bytes back also recreates a file the reverse patch deleted — and
-    // the parent directory first: reverse-applying a `new file` hunk removes
-    // the directories it emptied, and a restore that throws ENOENT from this
-    // finally loses the verdict AND marks every remaining hunk inconclusive.
-    mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, original, 'utf8');
+  // Re-validation of the restore write must be able to STOP the phase — a
+  // throw from inside the finally itself is not safe — so the attempt reports
+  // what its finally saw, and the refusal lands after it.
+  let relinkedMidRun = false;
+  const attempt = (): HunkResult => {
+    try {
+      const { perFile } = runProbeSuite(
+        probeTree,
+        probes,
+        deadlineAt,
+        now,
+        dependencyRoot,
+      );
+      const verdict = classifyMutantRun(perFile);
+      const detail =
+        verdict === 'killed'
+          ? 'the suite went red with this hunk reverted — a test covers this change'
+          : verdict === 'survived'
+            ? 'every affected test still PASSED with this hunk reverted — no test in this diff fails when the change is undone'
+            : 'the tree with this hunk reverted produced no clean verdict (likely a compile or import error) — not evidence either way';
+      return { ...meta, verdict, detail };
+    } finally {
+      // Re-validate immediately before the restore WRITE: the suite the
+      // reverse patch just ran on is the PR's own test code, and it can
+      // relink the target while the run is in flight. A restore through the
+      // link is the same escape as a mutation through it — refuse it, and
+      // let the throw below stop the phase: a tree this code can no longer
+      // restore is a tree no later probe may trust.
+      if (probeTargetEscapes(probeTree, hunk.file)) {
+        relinkedMidRun = true;
+      } else {
+        // Restore by content, not by re-applying the patch forward: a forward
+        // apply can fail on its own and would leave the tree neutralised for
+        // every later probe, turning one bad restore into a run of false
+        // survivors. Writing the saved bytes back also recreates a file the
+        // reverse patch deleted — and the parent directory first:
+        // reverse-applying a `new file` hunk removes the directories it
+        // emptied, and a restore that throws ENOENT here loses the verdict
+        // AND marks every remaining hunk inconclusive.
+        mkdirSync(dirname(abs), { recursive: true });
+        writeFileSync(abs, original, 'utf8');
+      }
+    }
+  };
+  const result = attempt();
+  if (relinkedMidRun) {
+    throw new Error(
+      `refusing to restore ${hunk.file} through a symlink — the probe tree was relinked mid-run`,
+    );
   }
+  return result;
 }
 
 /**
@@ -1792,28 +2226,65 @@ export function runControlMutant(
   probeFile: string,
   deadlineAt?: number,
   now: () => number = Date.now,
+  dependencyRoot: string = probeTree,
 ): boolean | null {
   const abs = join(probeTree, probeFile);
+  // A probe file reached through a symlink — at the leaf or an ancestor —
+  // would take the injection OUT of the probe tree: into the shared review
+  // worktree for a link aimed at the predictable sibling path. The control
+  // never ran, which is `null`, not a verdict.
+  if (probeTargetEscapes(probeTree, probeFile)) return null;
+  // A control run on a tree an earlier run wrote into demonstrates that
+  // tree's behaviour, not the suite's — and this is the run every survivor
+  // verdict is conditioned on.
+  if (restoreProbeTreeTracked(probeTree) !== null) return null;
   let original: string;
   try {
     original = readFileSync(abs, 'utf8');
   } catch {
     return null; // cannot even read the probe file — nothing was demonstrated
   }
-  try {
-    writeFileSync(
-      abs,
-      `${original}\n;import { it as __qcIt, expect as __qcExpect } from 'vitest';\n__qcIt('QWEN-REVIEW-POSITIVE-CONTROL', () => {\n  __qcExpect(1).toBe(2);\n});\n`,
-      'utf8',
+  let relinkedMidRun = false;
+  const attempt = (): boolean | null => {
+    try {
+      // Same pre-write re-check as the mutant and hunk paths: the entry guard
+      // is several calls back, and the injection is what would follow a link
+      // out of the tree.
+      if (probeTargetEscapes(probeTree, probeFile)) return null;
+      writeFileSync(
+        abs,
+        `${original}\n;import { it as __qcIt, expect as __qcExpect } from 'vitest';\n__qcIt('QWEN-REVIEW-POSITIVE-CONTROL', () => {\n  __qcExpect(1).toBe(2);\n});\n`,
+        'utf8',
+      );
+      const { perFile } = runProbeSuite(
+        probeTree,
+        [probeFile],
+        deadlineAt,
+        now,
+        dependencyRoot,
+      );
+      // `gated` is the runner's "went red" verdict; anything else — still
+      // green, collected nothing, crashed — means the control did NOT
+      // demonstrate a working kill path.
+      return perFile.some((r) => r.verdict === 'gated');
+    } finally {
+      // Same re-validation as every other restore write: the run just
+      // executed the PR's own test code, which can relink the target
+      // mid-run. Refuse the write; the throw below stops the phase.
+      if (probeTargetEscapes(probeTree, probeFile)) {
+        relinkedMidRun = true;
+      } else {
+        writeFileSync(abs, original, 'utf8');
+      }
+    }
+  };
+  const demonstrated = attempt();
+  if (relinkedMidRun) {
+    throw new Error(
+      `refusing to restore ${probeFile} through a symlink — the probe tree was relinked mid-run`,
     );
-    const { perFile } = runProbeSuite(probeTree, [probeFile], deadlineAt, now);
-    // `gated` is the runner's "went red" verdict; anything else — still green,
-    // collected nothing, crashed — means the control did NOT demonstrate a
-    // working kill path.
-    return perFile.some((r) => r.verdict === 'gated');
-  } finally {
-    writeFileSync(abs, original, 'utf8');
   }
+  return demonstrated;
 }
 
 export function runOneMutant(
@@ -1825,6 +2296,22 @@ export function runOneMutant(
   dependencyRoot: string = probeTree,
 ): MutantResult {
   const abs = join(probeTree, mutant.file);
+  if (probeTargetEscapes(probeTree, mutant.file)) {
+    return {
+      ...mutant,
+      verdict: 'inconclusive',
+      detail:
+        'the probe target resolves through a symlink — the mutation and the restore would follow it out of the probe tree, so nothing was mutated',
+    };
+  }
+  const stale = restoreProbeTreeTracked(probeTree);
+  if (stale !== null) {
+    return {
+      ...mutant,
+      verdict: 'inconclusive',
+      detail: `the probe tree could not be put back to the commit before this run, so an earlier run's writes may still be standing: ${stale}`,
+    };
+  }
   const original = readFileSync(abs, 'utf8');
   const lines = original.split('\n');
   if ((lines[mutant.line - 1] ?? '').trim() !== mutant.statement) {
@@ -1852,30 +2339,61 @@ export function runOneMutant(
   } else {
     lines.splice(mutant.line - 1, 1);
   }
-  try {
-    writeFileSync(abs, lines.join('\n'), 'utf8');
-    const { perFile } = runProbeSuite(
-      probeTree,
-      probes,
-      deadlineAt,
-      now,
-      dependencyRoot,
+  let relinkedMidRun = false;
+  const attempt = (): MutantResult => {
+    try {
+      // Re-check at the write itself. The guard at the top of this function
+      // and this line are a check-then-use pair with a `readFileSync` and a
+      // restore between them, and the threat it exists for has a shell inside
+      // these trees and picks its moment — the hunk probe carries the same
+      // re-check immediately before its own mutation op, with the same
+      // reasoning, and these two writes were the ones without it.
+      if (probeTargetEscapes(probeTree, mutant.file)) {
+        return {
+          ...mutant,
+          verdict: 'inconclusive',
+          detail:
+            'the probe target was relinked through a symlink before the mutation was written — nothing was mutated',
+        };
+      }
+      writeFileSync(abs, lines.join('\n'), 'utf8');
+      const { perFile } = runProbeSuite(
+        probeTree,
+        probes,
+        deadlineAt,
+        now,
+        dependencyRoot,
+      );
+      const verdict = classifyMutantRun(perFile);
+      const detail =
+        verdict === 'killed'
+          ? `the suite went red with this statement ${what} — a test catches it`
+          : verdict === 'survived'
+            ? `every affected test still PASSED with this statement ${what} — no test fails ${
+                mutant.mutated === undefined
+                  ? 'when it is removed'
+                  : 'when it changes'
+              }`
+            : 'the mutated tree produced no clean verdict (likely a compile or import error) — not evidence either way';
+      return { ...mutant, verdict, detail };
+    } finally {
+      // Same re-validation as every other restore write: the suite just ran
+      // the PR's own test code, which can relink the target mid-run. Refuse
+      // the write; the throw below stops the phase.
+      if (probeTargetEscapes(probeTree, mutant.file)) {
+        relinkedMidRun = true;
+      } else {
+        writeFileSync(abs, original, 'utf8');
+      }
+    }
+  };
+  const result = attempt();
+  if (relinkedMidRun) {
+    throw new Error(
+      `refusing to restore ${mutant.file} through a symlink — the probe tree was relinked mid-run`,
     );
-    const verdict = classifyMutantRun(perFile);
-    const detail =
-      verdict === 'killed'
-        ? `the suite went red with this statement ${what} — a test catches it`
-        : verdict === 'survived'
-          ? `every affected test still PASSED with this statement ${what} — no test fails ${
-              mutant.mutated === undefined
-                ? 'when it is removed'
-                : 'when it changes'
-            }`
-          : 'the mutated tree produced no clean verdict (likely a compile or import error) — not evidence either way';
-    return { ...mutant, verdict, detail };
-  } finally {
-    writeFileSync(abs, original, 'utf8');
   }
+  return result;
 }
 
 /**
@@ -1946,10 +2464,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   ) as { workspaces?: string[] };
   const globs = rootPkg.workspaces ?? [];
 
-  const { unreachable, probes, revert } = planTestEfficacy(
-    plan.files ?? [],
-    globs,
-  );
+  const efficacyPlan = planTestEfficacy(plan.files ?? [], globs);
+  const { unreachable, revert } = efficacyPlan;
+  // `let` because probes committed as symlinks are dropped from it below,
+  // before any vitest run collects them.
+  let { probes } = efficacyPlan;
+  // The probe set as PLANNED, kept whole: the symlink drop below narrows
+  // `probes` to what will actually run, while the collocated-test hold has to
+  // keep asking whether a mutant's own test EXISTS at all.
+  let allProbes = probes;
 
   // The report JSON is untrusted input, and `revert` paths become both git
   // pathspecs and `join(worktree, …)` filesystem targets we check out and
@@ -2014,7 +2537,23 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     }
   };
 
-  if (probes.length > 0 && revert.length > 0) {
+  // BEFORE the probe tree is even created. Every run this phase makes executes
+  // the reviewed repository's suite, so under `review.sandbox: required` with no
+  // container runtime the honest outcome is no efficacy evidence — not evidence
+  // bought by running that suite unsandboxed. Refusing here rather than at the
+  // spawn keeps the report's vocabulary intact: the phase produced nothing, and
+  // says why, instead of a run of probes each blaming the runner.
+  // The probe tree this phase WOULD build, named before it exists — the gate
+  // has to answer before anything is created, and `probeWorktreePath` is a
+  // pure path function.
+  const sandboxRefusal = refuseUnsandboxedPhase(probeWorktreePath(worktree));
+  if (sandboxRefusal) {
+    noteMutants(
+      `mutation probes did not run: ${sandboxRefusal}. Every probe executes ` +
+        `the reviewed repository's own test suite, which is what the policy ` +
+        `forbids unsandboxed — read the absence as unmeasured, not as covered.`,
+    );
+  } else if (probes.length > 0 && revert.length > 0) {
     // The probe reverts the PR's source to base and runs the tests against it —
     // in its OWN disposable worktree, checked out at the PR head and discarded
     // wholesale when the probe finishes. The shared worktree the other review
@@ -2142,7 +2681,48 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       }
     }
 
-    if (created && (candidates.length > 0 || hunkCandidates.length > 0)) {
+    if (created && probes.length > 0) {
+      // BEFORE the baseline run: a probe committed as mode 120000 is executed
+      // through the link, scoring mutants against code this tree never
+      // mutated — the fabricated-verdict class this command exists to
+      // prevent, reached without tripping any write guard.
+      const linked = committedSymlinkProbes(probeTree, probes);
+      if (linked.size > 0) {
+        // The hold below asks "does this mutant's own collocated test exist,
+        // and did it run green?" against the probe LIST. Reassigning `probes`
+        // to the survivors answers "there is no such test" for a dropped one —
+        // so the mutant it covers is scored `survived` on the strength of the
+        // other probes passing, which is exactly what the hold exists to
+        // refuse. The full list is kept for that lookup.
+        allProbes = [...probes];
+        const kept: string[] = [];
+        for (const file of probes) {
+          if (linked.has(file)) {
+            results.push({
+              file,
+              verdict: 'inconclusive' as const,
+              reason: 'not-run' as const,
+              detail:
+                'committed as a symlink (mode 120000) — vitest would collect it through the link and score mutants against code this tree never mutated, so it was dropped from the probe set',
+            });
+          } else {
+            kept.push(file);
+          }
+        }
+        probes = kept;
+        if (probes.length === 0) {
+          noteMutants(
+            'mutants not run: every probe file is committed as a symlink (mode 120000), so no suite can be scored in this tree',
+          );
+        }
+      }
+    }
+
+    if (
+      created &&
+      probes.length > 0 &&
+      (candidates.length > 0 || hunkCandidates.length > 0)
+    ) {
       // The mutation phase runs BEFORE the revert: it needs the probe tree at
       // the unmodified PR head, and the revert below rewrites that tree to
       // base. The two cannot contaminate each other — every mutated file is in
@@ -2160,6 +2740,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         // 600s tool ceiling (540s budget: at most 240s here + 300s revert).
         const mutantDeadline =
           startedAt + TOTAL_BUDGET_MS - PROBE_RUN_TIMEOUT_MS;
+        // The probe tree is reused ACROSS reviews too (#6832), so the baseline
+        // is not exempt: it can open on whatever the previous review's suite
+        // left in it.
+        const staleBaseline = restoreProbeTreeTracked(probeTree);
+        if (staleBaseline !== null) {
+          throw new Error(
+            `the probe tree could not be put back to the commit: ${staleBaseline}`,
+          );
+        }
         const baseline = runProbeSuite(
           probeTree,
           probes,
@@ -2214,6 +2803,12 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               greenProbes[0],
               mutantDeadline,
               now,
+              // The dependency root, so this run re-links the farm like the
+              // others. Defaulting it to the probe tree made the farm rebuild
+              // a no-op here (`exposeDependencies` returns at once when the
+              // two are the same) — and the control is the run that decides
+              // whether ANY mutant verdict is trusted.
+              worktree,
             );
             if (harnessValidated === null) {
               // The probe file could not be read, so no test was injected and
@@ -2255,7 +2850,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             const heldDetail = heldForRedCollocatedTest(
               'mutant',
               c.file,
-              probes,
+              allProbes,
               greenProbes,
               baseline.perFile,
             );
@@ -2305,7 +2900,7 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             const heldDetail = heldForRedCollocatedTest(
               'hunk',
               h.file,
-              probes,
+              allProbes,
               greenProbes,
               baseline.perFile,
             );
@@ -2325,7 +2920,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               break;
             }
             hunkResults.push(
-              runOneHunkProbe(probeTree, h, greenProbes, mutantDeadline, now),
+              runOneHunkProbe(
+                probeTree,
+                h,
+                greenProbes,
+                mutantDeadline,
+                now,
+                worktree,
+              ),
             );
           }
         }
@@ -2349,8 +2951,24 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       }
     }
 
-    if (created) {
+    // `probes.length > 0` for the same reason as the mutation gate above: a
+    // `runProbeSuite` with no files runs vitest with no filter, which collects
+    // whatever the repo holds — minutes of unrelated suite, scored as this
+    // probe's evidence.
+    if (created && probes.length > 0) {
       try {
+        // The tree must still BE the tree. The mutation phase above can end by
+        // detecting that the probe tree was relinked mid-run — and this phase
+        // then ran `git checkout base -- …` and `safeRmWithin` with a cwd that
+        // resolves through the link into the shared review worktree, which is
+        // the one thing this whole command exists to keep untouched. Detection
+        // that is followed by the damage it detected is not detection.
+        if (probeTargetEscapes(probeTree, '.')) {
+          throw new Error(
+            'the probe tree no longer resolves to itself (a symlink at its ' +
+              'root), so the revert would run against whatever it points at',
+          );
+        }
         // "Revert to base" is two operations, confined to the throwaway tree. A
         // file the PR MODIFIED is checked out from base; a file the PR ADDED did
         // not exist at base, so it is removed — through `safeRmWithin`, which
@@ -2367,9 +2985,42 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
         }
         for (const p of added) safeRmWithin(probeTree, p);
 
+        // The probes were screened for symlinks ONCE, from the index, before
+        // the baseline — and every run since has executed the PR's own test
+        // code, which can replace a probe file with a link at any point. The
+        // mutation writers re-check their target immediately before they
+        // write; this collection had no equivalent, so a probe relinked out of
+        // the tree during an earlier run was collected THROUGH the link here
+        // and its verdict scored against code the revert never touched. A
+        // probe that escapes is dropped from this run rather than believed.
+        const collectable = probes.filter(
+          (p) => !probeTargetEscapes(probeTree, p),
+        );
+        // Every probe relinked away leaves nothing to run, and `vitest run`
+        // with no file argument collects the WHOLE suite — a run whose verdicts
+        // belong to files this phase never selected. The `probes.length > 0`
+        // gate this phase opened with was taken before the screen above could
+        // empty the list. Thrown before the per-probe records below, so the
+        // report carries one reason rather than the same file twice.
+        if (collectable.length === 0) {
+          throw new Error(
+            'every probe was relinked out of the probe tree after the baseline — the revert phase had nothing left it could score',
+          );
+        }
+        for (const p of probes) {
+          if (collectable.includes(p)) continue;
+          results.push({
+            file: p,
+            verdict: 'inconclusive',
+            reason: 'not-run',
+            detail:
+              'the probe resolves through a symlink out of the probe tree — it was relinked after the baseline, so this run could not score it',
+          });
+        }
+
         const revertRun = runProbeSuite(
           probeTree,
-          probes,
+          collectable,
           startedAt + TOTAL_BUDGET_MS,
           now,
           worktree,

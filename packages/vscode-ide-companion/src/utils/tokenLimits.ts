@@ -12,8 +12,13 @@
  * actually uses so that the core package never needs to be pulled into the
  * browser bundle.
  *
- * Keep this file in sync with:
- *   packages/core/src/core/tokenLimits.ts
+ * NOTE: the companion's LIVE context-limit path does NOT go through this
+ * module — acpModelInfo.ts runs in the extension host (Node) and imports
+ * `knownTokenLimit` from @qwen-code/qwen-code-core directly, so companion
+ * limits already track core. This mirror exists only as a browser-safe
+ * fallback for a future webview consumer; nothing imports it today. Keep it
+ * in sync with packages/core/src/core/tokenLimits.ts so that consumer, when
+ * it lands, sees the same numbers core reports.
  */
 
 type TokenCount = number;
@@ -43,6 +48,7 @@ const LIMITS = {
   '200k': 200_000,
   '256k': 262_144,
   '272k': 272_000,
+  '384k': 384_000,
   '400k': 400_000,
   '512k': 524_288,
   '1m': 1_000_000,
@@ -69,7 +75,18 @@ function normalize(model: string): string {
   s = s.replace(/^.*\//, '');
   s = s.split('|').pop() ?? s;
   s = s.split(':').pop() ?? s;
+
   s = s.replace(/\s+/g, '-');
+
+  // Mirror core: rewrite dotted-minor Claude aliases (LiteLLM/Vertex/Bedrock
+  // convention, e.g. `claude-opus-4.8`) to the canonical hyphenated form
+  // BEFORE the trailing-suffix strip eats them. Runs after the whitespace
+  // collapse so space-separated display names are covered, matches the family
+  // as `[a-z]+`, and folds an optional hyphenated minor plus any further
+  // dotted components. See packages/core/src/core/tokenLimits.ts::normalize
+  // for the full rationale.
+  s = s.replace(/^(claude-[a-z]+-\d+(?:-\d+)?)\.(\d+)(?:\.\d+)*/, '$1-$2');
+
   s = s.replace(/-preview/g, '');
 
   if (
@@ -90,6 +107,11 @@ function normalize(model: string): string {
 // Input context-window patterns (most specific → most general)
 // ---------------------------------------------------------------------------
 
+// Mirror of core's CLAUDE_OPUS_EXTENDED: Opus tiers with the 1M input / 128K
+// output window (Opus 4.6-4.8 and every 5.x). Shared across both pattern
+// tables here so a tier bump touches one site, not two.
+const CLAUDE_OPUS_EXTENDED = /^claude-opus-(?:4-(?:6|7|8)|5)/;
+
 const INPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // Google Gemini
   [/^gemini-3/, LIMITS['1m']],
@@ -101,6 +123,7 @@ const INPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^o\d/, LIMITS['200k']],
 
   // Anthropic Claude
+  [CLAUDE_OPUS_EXTENDED, LIMITS['1m']],
   [/^claude-/, LIMITS['200k']],
 
   // Alibaba / Qwen
@@ -115,13 +138,16 @@ const INPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen/, LIMITS['256k']],
 
   // DeepSeek
+  [/^deepseek-v4/, LIMITS['1m']],
   [/^deepseek/, LIMITS['128k']],
 
   // Zhipu GLM
-  [/^glm-5/, 202_752 as TokenCount],
+  [/^glm-5(\.[01])?(-|$)/, 202_752 as TokenCount],
+  [/^glm-(?:[5-9]|\d{2,})/, LIMITS['1m']],
   [/^glm-/, 202_752 as TokenCount],
 
   // MiniMax
+  [/^minimax-m3/i, LIMITS['1m']],
   [/^minimax-m2\.5/i, LIMITS['192k']],
   [/^minimax-/i, LIMITS['200k']],
 
@@ -145,7 +171,9 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^gpt-/, LIMITS['16k']],
   [/^o\d/, LIMITS['128k']],
 
-  [/^claude-opus-4-6/, LIMITS['128k']],
+  // 128_000 (vendor-declared), not LIMITS['128k'] (131_072) — matches core's
+  // authoritative value so the two files can't diverge by 3072 tokens.
+  [CLAUDE_OPUS_EXTENDED, 128_000 as TokenCount],
   [/^claude-sonnet-4-6/, LIMITS['64k']],
   [/^claude-/, LIMITS['64k']],
 
@@ -153,11 +181,12 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^coder-model$/, LIMITS['64k']],
   [/^qwen/, LIMITS['32k']],
 
+  [/^deepseek-v4/, LIMITS['384k']],
   [/^deepseek-reasoner/, LIMITS['64k']],
   [/^deepseek-r1/, LIMITS['64k']],
   [/^deepseek-chat/, LIMITS['8k']],
 
-  [/^glm-5/, LIMITS['16k']],
+  [/^glm-5(?:\.\d+)?(?:-|$)/, LIMITS['128k']],
   [/^glm-4\.7/, LIMITS['16k']],
 
   [/^minimax-m2\.5/i, LIMITS['64k']],

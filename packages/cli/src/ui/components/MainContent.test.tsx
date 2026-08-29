@@ -172,10 +172,10 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     settingInputRequests: [],
     pluginChoiceRequests: [],
     loopDetectionConfirmationRequest: null,
-    geminiMdFileCount: 0,
+    memoryFileCount: 0,
     streamingState: {} as UIState['streamingState'],
     initError: null,
-    pendingGeminiHistoryItems: [],
+    pendingLlmHistoryItems: [],
     thought: null,
     shellModeActive: false,
     userMessages: [],
@@ -884,6 +884,293 @@ describe('<MainContent />', () => {
       expect(lastFrame()).toMatch(/VP_ITEM:1[\s\S]*VP_ITEM:2/);
     });
 
+    // Shared fixtures for the #9420 collapse tests. A tool batch renders
+    // twice transiently — the committed history copy plus the live pending
+    // copy — and both copies carry the same scheduler-minted `batchId`.
+    // The collapse matches on that identity, never on callIds: callIds are
+    // not globally unique (deterministic ids re-minted after core-history
+    // compaction, provider wire-id reuse).
+    const toolGroupFixture = (...callIds: string[]) => ({
+      type: 'tool_group' as const,
+      tools: callIds.map((callId) => ({
+        callId,
+        name: 'read_file',
+        description: `read ${callId}`,
+        status: ToolCallStatus.Executing,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      })),
+    });
+    const batched = (batchId: string, ...callIds: string[]) => ({
+      ...toolGroupFixture(...callIds),
+      batchId,
+    });
+    const lastVpDataIds = () =>
+      scrollableListPropsSpy.mock.calls
+        .at(-1)?.[0]
+        .data.map((item: { id: number }) => item.id);
+
+    it('collapses a tool_group duplicated across history and pending (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [{ id: 1, ...batched('batch-1', 'call-A', 'call-B') }],
+          pendingHistoryItems: [batched('batch-1', 'call-A', 'call-B')],
+        }),
+      );
+
+      // The same in-flight tool batch must render once (the live pending
+      // copy, negative id), not twice (history id 1 + pending id -1). The
+      // exact list data is pinned so a duplicate that both replaces and
+      // appends is caught (a substring check passes with two -1 rows).
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -1]);
+    });
+
+    it('collapses a duplicated tool_group separated by pending items (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [{ id: 1, ...batched('batch-1', 'dup-call') }],
+          // The real lifecycle: onComplete commits the batch to history, then
+          // the continuation stream appends thought/content pending items
+          // before the scheduler clears the stale live copy — so the two
+          // copies are not adjacent in the combined list.
+          pendingHistoryItems: [
+            { type: 'gemini_thought' as const, text: 'thinking' },
+            batched('batch-1', 'dup-call'),
+          ],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -1, -2]);
+    });
+
+    it('collapses a tool_group duplicated within the pending list (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          pendingHistoryItems: [
+            batched('batch-1', 'dup-call'),
+            batched('batch-1', 'dup-call'),
+          ],
+        }),
+      );
+
+      // Only the later (more current) copy survives.
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -2]);
+    });
+
+    it('collapses pending duplicates separated by other pending items (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          pendingHistoryItems: [
+            batched('batch-1', 'dup-call'),
+            { type: 'gemini_thought' as const, text: 'between' },
+            batched('batch-1', 'dup-call'),
+          ],
+        }),
+      );
+
+      // The later (more current) copy survives even though the copies are
+      // not adjacent; it keeps its original positional id (-3).
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -2, -3]);
+    });
+
+    it('keeps tool_groups of unrelated batches side by side (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [
+            { id: 1, ...batched('batch-1', 'call-A') },
+            { id: 2, ...batched('batch-2', 'call-B') },
+          ],
+          pendingHistoryItems: [batched('batch-3', 'call-C')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, -1]);
+    });
+
+    it('keeps committed tool_groups sharing callIds when no pending copy is live (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          // Two committed batches with identical callIds (e.g. accepted-
+          // speculation runs whose synthetic callIds collide) and no live
+          // pending copy: nothing is duplicated, both rows must survive.
+          // Restored-session groups carry no batchId and take this shape.
+          history: [
+            { id: 1, ...toolGroupFixture('dup-call') },
+            { id: 2, type: 'gemini_thought' as const, text: 'between' },
+            { id: 3, ...toolGroupFixture('dup-call') },
+          ],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, 3]);
+    });
+
+    it('keeps an unrelated committed batch that collides with a live batch before it commits (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          // Pre-commit shape: the live batch ('batch-new') has not been
+          // committed yet, so it has no stale copy in history. The
+          // committed row belongs to an unrelated earlier batch whose
+          // callIds merely collide (ids re-minted after core-history
+          // compaction, provider wire-id reuse) and must keep rendering
+          // for the whole execution window of the new batch.
+          history: [{ id: 1, ...batched('batch-old', 'dup-call') }],
+          pendingHistoryItems: [batched('batch-new', 'dup-call')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, -1]);
+    });
+
+    it('keeps earlier committed batches whose callIds collide with the live pending batch (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          // The unrelated earlier batch ('batch-old') sharing the live
+          // batch's callIds must keep rendering; only the stale committed
+          // copy of the live batch itself (id 3, 'batch-live') collapses
+          // against the pending copy.
+          history: [
+            { id: 1, ...batched('batch-old', 'dup-call') },
+            { id: 2, type: 'gemini_thought' as const, text: 'between' },
+            { id: 3, ...batched('batch-live', 'dup-call') },
+          ],
+          pendingHistoryItems: [batched('batch-live', 'dup-call')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, -1]);
+    });
+
+    it('collapses two distinct duplicated tool_groups pending at once (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [
+            { id: 1, ...batched('batch-A', 'call-A') },
+            { id: 2, ...batched('batch-B', 'call-B') },
+          ],
+          pendingHistoryItems: [
+            batched('batch-A', 'call-A'),
+            batched('batch-B', 'call-B'),
+          ],
+        }),
+      );
+
+      // Each live batch collapses exactly its own committed copy — the
+      // bookkeeping must key per batch, not collapse into one shared slot.
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, -1, -2]);
+    });
+
+    it('collapses a stale committed copy that is not the last history item (#9420)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [
+            { id: 1, ...batched('batch-1', 'dup-call') },
+            { id: 2, type: 'gemini_thought' as const, text: 'after' },
+          ],
+          pendingHistoryItems: [batched('batch-1', 'dup-call')],
+        }),
+      );
+
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 2, -1]);
+    });
+
+    it('requests a full-height measurement only for pending plain-text confirmations', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          pendingHistoryItems: [
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: 'write-memory',
+                  name: 'context_remember',
+                  description: 'remember content',
+                  status: ToolCallStatus.Confirming,
+                  resultDisplay: undefined,
+                  confirmationDetails: {
+                    type: 'info',
+                    title: 'Confirm exact content',
+                    prompt: 'literal content',
+                    renderPromptAsPlainText: true,
+                    onConfirm: vi.fn(async () => {}),
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+
+      expect(
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].measureAtFullHeight,
+      ).toBe(true);
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          pendingHistoryItems: [
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: 'search-memory',
+                  name: 'context_search',
+                  description: 'search context',
+                  status: ToolCallStatus.Confirming,
+                  resultDisplay: undefined,
+                  confirmationDetails: {
+                    type: 'mcp',
+                    title: 'Confirm MCP tool',
+                    serverName: 'external-context',
+                    toolName: 'context_search',
+                    toolDisplayName: 'context_search',
+                    onConfirm: vi.fn(async () => {}),
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+
+      expect(
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].measureAtFullHeight,
+      ).toBe(false);
+    });
+
     it('keeps ShowMoreLines reachable in VP mode (regression of OverflowProvider misplacement)', () => {
       const { lastFrame } = renderMainContent(
         createUIState({
@@ -1003,6 +1290,168 @@ describe('<MainContent />', () => {
       // change here and static items would re-render on every shell tick.
       // The ref-based read keeps identity stable.
       expect(secondRenderItem).toBe(firstRenderItem);
+    });
+
+    it('keeps renderItem stable when the viewport height changes without pending content', () => {
+      scrollableListPropsSpy.mockClear();
+
+      const stableHistory: UIState['history'] = [
+        { id: 1, type: 'user', text: 'hello' },
+      ];
+      const stablePending: UIState['pendingHistoryItems'] = [];
+      const stableSlashCommands: UIState['slashCommands'] = [];
+      const { rerender } = renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          availableTerminalHeight: 12,
+          constrainHeight: true,
+          history: stableHistory,
+          pendingHistoryItems: stablePending,
+          slashCommands: stableSlashCommands,
+        }),
+      );
+
+      const firstRenderItem =
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
+
+      rerender(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                useTerminalBuffer: true,
+                availableTerminalHeight: 10,
+                constrainHeight: true,
+                history: stableHistory,
+                pendingHistoryItems: stablePending,
+                slashCommands: stableSlashCommands,
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>,
+      );
+
+      const secondRenderItem =
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
+      expect(secondRenderItem).toBe(firstRenderItem);
+    });
+
+    it('releases static item height caps when show-more mode is enabled', () => {
+      scrollableListPropsSpy.mockClear();
+      historyItemDisplayPropsSpy.mockClear();
+
+      const stableHistory: UIState['history'] = [
+        { id: 1, type: 'gemini_content', text: 'long output' },
+      ];
+      const stablePending: UIState['pendingHistoryItems'] = [];
+      const stableSlashCommands: UIState['slashCommands'] = [];
+      const { rerender } = renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          constrainHeight: true,
+          history: stableHistory,
+          pendingHistoryItems: stablePending,
+          slashCommands: stableSlashCommands,
+        }),
+      );
+
+      const firstRenderItem =
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
+      expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
+        expect.objectContaining({
+          availableTerminalHeight: 100,
+          availableTerminalHeightLlm: 65536,
+        }),
+      );
+
+      rerender(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                useTerminalBuffer: true,
+                constrainHeight: false,
+                history: stableHistory,
+                pendingHistoryItems: stablePending,
+                slashCommands: stableSlashCommands,
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>,
+      );
+
+      const secondRenderItem =
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
+      expect(secondRenderItem).not.toBe(firstRenderItem);
+      expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
+        expect.objectContaining({
+          availableTerminalHeight: undefined,
+          availableTerminalHeightLlm: undefined,
+        }),
+      );
+    });
+
+    it('re-renders pending items when virtual viewport height constraints change', () => {
+      scrollableListPropsSpy.mockClear();
+      historyItemDisplayPropsSpy.mockClear();
+
+      const stableHistory: UIState['history'] = [];
+      const stablePending: UIState['pendingHistoryItems'] = [
+        { type: 'gemini_content', text: 'pending' },
+      ];
+      const stableSlashCommands: UIState['slashCommands'] = [];
+      const { rerender } = renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          availableTerminalHeight: 12,
+          constrainHeight: true,
+          history: stableHistory,
+          pendingHistoryItems: stablePending,
+          slashCommands: stableSlashCommands,
+        }),
+      );
+
+      const firstRenderItem =
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
+      expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
+        expect.objectContaining({ availableTerminalHeight: 12 }),
+      );
+
+      rerender(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                useTerminalBuffer: true,
+                availableTerminalHeight: 12,
+                constrainHeight: false,
+                history: stableHistory,
+                pendingHistoryItems: stablePending,
+                slashCommands: stableSlashCommands,
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>,
+      );
+
+      const secondRenderItem =
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
+      expect(secondRenderItem).not.toBe(firstRenderItem);
+      expect(historyItemDisplayPropsSpy.mock.calls.at(-1)?.[0]).toEqual(
+        expect.objectContaining({ availableTerminalHeight: undefined }),
+      );
     });
   });
 

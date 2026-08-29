@@ -116,6 +116,14 @@ export function registerChannelNotifyRoutes(
         res,
       );
       if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (runtime.provenance === 'live-conversation') {
+        res.status(400).json({
+          error:
+            'Channel operations are unavailable in the Conversations workspace.',
+          code: 'live_channel_management_reserved',
+        });
+        return;
+      }
       await deliver(runtime.workspaceCwd, req, res);
     },
   );

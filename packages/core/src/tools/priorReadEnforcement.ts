@@ -239,6 +239,20 @@ export async function checkPriorRead(
       displayMessage: `file changed since last read; re-run ${ToolNames.READ_FILE} first.`,
     };
   }
+  if (status.state === 'unverifiable') {
+    const verbBare = verb === 'editing' ? 'edit' : 'overwrite';
+    const raw =
+      `File ${filePath} is on a filesystem that does not provide a ` +
+      `verifiable inode identity (ino=0), so the ${verbBare} tool cannot ` +
+      `safely confirm a prior read. Use a different mechanism (for example, ` +
+      `the shell tool) to ${verbBare} this file.`;
+    return {
+      ok: false,
+      type: ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+      rawMessage: raw,
+      displayMessage: `cannot verify prior read of ${filePath}; use a different mechanism to ${verbBare} it.`,
+    };
+  }
   // Differentiate "fresh but the recorded read was non-cacheable"
   // (binary / image / audio / video / PDF / notebook) from "never
   // read at all". Telling the model to "re-read with read_file" for

@@ -21,9 +21,12 @@
 #   --bin-dir <path>     install the visible binary/symlink to <path>
 #                        instead of ~/.local/bin
 #   --no-modify-path     skip auto-appending an `export PATH=...` line
+#   --channel <name>     persist and install the latest stable or nightly release
 #
 # Env overrides:
-#   CUA_DRIVER_RS_VERSION=0.1.2          pin a specific release tag
+#   CUA_DRIVER_RS_VERSION=0.1.2          pin a stable release
+#   CUA_DRIVER_RS_VERSION=nightly-cua-driver-rs-v0.1.3-nightly.20260812.42
+#                                        pin an exact nightly release
 #   CUA_DRIVER_RS_INSTALL_DIR=PATH       same as --bin-dir; sets the visible
 #                                        binary location
 #   CUA_DRIVER_RS_BIN_DIR=PATH           legacy alias for INSTALL_DIR
@@ -49,10 +52,10 @@
 #   $CUA_DRIVER_RS_HOME/
 #     packages/
 #       releases/
-#         0.1.3-x86_64-unknown-linux-gnu/qwen-cua-driver   (per-version binary)
-#         0.1.4-x86_64-unknown-linux-gnu/qwen-cua-driver
-#       current/qwen-cua-driver -> ../releases/<active>/qwen-cua-driver  (active version)
-#   $CUA_DRIVER_RS_INSTALL_DIR/qwen-cua-driver -> $HOME/packages/current/qwen-cua-driver
+#         0.1.3-x86_64-unknown-linux-gnu/cua-driver   (per-version binary)
+#         0.1.4-x86_64-unknown-linux-gnu/cua-driver
+#       current/cua-driver -> ../releases/<active>/cua-driver  (active version)
+#   $CUA_DRIVER_RS_INSTALL_DIR/cua-driver -> $HOME/packages/current/cua-driver
 #
 # Atomic upgrade: a new install drops the binary into a fresh per-version
 # dir, then rename(2)-swaps the `current` symlink to point at it. A
@@ -112,6 +115,7 @@ fi
 REPO="QwenLM/qwen-code"
 BINARY_NAME="qwen-cua-driver"
 TAG_PREFIX="cua-driver-rs-v"
+NIGHTLY_TAG_PREFIX="nightly-cua-driver-rs-v"
 # CUA_DRIVER_RS_INSTALL_DIR is the documented name; CUA_DRIVER_RS_BIN_DIR is
 # the legacy alias kept for users with the old env in their shell rc.
 BIN_DIR="${CUA_DRIVER_RS_INSTALL_DIR:-${CUA_DRIVER_RS_BIN_DIR:-$HOME/.local/bin}}"
@@ -132,13 +136,15 @@ NO_MODIFY_PATH="${CUA_DRIVER_RS_NO_MODIFY_PATH:-0}"
 # `current` resolves to is always preserved regardless of cutoff.
 KEEP_VERSIONS_DEFAULT=5
 KEEP_VERSIONS="${CUA_DRIVER_RS_KEEP_VERSIONS:-$KEEP_VERSIONS_DEFAULT}"
+CHANNEL_ARG=""
+CHANNEL_EXPLICIT=0
 
 # macOS-only: name and install location of the .app bundle that wraps
-# the bare binary so the TCC auto-relaunch path in `cua-driver mcp` has
+# the bare binary so the TCC auto-relaunch path in `qwen-cua-driver mcp` has
 # a stable bundle id (com.qwencode.cua-driver) to attribute the daemon to.
 # See packages/cua-driver/rust/scripts/CuaDriverBundle/Contents/Info.plist and
-# the matching docs on `cua-driver mcp`'s auto-relaunch behavior.
-# Identical to the Swift driver's QwenCuaDriver.app + com.qwencode.cua-driver
+# the matching docs on `qwen-cua-driver mcp`'s auto-relaunch behavior.
+# Identical to the prior Qwen driver's QwenCuaDriver.app + com.qwencode.cua-driver
 # pair — the Rust port replaces the Swift install at this path,
 # preserving TCC grants (they're keyed on bundle id, which we share).
 APP_NAME="QwenCuaDriver.app"
@@ -149,6 +155,10 @@ while [[ $# -gt 0 ]]; do
         --bin-dir) BIN_DIR="$2"; shift 2 ;;
         --bin-dir=*) BIN_DIR="${1#*=}"; shift ;;
         --no-modify-path) NO_MODIFY_PATH=1; shift ;;
+        --channel)
+            [[ -n "${2:-}" ]] || { printf 'error: --channel requires stable or nightly\n' >&2; exit 2; }
+            CHANNEL_ARG="$2"; CHANNEL_EXPLICIT=1; shift 2 ;;
+        --channel=*) CHANNEL_ARG="${1#*=}"; CHANNEL_EXPLICIT=1; shift ;;
         *) shift ;;
     esac
 done
@@ -471,7 +481,7 @@ if [[ "$OS" == "Darwin" && "$ARCH_RAW" == "x86_64" ]]; then
     fi
 fi
 
-# LABEL  = the release-asset tarball label (matches what cd-cua-driver.yml
+# LABEL  = the release-asset tarball label (matches what cd-rust-cua-driver.yml
 #          publishes; user-facing).
 # TARGET = the Rust target triple, used in the on-disk per-version dir name so
 #          a multi-arch dev can keep e.g. aarch64-apple-darwin and
@@ -501,46 +511,208 @@ done
 #
 # Version is resolved in priority order:
 #   1. CUA_DRIVER_RS_VERSION env var (explicit pin)
-#   2. CUA_DRIVER_RS_BAKED_VERSION below (set automatically by CD after
-#      each release — no API call needed)
+#   2. CUA_DRIVER_RS_BAKED_VERSION below (validated before release publication)
 #   3. GitHub Releases API (fallback for dev / un-baked checkouts;
 #      unauthenticated = 60 req/hr per IP)
 #
 # The baked value is the common-case default: `curl ... | bash` against
 # `main` resolves the version locally with zero API calls, so an API
 # outage / rate limit / network blip can't break a default install. The
-# API fallback only fires when this script is run from a branch where
-# the baked line hasn't been updated yet (dev / pre-release checkouts).
+# API is consulted only when the baked line is absent (dev / pre-release
+# checkouts) or when the baked version turns out to have no downloadable
+# asset — see the recovery at the download step below.
 #
-# ~~~ BAKED_VERSION: auto-updated by CD workflow after each release — do not edit ~~~
-CUA_DRIVER_RS_BAKED_VERSION="0.7.3"
+# ~~~ BAKED_VERSION: must match the release version in this change ~~~
+CUA_DRIVER_RS_BAKED_VERSION="0.20.2"
 # ~~~ END_BAKED_VERSION ~~~
 
+# Run API requests with an optional token. Keep the header construction here
+# (rather than in loggable command text) so neither GH_TOKEN nor GITHUB_TOKEN
+# can appear in installer output. Release-asset downloads stay unauthenticated:
+# the repository is public and curl may redirect them to another GitHub host.
+# GH_TOKEN takes precedence, matching the GitHub CLI.
+github_api_curl() {
+    local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    if [[ -n "$token" ]]; then
+        curl -H "Authorization: Bearer $token" "$@"
+    else
+        curl "$@"
+    fi
+}
+
+# The authenticated releases endpoint can include drafts for maintainers.
+# Associate each top-level tag_name with its following draft field before
+# considering it. GitHub's REST response renders those top-level fields on
+# separate lines in that order; nested author/assets objects have no tag_name.
+extract_published_release_versions() {
+    # Keep this helper usable by stable-only callers and extracted test
+    # harnesses that predate persistent channel selection.
+    local selected_channel="${SELECTED_CHANNEL:-stable}"
+    local selected_tag_prefix="${SELECTED_TAG_PREFIX:-$TAG_PREFIX}"
+    awk -v prefix="$selected_tag_prefix" -v channel="$selected_channel" '
+        /"tag_name"[[:space:]]*:/ {
+            tag = $0
+            sub(/^.*"tag_name"[[:space:]]*:[[:space:]]*"/, "", tag)
+            sub(/".*$/, "", tag)
+            next
+        }
+        tag != "" && /"draft"[[:space:]]*:/ {
+            if ($0 ~ /"draft"[[:space:]]*:[[:space:]]*false/) {
+                version = tag
+                if (index(version, prefix) == 1) {
+                    version = substr(version, length(prefix) + 1)
+                    if ((channel == "stable" && version ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) ||
+                        (channel == "nightly" && version ~ /^[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}\.[1-9][0-9]*$/)) {
+                        print version
+                    }
+                }
+            }
+            tag = ""
+        }
+    '
+}
+
+# Highest SemVer ${TAG_PREFIX}* version published on the repo, printed bare
+# (no tag prefix) on stdout. Returns non-zero when the API is unreachable or
+# has no matching tag; callers decide whether that is fatal, because this runs
+# both as the primary resolver and as recovery for a bad baked version.
+#
+# per_page=100 (the API maximum): the repo interleaves lume, Python, and Swift
+# releases with these. Walk up to ten pages so a busy repository cannot hide
+# cua-driver-rs behind the first page, but keep the request count bounded.
+resolve_latest_version_from_api() {
+    local page page_json page_count page_versions
+    local versions=""
+    for ((page=1; page<=10; page++)); do
+        page_json="$(github_api_curl -fsSL \
+            "https://api.github.com/repos/$REPO/releases?per_page=100&page=$page")" || return 1
+
+        # Extract only published tags matching the selected channel's strict
+        # grammar. Cua Driver's stable tags are marked prerelease in GitHub
+        # metadata, so tag syntax—not the prerelease flag—defines the channel.
+        page_versions="$(printf '%s' "$page_json" | extract_published_release_versions)" || true
+        if [[ -n "$page_versions" ]]; then
+            versions="${versions}${versions:+$'\n'}${page_versions}"
+        fi
+
+        page_count="$(
+            printf '%s' "$page_json" \
+                | awk '{ count += gsub(/"tag_name"[[:space:]]*:/, "&") } END { print count + 0 }'
+        )"
+        [[ "$page_count" =~ ^[0-9]+$ ]] || return 1
+        if (( page_count < 100 )); then
+            break
+        fi
+    done
+
+    local version
+    version="$(
+        printf '%s\n' "$versions" \
+            | sed '/^$/d' \
+            | sort -t. -k1,1nr -k2,2nr -k3,3nr -k4,4nr -k5,5nr \
+            | head -n 1
+    )"
+    [[ -n "$version" ]] || return 1
+    printf '%s' "$version"
+}
+
+# Where VERSION came from. A missing asset is fatal for an explicit pin (the
+# user named that version) but recoverable for the baked constant. The normal
+# CD path advances it only after every staged release asset is public; fallback
+# remains defense in depth for manual edits, asset removal, or an interrupted
+# legacy release flow.
+resolve_explicit_release_tag() {
+    local value="$1" stable_version nightly_version
+    if [[ "$value" =~ ^(cua-driver-rs-v|v)?([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+        stable_version="${BASH_REMATCH[2]}"
+        printf '%s%s' "$TAG_PREFIX" "$stable_version"
+        return 0
+    fi
+    if [[ "$value" =~ ^nightly-cua-driver-rs-v([0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}\.[1-9][0-9]*)$ ]]; then
+        nightly_version="${BASH_REMATCH[1]}"
+        printf '%s%s' "$NIGHTLY_TAG_PREFIX" "$nightly_version"
+        return 0
+    fi
+    if [[ "$value" =~ ^([0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}\.[1-9][0-9]*)$ ]]; then
+        nightly_version="${BASH_REMATCH[1]}"
+        printf '%s%s' "$NIGHTLY_TAG_PREFIX" "$nightly_version"
+        return 0
+    fi
+    return 1
+}
+
+CHANNEL_STATE_FILE="$HOME_DIR/release-channel"
+if [[ "$CHANNEL_EXPLICIT" == "1" && -n "${CUA_DRIVER_RS_VERSION:-}" ]]; then
+    err "--channel cannot be combined with CUA_DRIVER_RS_VERSION; exact pins do not change saved channel state"
+    exit 2
+fi
+if [[ "$CHANNEL_EXPLICIT" == "1" ]]; then
+    SELECTED_CHANNEL="$CHANNEL_ARG"
+elif [[ -n "${CUA_DRIVER_RS_VERSION:-}" ]]; then
+    # Exact pins are one-shot and outrank persisted preference. In particular,
+    # a damaged preference file must not make a deliberate recovery pin unusable.
+    SELECTED_CHANNEL="stable"
+elif [[ -f "$CHANNEL_STATE_FILE" ]]; then
+    SELECTED_CHANNEL="$(tr -d '[:space:]' < "$CHANNEL_STATE_FILE")"
+else
+    SELECTED_CHANNEL="stable"
+fi
+case "$SELECTED_CHANNEL" in
+    stable) SELECTED_TAG_PREFIX="$TAG_PREFIX" ;;
+    nightly) SELECTED_TAG_PREFIX="$NIGHTLY_TAG_PREFIX" ;;
+    *)
+        err "invalid release channel '$SELECTED_CHANNEL' in $CHANNEL_STATE_FILE; expected stable or nightly"
+        err "  repair with: qwen-cua-driver channel set stable"
+        exit 1
+        ;;
+esac
+
 if [[ -n "${CUA_DRIVER_RS_VERSION:-}" ]]; then
-    TAG="${TAG_PREFIX}${CUA_DRIVER_RS_VERSION#v}"
+    VERSION_SOURCE="pin"
+    if ! TAG="$(resolve_explicit_release_tag "$CUA_DRIVER_RS_VERSION")"; then
+        err "CUA_DRIVER_RS_VERSION must be an exact x.y.z stable version or canonical nightly tag"
+        exit 1
+    fi
     log "using version from CUA_DRIVER_RS_VERSION: $TAG"
-elif [[ -n "${CUA_DRIVER_RS_BAKED_VERSION:-}" ]]; then
+elif [[ "$SELECTED_CHANNEL" == "stable" && -n "${CUA_DRIVER_RS_BAKED_VERSION:-}" ]]; then
+    VERSION_SOURCE="baked"
+    if ! [[ "$CUA_DRIVER_RS_BAKED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        err "baked Cua Driver version must be an exact stable x.y.z version"
+        exit 1
+    fi
     TAG="${TAG_PREFIX}${CUA_DRIVER_RS_BAKED_VERSION#v}"
     log "using baked release: $TAG"
 else
-    log "resolving latest $TAG_PREFIX* release via GitHub API"
-    # Pinned to the exact `cua-driver-rs-v*` prefix so this script can never
-    # accidentally pick up a Swift `cua-driver-v*` release.
-    TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=40" \
-        | grep -Eo '"tag_name":[[:space:]]*"'"${TAG_PREFIX}"'[^"]+"' \
-        | sed -E 's/.*"'"${TAG_PREFIX}"'([0-9]+[.][0-9]+[.][0-9]+)"/\1/' \
-        | sort -t. -k1,1nr -k2,2nr -k3,3nr \
-        | head -n 1 \
-        | sed -E 's/^/'"${TAG_PREFIX}"'/')
-    if [[ -z "$TAG" ]]; then
-        err "no release matching ${TAG_PREFIX}* found on $REPO"
+    VERSION_SOURCE="api"
+    log "resolving latest $SELECTED_CHANNEL release via GitHub API"
+    if ! API_VERSION="$(resolve_latest_version_from_api)"; then
+        err "no release matching ${SELECTED_TAG_PREFIX}* found on $REPO"
         err "  (cua-driver-rs is a BETA-stage cross-platform port; releases may not be published yet.)"
         exit 1
     fi
+    TAG="${SELECTED_TAG_PREFIX}${API_VERSION}"
     log "latest release: $TAG"
 fi
 
-VERSION="${TAG#${TAG_PREFIX}}"
+if [[ "$TAG" == "$NIGHTLY_TAG_PREFIX"* ]]; then
+    VERSION="${TAG#${NIGHTLY_TAG_PREFIX}}"
+else
+    VERSION="${TAG#${TAG_PREFIX}}"
+fi
+
+# Releases through 0.12.6 predate semantic cursor themes.
+# Newer releases must contain both packaged copies.
+CURSOR_THEME_REQUIRED_FROM="0.12.7"
+version_is_at_least() {
+    local version="$1" minimum="$2"
+    local v_major v_minor v_patch m_major m_minor m_patch
+    version="${version%%-*}"
+    IFS=. read -r v_major v_minor v_patch <<< "$version"
+    IFS=. read -r m_major m_minor m_patch <<< "$minimum"
+    if (( v_major != m_major )); then (( v_major > m_major )); return; fi
+    if (( v_minor != m_minor )); then (( v_minor > m_minor )); return; fi
+    (( v_patch >= m_patch ))
+}
 
 # --- Download bare-binary tarball ---------------------------------------
 
@@ -549,7 +721,7 @@ VERSION="${TAG#${TAG_PREFIX}}"
 # macOS — fetch the directory tarball (cua-driver-rs-vN-darwin-universal.tar.gz).
 #   The directory layout includes `QwenCuaDriver.app/` alongside the bare
 #   binary, which we need to install into /Applications so the TCC
-#   auto-relaunch path in `cua-driver-rs mcp` can resolve
+#   auto-relaunch path in `qwen-cua-driver mcp` can resolve
 #   `com.qwencode.cua-driver` via `open -n -g -a QwenCuaDriver`. The
 #   directory variant carries the same universal binary as the
 #   bare-binary tarball, so users on both Apple Silicon and Intel
@@ -557,17 +729,93 @@ VERSION="${TAG#${TAG_PREFIX}}"
 #
 # Linux / Windows-via-WSL — use the bare-binary tarball. No bundle on
 #   these platforms, no TCC, no need to unpack a directory.
-case "$LABEL" in
-    darwin-*) TARBALL="cua-driver-rs-${VERSION}-darwin-universal.tar.gz" ;;
-    *)        TARBALL="cua-driver-rs-${VERSION}-${LABEL}-binary.tar.gz" ;;
-esac
-URL="https://github.com/$REPO/releases/download/$TAG/$TARBALL"
+release_tarball_name() {
+    case "$LABEL" in
+        darwin-*) printf 'cua-driver-rs-%s-darwin-universal.tar.gz' "$1" ;;
+        *)        printf 'cua-driver-rs-%s-%s-binary.tar.gz' "$1" "$LABEL" ;;
+    esac
+}
 
-log "downloading $URL"
-if ! curl -fsSL -o "$TMP_DIR/$TARBALL" "$URL"; then
-    err "download failed; try CUA_DRIVER_RS_VERSION=<version> to pin a specific release"
-    exit 1
+# Fetches one release tarball into $TMP_DIR. A confirmed HTTP 404 returns 44;
+# every other failure is retried at the same URL with bounded backoff, then
+# returns 1. This distinction is load-bearing: only a missing baked asset may
+# trigger release fallback. A timeout, TLS failure, rate limit, or server error
+# must never silently install an older version.
+download_release_tarball() {
+    local version="$1" tarball url partial http_code curl_status attempt retryable
+    tarball="$(release_tarball_name "$version")"
+    url="https://github.com/$REPO/releases/download/${TAG}/$tarball"
+    partial="$TMP_DIR/$tarball.partial"
+    log "downloading $url"
+    for attempt in 1 2 3; do
+        http_code=""
+        curl_status=0
+        http_code="$(
+            curl -sSL -o "$partial" -w '%{http_code}' "$url"
+        )" || curl_status=$?
+        if (( curl_status == 0 )) && [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+            mv "$partial" "$TMP_DIR/$tarball"
+            return 0
+        fi
+        rm -f "$partial" 2>/dev/null || true
+        if [[ "$http_code" == "404" ]]; then
+            return 44
+        fi
+        retryable=0
+        if (( curl_status != 0 )) \
+            || [[ "$http_code" == "408" || "$http_code" == "429" ]] \
+            || [[ "$http_code" =~ ^5[0-9][0-9]$ ]]; then
+            retryable=1
+        fi
+        if (( retryable == 1 && attempt < 3 )); then
+            err "download attempt $attempt failed (HTTP ${http_code:-unknown}, curl exit $curl_status); retrying the same release"
+            sleep "$attempt"
+            continue
+        fi
+        break
+    done
+    err "download failed after $attempt attempt(s) (HTTP ${http_code:-unknown}, curl exit $curl_status); refusing to fall back to an older release"
+    return 1
+}
+
+DOWNLOAD_STATUS=0
+download_release_tarball "$VERSION" || DOWNLOAD_STATUS=$?
+if (( DOWNLOAD_STATUS != 0 )); then
+    # Defense in depth for a manually advanced constant, removed asset, or
+    # interrupted legacy release flow. The normal CD path updates this constant
+    # only after every staged asset is publicly visible.
+    if [[ "$VERSION_SOURCE" != "baked" || "$DOWNLOAD_STATUS" != "44" ]]; then
+        err "download failed; try CUA_DRIVER_RS_VERSION=<version> to pin a specific release"
+        exit 1
+    fi
+    printf 'warning: baked release %s has no downloadable %s asset (HTTP 404); this is usually a temporary publish lag\n' \
+        "$TAG" "$LABEL" >&2
+    printf 'warning: temporarily falling back to the newest fully published release via the GitHub Releases API\n' >&2
+    if ! API_VERSION="$(resolve_latest_version_from_api)"; then
+        err "could not resolve any published ${TAG_PREFIX}* release to fall back to"
+        err "  try CUA_DRIVER_RS_VERSION=<version> to pin a specific release"
+        exit 1
+    fi
+    if [[ "$API_VERSION" == "$VERSION" ]]; then
+        # The API agrees this is the newest tag, so the tag exists but its
+        # assets do not. Retrying the identical URL would just 404 again.
+        err "${TAG_PREFIX}${API_VERSION} is the newest published release but is missing its ${LABEL} asset"
+        err "  try CUA_DRIVER_RS_VERSION=<version> to pin an older release"
+        exit 1
+    fi
+    printf 'warning: falling back to %s%s\n' "$TAG_PREFIX" "$API_VERSION" >&2
+    # Adopt the recovered release before anything downstream derives a path,
+    # a stage directory, or a capability check from VERSION.
+    VERSION="$API_VERSION"
+    TAG="${TAG_PREFIX}${VERSION}"
+    DOWNLOAD_STATUS=0
+    download_release_tarball "$VERSION" || DOWNLOAD_STATUS=$?
+    if (( DOWNLOAD_STATUS != 0 )); then
+        err "download failed; try CUA_DRIVER_RS_VERSION=<version> to pin a specific release"
+        exit 1
+    fi
 fi
+TARBALL="$(release_tarball_name "$VERSION")"
 
 log "extracting"
 tar -xzf "$TMP_DIR/$TARBALL" -C "$TMP_DIR"
@@ -575,20 +823,24 @@ tar -xzf "$TMP_DIR/$TARBALL" -C "$TMP_DIR"
 # Layout detection:
 #   macOS dir tarball expands to:
 #     cua-driver-rs-${VERSION}-darwin-universal/
-#       ├── qwen-cua-driver      (bare universal binary)
+#       ├── cua-driver           (bare universal binary)
 #       ├── QwenCuaDriver.app/     (minimal bundle; copy of the same binary
-#       │                         lives at Contents/MacOS/qwen-cua-driver)
+#       │                         lives at Contents/MacOS/cua-driver)
 #       └── LICENSE
-#   Linux bare-binary tarball expands to:
-#     qwen-cua-driver          (single file at the archive root)
+#   Linux bare-runtime tarball expands to:
+#     cua-driver and libcua_driver_sdk.so at the archive root. The installer
+#     consumes the CLI; SDK packaging consumes the colocated library.
 case "$LABEL" in
     darwin-*)
         STAGE="cua-driver-rs-${VERSION}-darwin-universal"
         SRC="$TMP_DIR/$STAGE/$BINARY_NAME"
+        SRC_THEME="$TMP_DIR/$STAGE/cua-cursor-theme"
         SRC_APP="$TMP_DIR/$STAGE/$APP_NAME"
         ;;
     *)
         SRC="$TMP_DIR/$BINARY_NAME"
+        SRC_THEME="$TMP_DIR/cua-cursor-theme"
+        SRC_WAYLAND_HELPER="$TMP_DIR/wayland-helper"
         SRC_APP=""
         ;;
 esac
@@ -596,6 +848,31 @@ if [[ ! -f "$SRC" ]]; then
     err "expected $BINARY_NAME in tarball but didn't find it"
     ls -la "$TMP_DIR"
     exit 1
+fi
+THEME_AVAILABLE=1
+if [[ ! -f "$SRC_THEME" ]] || {
+    [[ -n "$SRC_APP" ]] &&
+    [[ ! -f "$SRC_APP/Contents/MacOS/cua-cursor-theme" ]]
+}; then
+    THEME_AVAILABLE=0
+fi
+if [[ "$THEME_AVAILABLE" == "0" ]] && version_is_at_least \
+    "$VERSION" "$CURSOR_THEME_REQUIRED_FROM"; then
+    err "expected cua-cursor-theme in tarball but didn't find it"
+    ls -la "$TMP_DIR"
+    exit 1
+fi
+if [[ "$THEME_AVAILABLE" == "0" ]]; then
+    printf 'warning: release %s predates cua-cursor-theme; installing without custom cursor themes\n' \
+        "$VERSION" >&2
+fi
+
+if [[ "$CHANNEL_EXPLICIT" == "1" ]]; then
+    mkdir -p "$HOME_DIR"
+    CHANNEL_TMP="$HOME_DIR/.release-channel.$$"
+    printf '%s\n' "$SELECTED_CHANNEL" > "$CHANNEL_TMP"
+    mv -f "$CHANNEL_TMP" "$CHANNEL_STATE_FILE"
+    log "saved release channel: $SELECTED_CHANNEL"
 fi
 
 # --- Install ------------------------------------------------------------
@@ -607,23 +884,66 @@ cleanup_prior_local_install
 
 mkdir -p "$BIN_DIR"
 
+# Persist the bounded installer channel before the new binary becomes visible.
+# If the user invokes Cua Driver before the detached install-event hook wins
+# the lifecycle lock, the ordinary first-run path will still use the installer
+# attribution. The runtime removes this hint after lifecycle delivery succeeds.
+INSTALL_CHANNEL="${CUA_DRIVER_INSTALL_CHANNEL:-install_script}"
+case "$INSTALL_CHANNEL" in
+    install_script|update_apply|python_package|first_run) ;;
+    *) INSTALL_CHANNEL="install_script" ;;
+esac
+
+# Mirror the runtime's consent precedence before writing the attribution hint:
+# environment override, compatibility override, persisted preference, default-off.
+# This keeps an opted-out install free of telemetry state even when the detached
+# install-event hook returns before reading the hint.
+TELEMETRY_HINT_ENABLED=0
+TELEMETRY_HINT_FROM_ENV=0
+for telemetry_env_name in CUA_DRIVER_RS_TELEMETRY_ENABLED CUA_TELEMETRY_ENABLED; do
+    telemetry_env_value="${!telemetry_env_name:-}"
+    telemetry_env_value="$(printf '%s' "$telemetry_env_value" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    case "$telemetry_env_value" in
+        1|true|yes|on)
+            TELEMETRY_HINT_ENABLED=1
+            TELEMETRY_HINT_FROM_ENV=1
+            break
+            ;;
+        0|false|no|off)
+            TELEMETRY_HINT_ENABLED=0
+            TELEMETRY_HINT_FROM_ENV=1
+            break
+            ;;
+    esac
+done
+if [[ "$TELEMETRY_HINT_FROM_ENV" == "0" && -f "$HOME_DIR/config.json" ]]; then
+    TELEMETRY_CONFIG_VALUE="$(sed -nE 's/.*"telemetry_enabled"[[:space:]]*:[[:space:]]*(true|false).*/\1/p' "$HOME_DIR/config.json" | tail -n 1)"
+    case "$TELEMETRY_CONFIG_VALUE" in
+        true) TELEMETRY_HINT_ENABLED=1 ;;
+        false) TELEMETRY_HINT_ENABLED=0 ;;
+    esac
+fi
+if [[ "$TELEMETRY_HINT_ENABLED" == "1" ]]; then
+    mkdir -p "$HOME_DIR"
+    printf '%s\n' "$INSTALL_CHANNEL" > "$HOME_DIR/.telemetry_install_channel"
+else
+    rm -f "$HOME_DIR/.telemetry_install_channel"
+fi
+
 # macOS: install the .app to /Applications first, then symlink the
 # bin into the bundle so `~/.local/bin/qwen-cua-driver` resolves into
 # `/Applications/QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver`. The
 # `realpath` walk in `is_executable_inside_cuadriver_app()` keys on
 # that resolved path to know whether the auto-relaunch heuristic
 # should fire. Same path and same bundle id as the Swift `cua-driver`
-# install (`/Applications/QwenCuaDriver.app`, `com.qwencode.cua-driver`), so an
-# install over an existing Swift bundle is an in-place takeover —
-# TCC grants attributed to the shared bundle id survive the swap and
-# the new binary inherits them (macOS may re-prompt once on first
-# action because the cdhash differs; after that the grants persist).
+# install (`/Applications/QwenCuaDriver.app`,
+# `com.qwencode.cua-driver`) and does not collide with upstream Cua.
 #
 # The macOS path intentionally does NOT use the
 # $HOME_DIR/packages/releases/<v>/ + current symlink layout used on
 # Linux. Reason: /Applications/QwenCuaDriver.app placement is the
 # anchor for both TCC attribution (cdhash + bundle id) and
-# LaunchServices' `open -a CuaDriver` discovery — symlinking the
+# LaunchServices' `open -a QwenCuaDriver` discovery — symlinking the
 # .app from /Applications to a versioned dir under $HOME_DIR breaks
 # both. The asymmetry is deliberate; rollback on macOS = reinstall
 # an older release tag.
@@ -648,7 +968,7 @@ fi
 if [[ "$OS" == "Darwin" && -n "$SRC_APP" && -d "$SRC_APP" ]]; then
     if [[ ! -w "/Applications" ]]; then
         err "/Applications is not writable. Re-run this installer in a shell where it is, or grant write access."
-        err "  Without the .app bundle, \`cua-driver-rs mcp\` from an IDE terminal will not auto-relaunch into a TCC-correct daemon."
+        err "  Without the .app bundle, \`qwen-cua-driver mcp\` from an IDE terminal will not auto-relaunch into a TCC-correct daemon."
         exit 1
     fi
     # The Rust port and the legacy Swift driver both live at
@@ -690,14 +1010,14 @@ else
     # Linux: versioned-dirs + atomic `current` symlink swap.
     #
     # Layout under $HOME_DIR/packages/:
-    #   releases/<version>-<target>/qwen-cua-driver   (this install)
-    #   releases/<older>-<target>/qwen-cua-driver     (kept for rollback)
-    #   current/qwen-cua-driver -> ../releases/<active>-<target>/qwen-cua-driver
+    #   releases/<version>-<target>/cua-driver   (this install)
+    #   releases/<older>-<target>/cua-driver     (kept for rollback)
+    #   current/cua-driver -> ../releases/<active>-<target>/cua-driver
     #
     # Swap mechanics: write the new symlink to `current.tmp`, then
     # `mv -Tf current.tmp current` so the rename is a single
     # filesystem call. A daemon that already mmap'd the previous
-    # `current/qwen-cua-driver` keeps using the open file handle — Unix
+    # `current/cua-driver` keeps using the open file handle — Unix
     # only invalidates path-based lookups, not held fds.
     PACKAGES_DIR="$HOME_DIR/packages"
     RELEASES_DIR="$PACKAGES_DIR/releases"
@@ -706,6 +1026,21 @@ else
 
     mkdir -p "$VERSIONED_DIR"
     install -m 0755 "$SRC" "$VERSIONED_DIR/$BINARY_NAME"
+    if [[ "$THEME_AVAILABLE" == "1" ]]; then
+        install -m 0755 "$SRC_THEME" "$VERSIONED_DIR/cua-cursor-theme"
+    fi
+    if [[ -d "${SRC_WAYLAND_HELPER:-}" ]]; then
+        mkdir -p "$VERSIONED_DIR/wayland-helper"
+        cp -R "$SRC_WAYLAND_HELPER/." "$VERSIONED_DIR/wayland-helper/"
+
+        INSTALLED_WAYLAND_HELPER="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/winrects@cua"
+        if [[ -d "$INSTALLED_WAYLAND_HELPER" ]]; then
+            cp "$SRC_WAYLAND_HELPER/winrects@cua/metadata.json" \
+                "$SRC_WAYLAND_HELPER/winrects@cua/extension.js" \
+                "$INSTALLED_WAYLAND_HELPER/"
+            log "updated installed GNOME helper; reload the GNOME session to activate it"
+        fi
+    fi
     log "installed $VERSIONED_DIR/$BINARY_NAME (version $VERSION, target $TARGET)"
 
     # `ln -sfn` would replace an existing dir-symlink in place but is
@@ -752,6 +1087,14 @@ fi
 # skipped when the user pinned CUA_DRIVER_RS_HOME to the legacy path on
 # purpose. Best-effort + idempotent.
 if [[ -d "$LEGACY_HOME_DIR" && "$HOME_DIR" != "$LEGACY_HOME_DIR" ]]; then
+    mkdir -p "$HOME_DIR"
+    for telemetry_file in .telemetry_id .installation_recorded; do
+        if [[ -f "$LEGACY_HOME_DIR/$telemetry_file" && ! -e "$HOME_DIR/$telemetry_file" ]]; then
+            cp -p "$LEGACY_HOME_DIR/$telemetry_file" "$HOME_DIR/$telemetry_file" 2>/dev/null \
+                && log "preserved legacy telemetry state $telemetry_file" \
+                || log "note: could not preserve legacy telemetry state $telemetry_file"
+        fi
+    done
     rm -rf "$LEGACY_HOME_DIR" 2>/dev/null \
         && log "swept legacy package home $LEGACY_HOME_DIR (reconciled onto $HOME_DIR)" \
         || log "note: could not fully remove legacy package home $LEGACY_HOME_DIR (best-effort)"
@@ -771,27 +1114,32 @@ stop_cua_driver_daemons
 show_cua_driver_daemon_survivors
 
 # Agent skill pack: NOT auto-linked. The install script never touches
-# ~/.claude/skills/, ~/.agents/skills/, etc. Run `cua-driver skills
+# ~/.claude/skills/, ~/.agents/skills/, etc. Run `qwen-cua-driver skills
 # install` after install to fetch + symlink the skill pack from the
 # matching GitHub release. The post-install hint below points at the
 # verb.
 
-# --- Fire the one-shot install telemetry ping ---------------------------
+# --- Record consent-aware install telemetry -----------------------------
 #
-# Anonymous adoption signal — sends `cua_driver_install` to PostHog
-# exactly once per install (guarded by ~/.cua-driver/.installation_recorded
-# on the binary side). The Rust port keeps its install signal independent
-# of the Swift `cua-driver` install (separate marker dir + separate env var)
-# so users can opt out of one without affecting the other.
-#
-# Bypasses the CUA_DRIVER_RS_TELEMETRY_ENABLED check by design — see
-# `telemetry::capture_install()` for the rationale (count adoption even
-# when users opt out immediately after install). Every subsequent event
-# from the binary respects the opt-out normally.
+# Telemetry is default-off. When explicitly enabled, the binary applies the
+# same effective consent policy to installation events as every other event:
+# environment override, then the persisted preference. It records the pseudonymous
+# installation once and the installed release once per version. The channel
+# is a fixed enum so an inherited/user-controlled value cannot fragment the
+# dashboard.
 #
 # Background + redirect so a slow / failed POST never blocks the install.
-"$BIN_LINK" telemetry install-event >/dev/null 2>&1 &
-disown 2>/dev/null || true
+echo "Telemetry is disabled by default in the Qwen distribution; explicit saved preferences and environment overrides are honored."
+echo "When explicitly enabled, upstream Cua collects a pseudonymous installation ID and bounded, content-free usage metadata."
+echo "  No prompts, tool arguments, screen contents, or file paths are collected."
+echo "  Disable persistently at any time: $BIN_LINK telemetry disable"
+
+if [[ "$TELEMETRY_HINT_ENABLED" == "1" ]]; then
+    CUA_DRIVER_INSTALL_CHANNEL="$INSTALL_CHANNEL" \
+    CUA_DRIVER_RELEASE_VERSION="$VERSION" \
+        "$BIN_LINK" telemetry install-event >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+fi
 
 # Auto-extend PATH for users whose shell doesn't already include BIN_DIR.
 if [[ "$NO_MODIFY_PATH" != "1" ]] && [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
@@ -802,7 +1150,7 @@ if [[ "$NO_MODIFY_PATH" != "1" ]] && [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     esac
     if [[ -n "$SHELL_RC" ]]; then
         {
-            printf '\n# Added by cua-driver-rs installer — see https://github.com/QwenLM/qwen-code\n'
+            printf '\n# Added by qwen-cua-driver installer — see https://github.com/QwenLM/qwen-code\n'
             printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
         } >> "$SHELL_RC"
         log "appended PATH update to $SHELL_RC — open a new shell or run \`source $SHELL_RC\`"
@@ -812,11 +1160,11 @@ if [[ "$NO_MODIFY_PATH" != "1" ]] && [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
 fi
 
 echo ""
-echo "cua-driver-rs $VERSION installed."
+echo "qwen-cua-driver $VERSION installed."
 echo ""
 
 if [[ "${REPLACED_SWIFT:-0}" == "1" ]]; then
-    echo "Upgraded the cua-driver bundle that was previously at $APP_DEST."
+    echo "Upgraded the qwen-cua-driver bundle that was previously at $APP_DEST."
     echo "TCC grants (Accessibility, Screen Recording) are keyed on the bundle id"
     echo "(com.qwencode.cua-driver) — which is preserved — so they transfer to the new"
     echo "binary automatically. macOS may surface a one-time re-grant prompt on"

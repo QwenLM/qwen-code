@@ -392,6 +392,7 @@ export default {
   'Tool Output Truncation Threshold': 'ツール出力切り詰めのしきい値',
   'Tool Output Truncation Lines': 'ツール出力の切り詰め行数',
   'Tool Schema Compliance': 'Tool Schema 準拠',
+  Unset: '未設定',
   'Auto (detect from system)': '自動(システムから検出)',
   'Auto (follow user input)': '自動(ユーザー入力に従う)',
   'Auto (detect terminal theme)': '自動（端末テーマを検出）',
@@ -815,6 +816,12 @@ export default {
     'チャット履歴の圧縮でサイズが減少しませんでした。圧縮プロンプトに問題がある可能性があります',
   'Could not compress chat history due to a token counting error.':
     'トークンカウントエラーのため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because the compression summary was empty.':
+    '圧縮サマリーが空だったため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because the compression summary was truncated.':
+    '圧縮サマリーが切り詰められたため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history due to an API error.':
+    'API エラーのため、チャット履歴を圧縮できませんでした',
   // Directory
   'Configuration is not available.': '設定が利用できません',
   'Please provide at least one path to add.':
@@ -970,10 +977,20 @@ export default {
   'rejected — edit config to re-approve': '拒否済み — 設定を編集して再承認',
   'Background agent needs approval':
     'バックグラウンドエージェントが承認待ちです',
+  'from nested agent': 'ネストされた agent から',
   'Approve or deny the request above':
     '上のリクエストを承認または拒否してください',
   Running: '実行中',
+  Pausing: '一時停止に移行中',
   Paused: '一時停止中',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    '一時停止は協調的です。ワークフローが一時停止される前に、実行中の作業が完了する場合があります。ツール承認を待っているエージェント呼び出しは実行をこの状態に留め、承認に応答するまでアクティブ時間の上限に加算され続けます。',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    '一時停止中：新しいエージェントは開始されません。エージェント呼び出し間のスクリプトコードは実行を続けます。再開するには p を押してください。/clear、/branch、またはセッションを切り替えると、一時停止中の実行はキャンセルされます。',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    '一時停止／再開は拒否されました。ワークフローの状態が変化しました。もう一度お試しください。',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'ヒント：`/workflows p <runId>` またはバックグラウンドタスク + p で実行を協調的に一時停止／再開できます。詳細は `/workflows <runId>` で確認できます。',
   Completed: '完了',
   Failed: '失敗',
   Stopped: '停止済み',
@@ -1571,6 +1588,19 @@ export default {
   'Tool Approval Mode': 'ツール承認モード',
   'Ask a quick side question without affecting the main conversation':
     'メインの会話に影響を与えずに、ちょっとした質問をする',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'レビューモデルに現在の会話についてのセカンドオピニオンを求める',
+  'Consulting advisor...': 'アドバイザーに相談中...',
+  'Advisor review failed: {{error}}':
+    'アドバイザーレビューに失敗しました：{{error}}',
+  'No conversation context available for /advisor':
+    '/advisor に使用できる会話コンテキストがありません',
+  'Focus too long (max {{max}} chars)':
+    'フォーカスが長すぎます（最大 {{max}} 文字）',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    '別の操作が進行中です。完了するまで待ってから /advisor を実行してください',
+  'No response received.': '応答がありませんでした。',
+  'No model configured.': 'モデルが設定されていません。',
   'Manage Arena sessions': 'Arena セッションを管理',
   'Start an Arena session with multiple models competing on the same task':
     '同じタスクで複数モデルを競わせる Arena セッションを開始',
@@ -2073,4 +2103,5 @@ export default {
     'セーフモードでは自動スキル管理による変更は無効です。',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '自動スキル管理による変更は信頼済みのワークスペースでのみ利用できます。`/trust` でこのフォルダーを信頼してから、もう一度お試しください。',
+  'Kept model as {{model}}': 'モデルは {{model}} のままです',
 };

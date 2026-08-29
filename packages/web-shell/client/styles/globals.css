@@ -132,3 +132,25 @@
   *::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
 }
+
+/*
+ * Defensive selection-highlight rule for message content. #8214.
+ *
+ * Firefox is suspected of not painting the default selection highlight for
+ * text whose element chain passes through a `display: contents` element (the
+ * `data-user-selectable` wrapper on MessageItem). The logical selection
+ * (copy, selectionchange popup) works fine - only the visual highlight is
+ * missing. An explicit `::selection` background makes Firefox paint the
+ * highlight where the default painting may fail. This is a low-risk
+ * workaround, not a confirmed root-cause fix: the wrapper is shared by user
+ * and assistant rows alike, and the reporter's environment appears to be an
+ * embedding page, so its own CSS may also need adjustment.
+ *
+ * This rule lives in the component-scoped stylesheet (loaded by App.tsx and
+ * WebShellTranscript.tsx) rather than standalone.css so it ships with the
+ * npm package and applies to embedded deployments, not just the standalone
+ * app.
+ */
+[data-user-selectable] ::selection {
+  background: hsl(210 100% 50% / 30%);
+}

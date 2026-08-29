@@ -29,7 +29,7 @@ import { clearAutoMemoryRootCache } from '../memory/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { GeminiClient } from '../core/client.js';
+import { LlmClient } from '../core/client.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
@@ -40,7 +40,7 @@ const rootDir = path.resolve(os.tmpdir(), 'qwen-code-test-root');
 // --- MOCKS ---
 vi.mock('../core/client.js');
 
-let mockGeminiClientInstance: Mocked<GeminiClient>;
+let mockLlmClientInstance: Mocked<LlmClient>;
 
 // Mock Config
 const fsService = new StandardFileSystemService();
@@ -51,7 +51,7 @@ const mockConfigInternal = {
   getProjectRoot: () => rootDir,
   getApprovalMode: vi.fn(() => ApprovalMode.DEFAULT),
   setApprovalMode: vi.fn(),
-  getGeminiClient: vi.fn(), // Initialize as a plain mock function
+  getLlmClient: vi.fn(), // Initialize as a plain mock function
   getBaseLlmClient: vi.fn(), // Initialize as a plain mock function
   getFileSystemService: () => fsService,
   getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
@@ -68,8 +68,8 @@ const mockConfigInternal = {
   getUserAgent: () => 'test-agent',
   getUserMemory: () => '',
   setUserMemory: vi.fn(),
-  getGeminiMdFileCount: () => 0,
-  setGeminiMdFileCount: vi.fn(),
+  getMemoryFileCount: () => 0,
+  setMemoryFileCount: vi.fn(),
   getToolRegistry: () =>
     ({
       registerTool: vi.fn(),
@@ -110,16 +110,14 @@ describe('WriteFileTool', () => {
       fs.mkdirSync(rootDir, { recursive: true });
     }
 
-    // Setup GeminiClient mock
-    mockGeminiClientInstance = new (vi.mocked(GeminiClient))(
+    // Setup LlmClient mock
+    mockLlmClientInstance = new (vi.mocked(LlmClient))(
       mockConfig,
-    ) as Mocked<GeminiClient>;
-    vi.mocked(GeminiClient).mockImplementation(() => mockGeminiClientInstance);
+    ) as Mocked<LlmClient>;
+    vi.mocked(LlmClient).mockImplementation(() => mockLlmClientInstance);
 
-    // Now that mockGeminiClientInstance is initialized, set the mock implementation for getGeminiClient
-    mockConfigInternal.getGeminiClient.mockReturnValue(
-      mockGeminiClientInstance,
-    );
+    // Now that mockLlmClientInstance is initialized, set the mock implementation for getLlmClient
+    mockConfigInternal.getLlmClient.mockReturnValue(mockLlmClientInstance);
 
     tool = new WriteFileTool(mockConfig);
 
@@ -530,6 +528,10 @@ describe('WriteFileTool', () => {
       ['photo.jpg', 'image'],
       ['diagram.svg', 'image'],
       ['photo.webp', 'image'],
+      ['table.csv', 'file'],
+      ['table.xlsx', 'document'],
+      ['brief.docx', 'document'],
+      ['deck.pptx', 'document'],
     ])('infers artifact kind for %s as %s', async (fileName, expectedKind) => {
       mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
       const filePath = path.join(rootDir, 'reports', fileName);
@@ -562,6 +564,37 @@ describe('WriteFileTool', () => {
         kind: 'notebook',
         mimeType: 'application/x-ipynb+json',
       });
+    });
+
+    it('does not record intermediate files when record_as_artifact is false', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'alibaba.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Alibaba</body></html>',
+        record_as_artifact: false,
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('Successfully created');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('does not record intermediate files written under .qwen/tmp', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, '.qwen', 'tmp', 'alibaba.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Alibaba</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('Successfully created');
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toBeUndefined();
     });
 
     it('does not record artifact-like files when artifact recording is disabled', async () => {
@@ -853,6 +886,7 @@ describe('WriteFileTool', () => {
       expect(writeSpy).toHaveBeenCalledWith({
         path: filePath,
         content: proposedContent,
+        toolWriteOrigin: 'write_file',
         _meta: {
           bom: false,
           encoding: undefined,
@@ -1171,6 +1205,7 @@ describe('WriteFileTool', () => {
       expect(writeSpy).toHaveBeenCalledWith({
         path: filePath,
         content: newContent,
+        toolWriteOrigin: 'write_file',
         _meta: { bom: true, encoding: 'utf-8', lineEnding: 'lf' },
       });
 
@@ -1200,6 +1235,7 @@ describe('WriteFileTool', () => {
       expect(writeSpy).toHaveBeenCalledWith({
         path: filePath,
         content: newContent,
+        toolWriteOrigin: 'write_file',
         _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
       });
 
@@ -1229,6 +1265,7 @@ describe('WriteFileTool', () => {
       expect(writeSpy).toHaveBeenCalledWith({
         path: filePath,
         content: newContent,
+        toolWriteOrigin: 'write_file',
         _meta: { bom: false, encoding: undefined },
       });
 
@@ -1263,6 +1300,7 @@ describe('WriteFileTool', () => {
       expect(writeSpy).toHaveBeenCalledWith({
         path: filePath,
         content: newContent,
+        toolWriteOrigin: 'write_file',
         _meta: { bom: true, encoding: undefined },
       });
 
@@ -1402,6 +1440,43 @@ describe('WriteFileTool', () => {
 
       readSpy.mockRestore();
       fs.unlinkSync(filePath);
+    });
+
+    it('rejects an overwrite terminally when the filesystem reports ino 0', async () => {
+      // Same reasoning as the EditTool case: `ino: 0` means the cache
+      // cannot prove which file was read, and no amount of re-reading
+      // changes that, so the rejection must be terminal rather than an
+      // instruction to re-read.
+      const filePath = path.join(rootDir, 'enforce-zero-inode.txt');
+      fs.writeFileSync(filePath, 'untouched bytes', 'utf-8');
+      seedPriorRead(filePath);
+      const nativeStat = fs.promises.stat;
+      const stat = vi
+        .spyOn(fs.promises, 'stat')
+        .mockImplementation(async (target: fs.PathLike) => {
+          const stats = await nativeStat(target);
+          if (target === filePath) {
+            Object.defineProperty(stats, 'ino', { value: 0 });
+          }
+          return stats;
+        });
+
+      try {
+        const result = await tool
+          .build({ file_path: filePath, content: 'clobber attempt' })
+          .execute(abortSignal);
+
+        expect(result.error?.type).toBe(
+          ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+        );
+        expect(result.error?.message).toMatch(/does not provide a verifiable/);
+        expect(result.error?.message).toMatch(/overwrite this file/);
+        expect(result.error?.message).not.toMatch(/Re-read it with/);
+        expect(fs.readFileSync(filePath, 'utf-8')).toBe('untouched bytes');
+      } finally {
+        stat.mockRestore();
+        fs.unlinkSync(filePath);
+      }
     });
 
     it('allows a write after a ranged (offset/limit) read', async () => {
@@ -1676,6 +1751,71 @@ describe('workspace artifact metadata guard', () => {
     const deepDir = 'a'.repeat(510);
     const filePath = path.resolve(rootDir, deepDir, 'x.html');
     expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
+  });
+
+  it('derives auto-record identity from the realpath target', () => {
+    fs.mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+    const target = path.join(rootDir, 'data', 'payload.csv');
+    const link = path.join(rootDir, 'report.csv');
+    fs.writeFileSync(target, 'a,b\n');
+    fs.symlinkSync(target, link);
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, link)).toMatchObject({
+        title: 'payload.csv',
+        kind: 'file',
+        workspacePath: 'data/payload.csv',
+      });
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmSync(path.join(rootDir, 'data'), { recursive: true, force: true });
+    }
+  });
+
+  it('infers kind from the realpath target, not the link name', () => {
+    fs.mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+    const target = path.join(rootDir, 'data', 'payload.csv');
+    const link = path.join(rootDir, 'preview.png');
+    fs.writeFileSync(target, 'a,b\n');
+    fs.symlinkSync(target, link);
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, link)).toMatchObject({
+        title: 'payload.csv',
+        kind: 'file',
+        workspacePath: 'data/payload.csv',
+      });
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmSync(path.join(rootDir, 'data'), { recursive: true, force: true });
+    }
+  });
+
+  it('skips auto-record when the realpath target is not a whitelisted kind', () => {
+    const target = path.join(rootDir, 'dropped.bin');
+    const link = path.join(rootDir, 'report.csv');
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.writeFileSync(target, 'bin');
+    fs.symlinkSync(target, link);
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, link)).toBeNull();
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmSync(target, { force: true });
+    }
+  });
+
+  it('does not auto-record a file whose realpath is outside the workspace', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'write-file-out-'));
+    const linkDir = path.join(rootDir, 'output');
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.symlinkSync(outside, linkDir);
+    const filePath = path.join(linkDir, 'report.csv');
+    fs.writeFileSync(filePath, 'a,b\n');
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
+    } finally {
+      fs.rmSync(linkDir, { force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('skips artifacts whose workspace path contains a control character', () => {

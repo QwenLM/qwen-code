@@ -7,7 +7,10 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
-import { registerWorkspaceSettingsRoutes } from './workspace-settings.js';
+import {
+  registerWorkspaceQualifiedSettingsRoutes,
+  registerWorkspaceSettingsRoutes,
+} from './workspace-settings.js';
 import { loadSettings } from '../../config/settings.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 
@@ -49,12 +52,107 @@ function makeApp(
     broadcastSettingsChanged,
     parseAndValidateClientId: () => undefined,
     captureGenerationAssertion: overrides.captureGenerationAssertion,
+    includeLiveVoice: true,
   });
 
   return { app, persistSetting, broadcastSettingsChanged };
 }
 
+/** Minimal registry for the workspace-qualified routes: one active, trusted entry. */
+function makeQualifiedApp() {
+  const app = express();
+  app.use(express.json());
+  const persistSetting = vi.fn(async () => {});
+  const registry = {
+    getEntryByWorkspaceId: (selector: string) =>
+      selector === 'primary'
+        ? {
+            state: 'active',
+            current: {
+              runtime: {
+                trusted: true,
+                workspaceCwd: '/workspace',
+                bridge: {},
+                generationGuard: undefined,
+              },
+            },
+          }
+        : undefined,
+  };
+
+  registerWorkspaceQualifiedSettingsRoutes(app, {
+    mutate: () => (_req, _res, next) => next(),
+    safeBody: (req) =>
+      req.body && typeof req.body === 'object' ? req.body : {},
+    persistSetting,
+    workspaceRegistry: registry as unknown as Parameters<
+      typeof registerWorkspaceQualifiedSettingsRoutes
+    >[1]['workspaceRegistry'],
+    invalidateServeFeaturesCache: () => {},
+  });
+
+  return { app, persistSetting };
+}
+
 describe('POST /workspace/settings', () => {
+  it('exposes the Live shortcut as user-global and rejects generic writes', async () => {
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { experimental: { liveVoice: { shortcut: 'Command+W' } } },
+      user: {
+        settings: {
+          experimental: {
+            liveVoice: { enabled: true, shortcut: 'Command+E' },
+          },
+        },
+      },
+      workspace: {
+        settings: {
+          experimental: { liveVoice: { shortcut: 'Command+W' } },
+        },
+      },
+      forScope: vi.fn().mockReturnValue({ settings: {} }),
+    } as never);
+    const { app, persistSetting } = makeApp();
+
+    const read = await request(app).get('/workspace/settings');
+    const shortcut = read.body.settings.find(
+      (setting: { key?: string }) =>
+        setting.key === 'experimental.liveVoice.shortcut',
+    );
+    expect(shortcut).toMatchObject({
+      requiresRestart: false,
+      default: 'Command+E',
+      values: { effective: 'Command+E', user: 'Command+E' },
+    });
+    expect(shortcut.values.workspace).toBeUndefined();
+
+    for (const scope of ['user', 'workspace']) {
+      const write = await request(app).post('/workspace/settings').send({
+        scope,
+        key: 'experimental.liveVoice.shortcut',
+        value: 'Command+K',
+      });
+      expect(write.status).toBe(400);
+      expect(write.body.code).toBe('live_managed_setting');
+    }
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('exposes disabled Live setup settings on the supported WebShell surface', async () => {
+    const { app } = makeApp();
+
+    const read = await request(app).get('/workspace/settings');
+
+    expect(
+      read.body.settings.map((setting: { key?: string }) => setting.key),
+    ).toEqual(
+      expect.arrayContaining([
+        'experimental.liveVoice.enabled',
+        'experimental.liveVoice.shortcut',
+      ]),
+    );
+  });
+
   it('returns 503 without broadcasting when the runtime closes after persist', async () => {
     let generationOpen = true;
     const { app, broadcastSettingsChanged } = makeApp({
@@ -171,6 +269,39 @@ describe('POST /workspace/settings', () => {
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ code: 'invalid_scope' });
     expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  // R8-1: `stripWorkspaceRestrictedSettings` drops these before every merge, so
+  // a workspace-scope write persists a committable dead entry into the repo's
+  // .qwen/settings.json and answers 200 + requiresRestart while the feature
+  // never turns on. The TUI dialog already filters them; the API did not.
+  it('rejects a workspace-restricted key at workspace scope', async () => {
+    const { app, persistSetting } = makeApp();
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'tools.workflowsEnabled',
+      value: true,
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'workspace_restricted_setting' });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('still accepts the same key at user scope', async () => {
+    // User scope honors the setting — the guard must not reach beyond
+    // workspace scope, or this PR's whole enablement path dies with it.
+    const { app, persistSetting } = makeApp();
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'tools.workflowsEnabled',
+      value: true,
+    });
+
+    expect(res.status).toBe(200);
+    expect(persistSetting).toHaveBeenCalled();
   });
 
   it('rejects a security-sensitive key even at user scope', async () => {
@@ -418,4 +549,23 @@ describe('POST /workspace/settings', () => {
       );
     },
   );
+});
+
+describe('POST /workspaces/:workspace/settings', () => {
+  // R8-1, second call site: the qualified route accepts workspace scope only,
+  // so without the guard it is the easier of the two paths to write a dead
+  // entry through. Fixing the sibling route does not fix this one.
+  it('rejects a workspace-restricted key', async () => {
+    const { app, persistSetting } = makeQualifiedApp();
+
+    const res = await request(app).post('/workspaces/primary/settings').send({
+      scope: 'workspace',
+      key: 'tools.workflowsEnabled',
+      value: true,
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'workspace_restricted_setting' });
+    expect(persistSetting).not.toHaveBeenCalled();
+  });
 });

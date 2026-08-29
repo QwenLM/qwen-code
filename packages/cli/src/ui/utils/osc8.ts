@@ -88,6 +88,11 @@ export function isSafeOscScheme(url: string): boolean {
   return SAFE_OSC8_SCHEMES.has(match[1]!.toLowerCase());
 }
 
+const BARE_URL_BREAK_CHARACTERS = String.raw`\u3001-\u3004\u3008-\u3020\u302e-\u3030\u3036-\u3037\u303d-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65\ufe10-\ufe1f\ufe30-\ufe32\ufe35-\ufe6f`;
+// The escaped CJK ranges do not contain literal combining characters.
+// eslint-disable-next-line no-misleading-character-class
+const BARE_URL_BREAK_PATTERN = new RegExp(`[${BARE_URL_BREAK_CHARACTERS}]`);
+
 /**
  * Trim trailing sentence punctuation off a bare URL run before it becomes
  * an OSC 8 target. Models routinely produce `see https://example.com.` and
@@ -101,10 +106,13 @@ export function isSafeOscScheme(url: string): boolean {
  * the URL so URLs that legitimately end with `)` (Wikipedia disambiguation,
  * MSDN) aren't truncated.
  */
-export function trimTrailingUrlPunctuation(url: string): string {
-  // Count `( [ {` opens once up-front; we then decrement running `)`/`]`/`}`
-  // close counts as we trim, keeping the whole trim O(n) instead of O(n²)
-  // for adversarial inputs like `https://x.com))))…`.
+export function trimTrailingUrlPunctuation(
+  url: string,
+  nextCharacter = '',
+): string {
+  // Count `( [ {` opens once up-front; we then
+  // decrement running `)`/`]`/`}` close counts as we trim, keeping the whole
+  // trim O(n) instead of O(n²) for adversarial inputs like `https://x.com))))…`.
   let openParen = 0;
   let openBracket = 0;
   let openBrace = 0;
@@ -122,6 +130,12 @@ export function trimTrailingUrlPunctuation(url: string): string {
   }
 
   let end = url.length;
+  if (
+    url.charCodeAt(end - 1) === 0x5f &&
+    BARE_URL_BREAK_PATTERN.test(nextCharacter)
+  ) {
+    end--;
+  }
   while (end > 0) {
     const c = url.charCodeAt(end - 1);
     // .,;:!?'"`> — `>` covers CommonMark autolinks (`<https://x.com>`)
@@ -177,6 +191,21 @@ export const MD_LINK_PATTERN = String.raw`\[.*?\]\((?:[^()]|\([^()]*\))*\)`;
  * with `^...$` because callers pass the whole match string.
  */
 export const MD_LINK_CAPTURE = /^\[(.*?)\]\(((?:[^()]|\([^()]*\))*)\)$/;
+
+/**
+ * Bare-URL pattern shared between the React and ANSI renderers. Unlike a
+ * plain `\S+` run it stops at CJK / full-width punctuation: Chinese prose
+ * routinely glues `（…）`/`。` onto a URL with no space
+ * (`https://x.com（2 commits）`), and `\S` swallows the punctuation plus
+ * everything up to the next ASCII space, turning the OSC 8 target into a
+ * 404. Raw CJK ideographs, U+3005 々, U+3006 〆, and U+3007 〇 stay in the
+ * match because they are word-forming IRI characters. The exclusion also
+ * covers punctuation in CJK Compatibility Forms and Vertical Forms while
+ * preserving their word-forming repeat marks and vertical low lines. ASCII
+ * and other typographic punctuation stays matched and is left to
+ * `trimTrailingUrlPunctuation`.
+ */
+export const BARE_URL_PATTERN = String.raw`https?:\/\/[^\s${BARE_URL_BREAK_CHARACTERS}]+`;
 
 /**
  * Should the markdown renderers wrap a `[label](url)` token in an OSC 8

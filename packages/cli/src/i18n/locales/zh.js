@@ -184,6 +184,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '制品',
   'toolDisplayName.RecordArtifact': '记录制品',
+  'toolDisplayName.ReportFindings': '上报评审发现',
   'toolDisplayName.DisplayImage': '显示图片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '进入计划模式',
@@ -207,6 +208,7 @@ export default {
   'toolDisplayName.TeamDelete': '删除团队',
   'toolDisplayName.TeamPlanApproval': '团队计划审批',
   'toolDisplayName.SendMessage': '发送消息',
+  'toolDisplayName.RequestShutdown': '请求下线',
   'toolDisplayName.StructuredOutput': '结构化输出',
   'toolDisplayName.Monitor': '监控',
   'toolDisplayName.NotebookEdit': '编辑 Notebook',
@@ -766,6 +768,7 @@ export default {
   'Tool Output Truncation Lines': '工具输出截断行数',
   'Folder Trust': '文件夹信任',
   'Tool Schema Compliance': 'Tool Schema 兼容性',
+  Unset: '未设置',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
   'Auto (follow user input)': '自动（跟随用户输入）',
@@ -1543,6 +1546,12 @@ export default {
     '聊天历史压缩未能减小大小。这可能表明压缩提示存在问题。',
   'Could not compress chat history due to a token counting error.':
     '由于 token 计数错误，无法压缩聊天历史。',
+  'Could not compress chat history because the compression summary was empty.':
+    '由于压缩摘要为空，无法压缩聊天历史。',
+  'Could not compress chat history because the compression summary was truncated.':
+    '由于压缩摘要被截断，无法压缩聊天历史。',
+  'Could not compress chat history due to an API error.':
+    '由于 API 错误，无法压缩聊天历史。',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1810,6 +1819,7 @@ export default {
     'Ctrl+Q 排到下一轮 · ↑ 编辑排队消息',
   'Enter to steer · Ctrl+Q to queue':
     'Enter 追加到当前任务 · Ctrl+Q 排到下一轮',
+  '{{count}} queued': '{{count}} 条已排队',
   'Queue message for the next turn': '将消息排到下一轮',
 
   // ============================================================================
@@ -2238,6 +2248,17 @@ export default {
   // === Core: added from PR #3328 ===
   'Ask a quick side question without affecting the main conversation':
     '在不影响主对话的情况下快速问一个旁支问题',
+  'Get a second opinion on the current conversation from a reviewer model':
+    '让审查模型对当前对话给出第二意见',
+  'Consulting advisor...': '正在咨询审查模型...',
+  'Advisor review failed: {{error}}': '审查失败：{{error}}',
+  'No conversation context available for /advisor':
+    '没有可供 /advisor 使用的对话上下文',
+  'Focus too long (max {{max}} chars)': '关注点过长（最多 {{max}} 个字符）',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    '另一个操作正在进行中，请等待其完成后再运行 /advisor',
+  'No response received.': '未收到回复。',
+  'No model configured.': '未配置模型。',
   'Manage Arena sessions': '管理 Arena 会话',
   'Start an Arena session with multiple models competing on the same task':
     '启动一个 Arena 会话，让多个模型在同一任务上竞争',
@@ -2311,8 +2332,18 @@ export default {
   'rejected — edit config to re-approve': '已拒绝 — 编辑配置以重新审批',
   'Background agent needs approval': '后台 agent 等待审批',
   'Approve or deny the request above': '请批准或拒绝上方的请求',
+  'from nested agent': '来自嵌套 agent',
   Running: '运行中',
+  Pausing: '暂停中',
   Paused: '已暂停',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    '暂停是协作式的；在工作流暂停之前，进行中的工作可能会先完成。等待工具审批的 agent 调用会让运行保持在此状态，且在审批得到响应前仍会计入活跃时间上限。',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    '已暂停：不会启动新的 agent；agent 调用之间的脚本代码会继续运行。按 p 恢复。/clear、/branch 以及切换会话会取消已暂停的运行。',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    '暂停/恢复被拒绝；工作流状态已变化。请重试。',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    '提示：使用 `/workflows p <runId>`，或在后台任务中按 p 协作暂停/恢复；使用 `/workflows <runId>` 查看详情。',
   Completed: '已完成',
   Failed: '失败',
   Stopped: '已停止',
@@ -2598,4 +2629,7 @@ export default {
     '安全模式下禁止更改自动技能管理器。',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '仅受信任的工作区可以更改自动技能管理器。请通过 `/trust` 信任此文件夹后重试。',
+  'Kept model as {{model}}': '模型保持为 {{model}}',
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    '查看其他 Qwen Code 会话发来的待处理消息（accept | deny）',
 };

@@ -27,11 +27,13 @@ import {
 } from '../utils/modelConfigUtils.js';
 import type { CliGenerationConfigInputs } from '../utils/modelConfigUtils.js';
 import {
+  ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
+import { buildModelReasoningConfigPreview } from '../acp-integration/model-configuration.js';
 import { buildAcpModelDisplayFields } from '../acp-integration/acp-model-display.js';
 import { snapshotProcessEnv } from './env-snapshot.js';
 
@@ -165,6 +167,16 @@ function buildWorkspaceProvidersStatus(
 
       const isCurrent =
         currentAuth === model.authType && currentAcpModelId === modelId;
+      const configOptions = modelId.startsWith(ACP_ROUTE_ID_PREFIX)
+        ? undefined
+        : buildModelReasoningConfigPreview(model.id, {
+            thinkingMandatory:
+              modelsConfig.getResolvedModel(
+                model.authType,
+                model.id,
+                model.registryBaseUrl ?? model.baseUrl,
+              )?.generationConfig.thinkingMandatory === true,
+          });
       const description = display.description ?? undefined;
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,
@@ -181,6 +193,7 @@ function buildWorkspaceProvidersStatus(
         ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
         isCurrent,
         isRuntime: false,
+        ...(configOptions ? { configOptions } : {}),
       };
       provider.models.push(providerModel);
       if (isCurrent) provider.current = true;

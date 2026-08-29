@@ -51,7 +51,10 @@ jobs:
         github.repository == 'QwenLM/qwen-code' &&
         (github.event_name == 'workflow_dispatch' || vars.QWEN_ISSUE_FOLLOWUP_BOT_ENABLED == 'true')
       }}
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (schedule/dispatch use
+    # base-repo YAML), so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     steps:
       - name: 'Prepare issue follow-up runtime'
         id: 'runtime'
@@ -294,17 +297,24 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          settings_json: |-
+          # The input name is `settings` — this action version has no
+          # `settings_json` input, and an unknown input is silently dropped,
+          # which is what happened to this block until the rename.
+          settings: |-
             {
-              "maxSessionTurns": 50,
-              "coreTools": [
-                "run_shell_command(gh issue view)",
-                "run_shell_command(gh issue list)",
-                "run_shell_command(gh label list)",
-                "run_shell_command(gh issue edit)",
-                "run_shell_command(gh issue comment)"
-              ],
-              "sandbox": false
+              "model": {
+                "maxSessionTurns": 50
+              },
+              "tools": {
+                "core": [
+                  "run_shell_command(gh issue view)",
+                  "run_shell_command(gh issue list)",
+                  "run_shell_command(gh label list)",
+                  "run_shell_command(gh issue edit)",
+                  "run_shell_command(gh issue comment)"
+                ],
+                "sandbox": false
+              }
             }
           prompt: |-
             ## Role

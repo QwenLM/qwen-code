@@ -12,7 +12,18 @@
 // prevents route inconsistencies between the two transport variants.
 // ---------------------------------------------------------------------------
 
-import { isRecord } from './acpTransportUtils.js';
+const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
+
+// Kept local (instead of reusing `isRecord` from `acpTransportUtils.ts`):
+// acpTransportUtils imports this module's ROUTE_TABLE, so re-importing the
+// predicate from there would silently restore the
+// acpRouteTable -> acpTransportUtils -> acpRouteTable runtime cycle this
+// change exists to break. ESM cycles compile and test green, so the guard is
+// this comment — do not consolidate without breaking the cycle some other
+// way first.
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 export interface RouteMapping {
   method: string;
@@ -105,8 +116,22 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       method: 'session/new',
       extractParams: (_s, body) => {
         if (!isRecord(body)) return {};
-        const { sessionScope: _, ...rest } = body as Record<string, unknown>;
-        return rest;
+        const {
+          sessionScope: _,
+          sessionId,
+          _meta,
+          ...rest
+        } = body as Record<string, unknown>;
+        if (sessionId === undefined) {
+          return { ...rest, ...(_meta !== undefined ? { _meta } : {}) };
+        }
+        return {
+          ...rest,
+          _meta: {
+            ...(isRecord(_meta) ? _meta : {}),
+            [REQUESTED_SESSION_ID_META_KEY]: sessionId,
+          },
+        };
       },
     },
   },

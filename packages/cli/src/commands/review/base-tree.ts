@@ -56,6 +56,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { baseWorktreePath } from './lib/paths.js';
 import {
   discardWorktree,
+  sanitizedGitEnv,
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
@@ -89,8 +90,16 @@ export interface BaseTreeArgs {
   build?: (worktree: string) => BuildTestReport;
 }
 
+// Sanitized env on both helpers: an exported GIT_DIR redirects repository
+// discovery for every call at once — the base tree would be added into the
+// redirected repository and its reuse check would read HEAD from it, an A/B
+// against the wrong program while every check against the given tree passes.
 function gitOut(cwd: string, ...args: string[]): string {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+  });
   if (r.error) throw r.error;
   if (r.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
@@ -99,7 +108,11 @@ function gitOut(cwd: string, ...args: string[]): string {
 }
 
 function git(cwd: string, ...args: string[]): void {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+  });
   if (r.error) throw r.error;
   if (r.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
@@ -271,6 +284,27 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
           // tree to run against.
           buildOnly: true,
         });
+
+    // A build the whole-call budget truncated is NOT available: rerunning the
+    // PR's failing files against packages that were never compiled
+    // manufactures failures that read as "fails on base too" — pre-existing
+    // by measurement — and waves a real regression through. But it is not a
+    // settled answer about this SHA either (with more budget it may build
+    // fully), so NO marker is written — a later shard may repay and succeed.
+    if ((build.notBuilt?.length ?? 0) > 0) {
+      return {
+        available: false,
+        path: tree,
+        baseSha,
+        build,
+        note:
+          `the base tree build at ${baseSha.slice(0, 9)} was cut short by the ` +
+          `whole-call budget (${build.notBuilt!.join(', ')} not built), so a ` +
+          'rerun against it would manufacture pre-existing failures; an A/B ' +
+          'is not available for this review (this is an infrastructure ' +
+          'result, never a finding against the PR)',
+      };
+    }
 
     // `ok: true` is not enough: `runBuildTest` returns `ok: true` for a handoff
     // that built nothing — an `unsupported` toolchain (a changed dir the merge

@@ -12,6 +12,7 @@ import { AgentCore } from '../runtime/agent-core.js';
 import { getTeammateContext } from '../team/identity.js';
 import { createContentGenerator } from '../../core/contentGenerator.js';
 import { ApprovalMode, Config } from '../../config/config.js';
+import { hasRebuiltToolRegistry } from '../../tools/agent/agent.js';
 import { join } from 'node:path';
 
 const DEFAULT_MODE = 'default' as ApprovalMode;
@@ -21,13 +22,6 @@ const PLAN_MODE = 'plan' as ApprovalMode;
 const mockContentGenerator = {
   generateContentStream: vi.fn(),
 };
-const runReasoningLoopMock = vi.hoisted(() =>
-  vi.fn().mockResolvedValue({
-    text: 'Done',
-    terminateMode: null,
-    turnsUsed: 1,
-  }),
-);
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../core/contentGenerator.js')>();
@@ -39,94 +33,18 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
   };
 });
 
-// Mock AgentCore and AgentInteractive to avoid real model calls.
-// The mock must also expose the observable-state accessors that
-// AgentInteractive now delegates to (getMessages, pendingApprovals,
-// liveOutputs, shellPids, pushMessage, etc.) — otherwise agent lifecycle
-// methods like abort() / addMessage() fail on missing prototype methods.
-vi.mock('../runtime/agent-core.js', () => ({
-  AgentCore: vi.fn().mockImplementation(() => {
-    const messages: Array<Record<string, unknown>> = [];
-    const pendingApprovals = new Map<string, unknown>();
-    const liveOutputs = new Map<string, unknown>();
-    const shellPids = new Map<string, number>();
-    const emitter = {
-      on: vi.fn(),
-      off: vi.fn(),
-      emit: vi.fn(),
-    };
-    return {
-      subagentId: 'mock-id',
-      name: 'mock-agent',
-      eventEmitter: emitter,
-      stats: {
-        start: vi.fn(),
-        getSummary: vi.fn().mockReturnValue({}),
-      },
-      createChat: vi.fn().mockResolvedValue({}),
-      prepareTools: vi.fn().mockReturnValue([]),
-      runReasoningLoop: runReasoningLoopMock,
-      getEventEmitter: vi.fn().mockReturnValue(emitter),
-      getExecutionSummary: vi.fn().mockReturnValue({}),
-      getMessages: () => messages,
-      getPendingApprovals: () => pendingApprovals,
-      getLiveOutputs: () => liveOutputs,
-      getShellPids: () => shellPids,
-      pushMessage: (
-        role: string,
-        content: string,
-        options?: { thought?: boolean; metadata?: Record<string, unknown> },
-      ) => {
-        const message: Record<string, unknown> = {
-          role,
-          content,
-          timestamp: Date.now(),
-        };
-        if (options?.thought) message['thought'] = true;
-        if (options?.metadata) message['metadata'] = options.metadata;
-        messages.push(message);
-      },
-      setPendingApproval: (callId: string, details: unknown) =>
-        pendingApprovals.set(callId, details),
-      deletePendingApproval: (callId: string) =>
-        pendingApprovals.delete(callId),
-      clearPendingApprovals: () => pendingApprovals.clear(),
-    };
-  }),
-}));
-
-// Mirrors the positional AgentCore constructor parameters so tests can
-// destructure by name instead of indexing — adding new parameters can't
-// silently shift assertions onto the wrong slot.
-function destructureAgentCoreCall(call: unknown[]) {
-  return {
-    name: call[0] as string,
-    runtimeContext: call[1] as Record<string, unknown>,
-    promptConfig: call[2],
-    modelConfig: call[3],
-    runConfig: call[4],
-    toolConfig: call[5],
-    eventEmitter: call[6],
-    hooks: call[7],
-    runtimeView: call[8] as
-      | {
-          contentGenerator: unknown;
-          contentGeneratorConfig: { authType: string; model?: string };
-        }
-      | undefined,
-  };
-}
-
-function createMockToolRegistry() {
-  return {
-    getFunctionDeclarations: vi.fn().mockReturnValue([]),
-    getAllTools: vi.fn().mockReturnValue([]),
-    getAllToolNames: vi.fn().mockReturnValue([]),
-    registerTool: vi.fn(),
-    copyDiscoveredToolsFrom: vi.fn(),
-    stop: vi.fn().mockResolvedValue(undefined),
-  };
-}
+// Mock AgentCore to avoid real model calls. The factory, the positional
+// destructure helper, and the mock ToolRegistry live in a shared fixture
+// so this suite and TeamManager.model-routing.test.ts assert against the
+// same mocked AgentCore surface.
+vi.mock('../runtime/agent-core.js', async () =>
+  (await import('../runtime/agent-core-test-mock.js')).agentCoreMockModule(),
+);
+import {
+  runReasoningLoopMock,
+  destructureAgentCoreCall,
+  createMockToolRegistry,
+} from '../runtime/agent-core-test-mock.js';
 
 function createMockConfig() {
   const registry = createMockToolRegistry();
@@ -222,6 +140,9 @@ describe('InProcessBackend', () => {
 
     expect(backend.getActiveAgentId()).toBe('agent-1');
     expect(backend.getAgent('agent-1')).toBeDefined();
+    const call = destructureAgentCoreCall(vi.mocked(AgentCore).mock.calls[0]!);
+    expect(call.taskName).toBe('Do something');
+    expect(call.subagentId).toBe('agent-1');
   });
 
   it('routes owned monitor notifications into the agent message queue', async () => {
@@ -429,6 +350,69 @@ describe('InProcessBackend', () => {
 
     expect(() => backend.stopAgent('agent-does-not-exist')).not.toThrow();
     expect(registries.size).toBe(sizeBefore);
+  });
+
+  it('stopAgent keeps the handle readable for post-stop inspection while freeing the id for respawn', async () => {
+    // ArenaManager resolves transcripts through getAgent after the
+    // arena timeout path stops its agents (collectResults ->
+    // getAgentTranscript). Deleting the handle in stopAgent silently
+    // dropped those reads; retention must also keep respawns working.
+    await backend.init();
+    await backend.spawnAgent(createSpawnConfig('agent-1'));
+    const agent = backend.getAgent('agent-1');
+    expect(agent).toBeDefined();
+
+    backend.stopAgent('agent-1');
+
+    const retained = backend.getAgent('agent-1');
+    expect(retained).toBeDefined();
+    expect(retained).toBe(agent);
+    expect(retained!.getMessages()).toEqual(expect.any(Array));
+
+    // Same-id respawn still succeeds and replaces the retained handle.
+    await backend.spawnAgent(createSpawnConfig('agent-1'));
+    const respawned = backend.getAgent('agent-1');
+    expect(respawned).toBeDefined();
+    expect(respawned).not.toBe(agent);
+
+    // The respawned agent is live again: input and switching work.
+    expect(backend.writeToAgent('agent-1', 'follow-up')).toBe(true);
+    backend.switchTo('agent-1');
+    expect(backend.getActiveAgentId()).toBe('agent-1');
+  });
+
+  it('stopAgent reassigns the active agent and removes the stopped id from navigation', async () => {
+    // Mutation pin for the stopAgent roster bookkeeping: without the
+    // agentOrder splice a same-id respawn duplicates the entry and
+    // navigate() wrap-around skews; without the activeAgentId
+    // reassignment, forwardInput resolves to a stopped agent and
+    // typed input is silently dropped.
+    await backend.init();
+    await backend.spawnAgent(createSpawnConfig('agent-1'));
+    await backend.spawnAgent(createSpawnConfig('agent-2'));
+    expect(backend.getActiveAgentId()).toBe('agent-1');
+
+    backend.stopAgent('agent-1');
+
+    expect(backend.getActiveAgentId()).toBe('agent-2');
+    expect(backend.forwardInput('typed input')).toBe(true);
+    expect(backend.writeToAgent('agent-1', 'to a stopped agent')).toBe(false);
+
+    // Switching back to the stopped agent must not stick the roster
+    // on a dead handle (enqueueMessage would restart its run loop).
+    backend.switchTo('agent-1');
+    expect(backend.getActiveAgentId()).toBe('agent-2');
+
+    // Same-id respawn must not duplicate the roster entry: navigation
+    // cycles over exactly the two surviving ids.
+    await backend.spawnAgent(createSpawnConfig('agent-1'));
+    expect(backend.getActiveAgentId()).toBe('agent-2');
+    backend.switchToNext();
+    expect(backend.getActiveAgentId()).toBe('agent-1');
+    backend.switchToNext();
+    expect(backend.getActiveAgentId()).toBe('agent-2');
+    backend.switchToPrevious();
+    expect(backend.getActiveAgentId()).toBe('agent-1');
   });
 
   it('cleanup disposes all remaining registries (covers the in-flight shutdown path)', async () => {
@@ -642,6 +626,21 @@ describe('InProcessBackend', () => {
     expect(agentContext.getWorkingDir()).toBe(agentCwd);
     expect(agentContext.getTargetDir()).toBe(agentCwd);
     expect(agentContext.getToolRegistry()).toBeDefined();
+
+    // This config is LONG-LIVED — the agent keeps it — so it must NOT carry
+    // the rebuilt marker. `hasRebuiltToolRegistry` reads it through the
+    // prototype chain, so a wrapper built on it later (a dir-scoped workflow
+    // dispatch) would see it and skip `buildSubagentContextOverride`'s
+    // rebuild — the sole re-anchoring that lifts the subagent's tools above
+    // that wrapper. Without it, relative paths resolve against this agent's
+    // cwd instead of the provisioned worktree.
+    //
+    // Pinned HERE, at the call site, because the helper's own tests pass
+    // explicit options and so say nothing about what this caller passes:
+    // dropping `{ markRebuilt: false }` left every other suite green.
+    expect(hasRebuiltToolRegistry(runtimeContext as unknown as Config)).toBe(
+      false,
+    );
   });
 
   it('uses a per-agent approval mode without mutating the parent config', async () => {
@@ -747,6 +746,41 @@ describe('InProcessBackend', () => {
     expect(agentContext.getPrePlanMode()).toBe(DEFAULT_MODE);
     expect(parentConfig.getApprovalMode()).toBe(DEFAULT_MODE);
     expect(parentConfig.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('lets a teammate without an explicit approval mode switch modes child-locally', async () => {
+    // No `inProcess.approvalMode` — TeamManager passes undefined for every
+    // non-plan teammate. Tools bind to this config, so "Proceed always"
+    // (AUTO_EDIT) and Shift+Tab mode switches must transition child-local
+    // state instead of hitting the bare-derived-Config guard.
+    const parentConfig = createMockConfig() as unknown as {
+      getApprovalMode: ReturnType<typeof vi.fn>;
+      setApprovalMode: ReturnType<typeof vi.fn>;
+    };
+    const backendWithParentMode = new InProcessBackend(parentConfig as never);
+    await backendWithParentMode.init();
+
+    await backendWithParentMode.spawnAgent(createSpawnConfig('agent-1'));
+
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const lastCall = MockAgentCore.mock.calls.at(-1);
+    expect(lastCall).toBeDefined();
+
+    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
+    const agentContext = runtimeContext as unknown as Config;
+
+    expect(agentContext.getApprovalMode()).toBe(DEFAULT_MODE);
+
+    // "Proceed always" on a tool confirmation.
+    agentContext.setApprovalMode(ApprovalMode.AUTO_EDIT);
+    expect(agentContext.getApprovalMode()).toBe(ApprovalMode.AUTO_EDIT);
+    expect(parentConfig.getApprovalMode()).toBe(DEFAULT_MODE);
+    expect(parentConfig.setApprovalMode).not.toHaveBeenCalled();
+
+    // Shift+Tab back to default.
+    agentContext.setApprovalMode(DEFAULT_MODE);
+    expect(agentContext.getApprovalMode()).toBe(DEFAULT_MODE);
+    expect(parentConfig.getApprovalMode()).toBe(DEFAULT_MODE);
   });
 
   it('uses a teammate-scoped plan file path in per-agent config', async () => {

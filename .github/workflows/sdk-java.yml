@@ -7,6 +7,7 @@ on:
       - 'release/**'
     paths:
       - 'packages/sdk-java/**'
+      - 'packages/core/src/config/approval-modes.json'
       - 'packages/cli/src/commands/serve.ts'
       - 'packages/cli/src/serve/**'
       - 'packages/cli/src/acp-integration/**'
@@ -25,6 +26,7 @@ on:
       - 'release/**'
     paths:
       - 'packages/sdk-java/**'
+      - 'packages/core/src/config/approval-modes.json'
       - 'packages/cli/src/commands/serve.ts'
       - 'packages/cli/src/serve/**'
       - 'packages/cli/src/acp-integration/**'
@@ -52,7 +54,7 @@ concurrency:
 jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
-    runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
+    runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -96,6 +98,17 @@ jobs:
             exit 1
           fi
 
+      # Runner instances on one self-hosted machine share $HOME and therefore
+      # ~/.m2/toolchains.xml. setup-java merges its JDK entry into that file
+      # with a non-atomic read-modify-write, so two concurrent jobs can tear
+      # it — and once torn, every later job on the machine fails Set up Java
+      # with "Cannot insert a text node as a child of a document node". The
+      # build never reads toolchains.xml (no maven-toolchains-plugin), so
+      # dropping it is free and setup-java rewrites it from scratch.
+      - name: 'Drop shared Maven toolchains.xml (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'rm -f "${HOME}/.m2/toolchains.xml"'
+
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -129,7 +142,7 @@ jobs:
 
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
     timeout-minutes: 30
     steps:
       - name: 'Restore workspace ownership'
@@ -178,6 +191,12 @@ jobs:
           if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
             echo "::warning::Expected Node 22.x but found $(node -v); daemon E2E will run against the runner's Node."
           fi
+
+      # Same shared-$HOME hazard as the unit job above: drop the torn-prone
+      # toolchains.xml so a corrupt leftover cannot fail Set up Java.
+      - name: 'Drop shared Maven toolchains.xml (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'rm -f "${HOME}/.m2/toolchains.xml"'
 
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0

@@ -210,6 +210,13 @@ export interface DaemonWorkspaceService {
     enabled: boolean,
   ): Promise<WorkspaceSkillToggleResult>;
 
+  /** Toggle multiple skills with one settings write and one session refresh. */
+  setWorkspaceSkillsEnabled(
+    ctx: WorkspaceRequestContext,
+    skillNames: readonly string[],
+    enabled: boolean,
+  ): Promise<WorkspaceSkillBatchToggleResult>;
+
   /** Install a project- or user-level Skill from a bounded package. */
   installWorkspaceSkill(
     ctx: WorkspaceRequestContext,
@@ -342,6 +349,29 @@ export interface WorkspaceSkillToggleResult {
   sessionsFailed: number;
 }
 
+export type WorkspaceSkillToggleErrorCode = 'skill_not_found';
+
+export interface WorkspaceSkillToggleError {
+  skillName: string;
+  code: WorkspaceSkillToggleErrorCode;
+  error: string;
+}
+
+export interface WorkspaceSkillBatchToggleItem {
+  skillName: string;
+  enabled: boolean;
+  changed: boolean;
+}
+
+export interface WorkspaceSkillBatchToggleResult {
+  enabled: boolean;
+  activation: WorkspaceSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+  results: WorkspaceSkillBatchToggleItem[];
+  errors: WorkspaceSkillToggleError[];
+}
+
 export interface PersistDisabledSkillResult {
   changed: boolean;
   disabled: string[];
@@ -351,10 +381,18 @@ export interface PersistDisabledSkillResult {
   }>;
 }
 
-export type WorkspaceSkillNotToggleableReason =
-  | 'not_user_invocable'
-  | 'inactive_extension'
-  | 'locked';
+export interface PersistDisabledSkillsBatchOutcome {
+  skillName: string;
+  changed: boolean;
+}
+
+export interface PersistDisabledSkillsBatchResult {
+  outcomes: PersistDisabledSkillsBatchOutcome[];
+  settingsChanges: Array<{
+    key: 'skills.disabled' | 'skills.enabled';
+    value: string[] | undefined;
+  }>;
+}
 
 export class WorkspaceSkillNotFoundError extends Error {
   constructor(readonly skillName: string) {
@@ -363,19 +401,17 @@ export class WorkspaceSkillNotFoundError extends Error {
   }
 }
 
-export class WorkspaceSkillNotToggleableError extends Error {
-  constructor(
-    readonly skillName: string,
-    readonly reason: WorkspaceSkillNotToggleableReason,
-    readonly lockedScope?: 'system' | 'user' | 'systemDefaults',
-  ) {
-    super(
-      lockedScope
-        ? `Skill ${skillName} is locked by ${lockedScope} settings`
-        : `Skill ${skillName} is not toggleable: ${reason}`,
-    );
-    this.name = 'WorkspaceSkillNotToggleableError';
+export function mapWorkspaceSkillToggleError(
+  error: unknown,
+): WorkspaceSkillToggleError | undefined {
+  if (error instanceof WorkspaceSkillNotFoundError) {
+    return {
+      skillName: error.skillName,
+      code: 'skill_not_found',
+      error: error.message,
+    };
   }
+  return undefined;
 }
 
 /** Discriminated union for MCP server restart outcomes. */
@@ -470,6 +506,14 @@ export interface DaemonWorkspaceServiceDeps {
     enabled: boolean,
     assertGenerationOpen?: () => void,
   ) => Promise<PersistDisabledSkillResult>;
+
+  /** Persist multiple skill changes under one settings lock. */
+  persistDisabledSkillsBatch: (
+    workspace: string,
+    skillNames: readonly string[],
+    enabled: boolean,
+    assertGenerationOpen?: () => void,
+  ) => Promise<PersistDisabledSkillsBatchResult>;
 
   persistSetting?: (
     workspace: string,

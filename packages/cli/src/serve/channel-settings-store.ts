@@ -7,7 +7,11 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { ChannelConfigFieldDescriptor } from '@qwen-code/channel-base';
-import { getPlugin } from '../commands/channel/channel-registry.js';
+import {
+  getPlugin,
+  UNSAFE_OBJECT_KEYS,
+} from '../commands/channel/channel-registry.js';
+import { multiSessionCompatibilityError } from '../commands/channel/config-utils.js';
 import { loadSettings, saveSettings } from '../config/settings.js';
 
 export type ChannelSecretUpdate =
@@ -70,8 +74,6 @@ function invalidSecret(message: string): ChannelSettingsError {
 function invalidConfig(message: string): ChannelSettingsError {
   return new ChannelSettingsError('channel_settings_invalid_config', message);
 }
-
-const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function assertSafeChannelName(name: string): void {
   if (UNSAFE_OBJECT_KEYS.has(name)) {
@@ -138,12 +140,22 @@ function assertNumberRecord(
   }
 }
 
-function assertSharedField(key: string, value: unknown): boolean {
+function assertSharedField(
+  key: string,
+  value: unknown,
+  previous?: unknown,
+): boolean {
+  if (key === 'multiSession') {
+    if (typeof value !== 'boolean') {
+      throw invalidConfig(`Channel field "${key}" must be a boolean.`);
+    }
+    return true;
+  }
   const enumValues: Record<string, ReadonlySet<string>> = {
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
-    groupPolicy: new Set(['disabled', 'allowlist', 'open']),
-    sessionScope: new Set(['user', 'thread', 'single']),
+    groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
+    sessionScope: new Set(['user', 'thread', 'chat_thread', 'single']),
     dispatchMode: new Set(['steer', 'followup', 'collect']),
     blockStreaming: new Set(['on', 'off']),
   };
@@ -165,6 +177,64 @@ function assertSharedField(key: string, value: unknown): boolean {
       value.some((item) => typeof item !== 'string')
     ) {
       throw invalidConfig(`Channel field "${key}" must be a string array.`);
+    }
+    return true;
+  }
+  if (key === 'groups') {
+    if (!isRecord(value)) {
+      if (
+        containsUnsafeObjectKey(value) ||
+        !isDeepStrictEqual(previous, value)
+      ) {
+        throw invalidConfig(`Channel field "${key}" must be an object.`);
+      }
+      return true;
+    }
+    const previousGroups = isRecord(previous) ? previous : {};
+    for (const [groupId, groupConfig] of Object.entries(value)) {
+      if (UNSAFE_OBJECT_KEYS.has(groupId) || !isRecord(groupConfig)) {
+        throw invalidConfig(`Channel field "${key}.${groupId}" is invalid.`);
+      }
+      const previousGroup = isRecord(previousGroups[groupId])
+        ? previousGroups[groupId]
+        : {};
+      for (const [nestedKey, nestedValue] of Object.entries(groupConfig)) {
+        const known = [
+          'requireMention',
+          'dispatchMode',
+          'groupHistoryLimit',
+        ].includes(nestedKey);
+        const valid =
+          (nestedKey === 'requireMention' &&
+            typeof nestedValue === 'boolean') ||
+          (nestedKey === 'dispatchMode' &&
+            typeof nestedValue === 'string' &&
+            ['collect', 'steer', 'followup'].includes(nestedValue)) ||
+          (nestedKey === 'groupHistoryLimit' &&
+            typeof nestedValue === 'number' &&
+            Number.isFinite(nestedValue));
+        if (
+          known &&
+          !valid &&
+          !(
+            Object.hasOwn(previousGroup, nestedKey) &&
+            isDeepStrictEqual(previousGroup[nestedKey], nestedValue) &&
+            !containsUnsafeObjectKey(nestedValue)
+          )
+        ) {
+          throw invalidConfig(
+            `Channel field "${key}.${groupId}.${nestedKey}" is invalid.`,
+          );
+        }
+        if (!known) {
+          assertPreservedUnknownField(
+            `${key}.${groupId}`,
+            nestedKey,
+            nestedValue,
+            previousGroup,
+          );
+        }
+      }
     }
     return true;
   }
@@ -207,17 +277,60 @@ function assertSharedField(key: string, value: unknown): boolean {
   return false;
 }
 
+function containsUnsafeObjectKey(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => containsUnsafeObjectKey(item));
+  }
+  if (!isRecord(value)) return false;
+  return Object.entries(value).some(
+    ([key, nested]) =>
+      UNSAFE_OBJECT_KEYS.has(key) || containsUnsafeObjectKey(nested),
+  );
+}
+
 function assertDescriptorValue(
   field: ChannelConfigFieldDescriptor,
   value: unknown,
+  path = field.key,
+  previous?: unknown,
 ): void {
+  if (field.kind === 'object') {
+    // The web editor cannot edit object fields and re-sends the stored value
+    // verbatim on every save; an unchanged stored object keeps its values even
+    // if a newer rule would reject them. Reserved keys stay rejected.
+    if (isDeepStrictEqual(previous, value) && !containsUnsafeObjectKey(value)) {
+      return;
+    }
+    if (!isRecord(value)) {
+      throw invalidConfig(`Channel field "${path}" has an invalid value.`);
+    }
+    const previousRecord = isRecord(previous) ? previous : {};
+    const properties = new Map(
+      field.properties.map((property) => [property.key, property]),
+    );
+    for (const [key, nestedValue] of Object.entries(value)) {
+      const property = properties.get(key);
+      if (!property) {
+        assertPreservedUnknownField(path, key, nestedValue, previousRecord);
+        continue;
+      }
+      assertDescriptorValue(
+        property,
+        nestedValue,
+        `${path}.${key}`,
+        Object.hasOwn(previousRecord, key) ? previousRecord[key] : undefined,
+      );
+    }
+    assertRequiredFields(field.properties, value, path);
+    return;
+  }
   const invalidEnvironment =
     typeof value === 'string' &&
     isEnvironmentReference(value) &&
-    field.envResolvable !== true;
+    !field.envResolvable;
   if (invalidEnvironment) {
     throw invalidConfig(
-      `Channel field "${field.key}" does not support environment references.`,
+      `Channel field "${path}" does not support environment references.`,
     );
   }
   const valid =
@@ -227,7 +340,9 @@ function assertDescriptorValue(
     (field.kind === 'boolean' && typeof value === 'boolean') ||
     (field.kind === 'number' &&
       typeof value === 'number' &&
-      Number.isFinite(value)) ||
+      Number.isFinite(value) &&
+      (field.exclusiveMinimum === undefined ||
+        value > field.exclusiveMinimum)) ||
     (field.kind === 'enum' &&
       typeof value === 'string' &&
       field.options?.some((option) => option.value === value) === true) ||
@@ -236,10 +351,49 @@ function assertDescriptorValue(
       value.every((item) => typeof item === 'string')) ||
     (field.kind === 'record' &&
       isRecord(value) &&
-      Object.values(value).every((v) => typeof v === 'string'));
+      Object.values(value).every((v) => typeof v === 'string') &&
+      !containsUnsafeObjectKey(value));
   if (!valid) {
-    throw invalidConfig(`Channel field "${field.key}" has an invalid value.`);
+    throw invalidConfig(`Channel field "${path}" has an invalid value.`);
   }
+}
+
+function assertRequiredFields(
+  fields: ReadonlyArray<Pick<ChannelConfigFieldDescriptor, 'key' | 'required'>>,
+  values: Record<string, unknown>,
+  path?: string,
+): void {
+  for (const field of fields) {
+    if (!field.required) continue;
+    const value = Object.hasOwn(values, field.key)
+      ? values[field.key]
+      : undefined;
+    if (value === undefined || value === null || value === '') {
+      const fieldPath = path ? `${path}.${field.key}` : field.key;
+      throw invalidConfig(`Channel field "${fieldPath}" is required.`);
+    }
+  }
+}
+
+function assertPreservedUnknownField(
+  path: string | undefined,
+  key: string,
+  value: unknown,
+  previous: Record<string, unknown>,
+): void {
+  const fieldPath = path ? `${path}.${key}` : key;
+  if (UNSAFE_OBJECT_KEYS.has(key)) {
+    throw invalidConfig(`Channel field "${fieldPath}" is not manageable.`);
+  }
+  if (containsUnsafeObjectKey(value)) {
+    throw invalidConfig(
+      `Channel field "${fieldPath}" cannot use a reserved key.`,
+    );
+  }
+  if (Object.hasOwn(previous, key) && isDeepStrictEqual(previous[key], value)) {
+    return;
+  }
+  throw invalidConfig(`Channel field "${fieldPath}" is not manageable.`);
 }
 
 function assertManagedConfig(
@@ -252,24 +406,26 @@ function assertManagedConfig(
     if (key === 'type') continue;
     const field = descriptorFields.get(key);
     if (field) {
-      assertDescriptorValue(field, value);
+      assertDescriptorValue(
+        field,
+        value,
+        field.key,
+        Object.hasOwn(previous, key) ? previous[key] : undefined,
+      );
       continue;
     }
-    if (assertSharedField(key, value)) continue;
     if (
-      !Object.hasOwn(previous, key) ||
-      !isDeepStrictEqual(previous[key], value)
+      assertSharedField(
+        key,
+        value,
+        Object.hasOwn(previous, key) ? previous[key] : undefined,
+      )
     ) {
-      throw invalidConfig(`Channel field "${key}" is not manageable.`);
+      continue;
     }
+    assertPreservedUnknownField(undefined, key, value, previous);
   }
-  for (const field of fields) {
-    if (!field.required) continue;
-    const value = config[field.key];
-    if (value === undefined || value === null || value === '') {
-      throw invalidConfig(`Channel field "${field.key}" is required.`);
-    }
-  }
+  assertRequiredFields(fields, config);
 }
 
 function validateSecretUpdate(
@@ -386,6 +542,43 @@ export class WorkspaceChannelSettingsStore {
       if (value !== undefined) nextConfig[key] = value;
     }
     assertManagedConfig(nextConfig, previous, plugin.management.fields);
+    const multiSessionError = multiSessionCompatibilityError(name, {
+      multiSession: nextConfig['multiSession'] === true,
+      sessionScope:
+        (nextConfig['sessionScope'] as
+          | 'user'
+          | 'thread'
+          | 'chat_thread'
+          | 'single'
+          | undefined) ??
+        plugin.defaultSessionScope ??
+        'user',
+      groupHistoryLimit: nextConfig['groupHistoryLimit'],
+      groups: isRecord(nextConfig['groups']) ? nextConfig['groups'] : {},
+      webhooks: nextConfig['webhooks'],
+    });
+    if (multiSessionError) throw invalidConfig(multiSessionError);
+    let crossFieldError: unknown;
+    try {
+      crossFieldError = plugin.management.validateConfig?.(nextConfig);
+      if (crossFieldError instanceof Promise) {
+        // A non-async validateConfig can still return a rejected Promise; the
+        // backstop below throws without awaiting it, so attach a handler to
+        // keep the rejection from terminating the daemon.
+        void crossFieldError.catch(() => {});
+      }
+    } catch (error) {
+      throw invalidConfig(
+        `Channel validateConfig failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (crossFieldError !== undefined) {
+      throw invalidConfig(
+        typeof crossFieldError === 'string'
+          ? crossFieldError
+          : 'Channel validateConfig must return a string error message.',
+      );
+    }
 
     const channels = { ...current.channels, [name]: nextConfig };
     const workspaceFile = loadSettings(this.workspaceCwd, {

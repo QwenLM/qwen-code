@@ -14,22 +14,20 @@
 //!    `FindAll(TreeScope::Children, ...)` makes no z-order guarantee, so we
 //!    deliberately do NOT let it reorder anything Win32 already reported.
 //!
-//! Both sources apply the same listability filter (`is_listable_top_level`:
-//! visible, non-iconic, owner-less, non-cloaked). The title is read for
-//! display only and is **not** a filter — empty-caption windows (WPF
-//! `HwndWrapper[...]`, borderless / custom-chrome apps) are listed. The
-//! `filter_pid` argument is applied to the merged list so the union/dedupe
-//! pipeline runs unconditionally.
+//! Both sources require a visible, addressable top-level window. The title is
+//! display metadata rather than a filter, so empty-caption windows remain
+//! targetable. Minimized windows remain addressable and are reported as
+//! off-screen so callers can restore them explicitly. The `filter_pid`
+//! argument is applied to the merged list so the union/dedupe pipeline runs
+//! unconditionally.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
-use windows::Win32::Graphics::Dwm::{
-    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
-};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetWindow, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GW_OWNER,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, GW_OWNER,
 };
 
 #[derive(Debug, Clone)]
@@ -43,6 +41,8 @@ pub struct WindowInfo {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    pub is_on_screen: bool,
+    pub minimized: bool,
 }
 
 struct EnumState {
@@ -58,7 +58,7 @@ struct EnumState {
 /// EnumWindows already reported). The pid filter is applied to the merged
 /// list.
 pub fn list_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
-    let win32_windows = enumerate_via_enum_windows();
+    let win32_windows = list_windows_via_win32(None);
     let uia_windows = crate::uia::enumerate_top_level_windows();
 
     let mut seen: HashSet<u64> = HashSet::with_capacity(uia_windows.len() + win32_windows.len());
@@ -85,12 +85,171 @@ pub fn list_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
     merged
 }
 
-/// Walk `EnumWindows` and collect every listable top-level window (see
-/// `is_listable_top_level`). The title is read for display but is not a
-/// filter, so empty-caption windows are included. No pid filter is applied
-/// here — the caller does that on the merged list.
+/// Resolve one exact Win32 window without entering the global UIA tree.
+///
+/// Exact `(pid, HWND)` callers already have a native identity anchor. Avoiding
+/// the UIA union keeps an unrelated unresponsive provider from blocking that
+/// ownership check.
+pub(crate) fn find_window_by_pid_and_handle(pid: u32, hwnd: u64) -> Option<WindowInfo> {
+    exact_window_from_probe(pid, hwnd, window_info_by_handle)
+}
+
+fn exact_window_from_probe(
+    pid: u32,
+    hwnd: u64,
+    probe: impl FnOnce(u64) -> Option<WindowInfo>,
+) -> Option<WindowInfo> {
+    probe(hwnd).filter(|window| window.pid == pid && window.hwnd == hwnd)
+}
+
+/// Return the native owner of one exact HWND without enumerating Win32 or UIA.
+pub(crate) fn window_owner_pid(hwnd: u64) -> Option<u32> {
+    let hwnd = HWND(hwnd as *mut _);
+    if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
+        return None;
+    }
+    let mut pid = 0;
+    let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    (thread_id != 0 && pid != 0).then_some(pid)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PostActionForegroundRelation {
+    exact_match: bool,
+    target_identity_live: bool,
+    target_gone: bool,
+    actual_live: bool,
+    actual_visible: bool,
+    same_pid: bool,
+    ownership_reaches_target: bool,
+    actual_is_prior_owner: bool,
+}
+
+fn post_action_foreground_allowed(relation: PostActionForegroundRelation) -> bool {
+    relation.actual_live
+        && relation.actual_visible
+        && relation.same_pid
+        && ((relation.target_identity_live
+            && (relation.exact_match || relation.ownership_reaches_target))
+            || (relation.target_gone && relation.actual_is_prior_owner))
+}
+
+fn owner_chain_reaches_target(
+    target: u64,
+    actual: u64,
+    mut owner_of: impl FnMut(u64) -> Option<u64>,
+) -> bool {
+    let mut current = actual;
+    for _ in 0..64 {
+        let Some(owner) = owner_of(current) else {
+            return false;
+        };
+        if owner == target {
+            return true;
+        }
+        if owner == current || owner == actual {
+            return false;
+        }
+        current = owner;
+    }
+    false
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ForegroundTarget {
+    hwnd: u64,
+    pid: u32,
+    owner: Option<u64>,
+}
+
+/// Snapshot the exact target identity and owner before global input is sent.
+pub(crate) fn capture_foreground_target(target: u64) -> Option<ForegroundTarget> {
+    let pid = window_owner_pid(target)?;
+    let owner = unsafe { GetWindow(HWND(target as *mut _), GW_OWNER) }
+        .ok()
+        .filter(|owner| !owner.0.is_null())
+        .map(|owner| owner.0 as usize as u64);
+    Some(ForegroundTarget {
+        hwnd: target,
+        pid,
+        owner,
+    })
+}
+
+/// Verify the foreground before or after an exact-target global input action.
+///
+/// The requested HWND must become foreground before input is sent. The action
+/// may then legitimately open a same-process owned popup or modal, so the
+/// post-action check accepts that transient only when it is still a live,
+/// visible HWND and its complete `GW_OWNER` chain reaches the exact target.
+/// A dismiss action may instead destroy the requested owned modal; that is
+/// accepted only when foreground returns to its snapshotted same-process owner.
+/// Unrelated same-process siblings and foreign foreground windows fail closed.
+pub(crate) fn foreground_matches_target_or_owned_window(
+    target: ForegroundTarget,
+    actual: u64,
+) -> bool {
+    let current_target_pid = window_owner_pid(target.hwnd);
+    let actual_pid = window_owner_pid(actual);
+    let actual_hwnd = HWND(actual as *mut _);
+    let actual_visible = actual_pid.is_some() && unsafe { IsWindowVisible(actual_hwnd) }.as_bool();
+    let ownership_reaches_target = target.hwnd != actual
+        && owner_chain_reaches_target(target.hwnd, actual, |hwnd| {
+            let owner = unsafe { GetWindow(HWND(hwnd as *mut _), GW_OWNER) }
+                .ok()
+                .unwrap_or_default();
+            (!owner.0.is_null()).then_some(owner.0 as usize as u64)
+        });
+
+    post_action_foreground_allowed(PostActionForegroundRelation {
+        exact_match: target.hwnd == actual,
+        target_identity_live: current_target_pid == Some(target.pid),
+        target_gone: current_target_pid.is_none(),
+        actual_live: actual_pid.is_some(),
+        actual_visible,
+        same_pid: actual_pid == Some(target.pid),
+        ownership_reaches_target,
+        actual_is_prior_owner: target.owner == Some(actual),
+    })
+}
+
+fn window_info_by_handle(hwnd: u64) -> Option<WindowInfo> {
+    let native = HWND(hwnd as *mut _);
+    let pid = window_owner_pid(hwnd)?;
+    if !unsafe { IsWindowVisible(native) }.as_bool() {
+        return None;
+    }
+    let title = window_title(native);
+    let minimized = unsafe { IsIconic(native) }.as_bool();
+    let (x, y, width, height) = get_window_bounds(native);
+    Some(WindowInfo {
+        hwnd,
+        pid,
+        title,
+        x,
+        y,
+        width,
+        height,
+        is_on_screen: !minimized,
+        minimized,
+    })
+}
+
+pub(crate) fn list_windows_via_win32(filter_pid: Option<u32>) -> Vec<WindowInfo> {
+    let mut windows = enumerate_via_enum_windows();
+    if let Some(pid) = filter_pid {
+        windows.retain(|window| window.pid == pid);
+    }
+    windows
+}
+
+/// Walk `EnumWindows` and collect every visible top-level window, including
+/// empty-caption windows. No pid filter is applied here — the caller does that
+/// on the merged list.
 fn enumerate_via_enum_windows() -> Vec<WindowInfo> {
-    let state = Mutex::new(EnumState { windows: Vec::new() });
+    let state = Mutex::new(EnumState {
+        windows: Vec::new(),
+    });
     let state_ptr = &state as *const Mutex<EnumState> as isize;
     unsafe {
         let _ = EnumWindows(Some(enum_windows_cb), LPARAM(state_ptr));
@@ -101,22 +260,19 @@ fn enumerate_via_enum_windows() -> Vec<WindowInfo> {
 unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let state = &*(lparam.0 as *const Mutex<EnumState>);
 
-    // Listable == a real, targetable top-level window. We deliberately do NOT
-    // gate on the title: a visible, non-iconic, owner-less, non-cloaked window
-    // is a legitimate target even with an empty caption (WPF, borderless /
-    // custom-chrome apps). Filtering on a non-empty title used to hide these
-    // from the agent even though `debug_window_info` could see them — see
-    // trycua/cua#2020.
-    if !is_listable_top_level(hwnd) {
+    // Invisible helper windows are not user-addressable. Iconic windows are:
+    // retain them with explicit state so callers can restore them.
+    if IsWindowVisible(hwnd).0 == 0 {
         return TRUE;
     }
+    let minimized = IsIconic(hwnd).0 != 0;
 
     // Get pid.
     let mut pid: u32 = 0;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
 
-    // Read the caption for display only — empty is fine. The tool layer
-    // already renders "(no title)" for these records.
+    // Empty captions are legitimate targets; retain the exact OS caption for
+    // display and let callers provide their own fallback label.
     let title = window_title(hwnd);
 
     // Get bounds — prefer DWM extended frame bounds (includes shadow), fallback to GetWindowRect.
@@ -130,80 +286,11 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
         y,
         width: w,
         height: h,
+        is_on_screen: !minimized,
+        minimized,
     });
 
     TRUE
-}
-
-/// Is `hwnd` a real, agent-targetable top-level window?
-///
-/// Single source of truth for what `list_windows` exposes, shared by the
-/// `EnumWindows` and UI Automation enumeration paths so the two can't drift
-/// (that drift was the root cause of trycua/cua#2020). A window qualifies when
-/// it is:
-///
-///   - visible (`IsWindowVisible`) and not minimized (`!IsIconic`),
-///   - a true top-level window — no owner (`GW_OWNER` is null), which excludes
-///     tool-tips, owned pop-ups and transient child surfaces, and
-///   - not DWM-cloaked (`DWMWA_CLOAKED == 0`), which excludes the hidden
-///     background frames of suspended UWP / `ApplicationFrameHost` apps that
-///     still report `IsWindowVisible == true`.
-///
-/// What is deliberately NOT checked: the window title. An empty caption is not
-/// a signal that a window is unreal — WPF apps (`HwndWrapper[App.exe;;<guid>]`),
-/// borderless / custom-chrome apps, and various splash/tool windows ship
-/// visible, owner-less top-level windows with no caption. The owner + cloaked
-/// gates here express "is this a real window?" directly, which is what the
-/// non-empty-title check was a poor proxy for.
-pub(crate) fn is_listable_top_level(hwnd: HWND) -> bool {
-    unsafe {
-        if IsWindowVisible(hwnd).0 == 0 || IsIconic(hwnd).0 != 0 {
-            return false;
-        }
-        // Owner-less == genuine top-level. `GetWindow(GW_OWNER)` yields the
-        // owner HWND, or null/err when there is none. Mirrors the top-level
-        // test `debug_window_info` uses, so the two tools agree on a given HWND.
-        if !GetWindow(hwnd, GW_OWNER).unwrap_or_default().is_invalid() {
-            return false;
-        }
-        // Suspended UWP / ApplicationFrameHost shells keep `WS_VISIBLE` but are
-        // cloaked by DWM (not actually on screen). Drop them.
-        if is_cloaked(hwnd) {
-            return false;
-        }
-        true
-    }
-}
-
-/// True iff DWM reports `hwnd` as cloaked — hidden by the compositor even
-/// though `WS_VISIBLE` is set (suspended UWP app, window on another virtual
-/// desktop, etc.). Returns false if the attribute can't be read.
-unsafe fn is_cloaked(hwnd: HWND) -> bool {
-    let mut cloaked: u32 = 0;
-    let ok = DwmGetWindowAttribute(
-        hwnd,
-        DWMWA_CLOAKED,
-        &mut cloaked as *mut u32 as *mut _,
-        std::mem::size_of::<u32>() as u32,
-    );
-    ok.is_ok() && cloaked != 0
-}
-
-/// Read a window's caption via `GetWindowTextW`. Returns an empty string for
-/// untitled windows — which are still listed (see `is_listable_top_level`).
-/// Shared by the `EnumWindows` and UIA enumeration paths so both report the
-/// OS-level caption identically.
-pub(crate) fn window_title(hwnd: HWND) -> String {
-    unsafe {
-        let title_len = GetWindowTextLengthW(hwnd);
-        if title_len == 0 {
-            return String::new();
-        }
-        let mut buf = vec![0u16; (title_len + 1) as usize];
-        GetWindowTextW(hwnd, &mut buf);
-        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-        String::from_utf16_lossy(&buf[..len])
-    }
 }
 
 fn get_window_bounds(hwnd: HWND) -> (i32, i32, i32, i32) {
@@ -220,7 +307,144 @@ fn get_window_bounds(hwnd: HWND) -> (i32, i32, i32, i32) {
             // Fallback to GetWindowRect.
             let _ = GetWindowRect(hwnd, &mut rect);
         }
-        (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+        (
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+        )
+    }
+}
+
+#[cfg(test)]
+mod exact_window_tests {
+    use super::{
+        exact_window_from_probe, owner_chain_reaches_target, post_action_foreground_allowed,
+        PostActionForegroundRelation, WindowInfo,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn window(pid: u32, hwnd: u64) -> WindowInfo {
+        WindowInfo {
+            hwnd,
+            pid,
+            title: "Exact target".into(),
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            is_on_screen: true,
+            minimized: false,
+        }
+    }
+
+    #[test]
+    fn exact_lookup_probes_only_the_requested_native_handle() {
+        let calls = AtomicUsize::new(0);
+        let found = exact_window_from_probe(42, 0x1234, |hwnd| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(hwnd, 0x1234);
+            Some(window(42, hwnd))
+        });
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(found.map(|window| window.hwnd), Some(0x1234));
+    }
+
+    #[test]
+    fn exact_lookup_rejects_wrong_pid_or_handle() {
+        assert!(exact_window_from_probe(42, 7, |_| Some(window(43, 7))).is_none());
+        assert!(exact_window_from_probe(42, 7, |_| Some(window(42, 8))).is_none());
+    }
+
+    fn relation(
+        exact_match: bool,
+        same_pid: bool,
+        ownership_reaches_target: bool,
+    ) -> PostActionForegroundRelation {
+        PostActionForegroundRelation {
+            exact_match,
+            target_identity_live: true,
+            target_gone: false,
+            actual_live: true,
+            actual_visible: true,
+            same_pid,
+            ownership_reaches_target,
+            actual_is_prior_owner: false,
+        }
+    }
+
+    #[test]
+    fn exact_or_owned_modal_foreground_is_allowed() {
+        assert!(post_action_foreground_allowed(relation(true, true, false)));
+        assert!(post_action_foreground_allowed(relation(false, true, true)));
+    }
+
+    #[test]
+    fn nested_owned_popup_chain_reaches_exact_target() {
+        let owners = [(30, 20), (20, 10)];
+        assert!(owner_chain_reaches_target(10, 30, |hwnd| {
+            owners
+                .iter()
+                .find_map(|(child, owner)| (*child == hwnd).then_some(*owner))
+        }));
+    }
+
+    #[test]
+    fn unrelated_same_pid_sibling_and_foreign_foreground_are_denied() {
+        assert!(!post_action_foreground_allowed(relation(
+            false, true, false
+        )));
+        assert!(!post_action_foreground_allowed(relation(
+            false, false, true
+        )));
+        assert!(!owner_chain_reaches_target(10, 30, |hwnd| {
+            (hwnd == 30).then_some(40)
+        }));
+    }
+
+    #[test]
+    fn dismissed_owned_modal_may_return_to_its_snapshotted_owner_only() {
+        let mut dismissed = relation(false, true, false);
+        dismissed.target_identity_live = false;
+        dismissed.target_gone = true;
+        dismissed.actual_is_prior_owner = true;
+        assert!(post_action_foreground_allowed(dismissed));
+
+        dismissed.actual_is_prior_owner = false;
+        assert!(!post_action_foreground_allowed(dismissed));
+
+        dismissed.actual_is_prior_owner = true;
+        dismissed.same_pid = false;
+        assert!(!post_action_foreground_allowed(dismissed));
+    }
+
+    #[test]
+    fn stale_reused_invisible_or_cyclic_foreground_is_denied() {
+        let mut stale = relation(false, true, true);
+        stale.target_identity_live = false;
+        assert!(!post_action_foreground_allowed(stale));
+        stale.target_identity_live = true;
+        stale.actual_live = false;
+        assert!(!post_action_foreground_allowed(stale));
+        stale.actual_live = true;
+        stale.actual_visible = false;
+        assert!(!post_action_foreground_allowed(stale));
+        assert!(!owner_chain_reaches_target(10, 30, |_| Some(30)));
+    }
+}
+
+/// Read a window caption without treating an empty title as absence.
+pub(crate) fn window_title(hwnd: HWND) -> String {
+    unsafe {
+        let title_len = GetWindowTextLengthW(hwnd);
+        if title_len == 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u16; (title_len + 1) as usize];
+        GetWindowTextW(hwnd, &mut buf);
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        String::from_utf16_lossy(&buf[..len])
     }
 }
 
@@ -237,39 +461,70 @@ fn window_class_name(hwnd: HWND) -> String {
 /// Resolve a packaged-app (UWP) process id to the `ApplicationFrameWindow`
 /// that actually hosts it.
 ///
-/// `IApplicationActivationManager::ActivateApplication` returns the real
-/// packaged-app pid, but a UWP app's top-level window is owned by
-/// `ApplicationFrameHost.exe`, not the app process. The app's own
-/// `CoreWindow` is reparented inside the frame as a child. Consequently
-/// `list_windows(Some(app_pid))` is empty — the frame's
-/// `GetWindowThreadProcessId` reports the AFH pid, not `app_pid`.
+/// ## Why this exists
 ///
-/// We walk every visible top-level `ApplicationFrameWindow`, enumerate its
-/// children, and return the first frame that owns a child whose pid equals
-/// `app_pid`.
+/// `IApplicationActivationManager::ActivateApplication` (see `launch_uwp`)
+/// returns the **real** packaged-app pid — e.g. `CalculatorApp.exe`,
+/// `SystemSettings.exe`. But a modern UWP app's *top-level* window is not
+/// owned by that process. `ApplicationFrameHost.exe` owns the top-level
+/// `ApplicationFrameWindow` (title bar, caption, the HWND a user drags); the
+/// app's own process only owns a `Windows.UI.Core.CoreWindow` reparented
+/// *inside* that frame as a child. Consequences:
 ///
-/// Returns `None` if no hosting frame is found (callers should retry) or if
-/// `app_pid` is 0 (brokered activations that report no pid).
+/// - `list_windows(Some(app_pid))` is **empty** — the app process owns no
+///   top-level window, and the frame's `GetWindowThreadProcessId` reports the
+///   AFH pid, not `app_pid`.
+/// - One `ApplicationFrameHost.exe` pid hosts **many** unrelated UWP apps, so
+///   the AFH pid alone is not an app identity — only the specific frame HWND
+///   disambiguates.
+///
+/// So after a UWP launch, the handles a caller must actually drive are
+/// `(frame_hwnd, afh_pid)` — NOT the `(app_pid, …)` pair `launch_app` would
+/// otherwise report, which resolves to no window at all.
+///
+/// ## How the mapping is made
+///
+/// The stable identity link is process ownership of the hosted child: AFH
+/// reparents the app's `CoreWindow` under the frame, and that child window's
+/// `GetWindowThreadProcessId` reports the **app** pid (the child stays owned
+/// by the app process even though it lives under the AFH frame). We therefore
+/// walk every visible top-level `ApplicationFrameWindow`, scan its child
+/// windows, and return the first frame that owns a child whose process id
+/// equals `app_pid`. This keys off OS-level window parentage rather than a raw
+/// HWND/pid the caller cached, so it stays correct across the HWND churn UWP
+/// activations exhibit in the first moments after launch.
+///
+/// Returns `None` if no hosting frame is found yet (the frame can lag the
+/// process by a few hundred ms — callers should retry) or if `app_pid` is 0
+/// (brokered activations that report no pid; not resolvable by this path).
 pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
     if app_pid == 0 {
         return None;
     }
 
     struct FrameScan {
+        /// pid we're hunting for among each frame's child windows.
         target_app_pid: u32,
+        /// Set to the hosting frame's HWND once a child match is found.
         matched_frame: Option<HWND>,
     }
 
+    // Outer pass: every top-level ApplicationFrameWindow. For each, an inner
+    // EnumChildWindows pass looks for a child owned by `target_app_pid`.
     unsafe extern "system" fn frame_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let scan = &mut *(lparam.0 as *mut FrameScan);
 
         if IsWindowVisible(hwnd).0 == 0 || IsIconic(hwnd).0 != 0 {
             return TRUE;
         }
+        // Only ApplicationFrameHost frames host UWP CoreWindows; skip the rest
+        // cheaply before paying for a child enumeration.
         if window_class_name(hwnd) != "ApplicationFrameWindow" {
             return TRUE;
         }
 
+        // Inner pass: does this frame own a child window belonging to the
+        // launched app process?
         struct ChildScan {
             target_app_pid: u32,
             found: bool,
@@ -280,7 +535,7 @@ pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
             GetWindowThreadProcessId(child, Some(&mut child_pid));
             if child_pid == cs.target_app_pid {
                 cs.found = true;
-                return windows::Win32::Foundation::FALSE;
+                return windows::Win32::Foundation::FALSE; // stop enumerating children
             }
             TRUE
         }
@@ -297,7 +552,7 @@ pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
 
         if child_scan.found {
             scan.matched_frame = Some(hwnd);
-            return windows::Win32::Foundation::FALSE;
+            return windows::Win32::Foundation::FALSE; // stop enumerating frames
         }
         TRUE
     }
@@ -307,18 +562,29 @@ pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
         matched_frame: None,
     };
     unsafe {
-        let _ = EnumWindows(
-            Some(frame_cb),
-            LPARAM(&mut scan as *mut FrameScan as isize),
-        );
+        let _ = EnumWindows(Some(frame_cb), LPARAM(&mut scan as *mut FrameScan as isize));
     }
 
     let frame = scan.matched_frame?;
 
+    // Build the WindowInfo for the frame itself: its HWND is what the caller
+    // drives, and its owning pid is the AFH pid (what get_window_state will
+    // validate `window_id` against and what list_windows reports for it).
     let mut afh_pid: u32 = 0;
     unsafe { GetWindowThreadProcessId(frame, Some(&mut afh_pid)) };
 
-    let title = window_title(frame);
+    let title = unsafe {
+        let len = GetWindowTextLengthW(frame);
+        if len == 0 {
+            String::new()
+        } else {
+            let mut buf = vec![0u16; (len + 1) as usize];
+            GetWindowTextW(frame, &mut buf);
+            let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            String::from_utf16_lossy(&buf[..n])
+        }
+    };
+
     let (x, y, w, h) = get_window_bounds(frame);
 
     Some(WindowInfo {
@@ -329,141 +595,7 @@ pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
         y,
         width: w,
         height: h,
+        is_on_screen: true,
+        minimized: false,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{LRESULT, WPARAM};
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::Threading::GetCurrentProcessId;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
-        RegisterClassExW, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, MSG, PM_REMOVE,
-        SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
-    };
-
-    unsafe extern "system" fn test_wnd_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-        DefWindowProcW(h, m, w, l)
-    }
-
-    /// Drain the calling thread's message queue a few times so the freshly
-    /// created window finishes coming up (and DWM settles its cloaked state)
-    /// before we enumerate.
-    fn pump_messages(rounds: usize) {
-        unsafe {
-            for _ in 0..rounds {
-                let mut msg = MSG::default();
-                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        }
-    }
-
-    /// Regression test for trycua/cua#2020: a visible, owner-less,
-    /// **empty-title** top-level window must be enumerated by `list_windows`.
-    ///
-    /// Before the fix, both enumeration sources dropped any window with
-    /// `GetWindowTextLengthW == 0`, so WPF (`HwndWrapper[App.exe;;<guid>]`),
-    /// borderless and custom-chrome apps were invisible to the agent even
-    /// though `debug_window_info` could list them.
-    ///
-    /// `#[ignore]` because it needs an interactive window station to create a
-    /// visible top-level window; run it via the Windows sandbox harness runner
-    /// or locally with
-    /// `cargo test -p platform-windows -- --ignored empty_title`.
-    #[test]
-    #[ignore]
-    fn empty_title_top_level_window_is_listed() {
-        unsafe {
-            let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
-            let class_name: Vec<u16> = "Cua.Test.EmptyTitleWindow\0".encode_utf16().collect();
-
-            let wc = WNDCLASSEXW {
-                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-                style: CS_HREDRAW | CS_VREDRAW,
-                lpfnWndProc: Some(test_wnd_proc),
-                hInstance: hinstance.into(),
-                lpszClassName: PCWSTR(class_name.as_ptr()),
-                ..Default::default()
-            };
-            // Ignore the return: a re-run in the same process sees the class
-            // already registered, which is harmless.
-            RegisterClassExW(&wc);
-
-            // Empty window name == empty caption — the whole point of the test.
-            let empty_title: Vec<u16> = "\0".encode_utf16().collect();
-            let hwnd = CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
-                PCWSTR(class_name.as_ptr()),
-                PCWSTR(empty_title.as_ptr()),
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                100,
-                100,
-                320,
-                80,
-                None,
-                None,
-                hinstance,
-                None,
-            )
-            .expect("CreateWindowExW failed");
-
-            // RAII guard so the visible test window is always destroyed, even
-            // if a precondition assertion below panics before the explicit
-            // teardown runs.
-            struct WindowGuard(HWND);
-            impl Drop for WindowGuard {
-                fn drop(&mut self) {
-                    unsafe {
-                        let _ = DestroyWindow(self.0);
-                    }
-                }
-            }
-            let window_guard = WindowGuard(hwnd);
-
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            pump_messages(5);
-
-            // Preconditions: the OS really gave us an empty-caption window, and
-            // the shared predicate accepts it despite the empty title.
-            assert_eq!(
-                window_title(hwnd),
-                "",
-                "test precondition: the created window must be untitled"
-            );
-            assert!(
-                is_listable_top_level(hwnd),
-                "an empty-title visible owner-less top-level window must be listable"
-            );
-
-            let pid = GetCurrentProcessId();
-            let windows = list_windows(Some(pid));
-            let found = windows.iter().find(|w| w.hwnd == hwnd.0 as u64).cloned();
-
-            // Tear the window down before the final asserts. Dropping the guard
-            // runs DestroyWindow; if an assertion above already panicked, the
-            // guard's Drop ran during unwind, so the window is gone either way.
-            drop(window_guard);
-            pump_messages(2);
-
-            let found = found.expect(
-                "empty-title top-level window was dropped by list_windows — #2020 regression",
-            );
-            assert_eq!(
-                found.title, "",
-                "listed record should carry the (empty) OS caption verbatim"
-            );
-            assert_eq!(
-                found.pid, pid,
-                "listed record pid should match the creating process"
-            );
-        }
-    }
 }

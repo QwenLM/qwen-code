@@ -5,10 +5,22 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import type { Argv } from 'yargs';
+import yargs from 'yargs';
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
+  anchorRequestsFor,
   applyOutcomes,
   buildReport,
   compressSummary,
@@ -24,6 +36,7 @@ import {
   type Finding,
   type FindingsReport,
   holdCriticalsFailingOnBase,
+  holdUnwitnessedFindings,
   sharedFailingFilesOf,
 } from './findings.js';
 
@@ -67,6 +80,27 @@ describe('validateFindings', () => {
     // nothing publicly while believing it reported everything.
     const [f] = validateFindings([{ ...base, confidence: undefined }]);
     expect(f.confidence).toBe('high');
+  });
+
+  it('normalizes the bracketed source tags the finding format mandates', () => {
+    // Finders write `Source: [probe]` / `Source: [review]` — the bracketed
+    // form the finding format in every agent brief mandates. A finding copied
+    // forward with the tag it was born with must not die at this gate.
+    for (const source of SOURCES) {
+      const [f] = validateFindings([{ ...base, source: `[${source}]` }]);
+      expect(f.source).toBe(source);
+    }
+    const [spaced] = validateFindings([{ ...base, source: ' [probe] ' }]);
+    expect(spaced.source).toBe('probe');
+  });
+
+  it('still rejects an unknown source, bracketed or not', () => {
+    expect(() => validateFindings([{ ...base, source: '[bogus]' }])).toThrow(
+      /has source "\[bogus\]"; expected one of/,
+    );
+    expect(() => validateFindings([{ ...base, source: '[]' }])).toThrow(
+      /has source "\[\]"; expected one of/,
+    );
   });
 
   it('accepts snake_case for the fields the prose format spells with a space', () => {
@@ -171,10 +205,48 @@ describe('validateFindings', () => {
     ).toThrow(/location 0 has an invalid "line"/);
   });
 
-  it('rejects a top-level input that is not an array', () => {
-    expect(() => validateFindings({ findings: [] })).toThrow(
+  it('rejects a top-level input that is neither an array nor a findings wrapper', () => {
+    expect(() => validateFindings({ findings: 'not-an-array' })).toThrow(
       /must be a JSON array/,
     );
+    expect(() => validateFindings({ verdict: 'approve' })).toThrow(
+      /must be a JSON array/,
+    );
+  });
+
+  it('accepts the saved-artifact and report wrappers the recovery path feeds it', () => {
+    // Step 9 cleanup deletes the findings-in.json side file a later-session
+    // outcome path needs; the saved artifact (Step 8) and this command's own
+    // report survive it, and both wrap the array. `--input` must recover
+    // from that surviving state instead of dying on the missing side file.
+    const canonical = validateFindings([
+      { ...base, id: 'R1-1' },
+      { ...base, id: 'R1-2', severity: 'Suggestion' },
+    ]);
+    const report = buildReport(canonical);
+    const fromReport = validateFindings(report);
+    expect(fromReport.map((f) => f.id)).toEqual(['R1-1', 'R1-2']);
+
+    // The ReviewArtifactV1 shape: the same array under review metadata.
+    const artifact = {
+      schemaVersion: 1,
+      reviewId: 'review-1',
+      findings: report.findings,
+      counts: report.counts,
+    };
+    const fromArtifact = validateFindings(artifact);
+    expect(fromArtifact.map((f) => f.id)).toEqual(['R1-1', 'R1-2']);
+
+    // The wrapper round-trips the outcome merge end to end: outcomes apply
+    // to the unwrapped list exactly as they would to the bare array.
+    const withOutcomes = applyOutcomes(
+      validateFindings(report),
+      validateOutcomes([
+        { id: 'R1-1', outcome: 'fixed' },
+        { id: 'R1-2', outcome: 'skipped', note: 'intended behaviour' },
+      ]),
+    );
+    expect(withOutcomes.map((f) => f.outcome)).toEqual(['fixed', 'skipped']);
   });
 });
 
@@ -391,6 +463,24 @@ describe('validateOutcomes', () => {
       /index 0 is missing a string "id"/,
     );
   });
+
+  it('rejects a skipped outcome with no note', () => {
+    // `skipped` keeps the finding on the reader's plate and the note is the
+    // reader's only handle on it — and the report_findings contract refuses
+    // a skipped outcome that carries none, so the ledger feeding it must not
+    // accept one either.
+    expect(() => validateOutcomes([{ id: 'f1', outcome: 'skipped' }])).toThrow(
+      /"skipped" with no note/,
+    );
+    expect(() =>
+      validateOutcomes([{ id: 'f1', outcome: 'skipped', note: '   ' }]),
+    ).toThrow(/"skipped" with no note/);
+    expect(
+      validateOutcomes([
+        { id: 'f1', outcome: 'skipped', note: 'needs a product call' },
+      ]),
+    ).toEqual([{ id: 'f1', outcome: 'skipped', note: 'needs a product call' }]);
+  });
 });
 
 describe('buildReport', () => {
@@ -464,6 +554,150 @@ describe('renderFindings', () => {
   });
 });
 
+describe('anchorRequestsFor', () => {
+  // The Step 7 resolver input, so the projection nobody hand-writes anymore
+  // (a hand projection from `locations[]` once produced all-null anchors).
+  const finding = (over: Partial<Finding> = {}): Finding => ({
+    id: 'f1',
+    severity: 'Critical',
+    confidence: 'high',
+    source: 'review',
+    summary: 'The guard is missing.',
+    shortSummary: 'The guard is missing.',
+    failureScenario: 'A negative amount reaches charge().',
+    locations: [{ file: 'src/pay.ts', line: 11, anchor: 'charge(amt);' }],
+    ...over,
+  });
+
+  it('projects a standalone finding under its own id, path from file', () => {
+    expect(anchorRequestsFor([finding()])).toEqual([
+      { id: 'f1', path: 'src/pay.ts', anchor: 'charge(amt);', line: 11 },
+    ]);
+  });
+
+  it('omits line when the location has none', () => {
+    const [req] = anchorRequestsFor([
+      finding({ locations: [{ file: 'a.ts', anchor: 'x' }] }),
+    ]);
+    expect(req).toEqual({ id: 'f1', path: 'a.ts', anchor: 'x' });
+  });
+
+  it('expands an aggregate into suffixed ids, one per anchored location', () => {
+    const requests = anchorRequestsFor([
+      finding({
+        id: 'p1',
+        locations: [
+          { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+          { file: 'b.ts', line: 2, anchor: 'const b = 2;' },
+          { file: 'c.ts', line: 3, anchor: 'const c = 3;' },
+        ],
+      }),
+    ]);
+    expect(requests.map((r) => r.id)).toEqual(['p1-1', 'p1-2', 'p1-3']);
+    expect(requests.map((r) => r.path)).toEqual(['a.ts', 'b.ts', 'c.ts']);
+  });
+
+  it('skips locations without an anchor — there is nothing to resolve', () => {
+    // The one postable location is the only request, so it keeps the bare id:
+    // the suffix exists to tell several requests for one finding apart.
+    const requests = anchorRequestsFor([
+      finding({
+        id: 'p1',
+        locations: [
+          { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+          { file: 'b.ts', line: 2 },
+        ],
+      }),
+    ]);
+    expect(requests).toEqual([
+      { id: 'p1', path: 'a.ts', anchor: 'const a = 1;', line: 1 },
+    ]);
+  });
+
+  it('refuses an expanded id that collides with another finding’s id', () => {
+    // The aggregate `p1` mints `p1-1` for its first location; a standalone
+    // finding is allowed to be named `p1-1`. Resolutions join back on this
+    // id, so the collision must fail here — not at Step 7, where
+    // resolve-anchors refuses the whole batch.
+    expect(() =>
+      anchorRequestsFor([
+        finding({
+          id: 'p1',
+          locations: [
+            { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+            { file: 'b.ts', line: 2, anchor: 'const b = 2;' },
+          ],
+        }),
+        finding({ id: 'p1-1' }),
+      ]),
+    ).toThrow(/anchor request id "p1-1" is produced twice/);
+  });
+
+  it('refuses the collision when the other finding is itself an aggregate', () => {
+    // `p1-1` here mints `p1-1-1`, `p1-1-2` — it never emits its own bare id,
+    // so a guard that only compares minted ids never sees the collision. The
+    // Step 7 id-join pairs `p1`'s first-location resolution with finding
+    // `p1-1`'s body, and the comment lands on the wrong finding.
+    expect(() =>
+      anchorRequestsFor([
+        finding({
+          id: 'p1',
+          locations: [
+            { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+            { file: 'b.ts', line: 2, anchor: 'const b = 2;' },
+          ],
+        }),
+        finding({
+          id: 'p1-1',
+          locations: [
+            { file: 'c.ts', line: 3, anchor: 'const c = 3;' },
+            { file: 'd.ts', line: 4, anchor: 'const d = 4;' },
+          ],
+        }),
+      ]),
+    ).toThrow(/anchor request id "p1-1" is produced twice/);
+  });
+
+  // A low-confidence, anchorless, or Nice-to-have finding emits nothing —
+  // but it stays in the artifact, and Step 7 joins resolutions to the
+  // artifact by id. A minted id equal to its id attaches the comment to the
+  // wrong body all the same.
+  const noRequestShapes: Array<[string, Partial<Finding>]> = [
+    ['low-confidence', { confidence: 'low' }],
+    ['anchorless', { locations: [{ file: 'z.ts', line: 9 }] }],
+    ['Nice to have', { severity: 'Nice to have' }],
+  ];
+  it.each(noRequestShapes)(
+    'refuses the collision when the other finding emits no request (%s)',
+    (_shape, over) => {
+      expect(() =>
+        anchorRequestsFor([
+          finding({
+            id: 'p1',
+            locations: [
+              { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+              { file: 'b.ts', line: 2, anchor: 'const b = 2;' },
+            ],
+          }),
+          finding({ id: 'p1-1', ...over }),
+        ]),
+      ).toThrow(/anchor request id "p1-1" is produced twice/);
+    },
+  );
+
+  it('projects only high-confidence Criticals and Suggestions', () => {
+    // The resolver input is the comments[] set: Nice to have and
+    // low-confidence findings are terminal-only and never anchored.
+    const requests = anchorRequestsFor([
+      finding({ id: 'keep-c' }),
+      finding({ id: 'keep-s', severity: 'Suggestion' }),
+      finding({ id: 'drop-nth', severity: 'Nice to have' }),
+      finding({ id: 'drop-low', confidence: 'low' }),
+    ]);
+    expect(requests.map((r) => r.id)).toEqual(['keep-c', 'keep-s']);
+  });
+});
+
 // The exported functions are unit-tested above, and none of them reaches the
 // review unless this command's file boundary holds: reading two JSON inputs,
 // writing the artifact, and — the part that matters — turning an incomplete
@@ -510,6 +744,78 @@ describe('findings (command boundary)', () => {
     }
     return out;
   }
+
+  it('demotes an unwitnessed Critical through the whole handler, and says so on stderr', () => {
+    // The unit tests pin holdUnwitnessedFindings in isolation; this pins the
+    // WIRING — the call sits in the handler before buildReport, so removing
+    // it, or moving it after the report is built, fails here, not silently.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'w1' },
+        { ...base, id: 'w2', witness: 'probe flipped: 2 calls → 1' },
+      ]),
+    );
+    const stderr = runCapturingStderr({ input, out, print: false });
+    const report = JSON.parse(readFileSync(out, 'utf8')) as FindingsReport;
+    const byId = new Map(report.findings.map((f) => [f.id, f]));
+    expect(byId.get('w1')?.confidence).toBe('low');
+    expect(byId.get('w1')?.failureScenario).toContain('witness rule');
+    expect(byId.get('w2')?.confidence).toBe('high');
+    expect(stderr).toContain('w1 filed at low confidence');
+    expect(stderr).not.toContain('w2 filed at low confidence');
+    expect(report.counts.byConfidence['low']).toBe(1);
+  });
+
+  it('the artifact compose-review consumes already has an unwitnessed deferrable Critical at low confidence (#10291 × witness rule)', () => {
+    // The two features compose safely only by ORDER: the witness hold runs
+    // here, in Step 6, before compose-review ever reads the artifact — so a
+    // Critical whose axes say fails-closed on new-surface but that no run
+    // confirmed is terminal-only by the time the deferral channel exists,
+    // and the orchestrator has nothing high-confidence to route into
+    // `deferredSuggestions`. Nothing in compose-review can re-check this
+    // (its deferral entries carry no witness field), so the order IS the
+    // contract; moving the hold after the report is built fails here.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          ...base,
+          id: 'd1',
+          direction: 'fails-closed',
+          baseline: 'new-surface',
+        },
+        {
+          ...base,
+          id: 'd2',
+          direction: 'fails-closed',
+          baseline: 'new-surface',
+          witness: 'probe: the sparse clone wedged at step 3',
+        },
+      ]),
+    );
+    runCapturingStderr({ input, out, print: false });
+    const report = JSON.parse(readFileSync(out, 'utf8')) as FindingsReport;
+    const byId = new Map(report.findings.map((f) => [f.id, f]));
+    // Unwitnessed: demoted, axes preserved as facts, never deferrable.
+    expect(byId.get('d1')).toMatchObject({
+      confidence: 'low',
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+    expect(byId.get('d1')?.failureScenario).toContain('witness rule');
+    // Witnessed: the artifact carries it high with both axes intact — the
+    // only shape the critical floor is ever allowed to defer.
+    expect(byId.get('d2')).toMatchObject({
+      confidence: 'high',
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+  });
 
   it('announces every hold, naming the finding and the measured file', () => {
     // A severity this command lowered is a change to what the review says. Left
@@ -611,6 +917,290 @@ describe('findings (command boundary)', () => {
     expect(report.findings[0].severity).toBe('Suggestion');
     expect(report.counts.bySeverity['Critical']).toBe(0);
     expect(report.findings[0].failureScenario).toContain('failed there too');
+    // The measurement hold must run BEFORE the witness hold, or the held
+    // Suggestion (review-source, no witness) would be demoted to low
+    // confidence and silently lose the PR surface the hold promises.
+    expect(report.findings[0].confidence).toBe('high');
+  });
+
+  it('--to-anchors writes the resolver input beside the artifact, and names it on stderr', () => {
+    // The projection Step 7 used to hand-write: it must come out of the SAME
+    // findings the artifact carries, holds included.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'nested/anchors.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          ...base,
+          id: 'f1',
+          source: '[probe]',
+          anchor: 'charge(amt);',
+        },
+      ]),
+    );
+    const stderr = runCapturingStderr({
+      input,
+      out,
+      toAnchors: anchors,
+      print: false,
+    });
+    const requests = JSON.parse(readFileSync(anchors, 'utf8'));
+    expect(requests).toEqual([
+      { id: 'f1', path: 'src/retry.ts', anchor: 'charge(amt);', line: 42 },
+    ]);
+    expect(stderr).toContain('1 anchor request(s)');
+  });
+
+  it('--to-anchors skips a Critical the witness rule demoted to low confidence', () => {
+    // A Critical the witness rule lowered to low confidence is terminal-only
+    // and must not reach the resolver input: the projection runs after the
+    // holds, on the same findings the artifact carries.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'kept', anchor: 'charge(amt);', source: 'probe' },
+        { ...base, id: 'demoted', anchor: 'other(amt);', source: 'review' },
+      ]),
+    );
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out,
+      toAnchors: anchors,
+      print: false,
+    });
+    const requests = JSON.parse(readFileSync(anchors, 'utf8'));
+    expect(requests.map((r: { id: string }) => r.id)).toEqual(['kept']);
+  });
+
+  it('--to-anchors projects a test-delta-held finding as a postable Suggestion', () => {
+    // The hold demotes Critical to Suggestion but leaves confidence high, so
+    // the held finding is still postable and must reach the resolver input —
+    // the severity hold's projection, untested at the command boundary.
+    // `[probe]` keeps the witness rule out of the picture so this tests the
+    // severity hold alone.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const delta = join(dir, 'test-delta.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          ...base,
+          id: 'held',
+          source: '[probe]',
+          anchor: 'charge(amt);',
+          failureScenario:
+            'packages/cli/src/ui/auth/AuthDialog.test.tsx goes red on this change.',
+        },
+      ]),
+    );
+    writeFileSync(
+      delta,
+      JSON.stringify({
+        entries: [
+          {
+            command: 'npm test --workspace="packages/cli"',
+            netNew: [],
+            shared: ['src/ui/auth/AuthDialog.test.tsx'],
+          },
+        ],
+      }),
+    );
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out,
+      testDelta: delta,
+      toAnchors: anchors,
+      print: false,
+    });
+    const report = JSON.parse(readFileSync(out, 'utf8')) as FindingsReport;
+    expect(report.findings[0].severity).toBe('Suggestion');
+    expect(report.findings[0].confidence).toBe('high');
+    expect(JSON.parse(readFileSync(anchors, 'utf8'))).toEqual([
+      { id: 'held', path: 'src/retry.ts', anchor: 'charge(amt);', line: 42 },
+    ]);
+  });
+
+  it('--to-anchors leaves the previous pair untouched when the projection throws', () => {
+    // The projection can throw (the expanded-id collision guard). It runs
+    // BEFORE the artifact write precisely so a failed rerun leaves the
+    // previous consistent pair on disk — not v2 findings beside v1 anchors,
+    // a pair Step 7 joins by id.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'a1', anchor: 'charge(amt);', source: 'probe' },
+      ]),
+    );
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out,
+      toAnchors: anchors,
+      print: false,
+    });
+    const findingsBefore = readFileSync(out, 'utf8');
+    const anchorsBefore = readFileSync(anchors, 'utf8');
+
+    // Rerun on the same paths with input the collision guard refuses.
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          ...base,
+          id: 'p1',
+          source: 'probe',
+          locations: [
+            { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+            { file: 'b.ts', line: 2, anchor: 'const b = 2;' },
+          ],
+        },
+        { ...base, id: 'p1-1', source: 'probe', anchor: 'other(amt);' },
+      ]),
+    );
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)({
+        input,
+        out,
+        toAnchors: anchors,
+        print: false,
+      }),
+    ).toThrow(/anchor request id "p1-1" is produced twice/);
+    expect(readFileSync(out, 'utf8')).toBe(findingsBefore);
+    expect(readFileSync(anchors, 'utf8')).toBe(anchorsBefore);
+  });
+
+  it('--to-anchors leaves the previous pair untouched when the anchors write fails', () => {
+    // Step 7 joins the pair by id, and carried-forward findings keep their
+    // ids across reruns — so a rewritten findings.json beside the previous
+    // run's anchors lets stale resolutions attach to the wrong finding
+    // bodies instead of failing loudly. The anchors write must go down
+    // first: its path is the realistic failure (a parent that cannot be
+    // created, a read-only directory), and a failure there must find both
+    // files still the previous consistent pair.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'a1', source: 'probe', anchor: 'charge(amt);' },
+      ]),
+    );
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out,
+      toAnchors: anchors,
+      print: false,
+    });
+    const findingsBefore = readFileSync(out, 'utf8');
+    const anchorsBefore = readFileSync(anchors, 'utf8');
+
+    // Rerun with changed findings and an anchors path whose parent cannot
+    // be created: `anchors.json` already exists as a regular file, so a
+    // directory component through it throws ENOTDIR.
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'a2', source: 'probe', anchor: 'other(amt);' },
+      ]),
+    );
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)({
+        input,
+        out,
+        toAnchors: join(anchors, 'nested/anchors.json'),
+        print: false,
+      }),
+    ).toThrow();
+    expect(readFileSync(out, 'utf8')).toBe(findingsBefore);
+    expect(readFileSync(anchors, 'utf8')).toBe(anchorsBefore);
+  });
+
+  it("--to-anchors overwrites a previous run's anchors file on rerun", () => {
+    // The rerun is a designed case — the previous attempt's anchors.json is
+    // still on disk, and the write order exists to keep the pair consistent.
+    // Every other existing-anchor case in this suite expects a refusal; this
+    // one pins the success path, so a guard that refused ANY pre-existing
+    // anchor file turns red here instead of throwing at Step 6/7 of every
+    // pipeline rerun.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(anchors, '[]\n'); // a previous run's artifact
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'r2', source: 'probe', anchor: 'charge(amt);' },
+      ]),
+    );
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out,
+      toAnchors: anchors,
+      print: false,
+    });
+    expect(JSON.parse(readFileSync(anchors, 'utf8'))).toEqual([
+      { id: 'r2', path: 'src/retry.ts', anchor: 'charge(amt);', line: 42 },
+    ]);
+  });
+
+  it('--to-anchors names the postable locations it cannot project', () => {
+    // The projection skips anchorless locations, and nothing downstream
+    // cross-checks the artifact against the resolver input — so the skip
+    // must be named: a Critical that silently drops out of the posted
+    // review is the failure this line exists to prevent.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'anchored-c', source: 'probe', anchor: 'charge(amt);' },
+        { ...base, id: 'anchorless-c', source: 'probe' },
+        {
+          ...base,
+          id: 'agg',
+          source: 'probe',
+          locations: [
+            { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+            { file: 'b.ts', line: 2 },
+          ],
+        },
+      ]),
+    );
+    const stderr = runCapturingStderr({
+      input,
+      out,
+      toAnchors: anchors,
+      print: false,
+    });
+    // A finding that projects nothing is disposed of as a finding — the
+    // ordinary unanchorable one: a Critical moves to the body, a Suggestion
+    // is discarded.
+    expect(stderr).toContain(
+      'anchorless-c carries 1 location(s) without an anchor — ' +
+        'absent from the resolver input; dispose as unanchorable',
+    );
+    // A mixed aggregate still projects its anchored locations, so the
+    // finding-level disposition must not fire for it: "dispose as
+    // unanchorable" there would move the Critical into the body (or count
+    // the Suggestion into S) while its anchored location also posts — the
+    // same finding counted twice into C or S.
+    expect(stderr).toContain(
+      'agg carries 1 location(s) without an anchor — absent from the ' +
+        'resolver input; the finding still projects 1 anchored location(s), ' +
+        'and the anchorless ones add no comment and no body copy',
+    );
+    expect(stderr).not.toContain('anchored-c carries');
   });
 
   it.each([
@@ -787,6 +1377,446 @@ describe('findings (command boundary)', () => {
         print: false,
       }),
     ).toThrow(/is not valid JSON/);
+  });
+
+  it('refuses a --to-anchors that is the same file as another path argument', () => {
+    // The pair Step 7 joins by id must stay distinct files: a resolver input
+    // that resolves onto any of them destroys its counterpart while stderr
+    // reports every write as successful. All four siblings are checked, each
+    // spelled three ways: identical strings, and the same file named two
+    // different ways on each side in turn — the shape only resolve()
+    // normalisation catches, so a raw string compare must fail here.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    const sameFile = join(dir, 'shared.json');
+    const spelled = join(dir, 'sub') + '/../shared.json';
+    for (const flag of ['input', 'out', 'outcomes', 'testDelta']) {
+      for (const [flagPath, anchorPath] of [
+        [sameFile, sameFile],
+        [spelled, sameFile],
+        [sameFile, spelled],
+      ]) {
+        const argv: Record<string, unknown> = {
+          input,
+          out: join(dir, 'findings.json'),
+          outcomes: undefined,
+          testDelta: undefined,
+          print: false,
+          toAnchors: undefined,
+        };
+        argv[flag] = flagPath;
+        argv['toAnchors'] = anchorPath;
+        expect(() =>
+          (findingsCommand.handler as (a: unknown) => void)(argv),
+        ).toThrow(/--to-anchors points at the same file/);
+      }
+    }
+  });
+
+  it('refuses a --to-anchors that is a symlink', () => {
+    // resolve() is lexical — it never consults the filesystem — so a link
+    // aliasing a sibling argument (say --out) passes any string compare, and
+    // the handler would write the anchor requests through the alias and then
+    // truncate the same file with the artifact, both writes reporting
+    // success. Identity is the check, and it starts by refusing links: a
+    // dangling one realpath cannot even see.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    const makeArgv = (toAnchors: string) => ({
+      input,
+      out: join(dir, 'findings.json'),
+      outcomes: undefined,
+      testDelta: undefined,
+      print: false,
+      toAnchors,
+    });
+
+    const alias = join(dir, 'anchors.json');
+    symlinkSync(join(dir, 'findings.json'), alias);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(makeArgv(alias)),
+    ).toThrow(/--to-anchors must not be a symlink/);
+
+    const dangling = join(dir, 'dangling.json');
+    symlinkSync(join(dir, 'nowhere.json'), dangling);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(makeArgv(dangling)),
+    ).toThrow(/--to-anchors must not be a symlink/);
+  });
+
+  it('refuses a --to-anchors hardlinked to a sibling file', () => {
+    // realpathSync never resolves hard links: two names of one inode compare
+    // as different path strings, so a string-identity guard admits them and
+    // both writes hit the same file — the exact destruction the guard exists
+    // to refuse. Filesystem identity (dev/ino) is the check that sees it.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    const out = join(dir, 'findings.json');
+    writeFileSync(out, JSON.stringify([base])); // a previous run's artifact
+    const anchors = join(dir, 'anchors.json');
+    linkSync(out, anchors);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)({
+        input,
+        out,
+        outcomes: undefined,
+        testDelta: undefined,
+        print: false,
+        toAnchors: anchors,
+      }),
+    ).toThrow(/--to-anchors points at the same file/);
+    // The refusal must precede every write: the previous run's file is intact.
+    expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual([base]);
+  });
+
+  it('refuses a dangling-symlink sibling that can alias the anchor target', () => {
+    // realpathSync fails on a dangling link, and the catch used to label
+    // every such failure "absent" — so a --out dangling onto the
+    // not-yet-created --to-anchors target passed the guard, the handler
+    // created the target with the resolver input, and the artifact write
+    // followed the link and truncated that same file.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    const anchors = join(dir, 'anchors.json'); // the run would create it
+    const out = join(dir, 'findings.json');
+    symlinkSync(anchors, out);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)({
+        input,
+        out,
+        outcomes: undefined,
+        testDelta: undefined,
+        print: false,
+        toAnchors: anchors,
+      }),
+    ).toThrow(/must not be a dangling symlink/);
+    expect(existsSync(anchors)).toBe(false);
+  });
+
+  it('refuses a collision spelled through a symlinked directory', () => {
+    // With neither file on disk yet, no realpath reaches either side — the
+    // aliasing lives in a DIRECTORY component. Canonicalising the deepest
+    // existing ancestor sees it; lexical resolve() does not. The shared.json
+    // pair pins the same shape with the file already there, across the
+    // rewrite from string identity to dev/ino.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    mkdirSync(join(dir, 'real'));
+    symlinkSync(join(dir, 'real'), join(dir, 'link'));
+    const makeArgv = (out: string, toAnchors: string) => ({
+      input,
+      out,
+      outcomes: undefined,
+      testDelta: undefined,
+      print: false,
+      toAnchors,
+    });
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(
+        makeArgv(
+          join(dir, 'link/findings.json'),
+          join(dir, 'real/findings.json'),
+        ),
+      ),
+    ).toThrow(/--to-anchors points at the same file/);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(
+        makeArgv(
+          join(dir, 'real/findings.json'),
+          join(dir, 'link/findings.json'),
+        ),
+      ),
+    ).toThrow(/--to-anchors points at the same file/);
+    // The refusal precedes every write — the anchor target was never created.
+    expect(existsSync(join(dir, 'real/findings.json'))).toBe(false);
+
+    writeFileSync(join(dir, 'real/shared.json'), JSON.stringify([base]));
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(
+        makeArgv(join(dir, 'link/shared.json'), join(dir, 'real/shared.json')),
+      ),
+    ).toThrow(/--to-anchors points at the same file/);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(
+        makeArgv(join(dir, 'real/shared.json'), join(dir, 'link/shared.json')),
+      ),
+    ).toThrow(/--to-anchors points at the same file/);
+  });
+
+  it('refuses a --to-anchors nested inside a sibling path, or containing one', () => {
+    // Identity does not cover containment: o.json and o.json/anchors.json
+    // are distinct files, but the write sequence creates whichever path is
+    // the directory prefix as a directory, the paired write dies at EISDIR,
+    // and the stray directory survives every rerun. Both nesting directions
+    // must be refused up front.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    const out = join(dir, 'o.json'); // absent on purpose
+    const anchors = join(dir, 'o.json/anchors.json');
+    const makeArgv = (outArg: string, toAnchors: string) => ({
+      input,
+      out: outArg,
+      outcomes: undefined,
+      testDelta: undefined,
+      print: false,
+      toAnchors,
+    });
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(makeArgv(out, anchors)),
+    ).toThrow(/--to-anchors must not nest inside/);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)(makeArgv(anchors, out)),
+    ).toThrow(/--to-anchors must not nest inside/);
+    // The refusal precedes every write: the prefix was never created.
+    expect(existsSync(out)).toBe(false);
+  });
+
+  it('refuses a --to-anchors that is an existing directory', () => {
+    // A directory is not a symlink, so the link refusal does not see it, and
+    // the anchor write would die at a raw EISDIR — the up-front descriptive
+    // refusal is exactly what the guard exists for.
+    const input = join(dir, 'in.json');
+    writeFileSync(input, JSON.stringify([base]));
+    const anchors = join(dir, 'anchors-dir');
+    mkdirSync(anchors);
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)({
+        input,
+        out: join(dir, 'findings.json'),
+        outcomes: undefined,
+        testDelta: undefined,
+        print: false,
+        toAnchors: anchors,
+      }),
+    ).toThrow(/--to-anchors must not be a directory/);
+  });
+
+  it('parses --to-anchors into the field the handler actually reads', () => {
+    // Every boundary test above builds its args by hand with the camelCase
+    // key — the same shape that let a flag-name bug into `test-plan`: yargs
+    // camel-cases the flag, a field named for the flag reads `undefined` on
+    // every real invocation, and the suite stays green because nothing went
+    // through yargs. This one does: the parsed object goes straight into the
+    // handler, and the anchors file is written only if `toAnchors` actually
+    // arrived from the flag.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(
+      input,
+      // `probe` is witness-exempt: a default `review` Critical without a
+      // witness is held to low confidence by the handler and never projects.
+      JSON.stringify([{ ...base, source: 'probe', anchor: 'charge(amt);' }]),
+    );
+    // .strict() matters: a lenient parser camel-cases unknown flags and
+    // passes them through, so dropping the --to-anchors registration from
+    // the builder would keep this test green while the real command (whose
+    // root parser IS strict) rejects the flag.
+    const parsed = (findingsCommand.builder as (y: Argv) => Argv)(
+      yargs([]).strict(),
+    ).parseSync([
+      '--input',
+      input,
+      '--out',
+      out,
+      '--to-anchors',
+      anchors,
+    ]) as unknown as Record<string, unknown>;
+    expect(parsed['toAnchors']).toBe(anchors);
+    (findingsCommand.handler as (a: unknown) => void)({
+      ...parsed,
+      print: false,
+    });
+    const requests = JSON.parse(readFileSync(anchors, 'utf8'));
+    expect(requests).toEqual([
+      { id: 'f1', path: 'src/retry.ts', anchor: 'charge(amt);', line: 42 },
+    ]);
+  });
+});
+
+describe('holdUnwitnessedFindings — the witness rule has a machine half', () => {
+  const critical = {
+    id: 'w1',
+    severity: 'Critical' as const,
+    confidence: 'high' as const,
+    source: 'review' as const,
+    summary: 'double-executes the shell command',
+    shortSummary: 'double execute',
+    failureScenario: 'run !git push → sendShellCommand fires twice',
+    locations: [{ file: 'src/pay.ts', line: 42 }],
+  };
+
+  it('files an unwitnessed high-confidence review Critical at low confidence, and says why', () => {
+    // The demotion the SKILL promises as mechanical: without this, the sort
+    // exists only as Step 4 prose, and an omitted `confidence` even defaults
+    // to `high` — the fail-open direction (dogfood review of the witness PR).
+    const { findings, unwitnessed } = holdUnwitnessedFindings([critical]);
+    expect(findings[0].confidence).toBe('low');
+    expect(findings[0].severity).toBe('Critical');
+    expect(findings[0].failureScenario).toContain('witness rule');
+    expect(findings[0].failureScenario).toContain('this confirmed Critical');
+    // The original evidence survives — the rule is appended, not substituted.
+    expect(findings[0].failureScenario).toContain('fires twice');
+    expect(unwitnessed).toEqual(['w1']);
+  });
+
+  it('the deferrable axes (#10291) do NOT exempt an unwitnessed Critical — witness first, deferral second', () => {
+    // A Critical tagged fails-closed on new-surface is the ONE combination
+    // the critical floor may defer (compose-review's floorDefersCritical).
+    // Deferral is a posting decision about a CONFIRMED blocker; it is not a
+    // second door past the witness rule the way `heldByMeasurement` is (that
+    // one carries a measurement as its witness). Without this pin, an
+    // unverified Critical could ride its axes straight into the deferral
+    // channel — moved out of the posting set as if it were settled, while no
+    // run ever confirmed it. So: no witness → low confidence (terminal-only,
+    // never drafted, never deferrable), axes or not.
+    const deferrable = {
+      ...critical,
+      direction: 'fails-closed' as const,
+      baseline: 'new-surface' as const,
+    };
+    const held = holdUnwitnessedFindings([deferrable]);
+    expect(held.findings[0].confidence).toBe('low');
+    expect(held.unwitnessed).toEqual(['w1']);
+    // The axes are preserved on the demoted finding — they are facts about
+    // the finding, not a licence — so a later witness can restore it whole.
+    expect(held.findings[0].direction).toBe('fails-closed');
+    expect(held.findings[0].baseline).toBe('new-surface');
+
+    // With a witness the same finding stays high-confidence AND keeps its
+    // axes, which is what lets compose-review defer it: the axes reach the
+    // deferral channel only on a finding that passed the witness rule.
+    const witnessed = holdUnwitnessedFindings([
+      { ...deferrable, witness: 'probe: the sparse clone wedged at step 3' },
+    ]);
+    expect(witnessed.unwitnessed).toEqual([]);
+    expect(witnessed.findings[0]).toMatchObject({
+      confidence: 'high',
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+  });
+
+  it('leaves a witnessed Critical alone — either form of the field counts', () => {
+    for (const witness of [
+      'BASE: 2 calls / PR: 1 call — probe flipped',
+      'not run — needs a live OAuth endpoint this harness lacks',
+    ]) {
+      const { findings, unwitnessed } = holdUnwitnessedFindings([
+        { ...critical, witness },
+      ]);
+      expect(findings[0].confidence).toBe('high');
+      expect(unwitnessed).toEqual([]);
+    }
+  });
+
+  it('exempts deterministic sources — their witness is constitutive', () => {
+    // A [build]/[test]/[probe] finding IS a run's output; demanding a second
+    // witness would demote findings the pipeline treats as pre-confirmed.
+    for (const source of ['build', 'test', 'probe', 'lint'] as const) {
+      const { unwitnessed } = holdUnwitnessedFindings([
+        { ...critical, source },
+      ]);
+      expect(unwitnessed).toEqual([]);
+    }
+  });
+
+  it('is idempotent — a demoted finding re-fed is not touched again', () => {
+    const once = holdUnwitnessedFindings([critical]).findings[0];
+    const twice = holdUnwitnessedFindings([once]).findings[0];
+    expect(twice).toEqual(once);
+  });
+
+  it('exempts a measurement-held finding — the two holds must not compose into a silent drop', () => {
+    // test-delta's hold demotes Critical→Suggestion on the promise the
+    // finding STAYS in front of a human as a posted Suggestion whose note
+    // says how to re-raise it. Judging that Suggestion here would drop it to
+    // terminal-only — and it is not the unexecuted claim this rule stops:
+    // the measurement that moved it IS a run's output, riding the finding.
+    const named = {
+      ...critical,
+      failureScenario: 'breaks packages/x/foo.test.ts on main',
+    };
+    const held = holdCriticalsFailingOnBase([named], ['packages/x/foo.test.ts'])
+      .findings[0];
+    expect(held.severity).toBe('Suggestion');
+    expect(held.heldByMeasurement).toEqual({ file: 'packages/x/foo.test.ts' });
+    const { findings, unwitnessed } = holdUnwitnessedFindings([held]);
+    expect(unwitnessed).toEqual([]);
+    expect(findings[0].confidence).toBe('high');
+  });
+
+  it('does NOT exempt a Critical re-raised through the measurement note’s own door', () => {
+    // The note tells the reader to "file it at Critical again"; a finding
+    // that does so still carries `heldByMeasurement`, and it must face the
+    // witness rule like any unexecuted Critical — the exemption is scoped to
+    // Suggestion precisely so this door does not become a witness bypass.
+    const reraised = {
+      ...critical,
+      severity: 'Critical' as const,
+      heldByMeasurement: { file: 'packages/x/foo.test.ts' },
+    };
+    const { findings, unwitnessed } = holdUnwitnessedFindings([reraised]);
+    expect(unwitnessed).toEqual(['w1']);
+    expect(findings[0].confidence).toBe('low');
+  });
+
+  it('judges Suggestions on the same terms — they post to the PR too', () => {
+    // The rule originally targeted Criticals only; an unexecuted claim rides
+    // onto the author's screen through the Suggestion door on exactly the
+    // same terms, so both postable severities are judged. `Nice to have` is
+    // terminal-only by construction and stays exempt.
+    const { findings, unwitnessed } = holdUnwitnessedFindings([
+      { ...critical, severity: 'Suggestion' },
+    ]);
+    expect(findings[0].confidence).toBe('low');
+    expect(findings[0].failureScenario).toContain('witness rule');
+    // The sentence names the severity it demoted — a hardcoded 'Critical'
+    // here would mislabel every demoted Suggestion in the one sentence a
+    // human reads to understand the demotion.
+    expect(findings[0].failureScenario).toContain('this confirmed Suggestion');
+    expect(unwitnessed).toEqual(['w1']);
+    expect(
+      holdUnwitnessedFindings([{ ...critical, severity: 'Nice to have' }])
+        .unwitnessed,
+    ).toEqual([]);
+  });
+
+  it('treats a reason-less `not run` line as no witness at all', () => {
+    // The escape hatch is the REASON, not the phrase: `not run —` with
+    // nothing after the dash names nothing a human can weigh, so it counts
+    // as absent. Emptiness is "no letter or digit", not a dash-glyph list —
+    // the first draft enumerated three dashes and U+2015/U+2212/U+FF0D
+    // slipped through as "reasons".
+    for (const witness of [
+      'not run',
+      'not run —',
+      'witness: not run - ',
+      'not run \u2015',
+      'not run \u2212',
+      'not run \uFF0D',
+      'not run —— …',
+      // The phrase's own word-continuations carry no reason either.
+      'not runnable',
+      'not running —',
+    ]) {
+      const { unwitnessed } = holdUnwitnessedFindings([
+        { ...critical, witness },
+      ]);
+      expect(unwitnessed).toEqual(['w1']);
+    }
+    // A real reason in ANY script stands — JavaScript's \w is ASCII-only,
+    // so the emptiness test must not read a CJK reason as empty.
+    for (const witness of [
+      'not run — timing window no probe can pin',
+      'not run — 需要生产环境才能触发',
+      'not runnable — needs a prod-only token',
+    ]) {
+      const { unwitnessed } = holdUnwitnessedFindings([
+        { ...critical, witness },
+      ]);
+      expect(unwitnessed).toEqual([]);
+    }
   });
 });
 
@@ -1213,5 +2243,148 @@ describe('validateFindings — the canonical artifact round-trips', () => {
     const [f] = validateFindings([{ ...base, outcomeNote: 'stray' }]);
     expect(f.outcome).toBeUndefined();
     expect(f.outcomeNote).toBeUndefined();
+  });
+
+  it('keeps witness, so the executed evidence survives being fed back', () => {
+    // The Step 4 witness rule attaches the evidence once; the report and the
+    // comment bodies read it back out of the artifact. Dropped here, every
+    // downstream quote becomes a fresh transcription.
+    const [f] = validateFindings([
+      { ...base, witness: 'BASE: 2 calls / PR: 1 call — probe flipped' },
+    ]);
+    expect(f.witness).toBe('BASE: 2 calls / PR: 1 call — probe flipped');
+    expect(validateFindings([{ ...base }])[0].witness).toBeUndefined();
+  });
+
+  it('keeps fixWitness, and keeps it distinct from witness', () => {
+    // The acceptance criterion the finding hands to whoever fixes it — the
+    // reviewer-side half of #9578, and the field Step 7's comment body reads
+    // back. It is NOT the reviewer's own evidence: a round that collapsed the
+    // two would post the proof of the defect where the test to write belongs,
+    // or demand a test as the price of confirming a bug.
+    const [f] = validateFindings([
+      {
+        ...base,
+        witness: 'BASE: 2 calls / PR: 1 call — probe flipped',
+        fixWitness:
+          'src/retry.test.ts — asserts the guard rejects a negative delay; ' +
+          'reds with the guard removed',
+      },
+    ]);
+    expect(f.witness).toBe('BASE: 2 calls / PR: 1 call — probe flipped');
+    expect(f.fixWitness).toContain('reds with the guard removed');
+    // snake_case is accepted for the same reason every sibling field accepts
+    // it, and absence stays absence — `N/A` is a value a finding writes, not
+    // a default this validator invents.
+    expect(
+      validateFindings([{ ...base, fix_witness: 'N/A' }])[0].fixWitness,
+    ).toBe('N/A');
+    expect(validateFindings([{ ...base }])[0].fixWitness).toBeUndefined();
+  });
+
+  it('keeps fixConstraint, and drops the N/A its sibling field allows', () => {
+    // The fact the fix must not violate — the premise half of #10153, beside
+    // the claim half `fixWitness` carries. It round-trips like every sibling
+    // so Step 7's comment body reads it from data rather than re-deriving a
+    // constant or a file:line the finder already quoted.
+    const constraint =
+      'any bound here must be <= MAX_SUBAGENT_DEPTH_LIMIT = 100 ' +
+      '(packages/core/src/config/config.ts:1533)';
+    const [f] = validateFindings([
+      {
+        ...base,
+        fixWitness: 'N/A',
+        fixConstraint: constraint,
+      },
+    ]);
+    expect(f.fixConstraint).toBe(constraint);
+    expect(f.fixWitness).toBe('N/A');
+    expect(
+      validateFindings([{ ...base, fix_constraint: constraint }])[0]
+        .fixConstraint,
+    ).toBe(constraint);
+    // Absence stays absence: the field has no `N/A` form, because an empty
+    // constraint carries no information and would lengthen every posted
+    // comment (#9177). A finder that copies the fixWitness habit and writes
+    // the placeholder anyway must not hand the poster a "constraint" — the
+    // literal is normalised to absence so presence alone is the signal.
+    expect(validateFindings([{ ...base }])[0].fixConstraint).toBeUndefined();
+    for (const placeholder of [
+      'N/A',
+      'n/a',
+      'NA',
+      'none',
+      'None.',
+      ' N/A ',
+      // The omission literals the finding format and the posting rule name
+      // — the finder told to omit the line is the one most likely to write
+      // one, and carried through it would hand Step 7 a "constraint" that
+      // names no constant and no file:line.
+      'none observed',
+      'None observed',
+      'None observed.',
+      'no constraints observed',
+    ]) {
+      expect(
+        validateFindings([{ ...base, fixConstraint: placeholder }])[0]
+          .fixConstraint,
+      ).toBeUndefined();
+    }
+    // And the drop is narrow: a real constraint that merely CONTAINS one of
+    // the words survives — the bar for the field is a quoted constant or a
+    // file:line, and neither collapses to a placeholder.
+    expect(
+      validateFindings([
+        { ...base, fixConstraint: 'none of the callers pass 0 (src/a.ts:12)' },
+      ])[0].fixConstraint,
+    ).toBe('none of the callers pass 0 (src/a.ts:12)');
+  });
+});
+
+describe('the finding axes (#10291)', () => {
+  it('round-trips direction and baseline, and leaves an unclassified finding bare', () => {
+    const [classified, bare] = validateFindings([
+      { ...base, direction: 'fails-closed', baseline: 'new-surface' },
+      { ...base, id: 'f2' },
+    ]);
+    expect(classified.direction).toBe('fails-closed');
+    expect(classified.baseline).toBe('new-surface');
+    expect(bare.direction).toBeUndefined();
+    expect(bare.baseline).toBeUndefined();
+    // Fed back through `--input` (the artifact wrapper), both survive.
+    const again = validateFindings({
+      findings: [classified],
+    } as unknown as Finding[]);
+    expect(again[0]).toMatchObject({
+      direction: 'fails-closed',
+      baseline: 'new-surface',
+    });
+  });
+
+  it('refuses a misspelled axis with the index — a silent drop would post a deferrable blocker', () => {
+    expect(() =>
+      validateFindings([{ ...base, direction: 'fails-open' }]),
+    ).toThrow(
+      /Finding at index 0: has direction "fails-open"; expected one of "certifies-falsely", "fails-closed"/,
+    );
+    expect(() =>
+      validateFindings([{ ...base, baseline: 'old-surface' }]),
+    ).toThrow(
+      /Finding at index 0: has baseline "old-surface"; expected one of "regression", "new-surface"/,
+    );
+  });
+
+  it("renders the axes as the claim line's bracket tags", () => {
+    const report = buildReport(
+      validateFindings([
+        { ...base, direction: 'fails-closed', baseline: 'new-surface' },
+        { ...base, id: 'f2', direction: 'certifies-falsely' },
+        { ...base, id: 'f3' },
+      ]),
+    );
+    const lines = renderFindings(report);
+    expect(lines[0]).toMatch(/^Critical \[fails-closed\] \[new-surface\] — /);
+    expect(lines[1]).toMatch(/^Critical \[certifies-falsely\] — /);
+    expect(lines[2]).toMatch(/^Critical — /);
   });
 });

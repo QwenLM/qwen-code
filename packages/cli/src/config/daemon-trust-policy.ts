@@ -14,6 +14,7 @@ import {
   getUserSettingsPath,
 } from './settings.js';
 import {
+  getExplicitTrustLevel,
   getTrustedFoldersPath,
   LoadedTrustedFolders,
   TrustLevel,
@@ -331,25 +332,7 @@ function explicitTrustLevel(
   snapshot: DaemonTrustPolicySnapshot,
   workspaceCwd: string,
 ): TrustLevel | null {
-  const folders = new LoadedTrustedFolders(
-    {
-      path: getTrustedFoldersPath(),
-      config: { ...snapshot.trustedFolders },
-    },
-    [],
-  );
-  const effective = folders.isPathTrusted(workspaceCwd);
-  if (effective === undefined) return null;
-  for (const [rulePath, trustLevel] of Object.entries(
-    snapshot.trustedFolders,
-  )) {
-    const preview = new LoadedTrustedFolders(
-      { path: getTrustedFoldersPath(), config: { [rulePath]: trustLevel } },
-      [],
-    ).isPathTrusted(workspaceCwd);
-    if (preview === effective) return trustLevel;
-  }
-  return null;
+  return getExplicitTrustLevel(snapshot.trustedFolders, workspaceCwd);
 }
 
 export function evaluateDaemonWorkspaceTrust(

@@ -42,7 +42,13 @@ jobs:
     environment:
       name: 'github-pages'
       url: '${{ steps.deployment.outputs.page_url }}'
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (push/dispatch use
+    # base-repo YAML), so the persistent ECS pool is safe.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # One API deploy; a hang must not pin a persistent pool machine for the
+    # 360-minute default.
+    timeout-minutes: 5
     needs: 'build'
     steps:
       - name: 'Deploy to GitHub Pages'

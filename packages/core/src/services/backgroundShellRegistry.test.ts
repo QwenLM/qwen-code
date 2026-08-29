@@ -27,14 +27,32 @@ import {
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import { escapeXml } from '../utils/xml.js';
+import { stripDisplayControlChars } from '../utils/terminalSafe.js';
+
+/**
+ * Builds the expected `<output-file>` element with the same
+ * `stripDisplayControlChars` + `escapeXml` pipeline the registry applies.
+ * Expected paths below come from `tmpdir()`, which can legally contain XML
+ * metacharacters (`&` on Windows, `<` on POSIX) or bidi overrides, so
+ * hand-rolling the escaping would make these cases depend on the host's TMPDIR.
+ */
+function expectedOutputFileElement(path: string): string {
+  return `<output-file>${escapeXml(stripDisplayControlChars(path))}</output-file>`;
+}
 
 let tmpDirs: string[] = [];
+let tmpFiles: string[] = [];
 
 afterEach(() => {
   for (const dir of tmpDirs) {
     rmSync(dir, { recursive: true, force: true });
   }
+  for (const file of tmpFiles) {
+    rmSync(file, { force: true });
+  }
   tmpDirs = [];
+  tmpFiles = [];
 });
 
 function makeOutputFile(content: string): string {
@@ -54,19 +72,34 @@ function makeTempDir(): string {
 function makeEntry(
   overrides: Partial<ShellTaskRegistration> = {},
 ): ShellTaskRegistration {
+  const shellId = overrides.shellId ?? 's1';
   return {
-    shellId: 's1',
+    shellId,
     command: 'sleep 60',
     cwd: '/tmp',
     status: 'running',
     startTime: 1000,
-    outputPath: '/tmp/s1.output',
     abortController: new AbortController(),
     ...overrides,
+    // Every register/complete/fail/cancel mirrors the entry into a
+    // `<outputPath>.status` sidecar, so the default outputPath decides where
+    // that write lands. A fixed `/tmp/s1.output` pointed every entry in this
+    // file — across tests, across workers, across CI jobs — at the single
+    // path `/tmp/s1.status`. `/tmp` is sticky, so once that file belongs to
+    // another uid the atomic rename fails EPERM, and `renameWithRetrySync`
+    // burns its full 50+100+200ms backoff before the registry swallows the
+    // error. Give each entry its own directory instead: no shared state, and
+    // the sidecar write actually succeeds.
+    outputPath:
+      overrides.outputPath ?? join(makeTempDir(), `shell-${shellId}.output`),
   };
 }
 
 describe('BackgroundShellRegistry', () => {
+  it('gives each entry a unique default outputPath', () => {
+    expect(makeEntry().outputPath).not.toBe(makeEntry().outputPath);
+  });
+
   describe('register / get / getAll', () => {
     it('captures the Todo work-chain owner at registration', () => {
       const reg = new BackgroundShellRegistry();
@@ -152,6 +185,26 @@ describe('BackgroundShellRegistry', () => {
   });
 
   describe('callbacks', () => {
+    it('clears the status callback only when identities match', () => {
+      const reg = new BackgroundShellRegistry();
+      const installed = vi.fn();
+      const replacement = vi.fn();
+
+      reg.setStatusChangeCallback(installed);
+      reg.clearStatusChangeCallback(replacement);
+      reg.register(makeEntry({ shellId: 'a' }));
+      expect(installed).toHaveBeenCalledOnce();
+
+      reg.setStatusChangeCallback(replacement);
+      reg.clearStatusChangeCallback(installed);
+      reg.register(makeEntry({ shellId: 'b' }));
+      expect(replacement).toHaveBeenCalledOnce();
+
+      reg.clearStatusChangeCallback(replacement);
+      reg.register(makeEntry({ shellId: 'c' }));
+      expect(replacement).toHaveBeenCalledOnce();
+    });
+
     it('fires register callback synchronously when an entry is added', () => {
       const reg = new BackgroundShellRegistry();
       const seen: string[] = [];
@@ -236,7 +289,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('setNotificationCallback(undefined) clears the callback', () => {
-      // useGeminiStream's cleanup relies on this contract to avoid
+      // useLlmStream's cleanup relies on this contract to avoid
       // leaked callbacks firing into torn-down React state on unmount.
       // If a future refactor breaks the clearing path, stale callbacks
       // would fire silently — no test would catch it without this guard.
@@ -282,7 +335,7 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).toContain(
         '<output-tail truncated="false">first line\nfinal result</output-tail>',
       );
-      expect(modelText).toContain(`<output-file>${outputPath}</output-file>`);
+      expect(modelText).toContain(expectedOutputFileElement(outputPath));
       expect(meta).toEqual({
         shellId: 'a',
         status: 'completed',
@@ -314,20 +367,85 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).not.toContain(command);
     });
 
+    it('strips BIDI OVERRIDES from the OUTPUT TAIL — the biggest field', () => {
+      // The sibling test below asserts modelText-wide absence, which reads
+      // as whole-envelope coverage but is not: its fixture shell has no
+      // output file, so <output-tail> renders the canned unreadable form
+      // and is never exercised. The tail is the LARGEST
+      // attacker-controllable field — up to 8 KiB of a background shell's
+      // own output — and it renders through a different helper, which
+      // stripped C0/C1 but passed bidi overrides through verbatim
+      // (probe-verified). Newlines must survive the fix.
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      // ALL NINE codepoints of both stripped ranges: pinning one per
+      // range let a one-character bound typo (0x202a→0x202b,
+      // 0x2066→0x2067) ship green (probe-verified).
+      const outputPath = makeOutputFile(
+        'line one\nharmless\u202A\u202B\u202C\u202D\u202Eevil\u2066\u2067\u2068\u2069 two\n',
+      );
+      reg.register(makeEntry({ shellId: 'tail-bidi', outputPath }));
+
+      reg.complete('tail-bidi', 0, 2000);
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain('<output-tail');
+      const bidi = '\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069';
+      for (const ch of bidi) {
+        expect(modelText).not.toContain(ch);
+      }
+      // The tail keeps its line structure AND the text after the stripped
+      // characters survives — the strip must not eat \n or truncate at
+      // the first bidi marker.
+      expect(modelText).toContain('line one\nharmlessevil two</output-tail>');
+    });
+
+    it('strips BIDI OVERRIDES from the notification, not just C0/C1', () => {
+      // The shared helper this renders through removes U+202A-202E and
+      // U+2066-2069 as well as C0/C1 — the registry's own former copy did
+      // not. Those characters reorder how a path DISPLAYS without changing
+      // its bytes, so `/tmp/a<RLO>evil<PDI>/out.log` can render as
+      // something else entirely in a model-facing envelope. This pins the
+      // stronger behaviour that came with the shared helper.
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      const outputPath = join(makeTempDir(), 'a\u202Eevil\u2069.log');
+      reg.register(
+        makeEntry({
+          shellId: 'bidi',
+          // command and cwd render through the same shared helper — pin
+          // them too, so a field-local bidi-blind sanitizer fails here.
+          command: 'cat \u202Efd\u2069.txt',
+          cwd: '/repo/\u202Efd\u2069',
+          outputPath,
+        }),
+      );
+
+      reg.complete('bidi', 0, 2000);
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain(expectedOutputFileElement(outputPath));
+      expect(modelText).not.toContain('\u202E');
+      expect(modelText).not.toContain('\u2069');
+    });
+
     it('escapes XML and strips display control characters on failure', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
+      const outputPath = join(makeTempDir(), 'out&err.log');
       reg.register(
         makeEntry({
           shellId: 'a&b',
           command: 'echo "<script>"',
           cwd: '/repo&work',
-          outputPath: '/tmp/out&err.log',
+          outputPath,
         }),
       );
 
-      reg.fail('a&b', 'bad <thing>\x1B[31m', 2000);
+      reg.fail('a&b', 'bad <thing>\x1B[31m \u202Eevil\u2069', 2000);
 
       const [displayText, modelText] = callback.mock.calls[0];
       expect(displayText).toBe('Background shell "echo "<script>"" failed.');
@@ -336,10 +454,16 @@ describe('BackgroundShellRegistry', () => {
         '<command>echo &quot;&lt;script&gt;&quot;</command>',
       );
       expect(modelText).toContain('<cwd>/repo&amp;work</cwd>');
-      expect(modelText).toContain('<result>bad &lt;thing&gt;[31m</result>');
       expect(modelText).toContain(
-        '<output-file>/tmp/out&amp;err.log</output-file>',
+        '<result>bad &lt;thing&gt;[31m evil</result>',
       );
+      // The bidi pair in the fixture pins the fourth render site: <result>
+      // is the failed shell's error string and renders only on this path.
+      expect(modelText).not.toContain('\u202E');
+      expect(modelText).not.toContain('\u2069');
+      // Assert the whole element, not just the tail: the temp prefix is
+      // random but the escaping is what this test is about.
+      expect(modelText).toContain(expectedOutputFileElement(outputPath));
     });
 
     it('limits output-tail to the retained byte budget', () => {
@@ -387,15 +511,16 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).not.toContain('\uFFFD');
     });
 
-    it('strips control characters from cwd and output-file XML fields', () => {
+    it('strips control and bidi characters from cwd and output-file XML fields', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       reg.setNotificationCallback(callback);
+      const dir = makeTempDir();
       reg.register(
         makeEntry({
           shellId: 'a',
           cwd: '/repo\x01\x02/work',
-          outputPath: '/tmp/out\x03.log',
+          outputPath: join(dir, 'out\x03\u202e.log'),
         }),
       );
 
@@ -403,10 +528,15 @@ describe('BackgroundShellRegistry', () => {
 
       const [, modelText] = callback.mock.calls[0];
       expect(modelText).toContain('<cwd>/repo/work</cwd>');
-      expect(modelText).toContain('<output-file>/tmp/out.log</output-file>');
+      // Whole element: pins exactly which characters are stripped and that
+      // the rest of the path survives intact.
+      expect(modelText).toContain(
+        expectedOutputFileElement(join(dir, 'out.log')),
+      );
       expect(modelText).not.toContain('\x01');
       expect(modelText).not.toContain('\x02');
       expect(modelText).not.toContain('\x03');
+      expect(modelText).not.toContain('\u202e');
     });
 
     const itNoFollow = fsConstants.O_NOFOLLOW === undefined ? it.skip : it;
@@ -457,6 +587,10 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
       const dir = makeTempDir();
+      // A dir outputPath gets its `<dir>.status` sidecar as a sibling of
+      // the temp dir, which the dir cleanup above never removes; tracking
+      // it here lets afterEach delete it even if the assertions fail.
+      tmpFiles.push(statusFilePathFor(dir));
       reg.setNotificationCallback(callback);
       reg.register(makeEntry({ shellId: 'a', outputPath: dir }));
 
@@ -559,6 +693,11 @@ describe('BackgroundShellRegistry', () => {
       expect(e.status).toBe('running');
       expect(e.endTime).toBeUndefined();
       expect(ac.signal.aborted).toBe(true);
+      expect(reg.hasRunningEntries()).toBe(true);
+
+      reg.cancel('a', 2000);
+
+      expect(reg.hasRunningEntries()).toBe(false);
     });
 
     it('is a no-op on a terminal entry', () => {
@@ -771,16 +910,8 @@ describe('BackgroundShellRegistry', () => {
     function makeDirEntry(
       overrides: Partial<ShellTaskRegistration> = {},
     ): ShellTaskRegistration & { statusPath: string } {
-      const dir = makeTempDir();
-      const shellId = (overrides.shellId as string) ?? 's1';
-      const entry = makeEntry({
-        outputPath: join(dir, `shell-${shellId}.output`),
-        ...overrides,
-      });
-      return {
-        ...entry,
-        statusPath: join(dir, `shell-${shellId}.status`),
-      };
+      const entry = makeEntry(overrides);
+      return { ...entry, statusPath: statusFilePathFor(entry.outputPath) };
     }
 
     function readStatus(statusPath: string): Record<string, unknown> {

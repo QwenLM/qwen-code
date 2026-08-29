@@ -11,7 +11,7 @@
     "windows": [],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-      "capabilities": ["bootstrap"]
+      "capabilities": ["bootstrap", "web-shell-external-url"]
     }
   },
   "bundle": {
@@ -51,14 +51,16 @@
       },
       "nsis": {
         "installMode": "currentUser",
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "windows/electron-migration.nsh"
       }
     }
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENEREE1N0EwMkY5OUNDMzAKUldRd3pKa3ZvRmZhemRMb3Y0M3gzMytEZEtQZk5tWlNWWWhqTWM0ZUxiTHNzSHA4SUZJOFV5cnAK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkzMTlFNDMyRTVFNkUyNUMKUldSYzR1YmxNdVFaa3pJWjBPMERVVUw0akFvU3ZxS0pNMTFrcUhCbDlUaEVuRkVEVEcxaDBHNEcK",
       "endpoints": [
+        "https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/desktop/latest/desktop-latest.json",
         "https://github.com/QwenLM/qwen-code/releases/download/desktop-latest/desktop-latest.json"
       ]
     }

@@ -17,17 +17,20 @@ Deep health is a daemon-wide informational snapshot. It aggregates every
 runtime returned by `WorkspaceRegistry.listManaged()`, including workspaces
 that are draining but have not completed bridge cleanup.
 
-| Field                | Aggregation                                              |
-| -------------------- | -------------------------------------------------------- |
-| `workspaceCount`     | Number of managed runtimes in the snapshot               |
-| `sessions`           | Sum                                                      |
-| `pendingPermissions` | Sum                                                      |
-| `activePrompts`      | Sum                                                      |
-| `connectedClients`   | Existing daemon-wide REST SSE count                      |
-| `channelAlive`       | True when any managed runtime channel is live            |
-| `lastActivityAt`     | Latest non-null bridge activity time                     |
-| `idleSinceMs`        | One `Date.now()` snapshot minus the latest activity time |
-| `rateLimitHits`      | Existing optional daemon-wide rate-limit counts          |
+| Field                 | Aggregation                                              |
+| --------------------- | -------------------------------------------------------- |
+| `workspaceCount`      | Number of managed runtimes in the snapshot               |
+| `sessions`            | Sum                                                      |
+| `pendingPermissions`  | Sum                                                      |
+| `activePrompts`       | Sum                                                      |
+| `activeWork`          | True when any managed runtime reports active work        |
+| `activeWorkReporting` | Grade once after summing coverage counts across runtimes |
+| `activeWorkStaleMs`   | Age of the oldest snapshot behind it; `0` when uncovered |
+| `connectedClients`    | Existing daemon-wide REST SSE count                      |
+| `channelAlive`        | True when any managed runtime channel is live            |
+| `lastActivityAt`      | Latest non-null bridge activity time                     |
+| `idleSinceMs`         | One `Date.now()` snapshot minus the latest activity time |
+| `rateLimitHits`       | Existing optional daemon-wide rate-limit counts          |
 
 The route reads each runtime's required getters before combining the values.
 It does not short-circuit channel reads. If the registry or any getter throws,

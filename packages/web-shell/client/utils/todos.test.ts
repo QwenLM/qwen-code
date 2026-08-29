@@ -8,9 +8,10 @@ import {
   extractTodosFromToolCall,
   getAgentToolsForPlan,
   getFloatingTodos,
-  getLatestActiveTodos,
+  getActiveTodosForPlanRevision,
   getTodoStatusIcon,
   getTodoWindow,
+  isExitPlanApprovalRequest,
   isTodoWriteToolName,
   todoDetailSignature,
   todoStateKey,
@@ -38,6 +39,7 @@ function todoWriteMessage(
   id: string,
   todos: TodoItem[],
   stats?: TodoStatsSnapshot,
+  planId?: string,
 ): Message {
   const tool: ACPToolCall = {
     callId: `call-${id}`,
@@ -45,7 +47,14 @@ function todoWriteMessage(
     status: 'completed',
     kind: 'think',
     args: { todos },
-    ...(stats ? { rawOutput: { stats } } : {}),
+    ...(stats || planId
+      ? {
+          rawOutput: {
+            ...(stats ? { stats } : {}),
+            ...(planId ? { plan: { id: planId } } : {}),
+          },
+        }
+      : {}),
   };
   return { id, role: 'tool_group', tools: [tool] };
 }
@@ -230,29 +239,43 @@ describe('getFloatingTodos', () => {
   });
 });
 
-describe('getLatestActiveTodos', () => {
-  it('keeps the persisted workflow available after a later user message', () => {
+describe('getActiveTodosForPlanRevision', () => {
+  it('returns only the snapshot named by the approval revision', () => {
     const todos = [todo('1', 'in_progress')];
+    const revisedTodos = [todo('2', 'pending')];
     expect(
-      getLatestActiveTodos([
-        todoWriteMessage('m1', todos),
-        userMessage('revision'),
-      ]),
-    ).toEqual(todos);
+      getActiveTodosForPlanRevision(
+        [
+          todoWriteMessage('m1', todos, undefined, 'plan-1'),
+          userMessage('revision'),
+          todoWriteMessage('m2', revisedTodos, undefined, 'plan-1'),
+        ],
+        { planId: 'plan-1', sourceCallId: 'call-m2' },
+      ),
+    ).toEqual(revisedTodos);
   });
 
-  it('honors an explicit clear and ignores a terminal-only snapshot', () => {
+  it('rejects missing and mismatched revisions but preserves terminal ones', () => {
+    expect(getActiveTodosForPlanRevision([], undefined)).toEqual([]);
     expect(
-      getLatestActiveTodos([
-        todoWriteMessage('m1', [todo('1', 'in_progress')]),
-        todoWriteMessage('clear', []),
-      ]),
+      getActiveTodosForPlanRevision(
+        [todoWriteMessage('m1', [todo('1', 'pending')], undefined, 'plan-1')],
+        undefined,
+      ),
     ).toEqual([]);
     expect(
-      getLatestActiveTodos([
-        todoWriteMessage('done', [todo('1', 'completed')]),
-      ]),
+      getActiveTodosForPlanRevision(
+        [todoWriteMessage('m1', [todo('1', 'pending')], undefined, 'plan-1')],
+        { planId: 'plan-other', sourceCallId: 'call-m1' },
+      ),
     ).toEqual([]);
+    const completed = [todo('1', 'completed')];
+    expect(
+      getActiveTodosForPlanRevision(
+        [todoWriteMessage('done', completed, undefined, 'plan-1')],
+        { planId: 'plan-1', sourceCallId: 'call-done' },
+      ),
+    ).toEqual(completed);
   });
 });
 
@@ -615,6 +638,38 @@ describe('isTodoWriteToolName', () => {
 
   it.each(['read', 'edit', 'write_file', ''])('rejects %s', (name) => {
     expect(isTodoWriteToolName(name)).toBe(false);
+  });
+});
+
+describe('isExitPlanApprovalRequest', () => {
+  it('matches a switch_mode exit_plan_mode request', () => {
+    expect(
+      isExitPlanApprovalRequest({
+        toolKind: 'switch_mode',
+        toolName: 'Exit_Plan_Mode',
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a mismatched kind or name', () => {
+    expect(
+      isExitPlanApprovalRequest({
+        toolKind: 'execute',
+        toolName: 'exit_plan_mode',
+      }),
+    ).toBe(false);
+    expect(
+      isExitPlanApprovalRequest({
+        toolKind: 'switch_mode',
+        toolName: 'read_file',
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a missing or null request', () => {
+    expect(isExitPlanApprovalRequest(undefined)).toBe(false);
+    expect(isExitPlanApprovalRequest(null)).toBe(false);
+    expect(isExitPlanApprovalRequest({})).toBe(false);
   });
 });
 
@@ -1230,6 +1285,38 @@ describe('computeTodoDetails', () => {
       toolTimeMs: 1200,
     });
   });
+
+  it('uses todo tool timestamps inside a merged tool group', () => {
+    const start = todoWriteMessage('m1', [todo('1', 'in_progress')]);
+    const end = todoWriteMessage('m2', [todo('1', 'completed')]);
+    if (start.role !== 'tool_group' || end.role !== 'tool_group') {
+      throw new Error('Expected tool groups');
+    }
+    const details = computeTodoDetails([
+      {
+        id: 'merged',
+        role: 'tool_group',
+        timestamp: 50,
+        tools: [
+          { ...start.tools[0]!, startTime: 1000, endTime: 1100 },
+          {
+            callId: 'read',
+            toolName: 'read',
+            status: 'completed',
+            startTime: 1200,
+            endTime: 1700,
+          },
+          { ...end.tools[0]!, startTime: 1900, endTime: 2000 },
+        ],
+      },
+    ]);
+
+    expect(details.get(todoStateKey(todo('1', 'pending')))).toEqual({
+      startTs: 1100,
+      endTs: 2000,
+      resources: { toolTimeMs: 500 },
+    });
+  });
 });
 
 describe('plan stats contract (SDK normalizer → extractTodoStats)', () => {
@@ -1279,6 +1366,20 @@ describe('plan stats contract (SDK normalizer → extractTodoStats)', () => {
 });
 
 describe('todoDetailSignature', () => {
+  it('changes when a todo tool end time arrives', () => {
+    const message = todoWriteMessage('m1', [todo('1', 'in_progress')]);
+    if (message.role !== 'tool_group') throw new Error('Expected tool group');
+    const tool = message.tools[0]!;
+    const before = todoDetailSignature([
+      { ...message, tools: [{ ...tool, startTime: 1000 }] },
+    ]);
+    const after = todoDetailSignature([
+      { ...message, tools: [{ ...tool, startTime: 1000, endTime: 2000 }] },
+    ]);
+
+    expect(after).not.toBe(before);
+  });
+
   it('changes when a snapshot timestamp changes', () => {
     const a = todoDetailSignature([
       at(planMessage('p1', [todo('1', 'in_progress')]), 1000),

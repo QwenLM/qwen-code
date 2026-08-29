@@ -1,12 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
 
-const DIST_PATH = resolve(__dirname, '../dist/index.js');
+const DIST_DIR = resolve(__dirname, '../dist');
+const DIST_PATH = resolve(DIST_DIR, 'index.js');
 
 function readBundle(): string {
   return readFileSync(DIST_PATH, 'utf8');
+}
+
+function readPackageJavascript(): string {
+  return readdirSync(DIST_DIR)
+    .filter((fileName) => fileName.endsWith('.js'))
+    .map((fileName) => readFileSync(resolve(DIST_DIR, fileName), 'utf8'))
+    .join('\n');
 }
 
 function readInjectedCss(): string {
@@ -29,23 +37,16 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
-  it('externalizes @qwen-code/webui/daemon-react-sdk', () => {
-    const bundle = readBundle();
-    expect(bundle).toContain('from "@qwen-code/webui/daemon-react-sdk"');
+  it('does not depend on @qwen-code/webui', () => {
+    const bundle = readPackageJavascript();
+    expect(bundle).not.toContain('@qwen-code/webui');
   });
 
-  it('does not inline DaemonSessionProvider source code', () => {
-    const bundle = readBundle();
-    expect(bundle).not.toMatch(/DaemonStoreContext\s*=\s*createContext/);
-  });
-
-  it('does not inline createContext from React for provider contexts', () => {
-    const bundle = readBundle();
-    const contextMatches = bundle.match(/createContext\(/g) ?? [];
-    // WebShell's own ThemeContext is fine; but there should be at most
-    // a small number of createContext calls (WebShell internal only).
-    // If webui Provider got bundled, we'd see many more.
-    expect(contextMatches.length).toBeLessThanOrEqual(3);
+  it('owns the DaemonSessionProvider source code', () => {
+    const bundle = readPackageJavascript();
+    expect(bundle).toContain(
+      'useDaemonSessionNotices must be used within DaemonSessionProvider',
+    );
   });
 
   it('externalizes react and react-dom', () => {
@@ -58,7 +59,7 @@ describe('build artifact — package boundary', () => {
   });
 
   it('externalizes @qwen-code/sdk subpaths', () => {
-    const bundle = readBundle();
+    const bundle = readPackageJavascript();
     // Should not contain raw SDK implementation
     expect(bundle).not.toMatch(/DaemonSessionClient\s*\{/);
   });
@@ -198,6 +199,30 @@ describe('build artifact — package boundary', () => {
     expect(conflictingLayers).toEqual([]);
   });
 
+  it('removes the transcript width cap from fullscreen panels', () => {
+    let fullscreenRule: Rule | undefined;
+    postcss.parse(readInjectedCss()).walkRules((rule) => {
+      if (
+        rule.selector.includes('panelFullscreen') &&
+        rule.nodes.some(
+          (node) =>
+            node.type === 'decl' &&
+            node.prop === '--chat-content-width' &&
+            node.value === '100%',
+        )
+      ) {
+        fullscreenRule = rule;
+      }
+    });
+
+    expect(fullscreenRule).toBeDefined();
+    expect(fullscreenRule?.selector).toMatch(
+      /\._panelFullscreen_[A-Za-z0-9_]+$/,
+    );
+    expect(fullscreenRule?.selector).not.toContain('panelDrawer');
+    expect(fullscreenRule?.selector).not.toContain(':not(');
+  });
+
   it('prefixes global CSS registrations and animations', () => {
     const unscoped: string[] = [];
     postcss.parse(readInjectedCss()).walkAtRules((atRule) => {
@@ -216,5 +241,65 @@ describe('build artifact — package boundary', () => {
       }
     });
     expect(unscoped).toEqual([]);
+  });
+
+  it('ships the ::selection highlight for message content in the lib bundle (#8214)', () => {
+    // The defensive ::selection rule must reach embedded deployments -
+    // i.e. it must be in the component-scoped CSS injected into dist/index.js,
+    // not only the standalone app's standalone.css. Asserting the rule is
+    // present and scoped under the WebShell root pins the lib-bundle fix.
+    let matched: Rule | undefined;
+    postcss.parse(readInjectedCss()).walkRules((rule) => {
+      // Match the effect (selectable rows get a ::selection rule scoped to
+      // the WebShell root), not the exact notation - a maintainer changing
+      // `background` to `background-color` (the CSS Pseudo-Elements-4 name)
+      // should not break this pin while the e2e one stays green.
+      if (
+        rule.selector.includes('[data-user-selectable]') &&
+        rule.selector.includes('::selection')
+      ) {
+        matched = rule;
+      }
+    });
+    expect(
+      matched,
+      '::selection rule for [data-user-selectable] missing from lib bundle',
+    ).toBeDefined();
+    expect(matched?.selector).toContain('[data-web-shell-root]');
+    expect(
+      matched?.nodes.some(
+        (n) =>
+          n.type === 'decl' &&
+          (n.prop === 'background' || n.prop === 'background-color'),
+      ),
+    ).toBe(true);
+  });
+
+  it('ships self-contained KaTeX styles and fonts for embedded transcripts', () => {
+    const css = readInjectedCss();
+    const root = postcss.parse(css);
+    let mathmlRule: Rule | undefined;
+    let hasInlineFont = false;
+
+    root.walkRules((rule) => {
+      if (rule.selector.includes('.katex-mathml')) {
+        mathmlRule = rule;
+      }
+    });
+    root.walkAtRules('font-face', (atRule) => {
+      if (
+        atRule.nodes?.some(
+          (node) =>
+            node.type === 'decl' &&
+            node.prop === 'src' &&
+            node.value.includes('data:font/woff2;base64,'),
+        )
+      ) {
+        hasInlineFont = true;
+      }
+    });
+
+    expect(mathmlRule?.selector).toContain('[data-web-shell-root]');
+    expect(hasInlineFont).toBe(true);
   });
 });

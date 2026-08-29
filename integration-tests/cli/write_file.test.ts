@@ -28,13 +28,17 @@ describe('write_file', () => {
     }
 
     const allTools = rig.readToolLogs();
-    expect(foundToolCall, 'Expected to find a write_file tool call').toBeTruthy(
+    // The detailed message belongs on `expect`, not on `toBeTruthy` — the
+    // latter takes no arguments, so this diagnostic was being built and
+    // discarded on every failure, leaving only the bare literal.
+    expect(
+      foundToolCall,
       createToolCallErrorMessage(
         'write_file',
         allTools.map((t) => t.toolRequest.name),
         result,
       ),
-    );
+    ).toBeTruthy();
 
     // Validate model output - will throw if no output, warn if missing expected content
     validateModelOutput(result, 'dad.txt', 'Write file test');

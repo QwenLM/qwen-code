@@ -463,6 +463,7 @@ export default {
   'Tool Output Truncation Lines': 'Лимит строк вывода инструментов',
   'Folder Trust': 'Доверие к папке',
   'Tool Schema Compliance': 'Соответствие Tool Schema',
+  Unset: 'Не задано',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
   'Auto (follow user input)': 'Авто (следовать вводу пользователя)',
@@ -1065,6 +1066,12 @@ export default {
     'Сжатие истории чата не уменьшило размер. Это может указывать на проблемы с промптом сжатия.',
   'Could not compress chat history due to a token counting error.':
     'Не удалось сжать историю чата из-за ошибки подсчета токенов.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была пустой.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Не удалось сжать историю чата, потому что сводка сжатия была усечена.',
+  'Could not compress chat history due to an API error.':
+    'Не удалось сжать историю чата из-за ошибки API.',
   // ============================================================================
   // Команды - Директория
   // ============================================================================
@@ -1479,8 +1486,18 @@ export default {
     'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
   'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
+  'from nested agent': 'от вложенного агента',
   Running: 'Выполняется',
+  Pausing: 'Приостанавливается',
   Paused: 'Приостановлено',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Приостановка кооперативная; выполняемая работа может завершиться до того, как рабочий процесс будет приостановлен. Вызов агента, ожидающий одобрения инструмента, удерживает запуск в этом состоянии и продолжает учитываться в лимите активного времени, пока одобрение не будет обработано.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Приостановлено: новые агенты не будут запускаться; код скрипта между вызовами агентов продолжает выполняться. Нажмите p, чтобы возобновить. /clear, /branch и переключение сессий отменяют приостановленные запуски.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Приостановка/возобновление отклонены; состояние рабочего процесса изменилось. Повторите попытку.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Подсказка: используйте `/workflows p <runId>` или «Фоновые задачи» + p для кооперативной приостановки/возобновления; используйте `/workflows <runId>` для подробностей.',
   Completed: 'Завершено',
   Failed: 'Ошибка',
   Stopped: 'Остановлено',
@@ -1979,6 +1996,18 @@ export default {
   'not updatable': 'обновление недоступно',
   'Ask a quick side question without affecting the main conversation':
     'Задать быстрый побочный вопрос, не затрагивая основной разговор',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Получить второе мнение о текущем разговоре от модели-рецензента',
+  'Consulting advisor...': 'Консультация с советником...',
+  'Advisor review failed: {{error}}': 'Ошибка обзора советника: {{error}}',
+  'No conversation context available for /advisor':
+    'Нет контекста разговора, доступного для /advisor',
+  'Focus too long (max {{max}} chars)':
+    'Фокус слишком длинный (макс. {{max}} символов)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Выполняется другая операция, дождитесь её завершения перед запуском /advisor',
+  'No response received.': 'Ответ не получен.',
+  'No model configured.': 'Модель не настроена.',
   'Manage Arena sessions': 'Управлять сессиями Arena',
   'Start an Arena session with multiple models competing on the same task':
     'Запустить сессию Arena, где несколько моделей соревнуются на одной и той же задаче',
@@ -2282,4 +2311,5 @@ export default {
     'Изменения куратора автоматических навыков отключены в безопасном режиме.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
+  'Kept model as {{model}}': 'Оставлена модель {{model}}',
 };

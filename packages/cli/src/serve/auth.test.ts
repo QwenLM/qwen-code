@@ -4,15 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createServer } from 'node:http';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { describe, expect, it } from 'vitest';
 import {
   allowOriginCors,
+  bearerAuth,
   createMutationGate,
   denyBrowserOriginCors,
   InvalidAllowOriginPatternError,
   parseAllowOriginPatterns,
 } from './auth.js';
+import { CredentialStore } from './local-control/credentials.js';
+import { tagListener } from './local-control/listener-identity.js';
 
 interface GateResult {
   status?: number;
@@ -70,6 +74,22 @@ describe('denyBrowserOriginCors', () => {
 });
 
 describe('createMutationGate (#4175 PR 15)', () => {
+  it('scopes runtime and pairing credentials to opposite listeners', () => {
+    const credentials = new CredentialStore('runtime-token');
+    credentials.addPairingToken('pair', 'pairing-token');
+
+    expect(credentials.verify('runtime-token', { kind: 'primary' })).toBe(true);
+    expect(credentials.verify('pairing-token', { kind: 'primary' })).toBe(
+      false,
+    );
+    expect(credentials.verify('runtime-token', { kind: 'local-control' })).toBe(
+      false,
+    );
+    expect(credentials.verify('pairing-token', { kind: 'local-control' })).toBe(
+      true,
+    );
+  });
+
   it('passes through when --require-auth is on (global bearerAuth handles enforcement)', () => {
     // `requireAuth: true` is paired with a mandatory token at boot, so
     // the global bearer middleware has already 401'd unauthenticated
@@ -126,6 +146,35 @@ describe('createMutationGate (#4175 PR 15)', () => {
     // `run-qwen-serve.ts`). The error must point operators at fixes that
     // work standalone.
     expect(body.error).not.toMatch(/--require-auth/);
+  });
+
+  it('allows a verified pairing request through a strict route on a tokenless daemon', () => {
+    const credentials = new CredentialStore();
+    credentials.addPairingToken('pair', 'pairing-token');
+    const server = createServer();
+    tagListener(server, {
+      kind: 'local-control',
+      authority: '192.168.1.10:4170',
+      origin: 'http://192.168.1.10:4170',
+    });
+    const req = {
+      headers: { authorization: 'Bearer pairing-token' },
+      socket: { server },
+    } as unknown as Request;
+    const response = {} as Response;
+    response.status = (() => response) as Response['status'];
+    response.json = (() => response) as Response['json'];
+    let nextCalled = false;
+
+    bearerAuth(credentials)(req, response, () => {
+      createMutationGate({ tokenConfigured: false, requireAuth: false })({
+        strict: true,
+      })(req, response, () => {
+        nextCalled = true;
+      });
+    });
+
+    expect(nextCalled).toBe(true);
   });
 
   it('returns the same passthrough handler instance across calls when global auth is on (allocation discipline)', () => {
@@ -353,7 +402,7 @@ describe('allowOriginCors (T2.4 #4514)', () => {
     );
     expect(res.headers.get('access-control-max-age')).toBe('86400');
     expect(res.headers.get('access-control-expose-headers')).toBe(
-      'Retry-After, X-Qwen-Event-Epoch',
+      'Retry-After, X-Qwen-Event-Epoch, X-Qwen-SSE-Stream-Id',
     );
   });
 

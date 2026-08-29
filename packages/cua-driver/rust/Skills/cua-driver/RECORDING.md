@@ -22,9 +22,9 @@ display to `<output_dir>/recording.mp4` (H.264 / 30 fps) for the
 lifetime of the session. The mp4 is finalized on `stop_recording`. Opt
 out with `record_video: false` when you don't want video.
 
-**macOS — native ScreenCaptureKit, zero-config.** On macOS the
-recorder uses an in-process `SCStream` + `SCRecordingOutput`, so it
-inherits cua-driver's own Screen Recording grant — no separate
+**macOS — native ScreenCaptureKit, zero-config.** On macOS the daemon's
+recorder uses `SCStream` + `SCRecordingOutput`, so it inherits the daemon's
+Screen Recording grant — no separate
 subprocess prompt, no fast-fail, no second TCC dance. Requires macOS
 15.0+ (SCRecordingOutput introduced in macOS 15). No ffmpeg needed.
 
@@ -38,25 +38,25 @@ startup failures fast-fail with a stderr tail in the error.
 ## Start / stop
 
 Two equivalent surfaces: the `start_recording` / `stop_recording` MCP
-tools, or the friendlier `cua-driver recording` subcommand group
+tools, or the friendlier `qwen-cua-driver recording` subcommand group
 (wraps both with human-readable output).
 
 ```
-cua-driver recording start ~/cua-trajectories/run-1
+qwen-cua-driver recording start ~/cua-trajectories/run-1
 # … run the workflow …
-cua-driver recording status    # -> enabled / disabled, next_turn, output_dir
-cua-driver recording stop      # -> "Recording stopped. (video → recording.mp4)"
+qwen-cua-driver recording status    # -> enabled / disabled, next_turn, output_dir
+qwen-cua-driver recording stop      # -> "Recording stopped. (video → recording.mp4)"
 ```
 
 Raw-tool equivalent:
 
 ```
-cua-driver start_recording '{"output_dir":"~/cua-trajectories/run-1"}'
-cua-driver get_recording_state
-cua-driver stop_recording '{}'
+qwen-cua-driver start_recording '{"output_dir":"~/cua-trajectories/run-1"}'
+qwen-cua-driver get_recording_state
+qwen-cua-driver stop_recording '{}'
 ```
 
-The `recording` subcommands require a running daemon (`cua-driver
+The `recording` subcommands require a running daemon (`qwen-cua-driver
 serve &`) because recording state is per-process. `output_dir` expands
 `~` and is created (with intermediates) if missing. Turn numbering
 starts at `1` every time recording is (re-)enabled, regardless of any
@@ -67,26 +67,29 @@ daemon restart resets to disabled.
 
 Each action writes to `turn-NNNNN/` (five-digit zero-padded counter):
 
-- `app_state.json` — post-action AX/UIA snapshot for the target
-  `(pid, window_id)` carrying the same `tree_markdown` +
-  `element_count` shape `get_window_state` returns (minus the
-  screenshot fields — those live in `screenshot.png`). On macOS the
-  recorder resolves a frontmost window internally when the action's
-  args don't carry one; on Windows it uses the first window of the
-  target pid. **Omitted on Linux** — ATSPI doesn't expose a cheap
-  whole-tree snapshot, and the file is left out rather than faked.
-- `screenshot.png` — post-action capture of the target window.
-  Omitted when the pid has no visible window.
+- `before_state.json` and `after_state.json` — application accessibility
+  state immediately before and after the action. They carry the same
+  `tree_markdown` and `element_count` shape as `get_window_state`.
+- `before.png` and `after.png` — target-window images immediately before
+  and after the action. Window capture remains scoped to the target when
+  another window covers it.
+- `evidence.json` — capture status for each phase. Missing expected capture
+  has an explicit classification instead of disappearing from the turn.
+- `app_state.json` and `screenshot.png` — compatibility aliases for
+  `after_state.json` and `after.png`.
 - `action.json` — the tool name, full input arguments, result
-  summary, pid, click point (when applicable), ISO-8601 timestamp.
+  summary, result-error flag, pid, click point (when applicable), ISO-8601
+  timestamp.
 - `click.png` — for click-family actions (`click`, `double_click`,
-  `right_click`): a copy of `screenshot.png` with a red dot drawn at
+  `right_click`): a copy of `before.png` with a red marker drawn at
   the click point. **Both addressing modes are covered:** explicit
   `x, y` clicks use the supplied coordinates directly, and
   `element_index`-addressed clicks resolve to the element's center
   via the live AX/UIA cache, then convert to window-local screenshot
-  pixels. Absent for non-click tools and for clicks whose resolved
-  point falls outside the captured window.
+  pixels. Absent for non-click tools. It is also absent, and explicitly
+  classified as not applicable, when the driver refuses a click before target
+  resolution; no input was aimed in that case. A dispatched click whose marker
+  cannot be resolved or rendered remains an evidence failure.
 
 ## When to use it
 
@@ -115,11 +118,11 @@ tool with its recorded `arguments`. Optional knobs: `delay_ms`
 first failure, default true).
 
 ```
-cua-driver recording start ~/cua-trajectories/demo1
+qwen-cua-driver recording start ~/cua-trajectories/demo1
 # … run the workflow …
-cua-driver recording stop
+qwen-cua-driver recording stop
 # Later: replay against a new build.
-cua-driver replay_trajectory '{"dir":"~/cua-trajectories/demo1","delay_ms":500}'
+qwen-cua-driver replay_trajectory '{"dir":"~/cua-trajectories/demo1","delay_ms":500}'
 ```
 
 Important caveat: **element_index doesn't survive across sessions**.

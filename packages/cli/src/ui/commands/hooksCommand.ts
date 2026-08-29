@@ -197,6 +197,7 @@ export const hooksCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  canRunDuringStreaming: true,
   action: async (
     context: CommandContext,
     args: string,
