@@ -110,7 +110,7 @@ const {
   },
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useChannels: (options: unknown) => {
     useChannelsMock(options);
     return channelState.current;
