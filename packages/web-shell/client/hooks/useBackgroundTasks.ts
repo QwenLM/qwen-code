@@ -3,7 +3,7 @@ import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
 import {
   useActions,
   useDaemonSessionOwnerGuard,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { TASKS_STATUS_ACTIVE_EVENT } from '../components/messages/TasksStatusMessage';
 import { isSessionDisconnectedError } from '../utils/sessionErrors';
 
