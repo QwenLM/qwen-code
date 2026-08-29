@@ -4071,6 +4071,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
       getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      // Per-session folder-trust flag, default off (folder trust disabled ⇒
+      // sessionCd's trust gate is skipped). Tests that exercise the gate feed
+      // a trusted-enabled workspace through bootRelocatableSession, which
+      // overrides this to reflect the fed settings.
+      getFolderTrust: vi.fn().mockReturnValue(false),
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
@@ -4479,6 +4484,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
+      // Mirror loadCliConfig: the per-session Config's folder-trust flag is
+      // `security.folderTrust.enabled` from the workspace it was admitted
+      // under. sessionCd's trust gate reads this, not the agent's
+      // latest-loaded `this.settings` cache.
+      getFolderTrust: vi
+        .fn()
+        .mockReturnValue(
+          settings.merged.security?.folderTrust?.enabled ?? false,
+        ),
     });
     Object.assign(innerConfig.getLlmClient(), {
       addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
@@ -5569,6 +5583,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         settings,
         'expected-capability',
       );
+
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+            sessionId,
+            path: canonicalTarget,
+            allowedRoots: [canonicalRoot],
+          }),
+        ).rejects.toThrow('Directory not trusted');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+  });
+
+  it('resolves the cd trust gate from the session workspace, not the stale this.settings cache', async () => {
+    await withEmptyTrustedFolders(async (directory) => {
+      const root = path.join(directory, 'Conversations');
+      const target = path.join(root, 'conversation-cross-workspace');
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+      const canonicalRoot = await fs.realpath(root);
+      const canonicalTarget = await fs.realpath(target);
+      // Session A's workspace enables folder trust.
+      const aSettings = makeSessionSettings({
+        mcpServers: {},
+        security: { folderTrust: { enabled: true } },
+      });
+      const { agent, agentPromise, sessionId } = await bootRelocatableSession(
+        aSettings,
+        'expected-capability',
+      );
+      // A different workspace's activity has since refreshed the agent's
+      // "latest loaded" cache to a workspace that DISABLES folder trust.
+      // Reading that cache in the cd gate (the pre-fix bug) would switch off
+      // session A's trust check and admit the untrusted cd; the fix reads
+      // config.getFolderTrust(), which is A's own workspace flag.
+      (agent as unknown as { settings: LoadedSettings }).settings =
+        makeSessionSettings({
+          mcpServers: {},
+          security: { folderTrust: { enabled: false } },
+        });
 
       try {
         await expect(

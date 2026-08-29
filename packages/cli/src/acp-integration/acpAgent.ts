@@ -307,7 +307,6 @@ import {
 } from '../i18n/index.js';
 import {
   isWorkspaceTrusted,
-  isFolderTrustEnabled,
   loadTrustedFolders,
 } from '../config/trustedFolders.js';
 import {
@@ -10156,7 +10155,16 @@ class QwenAgent implements Agent {
         const validateTrust = () => {
           if (
             managedTrustAllowed ||
-            !isFolderTrustEnabled(this.settings.merged)
+            // Per-session folder-trust, NOT the process-wide `this.settings`
+            // "latest loaded" cache: in a multi-workspace daemon that cache
+            // may hold another workspace's settings, so reading it here lets a
+            // workspace that disables folder trust switch off THIS session's
+            // trust gate and admit a cd into an untrusted directory.
+            // `config.getFolderTrust()` is this session's own
+            // `security.folderTrust.enabled` (loadCliConfig binds it per
+            // workspace at admission), matching the settings the session was
+            // created under.
+            !config.getFolderTrust()
           ) {
             trustValidated = true;
             return;
