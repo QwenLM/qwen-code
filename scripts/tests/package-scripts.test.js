@@ -134,14 +134,18 @@ describe('package scripts', () => {
 
   it('preserves a worktree bootstrap interrupt status', () => {
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-signal-'));
+    const logFile = path.join(binDir, 'corepack.log');
 
     try {
       if (process.platform === 'win32') {
-        writeFileSync(path.join(binDir, 'corepack.cmd'), '@exit /b 130\r\n');
+        writeFileSync(
+          path.join(binDir, 'corepack.cmd'),
+          '@echo called>>"%WORKTREE_SETUP_LOG%"\r\n@exit /b 130\r\n',
+        );
       } else {
         writeFileSync(
           path.join(binDir, 'corepack'),
-          '#!/bin/sh\nkill -INT $$\n',
+          '#!/bin/sh\necho called >> "$WORKTREE_SETUP_LOG"\nkill -INT $$\n',
         );
         chmodSync(path.join(binDir, 'corepack'), 0o755);
       }
@@ -155,11 +159,13 @@ describe('package scripts', () => {
           env: {
             ...process.env,
             PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            WORKTREE_SETUP_LOG: logFile,
           },
         },
       );
 
       expect(result.status).toBe(130);
+      expect(readFileSync(logFile, 'utf8').trim()).toBe('called');
     } finally {
       rmSync(binDir, { recursive: true, force: true });
     }

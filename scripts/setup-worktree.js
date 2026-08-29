@@ -45,7 +45,11 @@ if (cachedInstall.status === 0) {
   process.exit(0);
 }
 
-if (cachedInstall.error || cachedInstall.signal) {
+if (
+  cachedInstall.error ||
+  cachedInstall.signal ||
+  (cachedInstall.status !== null && cachedInstall.status >= 128)
+) {
   exitWithResult(cachedInstall);
 }
 
