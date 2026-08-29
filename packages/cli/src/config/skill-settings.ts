@@ -72,6 +72,31 @@ export function skillMatchesSettingName(
 }
 
 /**
+ * The command names a `skills.disabled` filter withholds from a command list:
+ * both spellings of every skill it hides, plus the entries themselves.
+ *
+ * `CommandService` reserves these when renaming a colliding command (#9408).
+ * A loader that filters its own output drops the disabled skill before any
+ * rename happens, so its name reads as free to the collision probe; without
+ * this the probe can hand a renamed sibling exactly the name the user
+ * disabled, and nothing checks `skills.disabled` again after the rename. The
+ * raw entries are included because a disabled name need not be held by a
+ * currently-loaded skill to stay forbidden.
+ */
+export function disabledSkillReservedNames(
+  skills: ReadonlyArray<{ name: string; extensionName?: string }>,
+  disabled: ReadonlySet<string>,
+): Set<string> {
+  const reserved = new Set<string>(disabled);
+  for (const skill of skills) {
+    if (skillMatchesSettingName(skill, disabled)) {
+      for (const key of skillSettingKeys(skill)) reserved.add(key);
+    }
+  }
+  return reserved;
+}
+
+/**
  * Whether a resolved setting set applies to the skill named by `skillName`,
  * judged on that skill's own spellings rather than a bare-suffix match against
  * any entry (#9408).

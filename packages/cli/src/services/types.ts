@@ -21,4 +21,16 @@ export interface ICommandLoader {
    * @returns A promise that resolves to an array of SlashCommand objects.
    */
   loadCommands(signal: AbortSignal): Promise<SlashCommand[]>;
+  /**
+   * Command names this loader withheld from the array above, and which
+   * `CommandService` must therefore keep treating as taken when it renames a
+   * colliding command. A name the user disabled is not free for another command
+   * merely because the command that owns it never reached the aggregate
+   * (#9408). Names are compared case-insensitively.
+   *
+   * Optional: only loaders that filter their own output need it, and the set
+   * describes the most recent `loadCommands` result, so call it after awaiting
+   * that promise.
+   */
+  reservedNames?(): ReadonlySet<string>;
 }

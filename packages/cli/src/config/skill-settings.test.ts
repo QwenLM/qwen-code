@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { SettingScope } from './settings.js';
 import {
   computeWorkspaceSkillListUpdates,
+  disabledSkillReservedNames,
   lookupSkillDisablement,
   resolveSkillSettings,
   skillMatchesSettingName,
@@ -732,5 +733,52 @@ describe('computeWorkspaceSkillListUpdates truth matrix', () => {
     expect(result.enabled).toEqual(expected.enabled);
     expect(result.disabledChanged).toBe(expected.disabledChanged);
     expect(result.enabledChanged).toBe(expected.enabledChanged);
+  });
+});
+
+describe('disabledSkillReservedNames', () => {
+  it.each([
+    {
+      skills: [
+        { name: 'demo:chat', extensionName: 'demo' },
+        { name: 'demo:chat1', extensionName: 'demo' },
+      ],
+      disabled: ['demo:chat1'],
+      expected: ['chat1', 'demo:chat1'],
+      label: 'reserves both spellings of the skill the entry names',
+    },
+    {
+      skills: [
+        { name: 'demo:chat', extensionName: 'demo' },
+        { name: 'demo:chat1', extensionName: 'demo' },
+      ],
+      disabled: ['chat1'],
+      expected: ['chat1', 'demo:chat1'],
+      label: 'a legacy bare entry reserves the qualified name it hides',
+    },
+    {
+      skills: [{ name: 'demo:chat' }],
+      disabled: ['demo:gone'],
+      expected: ['demo:gone'],
+      label: 'an entry no loaded skill holds still reserves itself',
+    },
+    {
+      skills: [
+        { name: 'docs:chat1', extensionName: 'docs' },
+        { name: 'demo:chat', extensionName: 'demo' },
+      ],
+      disabled: ['demo:chat'],
+      expected: ['chat', 'demo:chat'],
+      label: 'a surviving sibling keeps no reservation',
+    },
+    {
+      skills: [{ name: 'demo:chat', extensionName: 'demo' }],
+      disabled: [],
+      expected: [],
+      label: 'nothing is reserved when nothing is disabled',
+    },
+  ])('$label', ({ skills, disabled, expected }) => {
+    const reserved = [...disabledSkillReservedNames(skills, new Set(disabled))];
+    expect(reserved.sort()).toEqual([...expected].sort());
   });
 });

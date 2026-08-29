@@ -631,5 +631,71 @@ describe('SkillCommandLoader', () => {
       const third = await loader.loadCommands(signal);
       expect(third.map((c) => c.name)).toEqual(['foo']);
     });
+
+    it('reports the names skills.disabled withheld from the collision probe (#9408 R3-19)', async () => {
+      // Extension `demo` ships `chat` and `chat1`; the operator disabled
+      // `demo:chat1`, so it never reaches the command list. The name it would
+      // have registered under has to stay occupied for CommandService's
+      // collision probe, which sees only the surviving `demo:chat`.
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          level === 'extension'
+            ? Promise.resolve([
+                makeSkill({
+                  name: 'demo:chat',
+                  level: 'extension',
+                  extensionName: 'demo',
+                }),
+                makeSkill({
+                  name: 'demo:chat1',
+                  level: 'extension',
+                  extensionName: 'demo',
+                }),
+              ])
+            : Promise.resolve([]),
+      );
+      (
+        mockConfig.getDisabledSkillNames as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['demo:chat1']));
+
+      const loader = new SkillCommandLoader(mockConfig, ['extension']);
+      const commands = await loader.loadCommands(signal);
+
+      expect(commands.map((c) => c.name)).toEqual(['demo:chat']);
+      expect(loader.reservedNames()).toEqual(new Set(['demo:chat1', 'chat1']));
+    });
+
+    it('reserves a qualified name that only the legacy bare entry disables', async () => {
+      // The entry is the pre-#9408 spelling and hides the skill through
+      // `skillSettingKeys`' bare fallback. Reserving the raw entries alone
+      // would leave `demo:chat1` looking free to the probe, because no entry
+      // spells it that way.
+      mockSkillManager.listSkills.mockImplementation(
+        ({ level }: { level: string }) =>
+          level === 'extension'
+            ? Promise.resolve([
+                makeSkill({
+                  name: 'demo:chat',
+                  level: 'extension',
+                  extensionName: 'demo',
+                }),
+                makeSkill({
+                  name: 'demo:chat1',
+                  level: 'extension',
+                  extensionName: 'demo',
+                }),
+              ])
+            : Promise.resolve([]),
+      );
+      (
+        mockConfig.getDisabledSkillNames as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['chat1']));
+
+      const loader = new SkillCommandLoader(mockConfig, ['extension']);
+      const commands = await loader.loadCommands(signal);
+
+      expect(commands.map((c) => c.name)).toEqual(['demo:chat']);
+      expect(loader.reservedNames()).toEqual(new Set(['chat1', 'demo:chat1']));
+    });
   });
 });

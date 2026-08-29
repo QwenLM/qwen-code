@@ -12,7 +12,10 @@ import {
   applySkillAllowedTools,
   recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
-import { skillMatchesSettingName } from '../config/skill-settings.js';
+import {
+  disabledSkillReservedNames,
+  skillMatchesSettingName,
+} from '../config/skill-settings.js';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
 import {
@@ -78,12 +81,24 @@ const ALL_SKILL_LEVELS: readonly SkillCommandLevel[] = [
  *   is set.
  */
 export class SkillCommandLoader implements ICommandLoader {
+  private reserved = new Set<string>();
+
   constructor(
     private readonly config: Config | null,
     readonly levels: readonly SkillCommandLevel[] = ALL_SKILL_LEVELS,
   ) {}
 
+  /**
+   * The spellings `skills.disabled` withheld from the last `loadCommands`, plus
+   * the entries themselves, so the collision rename in `CommandService` never
+   * registers a command under a name the user disabled (#9408).
+   */
+  reservedNames(): ReadonlySet<string> {
+    return this.reserved;
+  }
+
   async loadCommands(_signal: AbortSignal): Promise<SlashCommand[]> {
+    this.reserved = new Set<string>();
     if (this.config?.getBareMode?.()) {
       debugLogger.debug('Bare mode enabled, skipping skill commands');
       return [];
@@ -109,9 +124,13 @@ export class SkillCommandLoader implements ICommandLoader {
       // live-read provider rather than a frozen field.
       const disabled =
         this.config?.getDisabledSkillNames() ?? new Set<string>();
+      const hiddenSkills = allSkills.filter((skill) =>
+        skillMatchesSettingName(skill, disabled),
+      );
       const visibleSkills = allSkills.filter(
         (skill) => !skillMatchesSettingName(skill, disabled),
       );
+      this.reserved = disabledSkillReservedNames(allSkills, disabled);
       const nonUserInvocableCount = visibleSkills.filter(
         (skill) => skill.userInvocable === false,
       ).length;
@@ -121,7 +140,7 @@ export class SkillCommandLoader implements ICommandLoader {
         .join(' + ');
 
       debugLogger.debug(
-        `Loaded ${perLevel} skill(s) as slash commands; ${allSkills.length - visibleSkills.length} hidden by skills.disabled; ${nonUserInvocableCount} marked non-user-invocable`,
+        `Loaded ${perLevel} skill(s) as slash commands; ${hiddenSkills.length} hidden by skills.disabled; ${nonUserInvocableCount} marked non-user-invocable`,
       );
 
       return visibleSkills.map((skill) => {

@@ -24,13 +24,18 @@ const mockCommandB_Override = createMockCommand('command-b', CommandKind.FILE);
 class MockCommandLoader implements ICommandLoader {
   private commandsToLoad: SlashCommand[];
 
-  constructor(commandsToLoad: SlashCommand[]) {
+  constructor(
+    commandsToLoad: SlashCommand[],
+    private readonly reserved: ReadonlySet<string> = new Set(),
+  ) {
     this.commandsToLoad = commandsToLoad;
   }
 
   loadCommands = vi.fn(
     async (): Promise<SlashCommand[]> => Promise.resolve(this.commandsToLoad),
   );
+
+  reservedNames = vi.fn((): ReadonlySet<string> => this.reserved);
 }
 
 describe('CommandService', () => {
@@ -880,6 +885,79 @@ describe('CommandService', () => {
       expect(
         service.getCommands().filter((cmd) => cmd.kind === CommandKind.SKILL),
       ).toHaveLength(0);
+    });
+  });
+
+  describe('collision rename against a disabled name (#9408 R3-19)', () => {
+    it('walks past a name the skill loader hid behind skills.disabled', async () => {
+      // `demo/chat.toml` claims `demo:chat`. The extension ships `chat` and
+      // `chat1`, and `skills.disabled` hides `demo:chat1`, so the loader hands
+      // over only `demo:chat`: the disabled name is absent from the aggregate,
+      // and `skills.disabled` is never re-checked after the rename. The probe
+      // must still treat it as taken by the skill that was withheld.
+      const fileCommand = createMockCommand('demo:chat', CommandKind.FILE);
+      const visibleSkill = {
+        ...createMockCommand('demo:chat', CommandKind.SKILL),
+        extensionName: 'demo',
+        modelInvocable: true,
+        skillDetail: {
+          name: 'demo:chat',
+          level: 'extension',
+          extensionName: 'demo',
+        },
+      };
+
+      const service = await CommandService.create(
+        [
+          new MockCommandLoader([fileCommand]),
+          new MockCommandLoader(
+            [visibleSkill],
+            new Set(['demo:chat1', 'chat1']),
+          ),
+        ],
+        new AbortController().signal,
+      );
+
+      const commands = service.getCommands();
+
+      // The user's disabled name is not registered at all...
+      expect(commands.map((cmd) => cmd.name)).not.toContain('demo:chat1');
+      // ...and the skill they never disabled survives one step further along
+      // the suffix list instead of being dropped for it.
+      expect(commands.find((cmd) => cmd.extensionName === 'demo')?.name).toBe(
+        'demo:chat2',
+      );
+      expect(
+        service.getModelInvocableCommands().map((cmd) => cmd.name),
+      ).toEqual(['demo:chat2']);
+    });
+
+    it('walks past an entry in the global denylist that no command holds', async () => {
+      // `slashCommands.disabled: ['demo:chat1']` with no command of that name
+      // loaded. Unreserved, the probe lands on it and the post-rename filter
+      // then deletes the skill for a name it never held.
+      const fileCommand = createMockCommand('demo:chat', CommandKind.FILE);
+      const visibleSkill = {
+        ...createMockCommand('demo:chat', CommandKind.SKILL),
+        extensionName: 'demo',
+        modelInvocable: true,
+        skillDetail: {
+          name: 'demo:chat',
+          level: 'extension',
+          extensionName: 'demo',
+        },
+      };
+
+      const service = await CommandService.create(
+        [new MockCommandLoader([fileCommand, visibleSkill])],
+        new AbortController().signal,
+        new Set(['demo:chat1']),
+      );
+
+      expect(service.getCommands().map((cmd) => cmd.name)).toEqual([
+        'demo:chat',
+        'demo:chat2',
+      ]);
     });
   });
 });

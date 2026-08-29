@@ -19,6 +19,7 @@ import type {
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
 import { t } from '../i18n/index.js';
+import { disabledSkillReservedNames } from '../config/skill-settings.js';
 import {
   writeSkillArgs,
   clearSkillArgs,
@@ -34,9 +35,21 @@ const debugLogger = createDebugLogger('BUNDLED_SKILL_LOADER');
  * via /<skill-name> (e.g., /review).
  */
 export class BundledSkillLoader implements ICommandLoader {
+  private reserved = new Set<string>();
+
   constructor(private readonly config: Config | null) {}
 
+  /**
+   * The spellings `skills.disabled` withheld from the last `loadCommands`, plus
+   * the entries themselves, so the collision rename in `CommandService` never
+   * registers a command under a name the user disabled (#9408).
+   */
+  reservedNames(): ReadonlySet<string> {
+    return this.reserved;
+  }
+
   async loadCommands(_signal: AbortSignal): Promise<SlashCommand[]> {
+    this.reserved = new Set<string>();
     if (this.config?.getBareMode?.()) {
       debugLogger.debug('Bare mode enabled, skipping bundled skills');
       return [];
@@ -75,6 +88,7 @@ export class BundledSkillLoader implements ICommandLoader {
       const skills = cronVisible.filter(
         (skill) => !disabled.has(skill.name.toLowerCase()),
       );
+      this.reserved = disabledSkillReservedNames(cronVisible, disabled);
 
       debugLogger.debug(
         `Loaded ${skills.length} bundled skill(s) as slash commands; ${cronVisible.length - skills.length} hidden by skills.disabled`,
