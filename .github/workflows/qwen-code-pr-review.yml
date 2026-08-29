@@ -578,9 +578,12 @@ jobs:
             if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
               chmod -R u+w "$stale_qwen" 2>/dev/null || true
             fi
-            # If a foreign-owned directory cannot move to a different parent,
-            # quarantine the runner-owned workspace and recreate the checkout
-            # root. Warm contents are lost only on this unrecoverable path.
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
             rm -rf -- "$stale_qwen" 2>/dev/null ||
               sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
               {
