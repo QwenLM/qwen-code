@@ -2481,6 +2481,70 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('keeps the confirmed persisted reasoning preview after clearing the session', async () => {
+    const session = createMockSession('session-a');
+    session.setConfigOption.mockResolvedValueOnce({
+      configOptions: reasoningConfigOptions('medium'),
+      persisted: true,
+    });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentModel: 'qwen3.8-max',
+        providers: workspaceProvidersStatus('low'),
+      },
+      session,
+    });
+
+    await actions.setReasoningEffort('medium', { persist: true });
+    await actions.clearSession();
+
+    expect(getConnection().sessionId).toBeUndefined();
+    expect(getConnection().models?.[0]?.reasoningPreview).toMatchObject({
+      enabled: true,
+      effort: 'medium',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
+  it('waits for an in-flight persisted reasoning change before clearing', async () => {
+    const session = createMockSession('session-a');
+    const persisted = createDeferred<{
+      configOptions: ReturnType<typeof reasoningConfigOptions>;
+      persisted: boolean;
+    }>();
+    session.setConfigOption.mockReturnValueOnce(persisted.promise);
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentModel: 'qwen3.8-max',
+        providers: workspaceProvidersStatus('low'),
+      },
+      session,
+    });
+
+    const update = actions.setReasoningEffort('medium', { persist: true });
+    const clear = actions.clearSession();
+    await Promise.resolve();
+
+    expect(session.detach).not.toHaveBeenCalled();
+    persisted.resolve({
+      configOptions: reasoningConfigOptions('medium'),
+      persisted: true,
+    });
+    await update;
+    await clear;
+
+    expect(session.detach).toHaveBeenCalledOnce();
+    expect(getConnection().sessionId).toBeUndefined();
+    expect(getConnection().models?.[0]?.reasoningPreview).toMatchObject({
+      enabled: true,
+      effort: 'medium',
+    });
+  });
+
   it('accepts a confirmed default reset without inventing a Default option', async () => {
     const session = createMockSession('session-a');
     session.setConfigOption.mockResolvedValueOnce({
@@ -2492,6 +2556,7 @@ describe('createDaemonSessionActions', () => {
         status: 'connected',
         sessionId: 'session-a',
         currentModel: 'qwen3.8-max',
+        providers: workspaceProvidersStatus('none'),
       },
       session,
     });
@@ -2509,6 +2574,8 @@ describe('createDaemonSessionActions', () => {
       enabled: true,
       effort: 'xhigh',
     });
+    await actions.clearSession();
+    expect(getConnection().models?.[0]?.reasoningPreview?.effort).toBe('xhigh');
   });
 
   it('rejects a reasoning effort when live config options do not confirm it', async () => {
@@ -2535,24 +2602,35 @@ describe('createDaemonSessionActions', () => {
 
   it('does not update reasoning when persistence is not confirmed', async () => {
     const session = createMockSession('session-a');
-    session.setConfigOption.mockResolvedValueOnce({
-      configOptions: reasoningConfigOptions('medium'),
-      persisted: false,
-    });
+    const rejectedPersistence = createDeferred<{
+      configOptions: ReturnType<typeof reasoningConfigOptions>;
+      persisted: boolean;
+    }>();
+    session.setConfigOption.mockReturnValueOnce(rejectedPersistence.promise);
     const { actions, getConnection } = createActionsHarness({
       connection: {
         status: 'connected',
         sessionId: 'session-a',
         currentModel: 'qwen3.8-max',
+        providers: workspaceProvidersStatus('low'),
       },
       session,
     });
 
-    await expect(
-      actions.setReasoningEffort('medium', { persist: true }),
-    ).rejects.toThrow('Daemon did not confirm reasoning effort "medium"');
+    const update = actions.setReasoningEffort('medium', { persist: true });
+    const clear = actions.clearSession();
+    rejectedPersistence.resolve({
+      configOptions: reasoningConfigOptions('medium'),
+      persisted: false,
+    });
+
+    await expect(update).rejects.toThrow(
+      'Daemon did not confirm reasoning effort "medium"',
+    );
+    await expect(clear).resolves.toBeUndefined();
 
     expect(getConnection().reasoning).toBeUndefined();
+    expect(getConnection().models?.[0]?.reasoningPreview?.effort).toBe('low');
   });
 
   it('does not apply a late approval mode to a replacement attachment', async () => {
@@ -2818,6 +2896,35 @@ function reasoningConfigOptions(currentValue: string) {
       ],
     },
   ];
+}
+
+function workspaceProvidersStatus(
+  currentValue: string,
+): NonNullable<DaemonConnectionState['providers']> {
+  return {
+    v: 1,
+    workspaceCwd: '/workspace',
+    initialized: true,
+    current: { modelId: 'qwen3.8-max' },
+    providers: [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'qwen-oauth',
+        current: true,
+        models: [
+          {
+            modelId: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            isCurrent: true,
+            isRuntime: false,
+            configOptions: reasoningConfigOptions(currentValue),
+          },
+        ],
+      },
+    ],
+  };
 }
 
 function createDeferred<T>() {

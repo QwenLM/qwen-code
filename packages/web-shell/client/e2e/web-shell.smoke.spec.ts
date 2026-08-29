@@ -443,7 +443,8 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   });
   const daemon = await installScenario(page, scenario, testInfo);
 
-  await gotoEmptyMobileWelcomeHarness(page);
+  await page.goto('/');
+  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
 
   const modelButton = page.locator('[data-web-shell-model-button]');
   await expect(modelButton).toContainText('qwen3.8-max · Extra High');
@@ -544,6 +545,9 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
     persist: true,
   });
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  await daemon.sendEvent(
+    turnCompleteEvent('persisted-reasoning-prompt', { id: 1 }),
+  );
   const configRequestIndex = daemon.requests.findIndex(
     (request) =>
       request.method === 'POST' &&
@@ -570,6 +574,24 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   await expect(
     page.locator('[data-web-shell-effort="medium"]'),
   ).toHaveAttribute('aria-pressed', 'true');
+
+  const qualifiedProviderRequestCount = () =>
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'GET' &&
+        /^\/workspaces\/[^/]+\/providers\/?$/.test(request.path),
+    ).length;
+  const providersBeforeClear = qualifiedProviderRequestCount();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'New task', exact: true }).click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/');
+  await expect(modelButton).toContainText('qwen3.8-max · Medium');
+  expect(qualifiedProviderRequestCount()).toBe(providersBeforeClear);
+  expect(
+    daemon.requests.filter(
+      (request) => request.method === 'POST' && request.path === '/session',
+    ),
+  ).toHaveLength(1);
 });
 
 test('keeps mandatory qwen3.8-max effort switchable before lazy session creation @smoke', async ({

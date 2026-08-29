@@ -213,6 +213,49 @@ export function getWorkspaceModelsAfterSessionClear(
     : current.models;
 }
 
+function withPersistedReasoningPreview(
+  providers: DaemonConnectionState['providers'],
+  modelId: string | undefined,
+  configOptions: unknown[],
+): DaemonConnectionState['providers'] {
+  const targetModelId = modelId ?? providers?.current?.modelId;
+  const isReasoningOption = (option: unknown) =>
+    typeof option === 'object' &&
+    option !== null &&
+    'id' in option &&
+    option.id === 'reasoning_effort';
+  const reasoningConfigOptions = configOptions.filter(isReasoningOption);
+  if (!providers || !targetModelId || reasoningConfigOptions.length === 0) {
+    return providers;
+  }
+
+  let changed = false;
+  const nextProviders = providers.providers.map((provider) => {
+    let providerChanged = false;
+    const models = provider.models.map((model) => {
+      if (
+        model.modelId !== targetModelId ||
+        !model.configOptions?.some(isReasoningOption)
+      ) {
+        return model;
+      }
+      changed = true;
+      providerChanged = true;
+      return {
+        ...model,
+        configOptions: [
+          ...(model.configOptions ?? []).filter(
+            (option) => !isReasoningOption(option),
+          ),
+          ...reasoningConfigOptions,
+        ],
+      };
+    });
+    return providerChanged ? { ...provider, models } : provider;
+  });
+  return changed ? { ...providers, providers: nextProviders } : providers;
+}
+
 export function getConnectionAfterSessionClear(
   current: DaemonConnectionState,
   clearedSessionId: string | undefined,
@@ -286,6 +329,7 @@ export function createDaemonSessionActions({
   let reasoningActionToken = 0;
   let appliedReasoningActionToken = 0;
   let modelMutationGeneration = 0;
+  let pendingPersistedReasoningAction: Promise<void> | undefined;
   let branchInFlight = false;
   let attachmentClient = sessionRef.current?.client;
   let attachmentSessionId = sessionRef.current?.sessionId;
@@ -1090,15 +1134,23 @@ export function createDaemonSessionActions({
     },
 
     async setReasoningEffort(value, opts) {
-      const actionToken = ++reasoningActionToken;
-      const sourceModel = getConnection().currentModel;
-      const sourceModelGeneration = modelMutationGeneration;
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
         'Set reasoning effort failed',
         'set_reasoning_effort',
       );
+      let completePersistedAction: (() => void) | undefined;
+      const persistedAction = opts?.persist
+        ? new Promise<void>((resolve) => {
+            completePersistedAction = resolve;
+          })
+        : undefined;
+      if (persistedAction) pendingPersistedReasoningAction = persistedAction;
+
+      const actionToken = ++reasoningActionToken;
+      const sourceModel = getConnection().currentModel;
+      const sourceModelGeneration = modelMutationGeneration;
       try {
         const result = await withActionTimeout(
           trackSessionConfigMutation(
@@ -1140,6 +1192,14 @@ export function createDaemonSessionActions({
             return {
               ...current,
               reasoning: nextReasoning,
+              providers:
+                opts?.persist && result.persisted
+                  ? withPersistedReasoningPreview(
+                      current.providers,
+                      sourceModel,
+                      configOptions,
+                    )
+                  : current.providers,
               context: current.context
                 ? {
                     ...current.context,
@@ -1156,6 +1216,11 @@ export function createDaemonSessionActions({
           error,
           'set_reasoning_effort',
         );
+      } finally {
+        completePersistedAction?.();
+        if (pendingPersistedReasoningAction === persistedAction) {
+          pendingPersistedReasoningAction = undefined;
+        }
       }
     },
 
@@ -1435,6 +1500,7 @@ export function createDaemonSessionActions({
     },
 
     async clearSession() {
+      await pendingPersistedReasoningAction?.catch(() => undefined);
       const session = sessionRef.current;
       manualSessionClearRef.current = true;
       clearActiveSessionState();
