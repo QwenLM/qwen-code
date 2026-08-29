@@ -946,6 +946,62 @@ describe('workspace skill settings persistence', () => {
     expect(setValue.mock.calls[0]?.[3]).toBe(toolGuard);
   });
 
+  it('records the opt-in when a qualified name is enabled under a bare defaultDisabled entry (#9408 R3-3)', async () => {
+    // Settings hold the pre-rename spelling `pdf`. After a collision rename the
+    // registry name is `docs:pdf`, and the runtime treats that bare entry as
+    // disabling it. Enabling through the qualified name has to notice the same
+    // entry, otherwise the toggle writes nothing and the skill stays
+    // default-disabled for good.
+    workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-rename-')),
+    );
+    qwenHome = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-rename-home-')),
+    );
+    previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: {} }),
+    );
+    fs.writeFileSync(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({ skills: { defaultDisabled: ['pdf'] } }),
+    );
+
+    const originalCreateServeApp = serverModule.createServeApp;
+    let persistDisabledSkills:
+      | NonNullable<
+          Parameters<typeof serverModule.createServeApp>[2]
+        >['persistDisabledSkills']
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      persistDisabledSkills = args[2]?.persistDisabledSkills;
+      return originalCreateServeApp(...args);
+    });
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        serveWebShell: false,
+      },
+      { bridge: makeRuntimeBridge() },
+    );
+    await handle.runtimeReady;
+    expect(persistDisabledSkills).toBeDefined();
+
+    await expect(
+      persistDisabledSkills!(workspace, 'docs:pdf', true),
+    ).resolves.toMatchObject({
+      changed: true,
+      settingsChanges: [{ key: 'skills.enabled', value: ['docs:pdf'] }],
+    });
+  });
+
   it('persists a Skill batch with one settings write across settings scopes', async () => {
     workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-batch-')),

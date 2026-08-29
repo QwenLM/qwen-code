@@ -35,6 +35,7 @@ import { SettingScope } from '../../../config/settings.js';
 import {
   computeWorkspaceSkillListUpdates,
   resolveSkillSettings,
+  skillSettingEntriesApply,
   skillSettingStrings,
 } from '../../../config/skill-settings.js';
 import { t } from '../../../i18n/index.js';
@@ -318,8 +319,16 @@ export function SkillsManagerDialog({
           wasEnabled: initialSelectedKeys.has(skill.name),
           isEnabled: selected.has(skill.name),
           defaultDisabled:
-            initialResolved.defaultDisabledNames.has(lower(skill.name)) &&
-            !initialResolved.enabledNames.has(lower(skill.name)),
+            skillSettingEntriesApply(
+              initialResolved.defaultDisabledNames,
+              skill.name,
+              skill.extensionName,
+            ) &&
+            !skillSettingEntriesApply(
+              initialResolved.enabledNames,
+              skill.name,
+              skill.extensionName,
+            ),
           extensionName: skill.extensionName,
         })),
       );

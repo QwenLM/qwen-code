@@ -72,6 +72,27 @@ export function skillMatchesSettingName(
 }
 
 /**
+ * Whether a resolved setting set applies to the skill named by `skillName`,
+ * judged on that skill's own spellings rather than a bare-suffix match against
+ * any entry (#9408).
+ *
+ * This answers "is the skill default-disabled, or already opted in", so it has
+ * to use the same identity the runtime disables by. A qualified name still sees
+ * the bare spelling it persisted under before a collision rename, while a bare
+ * name sees only itself. Matching on suffix alone would let an entry belonging
+ * to `other:pdf` decide the state of an unrelated `pdf`, the same over-reach
+ * R3-1 removed from the write path.
+ */
+export function skillSettingEntriesApply(
+  names: ReadonlySet<string>,
+  skillName: string,
+  extensionName?: string,
+): boolean {
+  const keys = toggledSkillSettingKeys(skillName, extensionName);
+  return [...names].some((name) => keys.includes(name.trim().toLowerCase()));
+}
+
+/**
  * `skillMatchesSettingName` for a slash command whose name may have been
  * rewritten by `CommandService`'s collision suffixing (#9408).
  *
