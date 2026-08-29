@@ -7322,6 +7322,7 @@ describe('SessionService', () => {
     it.each([
       ['short', ''],
       ['larger than the tail window', 'x'.repeat(70 * 1024)],
+      ['ending at a colon', null],
     ])(
       'does not resurrect a clear glued after a %s torn record',
       async (_name, tornContent) => {
@@ -7330,21 +7331,27 @@ describe('SessionService', () => {
           goalStateLine(sessionId, 'Write the release notes'),
         );
         const clear = JSON.stringify(goalStateLine(sessionId, null, 'g2'));
-        const torn = JSON.stringify({
-          uuid: 'torn',
-          parentUuid: null,
-          sessionId,
-          type: 'system',
-          subtype: 'note',
-          timestamp: '2026-04-22T00:00:04.000Z',
-          cwd,
-          version: 'test',
-          systemPayload: { text: tornContent },
-        }).slice(0, -3);
+        const torn =
+          tornContent === null
+            ? '{"type":"system","subtype":"note","systemPayload":'
+            : JSON.stringify({
+                uuid: 'torn',
+                parentUuid: null,
+                sessionId,
+                type: 'system',
+                subtype: 'note',
+                timestamp: '2026-04-22T00:00:04.000Z',
+                cwd,
+                version: 'test',
+                systemPayload: { text: tornContent },
+              }).slice(0, -3);
         const file = writeRawSession(sessionId, `${create}${torn}${clear}\n`);
         const actualJsonl = await vi.importActual<
           typeof import('../utils/jsonl-utils.js')
         >('../utils/jsonl-utils.js');
+        vi.mocked(jsonl._recoverObjectsFromLine).mockImplementation(
+          actualJsonl._recoverObjectsFromLine,
+        );
         vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
           actualJsonl.readLinesWithIntegrity,
         );

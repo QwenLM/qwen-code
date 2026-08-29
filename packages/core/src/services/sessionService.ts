@@ -42,6 +42,7 @@ import {
   readLastJsonStringFieldSync,
   readLastMatchingLineFieldSync,
   readSessionTitleInfoFromFileSync,
+  type MatchingRecordFieldReader,
 } from '../utils/sessionStorageUtils.js';
 import {
   isSessionArtifactRecord,
@@ -75,6 +76,7 @@ import {
   resolveBranchPoints,
 } from './branch-points.js';
 import { recoverGoalFromRecords } from '../goals/goal-persistence.js';
+import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 export {
   buildApiHistoryFromConversation,
   type BuildApiHistoryOptions,
@@ -422,13 +424,20 @@ const MAX_PROMPT_SCAN_LINES = 10;
  */
 const TAIL_READ_SIZE = 64 * 1024;
 
-function isGoalStateRecord(record: unknown): boolean {
-  if (typeof record !== 'object' || record === null) return false;
+const readGoalStateObjective: MatchingRecordFieldReader = (record) => {
+  if (typeof record !== 'object' || record === null) {
+    return { matched: false, value: undefined };
+  }
   const candidate = record as Record<string, unknown>;
-  return (
-    candidate['type'] === 'system' && candidate['subtype'] === 'goal_state'
-  );
-}
+  if (candidate['type'] !== 'system' || candidate['subtype'] !== 'goal_state') {
+    return { matched: false, value: undefined };
+  }
+  const payload = parseGoalStateRecordPayloadV2(candidate['systemPayload']);
+  return {
+    matched: true,
+    value: payload?.snapshot.goal?.objective,
+  };
+};
 
 async function pathExists(filePath: string): Promise<boolean> {
   try {
@@ -1740,7 +1749,8 @@ export class SessionService {
       '"subtype":"goal_state"',
       'objective',
       tailBuffer,
-      isGoalStateRecord,
+      undefined,
+      readGoalStateObjective,
     );
     if (scan.matched) {
       return scan.value ? this.truncatePromptForDisplay(scan.value) : undefined;

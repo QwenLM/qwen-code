@@ -190,6 +190,19 @@ describe('sessionStorageUtils', () => {
       record !== null &&
       (record as Record<string, unknown>)['type'] === 'system' &&
       (record as Record<string, unknown>)['subtype'] === 'goal_state';
+    const readGoalStateObjective = (record: unknown) => {
+      if (!isGoalStateRecord(record)) {
+        return { matched: false, value: undefined };
+      }
+      const payload = (record as Record<string, unknown>)['systemPayload'];
+      return {
+        matched: true,
+        value:
+          typeof payload === 'object' && payload !== null
+            ? extractJsonStringField(JSON.stringify(payload), 'objective')
+            : undefined,
+      };
+    };
     const nestedGoal = {
       type: 'system',
       subtype: 'goal_state',
@@ -280,6 +293,44 @@ describe('sessionStorageUtils', () => {
           isGoalStateRecord,
         ),
       ).toEqual({ matched: false, value: undefined });
+    });
+
+    it('does not read a goal-shaped array element from a torn containing record', () => {
+      const nestedJson = JSON.stringify(nestedGoal);
+      const containing = JSON.stringify({
+        type: 'assistant',
+        parts: [nestedGoal],
+      });
+      const torn = containing.slice(
+        0,
+        containing.indexOf(nestedJson) + nestedJson.length,
+      );
+
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          torn,
+          GOAL,
+          'objective',
+          true,
+          undefined,
+          readGoalStateObjective,
+        ),
+      ).toEqual({ matched: true, value: undefined });
+    });
+
+    it('does not recover an older value when the newest marker cannot be attributed', () => {
+      const torn = '{"type":"system","subtype":"note","systemPayload":';
+
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          `${create('old')}${torn}${clear}`,
+          GOAL,
+          'objective',
+          true,
+          undefined,
+          readGoalStateObjective,
+        ),
+      ).toEqual({ matched: true, value: undefined });
     });
 
     it('continues past a rejected marker to an older matching record', () => {

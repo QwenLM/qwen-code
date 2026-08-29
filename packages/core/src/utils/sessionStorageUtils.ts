@@ -232,6 +232,10 @@ export interface LastMatchingLineField {
   value: string | undefined;
 }
 
+export type MatchingRecordFieldReader = (
+  record: unknown,
+) => LastMatchingLineField;
+
 /**
  * Outcome of {@link readLastMatchingLineFieldSync}. A miss is not one thing:
  * only `absent` proves the record does not exist, and callers that would
@@ -266,6 +270,10 @@ export type LastMatchingLineScan =
  * A leading partial line contributes only a complete suffix record. Its
  * truncated outer record cannot win, but a later record glued onto that
  * prefix remains recoverable.
+ *
+ * `readRecordField` lets lifecycle callers interpret complete candidates
+ * with their authoritative parser. When that parser is present, a malformed
+ * newest marker is decisive and cannot expose an older lifecycle value.
  */
 export function extractJsonStringFieldFromLastMatchingLine(
   text: string,
@@ -273,7 +281,23 @@ export function extractJsonStringFieldFromLastMatchingLine(
   key: string,
   wholeLines = false,
   recordMatches?: (record: unknown) => boolean,
+  readRecordField?: MatchingRecordFieldReader,
 ): LastMatchingLineField {
+  const readParsedRecord = (
+    parsed: unknown,
+    record: string,
+  ): LastMatchingLineField | undefined => {
+    if (readRecordField) {
+      const field = readRecordField(parsed);
+      return field.matched ? field : undefined;
+    }
+    if (recordMatches && !recordMatches(parsed)) return undefined;
+    return {
+      matched: true,
+      value: extractJsonStringField(record, key),
+    };
+  };
+
   let searchFrom = text.length;
   while (searchFrom > 0) {
     const hit = text.lastIndexOf(lineContains, searchFrom - 1);
@@ -285,12 +309,8 @@ export function extractJsonStringFieldFromLastMatchingLine(
     if (!leadingPartial) {
       try {
         const parsed = JSON.parse(line);
-        if (!recordMatches || recordMatches(parsed)) {
-          return {
-            matched: true,
-            value: extractJsonStringField(line, key),
-          };
-        }
+        const field = readParsedRecord(parsed, line);
+        if (field) return field;
         searchFrom = lineStart;
         continue;
       } catch {
@@ -299,20 +319,16 @@ export function extractJsonStringFieldFromLastMatchingLine(
     }
 
     let markerOffset = line.lastIndexOf(lineContains);
+    const latestMarkerOffset = markerOffset;
     while (markerOffset >= 0) {
       const recordStart = line.lastIndexOf('{', markerOffset);
       if (recordStart >= 0 && line[recordStart - 1] !== ':') {
         try {
           const parsed = JSON.parse(line.slice(recordStart));
           const record = JSON.stringify(parsed);
-          if (
-            record.includes(lineContains) &&
-            (!recordMatches || recordMatches(parsed))
-          ) {
-            return {
-              matched: true,
-              value: extractJsonStringField(record, key),
-            };
+          if (record.includes(lineContains)) {
+            const field = readParsedRecord(parsed, record);
+            if (field) return field;
           }
         } catch {
           // The marker does not belong to a complete suffix record.
@@ -329,16 +345,25 @@ export function extractJsonStringFieldFromLastMatchingLine(
       for (let i = recovered.length - 1; i >= 0; i--) {
         const parsed = recovered[i];
         const record = JSON.stringify(parsed);
-        if (
-          record.includes(lineContains) &&
-          (!recordMatches || recordMatches(parsed))
-        ) {
-          return {
-            matched: true,
-            value: extractJsonStringField(record, key),
-          };
+        if (record.includes(lineContains)) {
+          if (readRecordField) {
+            const recordOffset = line.lastIndexOf(record);
+            if (
+              recordOffset < 0 ||
+              recordOffset + record.lastIndexOf(lineContains) !==
+                latestMarkerOffset
+            ) {
+              continue;
+            }
+          }
+          const field = readParsedRecord(parsed, record);
+          if (field) return field;
         }
       }
+    }
+
+    if (readRecordField) {
+      return { matched: true, value: undefined };
     }
 
     searchFrom = lineStart;
@@ -370,6 +395,7 @@ export function readLastMatchingLineFieldSync(
   key: string,
   scratchBuffer?: Buffer,
   recordMatches?: (record: unknown) => boolean,
+  readRecordField?: MatchingRecordFieldReader,
 ): LastMatchingLineScan {
   let fd: number | undefined;
   try {
@@ -393,6 +419,7 @@ export function readLastMatchingLineFieldSync(
         key,
         tail.size <= LITE_READ_BUF_SIZE,
         recordMatches,
+        readRecordField,
       );
       if (hit.matched) return { matched: true, value: hit.value };
       return tail.size <= LITE_READ_BUF_SIZE
