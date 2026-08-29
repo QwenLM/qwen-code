@@ -526,6 +526,12 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   ).toHaveLength(0);
 
   await page.keyboard.press('Escape');
+  scenario.providersDelayMs = 500;
+  const staleProvidersResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/workspace/providers',
+  );
   await fillComposer(page, 'Create the lazy session');
   await page.locator('[data-web-shell-composer-submit]').click();
   await expect
@@ -548,6 +554,8 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   await daemon.sendEvent(
     turnCompleteEvent('persisted-reasoning-prompt', { id: 1 }),
   );
+  await staleProvidersResponse;
+  await page.waitForTimeout(50);
   const configRequestIndex = daemon.requests.findIndex(
     (request) =>
       request.method === 'POST' &&

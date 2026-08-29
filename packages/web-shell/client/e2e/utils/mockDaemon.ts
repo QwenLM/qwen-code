@@ -71,6 +71,7 @@ export interface WebShellDaemonScenario {
   events: DaemonEvent[];
   state: DaemonSessionState;
   contextDelayMs?: number;
+  providersDelayMs?: number;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
@@ -378,6 +379,7 @@ export function createWebShellDaemonScenario(
     events: overrides.events ?? [],
     state,
     contextDelayMs: overrides.contextDelayMs,
+    providersDelayMs: overrides.providersDelayMs,
     artifacts: overrides.artifacts ?? [],
     workspaceFiles: overrides.workspaceFiles ?? {},
     gitStatus: overrides.gitStatus,
@@ -904,7 +906,13 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && path === '/workspace/providers') {
-    await json(route, scenario.providers);
+    const providers = scenario.providers;
+    if (scenario.providersDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, scenario.providersDelayMs),
+      );
+    }
+    await json(route, providers);
     return;
   }
   if (method === 'GET' && path === '/workspace/skills') {
@@ -976,7 +984,13 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/providers\/?$/.test(path)) {
-    await json(route, scenario.providers);
+    const providers = scenario.providers;
+    if (scenario.providersDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, scenario.providersDelayMs),
+      );
+    }
+    await json(route, providers);
     return;
   }
   if (method === 'GET' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {

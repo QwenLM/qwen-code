@@ -2452,7 +2452,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               contextWindow: configSnapshotCurrent
                 ? (sessionContextWindow ?? current.contextWindow)
                 : current.contextWindow,
-              providers: providers ?? current.providers,
+              providers: configSnapshotCurrent
+                ? (providers ?? current.providers)
+                : current.providers,
               supportedCommands: supportedCommands ?? current.supportedCommands,
               context: configSnapshotCurrent
                 ? (context ?? current.context)
