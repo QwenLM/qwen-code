@@ -98,6 +98,8 @@ export interface BridgeSessionInfo {
 
 export interface ChannelAgentBridgeSessionOptions {
   approvalMode?: string;
+  /** Whether daemon-managed Channel loop tools may be attached to the session. */
+  enableChannelLoops?: boolean;
   /**
    * Channel instance name (e.g. `feishu-main`) stamped as the daemon `sourceId`
    * on **new** sessions — creation-time attribution paired with
@@ -107,12 +109,56 @@ export interface ChannelAgentBridgeSessionOptions {
   sourceId?: string;
 }
 
+export interface ChannelPromptImage {
+  data: string;
+  mimeType: string;
+}
+
 export interface ChannelAgentBridgePromptOptions {
+  images?: ChannelPromptImage[];
   imageBase64?: string;
   imageMimeType?: string;
   /** User-authored text shown in transcripts when `text` includes hidden context.
    * `''` means no user-visible text and must not be treated as unset. */
   displayText?: string;
+}
+
+/**
+ * Resolves the ordered `images` contract, falling back to the legacy
+ * single-image pair, and normalizes MIME types in one place: channel
+ * adapters forward CDN `content-type` headers verbatim, so values arrive
+ * with parameters and mixed case (e.g. `image/png; charset=binary`), and
+ * the non-standard `image/jpg` alias rides them too. Entries missing
+ * `data` or `mimeType` are dropped so one malformed attachment degrades
+ * to a prompt without that image, like the legacy field guards did.
+ */
+export function resolvePromptImages(
+  options?: ChannelAgentBridgePromptOptions,
+): ChannelPromptImage[] {
+  const images =
+    options?.images && options.images.length > 0
+      ? options.images
+      : options?.imageBase64 && options.imageMimeType
+        ? [{ data: options.imageBase64, mimeType: options.imageMimeType }]
+        : [];
+  return images
+    .filter(
+      (image) =>
+        !!image &&
+        typeof image.data === 'string' &&
+        image.data.length > 0 &&
+        typeof image.mimeType === 'string' &&
+        image.mimeType.length > 0,
+    )
+    .map((image) => {
+      const cleaned =
+        image.mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+      return {
+        data: image.data,
+        // Normalize the alias like the daemon attachment store's own naming.
+        mimeType: cleaned === 'image/jpg' ? 'image/jpeg' : cleaned,
+      };
+    });
 }
 
 export interface ChannelAgentBridge {

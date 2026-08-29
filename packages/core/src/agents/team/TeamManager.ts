@@ -28,7 +28,11 @@ import type {
   TeamAgentHandle,
 } from '../backends/types.js';
 import { PermissionMode } from '../../hooks/types.js';
-import { AgentStatus, isTerminalStatus } from '../runtime/agent-types.js';
+import {
+  AgentStatus,
+  isTerminalStatus,
+  lastVisibleAnswer,
+} from '../runtime/agent-types.js';
 import { AgentEventType } from '../runtime/agent-events.js';
 import type {
   AgentRoundTextEvent,
@@ -88,6 +92,14 @@ const debug = createDebugLogger('AGENTS_TEAM_MANAGER');
 // `TeamAgentHandle` is re-exported below so existing callers that
 // imported it from this module keep compiling.
 export type { TeamAgentHandle };
+
+/** Delivery outcome of a {@link TeamManager.broadcast} call. */
+export interface BroadcastResult {
+  /** Number of recipients the broadcast attempted (sender excluded). */
+  total: number;
+  /** Names of recipients whose delivery was rejected. */
+  failedRecipients: string[];
+}
 
 /** Configuration for spawning a teammate. */
 export interface TeammateSpawnConfig {
@@ -671,31 +683,38 @@ export class TeamManager {
   /**
    * Broadcast a message to all teammates and the leader
    * (except the sender).
+   *
+   * Returns the delivery outcome so the caller can distinguish complete
+   * success from partial/total failure instead of assuming every
+   * delivery landed.
    */
-  async broadcast(message: string, fromName: string): Promise<void> {
-    const promises = this.teamFile.members
+  async broadcast(message: string, fromName: string): Promise<BroadcastResult> {
+    const recipients = this.teamFile.members
       .filter((m) => m.name.toLowerCase() !== fromName.toLowerCase())
-      .map((m) => this.sendMessage(m.name, message, fromName));
+      .map((m) => m.name);
 
     // Also deliver to leader inbox if sender is not the leader.
     if (fromName.toLowerCase() !== LEADER_NAME) {
-      promises.push(this.sendMessage(LEADER_NAME, message, fromName));
+      recipients.push(LEADER_NAME);
     }
 
     // allSettled, not all: a single recipient that terminated between
     // the member snapshot and the send throws (its queue is gone), and
     // Promise.all would reject the whole broadcast — making the leader
     // think every recipient failed when the rest were delivered fine.
-    const results = await Promise.allSettled(promises);
-    const failures = results.filter(
-      (r): r is PromiseRejectedResult => r.status === 'rejected',
+    const results = await Promise.allSettled(
+      recipients.map((name) => this.sendMessage(name, message, fromName)),
     );
-    if (failures.length > 0) {
+    const failedRecipients = recipients.filter(
+      (_, i) => results[i]?.status === 'rejected',
+    );
+    if (failedRecipients.length > 0) {
       debug.warn(
-        `Broadcast: ${failures.length}/${results.length} send(s) failed ` +
+        `Broadcast: ${failedRecipients.length}/${results.length} send(s) failed ` +
           `(recipient likely terminated).`,
       );
     }
+    return { total: recipients.length, failedRecipients };
   }
 
   /**
@@ -1716,10 +1735,54 @@ export class TeamManager {
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
     });
 
-    // Reconcile: if agent already reached IDLE before we
-    // attached, flush now.
+    // Reconcile state reached before we attached. The emitter does
+    // not buffer for late subscribers, and the in-process run loop
+    // can settle the initial round while spawnAgent() is still
+    // resolving — those events never reach the bridge.
     const currentStatus = agent.getStatus();
-    if (currentStatus === AgentStatus.IDLE) {
+
+    // Round text emitted before attach survives only in the agent's
+    // message history (AgentCore appends an assistant message per
+    // ROUND_TEXT). Recover the last model-visible answer — mirroring
+    // onRoundText's last-non-empty-text-wins semantics — so the
+    // settlement below reports it instead of the no-visible-answer
+    // fallback. Live ROUND_TEXT events after attach overwrite this
+    // seed as usual; RUNNING/terminal handlers clear it like any
+    // pending report.
+    const preAttachReport = this.lastVisibleAnswer(agent);
+    if (preAttachReport !== undefined) {
+      this.pendingFinalReports.set(agentId, preAttachReport);
+      // Mirror onRoundText: visible round text supersedes any
+      // explicit send_message(to: leader) flag set earlier in this
+      // round. sendMessage sets that flag synchronously — no event
+      // bridge needed — so a pre-attach explicit progress note would
+      // otherwise survive until the replayed IDLE settlement below,
+      // which would then skip this recovered answer and leave the
+      // leader with zero automatic reports. Erring toward one extra
+      // delivery (when the last visible text preceded the explicit
+      // send) matches the "exactly once, not zero" intent.
+      this.explicitLeaderReports.delete(agentId);
+      debug.info(
+        `setupEventBridge: recovered pre-attach round text for "${agentName}" (${agentId}); seeding pending report (${preAttachReport.length} chars) from message history.`,
+      );
+    }
+
+    if (currentStatus === AgentStatus.IDLE && preAttachReport !== undefined) {
+      // The initial round already settled to IDLE before attach.
+      // Replay the STATUS_CHANGE through the same handler the live
+      // path uses so its final report and message flush happen
+      // exactly once. Without pre-attach round text there is no
+      // completed round to report — keep the flush-only behavior.
+      debug.info(
+        `setupEventBridge: replaying missed IDLE settlement for "${agentName}" (${agentId}); the initial round settled before the event bridge attached.`,
+      );
+      onStatusChange({
+        agentId,
+        previousStatus: AgentStatus.RUNNING,
+        newStatus: AgentStatus.IDLE,
+        timestamp: Date.now(),
+      } as AgentStatusChangeEvent);
+    } else if (currentStatus === AgentStatus.IDLE) {
       this.fireAndForget(
         `flushNextMessage(${agentId})`,
         this.flushNextMessage(agentId, agentName),
@@ -1737,6 +1800,18 @@ export class TeamManager {
         timestamp: Date.now(),
       } as AgentStatusChangeEvent);
     }
+  }
+
+  /**
+   * The last model-visible answer in an agent handle's message
+   * history, or undefined when there is none. Mirrors the live
+   * ROUND_TEXT → pendingFinalReports semantics: the most recent
+   * non-empty, non-thought assistant text wins.
+   */
+  private lastVisibleAnswer(agent: TeamAgentHandle): string | undefined {
+    const messages = agent.getMessages?.();
+    if (!messages) return undefined;
+    return lastVisibleAnswer(messages);
   }
 
   // ─── Private: Permission fallback ───────────────────────
