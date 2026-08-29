@@ -1169,8 +1169,25 @@ describe('qwen resolve workflow: recovering requests that used to be lost', () =
       'git fetch "${RESOLVE_ORIGIN_URL:-https://github.com/${REPO}.git}"',
     );
     expect(replay).not.toContain('git fetch origin');
-    // And the comment says a replay happened.
+    // And the comment says a replay happened, and where the pushed tree is:
+    // the first artifact holds the ORIGINAL resolution (uploaded before the
+    // replay ran), so a replay records what it pushed for a second upload.
     expect(reportStep).toContain('the resolution was replayed on top of it');
+    expect(reportStep).toContain(
+      'git diff "origin/${BASE_REF}...HEAD" > "${WORKDIR}/pushed/pushed.diff"',
+    );
+    expect(reportStep).toContain('qwen-resolve-pr-${PR_NUMBER}-pushed');
+    const pushedUpload = step(resolveJob, 'Upload pushed tree');
+    expect(pushedUpload).toContain(
+      "name: 'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}-pushed'",
+    );
+    expect(pushedUpload).toContain("path: '${{ env.WORKDIR }}/pushed/'");
+    expect(pushedUpload).toContain(
+      'if: "${{ always() && steps.prepare.outputs.decision == \'run\' }}"',
+    );
+    expect(resolveJob.indexOf("- name: 'Upload pushed tree'")).toBeGreaterThan(
+      resolveJob.indexOf("- name: 'Report result'"),
+    );
   });
 
   it('defines every uppercase variable the resolve-pr run blocks expand', () => {

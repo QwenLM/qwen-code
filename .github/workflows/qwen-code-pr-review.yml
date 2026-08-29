@@ -3121,7 +3121,14 @@ jobs:
             else
               classify_push_failure
               if [ "$push_fail_reason" = "moved" ] && replay_on_moved_head && push_resolution; then
-                :
+                # The run artifact uploaded earlier describes the ORIGINAL
+                # resolution; what was just pushed is its replay onto the new
+                # head. Record the pushed tree so the upload step after this
+                # one preserves it beside the original (the replay-success
+                # comment points at it).
+                mkdir -p "${WORKDIR}/pushed"
+                git rev-parse HEAD > "${WORKDIR}/pushed/pushed.sha" || true
+                git diff "origin/${BASE_REF}...HEAD" > "${WORKDIR}/pushed/pushed.diff" || true
               else
                 push_failed=true
                 # A replay that reached its own push leaves that push's log
@@ -3158,7 +3165,7 @@ jobs:
                 elif [ "$DRY_RUN" = "true" ]; then
                   echo "Qwen Code resolved the merge conflicts in dry-run mode. No branch update was pushed."
                 elif [ -n "$replayed_on" ]; then
-                  echo "Qwen Code resolved the merge conflicts and pushed the branch update. The head branch moved to \`${replayed_on}\` while the conflicts were being resolved; the resolution was replayed on top of it and re-checked before the push — where a file still conflicted and the new commits had not touched it, the replay took the agent's version. The pushed branch is that replay; the \`qwen-resolve-pr-${PR_NUMBER}\` run artifact describes the original resolution it was replayed from, not the pushed tree."
+                  echo "Qwen Code resolved the merge conflicts and pushed the branch update. The head branch moved to \`${replayed_on}\` while the conflicts were being resolved; the resolution was replayed on top of it and re-checked before the push — where a file still conflicted and the new commits had not touched it, the replay took the agent's version. The pushed branch is that replay: its diff against \`${BASE_REF}\` is attached as the \`qwen-resolve-pr-${PR_NUMBER}-pushed\` artifact on the [workflow run](${RUN_URL}); the \`qwen-resolve-pr-${PR_NUMBER}\` artifact describes the original resolution it was replayed from."
                 else
                   echo "Qwen Code resolved the merge conflicts and pushed the branch update."
                 fi
@@ -3196,3 +3203,15 @@ jobs:
           if [ "$OUTCOME" != "fixed" ] && [ "$OUTCOME" != "noop" ]; then
             exit 1
           fi
+
+      # Only populated when a moved head was replayed: the tree that was
+      # actually pushed, beside the `qwen-resolve-pr-N` artifact that holds
+      # the original resolution. Keeps the always()/decision gate of the
+      # first upload so it still runs when 'Report result' exits 1.
+      - name: 'Upload pushed tree'
+        if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}-pushed'
+          path: '${{ env.WORKDIR }}/pushed/'
+          if-no-files-found: 'ignore'
