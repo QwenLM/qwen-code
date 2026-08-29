@@ -10950,15 +10950,20 @@ Other open files:
         };
         client['chat'] = mockChat as LlmChat;
 
-        mockTurnRunFn.mockReturnValue(
-          (async function* () {
+        mockTurnRunFn.mockImplementation((_model, request) => {
+          // Miniature of GeminiChat's contract: publish the push counter on
+          // the request immediately before pushing it.
+          (request as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ] = pushCount;
+          return (async function* () {
             // Simulate the real chat pushing the re-submitted user content into
             // history before the API call, then failing pre-event.
             pushCount++;
             yield* [] as ServerLlmStreamEvent[];
             throw new Error('retry failed after push, before first event');
-          })(),
-        );
+          })();
+        });
 
         await expect(
           fromAsync(
@@ -11008,13 +11013,19 @@ Other open files:
         };
         client['chat'] = mockChat as LlmChat;
 
-        mockTurnRunFn.mockReturnValue(
+        mockTurnRunFn.mockImplementation((_model, request) =>
           (async function* () {
             // Compression collapses the old turns into one summary, THEN the
             // user content is pushed (counter bumps): net length (2) < the
             // post-strip baseline (3).
             historyRef.length = 0;
             historyRef.push({ role: 'user', parts: [{ text: 'summary' }] });
+            // Miniature of GeminiChat's contract: after auto-compression,
+            // publish the push counter on the request immediately before
+            // pushing it.
+            (request as unknown as Record<PropertyKey, unknown>)[
+              userContentPushSnapshotKey
+            ] = pushCount;
             historyRef.push(orphanedPrompt);
             pushCount++;
             yield* [] as ServerLlmStreamEvent[];
