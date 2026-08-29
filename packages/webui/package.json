@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/webui",
-  "version": "0.21.6",
+  "version": "0.22.3",
   "description": "Shared UI components for Qwen Code packages",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -11,11 +11,6 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
-    },
-    "./daemon-react-sdk": {
-      "types": "./dist/daemon-react-sdk.d.ts",
-      "import": "./dist/daemon-react-sdk.js",
-      "require": "./dist/daemon-react-sdk.cjs"
     },
     "./icons": {
       "types": "./dist/components/icons/index.d.ts",

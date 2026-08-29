@@ -24,6 +24,7 @@ export interface ChannelEditorDraft {
   values: Record<string, string | boolean>;
   secrets: Record<string, ChannelSecretDraft>;
   senderPolicy: ChannelSenderPolicy;
+  allowedGroupIds: string;
 }
 
 export type ChannelEditorValidationCode =
@@ -31,8 +32,10 @@ export type ChannelEditorValidationCode =
   | 'credential'
   | 'duplicate'
   | 'invalid'
+  | 'invalidGroupId'
   | 'invalidOption'
   | 'number'
+  | 'outOfRange'
   | 'policy';
 
 export type ChannelEditorValidationErrors = Record<
@@ -40,14 +43,30 @@ export type ChannelEditorValidationErrors = Record<
   ChannelEditorValidationCode
 >;
 
+const UNSAFE_OBJECT_KEYS = ['__proto__', 'constructor', 'prototype'];
+
 export function hasDescriptorSenderPolicy(
   descriptor: DaemonChannelTypeDescriptor,
 ): boolean {
   return descriptor.fields.some((f) => f.key === 'senderPolicy');
 }
 
+export function hasDescriptorGroupPolicy(
+  descriptor: DaemonChannelTypeDescriptor,
+): boolean {
+  return descriptor.fields.some((f) => f.key === 'groupPolicy');
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function configuredGroupIds(instance?: DaemonChannelInstanceSnapshot): string {
+  const groups = instance?.config['groups'];
+  if (!isRecord(groups)) return '';
+  return Object.keys(groups)
+    .filter((groupId) => groupId !== '*')
+    .join(', ');
 }
 
 function initialFieldValue(
@@ -72,7 +91,21 @@ function initialFieldValue(
   }
   if (field.kind === 'enum') {
     if (typeof value === 'string' && value) return value;
-    return instance ? '' : (field.default ?? field.options?.[0]?.value ?? '');
+    if (instance) {
+      if (field.key === 'senderPolicy') return 'allowlist';
+      if (field.key === 'groupPolicy') return 'disabled';
+      if (field.key !== 'sessionScope') return '';
+    }
+    if (field.key === 'sessionScope' && field.default === 'thread') {
+      if (instance) return 'thread';
+      return (
+        field.options?.find((option) => option.value === 'chat_thread')
+          ?.value ??
+        field.options?.find((option) => option.value !== 'thread')?.value ??
+        field.default
+      );
+    }
+    return field.default ?? field.options?.[0]?.value ?? '';
   }
   return typeof value === 'string' ? value : '';
 }
@@ -84,6 +117,7 @@ export function createChannelEditorDraft(
   const values: Record<string, string | boolean> = {};
   const secrets: Record<string, ChannelSecretDraft> = {};
   for (const field of descriptor.fields) {
+    if (field.kind === 'object') continue;
     if (field.kind === 'secret') {
       secrets[field.key] = instance?.secrets[field.key]?.present
         ? { operation: 'preserve' }
@@ -105,6 +139,7 @@ export function createChannelEditorDraft(
         : instance
           ? ''
           : 'pairing',
+    allowedGroupIds: configuredGroupIds(instance),
   };
 }
 
@@ -143,29 +178,34 @@ export function validateChannelEditorDraft(
   const name = draft.name.trim();
   if (!name) {
     errors['name'] = 'required';
-  } else if (
-    name === 'all' ||
-    ['__proto__', 'constructor', 'prototype'].includes(name)
-  ) {
+  } else if (name === 'all' || UNSAFE_OBJECT_KEYS.includes(name)) {
     errors['name'] = 'invalid';
   } else if (existingNames.includes(name)) {
     errors['name'] = 'duplicate';
   }
   for (const field of descriptor.fields) {
+    if (field.kind === 'object') continue;
+    const draftValue = draft.values[field.key];
     if (field.required && isMissingField(field, draft)) {
       errors[field.key] = 'required';
     } else if (
       field.kind === 'number' &&
-      typeof draft.values[field.key] === 'string' &&
-      draft.values[field.key] !== '' &&
-      !Number.isFinite(Number(draft.values[field.key]))
+      typeof draftValue === 'string' &&
+      draftValue.trim() !== ''
     ) {
-      errors[field.key] = 'number';
+      const parsed = Number(draftValue);
+      if (!Number.isFinite(parsed)) {
+        errors[field.key] = 'number';
+      } else if (
+        field.exclusiveMinimum !== undefined &&
+        parsed <= field.exclusiveMinimum
+      ) {
+        errors[field.key] = 'outOfRange';
+      }
     } else if (field.kind === 'string-list' && field.options) {
-      const rawValue = draft.values[field.key];
-      if (typeof rawValue === 'string') {
+      if (typeof draftValue === 'string') {
         const allowed = new Set(field.options.map((option) => option.value));
-        const invalid = rawValue
+        const invalid = draftValue
           .split(',')
           .map((token) => token.trim().toLowerCase())
           .filter((token) => token.length > 0)
@@ -185,6 +225,14 @@ export function validateChannelEditorDraft(
   }
   if (!draft.senderPolicy && !hasDescriptorSenderPolicy(descriptor)) {
     errors['senderPolicy'] = 'policy';
+  }
+  if (
+    String(draft.values['groupPolicy'] ?? '') === 'allowlist' &&
+    splitList(draft.allowedGroupIds).some((groupId) =>
+      UNSAFE_OBJECT_KEYS.includes(groupId),
+    )
+  ) {
+    errors['allowedGroupIds'] = 'invalidGroupId';
   }
   return errors;
 }
@@ -235,6 +283,61 @@ function assignField(
   }
 }
 
+function splitList(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function assignGroups(
+  config: Record<string, unknown>,
+  allowedGroupIds: string,
+  instance?: DaemonChannelInstanceSnapshot,
+): void {
+  const previous = instance?.config['groups'];
+  const previousGroups = isRecord(previous) ? previous : {};
+  const groups: Record<string, unknown> = {};
+  if (isRecord(previousGroups['*'])) {
+    groups['*'] = previousGroups['*'];
+  }
+  for (const groupId of splitList(allowedGroupIds)) {
+    if (groupId === '*') continue;
+    groups[groupId] = isRecord(previousGroups[groupId])
+      ? previousGroups[groupId]
+      : {};
+  }
+  if (Object.keys(groups).length > 0) {
+    config['groups'] = groups;
+  } else {
+    delete config['groups'];
+  }
+}
+
+function removeGroupAllowlistMembership(
+  config: Record<string, unknown>,
+  instance: DaemonChannelInstanceSnapshot,
+): void {
+  const previous = instance.config['groups'];
+  const previousGroups = isRecord(previous) ? previous : {};
+  const groups = Object.fromEntries(
+    Object.entries(previousGroups).filter(
+      ([groupId, groupConfig]) =>
+        isRecord(groupConfig) &&
+        (groupId === '*' || Object.keys(groupConfig).length > 0),
+    ),
+  );
+  if (Object.keys(groups).length > 0) {
+    config['groups'] = groups;
+  } else {
+    delete config['groups'];
+  }
+}
+
 export function buildChannelUpsertRequest(
   descriptor: DaemonChannelTypeDescriptor,
   draft: ChannelEditorDraft,
@@ -247,6 +350,7 @@ export function buildChannelUpsertRequest(
   };
   const secrets: Record<string, DaemonChannelSecretUpdate> = {};
   for (const field of descriptor.fields) {
+    if (field.kind === 'object') continue;
     if (field.kind === 'secret') {
       const secret = draft.secrets[field.key] ?? { operation: 'preserve' };
       secrets[field.key] =
@@ -261,6 +365,13 @@ export function buildChannelUpsertRequest(
   }
   if (!hasDescriptorSenderPolicy(descriptor)) {
     config['senderPolicy'] = draft.senderPolicy;
+  }
+  if (hasDescriptorGroupPolicy(descriptor)) {
+    if (config['groupPolicy'] === 'allowlist') {
+      assignGroups(config, draft.allowedGroupIds, instance);
+    } else if (instance?.config['groupPolicy'] === 'allowlist') {
+      removeGroupAllowlistMembership(config, instance);
+    }
   }
   return { expectedRevision, config, secrets };
 }

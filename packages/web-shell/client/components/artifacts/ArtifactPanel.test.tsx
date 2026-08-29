@@ -1,43 +1,112 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonSessionArtifact,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonSessionActions } from '@qwen-code/webui/daemon-react-sdk';
+import type {
+  DaemonScheduledTask,
+  DaemonSessionActions,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
+import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
+import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
+import type { TurnOutputScheduledTask } from './TurnOutputs';
 
-const { mockActions, mockWorkspaceActions } = vi.hoisted(() => ({
-  mockActions: {
-    cancelTask: vi.fn(),
-    getTasks: vi.fn(),
-  },
-  mockWorkspaceActions: {
-    readFileBytes: vi.fn(),
+const originalCreateObjectURL = Object.getOwnPropertyDescriptor(
+  URL,
+  'createObjectURL',
+);
+const originalRevokeObjectURL = Object.getOwnPropertyDescriptor(
+  URL,
+  'revokeObjectURL',
+);
+
+const {
+  mockActions,
+  mockWorkspace,
+  mockWorkspaceActions,
+  mockSecondaryWorkspaceActions,
+} = vi.hoisted(() => {
+  const mockSecondaryWorkspaceActions = {
     readWorkspaceFile: vi.fn(),
-    stat: vi.fn(),
-  },
-}));
+    readWorkspaceFileBytes: vi.fn(),
+    fileStat: vi.fn(),
+  };
+  return {
+    mockActions: {
+      cancelTask: vi.fn(),
+      getTasks: vi.fn(),
+    },
+    mockWorkspaceActions: {
+      readFileBytes: vi.fn(),
+      readWorkspaceFile: vi.fn(),
+      stat: vi.fn(),
+      listScheduledTasks: vi.fn(),
+      updateScheduledTask: vi.fn(),
+      deleteScheduledTask: vi.fn(),
+    },
+    mockSecondaryWorkspaceActions,
+    mockWorkspace: {
+      capabilities: {
+        workspaceCwd: '/primary',
+        workspaces: [
+          {
+            id: 'primary-id',
+            cwd: '/primary',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary-id',
+            cwd: '/secondary',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      },
+      client: {
+        workspaceByCwd: vi.fn(() => mockSecondaryWorkspaceActions),
+      },
+    },
+  };
+});
 
 vi.mock(
-  '@qwen-code/webui/daemon-react-sdk',
+  '@qwen-code/web-shell/daemon-react-sdk',
   async (importOriginal: () => Promise<Record<string, unknown>>) => ({
     ...(await importOriginal()),
     useActions: () => mockActions,
+    useWorkspace: () => mockWorkspace,
     useWorkspaceActions: () => mockWorkspaceActions,
   }),
 );
 
+vi.mock('../terminal/TerminalPanel', () => ({
+  TerminalPanel: ({ terminalId }: { terminalId: string }) => (
+    <div data-testid="terminal-panel" data-terminal-id={terminalId} />
+  ),
+}));
+
 const { ArtifactPanel } = await import('./ArtifactPanel');
+const { useArtifactWorkspaceTarget } = await import(
+  './useArtifactWorkspaceTarget'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+let latestArtifactWorkspaceTarget: ArtifactWorkspaceTarget | undefined;
+
+function ArtifactWorkspaceTargetProbe({ revision }: { revision: number }) {
+  latestArtifactWorkspaceTarget = useArtifactWorkspaceTarget('/secondary');
+  return <span data-revision={revision} />;
+}
 
 function monitorPanel(
   task: DaemonSessionMonitorTaskStatus,
@@ -113,7 +182,56 @@ function codeReviewArtifact(
   };
 }
 
-function artifactPanel(artifact: DaemonSessionArtifact) {
+const validCodeReviewDocument = JSON.stringify({
+  schemaVersion: 1,
+  target: 'local',
+  effort: 'high',
+  verdict: {
+    event: 'APPROVE',
+    verdictLine: 'Verdict: Approve',
+    baseEvent: 'APPROVE',
+    cappedBy: [],
+    downgraded: false,
+    downgradedFrom: null,
+  },
+  findings: [],
+  counts: {
+    total: 0,
+    bySeverity: {
+      Critical: 0,
+      Suggestion: 0,
+      'Nice to have': 0,
+    },
+    byConfidence: { high: 0, low: 0 },
+    held: 0,
+  },
+  outcomesRecorded: false,
+  markdownReportPath: '.qwen/reviews/review.md',
+});
+
+function linkArtifact(): DaemonSessionArtifact {
+  return {
+    id: 'review-artifact',
+    kind: 'link',
+    storage: 'external_url',
+    source: 'tool',
+    status: 'available',
+    title: 'Issue 9059',
+    url: 'https://github.com/QwenLM/qwen-code/issues/9059',
+    retention: 'ephemeral',
+    clientRetained: false,
+    createdAt: '2026-08-13T06:13:59.048Z',
+    updatedAt: '2026-08-13T06:13:59.048Z',
+  };
+}
+
+function artifactPanel(
+  artifact: DaemonSessionArtifact,
+  owner: { workspaceCwd: string; workspaceId: string } | null = {
+    workspaceCwd: '/primary',
+    workspaceId: 'primary-id',
+  },
+) {
   return (
     <I18nProvider language="en">
       <ArtifactPanel
@@ -124,6 +242,7 @@ function artifactPanel(artifact: DaemonSessionArtifact) {
             kind: 'artifact',
             title: artifact.title,
             artifactId: artifact.id,
+            ...(owner ?? {}),
           },
         ]}
         activeTabId="artifact:review-artifact"
@@ -138,17 +257,312 @@ function artifactPanel(artifact: DaemonSessionArtifact) {
   );
 }
 
+const secondaryScheduledTask: DaemonScheduledTask = {
+  id: 'cron-secondary',
+  name: 'Secondary task',
+  cron: '0 9 * * *',
+  prompt: 'secondary only',
+  recurring: true,
+  enabled: true,
+  createdAt: 1_700_000_000_000,
+  lastFiredAt: null,
+  nextRunAt: null,
+  sessionId: null,
+  runs: [],
+};
+
+function scheduledTaskPanel(
+  options: {
+    workspaceCwd?: string;
+    workspaceId?: string;
+    task?: Partial<TurnOutputScheduledTask>;
+  } = {},
+) {
+  const workspaceCwd = options.workspaceCwd ?? '/secondary';
+  const workspaceId = Object.hasOwn(options, 'workspaceId')
+    ? options.workspaceId
+    : 'secondary-id';
+  const taskPatch = options.task ?? {};
+  const task: TurnOutputScheduledTask = {
+    id: 'cron-secondary',
+    toolCallId: 'cron-call',
+    title: 'Secondary task',
+    cron: '0 9 * * *',
+    prompt: 'secondary only',
+    recurring: true,
+    durable: true,
+    workspaceId,
+    ...taskPatch,
+  };
+  return (
+    <I18nProvider language="en">
+      <ArtifactPanel
+        artifacts={[]}
+        tabs={[
+          {
+            id: 'scheduled-task:secondary:cron-call',
+            kind: 'scheduled_task',
+            title: 'Scheduled Tasks',
+            workspaceCwd,
+            workspaceId,
+            task,
+          },
+        ]}
+        activeTabId="scheduled-task:secondary:cron-call"
+        reviewChanges={[]}
+        selectedReviewPath={null}
+        onSelectTab={() => {}}
+        onCloseTab={() => {}}
+        onOpenFilePreview={() => {}}
+        onClose={() => {}}
+      />
+    </I18nProvider>
+  );
+}
+
 afterEach(() => {
+  delete (window as { __TAURI__?: unknown }).__TAURI__;
   for (const { root, container } of mounted) {
     act(() => root.unmount());
     container.remove();
   }
   mounted.length = 0;
+  if (originalCreateObjectURL) {
+    Object.defineProperty(URL, 'createObjectURL', originalCreateObjectURL);
+  } else {
+    Reflect.deleteProperty(URL, 'createObjectURL');
+  }
+  if (originalRevokeObjectURL) {
+    Object.defineProperty(URL, 'revokeObjectURL', originalRevokeObjectURL);
+  } else {
+    Reflect.deleteProperty(URL, 'revokeObjectURL');
+  }
   mockActions.cancelTask.mockReset();
   mockActions.getTasks.mockReset();
   mockWorkspaceActions.readFileBytes.mockReset();
   mockWorkspaceActions.readWorkspaceFile.mockReset();
   mockWorkspaceActions.stat.mockReset();
+  mockWorkspaceActions.listScheduledTasks.mockReset();
+  mockWorkspaceActions.updateScheduledTask.mockReset();
+  mockWorkspaceActions.deleteScheduledTask.mockReset();
+  mockSecondaryWorkspaceActions.readWorkspaceFile.mockReset();
+  mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReset();
+  mockSecondaryWorkspaceActions.fileStat.mockReset();
+  mockWorkspace.client.workspaceByCwd.mockClear();
+  latestArtifactWorkspaceTarget = undefined;
+  mockWorkspace.capabilities = {
+    workspaceCwd: '/primary',
+    workspaces: [
+      {
+        id: 'primary-id',
+        cwd: '/primary',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'secondary-id',
+        cwd: '/secondary',
+        primary: false,
+        trusted: true,
+      },
+    ],
+  };
+});
+
+describe('ArtifactPanel terminal tabs', () => {
+  const renderPanel = (activeTabId: string) => (
+    <I18nProvider language="en">
+      <ArtifactPanel
+        artifacts={[]}
+        tabs={[
+          { id: 'terminal-one', kind: 'terminal', title: 'Terminal' },
+          { id: 'terminal-two', kind: 'terminal', title: 'Terminal (2)' },
+        ]}
+        activeTabId={activeTabId}
+        reviewChanges={[]}
+        selectedReviewPath={null}
+        onSelectTab={() => {}}
+        onCloseTab={() => {}}
+        onOpenFilePreview={() => {}}
+        onClose={() => {}}
+      />
+    </I18nProvider>
+  );
+
+  it('keeps terminal instances mounted while switching tabs', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(renderPanel('terminal-one')));
+    const first = container.querySelector('[data-terminal-id="terminal-one"]');
+    expect(
+      container.querySelectorAll('[data-testid="terminal-panel"]'),
+    ).toHaveLength(2);
+
+    act(() => root.render(renderPanel('terminal-two')));
+
+    expect(container.querySelector('[data-terminal-id="terminal-one"]')).toBe(
+      first,
+    );
+    expect(
+      container.querySelectorAll('[data-testid="terminal-panel"]'),
+    ).toHaveLength(2);
+  });
+});
+
+describe('artifact workspace authority', () => {
+  it('keeps an in-flight read across an equivalent capabilities refresh', async () => {
+    let resolveRead:
+      | ((file: { content: string; truncated: boolean }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+    const initialActions = latestArtifactWorkspaceTarget?.actions;
+    const read = initialActions?.readWorkspaceFile('report.json');
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: mockWorkspace.capabilities.workspaces.map((entry) => ({
+        ...entry,
+      })),
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+
+    expect(latestArtifactWorkspaceTarget?.actions).toBe(initialActions);
+    resolveRead?.({ content: 'still-owned', truncated: false });
+    await expect(read).resolves.toEqual({
+      content: 'still-owned',
+      truncated: false,
+    });
+  });
+
+  it('does not revive an old read after the same owner is removed and re-added', async () => {
+    let resolveRead:
+      | ((file: { content: string; truncated: boolean }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+    const initialActions = latestArtifactWorkspaceTarget?.actions;
+    const read = initialActions?.readWorkspaceFile('report.json');
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [mockWorkspace.capabilities.workspaces[0]!],
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+    expect(latestArtifactWorkspaceTarget).toBeUndefined();
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [
+        mockWorkspace.capabilities.workspaces[0]!,
+        {
+          id: 'secondary-id',
+          cwd: '/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={2} />));
+    expect(latestArtifactWorkspaceTarget).toBeDefined();
+    expect(latestArtifactWorkspaceTarget?.actions).not.toBe(initialActions);
+
+    resolveRead?.({ content: 'stale-secret', truncated: false });
+    await expect(read).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+  });
+
+  it('revokes every pending file read when its owner is removed', async () => {
+    let resolveText:
+      | ((file: { content: string; truncated: boolean }) => void)
+      | undefined;
+    let resolveBytes:
+      | ((file: {
+          contentBase64: string;
+          offset: number;
+          returnedBytes: number;
+          sizeBytes: number;
+        }) => void)
+      | undefined;
+    let resolveStat:
+      | ((stat: { sizeBytes: number; modifiedMs: number }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveText = resolve;
+      }),
+    );
+    mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReturnValue(
+      new Promise((resolve) => {
+        resolveBytes = resolve;
+      }),
+    );
+    mockSecondaryWorkspaceActions.fileStat.mockReturnValue(
+      new Promise((resolve) => {
+        resolveStat = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={0} />));
+    const actions = latestArtifactWorkspaceTarget?.actions;
+    expect(actions).toBeDefined();
+    const textRead = actions?.readWorkspaceFile('report.txt');
+    const bytesRead = actions?.readFileBytes('report.bin', {
+      offset: 0,
+      maxBytes: 1024,
+    });
+    const statRead = actions?.stat('report.bin');
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [mockWorkspace.capabilities.workspaces[0]!],
+    };
+    act(() => root.render(<ArtifactWorkspaceTargetProbe revision={1} />));
+
+    resolveText?.({ content: 'stale-text', truncated: false });
+    resolveBytes?.({
+      contentBase64: btoa('stale-bytes'),
+      offset: 0,
+      returnedBytes: 11,
+      sizeBytes: 11,
+    });
+    resolveStat?.({ sizeBytes: 11, modifiedMs: 1 });
+    await expect(textRead).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+    await expect(bytesRead).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+    await expect(statRead).rejects.toThrow(
+      'Workspace artifact owner is no longer available',
+    );
+  });
 });
 
 function openAddMenu(container: HTMLElement) {
@@ -171,34 +585,279 @@ async function flush() {
 }
 
 describe('ArtifactPanel code review artifacts', () => {
+  it('fails closed when an artifact tab has no workspace owner', async () => {
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: 'PRIMARY_WORKSPACE_SECRET',
+      truncated: false,
+    });
+    const artifact = codeReviewArtifact({ metadata: {} });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(artifact, null)));
+    await flush();
+
+    expect(container.textContent).toContain(
+      'This workspace may have been removed or the link is no longer valid.',
+    );
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('PRIMARY_WORKSPACE_SECRET');
+  });
+
+  it('fails closed when a file tab has no workspace owner', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'file:missing-owner',
+                kind: 'file',
+                title: 'Missing owner',
+                workspacePath: 'secret.txt',
+                workspaceCwd: '/unknown',
+                workspaceId: 'missing-id',
+              },
+            ]}
+            activeTabId="file:missing-owner"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'This workspace may have been removed',
+    );
+    expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+  });
+
+  it('switches supplied Markdown attachments from source to preview without reading the workspace', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'attachment:notes.md',
+                kind: 'file',
+                title: 'notes.md',
+                workspacePath: 'notes.md',
+                workspaceCwd: '/removed',
+                workspaceId: 'removed-id',
+                previewData: new Blob(['# Hello attachment'], {
+                  type: 'text/markdown',
+                }),
+                previewMimeType: 'text/markdown',
+                previewOnly: true,
+              },
+            ]}
+            activeTabId="attachment:notes.md"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(
+      container.querySelector('[role="tab"] .lucide-file-text'),
+    ).not.toBeNull();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.querySelector('.cm-content')?.textContent).toContain(
+      '# Hello attachment',
+    );
+    act(() => {
+      (
+        container.querySelector(
+          'button[aria-label="Preview"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    await flush();
+    expect(container.querySelector('h1')?.textContent).toBe('Hello attachment');
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('switches supplied HTML text from source to preview', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'attachment:page.html',
+                kind: 'file',
+                title: 'page.html',
+                workspacePath: 'page.html',
+                previewContent: '<h1>Attachment page</h1>',
+                previewMimeType: 'text/html',
+                previewOnly: true,
+              },
+            ]}
+            activeTabId="attachment:page.html"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector('.cm-content')?.textContent).toContain(
+      '<h1>Attachment page</h1>',
+    );
+    act(() => {
+      (
+        container.querySelector(
+          'button[aria-label="Preview"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    await flush();
+    expect(container.querySelector('iframe')?.getAttribute('srcdoc')).toContain(
+      '<h1>Attachment page</h1>',
+    );
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('shows a clear unsupported state for binary attachments', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'attachment:report.xlsx',
+                kind: 'file',
+                title: 'report.xlsx',
+                workspacePath: 'report.xlsx',
+                previewData: new Blob(['PK'], {
+                  type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                }),
+                previewMimeType:
+                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                previewOnly: true,
+              },
+            ]}
+            activeTabId="attachment:report.xlsx"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain(
+      'Preview is not available for this file type.',
+    );
+    expect(container.querySelector('.cm-content')).toBeNull();
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('opens PDF attachments in the browser PDF preview', async () => {
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:attachment-pdf'),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'attachment:report.pdf',
+                kind: 'file',
+                title: 'report.pdf',
+                workspacePath: 'report.pdf',
+                previewData: new Blob(['%PDF-1.7'], {
+                  type: 'application/pdf',
+                }),
+                previewMimeType: 'application/pdf',
+                previewOnly: true,
+              },
+            ]}
+            activeTabId="attachment:report.pdf"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector<HTMLIFrameElement>('iframe')?.src).toContain(
+      'blob:attachment-pdf',
+    );
+    expect(container.querySelector('.cm-content')).toBeNull();
+  });
+
   it('dispatches an available workspace artifact to the dedicated renderer', async () => {
     mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
-      content: JSON.stringify({
-        schemaVersion: 1,
-        target: 'local',
-        effort: 'high',
-        verdict: {
-          event: 'APPROVE',
-          verdictLine: 'Verdict: Approve',
-          baseEvent: 'APPROVE',
-          cappedBy: [],
-          downgraded: false,
-          downgradedFrom: null,
-        },
-        findings: [],
-        counts: {
-          total: 0,
-          bySeverity: {
-            Critical: 0,
-            Suggestion: 0,
-            'Nice to have': 0,
-          },
-          byConfidence: { high: 0, low: 0 },
-          held: 0,
-        },
-        outcomesRecorded: false,
-        markdownReportPath: '.qwen/reviews/review.md',
-      }),
+      content: validCodeReviewDocument,
       truncated: false,
     });
     const container = document.createElement('div');
@@ -214,6 +873,29 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(container.querySelector('.cm-editor')).toBeNull();
     expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
       '.qwen/reviews/review.json',
+    );
+  });
+
+  it('loads an artifact under StrictMode effect replay', async () => {
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: validCodeReviewDocument,
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <StrictMode>{artifactPanel(codeReviewArtifact())}</StrictMode>,
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('Authoritative verdict');
+    expect(container.textContent).not.toContain(
+      'Workspace artifact owner is no longer available',
     );
   });
 
@@ -260,10 +942,136 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
   });
 
+  it('opens external_url link artifacts through the desktop opener', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    expect(button!.getAttribute('href')).toBe(
+      'https://github.com/QwenLM/qwen-code/issues/9059',
+    );
+    expect(button!.getAttribute('target')).toBe('_blank');
+    act(() => {
+      button!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9059',
+    });
+  });
+
+  it('routes modified external_url link clicks through the desktop opener', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 1,
+      ctrlKey: true,
+    });
+    act(() => {
+      button!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9059',
+    });
+  });
+
+  it('requests an error toast when opening a link artifact fails', async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error('no browser'));
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const toasts: ToastRequestDetail[] = [];
+    const onToast = (e: Event) =>
+      toasts.push((e as CustomEvent<ToastRequestDetail>).detail);
+    window.addEventListener(TOAST_REQUEST_EVENT, onToast);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    act(() => {
+      button!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    await flush();
+    window.removeEventListener(TOAST_REQUEST_EVENT, onToast);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].tone).toBe('error');
+    expect(toasts[0].message).toContain('no browser');
+  });
+
+  it('keeps relative link artifacts on the native anchor path', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(artifactPanel({ ...linkArtifact(), url: '#artifact' })),
+    );
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => {
+      button!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it('still sends an ordinary JSON artifact to the generic editor', async () => {
     // The regression the early `return` in the dispatch can cause: an
     // artifact WITHOUT the code_review metadata must keep reaching the
     // generic file preview, not the dedicated renderer.
+    mockWorkspaceActions.stat.mockResolvedValue({
+      kind: 'stat',
+      path: '.qwen/reviews/review.json',
+      type: 'file',
+      sizeBytes: 2,
+      modifiedMs: 1,
+    });
     mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
       content: '{}',
       truncated: false,
@@ -282,9 +1090,449 @@ describe('ArtifactPanel code review artifacts', () => {
       '.qwen/reviews/review.json',
     );
   });
+
+  it('discards a pending read when its workspace owner is replaced', async () => {
+    let resolveRead:
+      | ((file: { content: string; truncated: boolean }) => void)
+      | undefined;
+    mockSecondaryWorkspaceActions.readWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    const artifact = codeReviewArtifact({ metadata: {} });
+    const owner = {
+      workspaceCwd: '/secondary',
+      workspaceId: 'secondary-id',
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(artifact, owner)));
+    await flush();
+    expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/secondary',
+    );
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [
+        mockWorkspace.capabilities.workspaces[0]!,
+        {
+          id: 'secondary-replacement-id',
+          cwd: '/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    act(() => root.render(artifactPanel(artifact, owner)));
+    await flush();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'removed',
+    );
+
+    await act(async () => {
+      resolveRead?.({ content: 'REMOVED_WORKSPACE_SECRET', truncated: false });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain('REMOVED_WORKSPACE_SECRET');
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('ArtifactPanel scheduled-task ownership', () => {
+  it('loads a durable task through its secondary workspace route', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      'secondary-id',
+    );
+  });
+
+  it('updates and deletes only through the task workspace id', async () => {
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...secondaryScheduledTask,
+      enabled: false,
+    });
+    mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+
+    const disable = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Disable',
+    );
+    await act(async () => {
+      disable?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      { enabled: false },
+      'secondary-id',
+    );
+
+    const openDelete = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Delete',
+    );
+    act(() => openDelete?.click());
+    const confirmDelete = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Delete')
+      .at(-1);
+    await act(async () => {
+      confirmDelete?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      'secondary-id',
+    );
+  });
+
+  it('fails closed for a durable task whose workspace owner is unavailable', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          workspaceCwd: '/unknown',
+          workspaceId: 'missing-id',
+          task: { workspaceId: 'missing-id' },
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'This workspace may have been removed',
+    );
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.updateScheduledTask).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.deleteScheduledTask).not.toHaveBeenCalled();
+  });
+
+  it('shows a session-scoped task snapshot without a workspace owner', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          workspaceCwd: '/unknown',
+          workspaceId: 'missing-id',
+          task: {
+            id: 'session-task',
+            durable: false,
+            prompt: 'local session snapshot',
+            workspaceId: 'missing-id',
+          },
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain('session-scoped scheduled task');
+    expect(container.textContent).toContain('local session snapshot');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(mockWorkspaceActions.listScheduledTasks).not.toHaveBeenCalled();
+  });
+
+  it('keeps legacy single-workspace scheduled-task routes unqualified', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/primary',
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.listScheduledTasks.mockResolvedValue([
+      secondaryScheduledTask,
+    ]);
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValue({
+      ...secondaryScheduledTask,
+      enabled: false,
+    });
+    mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          workspaceCwd: '/primary',
+          workspaceId: undefined,
+          task: { workspaceId: undefined },
+        }),
+      ),
+    );
+    await flush();
+    expect(mockWorkspaceActions.listScheduledTasks).toHaveBeenCalledWith(
+      undefined,
+    );
+
+    const disable = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Disable',
+    );
+    await act(async () => {
+      disable?.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      { enabled: false },
+      undefined,
+    );
+
+    const openDelete = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Delete',
+    );
+    act(() => openDelete?.click());
+    const confirmDelete = Array.from(document.body.querySelectorAll('button'))
+      .filter((button) => button.textContent?.trim() === 'Delete')
+      .at(-1);
+    await act(async () => {
+      confirmDelete?.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.deleteScheduledTask).toHaveBeenCalledWith(
+      'cron-secondary',
+      undefined,
+    );
+  });
+
+  it.each(['save', 'toggle', 'delete'] as const)(
+    'settles a pending reload after a %s mutation',
+    async (mutation) => {
+      let resolveReload: ((tasks: DaemonScheduledTask[]) => void) | undefined;
+      mockWorkspaceActions.listScheduledTasks
+        .mockResolvedValueOnce([secondaryScheduledTask])
+        .mockReturnValueOnce(
+          new Promise((resolve) => {
+            resolveReload = resolve;
+          }),
+        );
+      const updatedTask = {
+        ...secondaryScheduledTask,
+        name: `${mutation} result`,
+        enabled: false,
+      };
+      mockWorkspaceActions.updateScheduledTask.mockResolvedValue(updatedTask);
+      mockWorkspaceActions.deleteScheduledTask.mockResolvedValue(undefined);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+
+      act(() => root.render(scheduledTaskPanel()));
+      await flush();
+      act(() =>
+        root.render(
+          scheduledTaskPanel({ task: { prompt: `reload ${mutation}` } }),
+        ),
+      );
+      await flush();
+      expect(container.textContent).toContain('Loading…');
+
+      if (mutation === 'save') {
+        const edit = Array.from(container.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === 'Edit',
+        );
+        act(() => edit?.click());
+        const save = Array.from(document.body.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === 'Save',
+        );
+        await act(async () => {
+          save?.click();
+          await Promise.resolve();
+        });
+        expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenCalledWith(
+          'cron-secondary',
+          expect.objectContaining({ prompt: expect.any(String) }),
+          'secondary-id',
+        );
+      } else if (mutation === 'toggle') {
+        const disable = Array.from(container.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === 'Disable',
+        );
+        await act(async () => {
+          disable?.click();
+          await Promise.resolve();
+        });
+      } else {
+        const openDelete = Array.from(
+          container.querySelectorAll('button'),
+        ).find((button) => button.textContent?.trim() === 'Delete');
+        act(() => openDelete?.click());
+        const confirmDelete = Array.from(
+          document.body.querySelectorAll('button'),
+        )
+          .filter((button) => button.textContent?.trim() === 'Delete')
+          .at(-1);
+        await act(async () => {
+          confirmDelete?.click();
+          await Promise.resolve();
+        });
+      }
+
+      await act(async () => {
+        resolveReload?.([secondaryScheduledTask]);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).not.toContain('Loading…');
+      if (mutation === 'delete') {
+        expect(container.textContent).toContain('has been deleted');
+      } else {
+        expect(container.textContent).toContain(`${mutation} result`);
+      }
+    },
+  );
+
+  it('discards a pending mutation when the task scope changes', async () => {
+    const replacementTask: DaemonScheduledTask = {
+      ...secondaryScheduledTask,
+      id: 'cron-replacement',
+      name: 'Replacement task',
+      prompt: 'replacement only',
+    };
+    let resolveStaleMutation: ((task: DaemonScheduledTask) => void) | undefined;
+    mockWorkspaceActions.listScheduledTasks
+      .mockResolvedValueOnce([secondaryScheduledTask])
+      .mockResolvedValueOnce([replacementTask]);
+    mockWorkspaceActions.updateScheduledTask.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStaleMutation = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(scheduledTaskPanel()));
+    await flush();
+    const disable = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Disable',
+    );
+    act(() => disable?.click());
+    await flush();
+
+    act(() =>
+      root.render(
+        scheduledTaskPanel({
+          task: {
+            id: replacementTask.id,
+            title: replacementTask.name ?? replacementTask.prompt,
+            prompt: replacementTask.prompt,
+          },
+        }),
+      ),
+    );
+    await flush();
+    expect(container.textContent).toContain('Replacement task');
+
+    await act(async () => {
+      resolveStaleMutation?.({
+        ...secondaryScheduledTask,
+        name: 'Stale mutation result',
+        enabled: false,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain('Stale mutation result');
+    expect(container.textContent).toContain('Replacement task');
+
+    mockWorkspaceActions.updateScheduledTask.mockResolvedValueOnce({
+      ...replacementTask,
+      enabled: false,
+    });
+    const replacementDisable = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.trim() === 'Disable');
+    await act(async () => {
+      replacementDisable?.click();
+      await Promise.resolve();
+    });
+    expect(mockWorkspaceActions.updateScheduledTask).toHaveBeenLastCalledWith(
+      'cron-replacement',
+      { enabled: false },
+      'secondary-id',
+    );
+  });
 });
 
 describe('ArtifactPanel add menu', () => {
+  it('opens terminals without forwarding UI events as terminal ids', () => {
+    const onOpenTerminal = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const renderPanel = (withTab: boolean) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={
+            withTab
+              ? [{ id: 'terminal-one', kind: 'terminal', title: 'Terminal' }]
+              : []
+          }
+          activeTabId={withTab ? 'terminal-one' : null}
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          onOpenTerminal={onOpenTerminal}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+        />
+      </I18nProvider>
+    );
+
+    act(() => root.render(renderPanel(false)));
+    const emptyAction = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Terminal'));
+    act(() => emptyAction?.click());
+    expect(onOpenTerminal).toHaveBeenLastCalledWith();
+
+    act(() => root.render(renderPanel(true)));
+    openAddMenu(container);
+    const menuAction = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Terminal');
+    act(() => menuAction?.click());
+    expect(onOpenTerminal).toHaveBeenLastCalledWith();
+    expect(onOpenTerminal).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the disabled review action on the empty page and hides the add button', () => {
     const onClose = vi.fn();
     const container = document.createElement('div');
@@ -564,7 +1812,15 @@ describe('ArtifactPanel add menu', () => {
         <I18nProvider language="en">
           <ArtifactPanel
             artifacts={[]}
-            tabs={[{ id: 'review', kind: 'review', title: 'Review' }]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
             activeTabId="review"
             reviewChanges={[]}
             selectedReviewPath={null}
@@ -604,6 +1860,8 @@ describe('ArtifactPanel add menu', () => {
                 kind: 'artifact',
                 title: 'Report',
                 artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
               },
             ]}
             activeTabId="artifact"
@@ -638,6 +1896,61 @@ describe('ArtifactPanel add menu', () => {
 });
 
 describe('ArtifactPanel review downloads', () => {
+  it('renders a saved unified patch without full file bodies', () => {
+    const fileDiff =
+      '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new';
+    const changes = [
+      {
+        path: 'src/app.ts',
+        status: 'modified' as const,
+        toolCallId: 'tool-app',
+        isArtifact: false,
+        diffs: [{ oldText: '', newText: '', fileDiff }],
+      },
+    ];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="review"
+            reviewChanges={changes}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="src/app.ts"]')
+        ?.click();
+    });
+
+    expect(container.textContent).toContain('old');
+    expect(container.textContent).toContain('new');
+    expect(container.textContent).not.toContain('No diff available.');
+  });
+
   it('shows the requested actions and reports download failures through toast', async () => {
     const changes = ['report.html', 'notes.md', 'image.png'].map((path) => ({
       path,
@@ -669,6 +1982,8 @@ describe('ArtifactPanel review downloads', () => {
                 kind: 'review',
                 title: 'Review',
                 changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
               },
             ]}
             activeTabId="review"
@@ -737,6 +2052,8 @@ describe('ArtifactPanel review downloads', () => {
                 kind: 'review',
                 title: 'Review',
                 changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
               },
             ]}
             activeTabId="review"
@@ -796,6 +2113,8 @@ describe('ArtifactPanel review downloads', () => {
                 kind: 'review',
                 title: 'Review',
                 changes,
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
               },
             ]}
             activeTabId="review"
@@ -1220,5 +2539,319 @@ describe('ArtifactPanel shell tab', () => {
     expect(container.textContent).toContain('/work/project');
     expect(container.textContent).toContain('Exit code');
     expect(container.textContent).toContain('Command failed');
+  });
+});
+
+describe('ArtifactPanel fullscreen toggle', () => {
+  function renderPanel(props: {
+    fullscreen?: boolean;
+    onToggleFullscreen?: () => void;
+  }) {
+    const task: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'monitor:monitor-1',
+                kind: 'monitor',
+                title: task.description,
+                task,
+              },
+            ]}
+            activeTabId="monitor:monitor-1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            fullscreen={props.fullscreen}
+            onToggleFullscreen={props.onToggleFullscreen}
+          />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  it('shows a fullscreen toggle and reports clicks', () => {
+    const onToggleFullscreen = vi.fn();
+    const container = renderPanel({ onToggleFullscreen });
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Fullscreen"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-pressed')).toBe('false');
+    act(() => {
+      toggle?.click();
+    });
+    expect(onToggleFullscreen).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks the panel full-bleed and flips the toggle when fullscreen', () => {
+    const container = renderPanel({
+      fullscreen: true,
+      onToggleFullscreen: () => {},
+    });
+    const aside = container.querySelector('aside');
+    expect(aside?.className).toContain('panelFullscreen');
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Exit fullscreen"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('omits the toggle when fullscreen is unsupported', () => {
+    const container = renderPanel({});
+    expect(
+      container.querySelector('button[aria-label="Fullscreen"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Exit fullscreen"]'),
+    ).toBeNull();
+  });
+});
+
+describe('ArtifactPanel image preview tabs', () => {
+  it('renders one preview tab per image and shows the active image', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'image:a',
+                kind: 'image',
+                title: 'Image Preview',
+                src: 'data:image/png;base64,aWFh',
+                alt: 'Uploaded image 1',
+              },
+              {
+                id: 'image:b',
+                kind: 'image',
+                title: 'Image Preview',
+                src: 'data:image/png;base64,iWJi',
+              },
+            ]}
+            activeTabId="image:a"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
+    const preview = container.querySelector(
+      'img[class*="imagePreview"]',
+    ) as HTMLImageElement;
+    expect(preview).not.toBeNull();
+    expect(preview.getAttribute('src')).toBe('data:image/png;base64,aWFh');
+    expect(preview.getAttribute('alt')).toBe('Uploaded image 1');
+
+    const download = container.querySelector(
+      'a[class*="imageDownloadButton"]',
+    ) as HTMLAnchorElement;
+    expect(download).not.toBeNull();
+    expect(download.getAttribute('href')).toBe('data:image/png;base64,aWFh');
+    expect(download.getAttribute('download')).toBe('image.png');
+  });
+});
+
+describe('ArtifactPanel workspace artifact previews', () => {
+  it.each([
+    {
+      label: 'Markdown',
+      mimeType: 'text/markdown; charset=utf-8',
+      content: '# Charset Markdown',
+    },
+    {
+      label: 'HTML',
+      mimeType: 'text/html; charset=utf-8',
+      content: '<h1>Charset HTML</h1>',
+    },
+  ])('previews document-classified $label MIME types', async (testCase) => {
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: testCase.content.length,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: testCase.content,
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'document',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: `${testCase.label} preview`,
+          workspacePath: 'reports/preview',
+          mimeType: testCase.mimeType,
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-08-23T00:00:00.000Z',
+          updatedAt: '2026-08-23T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
+      'reports/preview',
+    );
+    if (testCase.label === 'Markdown') {
+      expect(container.querySelector('h1')?.textContent).toBe(
+        'Charset Markdown',
+      );
+    } else {
+      expect(
+        container.querySelector('iframe')?.getAttribute('srcdoc'),
+      ).toContain(testCase.content);
+    }
+  });
+
+  it('renders a document artifact as download-only and does not preview it', async () => {
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: 12,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: 'PK\u0003\u0004',
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'document',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'Q3 workbook',
+          workspacePath: 'reports/q3.xlsx',
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-08-18T00:00:00.000Z',
+          updatedAt: '2026-08-18T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toMatch(/Download/i);
+    expect(container.querySelector('.cm-editor')).toBeNull();
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('shows status and disables download for a missing document artifact', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'document',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'missing',
+          title: 'Q3 workbook',
+          workspacePath: 'reports/q3.xlsx',
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-08-18T00:00:00.000Z',
+          updatedAt: '2026-08-18T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toMatch(/missing/i);
+    const download = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Download'),
+    );
+    expect(download).toBeTruthy();
+    expect(download).toHaveProperty('disabled', true);
+  });
+
+  it('does not read workspace bytes when stat says the path is a directory', async () => {
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'directory',
+      sizeBytes: 0,
+      modifiedMs: 1,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'file',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'Legacy folder',
+          workspacePath: 'exports',
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-08-18T00:00:00.000Z',
+          updatedAt: '2026-08-18T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toMatch(/director/i);
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
   });
 });

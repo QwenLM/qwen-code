@@ -1,8 +1,5 @@
 # AGENTS.md
 
-This file provides guidance to Qwen Code when working with code in this
-repository.
-
 ## Working Principles
 
 ### Simplicity First
@@ -18,8 +15,6 @@ repository.
 
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes,
 simplify.
-
-_Adapted from Andrej Karpathy's [CLAUDE.md](https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md)._
 
 ### Core Infrastructure Is Maintainer-Only (triage gate, two-tier rule)
 
@@ -64,10 +59,6 @@ npm run bundle     # Bundle dist/ into a single dist/cli.js via esbuild
                    # (requires build first)
 ```
 
-`npm run build` compiles TS into each package's `dist/`. `npm run bundle`
-takes that output and produces a single `dist/cli.js` via esbuild. Bundle
-requires build to have run first.
-
 ### Development
 
 ```bash
@@ -81,6 +72,20 @@ Runs the CLI via `tsx` with `DEV=true`. Changes to `packages/core` or
 
 Tests must be run from within the specific package directory, not the project
 root.
+
+**Fresh clone or new worktree:** `packages/cli` unit tests import workspace
+packages (`@qwen-code/acp-bridge`, `@qwen-code/web-templates`,
+`packages/channels/*`, ...) through their built `dist/` output, and
+`packages/core` tests import the package's own entry
+(`@qwen-code/qwen-code-core`), which also resolves into `dist/`. A plain
+`npm ci` already builds them via the `prepare` script, but a worktree that
+shares the main checkout's `node_modules` (or a deep-cleaned copy) does not
+have them. If any prerequisite is missing, a vitest `globalSetup` guard stops
+the run and names the fix; build once from the repository root:
+
+```bash
+npm run build
+```
 
 **Run individual test files** (always preferred):
 
@@ -206,11 +211,6 @@ npm run preflight  # Full check: clean → install → format → lint → build
    exit on a pass that found something. If five passes bring no convergence,
    say so instead of declaring done. Scale to the diff: one clean, careful
    pass suffices for a trivial change.
-5. **Code review** — run `/review` when available. Triage each comment:
-   valid / false positive / overthinking. Fixes go back through steps 3-4.
-   Here, `/review` means the Codex code-review workflow, not Qwen Review or
-   the `qwen-review` plugin. Do not invoke Qwen Review unless the user
-   explicitly requests it by name.
 
 ### Feature development
 

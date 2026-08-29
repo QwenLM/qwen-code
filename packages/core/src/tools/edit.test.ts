@@ -37,7 +37,7 @@ describe('EditTool', () => {
   let tempDir: string;
   let rootDir: string;
   let mockConfig: Config;
-  let geminiClient: any;
+  let llmClient: any;
   let baseLlmClient: any;
   let fileReadCache: FileReadCache;
   let mockFileHistoryService: { trackEdit: ReturnType<typeof vi.fn> };
@@ -52,7 +52,7 @@ describe('EditTool', () => {
     mockFileHistoryService = { trackEdit: vi.fn() };
     fsService = new StandardFileSystemService();
 
-    geminiClient = {
+    llmClient = {
       generateJson: mockGenerateJson, // mockGenerateJson is already defined and hoisted
     };
 
@@ -61,7 +61,7 @@ describe('EditTool', () => {
     };
 
     mockConfig = {
-      getGeminiClient: vi.fn().mockReturnValue(geminiClient),
+      getLlmClient: vi.fn().mockReturnValue(llmClient),
       getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
       getTargetDir: () => rootDir,
       getProjectRoot: () => rootDir,
@@ -83,8 +83,8 @@ describe('EditTool', () => {
       getUserAgent: () => 'test-agent',
       getUserMemory: () => '',
       setUserMemory: vi.fn(),
-      getGeminiMdFileCount: () => 0,
-      setGeminiMdFileCount: vi.fn(),
+      getMemoryFileCount: () => 0,
+      setMemoryFileCount: vi.fn(),
       getToolRegistry: () => ({}) as any, // Minimal mock for ToolRegistry
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
       getFileReadCache: () => fileReadCache,
@@ -590,6 +590,7 @@ describe('EditTool', () => {
         old_string: 'old',
         new_string: 'new',
       };
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
 
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
@@ -607,6 +608,9 @@ describe('EditTool', () => {
       // companion) cannot resolve a clickable location from `fileName`
       // alone once the file is outside the workspace root.
       expect(display.filePath).toBe(filePath);
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ toolWriteOrigin: 'edit' }),
+      );
     });
 
     // trackEdit is best-effort: a FileHistoryService failure (disk full,
@@ -761,6 +765,7 @@ describe('EditTool', () => {
       (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
         ApprovalMode.AUTO_EDIT,
       );
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
 
@@ -770,6 +775,9 @@ describe('EditTool', () => {
       );
       expect(fs.existsSync(newFilePath)).toBe(true);
       expect(fs.readFileSync(newFilePath, 'utf8')).toBe(fileContent);
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ toolWriteOrigin: 'edit' }),
+      );
 
       const display = result.returnDisplay as FileDiff;
       expect(display.fileDiff).toMatch(/\+Content for the new file\./);
@@ -1290,6 +1298,47 @@ describe('EditTool', () => {
       );
       // File must remain untouched.
       expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched content');
+    });
+
+    it('rejects an edit terminally when the filesystem reports ino 0', async () => {
+      // FAT/exFAT and some SMB mounts report `ino: 0` for every file, so
+      // the cache cannot prove the model read *this* file. Re-reading
+      // would not help, so the model must be told to stop rather than be
+      // sent round the "re-read it first" loop forever.
+      fs.writeFileSync(filePath, 'untouched content', 'utf8');
+      seedPriorRead(filePath);
+      const nativeStat = fs.promises.stat;
+      const stat = vi
+        .spyOn(fs.promises, 'stat')
+        .mockImplementation(async (target: fs.PathLike) => {
+          const stats = await nativeStat(target);
+          if (target === filePath) {
+            Object.defineProperty(stats, 'ino', { value: 0 });
+          }
+          return stats;
+        });
+
+      try {
+        const result = await tool
+          .build({
+            file_path: filePath,
+            old_string: 'untouched',
+            new_string: 'modified',
+          })
+          .execute(abortSignal);
+
+        expect(result.error?.type).toBe(
+          ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+        );
+        expect(result.error?.message).toMatch(/does not provide a verifiable/);
+        expect(result.error?.message).toMatch(/use a different mechanism/i);
+        // Not the message that tells the model to re-read — that would
+        // loop, because the re-read cannot change the inode.
+        expect(result.error?.message).not.toMatch(/Re-read it with/);
+        expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched content');
+      } finally {
+        stat.mockRestore();
+      }
     });
 
     it('allows an edit after a ranged (offset/limit) read', async () => {

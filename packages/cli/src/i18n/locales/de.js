@@ -444,6 +444,7 @@ export default {
   'Tool Output Truncation Lines': 'Zeilen für Werkzeugausgabe-Kürzung',
   'Folder Trust': 'Ordnervertrauen',
   'Tool Schema Compliance': 'Tool Schema-Konformität',
+  Unset: 'Nicht festgelegt',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
   'Auto (follow user input)': 'Automatisch (Benutzereingabe folgen)',
@@ -1056,6 +1057,12 @@ export default {
     'Chatverlauf-Komprimierung hat die Größe nicht reduziert. Dies kann auf Probleme mit dem Komprimierungs-Prompt hindeuten.',
   'Could not compress chat history due to a token counting error.':
     'Chatverlauf konnte aufgrund eines Token-Zählfehlers nicht komprimiert werden.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung leer war.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung abgeschnitten wurde.',
+  'Could not compress chat history due to an API error.':
+    'Chatverlauf konnte aufgrund eines API-Fehlers nicht komprimiert werden.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1529,10 +1536,20 @@ export default {
   'rejected — edit config to re-approve':
     'abgelehnt — Konfiguration bearbeiten, um erneut zu genehmigen',
   'Background agent needs approval': 'Hintergrund-Agent wartet auf Genehmigung',
+  'from nested agent': 'von verschachteltem Agent',
   'Approve or deny the request above':
     'Genehmigen oder lehnen Sie die obige Anfrage ab',
   Running: 'Läuft',
+  Pausing: 'Wird pausiert',
   Paused: 'Pausiert',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Das Pausieren ist kooperativ; laufende Arbeiten werden möglicherweise abgeschlossen, bevor der Workflow pausiert ist. Ein Agentenaufruf, der auf eine Tool-Genehmigung wartet, hält den Lauf in diesem Zustand und zählt weiter gegen das Aktive-Zeit-Limit, bis die Genehmigung beantwortet wird.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Pausiert: Es werden keine neuen Agenten gestartet; Skriptcode zwischen Agentenaufrufen läuft weiter. Drücke p, um fortzufahren. /clear, /branch und ein Sitzungswechsel beenden pausierte Läufe.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Pausieren/Fortsetzen wurde abgelehnt; der Workflow-Status hat sich geändert. Versuche es erneut.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Tipp: Verwende `/workflows p <runId>` oder Hintergrundaufgaben + p, um einen Lauf kooperativ zu pausieren/fortzusetzen; mit `/workflows <runId>` siehst du Details.',
   Completed: 'Abgeschlossen',
   Failed: 'Fehlgeschlagen',
   Stopped: 'Gestoppt',
@@ -1989,6 +2006,18 @@ export default {
   'not updatable': 'nicht aktualisierbar',
   'Ask a quick side question without affecting the main conversation':
     'Eine kurze Nebenfrage stellen, ohne die Hauptunterhaltung zu beeinflussen',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Eine zweite Meinung zur aktuellen Unterhaltung von einem Prüfmodell einholen',
+  'Consulting advisor...': 'Berater wird konsultiert...',
+  'Advisor review failed: {{error}}':
+    'Berater-Überprüfung fehlgeschlagen: {{error}}',
+  'No conversation context available for /advisor':
+    'Kein Gesprächskontext für /advisor verfügbar',
+  'Focus too long (max {{max}} chars)': 'Fokus zu lang (max. {{max}} Zeichen)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Ein anderer Vorgang läuft gerade. Warten Sie, bis er abgeschlossen ist, bevor Sie /advisor ausführen',
+  'No response received.': 'Keine Antwort erhalten.',
+  'No model configured.': 'Kein Modell konfiguriert.',
   'Manage Arena sessions': 'Arena-Sitzungen verwalten',
   'Start an Arena session with multiple models competing on the same task':
     'Eine Arena-Sitzung starten, in der mehrere Modelle dieselbe Aufgabe bearbeiten',
@@ -2307,4 +2336,5 @@ export default {
     'Änderungen durch den Auto-Skill-Kurator sind im Sicherheitsmodus deaktiviert.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Änderungen durch den Auto-Skill-Kurator sind nur in vertrauenswürdigen Arbeitsbereichen verfügbar. Stufen Sie diesen Ordner mit `/trust` als vertrauenswürdig ein und versuchen Sie es erneut.',
+  'Kept model as {{model}}': 'Modell als {{model}} beibehalten',
 };

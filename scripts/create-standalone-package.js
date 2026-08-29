@@ -77,6 +77,11 @@ const DIST_ALLOWED_ENTRIES = new Set([
   'package.json',
   'README.md',
   'LICENSE',
+  // Digest of the review sources this bundle was built from, stamped by
+  // copy_bundle_assets.js. Harmless to ship: a standalone install lays the
+  // dist entries out under `lib/`, and the staleness check only applies to
+  // a `<root>/dist/cli.js` layout — it never reads the stamp there.
+  'review-sources.sha256',
   'locales',
   'examples',
   // Web Shell SPA served at the daemon root by `qwen serve` (index.html +
@@ -790,4 +795,12 @@ function fail(message) {
   throw new Error(`Error: ${message}`);
 }
 
-export { TARGET_CLIPBOARD_PACKAGE, TARGETS, writeSha256Sums };
+export {
+  TARGET_CLIPBOARD_PACKAGE,
+  TARGETS,
+  writeSha256Sums,
+  // Exported so a test can hold the allowlist and the build's stamp together:
+  // the packager aborts on any dist entry it does not know, and nothing else
+  // would notice a one-sided rename until a release was cut.
+  isAllowedDistEntry,
+};

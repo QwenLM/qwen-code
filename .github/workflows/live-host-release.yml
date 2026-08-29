@@ -6,10 +6,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/live-host-release.yml'
-      - 'packages/desktop/apps/live-host/**'
-      - 'packages/desktop/bun.lock'
-      - 'packages/desktop/package.json'
-      - 'packages/desktop/scripts/bump-live-host-version.ts'
+      - 'packages/live-host/**'
   workflow_dispatch:
     inputs:
       version:
@@ -38,14 +35,14 @@ on:
         type: 'boolean'
 
 permissions:
+  actions: 'read'
   contents: 'read'
 
 concurrency:
-  group: 'live-host-release-${{ github.event.pull_request.number || inputs.version }}'
+  group: "${{ github.event_name == 'workflow_dispatch' && 'live-host-release' || format('live-host-release-pr-{0}', github.event.pull_request.number) }}"
   cancel-in-progress: false
 
 env:
-  BUN_VERSION: '1.3.9'
   NODE_VERSION: '22.20.0'
   LIVE_HOST_FEED_TAG: 'live-host-latest'
 
@@ -79,6 +76,17 @@ jobs:
             echo '::error::Live Host releases do not support SemVer build metadata.'
             exit 1
           fi
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then
+            if [[ "$version" == *-* ]]; then
+              version_is_prerelease=true
+            else
+              version_is_prerelease=false
+            fi
+            if [ "$version_is_prerelease" != "${{ inputs.prerelease }}" ]; then
+              echo '::error::The prerelease input must match the Live Host version.'
+              exit 1
+            fi
+          fi
           if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ "${{ inputs.dry_run }}" = 'false' ] && [ "$GITHUB_REF_NAME" != 'main' ]; then
             echo '::error::Published Live Host releases must run from main.'
             exit 1
@@ -98,21 +106,17 @@ jobs:
         with:
           node-version: '${{ env.NODE_VERSION }}'
 
-      - uses: 'oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6' # v2
-        with:
-          bun-version: '${{ env.BUN_VERSION }}'
-
       - name: 'Install dependencies'
-        working-directory: 'packages/desktop'
-        run: 'bun install --frozen-lockfile'
+        working-directory: 'packages/live-host'
+        run: 'npm ci'
 
       - name: 'Set Live Host version'
-        working-directory: 'packages/desktop'
-        run: 'bun run bump-live-host-version "${{ needs.prepare.outputs.version }}"'
+        working-directory: 'packages/live-host'
+        run: 'npm run bump-version -- "${{ needs.prepare.outputs.version }}"'
 
       - name: 'Test Live Host'
-        working-directory: 'packages/desktop'
-        run: 'bun run live-host:typecheck && bun run live-host:test'
+        working-directory: 'packages/live-host'
+        run: 'npm run typecheck && npm test'
 
       - name: 'Import macOS certificate'
         if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}"
@@ -148,8 +152,9 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
           identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
           if [ -z "$identity" ]; then echo '::error::Developer ID Application identity was not found.'; exit 1; fi
+          identity_name="${identity#Developer ID Application: }"
           {
-            echo "CSC_NAME=$identity"
+            echo "CSC_NAME=$identity_name"
             echo 'CSC_IDENTITY_AUTO_DISCOVERY=true'
           } >> "$GITHUB_ENV"
 
@@ -189,13 +194,13 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: 'Build packages'
-        working-directory: 'packages/desktop'
+        working-directory: 'packages/live-host'
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}"
-        run: 'bun run live-host:dist:mac:no-publish'
+        run: 'npm run dist:mac:no-publish'
 
       - name: 'Verify release assets'
-        working-directory: 'packages/desktop/apps/live-host'
+        working-directory: 'packages/live-host'
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
         shell: 'bash'
@@ -229,7 +234,7 @@ jobs:
 
       - name: 'Verify signing and notarization'
         if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}"
-        working-directory: 'packages/desktop'
+        working-directory: 'packages/live-host'
         shell: 'bash'
         run: |
           set -euo pipefail
@@ -244,22 +249,22 @@ jobs:
             fi
             spctl -a -vv -t exec "$app"
             xcrun stapler validate "$app"
-          done < <(find apps/live-host/release -mindepth 2 -maxdepth 2 -type d -name '*.app' -print0)
+          done < <(find release -mindepth 2 -maxdepth 2 -type d -name '*.app' -print0)
           if [ "$app_count" -eq 0 ]; then echo '::error::No packaged Qwen Live Host application was found.'; exit 1; fi
           dmg_count=0
           while IFS= read -r -d '' dmg; do
             dmg_count=$((dmg_count + 1))
             hdiutil verify "$dmg"
-          done < <(find apps/live-host/release -type f -name '*.dmg' -print0)
+          done < <(find release -type f -name '*.dmg' -print0)
           if [ "$dmg_count" -eq 0 ]; then echo '::error::No Qwen Live Host disk image was found.'; exit 1; fi
 
       - uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'qwen-live-host-macos'
           path: |
-            packages/desktop/apps/live-host/release/*.dmg
-            packages/desktop/apps/live-host/release/*-manifest.json
-            packages/desktop/apps/live-host/release/*.zip
+            packages/live-host/release/*.dmg
+            packages/live-host/release/*-manifest.json
+            packages/live-host/release/*.zip
           if-no-files-found: 'error'
           retention-days: 14
 
@@ -320,6 +325,7 @@ jobs:
         env:
           GH_TOKEN: '${{ github.token }}'
           FEED_TAG: '${{ env.LIVE_HOST_FEED_TAG }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
         run: |
           set -euo pipefail
           stable_assets=(
@@ -328,6 +334,13 @@ jobs:
             release-assets/Qwen-Live-Host-x64.zip
           )
           if gh release view "$FEED_TAG" >/dev/null 2>&1; then
+            current_feed="$(mktemp -d)"
+            gh release download "$FEED_TAG" --pattern 'Qwen-Live-Host-manifest.json' --dir "$current_feed" --clobber
+            current_version="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log(JSON.parse(readFileSync(process.argv[1], "utf8")).version)' "$current_feed/Qwen-Live-Host-manifest.json")"
+            if [ "$(printf '%s\n%s\n' "$current_version" "$RELEASE_VERSION" | sort -V | tail -n 1)" != "$RELEASE_VERSION" ]; then
+              echo "::error::Refusing to replace Live Host feed v$current_version with older v$RELEASE_VERSION."
+              exit 1
+            fi
             gh release upload "$FEED_TAG" "${stable_assets[@]}" --clobber
           else
             gh release create "$FEED_TAG" "${stable_assets[@]}" --title 'Qwen Live Host latest' --notes 'Stable Qwen Live Host installer feed.' --latest=false
@@ -344,3 +357,18 @@ jobs:
             echo "Version: $RELEASE_VERSION"
             echo "Release: $RELEASE_URL"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  sync-oss:
+    name: 'Mirror stable Qwen Live Host release to Aliyun OSS'
+    if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}"
+    needs:
+      - 'prepare'
+      - 'build'
+      - 'publish'
+    uses: './.github/workflows/sync-live-host-to-oss.yml'
+    with:
+      version: '${{ needs.prepare.outputs.version }}'
+      source: 'artifact'
+    secrets:
+      ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+      ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'

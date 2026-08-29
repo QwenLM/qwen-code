@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
 import {
   WebShellCustomizationProvider,
@@ -17,19 +18,33 @@ import {
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+const catalogController = vi.hoisted(() => ({
+  invalidateWorkspace: vi.fn(),
+  sessionCreated: vi.fn(),
+  promptAdmitted: vi.fn(),
+  promptAdmissionUncertain: vi.fn(),
+  renamed: vi.fn(),
+  turnCompleted: vi.fn(),
+}));
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
+let sessionHasActivePromptValue: boolean;
+let queuedPromptStreamingState: string | undefined;
+let queuedPromptSessionHasActivePrompt: boolean | undefined;
 let latestOnSubmit:
   | ((
       text: string,
       images?: unknown,
-      commit?: () => void,
+      files?: unknown,
+      commitAccepted?: () => void,
       metadata?: unknown,
     ) => boolean)
   | undefined;
 let latestChatEditorProps: any;
+let renderRealChatEditor: boolean;
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
 let latestMonitorDetailsOnOpen:
   | ((tool: {
@@ -42,6 +57,7 @@ let sendPromptAdmit: (() => void) | undefined;
 const clearFollowup = vi.fn();
 const insertText = vi.fn();
 const transcriptDispatch = vi.fn();
+const appendLocalUserMessage = vi.fn();
 const sendPrompt = vi.fn(async () => ({}) as any);
 const submitPermission = vi.fn(async () => true);
 const cancel = vi.fn(async () => {});
@@ -49,6 +65,10 @@ const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
+const getGoal = vi.fn();
+const controlGoal = vi.fn();
+const readAttachment = vi.fn();
+const getContextUsage = vi.fn();
 const daemonActions = {
   sendPrompt,
   submitPermission,
@@ -57,6 +77,10 @@ const daemonActions = {
   setModel,
   loadArtifacts,
   getTasks,
+  getGoal,
+  controlGoal,
+  readAttachment,
+  getContextUsage,
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
@@ -65,8 +89,13 @@ const editLastQueuedPrompt = vi.fn(() => false);
 const clearQueuedPrompts = vi.fn(() => false);
 let queuedPromptsMock: any[] = [];
 let queuedTextsMock: string[] = [];
+let ownerVersion = 0;
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+const latestComposerCoreOptions = vi.hoisted(() => ({
+  current: null as Record<string, unknown> | null,
+}));
+
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useActions: () => daemonActions,
   useConnection: () => connectionState,
@@ -91,23 +120,47 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
   useTranscriptStore: () => ({
     dispatch: transcriptDispatch,
+    appendLocalUserMessage,
   }),
   usePromptStatus: () => 'idle',
+  useOptionalWorkspace: () => undefined,
   useWorkspaceActions: () => ({}),
-  useWorkspace: () => ({ capabilities: connectionState.capabilities }),
+  useWorkspace: () => ({
+    capabilities: connectionState.capabilities,
+    client: {},
+    workspaceCwd: '/primary',
+  }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
+  useDaemonSessionOwnerGuard: () => ({
+    capture: () => {
+      const captured = ownerVersion;
+      return { isCurrent: () => ownerVersion === captured };
+    },
+  }),
+}));
+
+vi.mock('../session-catalog/session-catalog-hooks', () => ({
+  useSessionCatalogController: () => catalogController,
+  useSessionHasActivePrompt: () => sessionHasActivePromptValue,
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
-  useQueuedPrompts: () => ({
-    queuedPrompts: queuedPromptsMock,
-    queuedTexts: queuedTextsMock,
-    enqueuePrompt,
-    removeQueuedPrompt,
-    editQueuedPrompt,
-    editLastQueuedPrompt,
-    clearQueuedPrompts,
-  }),
+  useQueuedPrompts: (args: {
+    streamingState: string;
+    sessionHasActivePrompt?: boolean;
+  }) => {
+    queuedPromptStreamingState = args.streamingState;
+    queuedPromptSessionHasActivePrompt = args.sessionHasActivePrompt;
+    return {
+      queuedPrompts: queuedPromptsMock,
+      queuedTexts: queuedTextsMock,
+      enqueuePrompt,
+      removeQueuedPrompt,
+      editQueuedPrompt,
+      editLastQueuedPrompt,
+      clearQueuedPrompts,
+    };
+  },
 }));
 
 let messagesState: any[];
@@ -117,7 +170,7 @@ vi.mock('../hooks/useMessages', () => ({
 }));
 
 vi.mock('../hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptBlocks: () => [],
+  useAnimationFrameTranscriptSnapshot: () => ({ blocks: [] }),
 }));
 
 vi.mock('../adapters/transcriptAdapter', () => ({
@@ -144,6 +197,31 @@ vi.mock('./MessageList', () => ({
       data-approval={props.pendingApproval ? 'yes' : 'no'}
     >
       {props.messages.length}
+      <button
+        data-testid="pane-open-turn-output"
+        type="button"
+        onClick={() =>
+          props.onTurnOutputOpen?.({
+            id: 'artifact:turn-artifact',
+            kind: 'artifact',
+            title: 'Turn artifact',
+            turnId: 'turn-1',
+            artifactId: 'turn-artifact',
+            artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+            workspaceCwd: '/w',
+          })
+        }
+      />
+      <button
+        data-testid="pane-open-attachment"
+        type="button"
+        onClick={() =>
+          props.onAttachmentPreview?.({
+            name: 'data.json',
+            attachmentId: 'attachment-1',
+          })
+        }
+      />
     </div>
   ),
 }));
@@ -155,9 +233,61 @@ vi.mock('./StreamingStatus', () => ({
         props.startedAt === undefined ? 'none' : String(props.startedAt)
       }
       data-show-phrase={String(props.showPhrase)}
+      data-has-active-prompt={String(props.hasActivePrompt === true)}
     />
   ),
 }));
+vi.mock('../hooks/useComposerCore', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../hooks/useComposerCore')>();
+  return {
+    ...actual,
+    useComposerCore: (...args: Parameters<typeof actual.useComposerCore>) => {
+      latestComposerCoreOptions.current = args[0] as Record<string, unknown>;
+      const noop = vi.fn();
+      const fallback: ProxyHandler<object> = {
+        get(target, property) {
+          return Reflect.has(target, property)
+            ? Reflect.get(target, property)
+            : noop;
+        },
+      };
+      return new Proxy(
+        {
+          containerRef: { current: null },
+          viewRef: { current: null },
+          handle: new Proxy({ hasAttachments: () => false }, fallback),
+          searchState: new Proxy(
+            {
+              searchMode: false,
+              searchInputRef: { current: null },
+              searchUiRef: { current: null },
+            },
+            fallback,
+          ),
+          imageTransferHandlers: {},
+          pastedImages: [],
+          composerTags: [],
+          hasAttachments: false,
+          hasContent: false,
+          canSubmit: false,
+          pendingImageBatchCount: 0,
+          imageDragActive: false,
+          mobileComposer: null,
+          shellMode: false,
+          currentMode: 'default',
+          showShortcutHints: false,
+          disabled: false,
+          followupState: { isVisible: false, suggestion: '' },
+          slashMenu: null,
+          atMenu: null,
+        },
+        fallback,
+      );
+    },
+  };
+});
+
 vi.mock('./ChatEditor', () => ({
   ChatEditor: forwardRef(function MockChatEditor(props: any, ref: any) {
     latestOnSubmit = props.onSubmit;
@@ -165,6 +295,9 @@ vi.mock('./ChatEditor', () => ({
     useImperativeHandle(ref, () => ({
       insertText,
     }));
+    if (renderRealChatEditor) {
+      return <RealChatEditor {...props} visibleToolbarActions={[]} />;
+    }
     return (
       <div data-web-shell-composer>
         <button
@@ -222,6 +355,7 @@ vi.mock('./QueuedPromptDisplay', () => ({
     <div
       data-testid="pane-queue"
       data-can-mutate-mid-turn={String(props.canMutateMidTurn)}
+      data-can-insert-mid-turn={String(props.canInsertMidTurn)}
     >
       {String(props.prompts.length)}
     </div>
@@ -253,6 +387,9 @@ vi.mock('./messages/AskUserQuestion', () => ({
   ),
 }));
 
+const RealChatEditor = (
+  await vi.importActual<typeof import('./ChatEditor')>('./ChatEditor')
+).ChatEditor;
 const { ChatPane } = await import('./ChatPane');
 
 let root: Root | null = null;
@@ -267,21 +404,41 @@ beforeEach(() => {
     workspaceCwd: '/w',
     loadingTranscript: false,
     catchingUp: false,
+    // A loaded session normally carries a Goal snapshot; tests that exercise
+    // the hydration window set it back to undefined.
+    goalState: { v: 2, activity: 'idle', goal: null },
   };
   streamingStateValue = 'idle';
   pendingPermission = null;
   messagesState = [{ id: 'm1', role: 'user', content: 'hi' }];
   latestOnSubmit = undefined;
   latestChatEditorProps = undefined;
+  renderRealChatEditor = false;
+  sessionHasActivePromptValue = false;
+  queuedPromptStreamingState = undefined;
+  queuedPromptSessionHasActivePrompt = undefined;
+  latestComposerCoreOptions.current = null;
   latestFollowupAccept = undefined;
   latestMonitorDetailsOnOpen = undefined;
   sendPromptAdmit = undefined;
   queuedPromptsMock = [];
   queuedTextsMock = [];
+  ownerVersion = 0;
   sendPrompt.mockReset();
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
   getTasks.mockReset();
+  getGoal.mockReset();
+  controlGoal.mockReset();
+  readAttachment.mockReset();
+  readAttachment.mockResolvedValue({
+    data: 'eyJoaSI6IuS9oOWlvSJ9',
+    mimeType: 'application/json',
+  });
+  getContextUsage.mockReset();
+  getContextUsage.mockResolvedValue({
+    usage: { totalTokens: 1200, contextWindowSize: 8192 },
+  });
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
     return {} as any;
@@ -299,6 +456,11 @@ beforeEach(() => {
   editLastQueuedPrompt.mockClear();
   clearQueuedPrompts.mockClear();
   transcriptDispatch.mockClear();
+  appendLocalUserMessage.mockClear();
+  catalogController.invalidateWorkspace.mockClear();
+  catalogController.promptAdmitted.mockClear();
+  catalogController.promptAdmissionUncertain.mockClear();
+  catalogController.turnCompleted.mockClear();
 });
 
 afterEach(() => {
@@ -345,7 +507,658 @@ function testid(id: string): HTMLElement | null {
   return container!.querySelector(`[data-testid="${id}"]`);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, reject, resolve };
+}
+
 describe('ChatPane', () => {
+  it.each([
+    [
+      'images',
+      [{ data: 'image-data', media_type: 'image/png' }],
+      undefined,
+      undefined,
+    ],
+    ['files', undefined, [{ name: 'notes.txt' }], undefined],
+    [
+      'input annotations',
+      undefined,
+      undefined,
+      {
+        inputAnnotations: [
+          {
+            start: 15,
+            end: 22,
+            text: '@notes',
+            type: 'file',
+            data: { path: 'notes.txt' },
+          },
+        ],
+      },
+    ],
+  ])(
+    'rejects /goal with %s and preserves the draft',
+    (_kind, images, files, metadata) => {
+      const onError = vi.fn();
+      render({ onError });
+      let returned: boolean | undefined;
+
+      act(() => {
+        returned = latestOnSubmit!(
+          '/goal set inspect the attachment',
+          images,
+          files,
+          undefined,
+          metadata,
+        );
+      });
+
+      expect(returned).toBe(false);
+      expect(onError).toHaveBeenCalledWith(
+        expect.any(Error),
+        'Remove attachments before using /goal.',
+      );
+      expect(controlGoal).not.toHaveBeenCalled();
+      expect(transcriptDispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('lets the host slash handler intercept /goal before the control plane', () => {
+    // The prop contract says the host handler runs before Web Shell handles a
+    // slash command; the main composer honours that for /goal, so the pane has
+    // to as well or an override silently applies on one surface only.
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand, onOpenGoals: vi.fn() });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/goal pause');
+    });
+
+    expect(returned).toBe(true);
+    expect(onSlashCommand).toHaveBeenCalled();
+    expect(getGoal).not.toHaveBeenCalled();
+    expect(controlGoal).not.toHaveBeenCalled();
+  });
+
+  it('does not swallow a bare /goal when the pane has no goals view', () => {
+    // The side-task pane passes no `onOpenGoals`; consuming the text there
+    // opens nothing and shows nothing.
+    const onError = vi.fn();
+    render({ onError });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/goal');
+    });
+
+    expect(returned).toBe(false);
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      'The goals view is not available on this surface.',
+    );
+  });
+
+  it('reports an objective-less /goal set without consuming it', () => {
+    const onError = vi.fn();
+    render({ onError, onOpenGoals: vi.fn() });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/goal set');
+    });
+
+    expect(returned).toBe(false);
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      '/goal set requires an objective.',
+    );
+    expect(controlGoal).not.toHaveBeenCalled();
+  });
+
+  it('offers Insert only while a turn is running', () => {
+    // `insertQueuedPrompt` no-ops at idle, so the affordance has to disappear
+    // with it rather than render a button that does nothing.
+    queuedPromptsMock = [{ id: 1, text: 'held while the Goal runs' } as never];
+    connectionState.goalState = {
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active',
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    streamingStateValue = 'idle';
+    render();
+
+    expect(testid('pane-queue')?.dataset['canInsertMidTurn']).toBe('false');
+
+    act(() => {
+      sessionHasActivePromptValue = true;
+      rerender();
+    });
+
+    expect(testid('pane-queue')?.dataset['canInsertMidTurn']).toBe('true');
+
+    act(() => {
+      sessionHasActivePromptValue = false;
+      streamingStateValue = 'responding';
+      rerender();
+    });
+
+    expect(testid('pane-queue')?.dataset['canInsertMidTurn']).toBe('true');
+  });
+
+  it('preserves a /goal command the pane connection cannot deliver', () => {
+    // App.tsx applies the broken-connection guard before any slash handling and
+    // keeps the text in the composer. Without the same ordering here the branch
+    // consumes the text, writes a transcript entry, and only then fails inside
+    // `requireSessionForAction` — the typed control is gone.
+    const onError = vi.fn();
+    connectionState = { ...connectionState, status: 'error' };
+    render({ onError });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/goal pause');
+    });
+
+    expect(returned).toBe(false);
+    expect(controlGoal).not.toHaveBeenCalled();
+    expect(getGoal).not.toHaveBeenCalled();
+    expect(appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps goal controls locked when the goal is replaced mid-control', async () => {
+    const goalA = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const goalB = {
+      ...goalA,
+      goal: {
+        ...goalA.goal,
+        goalId: 'goal-b',
+        revision: 1,
+        objective: 'replaced by another client',
+        updatedAt: 2,
+      },
+    };
+    const pendingControl = deferred<{ snapshot: typeof goalA }>();
+    connectionState.goalState = goalA;
+    getGoal.mockResolvedValue({ snapshot: goalA });
+    controlGoal.mockReturnValueOnce(pendingControl.promise);
+    render();
+
+    const pause = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('pause control was not rendered');
+    act(() => pause.click());
+    await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledOnce());
+
+    // Another client replaces the goal while the pause is still in flight.
+    act(() => {
+      connectionState = { ...connectionState, goalState: goalB };
+      rerender();
+    });
+    const pauseAfterReplace = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    expect(pauseAfterReplace?.disabled).toBe(true);
+    act(() => pauseAfterReplace?.click());
+    expect(controlGoal).toHaveBeenCalledOnce();
+
+    await act(async () => pendingControl.resolve({ snapshot: goalB }));
+    expect(
+      container!.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+      )?.disabled,
+    ).toBe(false);
+  });
+
+  it('locks goal controls while the current snapshot refresh is in flight', async () => {
+    const current = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    connectionState.goalState = current;
+    let resolveGoal:
+      | ((value: { snapshot: typeof current }) => void)
+      | undefined;
+    getGoal.mockReturnValue(
+      new Promise((resolve) => {
+        resolveGoal = resolve;
+      }),
+    );
+    controlGoal.mockResolvedValue({ snapshot: current });
+    render();
+
+    const pause = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('pause control was not rendered');
+    act(() => pause.click());
+
+    expect(pause.disabled).toBe(true);
+    act(() => pause.click());
+    expect(getGoal).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveGoal?.({ snapshot: current });
+    });
+    expect(controlGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds the control request from the freshly fetched Goal', async () => {
+    // `expectedGoalId`/`expectedRevision` must come from the getGoal round trip,
+    // not from the possibly-stale snapshot in connection state, or every
+    // control races the daemon's CAS.
+    const stale = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const fresh = {
+      ...stale,
+      goal: { ...stale.goal, revision: 9 },
+    };
+    connectionState.goalState = stale;
+    getGoal.mockResolvedValue({ snapshot: fresh });
+    controlGoal.mockResolvedValue({ snapshot: fresh });
+    render({ onOpenGoals: vi.fn() });
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+        )!
+        .click();
+    });
+    await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledTimes(1));
+
+    expect(controlGoal).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 9,
+    });
+
+    // `/goal set` maps to a versioned replace against the same fresh snapshot.
+    act(() => {
+      latestOnSubmit!('/goal set ship the other thing');
+    });
+    await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledTimes(2));
+    expect(controlGoal).toHaveBeenLastCalledWith({
+      action: 'replace',
+      objective: 'ship the other thing',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 9,
+    });
+    expect(appendLocalUserMessage).toHaveBeenCalledWith(
+      '/goal set ship the other thing',
+    );
+  });
+
+  it('closes the pane Goal edit dialog when its session changes', async () => {
+    // Left open, the dialog re-syncs its textarea from the new session's
+    // objective and the user edits that Goal believing it is the old one.
+    const goalA = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 5,
+        objective: 'session A objective',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    connectionState.goalState = goalA;
+    getGoal.mockResolvedValue({ snapshot: goalA });
+    render();
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+        )!
+        .click();
+    });
+    expect(document.querySelector('textarea')).not.toBeNull();
+
+    act(() => {
+      connectionState = {
+        ...connectionState,
+        goalState: {
+          ...goalA,
+          goal: { ...goalA.goal, goalId: 'goal-b', objective: 'goal B' },
+        },
+      };
+      rerender();
+    });
+
+    expect(document.querySelector('textarea')).toBeNull();
+  });
+
+  it('does not dispatch a Goal control after the pane session changes during refresh', async () => {
+    const current = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const pendingGoal = deferred<{ snapshot: typeof current }>();
+    const onError = vi.fn();
+    connectionState.goalState = current;
+    getGoal.mockReturnValueOnce(pendingGoal.promise);
+    render({ onError });
+
+    const pause = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('pause control was not rendered');
+    act(() => pause.click());
+    act(() => {
+      ownerVersion += 1;
+      connectionState = { ...connectionState, sessionId: 'sess-2' };
+      rerender({ onError });
+    });
+    await act(async () => pendingGoal.resolve({ snapshot: current }));
+
+    expect(controlGoal).not.toHaveBeenCalled();
+    // The operation was dropped on purpose; reporting it would show a failure
+    // toast for a control the user's own session switch cancelled.
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('releases Goal control busy state after a same-session reattach', async () => {
+    const current = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const pendingControl = deferred<{ snapshot: typeof current }>();
+    connectionState.goalState = current;
+    getGoal.mockResolvedValue({ snapshot: current });
+    controlGoal.mockReturnValueOnce(pendingControl.promise);
+    render();
+
+    const pause = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('pause control was not rendered');
+    act(() => pause.click());
+    await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledOnce());
+    act(() => {
+      ownerVersion += 1;
+      rerender();
+    });
+    await act(async () => pendingControl.resolve({ snapshot: current }));
+
+    expect(
+      container!.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+      )?.disabled,
+    ).toBe(false);
+  });
+
+  it('reports an edit failure after the edited Goal disappears', async () => {
+    const current = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const pendingGoal = deferred<{
+      snapshot: { v: 2; activity: 'idle'; goal: null };
+    }>();
+    const onError = vi.fn();
+    connectionState.goalState = current;
+    getGoal.mockReturnValueOnce(pendingGoal.promise);
+    render({ onError });
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+        )
+        ?.click();
+    });
+    const save = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Save');
+    if (!save) throw new Error('save control was not rendered');
+    act(() => save.click());
+    act(() => {
+      connectionState = {
+        ...connectionState,
+        goalState: { v: 2, activity: 'idle', goal: null },
+      };
+      rerender({ onError });
+    });
+    await act(async () =>
+      pendingGoal.resolve({
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      }),
+    );
+
+    expect(onError).toHaveBeenCalledWith(
+      // The guard that produces this message is the only protection the
+      // pause/resume/clear flows have against dereferencing a null goal, so
+      // pin the message rather than "some Error".
+      expect.objectContaining({ message: 'The goal is no longer available.' }),
+      'Failed to edit the goal',
+    );
+  });
+
+  it.each(['resolve', 'reject'] as const)(
+    'ignores a stale Goal edit %s after the pane session changes',
+    async (outcome) => {
+      const goalA = {
+        v: 2 as const,
+        activity: 'running' as const,
+        goal: {
+          goalId: 'goal-a',
+          revision: 5,
+          objective: 'session A objective',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-a' },
+          turnCount: 1,
+          activeTimeMs: 10,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      };
+      const goalB = {
+        ...goalA,
+        goal: {
+          ...goalA.goal,
+          goalId: 'goal-b',
+          revision: 1,
+          objective: 'session B objective',
+        },
+      };
+      let resolveEdit!: (value: { snapshot: typeof goalA }) => void;
+      let rejectEdit!: (error: Error) => void;
+      const edit = new Promise<{ snapshot: typeof goalA }>(
+        (resolve, reject) => {
+          resolveEdit = resolve;
+          rejectEdit = reject;
+        },
+      );
+      connectionState.goalState = goalA;
+      getGoal.mockResolvedValue({ snapshot: goalA });
+      controlGoal.mockReturnValueOnce(edit);
+      render();
+
+      const editA = container!.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+      );
+      if (!editA) throw new Error('session A edit control was not rendered');
+      act(() => editA.click());
+      const saveA = [
+        ...document.querySelectorAll<HTMLButtonElement>('button'),
+      ].find((button) => button.textContent === 'Save');
+      if (!saveA) throw new Error('session A save control was not rendered');
+      act(() => saveA.click());
+      await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledTimes(1));
+
+      act(() => {
+        ownerVersion += 1;
+        connectionState = {
+          ...connectionState,
+          sessionId: 'sess-2',
+          goalState: goalB,
+        };
+        rerender();
+      });
+      const editB = container!.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+      );
+      if (!editB) throw new Error('session B edit control was not rendered');
+      expect(editB.disabled).toBe(false);
+      act(() => editB.click());
+      expect(document.querySelector('textarea')).not.toBeNull();
+
+      await act(async () => {
+        if (outcome === 'resolve') resolveEdit({ snapshot: goalA });
+        else rejectEdit(new Error('session A edit failed'));
+        await Promise.resolve();
+      });
+
+      expect(document.querySelector('textarea')).not.toBeNull();
+      expect(document.querySelector('[role="alert"]')).toBeNull();
+    },
+  );
+
+  it('rejects a Goal edit when the same session replaces the goal', async () => {
+    const goalA = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 5,
+        objective: 'goal A',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-a' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const goalB = {
+      ...goalA,
+      goal: { ...goalA.goal, goalId: 'goal-b', objective: 'goal B' },
+    };
+    const pendingGoal = deferred<{ snapshot: typeof goalB }>();
+    const onError = vi.fn();
+    connectionState.goalState = goalA;
+    getGoal.mockReturnValueOnce(pendingGoal.promise);
+    render({ onError });
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+        )
+        ?.click();
+    });
+    const save = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Save');
+    if (!save) throw new Error('save control was not rendered');
+    act(() => save.click());
+    act(() => {
+      connectionState = { ...connectionState, goalState: goalB };
+      rerender({ onError });
+    });
+    await act(async () => pendingGoal.resolve({ snapshot: goalB }));
+
+    expect(controlGoal).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      'Failed to edit the goal',
+    );
+  });
+
   it('opens a pane monitor in the shared right panel', async () => {
     connectionState.capabilities = {
       features: ['session_monitor_tool_correlation'],
@@ -478,6 +1291,38 @@ describe('ChatPane', () => {
     expect(footerProps.at(-1)?.disabled).toBe(true);
   });
 
+  it('hides the pane composer while an approval is pending', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    render();
+    expect(testid('pane-approval')).not.toBeNull();
+    // The streaming status and the editor share the approval-hidden wrapper,
+    // so neither lingers below the dialog.
+    expect(testid('pane-streaming')?.parentElement?.className).toContain(
+      'composerHidden',
+    );
+    expect(
+      container!.querySelector('[data-web-shell-composer]')?.parentElement
+        ?.className,
+    ).toContain('composerHidden');
+  });
+
+  it('restores the pane composer after the approval resolves', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    render();
+    expect(
+      container!.querySelector('[data-web-shell-composer]')?.parentElement
+        ?.className,
+    ).toContain('composerHidden');
+
+    pendingPermission = null;
+    rerender();
+    expect(testid('pane-approval')).toBeNull();
+    expect(
+      container!.querySelector('[data-web-shell-composer]')?.parentElement
+        ?.className,
+    ).not.toContain('composerHidden');
+  });
+
   it('adds no composer footer DOM when omitted or returning null', () => {
     render();
     const composer = container!.querySelector('[data-web-shell-composer]');
@@ -508,10 +1353,31 @@ describe('ChatPane', () => {
 
   it('adds no workspace toolbar chip on a single-workspace daemon', () => {
     render({ title: 'Refactor core', workspaceCwd: '/w' });
+    expect(latestChatEditorProps.visibleToolbarActions).toContain('addMenu');
     expect(latestChatEditorProps.visibleToolbarActions).not.toContain(
       'workspace',
     );
     expect(latestChatEditorProps.workspaceName).toBeUndefined();
+  });
+
+  it('does not thread host at mention props onto ChatEditor', () => {
+    render(
+      { title: 'Refactor core' },
+      {
+        atProviders: [
+          {
+            id: 'tables',
+            label: 'Tables',
+            async search() {
+              return [];
+            },
+          },
+        ],
+        builtinAtProviders: { exclude: ['extensions'] },
+      },
+    );
+    expect(latestChatEditorProps.atProviders).toBeUndefined();
+    expect(latestChatEditorProps.builtinAtProviders).toBeUndefined();
   });
 
   it('shows the pane workspace as a toolbar chip on a multi-workspace daemon', () => {
@@ -706,11 +1572,51 @@ describe('ChatPane', () => {
       await Promise.resolve();
     });
 
-    expect(onPaneArtifactsChange).toHaveBeenLastCalledWith(
-      'sess-1',
-      [artifact],
-      expect.any(Object),
-    );
+    expect(onPaneArtifactsChange).toHaveBeenLastCalledWith('sess-1', [
+      artifact,
+    ]);
+  });
+
+  it('stamps its session identity on turn-output open requests', () => {
+    const onRightPanelOpen = vi.fn();
+    render({ onRightPanelOpen });
+
+    act(() => {
+      testid('pane-open-turn-output')?.click();
+    });
+
+    expect(onRightPanelOpen).toHaveBeenCalledWith({
+      id: 'artifact:turn-artifact',
+      kind: 'artifact',
+      title: 'Turn artifact',
+      turnId: 'turn-1',
+      artifactId: 'turn-artifact',
+      artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+      workspaceCwd: '/w',
+      sourceSessionId: 'sess-1',
+    });
+  });
+
+  it('reads daemon attachments through the pane session before previewing', async () => {
+    const onRightPanelOpen = vi.fn();
+    render({ onRightPanelOpen });
+
+    await act(async () => {
+      testid('pane-open-attachment')?.click();
+      await Promise.resolve();
+    });
+
+    expect(readAttachment).toHaveBeenCalledWith('attachment-1');
+    expect(onRightPanelOpen).toHaveBeenCalledWith({
+      id: 'attachment:attachment-1',
+      kind: 'attachment',
+      title: 'data.json',
+      turnId: 'sess-1',
+      mimeType: 'application/json',
+      data: expect.any(Blob),
+      workspaceCwd: '/w',
+      sourceSessionId: 'sess-1',
+    });
   });
 
   it('suppresses the rotating loading phrase in its compact status', () => {
@@ -729,11 +1635,131 @@ describe('ChatPane', () => {
     );
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('hello there', {
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
     expect(clearFollowup).not.toHaveBeenCalled();
     expect(enqueuePrompt).not.toHaveBeenCalled();
   });
+
+  it('sends an idle prompt while the Goal state is still hydrating', () => {
+    connectionState = { ...connectionState, goalState: undefined };
+    render();
+
+    act(() =>
+      testid('pane-submit')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('inserts a hydrating prompt while the session is active', () => {
+    connectionState = { ...connectionState, goalState: undefined };
+    streamingStateValue = 'responding';
+    render();
+
+    act(() =>
+      testid('pane-submit')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).toHaveBeenCalled();
+    expect(queuedPromptStreamingState).toBe('responding');
+    expect(queuedPromptSessionHasActivePrompt).toBe(false);
+  });
+
+  it('inserts a prompt before the first stream event reaches the pane', () => {
+    sessionHasActivePromptValue = true;
+    render();
+
+    act(() =>
+      testid('pane-submit')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).toHaveBeenCalled();
+    expect(queuedPromptStreamingState).toBe('idle');
+    expect(queuedPromptSessionHasActivePrompt).toBe(true);
+
+    sendPrompt.mockClear();
+    enqueuePrompt.mockClear();
+    act(() => {
+      sessionHasActivePromptValue = false;
+      rerender();
+    });
+    act(() =>
+      testid('pane-submit')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+
+    expect(queuedPromptStreamingState).toBe('idle');
+    expect(queuedPromptSessionHasActivePrompt).toBe(false);
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('sends an idle prompt when an active Goal is known', () => {
+    connectionState.goalState = {
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active',
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    render();
+
+    act(() =>
+      testid('pane-submit')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+
+    sendPrompt.mockClear();
+    let accepted: boolean | undefined;
+    act(() => {
+      accepted = latestOnSubmit!('/deploy production');
+    });
+    expect(accepted).toBe(false);
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it.each(['idle', 'responding'] as const)(
+    'blocks a forwarded slash command while Goal state is hydrating (%s)',
+    (streamingState) => {
+      streamingStateValue = streamingState;
+      connectionState = { ...connectionState, goalState: undefined };
+      render();
+
+      let accepted: boolean | undefined;
+      act(() => {
+        accepted = latestOnSubmit!('/deploy production');
+      });
+
+      expect(accepted).toBe(false);
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(enqueuePrompt).not.toHaveBeenCalled();
+    },
+  );
 
   it('lets the host handle a slash command', () => {
     const onSlashCommand = vi.fn(() => true);
@@ -764,8 +1790,30 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).toHaveBeenCalledTimes(1);
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
+  });
+
+  it('queues a forwarded slash command while the pane is running', () => {
+    streamingStateValue = 'responding';
+    const onSlashCommand = vi.fn();
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      '/deploy staging',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Function),
+    );
   });
 
   it('lets the host handle a slash command while the pane is disconnected', () => {
@@ -798,6 +1846,7 @@ describe('ChatPane', () => {
       'onSlashCommand callback failed',
     );
     expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
   });
@@ -812,6 +1861,7 @@ describe('ChatPane', () => {
 
     expect(onSlashCommand).not.toHaveBeenCalled();
     expect(sendPrompt).toHaveBeenCalledWith('/usr/local/bin/tool', {
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
   });
@@ -821,13 +1871,52 @@ describe('ChatPane', () => {
     const commit = vi.fn();
     let returned: boolean | undefined;
     act(() => {
-      returned = latestOnSubmit!('hi', undefined, commit);
+      returned = latestOnSubmit!('hi', undefined, undefined, commit);
     });
     expect(returned).toBe(false);
     expect(commit).not.toHaveBeenCalled();
     act(() => sendPromptAdmit!());
+    expect(catalogController.promptAdmitted).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+    );
     expect(commit).toHaveBeenCalledTimes(1);
     expect(clearFollowup).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not attribute prompt admission across a workspace mismatch', () => {
+    connectionState.workspaceCwd = '/other';
+    render({ workspaceCwd: '/w' });
+
+    act(() => {
+      latestOnSubmit!('hi');
+      sendPromptAdmit!();
+    });
+
+    expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
+  });
+
+  it('does not update a catalog without an owning workspace', () => {
+    connectionState.workspaceCwd = undefined;
+    render();
+
+    act(() => {
+      latestOnSubmit!('hi');
+      sendPromptAdmit!();
+    });
+
+    expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
+
+    streamingStateValue = 'responding';
+    rerender();
+    act(() => {
+      latestOnSubmit!('queued next');
+    });
+    expect(catalogController.invalidateWorkspace).not.toHaveBeenCalled();
+
+    streamingStateValue = 'idle';
+    rerender();
+    expect(catalogController.turnCompleted).not.toHaveBeenCalled();
   });
 
   it('forwards images with an idle prompt', () => {
@@ -838,8 +1927,33 @@ describe('ChatPane', () => {
     });
     expect(sendPrompt).toHaveBeenCalledWith('with image', {
       images,
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
+  });
+
+  it('submits image-only prompts and preserves first-text naming eligibility', () => {
+    const images = [{ data: 'image-data', media_type: 'image/png' }];
+    const onFirstPromptAdmitted = vi.fn();
+    render({ onFirstPromptAdmitted });
+
+    act(() => {
+      latestOnSubmit!('', images);
+    });
+    expect(sendPrompt).toHaveBeenCalledWith('', {
+      images,
+      onAdmissionStarted: expect.any(Function),
+      onAdmitted: expect.any(Function),
+    });
+    act(() => sendPromptAdmit!());
+    expect(onFirstPromptAdmitted).not.toHaveBeenCalled();
+
+    act(() => {
+      latestOnSubmit!('name this task');
+    });
+    act(() => sendPromptAdmit!());
+    expect(onFirstPromptAdmitted).toHaveBeenCalledOnce();
+    expect(onFirstPromptAdmitted).toHaveBeenCalledWith('name this task');
   });
 
   it('forwards composer annotations with an idle prompt', () => {
@@ -854,12 +1968,13 @@ describe('ChatPane', () => {
     ];
     render();
     act(() => {
-      latestOnSubmit!('check @.husky/', undefined, undefined, {
+      latestOnSubmit!('check @.husky/', undefined, undefined, undefined, {
         inputAnnotations,
       });
     });
     expect(sendPrompt).toHaveBeenCalledWith('check @.husky/', {
       inputAnnotations,
+      onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
   });
@@ -870,11 +1985,108 @@ describe('ChatPane', () => {
     const commit = vi.fn();
     let returned: boolean | undefined;
     act(() => {
-      returned = latestOnSubmit!('queued next', undefined, commit);
+      returned = latestOnSubmit!('queued next', undefined, undefined, commit);
     });
     expect(returned).toBe(true);
-    expect(enqueuePrompt).toHaveBeenCalledWith('queued next', undefined);
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      'queued next',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Function),
+    );
+    expect(catalogController.invalidateWorkspace).toHaveBeenCalledWith('/w');
     expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('names a side task when its first text prompt is admitted from the queue', () => {
+    streamingStateValue = 'responding';
+    const onFirstPromptAdmitted = vi.fn();
+    render({ onFirstPromptAdmitted });
+
+    act(() => {
+      latestOnSubmit!('name this queued task');
+    });
+
+    const onAdmitted = enqueuePrompt.mock.calls[0]?.[5] as
+      | (() => void)
+      | undefined;
+    expect(onAdmitted).toEqual(expect.any(Function));
+    act(() => onAdmitted?.());
+    expect(onFirstPromptAdmitted).toHaveBeenCalledOnce();
+    expect(onFirstPromptAdmitted).toHaveBeenCalledWith('name this queued task');
+  });
+
+  it('resynchronizes the owning catalog when a pane turn completes', () => {
+    streamingStateValue = 'responding';
+    render();
+
+    streamingStateValue = 'idle';
+    rerender();
+
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+    );
+  });
+
+  it('does not duplicate turn completion owned by the outer session', () => {
+    streamingStateValue = 'responding';
+    render({ reportCatalogTurnCompletion: false });
+
+    streamingStateValue = 'idle';
+    rerender({ reportCatalogTurnCompletion: false });
+
+    expect(catalogController.turnCompleted).not.toHaveBeenCalled();
+  });
+
+  it('does not attribute a completed pane turn to a different workspace', () => {
+    streamingStateValue = 'responding';
+    render();
+
+    connectionState.workspaceCwd = '/other';
+    streamingStateValue = 'idle';
+    rerender();
+
+    expect(catalogController.turnCompleted).not.toHaveBeenCalled();
+  });
+
+  it('captures a pane identity that becomes available mid-turn', () => {
+    connectionState.sessionId = undefined;
+    streamingStateValue = 'responding';
+    render();
+
+    connectionState.sessionId = 'sess-late';
+    rerender();
+    streamingStateValue = 'idle';
+    rerender();
+
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith(
+      '/w',
+      'sess-late',
+    );
+  });
+
+  it('captures a pane workspace that becomes available mid-turn', () => {
+    connectionState.workspaceCwd = undefined;
+    streamingStateValue = 'responding';
+    render();
+
+    connectionState.workspaceCwd = '/secondary';
+    rerender();
+    streamingStateValue = 'idle';
+    rerender();
+
+    expect(catalogController.turnCompleted).toHaveBeenCalledTimes(1);
+    expect(catalogController.turnCompleted).toHaveBeenCalledWith(
+      '/secondary',
+      'sess-1',
+    );
+    expect(catalogController.turnCompleted).not.toHaveBeenCalledWith(
+      '/primary',
+      'sess-1',
+    );
   });
 
   it('forwards composer annotations with a queued prompt', () => {
@@ -890,7 +2102,7 @@ describe('ChatPane', () => {
     ];
     render();
     act(() => {
-      latestOnSubmit!('queue @.husky/', undefined, undefined, {
+      latestOnSubmit!('queue @.husky/', undefined, undefined, undefined, {
         inputAnnotations,
       });
     });
@@ -898,7 +2110,9 @@ describe('ChatPane', () => {
       'queue @.husky/',
       undefined,
       undefined,
+      undefined,
       inputAnnotations,
+      expect.any(Function),
     );
     expect(sendPrompt).not.toHaveBeenCalled();
   });
@@ -910,25 +2124,32 @@ describe('ChatPane', () => {
     act(() => {
       latestOnSubmit!('queued image', images);
     });
-    expect(enqueuePrompt).toHaveBeenCalledWith('queued image', images);
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      'queued image',
+      images,
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Function),
+    );
   });
 
-  it('does not submit while the pane is disconnected', () => {
+  it('queues an image-only prompt while the pane is already running', () => {
+    streamingStateValue = 'responding';
+    const images = [{ data: 'image-data', media_type: 'image/bmp' }];
+    render();
+
+    act(() => {
+      latestOnSubmit!('', images);
+    });
+
+    expect(enqueuePrompt).toHaveBeenCalledWith('', images, undefined);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('submits while disconnected when a session exists', () => {
     connectionState.status = 'disconnected';
     render();
-    let returned: boolean | undefined;
-    act(() => {
-      returned = latestOnSubmit!('hi');
-    });
-    expect(returned).toBe(false);
-    expect(sendPrompt).not.toHaveBeenCalled();
-    expect(enqueuePrompt).not.toHaveBeenCalled();
-  });
-
-  it('submits while disconnected when prompt SSE restart is enabled', () => {
-    connectionState.status = 'disconnected';
-    render({ restartSseOnPrompt: true });
-
     act(() => {
       latestOnSubmit!('hi');
     });
@@ -939,10 +2160,10 @@ describe('ChatPane', () => {
     );
   });
 
-  it('does not submit without a recoverable disconnected session', () => {
+  it('does not submit without a session while disconnected', () => {
     connectionState.status = 'disconnected';
     connectionState.sessionId = undefined;
-    render({ restartSseOnPrompt: true });
+    render();
 
     act(() => {
       latestOnSubmit!('hi');
@@ -951,21 +2172,153 @@ describe('ChatPane', () => {
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
-  it('reports an idle prompt failure to the pane error handler', async () => {
+  it('locks the pane when idle prompt admission outcome is unknown', async () => {
     const onError = vi.fn();
-    sendPrompt.mockRejectedValueOnce(new Error('disconnected'));
-    render({ onError });
+    const onImageIngestionNotice = vi.fn();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sendPrompt.mockImplementationOnce(async (_text, options) => {
+      options?.onAdmissionStarted?.();
+      throw new Error('disconnected');
+    });
+    render({ onError, onImageIngestionNotice });
     const commit = vi.fn();
     await act(async () => {
-      latestOnSubmit!('hi', undefined, commit);
+      latestOnSubmit!('hi', undefined, undefined, commit);
       await Promise.resolve();
     });
     expect(commit).not.toHaveBeenCalled();
     expect(clearFollowup).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      expect.stringContaining('uncertain'),
+    );
+    const notice = testid('pane-prompt-admission-unknown');
+    expect(notice).not.toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(true);
+    expect(catalogController.promptAdmissionUncertain).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(catalogController.promptAdmitted).not.toHaveBeenCalled();
+    act(() => latestOnSubmit!('do not retry'));
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      notice?.querySelectorAll('button').item(0).click();
+    });
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(latestChatEditorProps.disabled).toBe(true);
+
+    confirm.mockReturnValue(true);
+    act(() => {
+      notice?.querySelectorAll('button').item(0).click();
+    });
+    expect(commit).not.toHaveBeenCalled();
+    expect(latestChatEditorProps.disabled).toBe(false);
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    confirm.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('keeps an unknown admission locked across an unrelated stream', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sendPrompt.mockImplementationOnce(async (_text, options) => {
+      options?.onAdmissionStarted?.();
+      throw new Error('response lost');
+    });
+    render();
+
+    await act(async () => {
+      latestOnSubmit!('hi');
+      await Promise.resolve();
+    });
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+
+    streamingStateValue = 'responding';
+    rerender();
+
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('does not mark a turn error unknown after admission', async () => {
+    const onError = vi.fn();
+    let rejectTurn!: (error: unknown) => void;
+    sendPrompt.mockImplementationOnce((_text, options) => {
+      options?.onAdmissionStarted?.();
+      sendPromptAdmit = options?.onAdmitted;
+      return new Promise((_resolve, reject) => {
+        rejectTurn = reject;
+      });
+    });
+    render({ onError });
+    const commit = vi.fn();
+
+    act(() => {
+      latestOnSubmit!('hi', undefined, undefined, commit);
+      sendPromptAdmit?.();
+    });
+    await act(async () => {
+      rejectTurn(new Error('turn failed'));
+      await Promise.resolve();
+    });
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(testid('pane-prompt-admission-unknown')).toBeNull();
+    expect(latestChatEditorProps.disabled).toBe(false);
     expect(onError).toHaveBeenCalledWith(
-      expect.any(Error),
+      expect.objectContaining({ message: 'turn failed' }),
       'Failed to send prompt',
     );
+  });
+
+  it('discards an unknown local payload without hiding its marker', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sendPrompt.mockImplementationOnce(async (_text, options) => {
+      options?.onAdmissionStarted?.();
+      throw new Error('disconnected');
+    });
+    render();
+    const commit = vi.fn();
+    await act(async () => {
+      latestOnSubmit!('hi', undefined, undefined, commit);
+      await Promise.resolve();
+    });
+
+    act(() => {
+      testid('pane-prompt-admission-unknown')
+        ?.querySelectorAll('button')
+        .item(1)
+        .click();
+    });
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(latestChatEditorProps.disabled).toBe(false);
+    expect(testid('pane-prompt-admission-unknown')).not.toBeNull();
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it('keeps the pane editable after a definite 413 rejection', async () => {
+    const onError = vi.fn();
+    sendPrompt.mockRejectedValueOnce(
+      new DaemonHttpError(413, undefined, 'Too large'),
+    );
+    render({ onError });
+
+    await act(async () => {
+      latestOnSubmit!('hi');
+      await Promise.resolve();
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(DaemonHttpError),
+      'Failed to send prompt',
+    );
+    expect(latestChatEditorProps.disabled).toBe(false);
   });
 
   it('keeps pane approvals click-only (no global keyboard shortcuts)', () => {
@@ -1176,6 +2529,7 @@ describe('ChatPane', () => {
     expect(renderHeaderActions).toHaveBeenCalledWith({
       sessionId: 'sess-1',
       workspaceCwd: '/work/api',
+      sessionActions: daemonActions,
     });
     expect(testid('host-pane-action')?.textContent).toBe('sess-1:/work/api');
     expect(testid('pane-header-actions')).not.toBeNull();
@@ -1195,7 +2549,7 @@ describe('ChatPane', () => {
     render();
     let returned: boolean | undefined;
     act(() => {
-      returned = latestOnSubmit!('   ', undefined, vi.fn());
+      returned = latestOnSubmit!('   ', undefined, undefined, vi.fn());
     });
     expect(returned).toBe(false);
     expect(sendPrompt).not.toHaveBeenCalled();
@@ -1217,6 +2571,7 @@ describe('ChatPane', () => {
   });
 
   it('enables mid-turn queue mutations only when advertised', () => {
+    queuedPromptsMock = [{ id: 1, text: 'queued next' }];
     connectionState.capabilities = {
       features: ['session_mid_turn_message_mutation'],
     };
@@ -1226,6 +2581,7 @@ describe('ChatPane', () => {
   });
 
   it('disables mid-turn queue mutations when not advertised', () => {
+    queuedPromptsMock = [{ id: 1, text: 'queued next' }];
     render();
     expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('false');
   });
@@ -1274,11 +2630,42 @@ describe('ChatPane', () => {
     );
   });
 
-  it('enables the interactive composer controls (approval mode, model, voice)', () => {
+  it('enables the interactive composer controls', () => {
+    connectionState.tokenCount = 1200;
+    connectionState.contextWindow = 8192;
     render();
     expect(testid('pane-toolbar')?.textContent).toBe(
-      JSON.stringify(['approvalMode', 'model', 'voice']),
+      JSON.stringify([
+        'addMenu',
+        'approvalMode',
+        'contextUsage',
+        'model',
+        'voice',
+      ]),
     );
+    expect(latestChatEditorProps.tokenCount).toBe(1200);
+    expect(latestChatEditorProps.contextWindow).toBe(8192);
+    expect(latestChatEditorProps.onShowContextUsage).toEqual(
+      expect.any(Function),
+    );
+  });
+
+  it('shows context usage for this pane session', async () => {
+    render();
+
+    await act(async () => {
+      latestChatEditorProps.onShowContextUsage();
+    });
+
+    expect(appendLocalUserMessage).toHaveBeenCalledWith('/context');
+    expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
+    expect(transcriptDispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        clearActiveText: false,
+        text: expect.stringContaining('web-shell:context-usage:v1:'),
+      }),
+    ]);
   });
 
   it("lists the pane session's own commands in the slash menu", () => {
@@ -1291,6 +2678,27 @@ describe('ChatPane', () => {
     // 'compress' is daemon-only — so the count is localCount + 1.
     const count = Number(testid('pane-commands')?.textContent);
     expect(count).toBeGreaterThan(30);
+  });
+
+  it("passes the pane session's skills to the add menu", () => {
+    connectionState.skills = ['review'];
+    connectionState.commands = [
+      {
+        name: 'review',
+        description: 'Review code',
+        argumentHint: '[path]',
+        source: 'skill',
+      },
+    ];
+    render();
+
+    expect(latestChatEditorProps.skills).toEqual([
+      {
+        name: 'review',
+        description: 'Review changed code for bugs, security, and quality',
+        argumentHint: '[path]',
+      },
+    ]);
   });
 
   it('hides internal composer models and labels the rest', () => {
@@ -1395,5 +2803,51 @@ describe('ChatPane', () => {
     });
     expect(setApprovalMode).toHaveBeenCalledWith('yolo');
     expect(submitPermission).toHaveBeenCalledWith('perm-yolo', 'allow-1');
+  });
+
+  it('resolves host at mention providers through a pane ChatEditor', () => {
+    renderRealChatEditor = true;
+    const atProviders = [
+      {
+        id: 'tables',
+        label: 'Tables',
+        async search() {
+          return [];
+        },
+      },
+    ];
+    const builtinAtProviders = { exclude: ['extensions'] as const };
+
+    render({}, { atProviders, builtinAtProviders });
+
+    expect(latestComposerCoreOptions.current?.atProviders).toBe(atProviders);
+    expect(latestComposerCoreOptions.current?.builtinAtProviders).toBe(
+      builtinAtProviders,
+    );
+  });
+});
+
+describe('ChatPane daemon keep-alive (#9487)', () => {
+  it('passes the daemon active-prompt flag to the indicator and composer', () => {
+    streamingStateValue = 'idle';
+    sessionHasActivePromptValue = true;
+    render({ onError: vi.fn() });
+
+    const status = testid('pane-streaming');
+    expect(status).not.toBeNull();
+    expect(status!.getAttribute('data-has-active-prompt')).toBe('true');
+    // The stop/cancel affordance stays available during the silent gap:
+    // the daemon still has an active prompt, so cancel genuinely works.
+    expect(testid('pane-running')!.textContent).toBe('true');
+  });
+
+  it('keeps the pane idle without a daemon active prompt', () => {
+    streamingStateValue = 'idle';
+    sessionHasActivePromptValue = false;
+    render({ onError: vi.fn() });
+
+    const status = testid('pane-streaming');
+    expect(status!.getAttribute('data-has-active-prompt')).toBe('false');
+    expect(testid('pane-running')!.textContent).toBe('false');
   });
 });

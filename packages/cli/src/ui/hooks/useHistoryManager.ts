@@ -7,6 +7,10 @@
 import { useState, useRef, useCallback, useMemo } from 'react';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import {
+  coalesceFindingsHistoryItems,
+  isFindingsListDisplay,
+} from '../utils/findings-coalescing.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('HISTORY_MANAGER');
@@ -17,6 +21,8 @@ type HistoryItemUpdater = (
 ) => Partial<HistoryItemWithoutId>;
 
 export const UI_COMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
+export const UI_COMPACT_CLEARED_IMAGE_MESSAGE =
+  '[Old assistant image content cleared]';
 const UI_COMPACT_KEEP_RECENT = 20;
 
 export interface UseHistoryManagerReturn {
@@ -79,6 +85,18 @@ export function useHistory(): UseHistoryManagerReturn {
               `textSize=${textSize}, ` +
               `historyLength=${newHistory.length}`,
           );
+        }
+        // A delivered report_findings list REPLACES the session's earlier
+        // one; collapse the superseded displays the moment the new group
+        // commits so live history, the Ctrl+O transcript, and every
+        // re-render surface show only the latest list.
+        if (
+          newItem.type === 'tool_group' &&
+          newItem.tools.some((tool) =>
+            isFindingsListDisplay(tool.resultDisplay),
+          )
+        ) {
+          return coalesceFindingsHistoryItems(newHistory);
         }
         return newHistory;
       });
@@ -148,9 +166,11 @@ export function useHistory(): UseHistoryManagerReturn {
 
       let thoughtRemoved = 0;
       let toolGroupsCompacted = 0;
+      let assistantImageItemsCompacted = 0;
 
       let totalThoughts = 0;
       let totalToolGroupsWithOutput = 0;
+      let totalAssistantItemsWithImages = 0;
       for (const item of prev) {
         if (
           item.type === 'gemini_thought' ||
@@ -158,12 +178,18 @@ export function useHistory(): UseHistoryManagerReturn {
         ) {
           totalThoughts++;
         } else if (
+          (item.type === 'gemini' || item.type === 'gemini_content') &&
+          (item.images?.length || item.omittedImageCount)
+        ) {
+          totalAssistantItemsWithImages++;
+        } else if (
           item.type === 'tool_group' &&
           item.tools.some(
             (t) =>
               (t.resultDisplay != null &&
                 t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
-              t.detailedDisplay != null,
+              t.detailedDisplay != null ||
+              Boolean(t.images?.length || t.omittedImageCount),
           )
         ) {
           totalToolGroupsWithOutput++;
@@ -177,8 +203,13 @@ export function useHistory(): UseHistoryManagerReturn {
         0,
         totalToolGroupsWithOutput - UI_COMPACT_KEEP_RECENT,
       );
+      const assistantImageItemsToCompact = Math.max(
+        0,
+        totalAssistantItemsWithImages - UI_COMPACT_KEEP_RECENT,
+      );
       let thoughtsDropped = 0;
       let toolGroupsSeen = 0;
+      let assistantImageItemsSeen = 0;
 
       const next = prev
         .filter((item) => {
@@ -195,16 +226,34 @@ export function useHistory(): UseHistoryManagerReturn {
           return true;
         })
         .map((item) => {
+          if (
+            (item.type === 'gemini' || item.type === 'gemini_content') &&
+            (item.images?.length || item.omittedImageCount)
+          ) {
+            assistantImageItemsSeen++;
+            if (assistantImageItemsSeen <= assistantImageItemsToCompact) {
+              assistantImageItemsCompacted++;
+              return {
+                ...item,
+                text: item.text
+                  ? `${item.text}\n\n${UI_COMPACT_CLEARED_IMAGE_MESSAGE}`
+                  : UI_COMPACT_CLEARED_IMAGE_MESSAGE,
+                images: undefined,
+                omittedImageCount: undefined,
+              };
+            }
+          }
           if (item.type !== 'tool_group') return item;
           // Check for any non-null resultDisplay (covers string, FileDiff,
-          // AnsiOutputDisplay, AgentResultDisplay, etc.) OR a lingering
-          // `detailedDisplay` — so a tool that somehow carries only the raw
-          // transcript detail still triggers compaction and gets cleared.
+          // AnsiOutputDisplay, AgentResultDisplay, etc.), a lingering
+          // `detailedDisplay`, or image payloads. Every retained output form
+          // must participate in the same keep-recent limit.
           const hasOldOutput = item.tools.some(
             (t) =>
               (t.resultDisplay != null &&
                 t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
-              t.detailedDisplay != null,
+              t.detailedDisplay != null ||
+              Boolean(t.images?.length || t.omittedImageCount),
           );
           if (!hasOldOutput) return item;
           toolGroupsSeen++;
@@ -216,19 +265,24 @@ export function useHistory(): UseHistoryManagerReturn {
               if (
                 (t.resultDisplay != null &&
                   t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
-                t.detailedDisplay != null
+                t.detailedDisplay != null ||
+                t.images?.length ||
+                t.omittedImageCount
               ) {
                 // Also drop `detailedDisplay` (the raw functionResponse text
                 // kept for the Ctrl+O full-detail transcript): clearing only
                 // `resultDisplay` would let a post-compaction transcript reopen
                 // re-surface the supposedly cleared read/search/list output,
                 // defeating the memory/privacy compaction. The `detailedDisplay`
-                // arm keeps the guard robust even if a tool ever carries the
-                // raw detail without a `resultDisplay`.
+                // and `images` arms keep the guard robust when a tool carries
+                // raw detail or media without a `resultDisplay`.
                 return {
                   ...t,
                   resultDisplay: UI_COMPACT_CLEARED_MESSAGE,
                   detailedDisplay: undefined,
+                  supersededFindingsDisplay: undefined,
+                  images: undefined,
+                  omittedImageCount: undefined,
                 };
               }
               return t;
@@ -236,17 +290,26 @@ export function useHistory(): UseHistoryManagerReturn {
           };
         });
 
-      if (thoughtRemoved > 0 || toolGroupsCompacted > 0) {
+      if (
+        thoughtRemoved > 0 ||
+        toolGroupsCompacted > 0 ||
+        assistantImageItemsCompacted > 0
+      ) {
         if (debugLogger.isEnabled()) {
           debugLogger.debug(
             `[COMPACT_UI_HISTORY] removed ${thoughtRemoved} thought item(s), ` +
+              `compacted ${assistantImageItemsCompacted} assistant image item(s), ` +
               `compacted ${toolGroupsCompacted} tool group(s), ` +
               `historyLength ${prev.length} -> ${next.length}, ` +
               `memory=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
           );
         }
       }
-      return thoughtRemoved > 0 || toolGroupsCompacted > 0 ? next : prev;
+      return thoughtRemoved > 0 ||
+        toolGroupsCompacted > 0 ||
+        assistantImageItemsCompacted > 0
+        ? next
+        : prev;
     });
   }, []);
 

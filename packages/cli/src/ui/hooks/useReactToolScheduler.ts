@@ -38,6 +38,7 @@ import type {
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import { collectInlineImages } from '../utils/inline-image-parts.js';
 
 const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 
@@ -49,13 +50,13 @@ export type ScheduleFn = (
 export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
 
 export type TrackedScheduledToolCall = ScheduledToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 export type TrackedValidatingToolCall = ValidatingToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 export type TrackedWaitingToolCall = WaitingToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 /**
  * NOTE on inherited fields: `pid?` and `promoteAbortController?` come
@@ -89,13 +90,13 @@ const _ASSERT_INHERITED_FIELDS_PRESENT: _AssertExecutingHasPid &
 void _ASSERT_INHERITED_FIELDS_PRESENT;
 
 export type TrackedExecutingToolCall = ExecutingToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 export type TrackedCompletedToolCall = CompletedToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 export type TrackedCancelledToolCall = CancelledToolCall & {
-  responseSubmittedToGemini?: boolean;
+  responseSubmittedToLlm?: boolean;
 };
 
 export type TrackedToolCall =
@@ -155,8 +156,8 @@ export function useReactToolScheduler(
           );
           // Start with the new core state, then layer on the existing UI state
           // to ensure UI-only properties like pid are preserved.
-          const responseSubmittedToGemini =
-            existingTrackedCall?.responseSubmittedToGemini ?? false;
+          const responseSubmittedToLlm =
+            existingTrackedCall?.responseSubmittedToLlm ?? false;
 
           if (coreTc.status === 'executing') {
             // `...coreTc` already spreads `pid` and
@@ -166,7 +167,7 @@ export function useReactToolScheduler(
             // version of this call.
             return {
               ...coreTc,
-              responseSubmittedToGemini,
+              responseSubmittedToLlm,
               liveOutput: (existingTrackedCall as TrackedExecutingToolCall)
                 ?.liveOutput,
             };
@@ -185,7 +186,7 @@ export function useReactToolScheduler(
           // tool call).
           return {
             ...coreTc,
-            responseSubmittedToGemini,
+            responseSubmittedToLlm,
             liveOutput: undefined,
             pid: undefined,
             promoteAbortController: undefined,
@@ -225,7 +226,14 @@ export function useReactToolScheduler(
       modelOverride?: string,
     ) => {
       if (!modelOverride?.endsWith('\0')) {
-        void scheduler.schedule(request, signal);
+        void scheduler.schedule(request, signal).catch((error: unknown) => {
+          if (signal.aborted) return;
+          debugLogger.error(
+            `Tool scheduling failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
         return;
       }
       void (async () => {
@@ -283,7 +291,7 @@ export function useReactToolScheduler(
       setToolCallsForDisplay((prevCalls) =>
         prevCalls.map((tc) =>
           callIdsToMark.includes(tc.request.callId)
-            ? { ...tc, responseSubmittedToGemini: true }
+            ? { ...tc, responseSubmittedToLlm: true }
             : tc,
         ),
       );
@@ -390,8 +398,15 @@ export function mapToDisplay(
             : undefined,
       };
 
+      const inlineImageCollection =
+        trackedCall.status === 'success' ||
+        trackedCall.status === 'error' ||
+        trackedCall.status === 'cancelled'
+          ? collectInlineImages(trackedCall.response.responseParts)
+          : null;
+
       switch (trackedCall.status) {
-        case 'success':
+        case 'success': {
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
@@ -415,9 +430,19 @@ export function mapToDisplay(
             detailedDisplay: isCollapsibleTool(displayName)
               ? getToolResponseDisplayText(trackedCall.response.responseParts)
               : undefined,
+            ...(inlineImageCollection?.images.length
+              ? { images: inlineImageCollection.images }
+              : {}),
+            ...(inlineImageCollection?.omittedImageCount
+              ? {
+                  omittedImageCount: inlineImageCollection.omittedImageCount,
+                }
+              : {}),
             confirmationDetails: undefined,
           };
+        }
         case 'error':
+        case 'cancelled': {
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
@@ -429,22 +454,17 @@ export function mapToDisplay(
                   visionBridgeNotice: trackedCall.response.visionBridgeNotice,
                 }
               : {}),
-            confirmationDetails: undefined,
-          };
-        case 'cancelled':
-          return {
-            ...baseDisplayProperties,
-            status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: compactToolResultDisplayForHistory(
-              trackedCall.response.resultDisplay,
-            ),
-            ...(trackedCall.response.visionBridgeNotice !== undefined
+            ...(inlineImageCollection?.images.length
+              ? { images: inlineImageCollection.images }
+              : {}),
+            ...(inlineImageCollection?.omittedImageCount
               ? {
-                  visionBridgeNotice: trackedCall.response.visionBridgeNotice,
+                  omittedImageCount: inlineImageCollection.omittedImageCount,
                 }
               : {}),
             confirmationDetails: undefined,
           };
+        }
         case 'awaiting_approval':
           return {
             ...baseDisplayProperties,

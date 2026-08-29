@@ -71,6 +71,13 @@ export interface BackgroundTaskViewActions {
   cancelSelected(): void;
   /** Resume the currently selected paused entry. */
   resumeSelected(): Promise<void>;
+  /**
+   * Cooperatively pause or resume the selected workflow. Returns whether
+   * the registry accepted the transition, or `null` when the keypress does
+   * not apply to the selection (not a backgrounded workflow in a pausable
+   * state). A `false` verdict means the run's state changed mid-race.
+   */
+  toggleSelectedWorkflowPause(): boolean | null;
   enterDetailFromPanel(): void;
   setPillFocused(focused: boolean): void;
   setLivePanelFocused(focused: boolean): void;
@@ -111,6 +118,7 @@ const DEFAULT_ACTIONS: BackgroundTaskViewActions = {
   enterDetailFromPanel: noop,
   cancelSelected: noop,
   resumeSelected: async () => {},
+  toggleSelectedWorkflowPause: () => null,
   setPillFocused: noop,
   setLivePanelFocused: noop,
   setLivePanelSelectedIndex: noop,
@@ -220,8 +228,8 @@ export function BackgroundTaskViewProvider({
       config.abandonBackgroundAgent(target.agentId);
       return;
     }
-    // All three registries' cancel paths are no-ops on non-running
-    // entries, so no pre-check here. Shell cancel goes through
+    // Registry cancel paths are no-ops outside their actionable states,
+    // so no pre-check here. Shell cancel goes through
     // requestCancel — it triggers the AbortController only and lets the
     // spawn's settle path record the real terminal moment + outcome
     // (mirrors the task_stop tool path in #3687). Monitor cancel is
@@ -261,7 +269,8 @@ export function BackgroundTaskViewProvider({
       }
       case 'workflow':
         // Aborts the orchestrator + in-flight dispatches via the
-        // registry's cancel — flips status to 'cancelled' and signals
+        // registry's cancel — rejects queued work, flips status to
+        // 'cancelled', and signals
         // the AbortController the WorkflowTool wired into the run.
         // The tool's catch arm sees signal.aborted and records the
         // terminal in the registry; the registry.cancel here is the
@@ -289,6 +298,23 @@ export function BackgroundTaskViewProvider({
       return;
     }
     await config.resumeBackgroundAgent(target.agentId);
+  }, [config, entries, selectedIndex]);
+
+  const toggleSelectedWorkflowPause = useCallback((): boolean | null => {
+    if (!config) return null;
+    const target = entries[selectedIndex];
+    if (!target || target.kind !== 'workflow' || !target.isBackgrounded) {
+      return null;
+    }
+    const registry = config.getWorkflowRunRegistry();
+    if (target.status === 'running') return registry.pause(target.runId);
+    if (target.status === 'paused') return registry.resume(target.runId);
+    // R12 (doudouOUC): `pausing` can last a full subagent dispatch, so a
+    // silent keypress reads as a stuck UI. The registry refuses the
+    // transition (returns false), which lights the existing rejection
+    // flash — same surface as any other refused pause/resume.
+    if (target.status === 'pausing') return registry.pause(target.runId);
+    return null;
   }, [config, entries, selectedIndex]);
 
   const state: BackgroundTaskViewState = useMemo(
@@ -323,6 +349,7 @@ export function BackgroundTaskViewProvider({
       exitDetail,
       cancelSelected,
       resumeSelected,
+      toggleSelectedWorkflowPause,
       setPillFocused,
       setLivePanelFocused,
       setLivePanelSelectedIndex,
@@ -338,6 +365,7 @@ export function BackgroundTaskViewProvider({
       exitDetail,
       cancelSelected,
       resumeSelected,
+      toggleSelectedWorkflowPause,
       setPillFocused,
       setLivePanelFocused,
       setLivePanelSelectedIndex,

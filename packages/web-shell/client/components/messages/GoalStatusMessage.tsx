@@ -1,7 +1,5 @@
-import { useEffect } from 'react';
 import { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
-import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import styles from './GoalStatusMessage.module.css';
@@ -12,6 +10,7 @@ export type GoalStatusKind =
   | 'cleared'
   | 'failed'
   | 'aborted'
+  | 'paused'
   | 'checking';
 
 export interface SerializedGoalStatusMessage {
@@ -22,8 +21,6 @@ export interface SerializedGoalStatusMessage {
   setAt?: number;
   lastReason?: string;
 }
-
-export const GOAL_STATUS_ACTIVE_EVENT = 'web-shell-goal-status-active';
 
 const {
   serialize: serializeGoalStatusMessage,
@@ -38,6 +35,10 @@ const VALID_GOAL_KINDS = new Set<string>([
   'cleared',
   'failed',
   'aborted',
+  // A paused goal is not running. Dropping it here left the footer and
+  // the active-goal derivation falling through to the previous `set`
+  // card, so the UI kept claiming autonomous work was under way.
+  'paused',
   'checking',
 ]);
 
@@ -127,32 +128,20 @@ function getTitle(
         title: t('goal.aborted'),
         colorClass: styles.warning,
       };
+    case 'paused':
+      return {
+        title: t('goal.paused'),
+        colorClass: styles.warning,
+      };
   }
 }
 
 export function GoalStatusMessage({
   status,
-  activateFooter = false,
 }: {
   status: SerializedGoalStatusMessage;
-  activateFooter?: boolean;
 }) {
   const { t } = useI18n();
-  const renderMode = useTranscriptRenderMode();
-
-  useEffect(() => {
-    if (!activateFooter || renderMode === 'readonly') return;
-    const active = status.kind === 'set' || status.kind === 'checking';
-    window.dispatchEvent(
-      new CustomEvent(GOAL_STATUS_ACTIVE_EVENT, {
-        detail: {
-          active,
-          condition: status.condition,
-          setAt: status.setAt,
-        },
-      }),
-    );
-  }, [activateFooter, renderMode, status.condition, status.kind, status.setAt]);
 
   const title = getTitle(status, t);
   const stats: string[] = [];
@@ -169,7 +158,8 @@ export function GoalStatusMessage({
     (status.kind === 'checking' ||
       status.kind === 'achieved' ||
       status.kind === 'failed' ||
-      status.kind === 'aborted') &&
+      status.kind === 'aborted' ||
+      status.kind === 'paused') &&
     status.lastReason?.trim();
   const reasonLabel =
     status.kind === 'checking' ? t('goal.judge') : t('goal.lastCheck');

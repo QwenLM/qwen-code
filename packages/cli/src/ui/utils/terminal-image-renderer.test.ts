@@ -11,12 +11,15 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   containsCmdShellMetacharacters,
   getTerminalImageRenderSupport,
+  MAX_INLINE_IMAGE_PIXELS,
   markKittyImageWritten,
+  prepareInlineTerminalImage,
   renderTerminalImage,
   supportsKittyImageProtocol,
   TRANSMITTED_KEY_LIMIT,
   wasKittyImageWritten,
 } from './terminal-image-renderer.js';
+import { MAX_INLINE_IMAGE_ENCODED_LENGTH } from './inline-image-parts.js';
 
 const PNG_1X1 = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
@@ -84,6 +87,102 @@ describe('terminalImageRenderer', () => {
     expect(result.sequence).toContain('c=1,r=1');
     expect(result.placeholder.lines).toHaveLength(1);
     expect(result.placeholder.lines[0]).toContain('\u{10EEEE}');
+  });
+
+  it('renders bounded inline PNG data through the Kitty path', () => {
+    const prepared = prepareInlineTerminalImage({
+      data: PNG_1X1.toString('base64'),
+      mimeType: 'image/png',
+      contentWidth: 24,
+      availableTerminalHeight: 12,
+      env: { TERM: 'xterm-kitty' },
+      stdoutIsTTY: true,
+    });
+
+    expect(prepared.fallbackText).toBe('[image: 1x1 png]');
+    expect(prepared.result?.kind).toBe('kitty');
+    if (prepared.result?.kind !== 'kitty') return;
+    expect(prepared.result.sequence).toContain('\u001b_Ga=T,f=100');
+    expect(prepared.result.placeholder.lines).toHaveLength(1);
+  });
+
+  it('validates inline PNG payloads before rendering', () => {
+    for (const testCase of [
+      { data: 'AB==', mimeType: 'image/png', fallback: '[image: png]' },
+      {
+        data: Buffer.from('not a png').toString('base64'),
+        mimeType: 'image/png',
+        fallback: '[image: png]',
+      },
+      {
+        data: PNG_1X1.toString('base64'),
+        mimeType: 'image/jpeg',
+        fallback: '[image: jpeg]',
+      },
+    ]) {
+      expect(
+        prepareInlineTerminalImage({
+          data: testCase.data,
+          mimeType: testCase.mimeType,
+          contentWidth: 24,
+          env: { TERM: 'xterm-kitty' },
+          stdoutIsTTY: true,
+        }),
+      ).toEqual({ fallbackText: testCase.fallback, result: null });
+    }
+  });
+
+  it('rejects inline payloads above the shared image limit before decoding', () => {
+    const oversizedBase64 = 'A'.repeat(MAX_INLINE_IMAGE_ENCODED_LENGTH + 1);
+
+    expect(
+      prepareInlineTerminalImage({
+        data: oversizedBase64,
+        mimeType: 'image/png',
+        contentWidth: 24,
+        env: { TERM: 'xterm-kitty' },
+        stdoutIsTTY: true,
+      }),
+    ).toEqual({ fallbackText: '[image: png]', result: null });
+  });
+
+  it('rejects inline PNG dimensions above the shared image limit', () => {
+    expect(
+      prepareInlineTerminalImage({
+        data: pngWithSize(1_000_001, 1).toString('base64'),
+        mimeType: 'image/png',
+        contentWidth: 24,
+        env: { TERM: 'xterm-kitty' },
+        stdoutIsTTY: true,
+      }),
+    ).toEqual({ fallbackText: '[image: png]', result: null });
+  });
+
+  it('rejects inline PNGs above the total pixel limit', () => {
+    const width = 8_001;
+    const height = Math.floor(MAX_INLINE_IMAGE_PIXELS / width) + 1;
+    expect(
+      prepareInlineTerminalImage({
+        data: pngWithSize(width, height).toString('base64'),
+        mimeType: 'image/png',
+        contentWidth: 24,
+        env: { TERM: 'xterm-kitty' },
+        stdoutIsTTY: true,
+      }),
+    ).toEqual({ fallbackText: '[image: png]', result: null });
+  });
+
+  it('does not render inline image data when output is disabled', () => {
+    expect(
+      prepareInlineTerminalImage({
+        data: PNG_1X1.toString('base64'),
+        mimeType: 'image/png',
+        contentWidth: 24,
+        env: { TERM: 'xterm-kitty' },
+        stdoutIsTTY: true,
+        disabled: true,
+      }),
+    ).toEqual({ fallbackText: '[image: 1x1 png]', result: null });
   });
 
   it('exposes a stable render key on Kitty results so remounts can skip re-transmission', async () => {
@@ -285,6 +384,38 @@ describe('terminalImageRenderer', () => {
           true,
         ),
       ).toEqual({ available: true });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'passes inline PNG bytes to chafa over stdin',
+    async () => {
+      const binDir = path.join(tempDir, 'inline-bin');
+      await fs.mkdir(binDir);
+      const chafaPath = path.join(binDir, 'chafa');
+      await fs.writeFile(
+        chafaPath,
+        '#!/usr/bin/env node\nconst chunks=[];process.stdin.on("data",(chunk)=>chunks.push(chunk));process.stdin.on("end",()=>{const data=Buffer.concat(chunks);process.stdout.write(`${process.argv.at(-1)}:${data.subarray(0,8).toString("hex")}:${process.env.TEST_RENDERER_SECRET ? "LEAKED" : "safe"}\\n`);});\n',
+      );
+      await fs.chmod(chafaPath, 0o755);
+
+      const prepared = prepareInlineTerminalImage({
+        data: PNG_1X1.toString('base64'),
+        mimeType: 'image/png',
+        contentWidth: 20,
+        env: {
+          PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+          TERM_PROGRAM: 'WarpTerminal',
+          TEST_RENDERER_SECRET: 'must-not-reach-chafa',
+        },
+        stdoutIsTTY: true,
+      });
+
+      expect(prepared.result).toEqual({
+        kind: 'ansi',
+        lines: ['-:89504e470d0a1a0a:safe'],
+      });
+      expect(prepared.fallbackText).toBe('[image: 1x1 png]');
     },
   );
 

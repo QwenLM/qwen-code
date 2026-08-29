@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qwen-code.invalid/chat-transcript-contract/manifest-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "fixtureVersion",
+    "name",
+    "sources",
+    "consumers",
+    "capabilities",
+    "complete",
+    "expectedDiagnostics",
+    "hashes"
+  ],
+  "properties": {
+    "fixtureVersion": { "const": 1 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "generatorVersion": { "type": "string", "maxLength": 100 },
+    "sources": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["daemon", "acp", "chat-records"] }
+    },
+    "consumers": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["web", "tauri", "vscode", "html"] }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "maxLength": 100 }
+    },
+    "complete": { "type": "boolean" },
+    "expectedDiagnostics": {
+      "type": "array",
+      "items": { "type": "string", "maxLength": 128 }
+    },
+    "normalizedFields": {
+      "type": "array",
+      "items": { "type": "string", "maxLength": 128 }
+    },
+    "hashes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    }
+  }
+}

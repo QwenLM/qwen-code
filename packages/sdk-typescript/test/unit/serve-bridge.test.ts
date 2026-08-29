@@ -191,6 +191,71 @@ describe('serve-bridge', () => {
     });
 
     describe('session_create', () => {
+      it('exposes session_id and forwards it after capability gating', async () => {
+        const requested = '550e8400-e29b-41d4-a716-446655440000';
+        const { state, calls } = makeMockState({
+          fetchReply: (req) => {
+            if (req.url.endsWith('/capabilities')) {
+              return jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: ['session_id_override'],
+              });
+            }
+            if (req.url.endsWith('/session') && req.method === 'POST') {
+              return jsonResponse(200, {
+                sessionId: requested,
+                workspaceCwd: '/tmp',
+                attached: false,
+              });
+            }
+            return jsonResponse(404, {});
+          },
+        });
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const createTool = sessionTools(state).find(
+          (tool: { name: string }) => tool.name === 'session_create',
+        );
+
+        await createTool.handler({ session_id: requested }, {});
+
+        const mutation = calls.find(
+          (call) => call.url.endsWith('/session') && call.method === 'POST',
+        );
+        expect(JSON.parse(mutation!.body!)).toMatchObject({
+          sessionId: requested,
+        });
+      });
+
+      it('does not mutate when session_id_override is unavailable', async () => {
+        const { state, calls } = makeMockState({
+          fetchReply: () =>
+            jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: [],
+            }),
+        });
+        const { sessionTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/session.js'
+        );
+        const createTool = sessionTools(state).find(
+          (tool: { name: string }) => tool.name === 'session_create',
+        );
+
+        const result = await createTool.handler(
+          { session_id: '550e8400-e29b-41d4-a716-446655440000' },
+          {},
+        );
+
+        expect(result.isError).toBe(true);
+        expect(calls.map((call) => call.url)).toEqual([
+          'http://127.0.0.1:4170/capabilities',
+        ]);
+      });
+
       it('should set defaultSessionId after successful creation', async () => {
         const { state } = makeMockState({
           fetchReply: (req) => {
@@ -512,49 +577,30 @@ describe('serve-bridge', () => {
       expect(result.content[0].text).toContain('Global scope is disabled');
     });
 
-    it('should reject yolo approval mode without allowGlobalScope', async () => {
-      const { state } = makeMockState({
-        defaultSessionId: 'test-session',
-      });
-      state.allowGlobalScope = false;
+    it.each(['auto-edit', 'auto', 'yolo'] as const)(
+      'should reject %s approval mode without allowGlobalScope',
+      async (mode) => {
+        const { state } = makeMockState({
+          defaultSessionId: 'test-session',
+        });
+        state.allowGlobalScope = false;
 
-      const { workspaceWriteTools } = await import(
-        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
-      );
-      const tools = workspaceWriteTools(state);
-      const approvalTool = tools.find(
-        (t: { name: string }) => t.name === 'session_set_approval_mode',
-      );
+        const { workspaceWriteTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+        );
+        const tools = workspaceWriteTools(state);
+        const approvalTool = tools.find(
+          (t: { name: string }) => t.name === 'session_set_approval_mode',
+        );
 
-      const result = await approvalTool.handler(
-        { mode: 'yolo', session_id: 'test-session' },
-        {},
-      );
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('restricted for security');
-    });
-
-    it('should reject auto-edit approval mode without allowGlobalScope', async () => {
-      const { state } = makeMockState({
-        defaultSessionId: 'test-session',
-      });
-      state.allowGlobalScope = false;
-
-      const { workspaceWriteTools } = await import(
-        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
-      );
-      const tools = workspaceWriteTools(state);
-      const approvalTool = tools.find(
-        (t: { name: string }) => t.name === 'session_set_approval_mode',
-      );
-
-      const result = await approvalTool.handler(
-        { mode: 'auto-edit', session_id: 'test-session' },
-        {},
-      );
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('restricted for security');
-    });
+        const result = await approvalTool.handler(
+          { mode, session_id: 'test-session' },
+          {},
+        );
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('restricted for security');
+      },
+    );
 
     it('should reject persistent approval mode change without allowGlobalScope', async () => {
       const { state } = makeMockState({
@@ -576,6 +622,62 @@ describe('serve-bridge', () => {
       );
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('restricted for security');
+    });
+
+    it.each(['default', 'plan'] as const)(
+      'should allow local %s approval mode changes without allowGlobalScope',
+      async (mode) => {
+        const { state, calls } = makeMockState({
+          defaultSessionId: 'default-session',
+        });
+        state.allowGlobalScope = false;
+
+        const { workspaceWriteTools } = await import(
+          '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+        );
+        const tools = workspaceWriteTools(state);
+        const approvalTool = tools.find(
+          (t: { name: string }) => t.name === 'session_set_approval_mode',
+        );
+
+        const result = await approvalTool.handler(
+          { mode, session_id: 'other-session' },
+          {},
+        );
+        expect(result.isError).toBeUndefined();
+        expect(calls[0]?.url).toBe(
+          'http://127.0.0.1:4170/session/other-session/approval-mode',
+        );
+        expect(JSON.parse(calls[0]?.body ?? '{}')).toEqual({ mode });
+      },
+    );
+
+    it('should allow persistent elevated approval mode changes with allowGlobalScope', async () => {
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+      });
+      state.allowGlobalScope = true;
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const approvalTool = tools.find(
+        (t: { name: string }) => t.name === 'session_set_approval_mode',
+      );
+
+      const result = await approvalTool.handler(
+        { mode: 'auto', persist: true, session_id: 'test-session' },
+        {},
+      );
+      expect(result.isError).toBeUndefined();
+      expect(calls[0]?.url).toBe(
+        'http://127.0.0.1:4170/session/test-session/approval-mode',
+      );
+      expect(JSON.parse(calls[0]?.body ?? '{}')).toEqual({
+        mode: 'auto',
+        persist: true,
+      });
     });
 
     it('should allow read-only agents_manage actions with global scope', async () => {

@@ -14,7 +14,7 @@ export { resolveWebShellDir } from './web-shell-resolver.js';
 /**
  * Content-Security-Policy for the Web Shell HTML shell.
  *
- * Deliberately looser than the `/demo` page's `default-src 'none'`: the real
+ * Deliberately looser than a `default-src 'none'` static page: the real
  * UI loads same-origin module scripts plus the inline performance.measure
  * patch baked into `index.html`, runs shiki/mermaid (eval + wasm + blob
  * workers), pulls katex fonts/images as `data:`, and streams SSE
@@ -38,6 +38,52 @@ const WEB_SHELL_CSP_DIRECTIVES = [
 ];
 
 /**
+ * Loopback origins the Web Shell may frame for the MCP App sandbox, pinned to
+ * the request's Host port. Wildcard ports would let a compromised shell embed
+ * any loopback listener.
+ */
+export function loopbackSandboxOrigins(
+  hostHeader: string | undefined,
+): string[] {
+  const port = portFromHostHeader(hostHeader);
+  const suffix = port ? `:${port}` : '';
+  // CSP host-sources reject bracketed IPv6 (`http://[::1]:<port>`). The
+  // sandbox iframe aliases `[::1]` to `localhost`, so these hosts are enough.
+  const hosts = ['localhost', '127.0.0.1'] as const;
+  return (['http', 'https'] as const).flatMap((scheme) =>
+    hosts.map((host) => `${scheme}://${host}${suffix}`),
+  );
+}
+
+export function portFromHostHeader(
+  hostHeader: string | undefined,
+): string | undefined {
+  if (!hostHeader) return undefined;
+  if (hostHeader.startsWith('[')) {
+    const end = hostHeader.indexOf(']');
+    if (end === -1) return undefined;
+    const rest = hostHeader.slice(end + 1);
+    return rest.startsWith(':') && /^\d+$/u.test(rest.slice(1))
+      ? rest.slice(1)
+      : undefined;
+  }
+  const colon = hostHeader.lastIndexOf(':');
+  if (colon === -1) return undefined;
+  const port = hostHeader.slice(colon + 1);
+  return /^\d+$/u.test(port) ? port : undefined;
+}
+
+export function buildWebShellPermissionsPolicy(): string {
+  return [
+    'camera=()',
+    'microphone=(self)',
+    'geolocation=()',
+    'payment=()',
+    'clipboard-write=(self)',
+  ].join(', ');
+}
+
+/**
  * Build the Web Shell CSP. `frame-ancestors` defaults to `'none'` (the caller
  * also sets `X-Frame-Options: DENY`) to block clickjacking. When the daemon is
  * started with `--allow-origin chrome-extension://<id>`, those extension
@@ -47,11 +93,13 @@ const WEB_SHELL_CSP_DIRECTIVES = [
  */
 export function buildWebShellCsp(
   frameAncestors: readonly string[] = [],
+  frameSrcOrigins: readonly string[] = loopbackSandboxOrigins(undefined),
 ): string {
   const fa = frameAncestors.length
     ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
-  return [...WEB_SHELL_CSP_DIRECTIVES, fa].join('; ');
+  const frameSrc = `frame-src ${frameSrcOrigins.join(' ')}`;
+  return [...WEB_SHELL_CSP_DIRECTIVES, frameSrc, fa].join('; ');
 }
 
 /** Default (no-framing) Web Shell CSP. */
@@ -78,6 +126,45 @@ export function isDocumentNavigation(req: Request): boolean {
 }
 
 /**
+ * Exact session deep-link document navigations: `/session/<id>` with an
+ * optional trailing slash and no further segments. Expressed as a regex (not
+ * an Express route) so callers outside the runtime app — the deferred-runtime
+ * gate in `run-qwen-serve.ts` — can apply the same discriminator.
+ */
+const SESSION_DEEP_LINK_PATH = /^\/session\/[^/]+\/?$/u;
+
+/**
+ * True when the request matches a route `mountWebShellAssets` registers
+ * BEFORE `bearerAuth`. The deferred-runtime gate in `createDelegatingServeApp`
+ * exempts exactly these so a cold daemon answers the shell's entry points the
+ * same way the warm runtime app does, instead of 401ing browser navigations
+ * that cannot attach the bearer header. Percent-encoded single-segment deep
+ * links (e.g. `/session/<id>%2fstatus`) also match — Express does not decode
+ * `%2F` during route matching — but they cannot reach an API route or session
+ * data: pre-auth answers serve only the public shell HTML or the MCP App
+ * sandbox proxy, identical to `GET /` (or the startup-failure envelope).
+ * Keep in sync with the routes registered in `mountWebShellAssets` and
+ * `mountMcpAppSandbox`.
+ */
+export function isPreAuthWebShellRequest(req: Request): boolean {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  // Express route matching is case-insensitive by default, so the warm app
+  // serves /Session/<id> and /Assets/* pre-auth too; mirror that exactly.
+  const reqPath = req.path.toLowerCase();
+  if (
+    reqPath === '/' ||
+    // Express non-strict routing compiles `/` to `/^(?:\/)(?:\/$)?$/i`, so
+    // a raw `//` also matches `app.get('/')` pre-auth (but `///` does not).
+    reqPath === '//' ||
+    reqPath === '/assets' ||
+    reqPath.startsWith('/assets/') ||
+    reqPath === '/mcp-app-sandbox'
+  )
+    return true;
+  return SESSION_DEEP_LINK_PATH.test(reqPath) && isDocumentNavigation(req);
+}
+
+/**
  * Build the `index.html` responder for a Web Shell dir. Sets the security
  * headers + a no-cache policy (a redeploy changes the hashed asset names
  * index.html references, so a stale shell would point at missing chunks; the
@@ -86,10 +173,11 @@ export function isDocumentNavigation(req: Request): boolean {
 function createSendIndex(
   webShellDir: string,
   frameAncestors: readonly string[] = [],
-): (res: Response) => void {
+): (req: Request, res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
-  const csp = buildWebShellCsp(frameAncestors);
-  return (res: Response): void => {
+  return (req: Request, res: Response): void => {
+    const sandboxOrigins = loopbackSandboxOrigins(req.get('host'));
+    const csp = buildWebShellCsp(frameAncestors, sandboxOrigins);
     res
       .status(200)
       .set('Content-Security-Policy', csp)
@@ -98,10 +186,12 @@ function createSendIndex(
       .set(
         // `microphone=(self)` lets the same-origin Web Shell document request
         // the mic for voice dictation (the prompt won't even appear under an
-        // empty `microphone=()` allowlist). Still blocks cross-origin iframes;
-        // camera/geolocation/payment stay disabled (unused).
+        // empty `microphone=()` allowlist). Camera/geolocation stay disabled:
+        // the MCP App inner iframe is opaque-origin, so those grants cannot
+        // work there, and this header also blocks delegating them to the
+        // cross-origin sandbox.
         'Permissions-Policy',
-        'camera=(), microphone=(self), geolocation=(), payment=()',
+        buildWebShellPermissionsPolicy(),
       )
       .set('Cache-Control', 'no-cache');
     // X-Frame-Options can't express an allowlist, so only send the hard DENY
@@ -121,9 +211,9 @@ function createSendIndex(
       (err) => {
         if (!err) return;
         // Only 5xx path in the serve app that would otherwise emit nothing —
-        // log it like the sibling /demo handler so an operator can see why the
-        // shell stopped loading (EACCES/ESTALE on a network mount, a perms
-        // change, a partial deploy).
+        // log it so an operator can see why the shell stopped loading
+        // (EACCES/ESTALE on a network mount, a perms change, a partial
+        // deploy).
         writeStderrLine(
           `qwen serve: Web Shell index send failed: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -149,6 +239,14 @@ function createSendIndex(
  *
  *  - `GET /assets/*` — hashed, immutable build chunks (long-cache).
  *  - `GET /` — the HTML shell, always (so `curl /` shows the UI too).
+ *  - `GET /session/:id` document navigations — the HTML shell, so a browser
+ *    refresh can load before the front-end adds its bearer header.
+ *
+ * `GET /mcp-app-sandbox` is a separate pre-auth route mounted by
+ * `mountMcpAppSandbox` (the iframe proxy, not the shell HTML).
+ *
+ * `isPreAuthWebShellRequest` encodes this same surface for the
+ * deferred-runtime gate; keep the two in sync.
  *
  * Caller must have already verified `webShellDir` exists.
  */
@@ -182,11 +280,15 @@ export function mountWebShellAssets(
     }
     res.status(404).type('text/plain').send('Not found');
   });
-  app.get('/', (_req: Request, res: Response) => sendIndex(res));
+  app.get('/', (req: Request, res: Response) => sendIndex(req, res));
+  app.get('/session/:id', (req: Request, res: Response, next: NextFunction) => {
+    if (!isDocumentNavigation(req)) return next();
+    sendIndex(req, res);
+  });
 }
 
 /**
- * Mount the SPA deep-link fallback (for navigations like `/session/<id>`).
+ * Mount the SPA deep-link fallback for routes not explicitly mounted above.
  * Registered AFTER all API routes — just before the error handler — so real
  * routes, INCLUDING their `bearerAuth` 401s, always win and only genuine 404
  * misses fall through to the shell.
@@ -195,7 +297,12 @@ export function mountWebShellAssets(
  * attacker-controlled `Accept: text/html` to an authed route (e.g.
  * `/capabilities`, `/health` on a non-loopback bind) hits that route's real
  * response / 401, not this shell. Because real routes run first, no per-path
- * denylist is needed.
+ * denylist is needed. The one exception is exact `/session/:id` document
+ * navigations, which `mountWebShellAssets` claims BEFORE auth so a browser
+ * refresh can load the shell. That stays safe because the route matches a
+ * single path segment only, serves only document navigations, and there is no
+ * `GET /session/:id` API route for it to shadow — API subpaths like
+ * `/session/:id/status` still hit `bearerAuth`.
  *
  * Only GET/HEAD document navigations are claimed; API fetches send
  * `Accept: application/json`, fail `isDocumentNavigation`, and fall through to
@@ -217,6 +324,6 @@ export function mountWebShellSpaFallback(
         `qwen serve: Web Shell SPA fallback served for ${req.method} ${req.originalUrl}`,
       );
     }
-    sendIndex(res);
+    sendIndex(req, res);
   });
 }

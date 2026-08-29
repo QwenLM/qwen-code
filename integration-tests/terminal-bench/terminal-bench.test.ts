@@ -3,6 +3,10 @@
  *
  * Tests qwen-code integration with terminal-bench tasks
  * using both oracle (for debugging) and qwen-code agents
+ *
+ * Manual-only: excluded from the integration vitest config and not run by
+ * any CI job. Changes to this file are ungated; run it locally with
+ * `npm run test:terminal-bench`.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -94,7 +98,9 @@ describe('terminal-bench integration', () => {
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const available = new Set(baseTestTasks.map((t) => t));
+    // Set<string>, not Set<of the literal union>: the whole point is to test
+    // arbitrary env-supplied ids for membership.
+    const available = new Set<string>(baseTestTasks);
     const unknown = selected.filter((s) => !available.has(s));
     if (unknown.length > 0) {
       throw new Error(
@@ -113,7 +119,7 @@ describe('terminal-bench integration', () => {
     it(
       `should complete ${taskId} task with oracle agent`,
       async () => {
-        rig.setup(`terminal-bench-oracle-${taskId}`);
+        await rig.setup(`terminal-bench-oracle-${taskId}`);
 
         const outputPath = join(outputBase, `oracle-${taskId}`);
 
@@ -213,7 +219,7 @@ describe('terminal-bench integration', () => {
     it(
       `should complete ${taskId} task with qwen-code agent`,
       async () => {
-        rig.setup(`terminal-bench-qwen-${taskId}`);
+        await rig.setup(`terminal-bench-qwen-${taskId}`);
 
         const outputPath = join(outputBase, `qwen-${taskId}`);
 

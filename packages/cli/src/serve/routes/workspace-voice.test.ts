@@ -758,6 +758,75 @@ describe('workspace voice routes', () => {
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
+  it('POST accepts an exactly allowlisted private voice provider', async () => {
+    const baseUrl = 'http://voice.region-a.internal.example/v1';
+    await writeJson(path.join(h.home, 'settings.json'), {
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Private Qwen ASR',
+            baseUrl,
+            envKey: 'PRIVATE_ASR_KEY',
+          },
+        ],
+      },
+      env: { PRIVATE_ASR_KEY: 'sk-secret' },
+      security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
+      voiceModel: 'qwen3-asr-flash',
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/voice')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .send({ enabled: true });
+
+    expect(res.status).toBe(200);
+    expect(h.persistSetting).toHaveBeenCalledWith(
+      h.workspace,
+      SettingScope.User,
+      'general.voice.enabled',
+      true,
+      expect.any(Function),
+    );
+  });
+
+  it('POST rejects a private voice provider allowlisted only in workspace scope', async () => {
+    await teardown(h);
+    h = await makeHarness({ trusted: true });
+    const baseUrl = 'http://voice.region-a.internal.example/v1';
+    // A cloned repo must not be able to self-grant HTTP/private-network voice
+    // egress: security.allowedInsecureVoiceBaseUrls is stripped from workspace
+    // scope, so the resolver still rejects the cleartext endpoint.
+    await writeJson(path.join(h.workspace, '.qwen', 'settings.json'), {
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3-asr-flash',
+            label: 'Private Qwen ASR',
+            baseUrl,
+            envKey: 'PRIVATE_ASR_KEY',
+          },
+        ],
+      },
+      env: { PRIVATE_ASR_KEY: 'sk-secret' },
+      security: { allowedInsecureVoiceBaseUrls: [baseUrl] },
+      voiceModel: 'qwen3-asr-flash',
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/voice')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .send({ enabled: true });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_voice_model');
+    expect(res.body.error).toContain('must use an https baseUrl');
+    expect(h.persistSetting).not.toHaveBeenCalled();
+  });
+
   it('POST allows disabling voice without a selected model', async () => {
     const res = await request(h.app)
       .post('/workspace/voice')

@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { Text } from 'ink';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { type HistoryItem, ToolCallStatus } from '../types.js';
 import { MessageType } from '../types.js';
@@ -28,6 +29,12 @@ import {
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
   ToolGroupMessage: vi.fn(() => <div />),
+}));
+
+vi.mock('./TerminalImage.js', () => ({
+  TerminalImage: ({ image }: { image: { mimeType: string } }) => (
+    <Text>MockTerminalImage:{image.mimeType}</Text>
+  ),
 }));
 
 vi.mock('../hooks/useMouseEvents.js', () => ({
@@ -94,6 +101,29 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('◆\uFE0E Hello');
   });
 
+  it.each(['gemini', 'gemini_content'] as const)(
+    'passes images from a %s history item to the assistant renderer',
+    (type) => {
+      const item: HistoryItem = {
+        id: 1,
+        type,
+        text: '',
+        images: [{ data: 'aW1hZ2U=', mimeType: 'image/png' }],
+        omittedImageCount: 2,
+      };
+      const { lastFrame } = renderWithProviders(
+        <HistoryItemDisplay
+          item={item}
+          terminalWidth={100}
+          isPending={false}
+        />,
+      );
+
+      expect(lastFrame()).toContain('MockTerminalImage:image/png');
+      expect(lastFrame()).toContain('[+2 more images]');
+    },
+  );
+
   it('renders tool summaries without a leading spacer row', () => {
     const item: HistoryItem = {
       id: 1,
@@ -124,6 +154,21 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('Converted 1 image(s) to text via vm.');
   });
 
+  it('renders AdvisorMessage for "advisor" type', () => {
+    const item: HistoryItem = {
+      ...baseItem,
+      type: MessageType.ADVISOR,
+      text: 'review body',
+      model: 'qwen3-max',
+    };
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay {...baseItem} item={item} />,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('/advisor · qwen3-max');
+    expect(output).toContain('review body');
+  });
+
   it('renders v2 goal_state history items through the lifecycle card', () => {
     const item: HistoryItem = {
       id: 1,
@@ -139,6 +184,7 @@ describe('<HistoryItemDisplay />', () => {
           evidenceCursor: { recordId: 'record-1' },
           turnCount: 2,
           activeTimeMs: 4_000,
+          tokensUsed: 0,
           createdAt: 1_000,
           updatedAt: 5_000,
           lastReason: 'waiting for approval',
@@ -343,7 +389,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
-  it('should render a full gemini item when using availableTerminalHeightGemini', () => {
+  it('should render a full gemini item when using availableTerminalHeightLlm', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini',
@@ -355,7 +401,7 @@ describe('<HistoryItemDisplay />', () => {
         isPending={false}
         terminalWidth={80}
         availableTerminalHeight={10}
-        availableTerminalHeightGemini={Number.MAX_SAFE_INTEGER}
+        availableTerminalHeightLlm={Number.MAX_SAFE_INTEGER}
       />,
     );
 
@@ -380,7 +426,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
-  it('should render a full gemini_content item when using availableTerminalHeightGemini', () => {
+  it('should render a full gemini_content item when using availableTerminalHeightLlm', () => {
     const item: HistoryItem = {
       id: 1,
       type: 'gemini_content',
@@ -392,7 +438,7 @@ describe('<HistoryItemDisplay />', () => {
         isPending={false}
         terminalWidth={80}
         availableTerminalHeight={10}
-        availableTerminalHeightGemini={Number.MAX_SAFE_INTEGER}
+        availableTerminalHeightLlm={Number.MAX_SAFE_INTEGER}
       />,
     );
 

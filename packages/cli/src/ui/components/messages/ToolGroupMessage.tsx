@@ -45,6 +45,10 @@ function isRunningAgent(
   );
 }
 
+function hasInlineImageOutput(tool: IndividualToolCallDisplay): boolean {
+  return Boolean(tool.images?.length || tool.omittedImageCount);
+}
+
 /**
  * Predicate: tool entry whose `resultDisplay` is an `AgentResultDisplay`
  * (i.e. a `task_execution` subagent invocation), regardless of status.
@@ -388,13 +392,17 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     ? []
     : inlineToolCalls.filter(
         (t) =>
-          isCollapsibleTool(t.name) && t.status !== ToolCallStatus.Canceled,
+          isCollapsibleTool(t.name) &&
+          t.status !== ToolCallStatus.Canceled &&
+          !hasInlineImageOutput(t),
       );
   const nonCollapsibleTools = forceExpandAll
     ? inlineToolCalls
     : inlineToolCalls.filter(
         (t) =>
-          !isCollapsibleTool(t.name) || t.status === ToolCallStatus.Canceled,
+          !isCollapsibleTool(t.name) ||
+          t.status === ToolCallStatus.Canceled ||
+          hasInlineImageOutput(t),
       );
 
   // Memory badge — shared between all-collapsible and mixed paths.
@@ -448,7 +456,10 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   let countToolCallsWithResults = 0;
   for (const tool of nonCollapsibleTools) {
-    if (tool.resultDisplay !== undefined && tool.resultDisplay !== '') {
+    if (
+      (tool.resultDisplay !== undefined && tool.resultDisplay !== '') ||
+      hasInlineImageOutput(tool)
+    ) {
       countToolCallsWithResults++;
     }
   }

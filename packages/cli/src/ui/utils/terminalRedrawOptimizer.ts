@@ -6,24 +6,33 @@
 
 import ansiEscapes from 'ansi-escapes';
 
+import { isWsl } from '@qwen-code/qwen-code-core';
+
 const ESC = '\u001B[';
-const ERASE_LINE = `${ESC}2K`;
+export const ERASE_LINE = `${ESC}2K`;
 const CURSOR_UP_ONE = `${ESC}1A`;
 const CURSOR_DOWN_ONE = `${ESC}1B`;
 const CURSOR_LEFT = `${ESC}G`;
 
-const MULTILINE_ERASE_LINES_PATTERN = new RegExp(
-  `(?:${escapeRegExp(ERASE_LINE + CURSOR_UP_ONE)})+${escapeRegExp(
-    ERASE_LINE + CURSOR_LEFT,
-  )}`,
-  'g',
-);
+export function createEraseLinesPattern(flags?: string): RegExp {
+  return new RegExp(
+    `(?:${escapeRegExp(ERASE_LINE + CURSOR_UP_ONE)})+${escapeRegExp(
+      ERASE_LINE + CURSOR_LEFT,
+    )}`,
+    flags,
+  );
+}
 
-function escapeRegExp(value: string): string {
+const MULTILINE_ERASE_LINES_PATTERN = createEraseLinesPattern('g');
+
+export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function countOccurrences(value: string, search: string): number {
+export function countOccurrences(value: string, search: string): number {
+  // Match core's editHelper.countOccurrences empty-needle semantics; without
+  // this guard indexOf('', 0) never advances and the loop hangs.
+  if (search === '') return 0;
   let count = 0;
   let index = 0;
 
@@ -120,8 +129,30 @@ export function optimizeMultilineEraseLines(output: string): string {
 
 export function installTerminalRedrawOptimizer(
   stdout: NodeJS.WriteStream,
+  // Injectable for tests; production callers omit it and it resolves to
+  // process.env at call time.
+  env: NodeJS.ProcessEnv = process.env,
 ): () => void {
-  if (process.env['QWEN_CODE_LEGACY_ERASE_LINES'] === '1') {
+  // QWEN_CODE_LEGACY_ERASE_LINES:
+  //   '1' — force-disable the optimizer (existing escape hatch)
+  //   '0' — force-enable even on WSL, for terminals that handle ConPTY's
+  //         batched cursor moves correctly (new in #7897)
+  //   unset/anything else — use platform defaults below
+  if (env['QWEN_CODE_LEGACY_ERASE_LINES'] === '1') {
+    return () => {};
+  }
+
+  // During Ink's per-frame erase-and-redraw of streaming output, the optimizer
+  // is the only path emitting cursor-down (CSI 1 B) and multi-count cursor-up
+  // (CSI n A); Ink's native eraseLines() path uses neither. Ink's
+  // cursor-positioning path still emits both sequence classes on cursor moves.
+  // ConPTY's (Windows Console Pseudo Terminal) row tracking diverges on those,
+  // so the erase lands on the wrong rows and streaming frames stack, causing
+  // duplicate text. Skip the optimizer on WSL (ConPTY is the default pty there),
+  // unless the user explicitly force-enables it. WT_SESSION is deliberately NOT
+  // included: it is set on the Windows side and is not propagated into WSL
+  // shells without WSLENV, so it can never be the variable that fires for #7634.
+  if (env['QWEN_CODE_LEGACY_ERASE_LINES'] !== '0' && isWsl(env)) {
     return () => {};
   }
 

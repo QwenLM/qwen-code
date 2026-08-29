@@ -13,7 +13,10 @@ import type { Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { resolveLanguageSetting } from '../../i18n/index.js';
-import { createExtensionsController } from './workspace-extensions-controller.js';
+import {
+  createExtensionsController,
+  redactExtensionDisplaySource,
+} from './workspace-extensions-controller.js';
 
 vi.mock('../../i18n/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../i18n/index.js')>();
@@ -21,6 +24,19 @@ vi.mock('../../i18n/index.js', async (importOriginal) => {
     ...actual,
     resolveLanguageSetting: vi.fn().mockReturnValue('en'),
   };
+});
+
+describe('redactExtensionDisplaySource', () => {
+  it('keeps uploaded filenames readable while hiding their identity token', () => {
+    expect(
+      redactExtensionDisplaySource(
+        'upload:v1:550e8400-e29b-41d4-a716-446655440000:扩展?#.zip',
+      ),
+    ).toBe('upload:扩展?#.zip');
+    expect(redactExtensionDisplaySource('upload:legacy?#.zip')).toBe(
+      'upload:legacy?#.zip',
+    );
+  });
 });
 
 describe('createExtensionsController', () => {
@@ -31,6 +47,21 @@ describe('createExtensionsController', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it('does not impose a public-only extension network policy', () => {
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+      isWorkspaceTrusted: () => true,
+    });
+
+    const manager = controller.createExtensionManager() as unknown as {
+      networkPolicy?: string;
+    };
+
+    expect(manager.networkPolicy).toBeUndefined();
   });
 
   it('releases the commit lane when a manual refresh times out', async () => {
