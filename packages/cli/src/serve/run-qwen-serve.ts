@@ -112,6 +112,7 @@ import {
   getServeProtocolVersions,
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import {
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
@@ -2289,6 +2290,7 @@ function currentServeFeaturesForRunQwenServe(
   sessionArtifactsPersistenceAvailable: boolean,
   currentSessionSchedulingAvailable: boolean,
   env: Readonly<Record<string, string | undefined>>,
+  nativeDirectoryPickerAvailable: boolean,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -2315,8 +2317,10 @@ function currentServeFeaturesForRunQwenServe(
     channelManagementAvailable: true,
     persistentWorkspaceRegistrationAvailable: true,
     workspaceRuntimeRemovalAvailable: true,
-    // Advertise the same WS feature flags as the runtime path (serve-features.ts)
-    // so the bootstrap `/capabilities` window doesn't briefly under-report them.
+    // Advertise the same host-conditional and WS feature flags as the runtime
+    // path (serve-features.ts) so the bootstrap `/capabilities` window doesn't
+    // briefly under-report them.
+    nativeDirectoryPickerAvailable,
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
     browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
@@ -2332,6 +2336,7 @@ function createBootstrapCapabilities(input: {
   currentSessionSchedulingAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   env: Readonly<Record<string, string | undefined>>;
+  nativeDirectoryPickerAvailable: boolean;
 }): CapabilitiesEnvelope {
   return {
     v: CAPABILITIES_SCHEMA_VERSION,
@@ -2346,6 +2351,7 @@ function createBootstrapCapabilities(input: {
       input.sessionArtifactsPersistenceAvailable,
       input.currentSessionSchedulingAvailable,
       input.env,
+      input.nativeDirectoryPickerAvailable,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -2566,6 +2572,11 @@ function createBootstrapServeApp(input: {
     onHealthServed,
   } = input;
   const app = express();
+  // The probe stats `/dev/console` (macOS) or scans `PATH` for `zenity`
+  // (Linux), and both bootstrap endpoints rebuild their envelope per request,
+  // so evaluate it once here — the runtime path likewise probes once, at
+  // `createApp` time (server.ts).
+  const nativeDirectoryPickerAvailable = isNativeDirectoryPickerAvailable();
 
   installSameOriginOriginStrip(app, getPort);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
@@ -2626,6 +2637,7 @@ function createBootstrapServeApp(input: {
         currentSessionSchedulingAvailable,
         permissionPolicy,
         env: process.env,
+        nativeDirectoryPickerAvailable,
       }),
     );
   });
@@ -2765,6 +2777,7 @@ function createBootstrapServeApp(input: {
           sessionArtifactsPersistenceAvailable,
           currentSessionSchedulingAvailable,
           process.env,
+          nativeDirectoryPickerAvailable,
         ),
       },
       runtime: {

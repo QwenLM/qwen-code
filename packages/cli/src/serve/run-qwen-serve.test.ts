@@ -34,6 +34,7 @@ import {
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
+import * as nativeDirectoryPicker from './native-directory-picker.js';
 import { loadServeFastPathEnvironment } from './fast-path-settings.js';
 import { loadEnvironment } from '../config/environment.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
@@ -10614,6 +10615,62 @@ describe('runQwenServe runtime startup failures', () => {
       mockTotalMemBytes.value = undefined;
     }
   });
+
+  it.each([true, false])(
+    'mirrors the native directory picker probe on the bootstrap envelopes (available: %s)',
+    async (available) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-picker-')),
+      );
+      // Keep the runtime from mounting so the bootstrap `/capabilities` and
+      // `/daemon-status` envelopes stay the ones being served.
+      vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+      const probe = vi
+        .spyOn(nativeDirectoryPicker, 'isNativeDirectoryPickerAvailable')
+        .mockReturnValue(available);
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+      try {
+        await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+        const probeCallsAfterBoot = probe.mock.calls.length;
+        const capabilities = (await (
+          await fetch(`${handle.url}/capabilities`)
+        ).json()) as { features: string[] };
+        const status = (await (
+          await fetch(`${handle.url}/daemon/status`)
+        ).json()) as { capabilities: { features: string[] } };
+        if (available) {
+          expect(capabilities.features).toContain('native_directory_picker');
+          expect(status.capabilities.features).toContain(
+            'native_directory_picker',
+          );
+        } else {
+          expect(capabilities.features).not.toContain(
+            'native_directory_picker',
+          );
+          expect(status.capabilities.features).not.toContain(
+            'native_directory_picker',
+          );
+        }
+        // Probed once while the bootstrap app was built, not per request.
+        expect(probe.mock.calls.length).toBe(probeCallsAfterBoot);
+      } finally {
+        probe.mockRestore();
+        await handle.close();
+      }
+    },
+  );
 
   it('shuts down a bridge when runtime mounting fails after bridge creation', async () => {
     tmpDir = fs.realpathSync(
