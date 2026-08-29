@@ -5895,6 +5895,68 @@ describe('OpenAIContentConverter', () => {
       expect(parametersJsonSchema.properties.blockedBy.uniqueItems).toBe(true);
     });
 
+    it('only relaxes grammar constraints backed by local validation', async () => {
+      const supportedSchema = {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      };
+      const unsupportedSchema = {
+        $schema: 'https://json-schema.org/draft/2019-09/schema',
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            { name: 'supported', parametersJsonSchema: supportedSchema },
+            { name: 'unsupported', parametersJsonSchema: unsupportedSchema },
+            {
+              name: 'without_local_schema',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {},
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertLlmToolsToOpenAI(tools);
+
+      expect(result.map(({ function: declaration }) => declaration)).toEqual([
+        { name: 'supported', description: '', parameters: { type: 'object' } },
+        {
+          name: 'unsupported',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+        {
+          name: 'without_local_schema',
+          description: '',
+          parameters: {
+            type: 'object',
+            properties: {},
+            additionalProperties: false,
+          },
+        },
+      ]);
+      expect(supportedSchema).toEqual({
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      });
+      expect(unsupportedSchema.$schema).toBe(
+        'https://json-schema.org/draft/2019-09/schema',
+      );
+    });
+
     it('should convert Gemini tools with parameters field', async () => {
       const llmTools = [
         {

@@ -527,7 +527,7 @@ describe('relaxSchemaForFunctionCalling', () => {
       },
     };
 
-    expect(relaxSchemaForFunctionCalling(schema)).toEqual({
+    expect(relaxSchemaForFunctionCalling(schema, true)).toEqual({
       type: 'object',
       properties: {
         empty: { type: 'object' },

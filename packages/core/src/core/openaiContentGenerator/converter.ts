@@ -41,6 +41,7 @@ import {
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { SchemaValidator } from '../../utils/schemaValidator.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -370,6 +371,9 @@ export async function convertLlmToolsToOpenAI(
           }
 
           if (parameters) {
+            const canValidateLocally =
+              func.parametersJsonSchema !== undefined &&
+              SchemaValidator.canCompile(func.parametersJsonSchema);
             parameters = convertSchema(parameters, schemaCompliance);
             // #7315: gateways enforcing OpenAI's structured-output contract
             // promote every property to required when an object level has
@@ -377,7 +381,10 @@ export async function convertLlmToolsToOpenAI(
             // mutually exclusive optional fields (Agent working_dir vs
             // isolation). Relax the wire schema; client-side
             // validateToolParams still enforces the source schema.
-            parameters = relaxSchemaForFunctionCalling(parameters);
+            parameters = relaxSchemaForFunctionCalling(
+              parameters,
+              canValidateLocally,
+            );
           }
 
           openAITools.push({

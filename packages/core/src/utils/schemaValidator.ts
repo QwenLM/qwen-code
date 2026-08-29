@@ -89,6 +89,24 @@ function getValidator(schema: AnySchema): Ajv {
  * Supports both draft-07 (default) and draft-2020-12 schemas.
  */
 export class SchemaValidator {
+  static canCompile(schema: unknown): boolean {
+    if (
+      (typeof schema !== 'object' ||
+        schema === null ||
+        Array.isArray(schema)) &&
+      typeof schema !== 'boolean'
+    ) {
+      return false;
+    }
+
+    try {
+      getValidator(schema as AnySchema).compile(schema as AnySchema);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Strictly compiles a schema. Returns an error message if the schema is
    * malformed or uses unsupported draft/features for our Ajv configuration

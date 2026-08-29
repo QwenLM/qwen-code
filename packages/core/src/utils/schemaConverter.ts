@@ -199,9 +199,9 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
  *   gateways reject unknown keywords).
  * - `uniqueItems` is dropped at every schema level because some
  *   OpenAI-compatible function-calling endpoints reject it.
- * - Empty object declarations and string / array length limits at or above
- *   2000 are dropped because grammar-based endpoints can turn them into
- *   invalid or rejected repetition rules.
+ * - When the source schema can be validated locally, empty object declarations
+ *   and string / array length limits at or above 2000 are dropped because
+ *   grammar-based endpoints can turn them into invalid or rejected rules.
  * - Other constraints pass through untouched; client-side
  *   `validateToolParams` still enforces the full source schema, so the
  *   constraint is relaxed on the wire only.
@@ -210,6 +210,7 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
  */
 export function relaxSchemaForFunctionCalling(
   schema: Record<string, unknown>,
+  relaxGrammarConstraints = false,
 ): Record<string, unknown> {
   const relax = (obj: unknown): unknown => {
     if (typeof obj !== 'object' || obj === null) {
@@ -249,10 +250,15 @@ export function relaxSchemaForFunctionCalling(
       if (key === '$schema' || key === '$id' || key === 'uniqueItems') {
         continue;
       }
-      if (key === 'properties' && hasEmptyProperties) {
+      if (
+        relaxGrammarConstraints &&
+        key === 'properties' &&
+        hasEmptyProperties
+      ) {
         continue;
       }
       if (
+        relaxGrammarConstraints &&
         (key === 'minLength' ||
           key === 'maxLength' ||
           key === 'minItems' ||
@@ -265,7 +271,8 @@ export function relaxSchemaForFunctionCalling(
       if (
         key === 'additionalProperties' &&
         value === false &&
-        (hasOptionalProperties || hasNoDeclaredProperties)
+        (hasOptionalProperties ||
+          (relaxGrammarConstraints && hasNoDeclaredProperties))
       ) {
         continue;
       }
