@@ -21,6 +21,7 @@ const DEFAULT_INLINE_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
 
 /** Items that can never appear as inline buttons. */
 const DROPDOWN_ONLY_ITEMS: readonly WebShellSidebarSessionActionItem[] = [
+  'archive',
   'group',
 ];
 

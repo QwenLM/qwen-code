@@ -229,9 +229,9 @@ These settings are read from operator scopes only (User, System, and SystemDefau
 
 `timeout` is the per-request timeout in milliseconds (default `120000`). Set it to `0` to disable the request timeout — matching the `QWEN_STREAM_IDLE_TIMEOUT_MS=0` convention — rather than aborting the request. It can also be set via the `QWEN_CODE_API_TIMEOUT_MS` environment variable. This is distinct from the two stream guards below.
 
-**stream guards (OpenAI-compatible providers only):**
+**stream guards (OpenAI-compatible and Anthropic providers):**
 
-Two guards bound a streaming response, each accepting `0` to disable. Neither is implemented by the Anthropic/Gemini generators, which leave the drip-fed shape below unbounded.
+Two guards bound a streaming response, each accepting `0` to disable. The Gemini generator does not implement them, which leaves the drip-fed shape below unbounded for Gemini models.
 
 - `streamIdleTimeoutMs` (default `240000`) bounds inactivity _between_ streamed chunks: a stream that goes silent for this long is aborted as a retryable `ETIMEDOUT`. For provider-backed models, set it under the matching `modelProviders[providerId][].generationConfig`; for runtime models, use `model.generationConfig`. An explicit model value takes precedence over `QWEN_STREAM_IDLE_TIMEOUT_MS`, and `0` disables the idle guard.
 - `QWEN_STREAM_MAX_LIFETIME_MS` (default `900000`) caps the _total_ upstream-wait time of one streaming response regardless of chunk flow — the bound a drip-fed stream that never completes cannot reset.
@@ -403,11 +403,13 @@ See [Memory](../features/memory) for details on how auto-memory works and how to
 
 #### agents
 
-| Setting                       | Type             | Description                                                                                                                                                                                                                                               | Default     |
-| ----------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| `agents.builtin.exploreModel` | string           | Model selector for the built-in Explore subagent. Use `inherit` for the main session model, `fast` for `fastModel`, a model ID, or an `authType:model-id` selector. A custom same-name Explore agent keeps its own model configuration. Requires restart. | `inherit`   |
-| `agents.modelGrades`          | object           | Maps semantic grade names exposed to the Agent tool to model selectors. Requires restart.                                                                                                                                                                 | `undefined` |
-| `agents.allowedGrades`        | array of strings | Optional whitelist of configured model grades the Agent tool may use. Requires restart.                                                                                                                                                                   | `undefined` |
+| Setting                        | Type             | Description                                                                                                                                                                                                                                                                                                                  | Default     |
+| ------------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `agents.builtin.exploreModel`  | string           | Model selector for the built-in Explore subagent. Use `inherit` for the main session model, `fast` for `fastModel`, a model ID, or an `authType:model-id` selector. A custom same-name Explore agent keeps its own model configuration. Requires restart.                                                                    | `inherit`   |
+| `agents.modelGrades`           | object           | Maps semantic grade names exposed to the Agent tool to model selectors. Requires restart.                                                                                                                                                                                                                                    | `undefined` |
+| `agents.allowedGrades`         | array of strings | Optional whitelist of configured model grades the Agent tool may use. Requires restart.                                                                                                                                                                                                                                      | `undefined` |
+| `agents.crossSessionMessaging` | boolean          | Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Turning it on opens this session to peer messages, makes it discoverable to others, and lets its model address them from `send_message`. Requires restart.                                                    | `false`     |
+| `agents.crossSessionInbound`   | enum             | What happens to messages other sessions send this one: `accept` delivers them, `hold` parks them for `/peers` review without letting the model act, `refuse` opts this session out. Unset means approval-mode parity (see [Messaging another running session](../features/commands.md#6-messaging-another-running-session)). | `undefined` |
 
 #### permissions
 

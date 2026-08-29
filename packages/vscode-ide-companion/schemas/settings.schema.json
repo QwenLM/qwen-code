@@ -779,7 +779,7 @@
               "type": "number"
             },
             "streamIdleTimeoutMs": {
-              "description": "Maximum inactivity between streamed chunks for OpenAI-compatible models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.",
+              "description": "Maximum inactivity between streamed chunks for OpenAI-compatible and Anthropic models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.",
               "type": "integer",
               "minimum": 0,
               "maximum": 2147483647
@@ -1564,7 +1564,7 @@
           }
         },
         "crossSessionMessaging": {
-          "description": "Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on both opens this session to peer messages and makes it discoverable to others.",
+          "description": "Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on opens this session to peer messages, makes it discoverable to others, and lets its model address them from send_message.",
           "type": "boolean",
           "default": false
         },

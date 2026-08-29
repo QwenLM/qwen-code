@@ -3,10 +3,21 @@
 name: 'Qwen Code CI'
 
 on:
-  # No `push` trigger: every job here is gated to pull_request / merge_group, so
-  # a push to `main` ran nothing (CodeQL was the last push job and moved to its
-  # own scheduled codeql.yml). The merge queue validates the merged tree before
-  # it lands, so there is nothing left to run on the post-merge push.
+  # This trigger was removed on the premise that the merge queue validates the
+  # merged tree before it lands. No queue is enabled (none since 2026-07-02),
+  # so nothing validated that tree on either side of a merge: `main` had no
+  # gate before one and nothing faster than the ~40-minute E2E after one.
+  # Only `test` and the `classify_pr` it depends on accept it (see their
+  # `if`s); every other job excludes push, so a post-merge run is exactly
+  # Classify PR + Test. The no-AK integration gate is its own
+  # `integration_no_ak` job on pull_request / merge_group, so this lane is
+  # lint, static analysis and unit tests. Removing it once the queue is
+  # enabled means dropping the trigger AND the push arm from BOTH those
+  # `if`s: a half-removal leaves every merge running Classify PR alone,
+  # publishing outputs nothing consumes.
+  push:
+    branches:
+      - 'main'
   pull_request:
     branches:
       - 'main'
@@ -40,7 +51,14 @@ on:
           - 'hosted'
 
 concurrency:
-  group: '${{ github.workflow }}-${{ github.head_ref || github.ref }}'
+  # Event + source repo + ref, not ref alone. Without the event the group
+  # collapses onto `Qwen Code CI-refs/heads/main`, shared with the nightly
+  # (60-minute lanes, neither cancelling on `main`). Without the source repo,
+  # same-named branches across forks collide — they evaluate in the base
+  # repo's namespace and PR runs DO cancel in progress, so a fork whose
+  # default branch is `main` cancels a victim PR's run on every push.
+  # Supersede within a PR is kept: one branch backs one open PR per fork.
+  group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'
   cancel-in-progress: |-
     ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}
 
@@ -61,18 +79,26 @@ env:
   # BOTH the github_ci_only helper step and the full-profile Test step, so a
   # new helper test can't be added to one path and silently dropped from the
   # other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
   # inherits it — the gate step and every `npm run test:ci` step, whatever
   # it is named — instead of each step hand-wiring a copy.
-  WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
+  # `github.event.before` is the push lane's base: on a squash-merge push it is
+  # main's previous tip, restoring the PR lane's leniency for a baseline that
+  # went stale on main. Without it both enforcers see an empty base and fail
+  # closed, so the next stale baseline reddens every merge while every PR stays
+  # green — telling you to "update .size-baseline in this PR" when no PR
+  # exists. `github.sha` is deliberately not used: on workflow_dispatch it
+  # resolves to the checked-out commit and would compare the file against
+  # itself, failing open. An all-zeros `before` still fails closed.
+  WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}'
 
 jobs:
   classify_pr:
     name: 'Classify PR'
-    if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' }}"
+    if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' }}"
     # Gate runs on ECS for in-repo PRs, fork PRs whose author has write access
     # (OWNER/MEMBER/COLLABORATOR association — a write-access author is as
     # trusted as an in-repo branch), and the merge queue (base-repo context),
@@ -127,9 +153,17 @@ jobs:
           echo "skip_ci=${skip_ci}"
 
       # In-repo PRs, fork PRs whose author has write access
-      # (OWNER/MEMBER/COLLABORATOR association), and the merge queue
-      # (base-repo context) run the Linux jobs on ECS; other fork PRs stay
-      # hosted. Disable via repo var MAINTAINER_ECS_RUNNER_DISABLED=true.
+      # (OWNER/MEMBER/COLLABORATOR association), the merge queue (base-repo
+      # context) and a push to `main` run the Linux jobs on ECS; other fork
+      # PRs stay hosted. Disable via repo var
+      # MAINTAINER_ECS_RUNNER_DISABLED=true.
+      #
+      # push is deliberately absent from the `runs-on` expression above, so a
+      # post-merge run leaves classify_pr hosted while the Test job it feeds
+      # goes to ECS. That is intentional: the expression is the canonical
+      # association-routing text sdk-java.yml and serve-ab.yml mirror, a push
+      # has no author association to route on, and classify_pr costs seconds —
+      # while Test should not spend a scarce hosted runner on every merge.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
@@ -148,7 +182,7 @@ jobs:
             if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
               ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
             fi
-          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
+          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ) ]]; then
             ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
@@ -162,9 +196,18 @@ jobs:
     needs: 'classify_pr'
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
-    # Not on push: the merge queue already tested the merged tree, so a
-    # post-merge re-run on `main` would be redundant.
-    if: "${{ !cancelled() && github.event_name != 'push' && github.event_name != 'schedule' }}"
+    # Accepts push on `main`: this is the only post-merge check faster than the
+    # ~40-minute E2E, and with no merge queue enabled nothing validates the
+    # merged tree before it lands either. The expensive and PR-shaped steps
+    # stay off it on their own gates, each by its own mechanism — the
+    # checkout-head verifier is restricted to pull_request / merge_group,
+    # while the test reporter carries no event gate at all: its same-repo
+    # clause (head.repo.full_name == github.repository) is empty on push. Do
+    # not "normalise" that clause into the event allowlist — it also keeps
+    # fork PRs out, and dorny/test-reporter needs `checks: write`, which
+    # fork-event runs do not have. So a push run is lint, static analysis and
+    # unit tests.
+    if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 60
     outputs:
@@ -192,37 +235,55 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
-      # Remove .qwen/ left by a previous job so actions/checkout doesn't trip
-      # on restrictive permissions.
+      # Remove .qwen/ and its recovery backup left by a previous job so
+      # actions/checkout doesn't trip on restrictive permissions.
+      # `.qwen.root-orig` is emitted by recovery tooling OUTSIDE this repo —
+      # nothing here produces it (git grep matches only these sweep copies
+      # and their pins in scripts/tests/review-worktree-cleanup-workflow.
+      # test.js). It is the backup name a cancelled verify's recovery leaves
+      # after renaming an unreadable, root-owned `.qwen` aside (observed on
+      # the shared pool; first recorded around review run 33146730771). If
+      # that producer's naming changes or a third residue name appears,
+      # update the for-loop list in every sweep copy or the checkout
+      # poisoning this sweep exists for silently recurs.
       - name: 'Clean stale .qwen before checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           set -uo pipefail
-          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
-            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
-            # Last resort when nothing can DELETE the tree: move it out of the
-            # workspace. Unlinking an entry needs write permission on the
-            # directory holding it — which is exactly what a foreign-owned
-            # leftover denies — while renaming needs it only on the two
-            # parents, and the workspace root is always this runner's own. So
-            # a tree that defeats rm, chmod, and a sudo-less chown still
-            # renames aside, and the checkout below finds nothing to trip on.
-            # Leaving it in place instead poisons EVERY later job scheduled
-            # here, not just this one (measured, run 32621267802: `EACCES
-            # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
-            # killed checkout for two unrelated PRs on the same runner).
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
-              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
               {
                 quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
                 mkdir -p "$quarantine" 2>/dev/null || true
-                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
-                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
                 else
-                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
                 fi
               }
-          fi
+          done
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose
           # directories the rm above removed; worktree remove --force then
@@ -281,7 +342,17 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          # Pin push runs to the event SHA: the `github.ref` fallback resolves
+          # `refs/heads/main` at fetch time — a moving tip — while the check run
+          # attaches to the triggering commit, so the lane would validate a tree
+          # it does not report on. Nothing detects that (the checkout-head
+          # verifier is gated to pull_request / merge_group, and its ancestor
+          # check passes for a newer tip regardless), and merges land close
+          # enough together to hit it routinely. Regressions are still caught —
+          # the tested tree is a descendant — but attribution breaks: red on a
+          # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
+          # the event SHA by taking actions/checkout's default.
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
           # Shallow: nothing here walks git history except on demand (the
           # verify guard below checks head.sha == HEAD; the size gate and its
           # vitest mirror fetch the PR's base commit at depth 1 when the
@@ -619,8 +690,11 @@ jobs:
           name: 'test-results-fork-22.x-ubuntu-latest'
           path: 'packages/*/junit.xml'
 
+      # Excludes push: the only consumer, `post_coverage_comment`, is gated to
+      # pull_request and nothing else reads `coverage-reports-*`, so uploading
+      # on every merge spends egress and retention on a lane with no reader.
       - name: 'Upload coverage reports'
-        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}"
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'coverage-reports-22.x-ubuntu-latest'
@@ -659,35 +733,46 @@ jobs:
 
       # Same pre-checkout recovery as the test job: this job lands on the
       # same reused pool, so leftover review worktrees and branches from an
-      # interrupted review would break this checkout too.
+      # interrupted review would break this checkout too. The
+      # `.qwen.root-orig` name's provenance (an external recovery tool) is
+      # documented on the test job's copy.
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
-            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
-            # Last resort when nothing can DELETE the tree: move it out of the
-            # workspace. Unlinking an entry needs write permission on the
-            # directory holding it — which is exactly what a foreign-owned
-            # leftover denies — while renaming needs it only on the two
-            # parents, and the workspace root is always this runner's own. So
-            # a tree that defeats rm, chmod, and a sudo-less chown still
-            # renames aside, and the checkout below finds nothing to trip on.
-            # Leaving it in place instead poisons EVERY later job scheduled
-            # here, not just this one (measured, run 32621267802: `EACCES
-            # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
-            # killed checkout for two unrelated PRs on the same runner).
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
-              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
               {
                 quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
                 mkdir -p "$quarantine" 2>/dev/null || true
-                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
-                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
                 else
-                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
                 fi
               }
-          fi
+          done
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose
           # directories the rm above removed; worktree remove --force then
@@ -1206,31 +1291,40 @@ jobs:
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
-            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
-            # Last resort when nothing can DELETE the tree: move it out of the
-            # workspace. Unlinking an entry needs write permission on the
-            # directory holding it — which is exactly what a foreign-owned
-            # leftover denies — while renaming needs it only on the two
-            # parents, and the workspace root is always this runner's own. So
-            # a tree that defeats rm, chmod, and a sudo-less chown still
-            # renames aside, and the checkout below finds nothing to trip on.
-            # Leaving it in place instead poisons EVERY later job scheduled
-            # here, not just this one (measured, run 32621267802: `EACCES
-            # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
-            # killed checkout for two unrelated PRs on the same runner).
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
-              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
               {
                 quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
                 mkdir -p "$quarantine" 2>/dev/null || true
-                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
-                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
                 else
-                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
                 fi
               }
-          fi
+          done
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose
           # directories the rm above removed; worktree remove --force then
@@ -1424,35 +1518,46 @@ jobs:
 
       # Same pre-checkout recovery as the test job: this job lands on the
       # same reused pool, so leftover review worktrees and branches from an
-      # interrupted review would break this checkout too.
+      # interrupted review would break this checkout too. The
+      # `.qwen.root-orig` name's provenance (an external recovery tool) is
+      # documented on the test job's copy.
       - name: 'Clean stale .qwen before checkout'
         run: |-
           set -uo pipefail
-          if [ -d "$GITHUB_WORKSPACE/.qwen" ] && [ ! -L "$GITHUB_WORKSPACE/.qwen" ]; then
-            chmod -R u+w "$GITHUB_WORKSPACE/.qwen" 2>/dev/null || true
-            # Last resort when nothing can DELETE the tree: move it out of the
-            # workspace. Unlinking an entry needs write permission on the
-            # directory holding it — which is exactly what a foreign-owned
-            # leftover denies — while renaming needs it only on the two
-            # parents, and the workspace root is always this runner's own. So
-            # a tree that defeats rm, chmod, and a sudo-less chown still
-            # renames aside, and the checkout below finds nothing to trip on.
-            # Leaving it in place instead poisons EVERY later job scheduled
-            # here, not just this one (measured, run 32621267802: `EACCES
-            # rmdir .qwen/tmp/review-pr-9748-scratch-verify-…/probe-ws/…`
-            # killed checkout for two unrelated PRs on the same runner).
-            rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
-              sudo -n rm -rf "$GITHUB_WORKSPACE/.qwen" 2>/dev/null ||
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
               {
                 quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
                 mkdir -p "$quarantine" 2>/dev/null || true
-                if mv -- "$GITHUB_WORKSPACE/.qwen" "$quarantine/qwen-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
-                  echo "::warning::could not delete leaked .qwen; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
                 else
-                  echo "::warning::leaked .qwen; runner needs manual cleanup"
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
                 fi
               }
-          fi
+          done
           # Interrupted reviews leave worktree registrations under .qwen/tmp/
           # and qwen-review/* branches behind. prune drops registrations whose
           # directories the rm above removed; worktree remove --force then
