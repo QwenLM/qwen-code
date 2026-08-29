@@ -151,6 +151,16 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/native-directory-picker.ts',
+    {
+      reason:
+        'Picker availability probes process-scoped host session state ' +
+        '(SSH markers, display server, Windows session name), so embedded ' +
+        'callers may omit the environment argument.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/pem-certificate-blocks.ts',
     {
       reason:
@@ -232,6 +242,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:PYTHONPATH': 2,
         'key:QWEN_CODE_INTEGRATION_TEST': 1,
         'key:QWEN_CODE_MCP_APPROVALS_PATH': 2,
+        'key:QWEN_CODE_WARNINGS_FILE': 2,
         'key:QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE': 1,
         'key:QWEN_CODE_TEST_VAR': 2,
         'key:QWEN_SANDBOX_PROXY_COMMAND': 2,

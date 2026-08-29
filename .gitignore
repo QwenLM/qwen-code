@@ -140,5 +140,8 @@ tmp/
 **/.qwen/computer-use/
 .playwright-mcp/
 
+# Tool state written to the repo root when $HOME is unset (e.g. gh CLI)
+.local/
+
 # Brand build workspaces (created by the desktop-brand-builder skill)
 brand-builds/

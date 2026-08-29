@@ -3580,7 +3580,7 @@ describe('ChannelBase', () => {
           expect(recoveredBridge.loadSession).toHaveBeenCalledWith(
             's-2',
             '/tmp',
-            undefined,
+            { sourceId: 'test-chan' },
             expect.anything(),
           ),
         );
@@ -4142,7 +4142,7 @@ describe('ChannelBase', () => {
         expect(bridge.loadSession).toHaveBeenCalledWith(
           's-1',
           '/tmp',
-          undefined,
+          { sourceId: 'test-chan' },
           expect.anything(),
         );
 
