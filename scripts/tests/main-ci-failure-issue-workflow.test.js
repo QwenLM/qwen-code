@@ -36,7 +36,10 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain(
       "github.event.workflow_run.head_branch == 'main'",
     );
-    // Push covers the other two watched workflows; schedule is scoped to
+    // Push covers the other two watched workflows AND 'Qwen Code CI''s own
+    // post-merge lane on `main` — ci.yml restored that trigger, so main's
+    // squash commits now carry Test check-runs and a red one files an issue
+    // here. Schedule is scoped to
     // 'Qwen Code CI' — that nightly is the platform lanes' only trigger
     // outside a pull request, and the other watched workflows' own
     // nightlies must not dispatch the autofix agent through this watcher.
