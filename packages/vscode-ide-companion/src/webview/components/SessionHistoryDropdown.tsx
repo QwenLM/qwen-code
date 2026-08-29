@@ -132,12 +132,51 @@ export function SessionHistoryDropdown({
     setConfirmDeleteId(undefined);
   }, [searchQuery]);
 
+  const lastRenamingIdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (renamingId) {
+      lastRenamingIdRef.current = renamingId;
       renameRef.current?.focus();
       renameRef.current?.select();
+      return;
     }
+    const finished = lastRenamingIdRef.current;
+    if (!finished) return;
+    lastRenamingIdRef.current = undefined;
+    // The rename input unmounts when the rename ends; without a restore,
+    // focus falls to <body> and the dialog stops receiving key events.
+    const row = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '#qwen-session-history [data-session-id]',
+      ),
+    ).find((element) => element.dataset.sessionId === finished);
+    (row ?? searchRef.current)?.focus();
   }, [renamingId]);
+
+  // Focus can also land on <body> when a focused element unmounts (a deleted
+  // row) or non-focusable content is clicked. Those events never pass
+  // through the dialog div's onKeyDown, so guard Escape and re-trap Tab at
+  // the window level while the dropdown is mounted.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+        return;
+      }
+      if (
+        event.key !== 'Tab' ||
+        document
+          .getElementById('qwen-session-history')
+          ?.contains(document.activeElement)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      searchRef.current?.focus();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
 
   const filtered = searchQuery.trim()
     ? sessions.filter((session) =>

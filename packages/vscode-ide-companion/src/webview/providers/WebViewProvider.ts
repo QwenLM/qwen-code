@@ -44,7 +44,10 @@ import {
   parseInsightMessage,
 } from '@qwen-code/qwen-code-core';
 import { isLogLevel, logger } from '../../utils/logger.js';
-import { QwenDaemonProcess } from '../../services/qwenDaemonProcess.js';
+import {
+  QwenDaemonProcess,
+  type QwenDaemonListenerHandle,
+} from '../../services/qwenDaemonProcess.js';
 
 /** Threshold (ms) before a completed task triggers a notification. */
 const LONG_TASK_THRESHOLD_MS = 20_000;
@@ -136,6 +139,8 @@ export class WebViewProvider {
   private agentManager: QwenAgentManager;
   private conversationStore: ConversationStore;
   private daemonProcess: QwenDaemonProcess;
+  /** Daemon subscriptions held by the most recent successful bootstrap. */
+  private daemonListenerHandles: QwenDaemonListenerHandle[] = [];
   /**
    * Daemon client identity for this host. The daemon uses it to attribute
    * session-scoped requests, so it has to stay stable across webview reloads
@@ -1955,6 +1960,12 @@ export class WebViewProvider {
         });
         return true;
       }
+      // Re-bootstrap replaces this host's previous daemon subscriptions; a
+      // workspace switch this host itself triggers must not notify its own
+      // stale listener.
+      for (const handle of this.daemonListenerHandles.splice(0)) {
+        handle.dispose();
+      }
       try {
         const runtime = await this.daemonProcess.start(
           resolveQwenCliEntryPath(
@@ -1986,18 +1997,31 @@ export class WebViewProvider {
             ...(restoredSessionId ? { sessionId: restoredSessionId } : {}),
           },
         });
-        // A daemon that dies after a successful start leaves the webview
-        // making requests against a dead port with no way to know; surface it
-        // so the panel can show the failure instead of silently hanging.
-        this.daemonProcess.onExit = () => {
+        // A daemon that dies after a successful start — or that gets
+        // replaced by another host's workspace switch — leaves this webview
+        // making requests against a dead port with no way to know; surface
+        // it so the panel can show the failure instead of silently hanging.
+        // The daemon is shared by every chat host, so each host holds its own
+        // subscription: a single overwritable slot only ever reached the
+        // last webview that bootstrapped.
+        const postDaemonFailure = (message: string) => {
           void webview.postMessage({
             type: 'webShellBootstrapError',
-            data: {
-              message:
-                'Qwen Code stopped unexpectedly. Reload the panel to restart it.',
-            },
+            data: { message },
           });
         };
+        this.daemonListenerHandles.push(
+          this.daemonProcess.addExitListener(() =>
+            postDaemonFailure(
+              'Qwen Code stopped unexpectedly. Reload the panel to restart it.',
+            ),
+          ),
+          this.daemonProcess.addSupersededListener(() =>
+            postDaemonFailure(
+              'Qwen Code restarted against a different folder. Reload the panel to reconnect.',
+            ),
+          ),
+        );
         await this.replayAuthState(webview);
         const editor = vscode.window.activeTextEditor;
         if (editor) {
@@ -2727,6 +2751,9 @@ export class WebViewProvider {
     }
     if (WebViewProvider.lastContextMenuProvider === this) {
       WebViewProvider.lastContextMenuProvider = null;
+    }
+    for (const handle of this.daemonListenerHandles.splice(0)) {
+      handle.dispose();
     }
     this.panelManager.dispose();
     this.agentManager.disconnect();
