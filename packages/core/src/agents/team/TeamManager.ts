@@ -19,6 +19,7 @@ import { randomBytes } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { escapeJsonTagCharacters } from '../../utils/formatters.js';
 import { escapeXml } from '../../utils/xml.js';
 import { ApprovalMode } from '../../config/config.js';
 import type {
@@ -1151,9 +1152,8 @@ export class TeamManager {
       originalRequest: request.originalRequest,
       researchSummary: request.researchSummary,
     };
-    const escapedJson = JSON.stringify(payload, null, 2).replace(
-      /</g,
-      '\\u003c',
+    const escapedJson = escapeJsonTagCharacters(
+      JSON.stringify(payload, null, 2),
     );
     return [
       `<team_plan_approval_request request_id="${escapeXml(requestId)}" from="${escapeXml(request.teammateName)}">`,
