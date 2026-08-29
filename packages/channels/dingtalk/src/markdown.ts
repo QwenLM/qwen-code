@@ -8,6 +8,10 @@
 
 export const DINGTALK_CHUNK_LIMIT = 3800;
 
+export function escapeDingTalkMarkdown(value: string): string {
+  return value.replace(/([\\`*_[\]{}()#+.!|>~:-])/gu, '\\$1');
+}
+
 // --- Chunk splitting ---
 
 function safeUtf16SliceEnd(value: string, end: number): number {
@@ -66,7 +70,13 @@ export function splitChunks(
         chunkLimit - closeFenceOverhead - buf.length - prefix.length;
 
       if (available <= 0) {
-        flush(inCode || lineOpenedFenceInBuffer);
+        const keepCodeOpen = inCode || lineOpenedFenceInBuffer;
+        if (buf === (keepCodeOpen ? '```' : '')) {
+          throw new RangeError(
+            'chunk limit cannot contain one Unicode character',
+          );
+        }
+        flush(keepCodeOpen);
         continue;
       }
 
@@ -89,12 +99,13 @@ export function splitChunks(
       pieceLength = safeUtf16SliceEnd(remaining, pieceLength);
 
       if (pieceLength === 0 && remaining.length > 0) {
-        if (!buf) {
+        const keepCodeOpen = inCode || lineOpenedFenceInBuffer;
+        if (!buf || (keepCodeOpen && buf === '```')) {
           throw new RangeError(
             'chunk limit cannot contain one Unicode character',
           );
         }
-        flush(inCode || lineOpenedFenceInBuffer);
+        flush(keepCodeOpen);
         continue;
       }
 

@@ -7,6 +7,7 @@ import type {
   SessionTarget,
   UserInputPresentationResult,
 } from '@qwen-code/channel-base';
+import { escapeDingTalkMarkdown } from './markdown.js';
 import { stripPartialImageMarker } from './outbound-image.js';
 import type { QuestionCardController } from './question-card-controller.js';
 import {
@@ -51,17 +52,13 @@ export interface DingtalkCardSender {
   senderName: string;
 }
 
-function escapeMarkdownText(text: string): string {
-  return text.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
-}
-
 function formatSenderPrefixes(sender: DingtalkCardSender): {
   senderPrefix: string;
   senderRawPrefix: string;
 } {
   const senderName = sanitizeSenderName(sender.senderName);
   return {
-    senderPrefix: `@${escapeMarkdownText(senderName)}`,
+    senderPrefix: `@${escapeDingTalkMarkdown(senderName)}`,
     senderRawPrefix: `@${senderName}`,
   };
 }
@@ -422,7 +419,7 @@ export class DingtalkInteractionPresenter {
   private withSenderPrefix(run: RunPresentation, content: string): string {
     const prefixes = [
       run.senderPrefix,
-      run.sourceLabel ? escapeMarkdownText(run.sourceLabel) : undefined,
+      run.sourceLabel ? escapeDingTalkMarkdown(run.sourceLabel) : undefined,
     ].filter((value): value is string => Boolean(value));
     if (prefixes.length === 0) return this.boundContent(content);
     const body = this.withoutExistingSenderPrefix(run, content);
@@ -438,7 +435,7 @@ export class DingtalkInteractionPresenter {
 
   private withSourcePrefix(run: RunPresentation, content: string): string {
     if (!run.sourceLabel) return this.boundContent(content);
-    const sourceLabel = escapeMarkdownText(run.sourceLabel);
+    const sourceLabel = escapeDingTalkMarkdown(run.sourceLabel);
     if (!content) return sourceLabel;
     return `${sourceLabel}\n\n${this.boundContent(
       content,
@@ -489,7 +486,7 @@ export class DingtalkInteractionPresenter {
     content: string,
   ): string {
     if (!run.sourceLabel) return content;
-    const rendered = escapeMarkdownText(run.sourceLabel);
+    const rendered = escapeDingTalkMarkdown(run.sourceLabel);
     if (content === rendered) return '';
     const prefix = `${rendered}\n\n`;
     return content.startsWith(prefix) ? content.slice(prefix.length) : content;

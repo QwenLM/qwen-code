@@ -266,7 +266,7 @@ export function splitChunks(
     while (buf.length > budget) {
       const maxSlice = inCode ? chunkLimit - '\n```'.length - 1 : chunkLimit;
       const sliceEnd = safeUtf16SliceEnd(buf, maxSlice);
-      if (sliceEnd === 0) {
+      if (sliceEnd <= 0) {
         throw new RangeError(
           'chunk limit cannot contain one Unicode character',
         );

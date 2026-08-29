@@ -21,7 +21,12 @@ import type {
 import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
 import type { CdnRef, FileCdnRef } from './monitor.js';
-import { sendText, sendImage, detectImageMime } from './send.js';
+import {
+  sendText,
+  sendImage,
+  detectImageMime,
+  markdownToPlainText,
+} from './send.js';
 import { downloadAndDecrypt } from './media.js';
 import { getConfig, sendTyping, WeixinApiError } from './api.js';
 import { TypingStatus } from './types.js';
@@ -281,7 +286,7 @@ export class WeixinChannel extends ChannelBase {
     cleanedText = cleanedText.replace(/\n{3,}/g, '\n\n').trim();
 
     const visibleText = cleanedText
-      ? this.formatAttributedText(cleanedText, sourceLabel)
+      ? this.formatAttributedText(markdownToPlainText(cleanedText), sourceLabel)
       : parsedImages.length > 0
         ? sourceLabel
         : undefined;

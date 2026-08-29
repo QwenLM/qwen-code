@@ -2834,7 +2834,12 @@ export class FeishuChannel extends ChannelBase {
           ).catch(() => {});
           this.cleanupCard(msgId);
         } else {
-          this.sendMessage(chatId, '处理消息时出错，请重试。').catch(() => {});
+          this.sendFallbackMessage(
+            chatId,
+            '处理消息时出错，请重试。',
+            existingCard.sourceLabel ??
+              this.getInboundErrorSourceLabel(envelope),
+          ).catch(() => {});
           this.cleanupCard(msgId);
         }
       });

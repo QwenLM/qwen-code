@@ -152,6 +152,10 @@ describe('Feishu markdown utilities', () => {
       expect(splitChunks('')).toEqual(['']);
     });
 
+    it('rejects a code-fence limit that cannot make progress', () => {
+      expect(() => splitChunks('```\nabc\n```', 4)).toThrow(RangeError);
+    });
+
     it('splits long text into chunks', () => {
       const line = 'a'.repeat(100) + '\n';
       const text = line.repeat(50); // 5050 chars > 4000

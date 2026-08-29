@@ -15,6 +15,15 @@ describe('DingTalk markdown utilities', () => {
       expect(splitChunks('')).toEqual(['']);
     });
 
+    it.each([1, 4, 7])(
+      'rejects code-fence limit %i when it cannot make progress',
+      (chunkLimit) => {
+        expect(() => splitChunks('```\nabc\n```', chunkLimit)).toThrow(
+          RangeError,
+        );
+      },
+    );
+
     it('splits long text into chunks', () => {
       const line = 'a'.repeat(100) + '\n';
       const text = line.repeat(50); // 5050 chars > 3800

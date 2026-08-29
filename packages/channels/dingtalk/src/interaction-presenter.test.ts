@@ -181,7 +181,7 @@ describe('DingtalkInteractionPresenter', () => {
       target,
       'session-1',
       undefined,
-      '[review_*]',
+      '[IMAGE: x · review_*]',
     );
 
     presenter.startStatusCard('run-1');
@@ -191,13 +191,13 @@ describe('DingtalkInteractionPresenter', () => {
       expect(client.createAndDeliver).toHaveBeenCalledWith(
         expect.objectContaining({
           cardParamMap: expect.objectContaining({
-            content: '\\[review\\_\\*\\]',
+            content: '\\[IMAGE\\: x · review\\_\\*\\]',
           }),
         }),
       );
       expect(client.openOrUpdateStream).toHaveBeenCalledWith(
         expect.objectContaining({
-          content: '\\[review\\_\\*\\]\n\nanalysis',
+          content: '\\[IMAGE\\: x · review\\_\\*\\]\n\nanalysis',
         }),
       );
     });
@@ -206,7 +206,7 @@ describe('DingtalkInteractionPresenter', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          content: '\\[review\\_\\*\\]\n\nfinal answer',
+          content: '\\[IMAGE\\: x · review\\_\\*\\]\n\nfinal answer',
         }),
       }),
     );

@@ -112,7 +112,24 @@ describe('WeixinChannel', () => {
     expect(sendMocks.sendText).toHaveBeenCalledWith(
       expect.objectContaining({
         to: 'user-1',
-        text: '[review_*] `[IMAGE: example.png]` remains text',
+        text: '[review_*] [IMAGE: example.png] remains text',
+      }),
+    );
+  });
+
+  it('preserves underscores in attributed task names', async () => {
+    const channel = createChannel();
+
+    await channel.sendAttributed(
+      'user-1',
+      '**Here** is the result.',
+      '[fix_bug_2]',
+    );
+
+    expect(sendMocks.sendText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'user-1',
+        text: '[fix_bug_2] Here is the result.',
       }),
     );
   });

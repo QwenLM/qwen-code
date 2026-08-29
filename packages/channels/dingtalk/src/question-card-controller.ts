@@ -11,6 +11,7 @@ import type {
   DingtalkCardCallback,
   DingtalkCardCallbackResult,
 } from './interactive-card-types.js';
+import { escapeDingTalkMarkdown } from './markdown.js';
 
 type QuestionState = 'reserved' | 'pending' | 'claimed' | 'terminal';
 type QuestionTerminalState =
@@ -472,10 +473,7 @@ export class QuestionCardController {
     text: string,
   ): string {
     if (!context.sourceLabel) return text;
-    const label = context.sourceLabel.replace(
-      /([\\`*_[\]{}()#+.!|>~-])/gu,
-      '\\$1',
-    );
+    const label = escapeDingTalkMarkdown(context.sourceLabel);
     return `${label}\n\n${text}`;
   }
 }

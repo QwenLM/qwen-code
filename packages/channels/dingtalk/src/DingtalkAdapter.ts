@@ -20,6 +20,7 @@ import {
 } from '@qwen-code/channel-base';
 import {
   DINGTALK_CHUNK_LIMIT,
+  escapeDingTalkMarkdown,
   normalizeDingTalkMarkdown,
   extractTitle,
 } from './markdown.js';
@@ -626,10 +627,6 @@ interface CardRunCorrelation {
   ownerId: string;
   target: { chatId: string; isGroup: boolean };
   sender?: { senderName: string };
-}
-
-function escapeDingTalkMarkdown(value: string): string {
-  return value.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
 }
 
 function collectNonBotMentionIds(data: DingTalkMessageData): string[] {
