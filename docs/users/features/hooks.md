@@ -771,7 +771,7 @@ When sent to the model, injected `additionalContext` is appended as its own mess
 }
 ```
 
-The hook uses the deleting runtime's normal session fields (`session_id`, `transcript_path`, and `cwd`); over ACP, `transcript_path` is empty because the deleting runtime has no transcript of its own. `SessionDelete` currently fires for the interactive `/delete` flow and ACP's explicit `deleteSession` method; daemon REST batch deletion and internal cleanup do not emit it.
+The hook uses the deleting runtime's normal session fields (`session_id`, `transcript_path`, and `cwd`); over ACP, `transcript_path` is empty because the deleting runtime has no transcript of its own. `SessionDelete` currently fires for the interactive `/delete` flow and ACP's explicit `deleteSession` method; daemon REST batch deletion and internal cleanup do not emit it. A command hook is left to finish if Qwen exits after dispatch; its stdout and stderr are ignored and remain independent of Qwen's pipes.
 
 #### MessageDisplay
 
@@ -890,6 +890,8 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 - Authentication failure logging
 - Billing error notifications
 - Error statistics collection
+
+A command hook is left to finish if Qwen exits after dispatch; its stdout and stderr are ignored and remain independent of Qwen's pipes.
 
 #### SubagentStart
 
@@ -1352,10 +1354,12 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
 
 Only `command` type supports asynchronous execution. Setting `"async": true` runs the hook in the background without blocking the main flow.
 
+Async hooks are scoped to the Qwen process because their captured output is delivered through the in-memory async hook registry. On POSIX, Qwen reclaims a still-running async hook process tree when it exits, except for event types whose sections explicitly guarantee fire-and-forget completion after exit. Windows cannot reconstruct a descendant tree after its root exits, so full parent-exit reclamation there requires a Job Object or descendant tracking.
+
 **Features:**
 
 - Cannot return decision control (operation has already occurred)
-- Results are injected in the next conversation turn via `systemMessage` or `additionalContext`
+- Results are injected in the next conversation turn via `systemMessage` or `additionalContext`, except for output-ignored fire-and-forget event types documented above
 - Suitable for auditing, logging, background testing, etc.
 
 **Example:**

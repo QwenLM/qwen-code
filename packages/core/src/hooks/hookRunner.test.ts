@@ -13,6 +13,9 @@ import {
   afterEach,
   type MockInstance,
 } from 'vitest';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   HookRunner,
   __resetPowerShellCache,
@@ -113,6 +116,7 @@ describe('HookRunner', () => {
         }
       }),
       kill: vi.fn(),
+      unref: vi.fn(),
     };
     return mockProcess;
   };
@@ -170,6 +174,7 @@ describe('HookRunner', () => {
       exitCode: null,
       signalCode: null,
       kill: vi.fn(),
+      unref: vi.fn(),
       on: vi.fn((event: string, callback: Listener) => {
         addListener(event, callback);
         return mockProcess;
@@ -1070,6 +1075,12 @@ describe('HookRunner', () => {
   });
 
   describe('process tree cancellation', () => {
+    const parentExitSurvivingEvents = [
+      HookEventName.MessageDisplay,
+      HookEventName.StopFailure,
+      HookEventName.SessionDelete,
+    ] as const;
+
     const hookConfig: HookConfig = {
       type: HookType.Command,
       command: 'long-running-command',
@@ -1079,6 +1090,111 @@ describe('HookRunner', () => {
 
     const createNoSuchProcessError = () =>
       Object.assign(new Error('no such process'), { code: 'ESRCH' });
+
+    it.each(parentExitSurvivingEvents)(
+      'uses a detached parent-independent supervisor for synchronous and async %s hooks',
+      async (eventName) => {
+        mockSpawn.mockImplementation(() => createMockProcess());
+
+        await hookRunner.executeHook(
+          hookConfig,
+          eventName,
+          createMockInput({ hook_event_name: eventName }),
+        );
+        await hookRunner.executeHook(
+          { ...hookConfig, async: true },
+          eventName,
+          createMockInput({ hook_event_name: eventName }),
+        );
+
+        expect(mockSpawn).toHaveBeenCalledTimes(2);
+        for (const call of mockSpawn.mock.calls) {
+          expect(call[0]).toBe(process.execPath);
+          expect(call[1]).toContain('--eval');
+          expect(call[2].stdio).toEqual(['ignore', 'ignore', 'ignore', 'pipe']);
+          expect(call[2].detached).toBe(true);
+        }
+        for (const result of mockSpawn.mock.results) {
+          expect(result.value.unref).toHaveBeenCalledOnce();
+        }
+      },
+    );
+
+    it('removes staged input when the supervisor spawn throws', async () => {
+      const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-spawn-error-'));
+      const originalTmpDir = process.env['TMPDIR'];
+      process.env['TMPDIR'] = tempDir;
+      mockSpawn.mockImplementation(() => {
+        throw new Error('spawn failed');
+      });
+
+      try {
+        const result = await hookRunner.executeHook(
+          hookConfig,
+          HookEventName.SessionDelete,
+          createMockInput({ hook_event_name: HookEventName.SessionDelete }),
+        );
+
+        expect(result.error?.message).toBe('spawn failed');
+        expect(await readdir(tempDir)).toEqual([]);
+      } finally {
+        if (originalTmpDir === undefined) {
+          delete process.env['TMPDIR'];
+        } else {
+          process.env['TMPDIR'] = originalTmpDir;
+        }
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps output capture for process-scoped async hooks', async () => {
+      mockSpawn.mockReturnValue(createMockProcess());
+
+      await hookRunner.executeHook(
+        { ...hookConfig, async: true },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(mockSpawn.mock.calls[0][2].stdio).toEqual([
+        'pipe',
+        'pipe',
+        'pipe',
+      ]);
+    });
+
+    it.each(parentExitSurvivingEvents)(
+      'still cancels a parent-exit-surviving %s hook',
+      async (eventName) => {
+        vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+        const mockProcess = createControllableMockProcess();
+        mockSpawn.mockReturnValue(mockProcess);
+        const killSpy = vi
+          .spyOn(process, 'kill')
+          .mockImplementation((target, signal) => {
+            if (target === -mockProcess.pid && signal === 0) {
+              throw createNoSuchProcessError();
+            }
+            return true;
+          });
+        const controller = new AbortController();
+
+        const resultPromise = hookRunner.executeHook(
+          hookConfig,
+          eventName,
+          createMockInput({ hook_event_name: eventName }),
+          controller.signal,
+        );
+        controller.abort();
+        mockProcess.emit('close', null);
+        const result = await resultPromise;
+
+        expect(result.error?.message).toBe(
+          'Hook execution cancelled (aborted)',
+        );
+        expect(killSpy).toHaveBeenCalledWith(-mockProcess.pid, 'SIGTERM');
+      },
+    );
 
     it('owns a POSIX process group without signalling it on normal completion', async () => {
       const mockProcess = createMockProcess(0, 'done');

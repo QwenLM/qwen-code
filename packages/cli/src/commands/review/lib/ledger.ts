@@ -52,9 +52,49 @@ export interface LedgerFinding {
    * flag, which is exactly what they mean.
    */
   k?: 1;
+  /**
+   * A Critical's two decision axes (#10291), read off the posted claim
+   * line's `[certifies-falsely]`/`[fails-closed]` and
+   * `[regression]`/`[new-surface]` tags: `d` is the direction (`c` / `f`),
+   * `b` the baseline (`r` / `n`) — one letter each on the body-bytes
+   * discipline, spelled out by `LEDGER_DIRECTIONS` / `LEDGER_BASELINES`.
+   * Absent when the claim carried no tag, which is also how a marker
+   * written before the fields existed reads. They decide nothing in this
+   * module: the next round's Step 6 routing reads them off the side file,
+   * and the autofix tooling keys on them (#9907). A value this version does
+   * not know is normalised to absent like `k`, never used to reject the
+   * entry.
+   */
+  d?: 'c' | 'f';
+  b?: 'r' | 'n';
   line?: number;
   /** One line, capped — enough for the next round to re-locate the claim. */
   title: string;
+}
+
+/** The marker's one-letter direction spellings, and what each means. */
+export const LEDGER_DIRECTIONS = {
+  c: 'certifies-falsely',
+  f: 'fails-closed',
+} as const;
+/** The marker's one-letter baseline spellings, and what each means. */
+export const LEDGER_BASELINES = {
+  r: 'regression',
+  n: 'new-surface',
+} as const;
+
+/**
+ * The axes a finding carries, spelled out — `fails-closed, new-surface` —
+ * or `''` when it carries neither. One renderer for the side-file table and
+ * the terminal, so the two cannot spell a classification differently.
+ */
+export function axesOf(f: Pick<LedgerFinding, 'd' | 'b'>): string {
+  return [
+    f.d === undefined ? undefined : LEDGER_DIRECTIONS[f.d],
+    f.b === undefined ? undefined : LEDGER_BASELINES[f.b],
+  ]
+    .filter((a) => a !== undefined)
+    .join(', ');
 }
 
 /**
@@ -293,6 +333,33 @@ export interface Ledger {
    * disengages.
    */
   flatRounds?: number;
+  /**
+   * The recommendation codes this round's convergence diagnosis matched —
+   * the machine-readable half of the observation (#9623), re-published on
+   * the one surface an OUTSIDE consumer can reach. The composed result and
+   * the durable artifact already carry them, but both live inside this
+   * process; the autofix takeover loop reads the posted review body, and
+   * without the codes there its only view of "is this loop converging" is
+   * prose (#10107).
+   *
+   * A carrier, not a contract restatement: the closed vocabulary is owned
+   * by `RECOMMENDATION_CODES` in `convergence.ts`, and membership is
+   * enforced at the ONE write site (`compose-review` passes the codes off
+   * `result.recommendations`, which `recommendationsFor` derived — typed,
+   * so an out-of-vocabulary code cannot arrive). Spelled `string[]` here
+   * because this module is `convergence.ts`'s runtime dependency and the
+   * narrow type would close an import cycle for a field this side only
+   * bounds and never interprets.
+   *
+   * Write-only telemetry: `parseLedger` deliberately does not read it back.
+   * Nothing CLI-side consumes a PRIOR round's codes — each round re-derives
+   * its own from its own diagnosis — and recovering them would hand the
+   * next round a value another account's writable surface controls, for no
+   * reader. Same rung as the streaks above (small, zero-omitted, above the
+   * shed cascade), and for the same reason: the pull request whose loop is
+   * not converging is exactly the one whose marker sits at the byte cap.
+   */
+  rec?: string[];
 }
 
 /**
@@ -490,6 +557,16 @@ export function streakOf(n: unknown): number | undefined {
 }
 
 /**
+ * Bounds on the recommendation-code carrier (`Ledger.rec`). The vocabulary
+ * is closed at the write site; these bound only the SHAPE, so a value the
+ * vocabulary could never contain cannot spend the byte budget. Eight is
+ * twice the design's emitted set; forty covers the longest code in the
+ * design's full menu with room for a successor vocabulary.
+ */
+export const LEDGER_MAX_REC_CODES = 8;
+export const LEDGER_MAX_REC_CODE = 40;
+
+/**
  * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
  * fifty findings at full width serialize to just under 17,000 characters.
  *
@@ -608,6 +685,25 @@ export function serializeLedger(ledger: Ledger): string {
     // whose marker sits at the byte cap.
     const flat = streakOf(ledger.flatRounds);
     if (flat !== undefined && flat > 0) payload.flatRounds = flat;
+    // The recommendation codes ride the streak rung — same size class, same
+    // zero-omission, and the same argument for sitting above the shed
+    // cascade. Bounded here the way every written field is: membership
+    // belongs to the write site (see `Ledger.rec`); this bounds only the
+    // shape, deduplicated in first-seen order so a repeated code cannot
+    // spend the budget twice.
+    if (Array.isArray(ledger.rec)) {
+      const rec = [
+        ...new Set(
+          ledger.rec.filter(
+            (c): c is string =>
+              typeof c === 'string' &&
+              c.length > 0 &&
+              c.length <= LEDGER_MAX_REC_CODE,
+          ),
+        ),
+      ].slice(0, LEDGER_MAX_REC_CODES);
+      if (rec.length > 0) payload.rec = rec;
+    }
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -806,7 +902,7 @@ export function isLedgerClosure(
  * hand-edited marker nor a side file is bound by it.
  */
 export function normalizeLedgerFinding(f: LedgerFinding): LedgerFinding {
-  const { k: _k, ...rest } = f;
+  const { k: _k, d: _d, b: _b, ...rest } = f;
   return {
     ...rest,
     id: f.id.slice(0, LEDGER_MAX_ID),
@@ -821,6 +917,10 @@ export function normalizeLedgerFinding(f: LedgerFinding): LedgerFinding {
     // decides-nothing siblings (`posted`, `prevPosted`, `floor`) are all
     // normalised the same way.
     ...(f.k === 1 ? { k: 1 as const } : {}),
+    // The axes too: a spelling this version does not know reads as "not
+    // classified", which every consumer treats as "posts at any floor".
+    ...(f.d === 'c' || f.d === 'f' ? { d: f.d } : {}),
+    ...(f.b === 'r' || f.b === 'n' ? { b: f.b } : {}),
   };
 }
 
@@ -960,6 +1060,10 @@ export function parseLedger(body: string | undefined): Ledger | null {
     const closed = (Array.isArray(raw.closed) ? raw.closed : [])
       .filter((c): c is LedgerClosure => isLedgerClosure(c, raw.round))
       .slice(-LEDGER_MAX_CLOSED);
+    // `rec` is deliberately NOT recovered — write-only telemetry for the
+    // workflow consumer, per the field's own note: every round re-derives
+    // its own codes, and reading a prior round's back would hand this
+    // account a value another account's writable surface controls.
     return {
       v: 1,
       round: raw.round,

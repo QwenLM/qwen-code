@@ -53,6 +53,7 @@ import {
   parseGitHubRepoForReleases,
   shouldUsePublicGitHubArchiveFallback,
 } from './github.js';
+import { assertDirectorySymlinksAreSafe } from './archive-safety.js';
 import { downloadFromNpmRegistry } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
 import type { LoadExtensionContext } from './variableSchema.js';
@@ -2121,6 +2122,7 @@ export class ExtensionManager {
     let tempDir: string | undefined;
     let convertedSourcePath: string | undefined;
     let stagingPath: string | undefined;
+    let archiveSymlinksValidated = false;
     let preparedSettings: PreparedExtensionSettingsMutation | undefined;
     let preparedGitCredential: PreparedStoredGitCredential | undefined;
 
@@ -2203,6 +2205,7 @@ export class ExtensionManager {
                   tempDir,
                   signal,
                 );
+              archiveSymlinksValidated = true;
             } else {
               installMetadata.gitCommit = await cloneFromGit(
                 installMetadata,
@@ -2403,8 +2406,25 @@ export class ExtensionManager {
         stagingPath = await this.extensionStore.createStagingDirectory();
 
         if (installMetadata.type !== 'link') {
+          if (
+            archiveSymlinksValidated &&
+            localSourcePath !== sourceBeforeConversion
+          ) {
+            // archiveSymlinksValidated was only ever proven for
+            // sourceBeforeConversion. `isAgentPlugin` is true only when
+            // convertCompatibleExtension left the directory unchanged
+            // (extension-converter.ts's AgentPlugins branch never reassigns
+            // its output dir), so gating this on `isAgentPlugin` as well
+            // would make it unreachable: every branch that actually moves
+            // the tree sets a different originSource. A converter that
+            // restructures the tree while preserving symlinks (today's
+            // Gemini/Claude/Qoder converters materialize links instead, but
+            // that's not an invariant) would otherwise carry stale trust
+            // onto a directory that was never actually checked.
+            await assertDirectorySymlinksAreSafe(localSourcePath, signal);
+          }
           await copyExtension(localSourcePath, stagingPath, {
-            skipSymlinks: isAgentPlugin,
+            skipSymlinks: isAgentPlugin && !archiveSymlinksValidated,
             excludeRootGitDirectory: remoteGitInstall,
           });
         }
