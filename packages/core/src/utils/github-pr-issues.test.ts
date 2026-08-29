@@ -63,6 +63,9 @@ describe('buildPullRequestIssuesQuery', () => {
   it('aliases one pullRequest lookup per number with a capped closing list', () => {
     const query = buildPullRequestIssuesQuery([42, 7]);
     expect(query).toContain('query($owner: String!, $name: String!)');
+    // The variables must feed the repository scope; gh rejects a document
+    // that declares but never uses them.
+    expect(query).toContain('repository(owner: $owner, name: $name)');
     expect(query).toContain('p42: pullRequest(number: 42)');
     expect(query).toContain('p7: pullRequest(number: 7)');
     // The sidecar reader voids the whole file above its per-PR cap, so the
@@ -319,6 +322,32 @@ describe('fetchGitHubPullRequestIssues', () => {
       `p${GITHUB_PR_ISSUES_BATCH_SIZE + 1}: pullRequest`,
     );
     expect(queries[1]).not.toContain('p1: pullRequest');
+  });
+
+  it('never puts a non-safe integer into the document', async () => {
+    // 1e21 passes `Number.isInteger` but stringifies as `1e+21`, an invalid
+    // Int literal that fails the entire query rather than one alias.
+    fs.mkdirSync(path.join(dir, '.git'));
+    let query = '';
+    mockGh((args) => {
+      query = args[args.length - 1]!;
+      return {
+        stdout: JSON.stringify({
+          data: { repository: { p7: prNode(7, []) } },
+        }),
+      };
+    });
+
+    const result = await fetchGitHubPullRequestIssues(dir, undefined, [
+      1e21,
+      Number.MAX_SAFE_INTEGER + 2,
+      7,
+    ]);
+
+    expect(result.kind).toBe('ok');
+    expect(query).toContain('p7: pullRequest(number: 7)');
+    expect(query).not.toContain('1e+21');
+    expect(query).not.toContain('9007199254740993');
   });
 
   it('fails the whole call when a later chunk fails', async () => {

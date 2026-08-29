@@ -327,6 +327,40 @@ describe('refreshWorkspaceSessionPrStates', () => {
       expect(persisted?.[0]?.createdAt).toBe(seeded[0]?.createdAt);
     });
 
+    it('converges merged bindings without a snapshot and then costs nothing', async () => {
+      // Closing references are GitHub-only, so a merged Aone binding
+      // would otherwise keep the workspace pending forever — one origin
+      // resolution per sweep for nothing.
+      await seedSession(SESSION_A);
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        SESSION_A,
+        'active',
+      );
+      await upsertSessionPr(prPath, {
+        number: 26430560,
+        url: AONE_URL,
+        state: 'merged',
+      });
+      const backend = fakeAoneBackend();
+
+      const first = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      expect(first).toEqual({ scanned: 1, updated: 1, aoneConsumed: 0 });
+      expect(backend.view).not.toHaveBeenCalled();
+      expect((await readSessionPrs(prPath))?.[0]?.issues).toEqual([]);
+
+      const second = await refreshWorkspaceSessionPrStates(runtime, undefined, {
+        aoneBackend: backend,
+      });
+
+      // No pending target at all: the sweep returns before it even
+      // resolves the workspace repository (no `aoneConsumed`).
+      expect(second).toEqual({ scanned: 1, updated: 0 });
+      expect(backend.view).not.toHaveBeenCalled();
+    });
+
     it('dedupes one mr view across sessions binding the same MR', async () => {
       await seedSession(SESSION_A);
       await seedSession(SESSION_B);
@@ -1057,6 +1091,184 @@ describe('refreshWorkspaceSessionPrStates', () => {
     });
     expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
     expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+  });
+
+  it('converges a merged binding the lookup resolves to nothing', async () => {
+    // Another repository's merged PR whose number this repository does not
+    // have at all: the lookup succeeds with an empty result, and the
+    // binding must leave the sweep on that success instead of being
+    // re-queried every five minutes.
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 424242,
+      url: 'https://github.com/other-org/other-repo/pull/424242',
+      state: 'merged',
+    });
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 1,
+    });
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toEqual([]);
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    expect(fetchGitHubPullRequestIssuesMock).toHaveBeenCalledTimes(1);
+
+    fetchGitHubPullRequestIssuesMock.mockClear();
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 0,
+    });
+    expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps a foreign open binding out of the issue lookup', async () => {
+    // The list query names this workspace's repository; an open binding to
+    // another repository can never resolve here and must not cost the
+    // lookup every sweep (the Aone branch filters the same way).
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/other-org/other-repo/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'open')],
+    });
+
+    for (const round of [1, 2]) {
+      expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+        scanned: 1,
+        updated: 0,
+      });
+      expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(round);
+      expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+    }
+    expect((await readSessionPrs(prPath))?.[0]).toMatchObject({
+      state: 'open',
+    });
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toBeUndefined();
+  });
+
+  it('converges merged bindings locally when the lookup is structurally impossible', async () => {
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'merged',
+    });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue({
+      kind: 'cli_unavailable',
+    });
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 1,
+    });
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toEqual([]);
+
+    fetchGitHubPullRequestIssuesMock.mockClear();
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 1,
+      updated: 0,
+    });
+    expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps retrying a merged binding after a transient lookup failure', async () => {
+    // A 5xx or rate limit says nothing about the PR's references; an
+    // empty snapshot here would permanently record "fetched, none".
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'merged',
+    });
+    fetchGitHubPullRequestIssuesMock.mockResolvedValue({
+      kind: 'failed',
+      message: 'HTTP 502',
+      gitRoot: workspaceCwd,
+    });
+
+    for (const round of [1, 2]) {
+      expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+        scanned: 1,
+        updated: 0,
+      });
+      expect(fetchGitHubPullRequestIssuesMock).toHaveBeenCalledTimes(round);
+    }
+    expect((await readSessionPrs(prPath))?.[0]?.issues).toBeUndefined();
+  });
+
+  it('runs the list query for a mixed workspace', async () => {
+    // One legacy merged binding (issue catch-up only) next to one open
+    // binding: the open one still needs its state refreshed.
+    await seedSession(SESSION_A);
+    const prPathA = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPathA, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'merged',
+    });
+    await seedSession(SESSION_B);
+    const prPathB = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
+      'active',
+    );
+    await upsertSessionPr(prPathB, {
+      number: 43,
+      url: 'https://github.com/o/r/pull/43',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(43, 'merged')],
+    });
+
+    expect(await refreshWorkspaceSessionPrStates(runtime)).toEqual({
+      scanned: 2,
+      updated: 2,
+    });
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
+    expect((await readSessionPrs(prPathB))?.[0]?.state).toBe('merged');
+    expect((await readSessionPrs(prPathA))?.[0]?.issues).toEqual([]);
+  });
+
+  it('never runs the issue lookup once the generation closes between the two queries', async () => {
+    const prPath = await seedOpenBinding(SESSION_A);
+    const guard = attachGuard(runtime);
+    fetchGitHubPullRequestsMock.mockImplementation(async () => {
+      // A trust/env replacement lands while the list query is in flight.
+      guard.close();
+      return { kind: 'ok', pullRequests: [pr(42, 'merged')] };
+    });
+
+    await expect(
+      refreshWorkspaceSessionPrStates(runtime),
+    ).rejects.toBeInstanceOf(WorkspaceGenerationClosedError);
+
+    expect(fetchGitHubPullRequestIssuesMock).not.toHaveBeenCalled();
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    expect(markSessionCatalogChanged).not.toHaveBeenCalled();
   });
 
   it('still snapshots issues when the list query fails', async () => {

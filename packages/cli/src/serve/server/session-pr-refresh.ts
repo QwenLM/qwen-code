@@ -236,9 +236,22 @@ export async function refreshWorkspaceSessionPrStates(
     number,
     { state?: SessionPrState; url: string; issues?: SessionPrIssue[] }
   >();
-  // Set once the GitHub issue lookup succeeded: only then is a binding the
-  // repository could not resolve given its converging empty snapshot.
-  let issuesFetched = false;
+  // Once true, a merged binding lacking a snapshot that no lookup resolved
+  // gets a converging empty one, so it leaves the sweep instead of
+  // re-entering the lookup forever: the lookup succeeded (the repository
+  // does not know the number), it is structurally impossible (no gh, no
+  // git root), or the platform has no closing references at all (Aone).
+  // A transient failure never converges — the PR may well have references.
+  let convergeMerged = false;
+  // The repository the list query resolved, as a canonical `…/owner/repo`
+  // prefix. A binding outside it (another repository's same-numbered PR)
+  // can never resolve here, so it stays out of the lookup — the GitHub
+  // twin of the Aone refreshability filter. Unknown (no list result) fails
+  // open into the lookup, whose per-alias NOT_FOUND then converges it.
+  let repoPrefix: string | undefined;
+  const isForeign = (url: string): boolean =>
+    repoPrefix !== undefined &&
+    !canonicalSessionPrUrl(url).startsWith(`${repoPrefix}/pull/`);
   const aoneRepo = await resolveAoneWorkspaceRepo(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
@@ -299,9 +312,10 @@ export async function refreshWorkspaceSessionPrStates(
     // this, so a budget-truncated sweep's tail is picked up next sweep
     // instead of falling in the gap between fixed-cap windows.
     aoneConsumed = consumed;
-    if (numberToFetch.size === 0) {
-      return { scanned, updated: 0, aoneConsumed };
-    }
+    // Closing references are a GitHub notion; without this a merged Aone
+    // binding would keep the workspace pending (one origin resolution per
+    // sweep) forever.
+    convergeMerged = true;
   } else {
     if (pendingNumbers.some((target) => target.numbers.length > 0)) {
       const result = await fetchPullRequests(
@@ -318,12 +332,21 @@ export async function refreshWorkspaceSessionPrStates(
             url: pr.url,
           });
         }
+        const sample = result.pullRequests[0]?.url;
+        if (sample !== undefined && /\/pull\/\d+$/.test(sample)) {
+          repoPrefix = canonicalSessionPrUrl(sample).replace(
+            /\/pull\/\d+$/,
+            '',
+          );
+        }
       }
     }
     const issueNumbers = [
       ...new Set(
         pendingNumbers.flatMap((target) =>
-          target.issueEntries.map((entry) => entry.number),
+          target.issueEntries
+            .filter((entry) => !isForeign(entry.url))
+            .map((entry) => entry.number),
         ),
       ),
     ];
@@ -335,7 +358,7 @@ export async function refreshWorkspaceSessionPrStates(
         issueNumbers,
       );
       if (issuesResult.kind === 'ok') {
-        issuesFetched = true;
+        convergeMerged = true;
         for (const [number, { url, issues }] of issuesResult.pullRequests) {
           // Both queries resolve the same repository, so a number present
           // in both names one PR; the state (if any) stays from the list
@@ -345,10 +368,12 @@ export async function refreshWorkspaceSessionPrStates(
             issues,
           });
         }
+      } else if (
+        issuesResult.kind === 'cli_unavailable' ||
+        issuesResult.kind === 'not_a_repo'
+      ) {
+        convergeMerged = true;
       }
-    }
-    if (numberToFetch.size === 0 && !issuesFetched) {
-      return { scanned, updated: 0 };
     }
   }
 
@@ -366,23 +391,18 @@ export async function refreshWorkspaceSessionPrStates(
       // 'closed' after a reopen.
       if (fetched !== undefined) states.set(number, fetched);
     }
-    if (issuesFetched) {
-      for (const entry of target.issueEntries) {
-        const fetched = numberToFetch.get(entry.number);
-        if (
-          fetched?.issues !== undefined &&
-          canonicalSessionPrUrl(fetched.url) ===
-            canonicalSessionPrUrl(entry.url)
-        ) {
-          states.set(entry.number, fetched);
-        } else if (entry.merged) {
-          // The repository cannot resolve this binding (another
-          // repository's same-numbered PR), so no lookup can ever snapshot
-          // it; without a converging empty snapshot a merged one would
-          // re-enter the lookup every sweep. Open ones stay pending for
-          // their state anyway and cost the lookup nothing extra.
-          states.set(entry.number, { url: entry.url, issues: [] });
-        }
+    for (const entry of target.issueEntries) {
+      const fetched = numberToFetch.get(entry.number);
+      if (
+        fetched?.issues !== undefined &&
+        canonicalSessionPrUrl(fetched.url) === canonicalSessionPrUrl(entry.url)
+      ) {
+        states.set(entry.number, fetched);
+      } else if (entry.merged && (convergeMerged || isForeign(entry.url))) {
+        // No lookup will ever snapshot this merged binding; an empty
+        // snapshot (renders as none) retires it from the sweep. Open ones
+        // stay pending for their state anyway.
+        states.set(entry.number, { url: entry.url, issues: [] });
       }
     }
     if (states.size === 0) continue;

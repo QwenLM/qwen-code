@@ -90,6 +90,7 @@ import {
   TrustGateError,
   readSessionPrs,
   updateSessionPrStates,
+  writeSessionPrs,
   upsertSessionPr,
   type Extension,
   type ExtensionInstallMetadata,
@@ -16036,6 +16037,68 @@ describe('createServeApp', () => {
       const merged = result.sessions.find((s) => s.sessionId === id);
       expect(merged?.prs).toEqual([
         { number: 42, url: 'https://github.com/repo-b/o/pull/42' },
+      ]);
+    });
+
+    it('attaches the snapshot of the url-matched entry, not a same-numbered duplicate', async () => {
+      // A hand-edited sidecar can hold two entries with one number (the
+      // reader validates shape, not uniqueness); the live binding must find
+      // its own entry by url, not whichever one comes last.
+      const id = '550e8400-e29b-41d4-a716-44665544a007';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      const issues = [
+        { number: 7, url: 'https://github.com/repo-a/o/issues/7' },
+      ];
+      await writeSessionPrs(sidecarPath, [
+        {
+          number: 42,
+          url: 'https://github.com/repo-a/o/pull/42',
+          createdAt: '2026-05-17T12:00:01.000Z',
+          state: 'merged',
+          issues,
+        },
+        {
+          number: 42,
+          url: 'https://github.com/repo-b/o/pull/42',
+          createdAt: '2026-05-17T12:00:02.000Z',
+        },
+      ]);
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 42, url: 'https://github.com/repo-a/o/pull/42' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        {
+          number: 42,
+          url: 'https://github.com/repo-a/o/pull/42',
+          state: 'merged',
+          issues,
+        },
       ]);
     });
 

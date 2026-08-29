@@ -40,7 +40,7 @@ number, chunks at 100, and maps a missing binary to `cli_unavailable`.
 cd packages/cli
 npx vitest run src/serve/server/session-pr-refresh.test.ts
 npx vitest run src/serve/server.test.ts -t sidecar
-cd ../acp-bridge && npx vitest run src/bridge.test.ts -t "SessionPrs|re-bind"
+cd ../acp-bridge && npx vitest run src/bridge.test.ts -t "SessionPrs|re-bind|client-supplied"
 cd ../sdk-typescript && npx vitest run test/unit/sessionPr.test.ts
 ```
 

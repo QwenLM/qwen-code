@@ -65,7 +65,8 @@ p10303: pullRequest(number: 10303) {
 2. 若存在非 merged 绑定，跑原有 slim `gh pr list --state all` 刷 PR state（不变）。
 3. 对第 1 步的编号去重后跑一次 GraphQL 拿 issues。
 4. 每个 sidecar 一次 `updateSessionPrStates` 原地写入 state + issues：url 不匹配不写；`state` / `issues` 任一缺省则保留原值；都无变化则不写文件。
-5. 收敛：查询成功但仓库解析不到的绑定（指向别的仓库的同号 PR、已删除的 PR）写入空快照 `issues: []`——否则 merged 的外仓绑定会永远重新进入查询，违背"全 merged 且有快照零调用"的不变量。
+5. 收敛：merged 且无快照、又永远不可能被查询解析到的绑定写入空快照 `issues: []`（渲染上等同于没有），否则它会永远重新进入查询，违背"全 merged 且有快照零调用"的不变量。触发条件：查询成功但仓库不认识该编号（外仓同号 PR）、查询结构上不可能（无 gh / 无 git root）、平台根本没有 closing references（Aone）。瞬时失败（`failed`）不收敛。
+6. 可解析性过滤：用列表查询返回的 PR url 推出本 workspace 仓库的 canonical 前缀，url 不在该仓库下的绑定不进入查询（与 Aone 的 refreshable 过滤对称），merged 的直接本地收敛；列表没跑或为空则放行进查询，由逐别名 NOT_FOUND 收敛。
 
 成本：全 merged 且已有快照的 workspace 零调用；否则多一条 ~1–3s 的 GraphQL。已合入 PR 的 issue 之后被 reopen 不再跟踪（与"merged 是终态"同一取舍）。
 

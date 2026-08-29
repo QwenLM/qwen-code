@@ -190,8 +190,11 @@ export async function fetchGitHubPullRequestIssues(
 ): Promise<FetchGitHubPullRequestIssuesResult> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return { kind: 'not_a_repo' };
+  // Safe integers only: an integer-valued double at or beyond 1e21 renders
+  // in exponential notation, an invalid GraphQL Int literal that would fail
+  // the whole document instead of one alias.
   const valid = [
-    ...new Set(numbers.filter((n) => Number.isInteger(n) && n > 0)),
+    ...new Set(numbers.filter((n) => Number.isSafeInteger(n) && n > 0)),
   ];
   const pullRequests = new Map<number, GitHubPullRequestIssues>();
   for (let i = 0; i < valid.length; i += GITHUB_PR_ISSUES_BATCH_SIZE) {

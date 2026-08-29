@@ -550,21 +550,20 @@ function mergeSummaryPrs(
   livePrs: readonly SessionPrInfo[] | undefined,
 ): SessionPrInfo[] {
   const live = livePrs ?? [];
-  const persistedByNumber = new Map(
-    (persistedPrs ?? []).map((p) => [p.number, p]),
-  );
   return [
     ...(persistedPrs ?? []).filter(
       (p) => !live.some((l) => l.number === p.number),
     ),
     ...live.map((l) => {
-      const persisted = persistedByNumber.get(l.number);
-      if (
-        !persisted ||
-        canonicalSessionPrUrl(persisted.url) !== canonicalSessionPrUrl(l.url)
-      ) {
-        return l;
-      }
+      // Matched by url, not a number-keyed map: a hand-edited sidecar can
+      // hold two same-numbered entries, and a last-wins lookup would let
+      // the foreign one shadow the live binding's own snapshot.
+      const persisted = (persistedPrs ?? []).find(
+        (p) =>
+          p.number === l.number &&
+          canonicalSessionPrUrl(p.url) === canonicalSessionPrUrl(l.url),
+      );
+      if (!persisted) return l;
       return {
         ...l,
         ...(persisted.state ? { state: persisted.state } : {}),
