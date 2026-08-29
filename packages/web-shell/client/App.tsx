@@ -12573,6 +12573,8 @@ export function App({
                                 ),
                             }
                           : {}),
+                        onOpenLocalControlSettings:
+                          handleOpenLocalControlSettings,
                       })}
                     </div>
                   ) : (

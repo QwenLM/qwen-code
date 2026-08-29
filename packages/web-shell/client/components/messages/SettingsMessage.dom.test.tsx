@@ -267,6 +267,15 @@ describe('SettingsMessage initialCategory', () => {
     expect(activeCategoryButton(container).textContent).toContain('General');
   });
 
+  it('falls back to the first category for an unknown initialCategory', () => {
+    const container = renderPanel(
+      makeState([boolSetting(), daemonSetting()], vi.fn()),
+      { initialCategory: 'NoSuchCategory' },
+    );
+
+    expect(activeCategoryButton(container).textContent).toContain('General');
+  });
+
   it('does not force the deep-linked category again after a manual switch', async () => {
     vi.stubGlobal(
       'fetch',
