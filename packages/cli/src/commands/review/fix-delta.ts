@@ -68,7 +68,10 @@ export interface FixSnapshot {
    * stamped as pre-existing, they would filter a fix's real edit out of the
    * warning into a false all-clear. Dirt that predates the fix is not the
    * fix's doing: a no-op fix in such a repository must still hear the
-   * all-clear, not a claim that invisible edits exist.
+   * all-clear, not a claim that invisible edits exist. Identities are
+   * keyed on the raw path bytes (latin1-encoded) — the display decode is
+   * not injective — so the `--since` comparison matches exactly the paths
+   * the probe recorded.
    */
   dirtySubmodules: string[];
 }
@@ -410,6 +413,11 @@ function patchBetweenTrees(
     '-r',
     '-p',
     '-M',
+    // Without `--binary` a binary-content edit enters the hunks — the
+    // command's sole output — as a bare "Binary files … differ" stub: no
+    // patch data, not `git apply`-replayable, and the audit all-clears an
+    // edit it could not read.
+    '--binary',
     '--no-color',
     '--no-ext-diff',
     fromTree,
@@ -460,15 +468,19 @@ function filesBetweenTrees(
  * plain status, and an edit inside would classify clean in both states.
  *
  * `failed` is a state of its own, not dirt: the caller decides what an
- * unanswerable probe means for the baseline and for the warning. A name
- * that is not valid UTF-8 cannot reach the child intact — spawn coerces
- * every channel through UTF-8 — so the probe fails for it, and the failure
- * direction over-warns, it never silences a blind spot.
+ * unanswerable probe means for the baseline and for the warning.
  */
 function probeNestedRepoState(absPath: Buffer): 'clean' | 'dirty' | 'failed' {
+  // Spawn coerces every channel through UTF-8, so a name the bytes cannot
+  // represent would reach the child mangled to U+FFFD — probing whatever
+  // happens to live at THAT name (a planted decoy answering 'clean' for the
+  // wrong repository) instead of failing. Refuse the coercion: the failure
+  // direction over-warns, it never silences a blind spot.
+  const path = absPath.toString('utf8');
+  if (!Buffer.from(path, 'utf8').equals(absPath)) return 'failed';
   const inner = gitOpt(
     '-C',
-    absPath.toString(),
+    path,
     '-c',
     'status.showUntrackedFiles=all',
     '--no-optional-locks',
@@ -509,6 +521,15 @@ function joinBytes(abs: Buffer, rel: Buffer): Buffer {
   return Buffer.concat([abs, Buffer.from(sep), rel]);
 }
 
+/**
+ * Join a walk-discovered RELATIVE name: always git's `/`, never the
+ * platform separator, so a walk-discovered path and a git-originated one
+ * (`-z` status, `ls-files`) key and report identically on every platform.
+ */
+function joinRel(parent: Buffer, name: Buffer): Buffer {
+  return Buffer.concat([parent, Buffer.from('/'), name]);
+}
+
 const DOT_GIT = Buffer.from('.git');
 
 /** The `ls-files -s` mode of a gitlink, plus the space after it. */
@@ -528,9 +549,8 @@ function decodePath(raw: Buffer): string {
   const decoded = Buffer.from(utf8, 'utf8').equals(raw)
     ? utf8
     : raw.toString('latin1');
-  // Walk-discovered names are joined with the platform separator while
-  // git-originated names carry `/` on every platform, and reporting plus
-  // the baseline identity compare the two — so render both in git's
+  // Reporting and baseline identity compare names of two origins — git's
+  // `-z` output and the filesystem walk — so render in git's `/`
   // separator. On win32 a backslash cannot be a filename byte; on POSIX it
   // can, and stays.
   return sep === '\\' ? decoded.split('\\').join('/') : decoded;
@@ -707,6 +727,7 @@ function reposUnder(
       }
       const name = e.name;
       const childAbs = joinBytes(cur.abs, name);
+      const childRel = joinRel(cur.rel, name);
       if (!e.isDirectory() && !e.isFile() && !e.isSymbolicLink()) {
         // DT_UNKNOWN — a filesystem that does not hand back d_type (NFS
         // without it, sshfs/FUSE): every predicate answers false, and
@@ -714,7 +735,7 @@ function reposUnder(
         // 'fully walked, nothing inside', indistinguishable from empty.
         // It rides `unreadable` instead: the failure direction
         // over-warns, it never silences a blind spot.
-        unreadable.push(joinBytes(cur.rel, name));
+        unreadable.push(childRel);
         continue;
       }
       let isDir = e.isDirectory();
@@ -730,7 +751,6 @@ function reposUnder(
         if (isDir && linkTargetExcluded(childAbs, root, gitDirRel)) continue;
       }
       if (!isDir) continue;
-      const childRel = joinBytes(cur.rel, name);
       if (relPathExcluded(childRel, gitDirRel)) continue;
       if (existsSync(joinBytes(childAbs, DOT_GIT))) {
         repos.push({ abs: childAbs, rel: childRel });
@@ -751,12 +771,19 @@ function probeNestedRepo(
     seen: Set<string>;
   },
 ): void {
-  const name = decodePath(rel);
-  if (state.seen.has(name)) return;
-  state.seen.add(name);
+  // Identity keys on the RAW BYTES — latin1 is a byte<->char bijection —
+  // never on the display decode: decodePath is not injective (UTF-8
+  // `C3 A9` and the single invalid byte `E9` both render 'é'), and a
+  // colliding `seen` mark let a clean repository's probe swallow its
+  // dirty sibling's. Display names are re-derived from the key at
+  // reporting time; the key itself is what the sets and the persisted
+  // baseline compare.
+  const key = rel.toString('latin1');
+  if (state.seen.has(key)) return;
+  state.seen.add(key);
   const result = probeNestedRepoState(abs);
-  if (result === 'dirty') state.dirty.add(name);
-  else if (result === 'failed') state.unresolved.add(name);
+  if (result === 'dirty') state.dirty.add(key);
+  else if (result === 'failed') state.unresolved.add(key);
 }
 
 /**
@@ -849,6 +876,10 @@ function probeLinkedRepo(
  * resolves, so the repository would be skipped silently while invisible
  * edits land inside it.
  *
+ * Identity throughout is keyed on the raw path bytes (the latin1
+ * byte<->char bijection), never on the display decode, which is not
+ * injective — one repository's answer must never stand for another's.
+ *
  * The answer is split instead of folded: `dirty` is CONFIRMED uncommitted
  * content — the only state that may enter the snapshot baseline — and
  * `unresolved` is every path the probe could not answer: an inner status
@@ -915,10 +946,10 @@ function probeBlindSpotState(
             probeNestedRepo(r.abs, r.rel, state);
           }
           for (const u of found.unreadable) {
-            unresolved.add(decodePath(u));
+            unresolved.add(u.toString('latin1'));
           }
           if (found.exhausted) {
-            unresolved.add(decodePath(dirRel));
+            unresolved.add(dirRel.toString('latin1'));
           }
         } else {
           probeNestedRepo(dirAbs, dirRel, state);
@@ -941,11 +972,12 @@ function probeBlindSpotState(
     if (sub.length !== 4 || !sub.startsWith('S')) continue;
     // Modified-content or untracked-content flag: the invisible content.
     if (sub[2] === '.' && sub[3] === '.') continue;
-    const name = decodePath(
-      pathAfterSpaces(entry, kind === '1' ? 8 : kind === '2' ? 9 : 10),
-    );
-    dirty.add(name);
-    seen.add(name);
+    const key = pathAfterSpaces(
+      entry,
+      kind === '1' ? 8 : kind === '2' ? 9 : 10,
+    ).toString('latin1');
+    dirty.add(key);
+    seen.add(key);
   }
   // Status entries are not the whole of discovery: assume-unchanged /
   // skip-worktree bits on an interior file hide the dirt from the inner
@@ -985,7 +1017,7 @@ function probeBlindSpotState(
     // checkout.
     if (!existsSync(abs)) continue;
     if (!existsSync(joinBytes(abs, DOT_GIT))) {
-      unresolved.add(decodePath(rel));
+      unresolved.add(rel.toString('latin1'));
       continue;
     }
     probeNestedRepo(abs, rel, state);
@@ -1049,6 +1081,15 @@ function cleanedSubmoduleNote(cleaned: string[]): string {
     `inside ${one ? 'it' : 'them'} changed between the two states, ` +
     'invisible to this command.'
   );
+}
+
+/**
+ * Identity byte keys back to display names for the notes above: latin1
+ * re-yields the exact bytes, and `decodePath` renders them the same way
+ * it rendered them at discovery time.
+ */
+function displayNames(keys: string[]): string[] {
+  return keys.map((key) => decodePath(Buffer.from(key, 'latin1')));
 }
 
 export interface FixDeltaArgs {
@@ -1161,16 +1202,16 @@ export function runFixDelta(args: FixDeltaArgs): void {
   );
   if (diff.length === 0) {
     if (preExisting.length > 0) {
-      writeStderrLine(preExistingDirtNote(preExisting));
+      writeStderrLine(preExistingDirtNote(displayNames(preExisting)));
     }
     if (freshDirt.length > 0) {
-      writeStderrLine(submoduleBlindSpot(freshDirt, true));
+      writeStderrLine(submoduleBlindSpot(displayNames(freshDirt), true));
     }
     if (unresolvedNow.length > 0) {
-      writeStderrLine(unresolvedBlindSpot(unresolvedNow, true));
+      writeStderrLine(unresolvedBlindSpot(displayNames(unresolvedNow), true));
     }
     if (cleaned.length > 0) {
-      writeStderrLine(cleanedSubmoduleNote(cleaned));
+      writeStderrLine(cleanedSubmoduleNote(displayNames(cleaned)));
     }
     if (
       freshDirt.length === 0 &&
@@ -1193,16 +1234,16 @@ export function runFixDelta(args: FixDeltaArgs): void {
       (files.length > 8 ? `, and ${files.length - 8} more` : ''),
   );
   if (preExisting.length > 0) {
-    writeStderrLine(preExistingDirtNote(preExisting));
+    writeStderrLine(preExistingDirtNote(displayNames(preExisting)));
   }
   if (freshDirt.length > 0) {
-    writeStderrLine(submoduleBlindSpot(freshDirt, false));
+    writeStderrLine(submoduleBlindSpot(displayNames(freshDirt), false));
   }
   if (unresolvedNow.length > 0) {
-    writeStderrLine(unresolvedBlindSpot(unresolvedNow, false));
+    writeStderrLine(unresolvedBlindSpot(displayNames(unresolvedNow), false));
   }
   if (cleaned.length > 0) {
-    writeStderrLine(cleanedSubmoduleNote(cleaned));
+    writeStderrLine(cleanedSubmoduleNote(displayNames(cleaned)));
   }
 }
 

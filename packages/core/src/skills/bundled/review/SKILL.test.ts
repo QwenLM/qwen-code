@@ -1008,6 +1008,16 @@ describe('bundled review skill', () => {
     expect(step).toContain(`--hunks ${hunksPath}`);
     expect(step).toContain(`--out ${artifactPath}`);
     expect(step).toContain(`--findings ${artifactPath}`);
+    // The producer and the consumer are failure-coupled: `fix-delta
+    // --since` writes its hunks only as its final act, so a failed
+    // producer leaves whatever an interrupted earlier run wrote at the
+    // same deterministic path — without the `&&` (and the prose branch
+    // for its failure) the auditor runs over that stale file and appends
+    // the previous run's assumptions to this run's ledger.
+    expect(step).toContain('--out ' + hunksPath + ' && \\');
+    expect(step).toContain(
+      'do not launch the auditor over the hunks file an interrupted earlier run can have left',
+    );
     // `--plan` is `demandOption: true` on the builder: dropping the flag
     // kills every later fix audit in a yargs refusal, disclosed as a
     // routine `Fix audit: not run — <error>`.

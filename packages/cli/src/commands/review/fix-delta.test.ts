@@ -158,6 +158,40 @@ describe('fix-delta', () => {
     return subSrc;
   }
 
+  /** Init + commit inside a nested repo whose NAME spawn args cannot
+   * carry (invalid UTF-8): the shell's stdin is the one byte-exact
+   * channel, as in the non-UTF-8 test above. */
+  function initNestedRepoSh(abs: Buffer): void {
+    execFileSync('/bin/sh', [], {
+      input: Buffer.concat([
+        Buffer.from("set -e\ncd -- '"),
+        abs,
+        Buffer.from(
+          "'\n" +
+            'git init -q -b main\n' +
+            'git config user.email t@t.t\n' +
+            'git config user.name t\n' +
+            'printf before > f.txt\n' +
+            'git add -A\n' +
+            'git commit -qm init\n',
+        ),
+      ]),
+    });
+  }
+
+  /** Byte-exact overwrite under a name spawn args cannot carry. */
+  function overwriteSh(absFile: Buffer, content: string): void {
+    execFileSync('/bin/sh', [], {
+      input: Buffer.concat([
+        Buffer.from("set -e\nprintf %s '"),
+        Buffer.from(content),
+        Buffer.from("' > '"),
+        absFile,
+        Buffer.from("'\n"),
+      ]),
+    });
+  }
+
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
     repo = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-fix-delta-')));
@@ -2187,6 +2221,116 @@ describe('fix-delta', () => {
       expect(readFileSync(hunksFile(), 'utf8')).toContain(
         '+export const x = 3;',
       );
+    },
+  );
+
+  it('keeps a binary edit git-apply-replayable in the hunks', () => {
+    // Without `--binary` a binary-content edit enters the hunks as a bare
+    // "Binary files … differ" stub — no patch data, not replayable —
+    // while the summary still reports the file, so the audit all-clears
+    // an edit it could not read.
+    writeFileSync(
+      join(repo, 'blob.bin'),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]),
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'binary fixture');
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(
+      join(repo, 'blob.bin'),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x02, 0x02]),
+    );
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('GIT binary patch');
+    expect(hunks).not.toContain('Binary files ');
+  });
+
+  // POSIX-only: a raw 0xE9-byte directory name cannot exist on NTFS.
+  it.skipIf(process.platform === 'win32')(
+    'keeps colliding display names apart when keying the blind-spot sets',
+    () => {
+      // UTF-8 `C3 A9` and the single invalid byte `E9` decode to the SAME
+      // display name; identity keys on the raw bytes, or the clean repo's
+      // `seen` mark swallows its dirty sibling's probe and the all-clear
+      // prints beside the landed edit.
+      const cleanAbs = Buffer.concat([
+        Buffer.from(repo),
+        Buffer.from('/'),
+        Buffer.from([0xc3, 0xa9]),
+      ]);
+      const dirtyAbs = Buffer.concat([
+        Buffer.from(repo),
+        Buffer.from('/'),
+        Buffer.from([0xe9]),
+      ]);
+      mkdirSync(cleanAbs);
+      mkdirSync(dirtyAbs);
+      initNestedRepoSh(cleanAbs);
+      initNestedRepoSh(dirtyAbs);
+
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      overwriteSh(
+        Buffer.concat([dirtyAbs, Buffer.from('/f.txt')]),
+        'the hidden fix',
+      );
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(lines.some((l) => l.includes('cannot see'))).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  // POSIX-only: a raw 0xFF-byte directory name cannot exist on NTFS.
+  it.skipIf(process.platform === 'win32')(
+    'never probes a planted decoy in place of a name the bytes cannot reach',
+    () => {
+      // Spawn coerces every channel through UTF-8: a 0xFF name would
+      // reach the child as U+FFFD and probe whatever lives at THAT name —
+      // a clean decoy answering 'clean' for the dirty repository. The
+      // probe must fail for the unrepresentable name instead.
+      const realAbs = Buffer.concat([
+        Buffer.from(repo),
+        Buffer.from('/'),
+        Buffer.from([0xff]),
+      ]);
+      const decoyAbs = Buffer.concat([
+        Buffer.from(repo),
+        Buffer.from('/'),
+        Buffer.from([0xef, 0xbf, 0xbd]), // U+FFFD, UTF-8 encoded
+      ]);
+      mkdirSync(realAbs);
+      mkdirSync(decoyAbs);
+      initNestedRepoSh(realAbs);
+      initNestedRepoSh(decoyAbs); // committed clean: the decoy
+
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      overwriteSh(
+        Buffer.concat([realAbs, Buffer.from('/f.txt')]),
+        'the hidden fix',
+      );
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(
+        lines.some((l) => l.includes('\u00ff') && l.includes('cannot see')),
+      ).toBe(true);
+      // The decoy is clean and is never named; the real repo rides the
+      // unresolved disclosure under its byte-preserving latin1 name.
+      expect(lines.some((l) => l.includes('\ufffd'))).toBe(false);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
     },
   );
 });
