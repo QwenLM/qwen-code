@@ -8183,6 +8183,7 @@ describe('createServeApp', () => {
               persistence: expected,
             },
           });
+          expect(captured?.installMetadata).not.toHaveProperty('networkPolicy');
           await vi.waitFor(() =>
             expect(bridge.extensionEvents.at(-1)).toMatchObject({
               status: 'installed',
@@ -14023,32 +14024,36 @@ describe('createServeApp', () => {
       });
     });
 
-    it('503s fresh session work while restore cleanup is quarantined', async () => {
-      const bridge = fakeBridge({
-        resumeImpl: async () => {
-          throw new BridgeChannelQuarantinedError(
-            'restore_settlement_overdue',
-            90,
-          );
-        },
-      });
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      const res = await request(app)
-        .post('/session/persisted-quarantined/resume')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({});
+    it('503s fresh session work for every channel quarantine reason', async () => {
+      for (const reason of [
+        'restore_cleanup_failed',
+        'restore_settlement_overdue',
+        'new_session_cleanup_failed',
+        'new_session_settlement_overdue',
+      ] as const) {
+        const bridge = fakeBridge({
+          resumeImpl: async () => {
+            throw new BridgeChannelQuarantinedError(reason, 90);
+          },
+        });
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session/persisted-quarantined/resume')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
 
-      expect(res.status).toBe(503);
-      // Quarantine lasts until the channel drains — strictly longer than the
-      // fence — and a fresh-id caller never sees the 409 that would tell it so.
-      expect(res.headers['retry-after']).toBe('90');
-      expect(res.body).toMatchObject({
-        code: 'acp_channel_unavailable',
-        errorKind: 'acp_channel_unavailable',
-        retryable: true,
-        reason: 'restore_settlement_overdue',
-        retryAfterSeconds: 90,
-      });
+        expect(res.status).toBe(503);
+        // Fresh-id callers never see the same-id 409, so the 503 must carry the
+        // operation-budget-scale retry hint itself.
+        expect(res.headers['retry-after']).toBe('90');
+        expect(res.body).toMatchObject({
+          code: 'acp_channel_unavailable',
+          errorKind: 'acp_channel_unavailable',
+          retryable: true,
+          reason,
+          retryAfterSeconds: 90,
+        });
+      }
     });
 
     it('400 workspace_mismatch before touching the bridge for non-primary cwd', async () => {
