@@ -61,6 +61,12 @@ let homeDir = '';
 let port = 0;
 let base = '';
 let client: DaemonClient;
+// The daemon evaluates isNativeDirectoryPickerAvailable() in its own process
+// at boot. Probe once at spawn time (same host, same uid, same relevant env)
+// so the expectation matches the daemon's boot-time view; re-probing at
+// assertion time minutes later diverged when the host's GUI session state
+// drifted mid-run (red macOS E2E runs after #9406, tracked in #10453).
+let nativeDirectoryPickerAtBoot = false;
 
 function writePersistedTranscript(
   sessionId: string,
@@ -112,6 +118,7 @@ function chatRecord(
 
 beforeAll(async () => {
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
+  nativeDirectoryPickerAtBoot = isNativeDirectoryPickerAvailable();
   daemon = spawn(
     process.execPath,
     [
@@ -296,7 +303,8 @@ describe('qwen serve — capabilities envelope', () => {
     // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
     // `native_directory_picker` is host-conditional (the daemon host's GUI
     // environment, not a spawn flag) and is spliced at its registry
-    // position below.
+    // position below, using the boot-time probe captured when the daemon
+    // was spawned rather than a fresh probe at assertion time.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
@@ -414,9 +422,7 @@ describe('qwen serve — capabilities envelope', () => {
       'persistent_workspace_registration',
       'workspace_display_name',
       'workspace_runtime_removal',
-      ...(isNativeDirectoryPickerAvailable()
-        ? ['native_directory_picker']
-        : []),
+      ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
       'workspace_qualified_rest_core',
       'extension_management_v2',
       'extension_git_credentials',
