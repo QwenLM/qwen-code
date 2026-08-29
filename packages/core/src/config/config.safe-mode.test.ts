@@ -62,10 +62,11 @@ vi.mock('../tools/tool-registry', () => {
   return { ToolRegistry: ToolRegistryMock };
 });
 
-vi.mock('../utils/memoryDiscovery.js', () => ({
+vi.mock('../memory/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
     memoryContent: '',
     fileCount: 0,
+    contextFilePaths: [],
     ruleCount: 0,
     conditionalRules: [],
     projectRoot: '/tmp',
@@ -136,9 +137,9 @@ vi.mock('../core/contentGenerator.js', () => ({
 }));
 
 vi.mock('../core/client.js', () => {
-  const GeminiClientMock = vi.fn();
-  GeminiClientMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
-  return { GeminiClient: GeminiClientMock };
+  const LlmClientMock = vi.fn();
+  LlmClientMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  return { LlmClient: LlmClientMock };
 });
 
 vi.mock('../telemetry/index.js', () => ({
@@ -468,7 +469,7 @@ describe('Config safe mode', () => {
       await config.initialize();
       expect(config.getUserMemory()).toBe('');
       expect(config.getAutoMemoryPrompt()).toBe('');
-      expect(config.getGeminiMdFileCount()).toBe(0);
+      expect(config.getMemoryFileCount()).toBe(0);
     });
 
     it('records every fixed Config startup phase in order when skipped', async () => {

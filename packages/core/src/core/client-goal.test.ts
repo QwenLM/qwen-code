@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import type { GeminiChat } from './geminiChat.js';
+import type { LlmChat } from './llm-chat.js';
 import {
   createGoalRuntime,
   GoalPersistenceUnavailableError,
@@ -19,6 +19,10 @@ import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
+import {
+  __resetActiveGoalStoreForTests,
+  setActiveGoal,
+} from '../goals/activeGoalStore.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { ApprovalMode } from '../config/config.js';
 
@@ -49,8 +53,8 @@ vi.mock('../utils/nextSpeakerChecker.js', () => ({
   checkNextSpeaker: nextSpeakerMocks.check,
 }));
 
-import { GeminiClient, SendMessageType } from './client.js';
-import { GeminiEventType, type ServerGeminiStreamEvent } from './turn.js';
+import { LlmClient, SendMessageType } from './client.js';
+import { LlmEventType, type ServerLlmStreamEvent } from './turn.js';
 
 const FORMER_GOAL_CONTINUATION_LIMIT = 50;
 
@@ -87,26 +91,26 @@ async function collectOutcome(stream: AsyncGenerator<unknown>) {
 }
 
 type GoalStateEvent = Extract<
-  ServerGeminiStreamEvent,
-  { type: GeminiEventType.GoalState }
+  ServerLlmStreamEvent,
+  { type: LlmEventType.GoalState }
 >;
 
 function goalStateEvents(events: unknown[]): GoalStateEvent[] {
   return events.filter(
     (event): event is GoalStateEvent =>
-      (event as { type?: GeminiEventType }).type === GeminiEventType.GoalState,
+      (event as { type?: LlmEventType }).type === LlmEventType.GoalState,
   );
 }
 
 function eventIndex(
   events: unknown[],
-  type: GeminiEventType,
-  predicate: (event: ServerGeminiStreamEvent) => boolean = () => true,
+  type: LlmEventType,
+  predicate: (event: ServerLlmStreamEvent) => boolean = () => true,
 ) {
   return events.findIndex(
     (event) =>
-      (event as { type?: GeminiEventType }).type === type &&
-      predicate(event as ServerGeminiStreamEvent),
+      (event as { type?: LlmEventType }).type === type &&
+      predicate(event as ServerLlmStreamEvent),
   );
 }
 
@@ -123,6 +127,7 @@ function setupGoalClient() {
       evidenceCursor: { recordId: 'create-record' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     },
@@ -235,19 +240,19 @@ function setupGoalClient() {
       getSnapshots: vi.fn(() => []),
     })),
   } as unknown as Config;
-  const client = new GeminiClient(config);
+  const client = new LlmClient(config);
   client['chat'] = {
     getUserContentPushCount: vi.fn(() => 0),
     getHistory: vi.fn(() => []),
     getHistoryLength: vi.fn(() => 0),
-  } as unknown as GeminiChat;
+  } as unknown as LlmChat;
   client['drainPendingAddedMcpToolsReminder'] = vi.fn();
   client['drainSkillAndCommandReminders'] = vi.fn(async () => undefined);
   client['drainAgentReminders'] = vi.fn(async () => undefined);
   return { client, config, runtime, recorder, order, unsubscribeGoalState };
 }
 
-describe('GeminiClient Goal admission', () => {
+describe('LlmClient Goal admission', () => {
   beforeEach(() => {
     turnMocks.constructors.length = 0;
     turnMocks.run.mockReset().mockImplementation(emptyStream);
@@ -258,7 +263,7 @@ describe('GeminiClient Goal admission', () => {
 
   it('exposes Goal as an explicit internal message type', () => {
     expect(SendMessageType.Goal).toBe('goal');
-    expect(GeminiEventType.GoalState).toBe('goal_state');
+    expect(LlmEventType.GoalState).toBe('goal_state');
   });
 
   it('flushes and queues real user input before finishing an exact Goal permit', async () => {
@@ -300,20 +305,19 @@ describe('GeminiClient Goal admission', () => {
     ]);
     const initialGoalStateIndex = eventIndex(
       events,
-      GeminiEventType.GoalState,
+      LlmEventType.GoalState,
       (event) =>
-        event.type === GeminiEventType.GoalState && event.cause === undefined,
+        event.type === LlmEventType.GoalState && event.cause === undefined,
     );
     const initialActiveGoalIndex = eventIndex(
       events,
-      GeminiEventType.ActiveGoal,
-      (event) =>
-        event.type === GeminiEventType.ActiveGoal && event.value !== null,
+      LlmEventType.ActiveGoal,
+      (event) => event.type === LlmEventType.ActiveGoal && event.value !== null,
     );
     expect(initialGoalStateIndex).toBeGreaterThanOrEqual(0);
     expect(initialActiveGoalIndex).toBeGreaterThan(initialGoalStateIndex);
     expect(events[initialActiveGoalIndex]).toEqual({
-      type: GeminiEventType.ActiveGoal,
+      type: LlmEventType.ActiveGoal,
       value: {
         condition: 'ship',
         iterations: 0,
@@ -449,12 +453,12 @@ describe('GeminiClient Goal admission', () => {
       'turn_finished',
     ]);
     expect(
-      eventIndex(events, GeminiEventType.GoalState, (event) =>
-        event.type === GeminiEventType.GoalState
+      eventIndex(events, LlmEventType.GoalState, (event) =>
+        event.type === LlmEventType.GoalState
           ? event.cause === 'turn_finished'
           : false,
       ),
-    ).toBeLessThan(eventIndex(events, GeminiEventType.UserPromptSubmitBlocked));
+    ).toBeLessThan(eventIndex(events, LlmEventType.UserPromptSubmitBlocked));
   });
 
   it('pauses and releases a hidden exact permit when UserPromptSubmit throws', async () => {
@@ -621,7 +625,7 @@ describe('GeminiClient Goal admission', () => {
     turnMocks.run.mockImplementationOnce(() =>
       (async function* () {
         caller.abort();
-        yield { type: GeminiEventType.UserCancelled };
+        yield { type: LlmEventType.UserCancelled };
       })(),
     );
 
@@ -650,12 +654,12 @@ describe('GeminiClient Goal admission', () => {
       'turn_finished',
     ]);
     expect(
-      eventIndex(events, GeminiEventType.GoalState, (event) =>
-        event.type === GeminiEventType.GoalState
+      eventIndex(events, LlmEventType.GoalState, (event) =>
+        event.type === LlmEventType.GoalState
           ? event.cause === 'turn_finished'
           : false,
       ),
-    ).toBeLessThan(eventIndex(events, GeminiEventType.UserCancelled));
+    ).toBeLessThan(eventIndex(events, LlmEventType.UserCancelled));
   });
 
   it('pauses and releases the current permit when model setup throws', async () => {
@@ -744,17 +748,16 @@ describe('GeminiClient Goal admission', () => {
     expect(messageBus.request).toHaveBeenCalledTimes(2);
     const pauseStateIndex = eventIndex(
       events,
-      GeminiEventType.GoalState,
+      LlmEventType.GoalState,
       (event) =>
-        event.type === GeminiEventType.GoalState && event.cause === 'pause',
+        event.type === LlmEventType.GoalState && event.cause === 'pause',
     );
     const inactiveProjectionIndex = eventIndex(
       events,
-      GeminiEventType.ActiveGoal,
-      (event) =>
-        event.type === GeminiEventType.ActiveGoal && event.value === null,
+      LlmEventType.ActiveGoal,
+      (event) => event.type === LlmEventType.ActiveGoal && event.value === null,
     );
-    const loopIndex = eventIndex(events, GeminiEventType.StopHookLoop);
+    const loopIndex = eventIndex(events, LlmEventType.StopHookLoop);
     expect(pauseStateIndex).toBeGreaterThanOrEqual(0);
     expect(inactiveProjectionIndex).toBeGreaterThan(pauseStateIndex);
     expect(loopIndex).toBeGreaterThan(inactiveProjectionIndex);
@@ -795,27 +798,26 @@ describe('GeminiClient Goal admission', () => {
 
     const pauseStateIndex = eventIndex(
       events,
-      GeminiEventType.GoalState,
+      LlmEventType.GoalState,
       (event) =>
-        event.type === GeminiEventType.GoalState && event.cause === 'pause',
+        event.type === LlmEventType.GoalState && event.cause === 'pause',
     );
     const inactiveProjectionIndex = eventIndex(
       events,
-      GeminiEventType.ActiveGoal,
-      (event) =>
-        event.type === GeminiEventType.ActiveGoal && event.value === null,
+      LlmEventType.ActiveGoal,
+      (event) => event.type === LlmEventType.ActiveGoal && event.value === null,
     );
     const finishStateIndex = eventIndex(
       events,
-      GeminiEventType.GoalState,
+      LlmEventType.GoalState,
       (event) =>
-        event.type === GeminiEventType.GoalState &&
+        event.type === LlmEventType.GoalState &&
         event.cause === 'turn_finished',
     );
     expect(pauseStateIndex).toBeGreaterThanOrEqual(0);
     expect(inactiveProjectionIndex).toBeGreaterThan(pauseStateIndex);
     expect(finishStateIndex).toBeGreaterThan(inactiveProjectionIndex);
-    expect(eventIndex(events, GeminiEventType.StopHookLoop)).toBe(-1);
+    expect(eventIndex(events, LlmEventType.StopHookLoop)).toBe(-1);
     expect(runtime.finishTurn).toHaveBeenCalledOnce();
   });
 
@@ -949,7 +951,7 @@ describe('GeminiClient Goal admission', () => {
     expect(turnMocks.run).toHaveBeenCalledOnce();
     expect(order).toEqual(['pause', 'flush', 'finish']);
     expect(events).toContainEqual({
-      type: GeminiEventType.HookSystemMessage,
+      type: LlmEventType.HookSystemMessage,
       value:
         'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
     });
@@ -1031,7 +1033,6 @@ describe('GeminiClient Goal admission', () => {
             goalPermit: current,
             goalTurnKey: `goal-runtime:${current.turnId}`,
           },
-          0,
         ),
       );
     }
@@ -1039,5 +1040,120 @@ describe('GeminiClient Goal admission', () => {
     expect(started).toHaveLength(turns + 1);
     expect(turnMocks.run).toHaveBeenCalledTimes(turns);
     expect(client['sessionTurnCount']).toBe(0);
+  });
+
+  it('holds a runtime Goal turn to the caller recursion budget like any other send', async () => {
+    // Each Goal continuation is a fresh top-level send that starts from
+    // MAX_TURNS on its own, so a Goal has no reason to outlive one turn's
+    // recursion allowance. A caller that hands over an exhausted budget gets
+    // the same refusal every other message type gets -- and, because the
+    // turn was admitted, the interrupted-exit path pauses the Goal instead
+    // of leaving it running with a permit nobody will finish.
+    const { client, runtime } = setupGoalClient();
+    turnMocks.run.mockImplementation(async function* () {});
+
+    const events = await collect(
+      client.sendMessageStream(
+        [{ text: 'continue' }],
+        new AbortController().signal,
+        'goal-exhausted',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+        },
+        0,
+      ),
+    );
+
+    expect(turnMocks.run).not.toHaveBeenCalled();
+    expect(runtime.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'pause' }),
+    );
+    expect(runtime.finishTurn).toHaveBeenCalledOnce();
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: LlmEventType.MaxSessionTurns }),
+    );
+  });
+
+  afterEach(() => __resetActiveGoalStoreForTests());
+
+  it('admits a runtime Goal turn to steer input at a hit session cap', async () => {
+    // Second half of the session-cap exclusion: runtime Goal turns skip the
+    // count increment (pinned by the 75-turn test above) and must also be
+    // admitted to steer input once the user's own turns hit the cap.
+    const { client } = setupGoalClient();
+    client['sessionTurnCount'] = 1;
+    const getSteerInput = vi.fn().mockResolvedValue(undefined);
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'continue' }],
+        new AbortController().signal,
+        'goal-steer-cap',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+          getSteerInput,
+        },
+      ),
+    );
+
+    expect(getSteerInput).toHaveBeenCalled();
+  });
+
+  it('does not decrement the caller recursion budget inside a legacy hook Goal chain', async () => {
+    // A legacy /goal chain recurses inside one sendMessageStream call. With
+    // the caller budget of 2 preserved at every hop, two blocked stops still
+    // run three model turns; a decremented budget would refuse the third.
+    // Unsupported Goal runtime: the legacy hook chain owns the send, so the
+    // branch under test is the one that keys the budget on the active goal.
+    const { client, config } = setupGoalClient();
+    vi.mocked(config.getGoalRuntimeReady).mockRejectedValue(
+      new GoalPersistenceUnavailableError('legacy-only session'),
+    );
+    vi.mocked(config.getSkipNextSpeakerCheck).mockReturnValue(true);
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'Stop',
+    );
+    let stopRequestCount = 0;
+    const messageBus = {
+      request: vi.fn(async () => {
+        stopRequestCount += 1;
+        if (stopRequestCount <= 2) {
+          return {
+            output: { decision: 'block', reason: 'keep going' },
+            stopHookCount: 1,
+          };
+        }
+        return { output: undefined, stopHookCount: 1 };
+      }),
+    };
+    vi.mocked(config.getMessageBus).mockReturnValue(
+      messageBus as unknown as ReturnType<Config['getMessageBus']>,
+    );
+    setActiveGoal('goal-test-session', {
+      condition: 'ship',
+      iterations: 0,
+      setAt: 1,
+      tokensAtStart: 0,
+      hookId: 'goal-hook:test',
+    });
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'start the chain' }],
+        new AbortController().signal,
+        'legacy-goal-chain',
+        undefined,
+        2,
+      ),
+    );
+
+    expect(messageBus.request).toHaveBeenCalledTimes(3);
+    expect(turnMocks.run).toHaveBeenCalledTimes(3);
   });
 });

@@ -4,6 +4,7 @@ export default {
   'followup-suggestions': 'Followup Suggestions',
   'tool-use-summaries': 'Tool-Use Summaries',
   'markdown-rendering': 'Markdown Rendering',
+  'terminal-images': 'Terminal Images',
   'sub-agents': 'SubAgents',
   'multi-agent-coordination': 'Multi-Agent Coordination',
   arena: 'Agent Arena',
@@ -25,5 +26,6 @@ export default {
   hooks: 'Hooks',
   'status-line': 'Status Line',
   'scheduled-tasks': 'Scheduled Tasks',
+  goals: 'Goals',
   tips: 'Contextual Tips',
 };

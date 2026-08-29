@@ -9,6 +9,8 @@ import {
   stripExportMeta,
   extractAndStripMeta,
   createWorkflowSandbox,
+  compileWorkflowScript,
+  describeWorkflowCompileError,
 } from './workflow-sandbox.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
@@ -221,43 +223,36 @@ describe('extractAndStripMeta', () => {
   });
 
   // Security regression: the meta-eval vm context has no globals at all
-  // (Object.create(null) prototype), so the model cannot reach host
-  // primitives during meta evaluation — even ones that the script-side
-  // sandbox normally provides (args, agent, phase, log, parallel,
-  // pipeline). Referencing any of them throws ReferenceError. Two
-  // shapes pinned: a truly unknown identifier (R7 dedup — was a
-  // duplicate of the bridge-global case below) and explicit `args`
-  // bridge-global access.
+  // meta is parsed, not executed, so an identifier is not "resolved to
+  // undefined" or "looked up and not found" — it is simply not a value the
+  // grammar admits. Two shapes pinned: a truly unknown identifier and
+  // explicit `args` bridge-global access.
   it('rejects meta that references an unknown identifier', () => {
     const src = `export const meta = { name: totallyUnknown, description: 'd' }\nreturn 1`;
     expect(() => extractAndStripMeta(src)).toThrow(
-      /failed to evaluate meta object literal/,
+      /invalid meta object literal/,
     );
   });
 
-  // Security regression: the meta-eval context's globalThis is null-
-  // prototyped, so the model has no bridge to host primitives like
-  // `process`, `require`, or the workflow-sandbox bridge globals
-  // (`args` / `agent` / `phase` / `log` / etc.). The vm realm still
-  // exposes its OWN intrinsics (`Object`, `Math`, `Date`, …) which is
-  // fine — meta extraction is one-shot at tool-invocation time, not
-  // replayed on resume, so it can be non-deterministic without breaking
-  // the resume contract that the script body honors.
+  // Security regression: there is no evaluation, so there is no scope to
+  // reach out of — neither the workflow-sandbox bridge globals
+  // (`args` / `agent` / `phase` / `log` / …) nor host primitives like
+  // `process` and `require` are reachable, because no identifier is.
   it('meta source cannot reference a workflow-sandbox bridge global (args)', () => {
     const src = `export const meta = { name: args.x, description: 'd' }\nreturn 1`;
     expect(() => extractAndStripMeta(src)).toThrow(
-      /failed to evaluate meta object literal/,
+      /invalid meta object literal/,
     );
   });
 
   it('meta source cannot reach the host process / require / fs', () => {
     const src1 = `export const meta = { name: process.version, description: 'd' }\nreturn 1`;
     expect(() => extractAndStripMeta(src1)).toThrow(
-      /failed to evaluate meta object literal/,
+      /invalid meta object literal/,
     );
     const src2 = `export const meta = { name: 'x', description: require('fs').readFileSync('/etc/passwd', 'utf8') }\nreturn 1`;
     expect(() => extractAndStripMeta(src2)).toThrow(
-      /failed to evaluate meta object literal/,
+      /invalid meta object literal/,
     );
   });
 
@@ -297,23 +292,37 @@ describe('extractAndStripMeta', () => {
   });
 
   // P4a Round 3 (wenshao): a Promise (e.g. `import('node:fs')`) used as a
-  // value in the meta literal previously crashed the host process. The
-  // synchronous `runInContext` returns normally with a dangling rejection
-  // scheduled for the next tick; validateMeta passes (the field isn't on
-  // the contract surface so it's silently dropped); the workflow even
-  // returns its result; THEN the unhandled rejection terminates the
-  // process under Node's default `--unhandled-rejections=throw`. The fix
-  // is to walk the eval result, neutralise any thenables with a `.catch`
-  // so they no longer trigger the unhandled-rejection handler, and throw
-  // an explicit error so the bad meta is rejected up front.
-  it('throws when meta value is a Promise (dynamic import) — no unhandled rejection crash', () => {
-    const src = `export const meta = { name: 'x', description: 'd', extra: import('node:fs') }\nreturn 1`;
-    expect(() => extractAndStripMeta(src)).toThrow(
-      /meta values must not be Promises/,
-    );
+  // value in the meta literal used to crash the host process — evaluation
+  // returned normally with a dangling rejection scheduled for the next tick,
+  // validateMeta dropped the non-contract field, the workflow returned its
+  // result, and only THEN did the unhandled rejection terminate the process
+  // under Node's default `--unhandled-rejections=throw`. That hazard was
+  // handled by walking the evaluated value and neutralising thenables.
+  //
+  // Nothing is evaluated now, so no Promise is ever constructed and there is
+  // no rejection to neutralise. The literal is rejected on syntax instead.
+  // These tests assert both halves: the call throws, AND the process records
+  // no unhandled rejection — the second is the property users actually cared
+  // about, and it is now guaranteed structurally rather than by a walker.
+  it('rejects a Promise-valued meta field (dynamic import) with no unhandled rejection', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const src = `export const meta = { name: 'x', description: 'd', extra: import('node:fs') }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /invalid meta object literal/,
+      );
+      // Let any rejection that a previous implementation would have scheduled
+      // reach the handler before asserting none arrived.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
-  it('throws when meta value is a Promise nested inside a phases entry', () => {
+  it('rejects a Promise-valued meta field nested inside a phases entry', () => {
     const src = `export const meta = {
       name: 'x',
       description: 'd',
@@ -321,7 +330,7 @@ describe('extractAndStripMeta', () => {
     }
     return 1`;
     expect(() => extractAndStripMeta(src)).toThrow(
-      /meta values must not be Promises/,
+      /invalid meta object literal/,
     );
   });
 
@@ -343,34 +352,34 @@ describe('extractAndStripMeta', () => {
     expect(sandbox.getPhases()).toEqual(['X', 'Y', 'X']);
   });
 
-  // P4 Round 4 (wenshao): the R3 thenable walker recursed without a
-  // seen-guard. A meta literal that builds a cyclic object via spread
-  // (no getters, no Promises, no exotic constructs — just self-reference)
-  // overflows the call stack. The walker's RangeError propagates OUT of
-  // extractAndStripMeta because the try/catch only wraps the vm-eval, so
-  // the run failure surfaces as `Maximum call stack size exceeded` rather
-  // than the meta-validation error this guard exists to produce. A
-  // WeakSet bounds the recursion against cycles AND against future
-  // shapes where the same node is reached through multiple keys.
-  it('rejects a cyclic meta value built via spread without stack-overflowing', () => {
+  // P4 Round 4 (wenshao): a meta literal that built a cyclic object via
+  // spread used to overflow the walker's stack. Both fixtures below used to
+  // SUCCEED — the cyclic field was not a contract field, so validateMeta
+  // dropped it and the run continued.
+  //
+  // They are now refused, and that is a deliberate narrowing of the contract
+  // rather than a regression: a spread means "evaluate this expression and
+  // merge the result", which is exactly what meta no longer does. A literal
+  // cannot be cyclic, so the whole class of cycle-walking concerns is gone
+  // with it. The message names the rule so the author knows what to write
+  // instead.
+  it('refuses a spread in meta rather than evaluating it', () => {
     const src = `export const meta = {
       name: 'x',
       description: 'y',
       ...(function () { const a = {}; a.self = a; return a; })(),
     }
     return 1`;
-    // The cyclic field should be silently ignored by validateMeta (it's
-    // not a contract field), so the run succeeds with just the required
-    // fields surviving — but only if the walker terminates first.
-    const { meta } = extractAndStripMeta(src);
-    expect(meta).toEqual({ name: 'x', description: 'y' });
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /spread is not allowed in meta/,
+    );
   });
 
-  it('rejects a cyclic meta value reached through nested arrays/objects', () => {
+  it('refuses a spread that would have built a cycle through nested arrays', () => {
     const src = `export const meta = {
       name: 'x',
       description: 'y',
-      // Cycle reached through phases[0].back → ref back to outer container.
+      // Cycle reached through items[0].ref → ref back to outer container.
       ...(function () {
         const outer = { items: [] };
         outer.items.push({ ref: outer });
@@ -378,8 +387,9 @@ describe('extractAndStripMeta', () => {
       })(),
     }
     return 1`;
-    const { meta } = extractAndStripMeta(src);
-    expect(meta).toEqual({ name: 'x', description: 'y' });
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /spread is not allowed in meta/,
+    );
   });
 });
 
@@ -695,14 +705,17 @@ describe('createWorkflowSandbox security', () => {
 
   // SEC-I2: log() must cap at MAX_LOG_LINES and add a truncation marker.
   it('log() caps at MAX_LOG_LINES with a truncation marker', async () => {
+    const emitted: string[] = [];
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
+      emitter: { logAppended: (line) => emitted.push(line) },
     });
     await sandbox.run(`for (let i = 0; i < 10100; i++) log(i); return 0;`);
     const logs = sandbox.getLogs();
     expect(logs.length).toBe(10_001); // 10_000 entries + 1 truncation marker
     expect(logs[10_000]).toMatch(/truncated/);
+    expect(emitted.at(-1)).toBe(logs[10_000]);
   });
 
   // FIX-C5 (SEC-2-I1): same cap pattern for phases array — protects host
@@ -1120,12 +1133,13 @@ describe('createWorkflowSandbox security', () => {
     await expect(run).rejects.toThrow(/exceeded 100 ms of active time/);
   });
 
-  it('re-arms the pause-suspended watchdog on abort so a cancelled paused run still settles', async () => {
+  it('settles a cancelled paused run at once, not on the banked wall-clock remainder', async () => {
     // Cancelling a paused run aborts the controller, but abortPending()
-    // emits no scheduler transition — a pause-suspended watchdog that
-    // never re-armed would leave a script hung in ungated code pending
-    // forever (no settlement, snapshot, or telemetry). The abort must
-    // re-arm the banked remainder.
+    // emits no scheduler transition. Before the abort arm, settlement
+    // depended on the watchdog re-arming with its banked remainder — the
+    // user watched a cancelled run refuse to end for up to that long. Now
+    // the abort settles the run immediately; the re-arm stays as a backstop.
+    vi.useFakeTimers();
     const scheduler = new WorkflowDispatchScheduler(1);
     const abortOnTimeout = new AbortController();
     let finish: ((value: string) => void) | undefined;
@@ -1139,32 +1153,37 @@ describe('createWorkflowSandbox security', () => {
       scheduler,
       abortOnTimeout,
     });
-    // Consume most of the budget BEFORE pausing so the banked remainder
-    // (~80 ms) is distinguishable from a fresh full budget (200 ms).
     const run = sandbox.run(`await agent('a'); return new Promise(() => {});`);
-    await vi.waitFor(() => expect(finish).toBeDefined());
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    expect(scheduler.pause()).toBe(true);
-    finish?.('done');
-    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    let settled = false;
+    const settlement = run.catch(() => {
+      settled = true;
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(finish).toBeDefined();
+      await vi.advanceTimersByTimeAsync(120);
+      expect(scheduler.pause()).toBe(true);
+      finish?.('done');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduler.snapshot().state).toBe('paused');
 
-    abortOnTimeout.abort();
-    const rearmAt = Date.now();
-    await expect(run).rejects.toThrow(/exceeded 200 ms of active time/);
-    // The banked remainder (~80 ms) bounds the settle: pre-fix the race
-    // never settled at all, a fresh-budget re-arm would overshoot the
-    // upper bound, and a zero-remainder re-arm would fire before the
-    // lower bound.
-    expect(Date.now() - rearmAt).toBeLessThan(150);
-    expect(Date.now() - rearmAt).toBeGreaterThan(40);
+      abortOnTimeout.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(true);
+      await expect(run).rejects.toThrow(/aborted \(cancelled\)/);
+    } finally {
+      abortOnTimeout.abort();
+      await vi.runAllTimersAsync();
+      await settlement;
+      vi.useRealTimers();
+    }
   });
 
-  it('keeps the watchdog armed when a post-abort drain lands paused', async () => {
+  it('settles a run cancelled mid-pausing before the post-abort drain lands', async () => {
     // An in-flight dispatch that settles AFTER the abort still lands the
-    // scheduler's `pausing` → `paused` transition (pump's finally). The
-    // watchdog must not re-suspend on that post-abort transition, or a
-    // script that catches the abort and hangs in ungated code is
-    // orphaned again.
+    // scheduler's `pausing` → `paused` transition (pump's finally). The run
+    // must already be settled by then: a script that catches the abort and
+    // hangs in ungated code used to be orphaned until the wall clock.
     const scheduler = new WorkflowDispatchScheduler(1);
     const abortOnTimeout = new AbortController();
     let finishDispatch: ((value: string) => void) | undefined;
@@ -1192,12 +1211,12 @@ describe('createWorkflowSandbox security', () => {
     expect(scheduler.snapshot().state).toBe('pausing');
 
     abortOnTimeout.abort();
+    await expect(run).rejects.toThrow(/aborted \(cancelled\)/);
+
+    // The drain still completes its transition afterwards; nothing about a
+    // settled run is disturbed by it.
     finishDispatch?.('late');
     await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
-
-    // The post-abort `paused` transition must not re-suspend the
-    // watchdog — the hung script still settles on the banked remainder.
-    await expect(run).rejects.toThrow(/exceeded 150 ms of active time/);
   });
 
   it('suspends the watchdog of a sandbox created while the scheduler is already paused', async () => {
@@ -1233,28 +1252,59 @@ describe('createWorkflowSandbox security', () => {
     await expect(run).rejects.toThrow(/exceeded 100 ms of active time/);
   });
 
-  it('keeps the seeded watchdog armed when the shared signal is already aborted', async () => {
+  it('does not run a script whose signal was already aborted before run()', async () => {
     // Production shares one controller between the registry (which
     // pre-registers the run before run() resolves) and the sandbox, so a
     // user cancel can land before run() begins: the scheduler is already
-    // paused AND the signal is already aborted. The abort re-arm listener
-    // is dead on an already-aborted signal and no scheduler transition
-    // can follow, so only the seed guard's !aborted() check keeps the
-    // watchdog armed — deleting it suspends the newborn watchdog and the
-    // hung run never settles.
+    // paused AND the signal is already aborted. The run must settle as
+    // cancelled without executing a line of model-authored code.
     const abortOnTimeout = new AbortController();
     const scheduler = new WorkflowDispatchScheduler(1, abortOnTimeout.signal);
     expect(scheduler.pause()).toBe(true);
     abortOnTimeout.abort();
+    const dispatch = vi.fn(async () => 'ignored');
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      dispatch: async () => 'ignored',
+      dispatch,
       maxWallClockMs: 100,
       scheduler,
       abortOnTimeout,
     });
-    await expect(sandbox.run(`return new Promise(() => {});`)).rejects.toThrow(
-      /exceeded 100 ms of active time/,
+    await expect(
+      sandbox.run(`await agent('never'); return new Promise(() => {});`),
+    ).rejects.toThrow(/aborted \(cancelled\)/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('cancellation settles the run at once while the script still runs its own finally', async () => {
+    // The host-side run settles immediately; the script's promise is left
+    // to finish on its own. Its dispatches reject on the aborted signal, so
+    // a `finally` inside the script still executes — cleanup the author
+    // wrote is not skipped just because the user stopped waiting.
+    const controller = new AbortController();
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      abortOnTimeout: controller,
+      dispatch: () =>
+        new Promise<string>((_, reject) => {
+          controller.signal.addEventListener(
+            'abort',
+            () => reject(new Error('dispatch aborted')),
+            { once: true },
+          );
+        }),
+    });
+    const run = sandbox.run(`
+      try { await agent('a'); }
+      finally { log('cleanup ran'); }
+    `);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    await expect(run).rejects.toThrow(/aborted \(cancelled\)/);
+    await vi.waitFor(() =>
+      expect(sandbox.getLogs().some((l) => l.includes('cleanup ran'))).toBe(
+        true,
+      ),
     );
   });
 
@@ -1652,6 +1702,94 @@ describe('createWorkflowSandbox security', () => {
     );
   });
 
+  it('agent({workingDir}) is passed through to dispatch', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
+    });
+    const result = await sandbox.run(
+      `return await agent("x", { workingDir: ".qwen/tmp/review-pr-7" });`,
+    );
+    expect(result).toBe('done');
+    expect((seen[0].opts as { workingDir?: unknown }).workingDir).toBe(
+      '.qwen/tmp/review-pr-7',
+    );
+  });
+
+  it('agent({workingDir}) rejects invalid values', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("x", { workingDir: 7 });`),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    await expect(
+      sandbox.run(`return agent("x", { workingDir: "" });`),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    // Whitespace-only used to clear both entrance gates and was refused only
+    // deep in the registration gate with a message blaming the directory
+    // instead of the argument.
+    await expect(
+      sandbox.run(`return agent("x", { workingDir: " " });`),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+  });
+
+  // The two options make opposite claims about who owns the directory's
+  // lifetime, so the contradiction is named rather than resolved by
+  // precedence — a script that got a silent winner would believe it was
+  // isolated when it was pinned, or vice versa.
+  it('agent({workingDir, isolation}) rejects the combination', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(
+        `return agent("x", { workingDir: "wt", isolation: "worktree" });`,
+      ),
+    ).rejects.toThrow(/incompatible options/);
+  });
+
+  // The schema advertises "0 disables the watchdog", but a non-number used
+  // to be silently dropped downstream where the DEFAULT watchdog applied —
+  // the dispatch the author meant to leave unwatched got aborted + retried.
+  it('agent({stallMs}) rejects non-numeric values', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("x", { stallMs: "0" });`),
+    ).rejects.toThrow(/stallMs.*finite number/);
+    await expect(
+      sandbox.run(`return agent("x", { stallMs: NaN });`),
+    ).rejects.toThrow(/stallMs.*finite number/);
+    await expect(
+      sandbox.run(`return agent("x", { stallMs: true });`),
+    ).rejects.toThrow(/stallMs.*finite number/);
+  });
+
+  it('agent({stallMs: 0}) passes through and disables the watchdog', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
+    });
+    const result = await sandbox.run(
+      `return await agent("x", { stallMs: 0 });`,
+    );
+    expect(result).toBe('done');
+    expect((seen[0].opts as { stallMs?: unknown }).stallMs).toBe(0);
+  });
+
   it('agent({isolation:"remote"}) is passed through to dispatch in P3', async () => {
     const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({
@@ -2002,7 +2140,10 @@ describe('createWorkflowSandbox primitives', () => {
         'Workflow subagent x did not complete (terminate mode: CANCELLED).',
       ),
     );
-    await runPromise;
+    // The abort arm settles the run as cancelled even though the script had
+    // already returned — cancel wins a same-tick race, matching the runner,
+    // which reports a cancelled registry entry over an ok outcome.
+    await expect(runPromise).rejects.toThrow(/aborted \(cancelled\)/);
     expect(sandbox.getLogs()).toEqual([]);
   });
 
@@ -2593,5 +2734,163 @@ describe('createWorkflowSandbox primitives', () => {
     `);
     expect(result).toBe('agent-response:write a hello');
     expect(sandbox.getPhases()).toEqual(['plan']);
+  });
+
+  // ── Compilation ──────────────────────────────────────────────────────
+  describe('compileWorkflowScript', () => {
+    it('compiles a body and hands back its meta', () => {
+      const { script, meta } = compileWorkflowScript(
+        "export const meta = { name: 'n', description: 'd' }\nawait agent('x');",
+      );
+      expect(script).toBeDefined();
+      expect(meta?.name).toBe('n');
+    });
+
+    it('throws on a body that does not parse', () => {
+      expect(() => compileWorkflowScript("const x: string = 'a';")).toThrow(
+        SyntaxError,
+      );
+    });
+
+    // The body runs in strict mode, so an undeclared assignment throws
+    // instead of quietly creating a sandbox global that outlives the
+    // statement. Asserted through a real run, because the directive only
+    // matters at execution time.
+    it('runs the body in strict mode', async () => {
+      const sandbox = createWorkflowSandbox({
+        args: undefined,
+        dispatch: async () => 'ok',
+      });
+      await expect(sandbox.run('undeclaredBinding = 1;')).rejects.toThrow(
+        /not defined/,
+      );
+    });
+
+    it('still allows a declared binding', async () => {
+      const sandbox = createWorkflowSandbox({
+        args: undefined,
+        dispatch: async () => 'ok',
+      });
+      await expect(
+        sandbox.run('const declared = 1; return declared;'),
+      ).resolves.toBe(1);
+    });
+  });
+
+  describe('describeWorkflowCompileError', () => {
+    function renderFor(source: string): string {
+      try {
+        compileWorkflowScript(source);
+      } catch (e) {
+        return describeWorkflowCompileError(
+          e,
+          source.split(/\r\n|[\n\r\u2028\u2029]/).length,
+        );
+      }
+      throw new Error('expected the source to fail compilation');
+    }
+
+    // The wrapper shifts every body line by one, so V8's own line number is
+    // one more than the author's. Reporting the raw number sends them to the
+    // wrong line, which is worse than reporting none.
+    it('reports the line number the author wrote, not the wrapped one', () => {
+      const rendered = renderFor("await agent('a');\nconst x: string = 1;");
+      expect(rendered).toContain('line 2');
+      expect(rendered).not.toContain('workflow.js');
+      expect(rendered).toContain(
+        'SyntaxError: Missing initializer in const declaration',
+      );
+    });
+
+    it('preserves author line numbers after a multiline meta block', () => {
+      const rendered = renderFor(`export const meta = {
+  name: 'n',
+  description: 'd',
+}
+await agent('a');
+const x: string = 1;`);
+      expect(rendered.split('\n')[0]).toBe('line 6');
+      expect(rendered).toContain('const x: string = 1;');
+    });
+
+    it.each([
+      ['CRLF', '\r\n'],
+      ['lone CR', '\r'],
+    ])(
+      'preserves author line numbers after a meta block with %s separators',
+      (_name, separator) => {
+        const rendered = renderFor(
+          [
+            'export const meta = {',
+            "  name: 'n',",
+            "  description: 'd',",
+            '}',
+            'const x: string = 1;',
+          ].join(separator),
+        );
+        expect(rendered.split('\n')[0]).toBe('line 5');
+        expect(rendered).toContain('const x: string = 1;');
+      },
+    );
+
+    it('does not attribute a closing-wrapper error to the author', () => {
+      const rendered = renderFor('await agent(');
+      expect(rendered).toContain('unmatched or incomplete syntax');
+      expect(rendered).toContain('braces');
+      expect(rendered).not.toContain("Unexpected token '}'");
+      expect(rendered).not.toContain('line 2');
+      expect(rendered).not.toContain('})()');
+    });
+
+    it('carries the offending source line and a caret under it', () => {
+      const rendered = renderFor('const x: string = 1;');
+      const lines = rendered.split('\n');
+      expect(lines[1]).toContain('const x');
+      expect(lines[2]).toContain('^');
+      // The caret has to sit under the source line, not float past its end.
+      expect(lines[2].indexOf('^')).toBeLessThanOrEqual(lines[1].length);
+    });
+
+    it('windows a long line while keeping the caret aligned', () => {
+      const padding = 'y'.repeat(300);
+      const rendered = renderFor(
+        `const a = '${padding}'; const x: string = 1;`,
+      );
+      const lines = rendered.split('\n');
+      expect(lines[1].length).toBeLessThan(120);
+      expect(lines[1]).toContain('…');
+      expect(lines[2]).toContain('^');
+      expect(lines[2].indexOf('^')).toBe(lines[1].indexOf('x: string'));
+    });
+
+    it('preserves a multi-column V8 caret on a long line', () => {
+      const padding = 'y'.repeat(120);
+      const rendered = renderFor(`const pad = '${padding}'; const x = 123abc;`);
+      const lines = rendered.split('\n');
+      expect(lines[1]).toContain('123abc');
+      expect(lines[2]).toContain('^^^');
+      expect(lines[2].indexOf('^^^')).toBe(lines[1].indexOf('123abc'));
+    });
+
+    it('keeps an author source line that begins with at', () => {
+      const rendered = renderFor('    at work();');
+      expect(rendered).toContain('line 1');
+      expect(rendered).toContain('    at work();');
+      expect(rendered).toContain('^^^^');
+      expect(rendered).toContain("Unexpected identifier 'work'");
+    });
+
+    it('omits a long source frame when V8 provides no caret', () => {
+      const rendered = renderFor(`const value = ${'a'.repeat(1100)}@;`);
+      expect(rendered).toContain('line 1');
+      expect(rendered).toContain('SyntaxError: Invalid or unexpected token');
+      expect(rendered).not.toContain('const value');
+    });
+
+    it('falls back to the plain message when there is no source frame', () => {
+      expect(
+        describeWorkflowCompileError(new Error('meta must be an object'), 1),
+      ).toBe('meta must be an object');
+    });
   });
 });

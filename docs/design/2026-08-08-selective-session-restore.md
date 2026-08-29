@@ -475,11 +475,13 @@ segments once:
    malformed-context, turn-reentry, and truncation decisions without retaining
    evidence content. Add only the selected evidence UUIDs to the union, then feed
    their materialized records to the shared accumulator and retain the resulting
-   window in the projection. This two-stage selection must preserve both the
-   existing production helper's result and its fail-closed errors; it must not
-   select every active record, perform a second scan, or copy Goal precedence.
-   Deferred Goal activation consumes that window instead of reading the
-   transcript again.
+   window in the projection. This two-stage selection must preserve the existing
+   production helper's valid result. When its evidence source is unavailable or
+   invalid, omit the projected window so deferred Goal activation falls back to
+   the existing runtime path and its established degradation behavior instead of
+   rejecting the whole session restore. It must not select every active record,
+   perform a second scan, or copy Goal precedence. Deferred Goal activation
+   consumes a valid projected window instead of reading the transcript again.
 5. **File history.** Read every active `file_history_snapshot` record in
    chronological order and feed each batch through the existing whole-batch
    deserializer. This preserves today's behavior where one malformed item skips

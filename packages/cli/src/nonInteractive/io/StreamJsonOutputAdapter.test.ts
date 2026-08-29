@@ -9,9 +9,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type {
   Config,
   GoalSnapshotV2,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core';
-import { GeminiEventType } from '@qwen-code/qwen-code-core';
+import { LlmEventType } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { StreamJsonOutputAdapter } from './StreamJsonOutputAdapter.js';
 import {
@@ -37,6 +37,7 @@ const goalSnapshot: GoalSnapshotV2 = {
     evidenceCursor: { recordId: 'record-1' },
     turnCount: 3,
     activeTimeMs: 12_000,
+    tokensUsed: 0,
     createdAt: 1,
     updatedAt: 2,
     lastReason: 'keep going',
@@ -69,14 +70,14 @@ describe('StreamJsonOutputAdapter', () => {
       it('should reset state for new message', () => {
         adapter.startAssistantMessage();
         adapter.processEvent({
-          type: GeminiEventType.Content,
+          type: LlmEventType.Content,
           value: 'First',
         });
         adapter.finalizeAssistantMessage();
 
         adapter.startAssistantMessage();
         adapter.processEvent({
-          type: GeminiEventType.Content,
+          type: LlmEventType.Content,
           value: 'Second',
         });
 
@@ -95,7 +96,7 @@ describe('StreamJsonOutputAdapter', () => {
 
       it('should emit stream events for text deltas', () => {
         adapter.processEvent({
-          type: GeminiEventType.Content,
+          type: LlmEventType.Content,
           value: 'Hello',
         });
 
@@ -125,7 +126,7 @@ describe('StreamJsonOutputAdapter', () => {
 
       it('should emit active goal stream events', () => {
         adapter.processEvent({
-          type: GeminiEventType.ActiveGoal,
+          type: LlmEventType.ActiveGoal,
           value: {
             condition: 'finish the refactor',
             iterations: 2,
@@ -137,7 +138,7 @@ describe('StreamJsonOutputAdapter', () => {
         });
 
         adapter.processEvent({
-          type: GeminiEventType.ActiveGoal,
+          type: LlmEventType.ActiveGoal,
           value: null,
         });
 
@@ -178,12 +179,12 @@ describe('StreamJsonOutputAdapter', () => {
 
       it('emits v2 goal_state before the gated legacy projection', () => {
         adapter.processEvent({
-          type: GeminiEventType.GoalState,
+          type: LlmEventType.GoalState,
           value: goalSnapshot,
           cause: 'edit',
         });
         adapter.processEvent({
-          type: GeminiEventType.ActiveGoal,
+          type: LlmEventType.ActiveGoal,
           value: {
             condition: 'finish the refactor',
             iterations: 3,
@@ -220,11 +221,11 @@ describe('StreamJsonOutputAdapter', () => {
 
       it('does not emit duplicate v2 goal snapshots from overlapping sources', () => {
         adapter.processEvent({
-          type: GeminiEventType.GoalState,
+          type: LlmEventType.GoalState,
           value: goalSnapshot,
         });
         adapter.processEvent({
-          type: GeminiEventType.GoalState,
+          type: LlmEventType.GoalState,
           value: structuredClone(goalSnapshot),
         });
 
@@ -239,7 +240,7 @@ describe('StreamJsonOutputAdapter', () => {
 
       it('should emit message_start event on first content', () => {
         adapter.processEvent({
-          type: GeminiEventType.Content,
+          type: LlmEventType.Content,
           value: 'First',
         });
 
@@ -261,7 +262,7 @@ describe('StreamJsonOutputAdapter', () => {
 
       it('should emit content_block_start for new blocks', () => {
         adapter.processEvent({
-          type: GeminiEventType.Content,
+          type: LlmEventType.Content,
           value: 'Text',
         });
 
@@ -283,7 +284,7 @@ describe('StreamJsonOutputAdapter', () => {
 
       it('should emit thinking delta events', () => {
         adapter.processEvent({
-          type: GeminiEventType.Thought,
+          type: LlmEventType.Thought,
           value: {
             subject: 'Planning',
             description: 'Thinking',
@@ -309,7 +310,7 @@ describe('StreamJsonOutputAdapter', () => {
 
       it('should emit message_stop on finalization', () => {
         adapter.processEvent({
-          type: GeminiEventType.Content,
+          type: LlmEventType.Content,
           value: 'Text',
         });
         adapter.finalizeAssistantMessage();
@@ -340,7 +341,7 @@ describe('StreamJsonOutputAdapter', () => {
     it('should not emit stream events', () => {
       adapter.startAssistantMessage();
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Text',
       });
 
@@ -359,7 +360,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should not emit active goal stream events', () => {
       adapter.processEvent({
-        type: GeminiEventType.ActiveGoal,
+        type: LlmEventType.ActiveGoal,
         value: {
           condition: 'finish the refactor',
           iterations: 0,
@@ -388,12 +389,12 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('still emits v2 goal_state without the partial-message gate', () => {
       adapter.processEvent({
-        type: GeminiEventType.GoalState,
+        type: LlmEventType.GoalState,
         value: goalSnapshot,
         cause: 'edit',
       });
       adapter.processEvent({
-        type: GeminiEventType.ActiveGoal,
+        type: LlmEventType.ActiveGoal,
         value: {
           condition: 'finish the refactor',
           iterations: 3,
@@ -419,7 +420,7 @@ describe('StreamJsonOutputAdapter', () => {
     it('should still emit final assistant message', () => {
       adapter.startAssistantMessage();
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Text',
       });
       adapter.finalizeAssistantMessage();
@@ -446,11 +447,11 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should append text content from Content events', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Hello',
       });
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: ' World',
       });
 
@@ -464,7 +465,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should append citation content from Citation events', () => {
       adapter.processEvent({
-        type: GeminiEventType.Citation,
+        type: LlmEventType.Citation,
         value: 'Citation text',
       });
 
@@ -477,9 +478,9 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should ignore non-string citation values', () => {
       adapter.processEvent({
-        type: GeminiEventType.Citation,
+        type: LlmEventType.Citation,
         value: 123,
-      } as unknown as ServerGeminiStreamEvent);
+      } as unknown as ServerLlmStreamEvent);
 
       const message = adapter.finalizeAssistantMessage();
       expect(message.message.content).toHaveLength(0);
@@ -487,7 +488,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should append thinking from Thought events', () => {
       adapter.processEvent({
-        type: GeminiEventType.Thought,
+        type: LlmEventType.Thought,
         value: {
           subject: 'Planning',
           description: 'Thinking about the task',
@@ -505,7 +506,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should handle thinking with only subject', () => {
       adapter.processEvent({
-        type: GeminiEventType.Thought,
+        type: LlmEventType.Thought,
         value: {
           subject: 'Planning',
           description: '',
@@ -521,7 +522,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should preserve whitespace in thinking content (issue #1356)', () => {
       adapter.processEvent({
-        type: GeminiEventType.Thought,
+        type: LlmEventType.Thought,
         value: {
           subject: '',
           description: 'The user just said "Hello"',
@@ -544,21 +545,21 @@ describe('StreamJsonOutputAdapter', () => {
     it('should preserve whitespace when streaming multiple thinking fragments (issue #1356)', () => {
       // Simulate streaming thinking content in multiple events
       adapter.processEvent({
-        type: GeminiEventType.Thought,
+        type: LlmEventType.Thought,
         value: {
           subject: '',
           description: 'The user just',
         },
       });
       adapter.processEvent({
-        type: GeminiEventType.Thought,
+        type: LlmEventType.Thought,
         value: {
           subject: '',
           description: ' said "Hello"',
         },
       });
       adapter.processEvent({
-        type: GeminiEventType.Thought,
+        type: LlmEventType.Thought,
         value: {
           subject: '',
           description: '. This is a simple greeting',
@@ -583,7 +584,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should append tool use from ToolCallRequest events', () => {
       adapter.processEvent({
-        type: GeminiEventType.ToolCallRequest,
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-call-1',
           name: 'test_tool',
@@ -605,7 +606,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should set stop_reason to tool_use when message contains only tool_use blocks', () => {
       adapter.processEvent({
-        type: GeminiEventType.ToolCallRequest,
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-call-1',
           name: 'test_tool',
@@ -621,7 +622,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should set stop_reason to null when message contains text blocks', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Some text',
       });
 
@@ -631,7 +632,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should set stop_reason to null when message contains thinking blocks', () => {
       adapter.processEvent({
-        type: GeminiEventType.Thought,
+        type: LlmEventType.Thought,
         value: {
           subject: 'Planning',
           description: 'Thinking about the task',
@@ -644,7 +645,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should set stop_reason to tool_use when message contains multiple tool_use blocks', () => {
       adapter.processEvent({
-        type: GeminiEventType.ToolCallRequest,
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-call-1',
           name: 'test_tool_1',
@@ -654,7 +655,7 @@ describe('StreamJsonOutputAdapter', () => {
         },
       });
       adapter.processEvent({
-        type: GeminiEventType.ToolCallRequest,
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-call-2',
           name: 'test_tool_2',
@@ -680,7 +681,7 @@ describe('StreamJsonOutputAdapter', () => {
         totalTokenCount: 160,
       };
       adapter.processEvent({
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: {
           reason: undefined,
           usageMetadata,
@@ -702,7 +703,7 @@ describe('StreamJsonOutputAdapter', () => {
         adapter.finalizeAssistantMessage().message.content;
 
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Should be ignored',
       });
 
@@ -719,7 +720,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should build and emit a complete assistant message', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Test response',
       });
 
@@ -736,7 +737,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should emit message to stdout immediately', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Test',
       });
 
@@ -751,7 +752,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should store message in lastAssistantMessage', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Test',
       });
 
@@ -763,7 +764,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should return same message on subsequent calls', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Test',
       });
 
@@ -776,11 +777,11 @@ describe('StreamJsonOutputAdapter', () => {
     it('should split different block types into separate assistant messages', () => {
       stdoutWriteSpy.mockClear();
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Text',
       });
       adapter.processEvent({
-        type: GeminiEventType.Thought,
+        type: LlmEventType.Thought,
         value: { subject: 'Thinking', description: 'Thought' },
       });
 
@@ -875,7 +876,7 @@ describe('StreamJsonOutputAdapter', () => {
       adapter = new StreamJsonOutputAdapter(mockConfig, false);
       adapter.startAssistantMessage();
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Response text',
       });
       adapter.finalizeAssistantMessage();
@@ -1296,11 +1297,11 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should not include message_id in content_block events', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Text',
       });
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'More',
       });
 
@@ -1328,7 +1329,7 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should identify content_block events by session_id and index', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Text',
       });
 
@@ -1361,15 +1362,15 @@ describe('StreamJsonOutputAdapter', () => {
     it('should split assistant messages when block types change repeatedly', () => {
       stdoutWriteSpy.mockClear();
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Text content',
       });
       adapter.processEvent({
-        type: GeminiEventType.Thought,
+        type: LlmEventType.Thought,
         value: { subject: 'Thinking', description: 'Thought' },
       });
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'More text',
       });
 
@@ -1438,15 +1439,15 @@ describe('StreamJsonOutputAdapter', () => {
 
     it('should merge consecutive text fragments', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Hello',
       });
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: ' ',
       });
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'World',
       });
 
