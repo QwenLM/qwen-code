@@ -1429,7 +1429,9 @@ export function createDaemonSessionActions({
         targetSessionContext = resolveActionSessionContext(
           options?.sessionContext,
           options?.workspaceCwd,
-          currentConnection.sessionContext ?? getDefaultSessionContext(),
+          currentConnection.error
+            ? getDefaultSessionContext()
+            : (currentConnection.sessionContext ?? getDefaultSessionContext()),
         );
         if (targetSessionContext?.kind === 'live') {
           throw new Error('Live session context does not support create');

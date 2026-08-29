@@ -882,9 +882,11 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('rejects a non-workspace context combined with workspaceCwd before connecting', async () => {
+    let actions: DaemonSessionActions | undefined;
     let connection: DaemonConnectionState | undefined;
 
     function Harness() {
+      actions = useDaemonActions();
       connection = useDaemonConnection();
       return null;
     }
@@ -903,6 +905,22 @@ describe('DaemonSessionProvider', () => {
       error: 'standalone session context cannot include workspaceCwd',
     });
     expect(sdkMocks.capabilities).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await expect(requireActions(actions).createSession()).rejects.toThrow(
+        'standalone session context cannot include workspaceCwd',
+      );
+    });
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).not.toHaveBeenCalled();
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      status: 'error',
+      error: 'standalone session context cannot include workspaceCwd',
+    });
   });
 
   it('does not start a controlled load for conflicting context props', async () => {
@@ -938,9 +956,11 @@ describe('DaemonSessionProvider', () => {
       events: createIdleEvents(),
     });
     sdkMocks.sessions.push(activeSession);
+    let actions: DaemonSessionActions | undefined;
     let connection: DaemonConnectionState | undefined;
 
     function Harness() {
+      actions = useDaemonActions();
       connection = useDaemonConnection();
       return null;
     }
@@ -985,6 +1005,23 @@ describe('DaemonSessionProvider', () => {
       expect.stringContaining('/session/workspace-active/detach'),
       expect.anything(),
     );
+
+    await act(async () => {
+      await expect(requireActions(actions).createSession()).rejects.toThrow(
+        'standalone session context cannot include workspaceCwd',
+      );
+    });
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).not.toHaveBeenCalled();
+    expect(
+      sdkMocks.MockDaemonSessionClient.createStandalone,
+    ).not.toHaveBeenCalled();
+    expect(connection).toMatchObject({
+      status: 'error',
+      error: 'standalone session context cannot include workspaceCwd',
+    });
+    expect(activeSession.detach).not.toHaveBeenCalled();
 
     act(() => {
       root?.render(

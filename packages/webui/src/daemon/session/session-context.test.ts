@@ -5,9 +5,13 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSession,
+  DaemonWorkspaceCapability,
+} from '@qwen-code/sdk/daemon';
 import {
   getDaemonErrorCode,
+  getStandaloneConnectionState,
   isDaemonErrorExplicitlyNonRetryable,
   resolveActionSessionContext,
   resolveLiveSessionWorkspaceCwd,
@@ -86,6 +90,17 @@ describe('session context', () => {
         kind: 'standalone',
       }),
     ).toEqual({ kind: 'workspace', cwd: '/project' });
+  });
+
+  it('rejects standalone-shaped connection state from another source', () => {
+    expect(
+      getStandaloneConnectionState({
+        sourceType: 'default',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output',
+        workingDirectory: { state: 'ready' },
+      } as unknown as DaemonSession),
+    ).toBeUndefined();
   });
 
   it('resolves one uniquely trusted non-primary Live runtime', () => {

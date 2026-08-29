@@ -3979,7 +3979,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ...(approvalMode !== undefined ? { approvalMode } : {}),
           });
         },
-        getDefaultSessionContext: () => resolvedSessionContextRef.current,
+        getDefaultSessionContext: () => {
+          const error = sessionContextResolutionErrorRef.current;
+          if (error !== undefined) throw new Error(error);
+          return resolvedSessionContextRef.current;
+        },
         getConnection: () => connectionRef.current,
         addNotice,
         setConnection,
