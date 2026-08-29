@@ -3503,19 +3503,15 @@ export function WebShellSidebar({
     ],
   );
 
-  const filteredSessions = useMemo(() => {
+  const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const sourceScopedSessions = sessions
       .map(applyOptimisticPin)
       .filter((session) =>
         matchesSessionSource(session, selectedSessionSource),
       );
-    const unpinnedSessions =
-      selectedSessionSource === 'channel'
-        ? sourceScopedSessions
-        : sourceScopedSessions.filter((session) => !session.isPinned);
-    const nextSessions = query
-      ? unpinnedSessions.filter((session) => {
+    return query
+      ? sourceScopedSessions.filter((session) => {
           const label = getSessionLabel(session).toLowerCase();
           return (
             label.includes(query) ||
@@ -3523,7 +3519,14 @@ export function WebShellSidebar({
             sessionMatchesGitQuery(session, query)
           );
         })
-      : unpinnedSessions.slice();
+      : sourceScopedSessions;
+  }, [applyOptimisticPin, searchQuery, selectedSessionSource, sessions]);
+  const filteredSessions = useMemo(() => {
+    const unpinnedSessions =
+      selectedSessionSource === 'channel'
+        ? searchedSessions
+        : searchedSessions.filter((session) => !session.isPinned);
+    const nextSessions = unpinnedSessions.slice();
     if (organizationEnabled) {
       return nextSessions;
     }
@@ -3538,13 +3541,7 @@ export function WebShellSidebar({
         (createdTimeById.get(b.sessionId) ?? 0) -
         (createdTimeById.get(a.sessionId) ?? 0),
     );
-  }, [
-    applyOptimisticPin,
-    organizationEnabled,
-    searchQuery,
-    selectedSessionSource,
-    sessions,
-  ]);
+  }, [organizationEnabled, searchedSessions, selectedSessionSource]);
 
   const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
@@ -3580,7 +3577,15 @@ export function WebShellSidebar({
       sessionsByGroupId.set(group.id, []);
     }
     const recentSessions: DaemonSessionSummary[] = [];
-    for (const session of filteredSessions) {
+    // Bucket the search-filtered catalog in one pass, pinned rows included:
+    // they are lifted into the Pinned section, but their group/color section
+    // must keep them, otherwise a section whose members are all pinned
+    // rendered `· 0`, indistinguishable from lost memberships (#10391).
+    // One pass (instead of bucketing the unpinned rows first and appending
+    // the pinned ones) preserves the daemon catalog order — pinned rows sort
+    // first there — so a pinned member is never pushed behind its section's
+    // preview limit by rows it sorts ahead of.
+    for (const session of searchedSessions) {
       // Color takes precedence: the picker keeps color and group mutually
       // exclusive, but stay defensive if a store somehow carries both.
       if (session.color && SESSION_GROUP_COLORS.includes(session.color)) {
@@ -3595,9 +3600,14 @@ export function WebShellSidebar({
           : undefined;
       if (groupSessions) {
         groupSessions.push(session);
-      } else {
-        recentSessions.push(session);
+        continue;
       }
+      // On sources with a Pinned section, a pinned session without a
+      // (renderable) group stays Pinned-section-only; it never spills into
+      // Ungrouped. The channel source has no Pinned section, so its pinned
+      // rows keep the normal Ungrouped bucket.
+      if (session.isPinned && selectedSessionSource !== 'channel') continue;
+      recentSessions.push(session);
     }
     const sections: SessionSection[] = [];
     // Color buckets first, in palette order; only render non-empty ones so the
@@ -3638,7 +3648,14 @@ export function WebShellSidebar({
       });
     }
     return sections;
-  }, [filteredSessions, groups, organizationEnabled, searchQuery, t]);
+  }, [
+    groups,
+    organizationEnabled,
+    searchedSessions,
+    searchQuery,
+    selectedSessionSource,
+    t,
+  ]);
 
   useEffect(() => {
     const activeSections = channelSessionSections ?? sessionSections;
@@ -3826,9 +3843,10 @@ export function WebShellSidebar({
       session: DaemonSessionSummary,
       options: {
         isArchived?: boolean;
+        renameFormDisabled?: boolean;
       } = {},
     ) => {
-      const { isArchived = false } = options;
+      const { isArchived = false, renameFormDisabled = false } = options;
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
@@ -3837,7 +3855,12 @@ export function WebShellSidebar({
       const exporting = exportingSessionIds.has(sessionIdentity);
       const completedUnread =
         !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
-      const isEditing = editingSessionIdentity === sessionIdentity;
+      // Pinned group members also render in the Pinned section; callers
+      // suppress the rename form on the duplicate row so only one input can
+      // mount — a rival input's autofocus would blur this one and its blur
+      // handler would cancel the rename.
+      const isEditing =
+        !renameFormDisabled && editingSessionIdentity === sessionIdentity;
       const gitIcon = session.worktree ? (
         <GitForkIcon aria-label={t('sidebar.newWorktreeTask')} />
       ) : session.branch ? (
@@ -4450,7 +4473,6 @@ export function WebShellSidebar({
       filteredSessions.length === 0 &&
       (selectedSessionSource === 'channel' ||
         channelSessionSections !== null ||
-        searchQuery.trim() ||
         !organizationEnabled ||
         sessionSections.length === 0)
     ) {
@@ -4508,7 +4530,14 @@ export function WebShellSidebar({
           deleteLabel={t('sidebar.groupDelete')}
           actionsDisabled={groupBusy}
         >
-          {section.sessions.map((session) => renderSessionRow(session))}
+          {section.sessions.map((session) =>
+            renderSessionRow(session, {
+              // Pinned members also render in the Pinned section; while that
+              // section is expanded its row hosts the rename form, so this
+              // duplicate row must not mount a second autofocused input.
+              renameFormDisabled: Boolean(session.isPinned) && pinnedExpanded,
+            }),
+          )}
         </SessionGroupSection>
       );
     });
@@ -4524,6 +4553,7 @@ export function WebShellSidebar({
     handleRenameGroup,
     loading,
     organizationEnabled,
+    pinnedExpanded,
     reload,
     renderSessionRow,
     searchQuery,
@@ -5396,10 +5426,39 @@ export function WebShellSidebar({
                           }
                           renderSessions={!ws.primary}
                           renderSession={(session) =>
-                            renderSessionRow({
-                              ...session,
-                              workspaceCwd: ws.cwd,
-                            })
+                            renderSessionRow(
+                              {
+                                ...session,
+                                workspaceCwd: ws.cwd,
+                              },
+                              {
+                                // Pinned members also render in the
+                                // sidebar-level Pinned section; while that
+                                // section is expanded its row hosts the
+                                // rename form, so this duplicate row must
+                                // not mount a second autofocused input.
+                                // Channel mode has no Pinned section, so
+                                // the workspace row is the only copy and
+                                // must stay editable. The suppression also
+                                // requires the Pinned section to actually
+                                // carry the member: `pinnedSessions` merges
+                                // only the pinned catalog pages and the
+                                // primary sessions page, never this
+                                // workspace's own page, so before the
+                                // pinned page settles (or while it errors)
+                                // this row is the only copy and must host
+                                // the form itself.
+                                renameFormDisabled:
+                                  selectedSessionSource !== 'channel' &&
+                                  Boolean(session.isPinned) &&
+                                  pinnedExpanded &&
+                                  pinnedSessions.some(
+                                    (candidate) =>
+                                      getIdentityForSession(candidate) ===
+                                      getIdentityForSession(session),
+                                  ),
+                              },
+                            )
                           }
                           showSessionDetails={sessionActionItems.has('details')}
                           headerActions={(visible) => {
