@@ -320,10 +320,26 @@ export class WorkflowRunner {
           const message = extractErrorMessage(error);
           if (entry && details?.meta && !entry.meta) entry.meta = details.meta;
           if (details?.logs) registry?.setRecentLogs(runId, details.logs);
+          // Mirror of the guard on the success path. When the entry was
+          // settled terminal from outside — the dialog's cancel, or the
+          // approval contingency's fail — the abort that follows is what
+          // makes the sandbox reject, so the rejection arriving here is a
+          // consequence of that settlement, not a new fact about the run.
+          // Report the entry's state and its own message, not the
+          // rejection's.
+          if (entry && isTerminalWorkflowStatus(entry.status)) {
+            return {
+              ok: false,
+              message:
+                entry.status === 'cancelled'
+                  ? 'Workflow run cancelled.'
+                  : (entry.error ?? message),
+              details,
+            };
+          }
           if (
             callerWasAbortedBeforeStart ||
-            (!runInBackground && options.signal.aborted) ||
-            entry?.status === 'cancelled'
+            (!runInBackground && options.signal.aborted)
           ) {
             registry?.cancel(runId, Date.now());
           } else {
