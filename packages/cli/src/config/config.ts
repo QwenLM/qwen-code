@@ -57,7 +57,11 @@ import {
   loadSettings,
   SettingScope,
 } from './settings.js';
-import { reloadEnvironment } from './environment.js';
+import {
+  buildRuntimeEnvironment,
+  isFileSourcedEnvKey,
+  reloadEnvironment,
+} from './environment.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -1255,6 +1259,14 @@ function resolveDisabledSlashCommands(
   argv: CliArgs,
   bareMode: boolean,
   safeMode: boolean,
+  /**
+   * The environment the `QWEN_DISABLED_SLASH_COMMANDS` denylist is read
+   * from. Startup reads `process.env` after `loadEnvironment` ran; the `/cd`
+   * reloader passes the TARGET project's environment view instead, since
+   * `prepare()` runs before (and, in a shared process, instead of) any
+   * `process.env` rewrite.
+   */
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): string[] {
   const disabled: string[] = [];
   const seen = new Set<string>();
@@ -1272,9 +1284,7 @@ function resolveDisabledSlashCommands(
     for (const name of settings.slashCommands?.disabled ?? []) add(name);
   }
   for (const name of argv.disabledSlashCommands ?? []) add(name);
-  for (const name of (process.env['QWEN_DISABLED_SLASH_COMMANDS'] ?? '').split(
-    ',',
-  )) {
+  for (const name of (env['QWEN_DISABLED_SLASH_COMMANDS'] ?? '').split(',')) {
     add(name);
   }
   return disabled;
@@ -1329,25 +1339,32 @@ function resolveProjectSkillPath(value: string, baseDir: string): string {
 }
 
 /**
- * The LoadedSettings a permission-rule persistence write may go through.
- * Bare mode hands `loadCliConfig` a `createMinimalSettings()` instance whose
- * scope paths are all `''`; persisting through it writes a stray `.tmp` into
- * the cwd and throws on the rename, so "Always allow" silently lands
- * nowhere. Only a LoadedSettings backed by real files may be used.
+ * Builds the "Always allow" persistence callback for a working directory.
+ *
+ * Every write is a read-modify-write against a FRESH disk load of that
+ * directory's settings — never the session's in-memory `LoadedSettings`:
+ *
+ * - bare mode assembles the session against `createMinimalSettings()`,
+ *   whose scope paths are all `''`; persisting through it wrote a stray
+ *   `.tmp` into the cwd and threw on the rename;
+ * - `--safe-mode` loads with `skipWorkspaceSettings`, so the in-memory
+ *   workspace scope is EMPTY while the file on disk is not — a
+ *   read-modify-write against memory wiped the project's existing rules;
+ * - a sibling session in the same project may have persisted a rule
+ *   since the last settings-watcher refresh; reading memory replayed the
+ *   stale list and deleted its rule.
+ *
+ * `skipLoadEnvironment` keeps the load free of side effects: a persist must
+ * never re-apply `.env` files to `process.env` (bare mode never loads env).
  */
-export function resolvePersistenceSettings(
-  loadedSettings: LoadedSettings | undefined,
-  cwd: string,
-): LoadedSettings {
-  return loadedSettings?.user.path ? loadedSettings : loadSettings(cwd);
-}
-
 function createPermissionRulePersistenceCallback(
-  loadedSettings: LoadedSettings | undefined,
   cwd: string,
 ): NonNullable<ConfigParameters['onPersistPermissionRule']> {
   return async (scope, ruleType, rule) => {
-    const currentSettings = resolvePersistenceSettings(loadedSettings, cwd);
+    const currentSettings = loadSettings(cwd, {
+      consumeCorruptionEnvVars: false,
+      skipLoadEnvironment: true,
+    });
     const settingScope =
       scope === 'project' ? SettingScope.Workspace : SettingScope.User;
     const key = `permissions.${ruleType}`;
@@ -1413,6 +1430,26 @@ function resolveEagerTools(
   return eagerTools;
 }
 
+/**
+ * Embedding-host policy for the `/cd` project-runtime reloader. Runtime-only:
+ * never sourced from argv, settings, or the environment.
+ */
+export interface ProjectRuntimeHostPolicy {
+  /** Session policy that remains authoritative across project changes. */
+  cronEnabled?: boolean;
+  /**
+   * Whether this session may rewrite the process-wide environment
+   * (`process.env`) to the target project's `.env` / `settings.env`.
+   * Spawned MCP servers and shell tools inherit `process.env`, so a process
+   * hosting OTHER live sessions must answer `false`: a per-session `/cd`
+   * would otherwise hand a sibling session's subprocesses this project's
+   * secrets while deleting its own. Defaults to `true` (single-session
+   * process). The target's environment still shapes the session's own
+   * configuration (for example `QWEN_DISABLED_SLASH_COMMANDS`).
+   */
+  ownsProcessEnvironment?: () => boolean;
+}
+
 export function createProjectRuntimeReloader(
   loadedSettings: LoadedSettings,
   settingsWatcher:
@@ -1430,7 +1467,7 @@ export function createProjectRuntimeReloader(
    * session-stable, so it is captured once rather than re-resolved per `/cd`.
    */
   modelDisablesToolSearch: boolean,
-  cronEnabledOverride?: boolean,
+  hostPolicy?: ProjectRuntimeHostPolicy,
 ): ProjectRuntimeReloader {
   return {
     async prepare(targetDir, trustedFolder, approvalMode, previousDir) {
@@ -1449,6 +1486,36 @@ export function createProjectRuntimeReloader(
             workspaceTrusted: trustedFolder,
           });
       const effectiveTrust = trustedFolder ?? nextSettings.isTrusted;
+      // The target project's environment as `reloadEnvironment` would leave
+      // it: keys the previous project's env files contributed are dropped
+      // before the target's files and `settings.env` overlay the process
+      // environment. Config resolution below reads THIS view, not
+      // `process.env` — prepare() runs before commit() rewrites the process
+      // environment, and in a shared process that rewrite never happens.
+      const targetEnvironment: Readonly<NodeJS.ProcessEnv> = bareMode
+        ? process.env
+        : buildRuntimeEnvironment(
+            nextSettings.merged,
+            targetDir,
+            Object.fromEntries(
+              Object.entries(process.env).filter(
+                ([key]) => !isFileSourcedEnvKey(key),
+              ),
+            ),
+            effectiveTrust,
+          ).effectiveEnv;
+      // Never rewrite `process.env` from a bare session (bare startup never
+      // loads env) or from a process that hosts other live sessions.
+      const reloadProcessEnvironment =
+        !bareMode && (hostPolicy?.ownsProcessEnvironment?.() ?? true);
+      const warnings: string[] = [];
+      if (!bareMode && !reloadProcessEnvironment) {
+        warnings.push(
+          'Process environment left unchanged: this process hosts other ' +
+            "sessions, so the target project's .env and settings.env were " +
+            'not applied to spawned tools and MCP servers.',
+        );
+      }
       const assembled =
         bareMode || safeMode
           ? { ...topTierMcpServers }
@@ -1526,8 +1593,10 @@ export function createProjectRuntimeReloader(
       let previousSettings: LoadedSettings | undefined;
       let resumeWatching: (() => void) | undefined;
       let committed = false;
+      let environmentReloaded = false;
 
       return {
+        warnings,
         config: {
           trustedFolder: effectiveTrust,
           includeDirectories,
@@ -1538,7 +1607,9 @@ export function createProjectRuntimeReloader(
           plansDir: Storage.getPlansDir(targetDir, plansDirectory),
           plansDirectoryConfigured: Boolean(plansDirectory?.trim()),
           cronEnabled:
-            cronEnabledOverride ?? runtimeSettings.experimental?.cron ?? true,
+            hostPolicy?.cronEnabled ??
+            runtimeSettings.experimental?.cron ??
+            true,
           cronRecurringMaxAgeDays:
             runtimeSettings.experimental?.cronRecurringMaxAgeDays,
           lsToolEnabled: runtimeSettings.tools?.listDirectory?.enabled === true,
@@ -1608,6 +1679,7 @@ export function createProjectRuntimeReloader(
             argv,
             bareMode,
             safeMode,
+            targetEnvironment,
           ),
           permissions: {
             allow: permissionsAllow.length > 0 ? permissionsAllow : undefined,
@@ -1704,10 +1776,8 @@ export function createProjectRuntimeReloader(
                   symlinkDirectories:
                     runtimeSettings.worktree.symlinkDirectories,
                 },
-          onPersistPermissionRule: createPermissionRulePersistenceCallback(
-            nextSettings,
-            targetDir,
-          ),
+          onPersistPermissionRule:
+            createPermissionRulePersistenceCallback(targetDir),
           disableAllHooks:
             bareMode || safeMode
               ? true
@@ -1739,21 +1809,24 @@ export function createProjectRuntimeReloader(
           // The target's `.env` files and `settings.env` must reach
           // `process.env` too — the assembled MCP servers inherit it at spawn
           // and expand their commands against it. Same step serve's
-          // `workspaceReload` performs; bare mode never loads env at all.
-          if (!bareMode) {
+          // `workspaceReload` performs. Skipped for bare sessions and for
+          // processes hosting other sessions (see `reloadProcessEnvironment`).
+          if (reloadProcessEnvironment) {
             reloadEnvironment(nextSettings.merged, targetDir, effectiveTrust);
+            environmentReloaded = true;
           }
         },
         async rollback() {
           if (!committed || !previousSettings) return;
           loadedSettings.replaceWith(previousSettings);
           committed = false;
-          if (!bareMode) {
+          if (environmentReloaded) {
             reloadEnvironment(
               previousSettings.merged,
               previousDir,
               previousSettings.isTrusted,
             );
+            environmentReloaded = false;
           }
           resumeWatching?.();
           resumeWatching = undefined;
@@ -1851,6 +1924,8 @@ export async function loadCliConfig(
     provisionalWorkspace?: true;
     /** Session policy that remains authoritative across project changes. */
     projectRuntimeCronEnabled?: boolean;
+    /** See {@link ProjectRuntimeHostPolicy.ownsProcessEnvironment}. */
+    ownsProcessEnvironment?: () => boolean;
     sessionRestore?: {
       projectionSource: (
         sessionId: string,
@@ -2443,7 +2518,12 @@ export async function loadCliConfig(
         safeMode,
         cliIncludeDirectories,
         modelDisablesToolSearch,
-        hostPolicy?.projectRuntimeCronEnabled,
+        hostPolicy
+          ? {
+              cronEnabled: hostPolicy.projectRuntimeCronEnabled,
+              ownsProcessEnvironment: hostPolicy.ownsProcessEnvironment,
+            }
+          : undefined,
       )
     : undefined;
 
@@ -2519,10 +2599,7 @@ export async function loadCliConfig(
     },
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     // Permission rule persistence callback (writes to settings files).
-    onPersistPermissionRule: createPermissionRulePersistenceCallback(
-      loadedSettings,
-      cwd,
-    ),
+    onPersistPermissionRule: createPermissionRulePersistenceCallback(cwd),
     toolDiscoveryCommand:
       bareMode || safeMode ? undefined : settings.tools?.discoveryCommand,
     toolCallCommand:

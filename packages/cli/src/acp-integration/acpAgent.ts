@@ -12588,35 +12588,31 @@ class QwenAgent implements Agent {
       // not process.exit(1) the shared ACP child and every session on its
       // channel. newSessionConfig maps the throw to a RequestError.
       true,
-      this.managedToolInvocationGuard ||
-        restoreOptions ||
-        provisionalWorkspace ||
-        sessionSource?.sourceType === 'channel'
-        ? {
-            ...(provisionalWorkspace
-              ? { provisionalWorkspace: true as const }
-              : {}),
-            ...(this.managedToolInvocationGuard
-              ? { toolInvocationGuard: this.managedToolInvocationGuard }
-              : {}),
-            ...(sessionSource?.sourceType === 'channel'
-              ? { projectRuntimeCronEnabled: false }
-              : {}),
-            ...(restoreOptions && sessionId
-              ? {
-                  sessionRestore: {
-                    projectionSource: (restoreSessionId) =>
-                      new SessionService(cwd, {
-                        runtimeBaseDir: Storage.getRuntimeBaseDir(),
-                      }).readRestoreProjection(
-                        restoreSessionId,
-                        restoreOptions,
-                      ),
-                  },
-                }
-              : {}),
-          }
-        : undefined,
+      {
+        // This child hosts every session on its channel and spawned tools
+        // inherit `process.env`, so a per-session `/cd` may only rewrite
+        // the process environment while no sibling session is live.
+        ownsProcessEnvironment: () => this.sessions.size <= 1,
+        ...(provisionalWorkspace
+          ? { provisionalWorkspace: true as const }
+          : {}),
+        ...(this.managedToolInvocationGuard
+          ? { toolInvocationGuard: this.managedToolInvocationGuard }
+          : {}),
+        ...(sessionSource?.sourceType === 'channel'
+          ? { projectRuntimeCronEnabled: false }
+          : {}),
+        ...(restoreOptions && sessionId
+          ? {
+              sessionRestore: {
+                projectionSource: (restoreSessionId) =>
+                  new SessionService(cwd, {
+                    runtimeBaseDir: Storage.getRuntimeBaseDir(),
+                  }).readRestoreProjection(restoreSessionId, restoreOptions),
+              },
+            }
+          : {}),
+      },
       settings,
     );
     if (sessionSource) {

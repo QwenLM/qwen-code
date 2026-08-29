@@ -1053,6 +1053,13 @@ export interface ProjectRuntimeConfig {
 
 export interface PreparedProjectRuntime {
   config: ProjectRuntimeConfig;
+  /**
+   * Non-blocking conditions the host decided at prepare time (for example,
+   * declining to rewrite a process-wide resource because the process hosts
+   * other sessions). Surfaced to the caller as
+   * `projectRuntimeRefreshErrors` once the switch has committed.
+   */
+  warnings?: readonly string[];
   commit(): Promise<void>;
   rollback(): Promise<void>;
   complete(): Promise<void>;
@@ -6040,6 +6047,9 @@ export class Config {
     }
 
     const projectRuntimeRefreshErrors: unknown[] = [];
+    for (const warning of preparedProjectRuntime?.warnings ?? []) {
+      projectRuntimeRefreshErrors.push(new Error(warning));
+    }
     if (preparedProjectRuntime) {
       try {
         await this.cleanupTeamRuntime();

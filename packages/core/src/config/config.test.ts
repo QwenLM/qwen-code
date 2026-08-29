@@ -7227,6 +7227,39 @@ describe('Server Config (config.ts)', () => {
     chdirSpy.mockRestore();
   });
 
+  it('relocateWorkingDirectory should surface prepare-time warnings as refresh errors', async () => {
+    // A host that declines to rewrite a process-wide resource (for example
+    // the environment, in a process hosting sibling sessions) reports it
+    // at prepare time; the switch still commits and the caller sees why.
+    const prepare = vi.fn().mockResolvedValue({
+      config: {} as ProjectRuntimeConfig,
+      warnings: ['Process environment left unchanged'],
+      commit: vi.fn().mockResolvedValue(undefined),
+      rollback: vi.fn(),
+      complete: vi.fn().mockResolvedValue(undefined),
+    });
+    const config = new Config({
+      ...baseParams,
+      projectRuntimeReloader: { prepare },
+    });
+    await config.initialize({ skipGeminiInitialization: true });
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    const result = await config.relocateWorkingDirectory(newDir, newDir, {
+      trustedFolder: true,
+    });
+
+    expect(result.projectRuntimeRefreshErrors?.[0]).toBeInstanceOf(Error);
+    expect((result.projectRuntimeRefreshErrors?.[0] as Error).message).toBe(
+      'Process environment left unchanged',
+    );
+    expect(config.getTargetDir()).toBe(newDir);
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
   it('relocateWorkingDirectory should roll back prepared settings when commit fails', async () => {
     const commitError = new Error('commit failed');
     const rollback = vi.fn().mockResolvedValue(undefined);

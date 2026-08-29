@@ -9,12 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApprovalMode, Storage } from '@qwen-code/qwen-code-core';
-import {
-  createProjectRuntimeReloader,
-  parseArguments,
-  resolvePersistenceSettings,
-} from './config.js';
-import type { CliArgs } from './config.js';
+import { createProjectRuntimeReloader, parseArguments } from './config.js';
+import type { CliArgs, ProjectRuntimeHostPolicy } from './config.js';
 import {
   createMinimalSettings,
   loadSettings,
@@ -35,7 +31,7 @@ describe('createProjectRuntimeReloader', () => {
   let projectB: string;
   let previousQwenHome: string | undefined;
   let argv: CliArgs;
-  const ENV_KEYS = ['A_KEY', 'B_TOKEN'];
+  const ENV_KEYS = ['A_KEY', 'B_TOKEN', 'QWEN_DISABLED_SLASH_COMMANDS'];
 
   const writeProject = (
     dir: string,
@@ -69,6 +65,7 @@ describe('createProjectRuntimeReloader', () => {
       safeMode?: boolean;
       modelDisablesToolSearch?: boolean;
       settingsWatcher?: { pauseWorkspaceWatching?: () => Promise<() => void> };
+      hostPolicy?: ProjectRuntimeHostPolicy;
     } = {},
   ) =>
     createProjectRuntimeReloader(
@@ -80,7 +77,15 @@ describe('createProjectRuntimeReloader', () => {
       overrides.safeMode ?? false,
       [],
       overrides.modelDisablesToolSearch ?? false,
+      overrides.hostPolicy,
     );
+
+  const readWorkspaceAllow = (dir: string): string[] | undefined =>
+    (
+      JSON.parse(
+        fs.readFileSync(new Storage(dir).getWorkspaceSettingsPath(), 'utf8'),
+      ) as { permissions?: { allow?: string[] } }
+    ).permissions?.allow;
 
   beforeEach(async () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-runtime-reloader-'));
@@ -129,10 +134,83 @@ describe('createProjectRuntimeReloader', () => {
     await prepared.commit();
     expect(process.env['B_TOKEN']).toBe('from-b');
     expect(process.env['A_KEY']).toBeUndefined();
+    expect(prepared.warnings).toEqual([]);
 
     await prepared.rollback();
     expect(process.env['A_KEY']).toBe('from-a');
     expect(process.env['B_TOKEN']).toBeUndefined();
+  });
+
+  it('leaves the process environment alone when the host reports sibling sessions', async () => {
+    // An ACP child under `qwen serve` hosts every session on its channel,
+    // and spawned MCP servers / shell tools inherit `process.env`. A
+    // per-session `/cd` that rewrote it handed a sibling session's
+    // subprocesses this project's secrets while deleting its own.
+    writeProject(projectA, {}, 'A_KEY=from-a\n');
+    writeProject(projectB, {}, 'B_TOKEN=from-b\n');
+    const loaded = startupSettings();
+    expect(process.env['A_KEY']).toBe('from-a');
+
+    const prepared = await makeReloader(loaded, {
+      hostPolicy: { ownsProcessEnvironment: () => false },
+    }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
+
+    await prepared.commit();
+    expect(process.env['A_KEY']).toBe('from-a');
+    expect(process.env['B_TOKEN']).toBeUndefined();
+    expect(loaded.workspace.path).toBe(
+      new Storage(projectB).getWorkspaceSettingsPath(),
+    );
+    expect(prepared.warnings).toHaveLength(1);
+    expect(prepared.warnings?.[0]).toMatch(/hosts other sessions/);
+
+    await prepared.rollback();
+    expect(process.env['A_KEY']).toBe('from-a');
+    expect(process.env['B_TOKEN']).toBeUndefined();
+  });
+
+  it('never applies the target environment from a bare session', async () => {
+    // Bare startup never loads env; a bare `/cd` must not start. And the
+    // rollback twin must not "restore" an environment that was never
+    // replaced — that leaked the boot environment's keys away.
+    writeProject(
+      projectB,
+      { experimental: { cron: false } },
+      'B_TOKEN=from-b\n',
+    );
+    process.env['A_KEY'] = 'from-boot';
+
+    const prepared = await makeReloader(createMinimalSettings(), {
+      bareMode: true,
+    }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
+
+    await prepared.commit();
+    expect(process.env['B_TOKEN']).toBeUndefined();
+    expect(process.env['A_KEY']).toBe('from-boot');
+    expect(prepared.warnings).toEqual([]);
+
+    await prepared.rollback();
+    expect(process.env['B_TOKEN']).toBeUndefined();
+    expect(process.env['A_KEY']).toBe('from-boot');
+  });
+
+  it('resolves QWEN_DISABLED_SLASH_COMMANDS from the target project environment', async () => {
+    // Startup reads the denylist after `loadEnvironment`; the reloader
+    // resolves config in `prepare()`, BEFORE any `process.env` rewrite —
+    // and in a shared process that rewrite never happens. Reading
+    // `process.env` there kept project A's denylist for the rest of the
+    // session.
+    writeProject(projectA, {}, 'QWEN_DISABLED_SLASH_COMMANDS=auth\n');
+    writeProject(projectB, {}, 'QWEN_DISABLED_SLASH_COMMANDS=deploy\n');
+    const loaded = startupSettings();
+    expect(process.env['QWEN_DISABLED_SLASH_COMMANDS']).toBe('auth');
+
+    const prepared = await makeReloader(loaded, {
+      hostPolicy: { ownsProcessEnvironment: () => false },
+    }).prepare(projectB, true, ApprovalMode.DEFAULT, projectA);
+
+    expect(prepared.config.disabledSlashCommands).toEqual(['deploy']);
+    expect(process.env['QWEN_DISABLED_SLASH_COMMANDS']).toBe('auth');
   });
 
   it('keeps a bare session on minimal settings instead of loading the user files', async () => {
@@ -266,18 +344,67 @@ describe('createProjectRuntimeReloader', () => {
     expect(emit).toHaveBeenCalledWith(AppEvent.McpPendingApprovalChanged);
   });
 
-  it('never persists permission rules through a minimal (bare) settings instance', () => {
-    // Bare mode's LoadedSettings has no file behind any scope; writing an
-    // "Always allow" rule through it threw on `rename('.tmp', '')` and the
-    // rule landed neither on disk nor in memory.
+  it('persists "Always allow" against the target project file in safe mode', async () => {
+    // `--safe-mode` loads the target with `skipWorkspaceSettings`, so the
+    // in-memory workspace scope is EMPTY while the file on disk is not. A
+    // read-modify-write against memory wrote `[newRule]` over the
+    // project's existing allow rules — data loss for every later session.
     writeProject(projectA, {});
-    const minimal = createMinimalSettings();
-    const resolved = resolvePersistenceSettings(minimal, projectA);
-    expect(resolved).not.toBe(minimal);
-    expect(resolved.user.path).toBe(Storage.getGlobalSettingsPath());
+    writeProject(projectB, { permissions: { allow: ['rule-A', 'rule-B'] } });
+    const loaded = startupSettings();
+    const prepared = await makeReloader(loaded, { safeMode: true }).prepare(
+      projectB,
+      true,
+      ApprovalMode.DEFAULT,
+      projectA,
+    );
 
-    const real = startupSettings();
-    expect(resolvePersistenceSettings(real, projectA)).toBe(real);
+    await prepared.commit();
+    expect(loaded.workspace.settings.permissions?.allow).toBeUndefined();
+    await prepared.config.onPersistPermissionRule?.(
+      'project',
+      'allow',
+      'run_shell_command(ls *)',
+    );
+
+    expect(readWorkspaceAllow(projectB)).toEqual([
+      'rule-A',
+      'rule-B',
+      'run_shell_command(ls *)',
+    ]);
+    expect(readWorkspaceAllow(projectA)).toBeUndefined();
+  });
+
+  it('reads the target project file fresh on every persist', async () => {
+    // Two sessions in one project: a rule the sibling persisted since the
+    // settings watcher last refreshed must survive this session's write.
+    writeProject(projectA, {});
+    writeProject(projectB, { permissions: { allow: ['rule-A'] } });
+    const loaded = startupSettings();
+    const prepared = await makeReloader(loaded).prepare(
+      projectB,
+      true,
+      ApprovalMode.DEFAULT,
+      projectA,
+    );
+    await prepared.commit();
+    expect(loaded.workspace.settings.permissions?.allow).toEqual(['rule-A']);
+
+    // The sibling session writes behind this session's back.
+    writeProject(projectB, {
+      permissions: { allow: ['rule-A', 'rule-from-sibling'] },
+    });
+    await prepared.config.onPersistPermissionRule?.(
+      'project',
+      'allow',
+      'run_shell_command(ls *)',
+    );
+
+    expect(readWorkspaceAllow(projectB)).toEqual([
+      'rule-A',
+      'rule-from-sibling',
+      'run_shell_command(ls *)',
+    ]);
   });
 
   it('persists bare-mode permission rules in the relocation target', async () => {
