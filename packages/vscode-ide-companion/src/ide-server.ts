@@ -29,6 +29,7 @@ import type { DiffManager } from './diff-manager.js';
 import { OpenFilesManager } from './open-files-manager.js';
 import { ACP_ERROR_CODES } from './constants/acpSchema.js';
 import { getGlobalQwenDir } from './utils/paths.js';
+import { shouldResolveAgainstWorkspace } from './utils/file-path.js';
 
 class CORSError extends Error {
   constructor(message: string) {
@@ -425,7 +426,7 @@ export class IDEServer {
   }
 }
 
-const createMcpServer = (diffManager: DiffManager) => {
+export const createMcpServer = (diffManager: DiffManager) => {
   const server = new McpServer(
     {
       name: 'qwen-code-companion-mcp-server',
@@ -456,8 +457,15 @@ const createMcpServer = (diffManager: DiffManager) => {
       filePath,
       suppressNotification,
     }: z.infer<typeof CloseDiffRequestSchema>) => {
+      let resolvedPath = filePath;
+      if (shouldResolveAgainstWorkspace(filePath)) {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (workspaceFolder) {
+          resolvedPath = vscode.Uri.joinPath(workspaceFolder.uri, filePath).fsPath;
+        }
+      }
       const content = await diffManager.closeDiff(
-        filePath,
+        resolvedPath,
         suppressNotification,
       );
       const response = { content: content ?? undefined };
