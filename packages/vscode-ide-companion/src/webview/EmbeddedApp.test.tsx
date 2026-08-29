@@ -70,7 +70,7 @@ vi.mock('@qwen-code/web-shell', async () => {
       // persists, each distinct error value is reported once. Hosts may pass
       // an onError whose identity changes on every render, which re-runs the
       // effect without re-delivering the already-reported error.
-      const { onError } = props;
+      const onError = props.onError as ((error: Error) => void) | undefined;
       const lastReportedError = useRef<string | undefined>(undefined);
       const [churn, setChurn] = useState(0);
       // A fresh wrapper identity whenever the host's onError identity
