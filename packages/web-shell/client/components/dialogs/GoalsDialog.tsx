@@ -10,7 +10,7 @@ import { canResumeGoal } from '../../utils/goalGate';
 import {
   useWorkspaceActions,
   type DaemonGoal,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
