@@ -23,6 +23,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
   type PathLike,
@@ -302,5 +303,44 @@ describe('isPathProvablyAbsent', () => {
     withLeafErrno(leaf, 'EACCES', () => {
       expect(isPathProvablyAbsent(repo, 'locked.ts')).toBe(false);
     });
+  });
+
+  // R1-6: one enumeration shares its ancestor probes.
+  it('probes a shared missing ancestor chain once, not once per path', () => {
+    // The whole `a/` subtree is unmaterialized, as out-of-cone paths are in
+    // a sparse checkout: without the shared memo, every path re-walks the
+    // same missing chain all the way to the repo root.
+    const memo = new Map<string, boolean>();
+    vi.mocked(statSync).mockClear();
+    expect(isPathProvablyAbsent(repo, join('a', 'b', 'x.ts'), memo)).toBe(true);
+    expect(isPathProvablyAbsent(repo, join('a', 'b', 'y.ts'), memo)).toBe(true);
+    expect(isPathProvablyAbsent(repo, join('a', 'c', 'z.ts'), memo)).toBe(true);
+    // The first path probes a/b, a, then the existing repo root; the second
+    // hits the memoized a/b at once; the third probes only a/c before the
+    // memoized a. Without the memo this is 9 ancestor probes (3 per path).
+    expect(vi.mocked(statSync).mock.calls).toHaveLength(4);
+    // The memo stores only ancestor-walk verdicts — never the leaf lstat.
+    expect(memo.has(join(repo, 'a', 'b', 'x.ts'))).toBe(false);
+  });
+
+  it('a non-ENOENT ancestor probe stays unmeasurable, even through the memo', () => {
+    mkdirSync(join(repo, 'src'));
+    const locked = join(repo, 'src');
+    vi.mocked(statSync).mockImplementation(((p: PathLike) => {
+      if (p === locked) throw errno('EACCES');
+      return realFs.statSync(p);
+    }) as unknown as typeof statSync);
+    try {
+      const memo = new Map<string, boolean>();
+      expect(isPathProvablyAbsent(repo, join('src', 'x.ts'), memo)).toBe(false);
+      // The memoized verdict for the EACCES ancestor IS the refusal: a
+      // sibling path sharing the chain answers the same without re-probing.
+      expect(memo.get(locked)).toBe(false);
+      vi.mocked(statSync).mockClear();
+      expect(isPathProvablyAbsent(repo, join('src', 'y.ts'), memo)).toBe(false);
+      expect(vi.mocked(statSync).mock.calls).toHaveLength(0);
+    } finally {
+      vi.mocked(statSync).mockRestore();
+    }
   });
 });

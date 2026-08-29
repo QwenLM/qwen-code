@@ -58,10 +58,14 @@ export const UNHASHABLE = 'unhashable';
  * intermediate into permanent re-review. A symlink to a file still resolves
  * to a non-directory (refused), and a broken link throws ENOENT, which
  * continues the walk upward.
+ *
+ * One enumeration may share its ancestor probes: pass a Map keyed by absolute
+ * path and decided verdicts are reused across paths. See the walk below.
  */
 export function isPathProvablyAbsent(
   repoRoot: string,
   relativePath: string,
+  ancestorProbes?: Map<string, boolean>,
 ): boolean {
   const candidate = join(repoRoot, relativePath);
   try {
@@ -71,13 +75,40 @@ export function isPathProvablyAbsent(
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
   }
 
+  // A sparse-checkout repo flags every out-of-cone path, all absent with
+  // unmaterialized ancestors: re-walking the same missing chain to the root
+  // once per path multiplied the metadata calls by depth+1, on Windows the
+  // slowest calls there are (R1-6). The optional memo — scoped by the caller
+  // to ONE enumeration — shares the decision: every stored entry is an
+  // actually-probed result, one statSync verdict plus that same verdict
+  // propagated down the chain this walk itself probed ENOENT, and a walk
+  // starting from any of those ancestors makes the identical probes and
+  // decides identically. The leaf lstat never enters the memo — it is
+  // per-path, and an existing path is never exempt. A non-ENOENT probe
+  // stores false: unmeasurable is not absent, and the memo must not launder
+  // it into an exemption.
   let ancestor = dirname(candidate);
-  for (;;) {
-    try {
-      return statSync(ancestor).isDirectory();
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+  const walked: string[] = [];
+  const decide = (verdict: boolean): boolean => {
+    if (ancestorProbes) {
+      for (const w of walked) ancestorProbes.set(w, verdict);
     }
+    return verdict;
+  };
+  for (;;) {
+    const memoized = ancestorProbes?.get(ancestor);
+    if (memoized !== undefined) return decide(memoized);
+    try {
+      const verdict = statSync(ancestor).isDirectory();
+      ancestorProbes?.set(ancestor, verdict);
+      return decide(verdict);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        ancestorProbes?.set(ancestor, false);
+        return decide(false);
+      }
+    }
+    walked.push(ancestor);
     const parent = dirname(ancestor);
     if (parent === ancestor) return false;
     ancestor = parent;
@@ -680,6 +711,11 @@ export function invisibleTrackedPaths(repoRoot: string): string[] | null {
       'core.sparseCheckout',
     ) === 'true';
   if (!sparse) return tagged;
+  // One memo for this one enumeration: the flagged paths share long missing
+  // ancestor chains (the sparse shape), and sharing the probe results keeps
+  // the walk to one probe per ancestor instead of one per path times depth
+  // (R1-6; see the walk in isPathProvablyAbsent).
+  const ancestorProbes = new Map<string, boolean>();
   const absent = new Set(
     tagged.filter((p) => {
       // A name that did not survive the decode cannot be measured OR fed to
@@ -690,7 +726,7 @@ export function invisibleTrackedPaths(repoRoot: string): string[] | null {
       if (p.includes('\ufffd')) return false;
       // Only ENOENT-proven absence may exempt (R19-2): every unmeasurable
       // shape the helper refuses stays flagged, never certified.
-      return isPathProvablyAbsent(repoRoot, p);
+      return isPathProvablyAbsent(repoRoot, p, ancestorProbes);
     }),
   );
   if (absent.size === 0) return tagged;
