@@ -1453,7 +1453,7 @@ export const useLlmStream = (
         if (thoughtMergeDeferralOwnerRef.current === owner) {
           armedCallIds.add(callId);
         } else {
-          commitOwnPendingThought(userMessageTimestamp, owner);
+          commitOwnPendingThought(userMessageTimestamp, owner ?? undefined);
         }
         return;
       }
