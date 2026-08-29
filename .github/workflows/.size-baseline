@@ -30,6 +30,7 @@
 5950 live-host.yml
 7642 main-ci-failure-issue.yml
 1686 npm-cache.yml
+2489 pnpm-worktree-smoke.yml
 7299 pr-force-push-reminder.yml
 6495 pr-self-report-label.yml
 9646 qwen-autofix-fork-bridge.yml
