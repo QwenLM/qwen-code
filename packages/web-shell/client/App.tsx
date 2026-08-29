@@ -124,6 +124,7 @@ import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { DialogShell } from './components/dialogs/DialogShell';
 import {
   ModelDialog,
+  type ModelDialogModel,
   type ModelDialogMode,
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
@@ -1046,6 +1047,8 @@ export interface WebShellProps {
   shellRef?: React.Ref<WebShellApi>;
   /** Built-in composer toolbar actions to show. Defaults to all actions. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /** Optionally filter main-model entries without changing shared defaults. */
+  mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
   compactComposerOverlays?: boolean;
   /** Submit slash items marked as immediate actions when selected. */
@@ -2066,6 +2069,7 @@ export function App({
   messageTurnOutputs,
   shellRef,
   composerToolbarActions,
+  mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
   additionalSlashCommands = EMPTY_ADDITIONAL_SLASH_COMMANDS,
@@ -12217,6 +12221,9 @@ export function App({
               <ModelDialog
                 mode={modelDialogMode}
                 models={modelDialogMode === 'voice' ? voiceModels : undefined}
+                filterModel={
+                  modelDialogMode === 'main' ? mainModelFilter : undefined
+                }
                 currentModelId={
                   modelDialogMode === 'voice'
                     ? currentVoiceModel

@@ -5438,6 +5438,7 @@ export const MessageList = memo(
                 onEditUserMessage &&
                 !isResponding &&
                 !hasOlderHistory &&
+                !historyCapacityReached &&
                 displayItem.message.role === 'user' &&
                 editableUserContent !== undefined &&
                 displayItem.message.id === editableUserTurn.lastId
@@ -5514,6 +5515,7 @@ export const MessageList = memo(
         onEditUserMessage,
         editableUserTurn,
         hasOlderHistory,
+        historyCapacityReached,
         generateContent,
         headerOffset,
         visibleItems,
