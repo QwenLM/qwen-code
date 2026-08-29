@@ -51,6 +51,7 @@ import {
   eventPromptId,
   findLiveJournalRepairSuffix,
   findLiveJournalRepairTarget,
+  isLiveJournalMarker,
   type LiveJournalRepairSuffix,
   type LiveJournalRepairTarget,
 } from './live-journal-repair.js';
@@ -1036,6 +1037,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     },
     [],
   );
+  const publishPendingRepairSettlement = useCallback(
+    (repair: LiveJournalRepairEpisode, transcriptComplete: boolean) => {
+      const settlement = repair.pendingSettlement;
+      if (!settlement) return;
+      repair.pendingSettlement = undefined;
+      publishPromptSettlement({ ...settlement, transcriptComplete });
+    },
+    [publishPromptSettlement],
+  );
   const repairReloadRef = useRef<
     DaemonSessionActions['reloadSession'] | undefined
   >(undefined);
@@ -1301,12 +1311,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               error instanceof Error ? error.message : String(error),
             recoverable: true,
           });
-          if (repair.pendingSettlement) {
-            publishPromptSettlement({
-              ...repair.pendingSettlement,
-              transcriptComplete: false,
-            });
-          }
+          publishPendingRepairSettlement(repair, false);
           liveJournalRepairRef.current = undefined;
         },
       );
@@ -2191,38 +2196,35 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       block.data['scope'] === 'live_journal',
                   );
                 const existingRepair = liveJournalRepairRef.current;
-                liveJournalRepairRef.current =
+                const reuseExistingRepair =
                   existingRepair?.target.signature === replayTarget.signature &&
-                  existingRepair.attempted
-                    ? existingRepair
-                    : {
-                        sessionId: activeSession.sessionId,
-                        target: replayTarget,
-                        checkpoint: {
-                          ...nextCheckpoint,
-                          maxBlocks: committedMaxBlocks,
-                        },
-                        ...(markerBlock
-                          ? { markerBlockId: markerBlock.id }
-                          : {}),
-                        observedSnapshotEventIds: new Set(
-                          liveJournal.flatMap((event) =>
-                            event.id === undefined ? [] : [event.id],
-                          ),
+                  existingRepair.attempted;
+                if (existingRepair && !reuseExistingRepair) {
+                  publishPendingRepairSettlement(existingRepair, false);
+                }
+                liveJournalRepairRef.current = reuseExistingRepair
+                  ? existingRepair
+                  : {
+                      sessionId: activeSession.sessionId,
+                      target: replayTarget,
+                      checkpoint: {
+                        ...nextCheckpoint,
+                        maxBlocks: committedMaxBlocks,
+                      },
+                      ...(markerBlock ? { markerBlockId: markerBlock.id } : {}),
+                      observedSnapshotEventIds: new Set(
+                        liveJournal.flatMap((event) =>
+                          event.id === undefined ? [] : [event.id],
                         ),
-                        snapshotLastEventId: activeSession.lastEventId ?? 0,
-                        lastObservedEventId: activeSession.lastEventId ?? 0,
-                        terminalSeen: false,
-                        attempted: false,
-                      };
+                      ),
+                      snapshotLastEventId: activeSession.lastEventId ?? 0,
+                      lastObservedEventId: activeSession.lastEventId ?? 0,
+                      terminalSeen: false,
+                      attempted: false,
+                    };
               } else if (repairingEpisode) {
                 liveJournalRepairRef.current = undefined;
-                if (repairingEpisode.pendingSettlement) {
-                  publishPromptSettlement({
-                    ...repairingEpisode.pendingSettlement,
-                    transcriptComplete: true,
-                  });
-                }
+                publishPendingRepairSettlement(repairingEpisode, true);
               }
             } else if (allUiEvents.length > 0) {
               store.dispatch(allUiEvents);
@@ -2296,6 +2298,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 passiveAssistantDoneTimerRef,
                 { requireBoundPromptId: true },
               );
+              if (activePromptSettled && restoredActivePrompt) {
+                settleRestoredActivePrompt();
+              }
               if (!activePromptSettled) continue;
               const settlement = promptSettledFromTurnEvent(
                 activeSession.sessionId,
@@ -2309,8 +2314,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ) {
                 repair.pendingSettlement = settlement;
                 repair.terminalSeen = true;
+                queueMicrotask(tryLiveJournalRepair);
               } else {
-                publishPromptSettlement(settlement);
+                publishPromptSettlement({
+                  ...settlement,
+                  transcriptComplete:
+                    !activeSession.replayDegraded &&
+                    !replayEvents.some(isLiveJournalMarker),
+                });
               }
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
@@ -2791,6 +2802,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 setPromptStatus,
                 passiveAssistantDoneTimerRef,
               );
+              if (activePromptSettled && restoredActivePrompt) {
+                settleRestoredActivePrompt();
+              }
               let restoredPromptSettled = false;
               if (
                 !activePromptSettled &&
@@ -3472,6 +3486,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     clearNotices,
     addNotice,
     dismissNotice,
+    publishPendingRepairSettlement,
     publishPromptSettlement,
     setConnectionSynchronous,
   ]);
@@ -3722,13 +3737,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         setAttachSessionNonce,
         setNewSessionNonce,
         clearLiveJournalRepair: () => {
-          liveJournalRepairRef.current?.controller?.abort();
+          const repair = liveJournalRepairRef.current;
+          if (repair) {
+            publishPendingRepairSettlement(repair, false);
+            repair.controller?.abort();
+          }
           liveJournalRepairRef.current = undefined;
         },
       }),
     [
       addNotice,
       clientId,
+      publishPendingRepairSettlement,
       resolvedBaseUrl,
       resolvedToken,
       restartEventStreamOnPrompt,

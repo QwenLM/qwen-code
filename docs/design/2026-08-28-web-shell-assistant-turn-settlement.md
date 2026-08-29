@@ -13,7 +13,7 @@ The callback is a generic Web Shell lifecycle contract. It is not tied to any em
 - `sessionId` and daemon-assigned `promptId`; their tuple is the stable idempotency key;
 - `outcome`: `completed`, `cancelled`, or `failed`;
 - the daemon `stopReason` when a turn completed;
-- `transcriptComplete`, which is false only when bounded live-journal repair could not restore the complete turn;
+- `transcriptComplete`, which is false when replay integrity is degraded or bounded live-journal repair could not restore the complete turn before failing or being discarded;
 - the final visible assistant message when it remains available in the committed current-session transcript; turns without assistant content and events delivered across a session switch omit it, while cancelled and failed turns may carry partial content.
 
 The callback is optional. Existing `onSessionChange({ type: 'turn_complete' })` behavior remains unchanged.
@@ -28,7 +28,7 @@ The daemon session provider publishes a settlement only after it has:
 
 1. flushed buffered transcript deltas;
 2. applied `assistant.done` and the terminal event's own transcript projection;
-3. completed live-journal repair when a truncated active turn can be repaired.
+3. completed live-journal repair when a truncated active turn can be repaired, or classified the retained transcript as incomplete before discarding an unsuccessful repair.
 
 Ordinary session load, branch/split transcript replay, and older-history pagination never publish settlements. A terminal received while reconnecting an already active prompt may publish because it is a previously unseen live lifecycle transition, not history playback.
 
@@ -57,5 +57,8 @@ Web Shell owns projection of the final visible assistant message and the public 
 - `TC-09`: session switch cannot attribute an old terminal to the new session.
 - `TC-10`: successful live-journal repair delays publication until the repaired transcript is committed; failed repair marks `transcriptComplete: false`.
 - `TC-11`: listener exceptions do not interrupt subsequent daemon events or listeners.
+- `TC-12`: clearing or replacing a repair episode releases its held settlement once with `transcriptComplete: false`.
+- `TC-13`: degraded catch-up replay and unrecoverable live-journal markers publish with `transcriptComplete: false`.
+- `TC-14`: a terminal after reconnect consumes the restored-active snapshot and allows live or catch-up repair to finish.
 
 No visual UI changes are introduced, so browser screenshot validation is not applicable. Package unit tests, build, typecheck, and repository preflight are the delivery gates.

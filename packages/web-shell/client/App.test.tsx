@@ -12820,13 +12820,15 @@ describe('App session callbacks', () => {
         streaming: false,
       },
       {
-        ...base,
         id: 'tool-1',
         kind: 'tool',
         toolCallId: 'call-1',
         title: 'Lookup',
         status: 'completed',
         preview: { kind: 'generic' },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
       },
       {
         ...base,
@@ -12835,6 +12837,15 @@ describe('App session callbacks', () => {
         text: 'The final answer.',
         streaming: false,
         serverTimestamp: 42,
+      },
+      {
+        ...base,
+        id: 'assistant-subagent',
+        kind: 'assistant',
+        parentToolCallId: 'call-1',
+        text: 'Subagent internal answer',
+        streaming: false,
+        serverTimestamp: 43,
       },
     ];
     const onAssistantTurnSettled = vi.fn();
@@ -12944,6 +12955,53 @@ describe('App session callbacks', () => {
         }),
       }),
     );
+  });
+
+  it('omits the message when the settled prompt has no assistant content', async () => {
+    testState.blocks = [
+      {
+        id: 'assistant-previous',
+        kind: 'assistant',
+        promptId: 'prompt-previous',
+        text: 'Previous answer',
+        streaming: false,
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      {
+        id: 'user-failed',
+        kind: 'user',
+        promptId: 'prompt-failed-before-content',
+        text: 'Question that failed immediately',
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      },
+    ];
+    const onAssistantTurnSettled = vi.fn();
+    renderApp({ onAssistantTurnSettled });
+    await flush();
+
+    act(() => {
+      testState.promptSettledListener?.({
+        sessionId: 'session-1',
+        promptId: 'prompt-failed-before-content',
+        outcome: 'failed',
+        eventId: 12,
+        transcriptComplete: true,
+        error: { message: 'model unavailable', code: 'model_error' },
+      });
+    });
+
+    expect(onAssistantTurnSettled).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      promptId: 'prompt-failed-before-content',
+      outcome: 'failed',
+      eventId: 12,
+      transcriptComplete: true,
+      error: { message: 'model unavailable', code: 'model_error' },
+    });
   });
 
   it('gates direct submissions and dispatches compatible submit events', async () => {

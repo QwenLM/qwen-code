@@ -196,7 +196,8 @@ export function App() {
 
 `outcome` 为 `completed`、`cancelled` 或 `failed`。取消和失败可能没有 Assistant
 消息，也可能携带终止前的部分内容。`transcriptComplete: false` 表示 Web Shell 已收到
-终态，但无法从受限的 live journal 中恢复完整 transcript。等待 permission 或
+终态，但 replay 已被标记为不完整，或受限 live journal 的修复在失败、会话切换或
+repair episode 被替换前未能恢复完整 transcript。等待 permission 或
 `ask_user_question` 不属于终态。Artifact 和 workspace projection 有各自的生命周期，
 不由该回调表示。进程硬崩溃且没有送达 prompt 终态时不会触发回调；连接失败应由连接
 状态单独处理，不能被当作已完成的 turn。

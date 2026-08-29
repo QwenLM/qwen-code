@@ -66,10 +66,7 @@ import {
   WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
 } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
-import {
-  isRetryableTurnErrorKind,
-  transcriptBlocksToDaemonMessages,
-} from './adapters/transcriptToMessages';
+import { isRetryableTurnErrorKind } from './adapters/transcriptToMessages';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
@@ -709,17 +706,21 @@ function getSettledAssistantMessage(
   blocks: readonly DaemonTranscriptBlock[],
   promptId: string,
 ): WebShellAssistantMessageInfo | undefined {
-  const messages = transcriptBlocksToDaemonMessages(
-    blocks.filter((block) => block.promptId === promptId),
-  );
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role !== 'assistant') continue;
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (
+      block?.kind !== 'assistant' ||
+      block.promptId !== promptId ||
+      block.parentToolCallId !== undefined ||
+      block.text.trim().length === 0
+    ) {
+      continue;
+    }
     return {
-      id: message.id,
-      content: message.content,
-      isStreaming: message.isStreaming,
-      timestamp: message.timestamp,
+      id: block.id,
+      content: block.text,
+      isStreaming: block.streaming ?? false,
+      timestamp: block.serverTimestamp ?? block.clientReceivedAt,
     };
   }
   return undefined;
