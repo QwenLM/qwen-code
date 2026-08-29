@@ -248,6 +248,7 @@ vi.mock('../hooks/index.js', () => {
         getHookSystem: () => {
           fireInstructionsLoadedEvent?: (...args: unknown[]) => unknown;
         },
+        signal?: AbortSignal,
       ) =>
       async (notification: {
         filePath: string;
@@ -264,6 +265,7 @@ vi.mock('../hooks/index.js', () => {
             triggerFilePath: notification.triggerFilePath,
             parentFilePath: notification.parentFilePath,
           },
+          signal,
         );
       },
   };
@@ -4062,6 +4064,34 @@ describe('Server Config (config.ts)', () => {
       ).toEqual([initializationError, closeError]);
     });
 
+    it('preserves initialization cancellation when recording close fails', async () => {
+      const config = new Config(baseParams);
+      const controller = new AbortController();
+      const abortReason = new Error('session initialization deadline exceeded');
+      const closeError = new Error('recording close failed');
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: (options?: {
+            signal?: AbortSignal;
+          }) => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockImplementation(async (options) => {
+        controller.abort(abortReason);
+        options?.signal?.throwIfAborted();
+      });
+      const close = vi
+        .spyOn(config, 'closeSessionWriter')
+        .mockRejectedValue(closeError);
+
+      const result = await config
+        .initialize({ signal: controller.signal })
+        .catch((error: unknown) => error);
+
+      expect(result).toBe(abortReason);
+      expect(close).toHaveBeenCalledOnce();
+    });
+
     it('runs due auto-skill curation before loading skills when enabled', async () => {
       const config = new Config({ ...baseParams, enableAutoSkill: true });
 
@@ -4423,6 +4453,73 @@ describe('Server Config (config.ts)', () => {
       await expect(config.initialize()).rejects.toThrow(
         'Config is shutting down',
       );
+    });
+
+    it('rejects a pre-aborted initialization without consuming the Config', async () => {
+      const config = new Config(baseParams);
+      const controller = new AbortController();
+      const abortReason = new Error('initialization cancelled before start');
+      controller.abort(abortReason);
+
+      await expect(
+        config.initialize({ signal: controller.signal }),
+      ).rejects.toBe(abortReason);
+
+      const initializeInternal = vi
+        .spyOn(
+          config as unknown as {
+            initializeInternal: () => Promise<void>;
+          },
+          'initializeInternal',
+        )
+        .mockResolvedValue(undefined);
+      await expect(config.initialize()).resolves.toBeUndefined();
+      expect(initializeInternal).toHaveBeenCalledOnce();
+      await config.shutdown({ shutdownTelemetry: false });
+    });
+
+    it('forwards cancellation into Gemini client initialization', async () => {
+      const config = new Config(baseParams);
+      const controller = new AbortController();
+      const abortReason = new Error('initialization deadline exceeded');
+      const refreshHierarchicalMemory = vi.spyOn(
+        config,
+        'refreshHierarchicalMemory',
+      );
+      let markGeminiEntered!: () => void;
+      const geminiEntered = new Promise<void>((resolve) => {
+        markGeminiEntered = resolve;
+      });
+      const geminiInitialize = vi
+        .spyOn(config.getGeminiClient(), 'initialize')
+        .mockImplementation(async (_source, signal) => {
+          expect(signal).toBe(controller.signal);
+          markGeminiEntered();
+          await new Promise<void>((_resolve, reject) => {
+            if (signal?.aborted) {
+              reject(signal.reason);
+              return;
+            }
+            signal?.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        });
+
+      const initialization = config.initialize({ signal: controller.signal });
+      await geminiEntered;
+      controller.abort(abortReason);
+
+      await expect(initialization).rejects.toBe(abortReason);
+      expect(geminiInitialize).toHaveBeenCalledWith(
+        undefined,
+        controller.signal,
+      );
+      expect(refreshHierarchicalMemory).toHaveBeenCalledWith(
+        'session_start',
+        controller.signal,
+      );
+      await config.shutdown({ shutdownTelemetry: false });
     });
 
     it('preserves graceful writer finalization after successful initialization', async () => {
@@ -7954,6 +8051,7 @@ describe('Server Config (config.ts)', () => {
   it('refreshHierarchicalMemory should fire InstructionsLoaded hooks from memory notifications', async () => {
     const config = new Config(baseParams);
     const fireInstructionsLoadedEvent = vi.fn().mockResolvedValue(undefined);
+    const signal = new AbortController().signal;
     config['hookSystem'] = {
       fireInstructionsLoadedEvent,
     } as unknown as HookSystem;
@@ -7967,7 +8065,7 @@ describe('Server Config (config.ts)', () => {
       projectRoot: '/tmp',
     });
 
-    await config.refreshHierarchicalMemory();
+    await config.refreshHierarchicalMemory('session_start', signal);
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     const options = lastCall?.at(-1) as
@@ -7991,6 +8089,7 @@ describe('Server Config (config.ts)', () => {
         triggerFilePath: '/tmp/project/AGENTS.md',
         parentFilePath: '/tmp/project/AGENTS.md',
       },
+      signal,
     );
   });
 
