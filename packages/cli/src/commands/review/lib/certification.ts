@@ -27,11 +27,14 @@ import { briefPath } from './prompt-record.js';
 
 /**
  * An agent's own declaration that its chunk cannot be reviewed. Anchored to a
- * line start so a quotation indented into prose does not match; the chunk
- * number is captured so the veto can stay scoped to the declarer's own
- * territory.
+ * line start so a quotation mid-line in prose cannot match; leading
+ * whitespace stays admitted because the brief template renders the line
+ * indented and an honest declarer may reproduce it that way — which an
+ * indented QUOTATION on its own line also matches, so consumers adjudicate
+ * the candidates rather than trusting any single match. The chunk number is
+ * captured so the veto can stay scoped to the declarer's own territory.
  */
-const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
+const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/gim;
 
 /**
  * The chunk a KEY assigns: `chunk-13` → 13, and the per-chunk audit shapes —
@@ -51,28 +54,32 @@ export function chunkOfKey(key: string): number | null {
  * is chunk-SCOPED: applied raw, the regex also matches a QUOTATION, and
  * quoting the evidence verbatim is exactly what a reverse-audit brief
  * instructs — a whole-diff record quoting a declaration is not declaring.
+ * EVERY match is read, not only the first: a declarer that quotes another
+ * chunk's declaration ahead of its own line still declares its own chunk
+ * (R22-2).
  */
 export function declaresOwnUncoverable(
   rec: AgentRecord,
   chunk: number | null,
 ): boolean {
   if (chunk === null) return false;
-  const m = UNCOVERABLE_RE.exec(rec.finalText);
-  return m !== null && Number(m[1]) === chunk;
+  return declaredUncoverableChunkIds(rec).includes(chunk);
 }
 
 /**
- * The chunk id a record's return declares uncoverable, whatever chunk the
- * record was ASSIGNED. A paraphrased launch breaks the anchored identity
- * line and de-assigns the record, but the declaration line survives — the
- * coverage walk reads the id off it so the declaration is sealed and ruled
- * on instead of dropped (R17-4). The quotation caveat rides the walk's
- * seals there, not this atom: an id read off a return is a claim, and the
- * walk decides what proves it.
+ * The chunk ids a record's return declares uncoverable, in text order,
+ * whatever chunk the record was ASSIGNED. Every match, not only the first:
+ * an earlier quotation of another chunk's declaration must not hide the
+ * record's own declaration — the walk adjudicates each candidate against
+ * its shape gates (R22-2). A paraphrased launch breaks the anchored
+ * identity line and de-assigns the record, but the declaration line
+ * survives — the coverage walk reads the id off it so the declaration is
+ * sealed and ruled on instead of dropped (R17-4). The quotation caveat
+ * rides the walk's seals there, not this atom: an id read off a return is
+ * a claim, and the walk decides what proves it.
  */
-export function declaredUncoverableChunkId(rec: AgentRecord): number | null {
-  const m = UNCOVERABLE_RE.exec(rec.finalText);
-  return m === null ? null : Number(m[1]);
+export function declaredUncoverableChunkIds(rec: AgentRecord): number[] {
+  return [...rec.finalText.matchAll(UNCOVERABLE_RE)].map((m) => Number(m[1]));
 }
 
 /**

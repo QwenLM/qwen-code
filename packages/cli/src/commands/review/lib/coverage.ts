@@ -68,7 +68,7 @@ import {
   recordedPromptPath,
 } from './prompt-record.js';
 import {
-  declaredUncoverableChunkId,
+  declaredUncoverableChunkIds,
   declaresOwnUncoverable,
   openedBrief,
   readFindingsPointer,
@@ -827,24 +827,17 @@ export function coverageFromTranscripts(
   // is positively the old plan's, which windows, counts and reads cannot
   // prove — a modify-only re-plan keeps every window, so a fence-surviving
   // record of the old plan passes the geometry seals with its old cause
-  // intact. A marker-less launch — one from before the mechanism, or a
-  // paraphrase that dropped the line — keeps the geometry seals alone,
-  // exactly the pre-token posture; a plan with no identity checks nothing,
-  // the absence rule the drift check states.
-  const launchOfThisPlan = (launch: string): boolean => {
-    if (planToken === null) return true;
-    const carried = launchPlanToken(launch);
-    return carried === null || carried === planToken;
-  };
-  // Fail-closed twin for the chunk-less admission paths: a launch that
-  // claims no chunk carries no geometry a seal could read — a whole-diff
-  // read spans every window by construction — so nothing ties a
-  // marker-less record to this plan's lines but the token. Over an
-  // identity-carrying plan such a record fails closed instead of riding
-  // `launchOfThisPlan`'s fail-open (R20-6). One predicate for every
-  // chunk-less arm: the check these arms share was copied site by site,
-  // and the sweep that sealed three of its four instances left the
-  // unassigned-declarer arm fail-open (R21-8).
+  // intact. Fail CLOSED on a marker-less launch: one from before the
+  // mechanism, or a paraphrase that dropped the line, carries nothing
+  // tying it to this plan's lines — geometry cannot tell the plans apart
+  // over a modify-only re-plan, and the chunk-less arms carry no geometry
+  // at all (a whole-diff read spans every window by construction). A plan
+  // with no identity checks nothing, the absence rule the drift check
+  // states. ONE predicate for every admission path: the seal below, the
+  // note arms, the declaration arms, the budget-gap gate, the credit gate
+  // and the rescue all ride it — the fail-open twin that preceded it left
+  // exactly the arms still riding it admitting stale records (R20-6,
+  // R21-8, R22-1, R22-3).
   const markedOfThisPlan = (launch: string): boolean =>
     planToken === null || launchPlanToken(launch) === planToken;
   // The plan identity a `chunk N of M` launch was written against. A stale
@@ -856,20 +849,22 @@ export function coverageFromTranscripts(
   // name the RECORD — but may not key causes or agents into a chunk they
   // were never assigned under this plan.
   //
-  // Membership, count and token are not the whole of that identity: a
+  // Membership, count and token are not the whole of that identity: two
+  // plans can share a count while chunking different lines, and a
   // same-session re-plan can keep BOTH count and token facts out of reach —
-  // two chunks stay two chunks while their windows move, and a marker-less
-  // record over an identity-less plan (the fail-open shapes
-  // `launchOfThisPlan` names) rides the token conjunct through. Territory
-  // tells the plans apart where the count cannot — see
+  // two chunks stay two chunks while their windows move. Territory tells
+  // the plans apart where the count cannot — see
   // `declarationStillOnTerritory`. Every launch this CLI builds spells its
   // chunk's whole window, so an honest record's told-range spans its chunk
   // exactly; a launch that spells no read resolves through the current plan
-  // inside `pointedAt` and still passes.
+  // inside `pointedAt` and still passes. The token conjunct fails closed
+  // with `markedOfThisPlan`: a marker-less launch over an identity-carrying
+  // plan cannot prove it belongs to this plan whatever its geometry, the
+  // same posture as the chunk-less arms (R22-3).
   const sealedToThisPlan = (rec: AgentRecord, chunkId: number): boolean =>
     plan.chunks.some((c) => c.id === chunkId) &&
     assignedChunkTotal(rec) === plan.chunks.length &&
-    launchOfThisPlan(rec.launchPrompt) &&
+    markedOfThisPlan(rec.launchPrompt) &&
     declarationStillOnTerritory(pointedAt(rec.launchPrompt, plan), chunkId);
   const noteChunkAgent = (
     rec: AgentRecord,
@@ -1534,9 +1529,9 @@ export function coverageFromTranscripts(
     // while one admitted makes the chunk uncoverable, its reads
     // crediting nothing, the declaration having answered them.
     if (chunk === null) {
-      const declared = declaredUncoverableChunkId(rec);
+      const declaredIds = declaredUncoverableChunkIds(rec);
       if (
-        declared !== null &&
+        declaredIds.length > 0 &&
         // Refuse role launches at the entrance: a role agent carries an
         // intact identity line (never CHUNK_RE-matched), walks chunk-less,
         // and can spell exactly the declared chunk's window — so a
@@ -1546,59 +1541,81 @@ export function coverageFromTranscripts(
         // exists for (R20-4).
         labelFromLaunchPrompt(rec.launchPrompt) === null
       ) {
-        const dc = plan.chunks.find((k) => k.id === declared);
-        if (
-          dc !== undefined &&
-          told.length > 0 &&
-          told.every(([s, e]) => s >= dc.startLine && e <= dc.endLine)
-        ) {
+        // Adjudicate the candidates in text order and route on the FIRST
+        // that fits the declarer shape: an earlier quotation of another
+        // chunk's declaration must not hide the record's own declaration —
+        // the quoted id fails the containment gate (a genuine declarer is
+        // pointed at its chunk alone) and the record's own line is
+        // adjudicated after it (R22-2).
+        let declarerRouted = false;
+        for (const declared of declaredIds) {
+          const dc = plan.chunks.find((k) => k.id === declared);
+          if (dc === undefined) continue;
           if (
-            // Fail-closed like the sibling chunk-less paths: the arm has
-            // no geometry a seal could read, so a marker-less record over
-            // an identity-carrying plan cannot prove it belongs to this
-            // plan (R20-6, R21-8).
-            markedOfThisPlan(rec.launchPrompt) &&
-            // No fail-open on absent reads: the arm has no told-range seal
-            // for the presumption to preserve, and an honest declarer
-            // discovered the over-cap line through a ranged read (R20-5).
-            rec.diffReads.length > 0 &&
-            declarerReadItsChunk(rec, declared) &&
-            !planContradictsDeclaration(declared) &&
-            // Same fail-toward-suppression posture as the assigned arm
-            // (R20-3): the conjunct is reachable only on the
-            // untrusted-metadata shape.
-            (chunkTruncatableByPlan(declared) ||
-              !chunkSatisfied(declared, rec)) &&
-            !refutedByReturnedSpanningRead(declared, rec)
+            told.length > 0 &&
+            told.every(([s, e]) => s >= dc.startLine && e <= dc.endLine)
           ) {
-            uncoverable.add(declared);
-            // Recorded directly, not through `noteChunkCause`: that
-            // re-applies `sealedToThisPlan`, whose count conjunct is
-            // guaranteed false here — a record reaches this branch exactly
-            // when CHUNK_RE did not match, so `assignedChunkTotal` returns
-            // null and the cause would be silently dropped, classifying
-            // the chunk `no-agent` beside the walk's own admission. This
-            // branch has already run its own seals (R17-4). The agent
-            // label records the same way: `noteChunkAgent` returned on the
-            // null assignment above.
-            const causesSeen = chunkCauses.get(declared);
-            if (causesSeen === undefined) {
-              chunkCauses.set(
-                declared,
-                new Set<ChunkFailureClass>(['declared-uncoverable']),
-              );
-            } else {
-              causesSeen.add('declared-uncoverable');
+            if (
+              // Fail-closed like the sibling chunk-less paths: the arm has
+              // no geometry a seal could read, so a marker-less record over
+              // an identity-carrying plan cannot prove it belongs to this
+              // plan (R20-6, R21-8).
+              markedOfThisPlan(rec.launchPrompt) &&
+              // No fail-open on absent reads: the arm has no told-range seal
+              // for the presumption to preserve, and an honest declarer
+              // discovered the over-cap line through a ranged read (R20-5).
+              rec.diffReads.length > 0 &&
+              declarerReadItsChunk(rec, declared) &&
+              !planContradictsDeclaration(declared) &&
+              // Same fail-toward-suppression posture as the assigned arm
+              // (R20-3): the conjunct is reachable only on the
+              // untrusted-metadata shape.
+              (chunkTruncatableByPlan(declared) ||
+                !chunkSatisfied(declared, rec)) &&
+              !refutedByReturnedSpanningRead(declared, rec)
+            ) {
+              uncoverable.add(declared);
+              // Recorded directly, not through `noteChunkCause`: that
+              // re-applies `sealedToThisPlan`, whose count conjunct is
+              // guaranteed false here — a record reaches this branch exactly
+              // when CHUNK_RE did not match, so `assignedChunkTotal` returns
+              // null and the cause would be silently dropped, classifying
+              // the chunk `no-agent` beside the walk's own admission. This
+              // branch has already run its own seals (R17-4). The agent
+              // label records the same way: `noteChunkAgent` returned on the
+              // null assignment above.
+              const causesSeen = chunkCauses.get(declared);
+              if (causesSeen === undefined) {
+                chunkCauses.set(
+                  declared,
+                  new Set<ChunkFailureClass>(['declared-uncoverable']),
+                );
+              } else {
+                causesSeen.add('declared-uncoverable');
+              }
+              const agentsSeen = chunkAgents.get(declared);
+              if (agentsSeen === undefined) {
+                chunkAgents.set(declared, [name]);
+              } else if (!agentsSeen.includes(name)) {
+                agentsSeen.push(name);
+              }
             }
-            const agentsSeen = chunkAgents.get(declared);
-            if (agentsSeen === undefined) {
-              chunkAgents.set(declared, [name]);
-            } else if (!agentsSeen.includes(name)) {
-              agentsSeen.push(name);
-            }
+            declarerRouted = true;
+            break;
           }
-          continue;
+          // A refused declarer whose launch spells no reads keeps the
+          // declarer posture when the plan's own measurement proves the
+          // chunk unspannable: its spanning reads are truncated by
+          // construction (the refutation guard's `> CAP` arm exists for
+          // exactly them), and falling through to the credit gate would
+          // certify the declared chunk covered off those very reads — the
+          // R17-4 drop surviving in the fall-through shape (R20-4).
+          if (told.length === 0 && chunkTruncatableByPlan(declared)) {
+            declarerRouted = true;
+            break;
+          }
         }
+        if (declarerRouted) continue;
       }
     }
 
@@ -1607,23 +1624,27 @@ export function coverageFromTranscripts(
     // modify-only re-plan keeps every window, so its told-range and reads
     // are geometrically identical to this plan's — only the token tells the
     // plans apart. Its ranges earned coverage for the plan that wrote it,
-    // not this one. A chunk-assigned record ALSO carries membership and the
-    // `of M` count here — not the territory conjunct, which a
-    // pasted-two-blocks launch legitimately fails (its merged told-range
-    // spans both chunks, neither exactly): a count-changed stale record the
-    // walk already discloses as rewritten must not also certify the chunk
-    // covered off the same record's read while `missingChunks` withholds
-    // the relaunch. The chunk-LESS arm carries no geometry a seal could
-    // read — a whole-diff read spans every window by construction — so
-    // nothing ties the record to this plan's lines but the token: over an
-    // identity-carrying plan a marker-less record fails closed instead of
-    // riding the fail-open (R20-6).
+    // not this one; the token conjunct fails closed with every other arm
+    // (R22-1). A chunk-assigned record ALSO carries membership, the `of M`
+    // count and the territory conjunct — evaluated over the record's
+    // MERGED told-and-read ranges, not its told-range alone: a
+    // pasted-two-blocks launch spells its own window beside its
+    // neighbour's, and while the merged told-range spans both chunks
+    // (neither exactly), the contiguous-run arm finds the window inside
+    // those ranges, so the carve-out stays admitted (R18-1). A
+    // count-changed or window-moved stale record the walk already discloses
+    // as rewritten must not also certify the chunk covered off the same
+    // record's read while `missingChunks` withholds the relaunch. The
+    // chunk-LESS arm carries no geometry a seal could read — a whole-diff
+    // read spans every window by construction — so nothing ties the record
+    // to this plan's lines but the token (R20-6).
     if (
       chunk === null
         ? markedOfThisPlan(rec.launchPrompt)
-        : launchOfThisPlan(rec.launchPrompt) &&
+        : markedOfThisPlan(rec.launchPrompt) &&
           plan.chunks.some((c) => c.id === chunk) &&
-          assignedChunkTotal(rec) === plan.chunks.length
+          assignedChunkTotal(rec) === plan.chunks.length &&
+          declarationStillOnTerritory([...told, ...rec.diffReads], chunk)
     ) {
       for (const c of plan.chunks) {
         if (ranges.some(([s, e]) => s <= c.startLine && e >= c.endLine)) {

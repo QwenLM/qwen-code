@@ -4202,27 +4202,32 @@ function composeReviewBody(
   // 2's auditor returned nothing substantive twice` beside the floor's own
   // sentence — and swallowing it routed a whiffed audit scope to the
   // verification axis. `includes`, not equality, so a prefix-reshaped
-  // relay ("step 5 — …") still dedupes. The budget entry is exempt from
-  // BOTH arms: its subject is `reverse audit`, which is also the subject
-  // the orchestrator gives a WHIFFED reverse audit — a bare-subject entry
-  // that is the whiff's only detector and a line-coverage claim, not an
-  // echo of the stop — and its relays classify through `isRelayedStopEntry`
-  // rather than being swallowed here.
+  // relay ("step 5 — …") still dedupes. The budget entry AND the floor
+  // entries are exempt from the two BARE-SUBJECT arms: their subjects are
+  // `reverse audit` / `反向审计`, which are also the subjects the
+  // orchestrator gives a WHIFFED reverse audit — a bare-subject entry that
+  // is the whiff's only detector and a line-coverage claim, not an echo of
+  // the structural gap. Swallowing it lost the whiff sentence from the
+  // body, left `axisDimensionGapsAreDepthOnly` vacuously true, and routed
+  // the cap to the verification axis — an automated repair caller
+  // relaunched verification instead of the auditor whose scope read
+  // nothing (R22-4). A compliant relay of a floor entry always carries its
+  // reason, so the full-sentence arms still dedup it exactly as before.
   const echoesCoverageEntry = (entry: string): boolean =>
     coverageEntries.some(
       (e) =>
         e !== budgetEntry &&
-        (entry === e.subject ||
-          entry.includes(`${e.subject} — ${e.reason}`) ||
+        (entry.includes(`${e.subject} — ${e.reason}`) ||
           // The Chinese twin of the same match: the stderr instruction
           // relays the structural entries in BOTH languages, and a zh relay
           // (the `subjectZh——reasonZh` shape deadline.ts coins) that
           // escapes the dedup flips `dimensionGapsAreDepthOnly` and
           // withholds the anchor from a run its English relay clears.
-          entry === e.subjectZh ||
           (e.subjectZh !== undefined &&
             e.reasonZh !== undefined &&
-            entry.includes(`${e.subjectZh}——${e.reasonZh}`))),
+            entry.includes(`${e.subjectZh}——${e.reasonZh}`)) ||
+          (!verificationFloorEntries.has(e) &&
+            (entry === e.subject || entry === e.subjectZh))),
     );
   const nonEchoedDimensionGaps = [
     ...unreviewed,
