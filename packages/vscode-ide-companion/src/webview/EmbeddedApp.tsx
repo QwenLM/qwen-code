@@ -36,6 +36,7 @@ import {
   getBlockCopyText,
 } from './utils/copyTranscript.js';
 import { resolveFileLinkFromAnchor } from './utils/fileLinks.js';
+import { isDiscontinuedModel } from './utils/discontinuedModel.js';
 
 const SESSION_SWITCH_TIMEOUT_MS = 15_000;
 const SESSION_SWITCH_MIN_VISIBLE_MS = 120;
@@ -44,8 +45,10 @@ const COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
   'contextUsage',
   'model',
-  'voice',
 ] as const satisfies readonly ComposerToolbarAction[];
+
+const isVsCodeModelVisible = (model: { id: string }) =>
+  !isDiscontinuedModel(model.id);
 
 /** Host-only slash entries. Built per language so the menu is not half-English. */
 function buildVsCodeSlashCommands(t: ChromeStrings) {
@@ -1331,6 +1334,7 @@ export function EmbeddedApp() {
           compactThinking
           collapseCompletedTurns
           composerToolbarActions={COMPOSER_TOOLBAR_ACTIONS}
+          mainModelFilter={isVsCodeModelVisible}
           compactComposerOverlays
           autoSubmitSlashCommands
           askUserFreeTextLabel={t('askUser.other')}
@@ -1379,10 +1383,13 @@ export function EmbeddedApp() {
           }}
           onSessionChange={(event) => {
             if (event.type === 'submit') {
-              latestSubmittedPromptRef.current = {
-                sessionId: event.sessionId,
-                prompt: event.prompt,
-              };
+              latestSubmittedPromptRef.current = event.queued
+                ? { sessionId: event.sessionId, prompt: event.prompt }
+                : undefined;
+            } else if (
+              latestSubmittedPromptRef.current?.sessionId === event.sessionId
+            ) {
+              latestSubmittedPromptRef.current = undefined;
             }
           }}
           messageTurnOutputs={['file']}
