@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
+import { sessionMatchesGitQuery } from '../sidebar/sessionSearch';
 import {
   useConnection,
   type DaemonSessionSummary,
@@ -33,7 +34,10 @@ export function ReleaseSessionDialog({
     loading,
     error: sessionsError,
     releaseSession,
-  } = useScopedSessions(workspaceCwd, { autoLoad: true });
+  } = useScopedSessions(workspaceCwd, {
+    autoLoad: true,
+    maxAgeMs: 1_000,
+  });
   const currentSessionId = connection.sessionId;
   const [deleting, setDeleting] = useState(false);
   // -1 = no highlight; see ResumeDialog for the rationale.
@@ -58,7 +62,8 @@ export function ReleaseSessionDialog({
         const q = filterQuery.toLowerCase();
         return (
           (s.displayName || '').toLowerCase().includes(q) ||
-          s.sessionId.toLowerCase().includes(q)
+          s.sessionId.toLowerCase().includes(q) ||
+          sessionMatchesGitQuery(s, q)
         );
       })
     : sessions;

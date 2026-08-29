@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '../config/config.js';
+import { deriveConfig, type Config } from '../config/config.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { PermissionManager } from '../permissions/permission-manager.js';
+import type {
+  PermissionManager,
+  ToolRegistrationStatus,
+} from '../permissions/permission-manager.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
@@ -26,8 +29,10 @@ type MemoryScopedPermissionManager = Pick<
   PermissionManager,
   | 'evaluate'
   | 'findMatchingDenyRule'
+  | 'getToolRegistrationStatus'
   | 'hasMatchingAskRule'
   | 'hasRelevantRules'
+  | 'isToolDisabledByCoreToolsAllowList'
   | 'isToolEnabled'
 >;
 
@@ -401,10 +406,32 @@ export function createMemoryScopedAgentConfig(
       }
       return true;
     },
+    async getToolRegistrationStatus(
+      toolName: string,
+    ): Promise<ToolRegistrationStatus> {
+      if (toolName === ToolNames.SHELL) {
+        return opts.allowShell ? 'registered' : 'disabled';
+      }
+      if (isScopedTool(toolName, opts)) {
+        return 'registered';
+      }
+      if (basePm) {
+        return typeof basePm.getToolRegistrationStatus === 'function'
+          ? basePm.getToolRegistrationStatus(toolName)
+          : Promise.resolve('registered' as ToolRegistrationStatus);
+      }
+      return 'registered';
+    },
+    isToolDisabledByCoreToolsAllowList(toolName: string): boolean {
+      return (
+        (typeof basePm?.isToolDisabledByCoreToolsAllowList === 'function' &&
+          basePm.isToolDisabledByCoreToolsAllowList(toolName)) ||
+        false
+      );
+    },
   };
 
-  const scopedConfig = Object.create(config) as Config;
-  scopedConfig.getPermissionManager = () =>
-    scopedPm as unknown as PermissionManager;
-  return scopedConfig;
+  return deriveConfig(config, {
+    getPermissionManager: () => scopedPm as unknown as PermissionManager,
+  });
 }

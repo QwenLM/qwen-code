@@ -1,0 +1,65 @@
+# Recorded byte size of each workflow file, enforced by
+# .github/scripts/check-workflow-size.sh.
+#
+# The absolute gate in that script is the ceiling; this file is the ratchet.
+# A workflow may not grow past its recorded size by more than the allowance
+# without updating the number here IN THE SAME PR — which is the point: it
+# turns invisible drift into one reviewed line. qwen-autofix.yml regained
+# 78 KB when its prose moved to qwen-autofix.md (#9517), then gave 25 KB of
+# it back in a single feature commit two days later, with nothing objecting
+# until the next PR ran out of ceiling.
+#
+# Growing a file is allowed — deliberately. Prefer moving prose into the
+# sibling .md and long steps into .github/scripts/ first; if the growth is
+# real, bump the number and say why in the PR.
+2226 assign-issue-owner.yml
+3480 audio-capture-prebuilds.yml
+9023 auto-minimize-spam.yml
+9256 build-and-publish-image.yml
+49610 cd-cua-driver.yml
+2076 cd-mobile-mcp.yml
+95501 ci.yml
+1482 codeql.yml
+9389 comment-attachment-guard.yml
+31677 desktop-release.yml
+2038 docs-page-action.yml
+10005 dsw-swe-verified-release.yml
+16534 e2e.yml
+11394 finalize-release.yml
+16647 live-host-release.yml
+5950 live-host.yml
+7642 main-ci-failure-issue.yml
+1686 npm-cache.yml
+7299 pr-force-push-reminder.yml
+6495 pr-self-report-label.yml
+9646 qwen-autofix-fork-bridge.yml
+5942 qwen-autofix-fork-signal.yml
+426924 qwen-autofix.yml
+7061 qwen-ci-flaky-rerun.yml
+165876 qwen-code-pr-review.yml
+79041 qwen-fleet-shepherd.yml
+20525 qwen-issue-followup-bot.yml
+5760 qwen-pr-safety-precheck.yml
+27648 qwen-triage-finalize.yml
+344548 qwen-triage.yml
+9657 release-sdk-java.yml
+22037 release-sdk-python.yml
+19094 release-sdk.yml
+14546 release-vscode-companion.yml
+39291 release.yml
+43717 repo-hygiene.yml
+1079 scorecard-monthly.yml
+10691 sdk-java.yml
+3886 sdk-python.yml
+3197 security-checks.yml
+6777 serve-ab-publish.yml
+17013 serve-ab.yml
+2641 stale.yml
+10920 sync-desktop-to-oss.yml
+10018 sync-live-host-to-oss.yml
+10138 sync-release-to-oss.yml
+3303 update-ecs-runner-qwen.yml
+2307 web-shell-visuals-cleanup.yml
+15380 web-shell-visuals-publish.yml
+16384 web-shell-visuals.yml
+4712 windows-runner-smoke.yml

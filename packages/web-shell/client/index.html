@@ -36,7 +36,7 @@
       would never be reachable. The data: URI is allowed by the shell CSP
       (img-src 'self' data: blob:). The encodeURIComponent(svg) encoding
       technique mirrors packages/web-templates/src/export-html/build.mjs;
-      the artwork is from packages/desktop/apps/webui/src/public/favicon.svg
+      the artwork is from packages/desktop-shell/bootstrap/qwen-code-logo.svg
       (the purple #6D44E8 Qwen mark, legible on both light and dark browser
       tab bars).
     -->
@@ -51,12 +51,22 @@
       Prevent React 19 dev-mode OOM crashes. React records component prop
       details through performance.measure(), which structured-clones and retains
       those details. Strip the detail before large transcripts reach the native
-      call while preserving the component timing and non-React measures.
+      call while preserving the component timing and non-React measures. The
+      stripped entries themselves still accumulate in the browser's unbounded
+      user-timing buffer — an idle dev page emits ~16k measures/s — so the
+      timeline is also cleared on a budget, or long-lived dev tabs exhaust the
+      renderer's PartitionAlloc address space and die with SIGABRT.
     -->
     <script>
       !(function () {
         if (typeof performance === 'undefined' || !performance.measure) return;
         var m = performance.measure.bind(performance);
+        var clear =
+          typeof performance.clearMeasures === 'function'
+            ? performance.clearMeasures.bind(performance)
+            : null;
+        var reactMeasures = 0;
+        var CLEAR_EVERY = 16384;
         performance.measure = function () {
           var options = arguments[1];
           var devtools =
@@ -64,7 +74,12 @@
             typeof options === 'object' &&
             options.detail &&
             options.detail.devtools;
-          if (devtools && devtools.track === 'Components ⚛') {
+          if (devtools) {
+            reactMeasures += 1;
+            if (clear && reactMeasures >= CLEAR_EVERY) {
+              reactMeasures = 0;
+              clear();
+            }
             var args = Array.prototype.slice.call(arguments);
             args[1] = Object.assign({}, options, { detail: null });
             return m.apply(this, args);

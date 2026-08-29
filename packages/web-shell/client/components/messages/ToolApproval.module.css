@@ -1,7 +1,7 @@
 .approval {
   margin: 0 auto;
   width: 100%;
-  max-width: min(800px, var(--chat-content-width, 800px));
+  max-width: min(100%, var(--chat-content-width, 1000px));
   box-sizing: border-box;
   padding: 16px;
   border: 1.5px solid var(--border);

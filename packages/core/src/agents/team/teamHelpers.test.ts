@@ -48,6 +48,32 @@ vi.mock('../../config/storage.js', async (importOriginal) => {
   };
 });
 
+// Optional readFile hook for simulating mid-reclaim I/O failures.
+// While a hook is installed and returns a value, that value is used;
+// otherwise the real readFile runs.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  type ReadFileHook = (...args: Parameters<typeof actual.readFile>) => unknown;
+  let readFileHook: ReadFileHook | undefined;
+  return {
+    ...actual,
+    __setReadFileHook: (fn: ReadFileHook | undefined) => {
+      readFileHook = fn;
+    },
+    readFile: (...args: Parameters<typeof actual.readFile>) => {
+      const hooked = readFileHook?.(...args);
+      if (hooked !== undefined) {
+        return hooked;
+      }
+      return actual.readFile(...args);
+    },
+  };
+});
+
+const { __setReadFileHook } = (await import('node:fs/promises')) as unknown as {
+  __setReadFileHook: (fn?: unknown) => void;
+};
+
 // ─── Fixtures ─────────────────────────────────────────────────
 
 function makeMember(
@@ -379,6 +405,10 @@ describe('file I/O', () => {
   });
 
   describe('tryReclaimStaleTeam', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
     /** PID of a process that has already exited. */
     function deadPid(): number {
       const child = spawnSync(process.execPath, ['-e', '']);
@@ -423,6 +453,91 @@ describe('file I/O', () => {
 
       await expect(tryReclaimStaleTeam('ghost')).resolves.toBe(true);
       await expect(fs.access(tasksDir)).rejects.toThrow();
+    });
+
+    it('does not reclaim when the lead PID is alive but owned by another user', async () => {
+      // Pins teamHelpers to the shared isPidAlive: EACCES (Windows'
+      // other-user errno, alongside EPERM) means the process exists —
+      // the duplicate local copy this replaced treated it as dead and
+      // would have reclaimed a live team.
+      vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('access denied'), {
+          code: 'EACCES',
+        });
+      });
+      await writeTeamFile('other-user', makeTeamFile({ leadPid: 424242 }));
+
+      await expect(tryReclaimStaleTeam('other-user')).resolves.toBe(false);
+      expect(await readTeamFile('other-user')).toBeDefined();
+    });
+
+    it('aborts when the config content is the JSON literal null', async () => {
+      // A config whose entire content is the valid-JSON literal `null`
+      // parses without entering the JSON.parse catch, so the shape
+      // guard must reject it instead of throwing on
+      // `existing.leadPid`. Like any unreadable/corrupt file, it
+      // can't prove its owner is gone — leave it for manual recovery.
+      await writeTeamFile('nullcfg', makeTeamFile({ leadPid: deadPid() }));
+      const tasksDir = getTasksDir('nullcfg');
+      await fs.mkdir(tasksDir, { recursive: true });
+      await fs.writeFile(path.join(tasksDir, 'marker.json'), '{}');
+      await fs.writeFile(getTeamFilePath('nullcfg'), 'null');
+
+      await expect(tryReclaimStaleTeam('nullcfg')).resolves.toBe(false);
+      expect(await fs.readFile(getTeamFilePath('nullcfg'), 'utf-8')).toBe(
+        'null',
+      );
+      await expect(fs.access(tasksDir)).resolves.toBeUndefined();
+    });
+
+    it('aborts when the config is unparseable at inspection', async () => {
+      // Corrupt/torn config: ownership liveness cannot be proven, so
+      // the dirs must be left for manual recovery instead of deleted.
+      await writeTeamFile('corrupt', makeTeamFile({ leadPid: deadPid() }));
+      const tasksDir = getTasksDir('corrupt');
+      await fs.mkdir(tasksDir, { recursive: true });
+      await fs.writeFile(path.join(tasksDir, 'marker.json'), '{}');
+      await fs.writeFile(getTeamFilePath('corrupt'), '{ "name": ');
+
+      await expect(tryReclaimStaleTeam('corrupt')).resolves.toBe(false);
+      expect(await fs.readFile(getTeamFilePath('corrupt'), 'utf-8')).toBe(
+        '{ "name": ',
+      );
+      await expect(fs.access(tasksDir)).resolves.toBeUndefined();
+    });
+
+    it('aborts when the config vanishes before the delete', async () => {
+      // If the config disappears between the staleness inspection and
+      // the byte-equality re-read, a by-name delete could hit a
+      // generation this reclaim never inspected — abort and leave the
+      // dirs intact.
+      await writeTeamFile('flaky', makeTeamFile({ leadPid: deadPid() }));
+      const tasksDir = getTasksDir('flaky');
+      await fs.mkdir(tasksDir, { recursive: true });
+      await fs.writeFile(path.join(tasksDir, 'marker.json'), '{}');
+
+      let readCount = 0;
+      __setReadFileHook(() => {
+        readCount += 1;
+        if (readCount === 2) {
+          // The re-read before the delete fails with ENOENT.
+          return Promise.reject(
+            Object.assign(new Error('ENOENT: no such file or directory'), {
+              code: 'ENOENT',
+            }),
+          );
+        }
+        return undefined;
+      });
+      try {
+        await expect(tryReclaimStaleTeam('flaky')).resolves.toBe(false);
+      } finally {
+        __setReadFileHook(undefined);
+      }
+      await expect(fs.access(tasksDir)).resolves.toBeUndefined();
+      await expect(
+        fs.access(getTeamFilePath('flaky')),
+      ).resolves.toBeUndefined();
     });
   });
 });

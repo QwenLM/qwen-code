@@ -28,6 +28,17 @@ import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 export const NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE =
   'Not currently generating' as const;
 
+export class StandaloneSessionSpawnError extends Error {
+  override readonly name = 'StandaloneSessionSpawnError';
+
+  constructor(
+    readonly dispatched: boolean,
+    cause: unknown,
+  ) {
+    super('Daemon-owned standalone session creation failed', { cause });
+  }
+}
+
 /**
  * ACP idle-cancel compatibility contract.
  *
@@ -57,10 +68,16 @@ function isNotCurrentlyGeneratingText(value: unknown): boolean {
 
 export class SessionNotFoundError extends Error {
   readonly sessionId: string;
-  constructor(sessionId: string, extra?: string) {
+  readonly code: 'session_not_found' | 'session_closing';
+  constructor(
+    sessionId: string,
+    extra?: string,
+    code: 'session_not_found' | 'session_closing' = 'session_not_found',
+  ) {
     super(`No session with id "${sessionId}"` + (extra ? `. ${extra}` : ''));
     this.name = 'SessionNotFoundError';
     this.sessionId = sessionId;
+    this.code = code;
   }
 }
 

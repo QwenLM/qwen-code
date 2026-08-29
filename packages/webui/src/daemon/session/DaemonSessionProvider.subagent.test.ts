@@ -100,4 +100,31 @@ describe('on-demand subagent transcript projection', () => {
       rawOutput: undefined,
     });
   });
+
+  it('preserves fields used to classify foreground agents', () => {
+    const [result] = projectMainTranscriptEventsForTesting([
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-1',
+        toolName: 'agent',
+        status: 'in_progress',
+        rawInput: {
+          description: 'Review the change',
+          prompt: 'Review the change.',
+          subagent_type: 'general-purpose',
+          run_in_background: false,
+          working_dir: '.qwen/tmp/review-pr-1',
+          name: 'reviewer',
+        },
+      },
+    ]);
+
+    expect(result).toMatchObject({
+      rawInput: {
+        run_in_background: false,
+        working_dir: '.qwen/tmp/review-pr-1',
+        name: 'reviewer',
+      },
+    });
+  });
 });

@@ -98,9 +98,13 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
+          npm run postinstall
+          npm run generate
 
       - name: 'Get the version'
         id: 'version'
@@ -169,9 +173,13 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
+          npm run postinstall
+          npm run generate
 
       - name: 'Format Project'
         run: |-
@@ -227,9 +235,13 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
+          npm run postinstall
+          npm run generate
 
       - name: 'Build Bundle'
         run: |-
@@ -274,9 +286,13 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
+          npm run postinstall
+          npm run generate
 
       - name: 'Build Bundle'
         run: |-
@@ -335,6 +351,28 @@ jobs:
           )
         )
       }}
+    # Set when the push-time guard decisively refuses because the version
+    # already shipped; notify_failure keeps this benign refusal out of the
+    # release-failed issue and autofix dispatch.
+    outputs:
+      version_refusal: '${{ steps.push_release_branch.outputs.version_refusal }}'
+    # Serialize publish per release tag: the pre-push re-validation in the
+    # push step is only sound while at most one run pushes and publishes a
+    # given version at a time, and --force removed the non-fast-forward
+    # rejection that used to serialize the push itself. In-progress runs are
+    # never cancelled; of queued same-tag runs only the latest survives, but
+    # whichever run reaches the push re-validates first, so the invariant
+    # holds. is_dry_run is part of the key because a dry run ships nothing
+    # (no push, tag, or release) and must not queue ahead of — or delay —
+    # the real release for the same tag. timeout-minutes bounds the hold
+    # a wedged publish (a stalled npm publish or release-asset upload)
+    # keeps on the group: without it the GitHub default of 360 minutes
+    # leaves same-tag retries queued behind it, unable to run, fail, or
+    # notify; a healthy publish completes well inside 90 minutes.
+    concurrency:
+      group: 'release-publish-${{ needs.prepare.outputs.release_tag }}-${{ needs.prepare.outputs.is_dry_run }}'
+      cancel-in-progress: false
+    timeout-minutes: 90
     environment:
       name: 'production-release'
       url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.release_tag }}'
@@ -349,11 +387,10 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          # Persist the bot PAT for release-branch pushes so downstream CI
-          # workflows are triggered.
           token: '${{ secrets.CI_BOT_PAT }}'
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
+          persist-credentials: false
 
       - name: 'Setup Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -364,12 +401,19 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
 
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
+
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
-          QWEN_SKIP_PREPARE: '1'
         run: |-
-          npm ci --no-audit --progress=false
+          npm ci --ignore-scripts --no-audit --progress=false
+          # Replay the root postinstall (patch-package) and commit-info
+          # generation; dependency and workspace lifecycle scripts remain
+          # disabled.
+          npm run postinstall
+          npm run generate
 
       - name: 'Configure Git User'
         run: |-
@@ -393,20 +437,85 @@ jobs:
           npm run release:version "${RELEASE_VERSION}"
 
       - name: 'Commit and Conditionally Push package versions'
+        id: 'push_release_branch'
         env:
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+          GITHUB_TOKEN: '${{ github.token }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
         run: |-
-          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/external-context/package.json
+          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
             git commit -m "chore(release): ${RELEASE_TAG}"
           fi
           if [[ "${IS_DRY_RUN}" == "false" ]]; then
+            # Restore the bot PAT in this step rather than persisting it in
+            # git credentials at checkout, so dependency installation and
+            # build tooling in earlier steps cannot read write credentials.
+            # The push itself needs the PAT (not the job token): pushes made
+            # with GITHUB_TOKEN do not trigger downstream CI workflows.
+            # Export (not inline) so GH_TOKEN is still set when `git push`
+            # invokes the credential helper, which re-resolves the token at
+            # push time rather than at `gh auth setup-git` time.
+            export GH_TOKEN="${CI_BOT_PAT}"
+            gh auth setup-git
+            # The guard runs scripts/get-release-version.js from the
+            # checked-out ref — the operator-controlled dispatch input `ref`
+            # — not the branch this workflow file came from. A ref predating
+            # this PR has an entry point that ignores --assert-unreleased,
+            # prints version JSON, and exits 0 (probed against the merge
+            # base), which would read as "unreleased verified" while the
+            # guard never ran. Refuse the force push unless the checked-out
+            # script carries the guard.
+            if ! grep -q "assert-unreleased" scripts/get-release-version.js; then
+              echo "::error::Checked-out ref predates the push-time guard; refusing force push."
+              exit 1
+            fi
+            # Force: a failed earlier attempt may have left this branch on an
+            # older head, and its divergent bump commit would fail a plain
+            # retry push as non-fast-forward. Replacing it is safe only while
+            # nothing for this version has shipped. prepare checked that once,
+            # but the validation jobs and the production-release approval gate
+            # separate that check from this push by minutes to hours, so
+            # re-validate prepare's invariant (doesVersionExist in
+            # scripts/get-release-version.js) at push time against the live
+            # registry, origin's tags, and GitHub releases: a concurrent
+            # same-version run that shipped in between would otherwise have
+            # its branch tip — and the tag and merge-to-main anchored to it —
+            # silently replaced. The script owns the published-package list,
+            # so this guard cannot drift from it. Exit 3 marks the decisive
+            # "already shipped" refusal, which the version_refusal output
+            # keeps out of the release-failed notification: such a refusal
+            # means the release shipped elsewhere (or partially), not that
+            # it failed. Any other non-zero exit stays a real failure. Exit 2
+            # (a probe failure) is retried a bounded number of times so a
+            # transient registry or network blip cannot fail the release and
+            # dispatch autofix at infrastructure noise; exit 0 and exit 3
+            # stay decisive on the first attempt.
+            for attempt in 1 2 3; do
+              GUARD_STATUS=0
+              node scripts/get-release-version.js --assert-unreleased="${RELEASE_VERSION}" || GUARD_STATUS=$?
+              if [[ "${GUARD_STATUS}" -ne 2 ]]; then
+                break
+              fi
+              if [[ "${attempt}" -lt 3 ]]; then
+                echo "Push-time guard probe failed (exit 2); retrying in $(( attempt * 15 ))s (attempt ${attempt} of 3)..."
+                sleep $(( attempt * 15 ))
+              fi
+            done
+            if [[ "${GUARD_STATUS}" -eq 3 ]]; then
+              echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+              exit 1
+            fi
+            if [[ "${GUARD_STATUS}" -ne 0 ]]; then
+              exit "${GUARD_STATUS}"
+            fi
             echo "Pushing release branch to remote..."
-            git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
+            git push --force --set-upstream origin "${BRANCH_NAME}" --follow-tags
           else
             echo "Dry run enabled. Skipping push."
           fi
@@ -453,9 +562,8 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish "${PUBLISH_ARGS[@]}"
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
@@ -471,9 +579,8 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish "${PUBLISH_ARGS[@]}"
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
@@ -489,9 +596,8 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          npm publish "${PUBLISH_ARGS[@]}"
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
@@ -501,7 +607,7 @@ jobs:
         run: |-
           # Explicit allowlist: new channel workspaces require release approval.
           PUBLISH_MARKER="$(mktemp)"
-          for channel in dingtalk feishu github qqbot telegram wecom weixin; do
+          for channel in dingtalk dws feishu github qqbot telegram wecom weixin; do
             echo "::group::Publishing @qwen-code/channel-${channel}"
             (
               cd "${channel}"
@@ -513,7 +619,7 @@ jobs:
                 echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
                 exit 0
               fi
-              npm publish "${PUBLISH_ARGS[@]}"
+              npm publish --provenance "${PUBLISH_ARGS[@]}"
               echo "${channel}" >> "${PUBLISH_MARKER}"
             )
             echo "::endgroup::"
@@ -522,7 +628,6 @@ jobs:
             echo "::warning::Every channel package was already published; nothing shipped"
           fi
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
@@ -649,6 +754,12 @@ jobs:
       - 'integration_none'
       - 'integration_docker'
       - 'publish'
+    # The push-time guard's decisive "already shipped" refusal
+    # (version_refusal) is a correct outcome, not a release failure: the
+    # version shipped via another attempt, or partially, so filing a
+    # "Release Failed" issue and dispatching autofix would chase a release
+    # that did not fail. Genuine publish failures — including the guard's
+    # fail-closed probe errors — still notify.
     if: |-
       ${{
         always() &&
@@ -661,7 +772,10 @@ jobs:
           needs.quality.result == 'failure' ||
           needs.integration_none.result == 'failure' ||
           needs.integration_docker.result == 'failure' ||
-          needs.publish.result == 'failure'
+          (
+            needs.publish.result == 'failure' &&
+            needs.publish.outputs.version_refusal != 'true'
+          )
         )
       }}
     permissions:

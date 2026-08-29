@@ -215,6 +215,16 @@ describe('cronTasksFile', () => {
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
 
+    it('rejects a non-boolean session ownership marker', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          { ...makeTask(), sessionId: 'sess-1', sessionOwnedByTask: 'yes' },
+        ]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
     it('round-trips the optional runs history', async () => {
       const task = makeTask({
         lastFiredAt: 1718000300000,

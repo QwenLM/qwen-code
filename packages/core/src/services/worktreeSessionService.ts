@@ -95,20 +95,30 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
  */
 export async function readWorktreeSession(
   filePath: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<WorktreeSession | null> {
   let raw: string;
   try {
-    raw = await fs.readFile(filePath, 'utf-8');
+    options.signal?.throwIfAborted();
+    raw = options.signal
+      ? await fs.readFile(filePath, {
+          encoding: 'utf-8',
+          signal: options.signal,
+        })
+      : await fs.readFile(filePath, 'utf-8');
   } catch (error) {
+    options.signal?.throwIfAborted();
     if (isNodeError(error) && error.code === 'ENOENT') return null;
     throw error;
   }
+  options.signal?.throwIfAborted();
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
     return null;
   }
+  options.signal?.throwIfAborted();
   if (!isValidWorktreeSession(parsed)) return null;
   return parsed;
 }

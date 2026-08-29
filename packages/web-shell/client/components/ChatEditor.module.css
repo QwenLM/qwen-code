@@ -19,6 +19,10 @@
   --chat-editor-input-min-height: 44px;
   --chat-editor-input-max-height: 300px;
   --chat-editor-attachments-max-height: 136px;
+  --dac-glow-on: 0;
+  --dac-glow-pulse: 0;
+  --dac-g1: #6a78ff;
+  --dac-g2: #8a7bff;
   --chat-send-button-disabled-foreground: var(--secondary-foreground);
   --chat-send-button-foreground: #fafafa;
 }
@@ -48,45 +52,146 @@
   );
 }
 
-.specularEffect {
-  position: absolute;
-  inset: -20px;
-  z-index: 3;
-  overflow: visible;
+.dacAura,
+.dacHalo {
   pointer-events: none;
 }
 
-.specularEffect::before {
+.dacAura {
   position: absolute;
-  inset: 20px;
-  border-radius: 12px;
-  content: '';
-  opacity: 0;
-  transition: opacity 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+  inset: -50px;
+  z-index: 0;
+  opacity: calc(var(--dac-glow-on) * (0.33 + var(--dac-glow-pulse) * 0.17));
+  -webkit-mask: radial-gradient(
+    ellipse 56% 64% at center,
+    transparent 28%,
+    #000 48%,
+    transparent 94%
+  );
+  mask: radial-gradient(
+    ellipse 56% 64% at center,
+    transparent 28%,
+    #000 48%,
+    transparent 94%
+  );
   will-change: opacity;
 }
 
-.specularEffect[data-theme='light']::before {
-  box-shadow:
-    0 0 0 4px rgba(205, 217, 255, 0.5),
-    0 16px 46px rgba(51, 92, 255, 0.08);
+.dacAura::before,
+.dacAura::after {
+  position: absolute;
+  inset: 0;
+  content: '';
+  will-change: opacity;
 }
 
-.specularEffect[data-theme='dark']::before {
-  box-shadow:
-    0 0 0 4px rgba(83, 103, 159, 0.3),
-    0 18px 54px rgba(51, 92, 255, 0.18);
-}
-
-.container:hover .specularEffect::before,
-.container:focus-within .specularEffect::before {
+.dacAura::before {
+  background: color-mix(in srgb, var(--dac-g1) 58%, transparent);
+  -webkit-mask:
+    repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 5px),
+    repeating-linear-gradient(0deg, #000 0 1px, transparent 1px 5px);
+  -webkit-mask-composite: source-in;
+  mask:
+    repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 5px),
+    repeating-linear-gradient(0deg, #000 0 1px, transparent 1px 5px);
+  mask-composite: intersect;
   opacity: 1;
+  transition: opacity 0.2s ease;
 }
 
-.specularEffect canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
+.dacAura::after {
+  background: color-mix(in srgb, var(--dac-g1) 66%, transparent);
+  -webkit-mask:
+    repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 5px),
+    repeating-linear-gradient(0deg, #000 0 1px, transparent 1px 5px),
+    repeating-linear-gradient(
+      90deg,
+      #000 0,
+      rgba(0, 0, 0, 0.08) 28px,
+      #000 56px
+    );
+  -webkit-mask-composite: source-in, source-in;
+  mask:
+    repeating-linear-gradient(90deg, #000 0 1px, transparent 1px 5px),
+    repeating-linear-gradient(0deg, #000 0 1px, transparent 1px 5px),
+    repeating-linear-gradient(
+      90deg,
+      #000 0,
+      rgba(0, 0, 0, 0.08) 28px,
+      #000 56px
+    );
+  mask-composite: intersect, intersect;
+  opacity: 0;
+  animation: dac-aura-cols 2.4s linear infinite paused;
+  transition: opacity 0.2s ease;
+}
+
+.container[data-dac-typing] .dacAura::before {
+  opacity: 0;
+}
+
+.container[data-dac-typing] .dacAura::after {
+  opacity: 1;
+  animation-play-state: running;
+}
+
+.dacHalo {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  opacity: calc(var(--dac-glow-on) * 0.5);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--dac-g2) 36%, transparent),
+    0 1px 5px color-mix(in srgb, var(--dac-g1) 18%, transparent),
+    0 6px 30px color-mix(in srgb, var(--dac-g1) 22%, transparent);
+  will-change: opacity;
+}
+
+.dacHalo::after {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 6px 40px color-mix(in srgb, var(--dac-g1) 14%, transparent);
+  content: '';
+  opacity: calc(var(--dac-glow-on) * var(--dac-glow-pulse) * 0.5);
+  will-change: opacity;
+}
+
+@keyframes dac-aura-cols {
+  from {
+    -webkit-mask-position:
+      0 0,
+      0 0,
+      0 0;
+    mask-position:
+      0 0,
+      0 0,
+      0 0;
+  }
+
+  to {
+    -webkit-mask-position:
+      0 0,
+      0 0,
+      56px 0;
+    mask-position:
+      0 0,
+      0 0,
+      56px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dacAura::after,
+  .container[data-dac-typing] .dacAura::after {
+    opacity: 0;
+    animation: none;
+  }
+
+  .container[data-dac-typing] .dacAura::before {
+    opacity: 1;
+  }
 }
 
 .atPortalLayer {
@@ -115,6 +220,16 @@
   width: min(max-content, var(--radix-popover-content-available-width));
   max-height: var(--radix-popover-content-available-height);
   overflow: hidden;
+}
+
+:global([data-web-shell-reasoning-popover]) {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+:global([data-web-shell-model-submenu]) {
+  z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
+  min-width: min(280px, var(--radix-popover-content-available-width));
 }
 
 .slashPanel {
@@ -526,6 +641,13 @@
   -webkit-mask: var(--at-item-icon-url) center / contain no-repeat;
 }
 
+.atItemUploadIcon {
+  align-self: center;
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+}
+
 .atItemImageIcon {
   display: block;
   width: 16px;
@@ -716,7 +838,6 @@
 }
 
 .editorArea {
-  position: relative;
   display: flex;
   flex: 1 1 auto;
   align-items: stretch;
@@ -724,69 +845,6 @@
   min-height: var(--chat-editor-input-min-height, 44px);
   padding: 4px 0;
   overflow: clip;
-}
-
-.typewriterPlaceholder {
-  position: absolute;
-  top: 4px;
-  left: 0;
-  z-index: 1;
-  color: var(--chat-editor-text-dimmed, #666);
-  font-family: var(--font-sans, system-ui, sans-serif);
-  font-size: 14px;
-  line-height: 1.6;
-  pointer-events: none;
-  white-space: pre-wrap;
-}
-
-.typewriterCaret {
-  display: inline-block;
-  margin-left: 1px;
-  color: #6785ff;
-}
-
-:global(.dark) .typewriterCaret {
-  color: rgba(205, 215, 255, 0.6);
-}
-
-.typewriterCaretFinished {
-  animation: typewriter-caret-blink 0.5s steps(1) 2 forwards;
-}
-
-.container[data-typewriter-visible] .editorArea :global(.cm-placeholder) {
-  opacity: 0;
-}
-
-.container[data-typewriter-visible] .mobileTextarea::placeholder {
-  color: transparent;
-}
-
-@keyframes typewriter-caret-blink {
-  0%,
-  48% {
-    opacity: 1;
-  }
-
-  49%,
-  100% {
-    opacity: 0;
-  }
-}
-
-@media (pointer: coarse) {
-  .typewriterPlaceholder {
-    font-size: 16px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .specularEffect::before {
-    transition: none;
-  }
-
-  .typewriterCaretFinished {
-    animation: none;
-  }
 }
 
 .editorArea > :last-child {
@@ -961,14 +1019,14 @@
 
 .gitBranchIcon {
   display: inline-flex;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 16px;
+  width: var(--git-branch-icon-size, 16px);
+  height: var(--git-branch-icon-size, 16px);
+  flex: 0 0 var(--git-branch-icon-size, 16px);
 }
 
 .gitBranchIcon svg {
-  width: 16px;
-  height: 16px;
+  width: var(--git-branch-icon-size, 16px);
+  height: var(--git-branch-icon-size, 16px);
 }
 
 .gitBranchText {
@@ -989,17 +1047,17 @@
 .gitBranchIconWrap {
   position: relative;
   display: inline-flex;
-  flex: 0 0 16px;
+  flex: 0 0 var(--git-branch-icon-size, 16px);
 }
 
 /* Compact (icon-only) chip: a single severity dot on the branch icon so the
    working-tree state is still glanceable without the text + inline indicators. */
 .gitBranchBadgeDot {
   position: absolute;
-  top: -2px;
-  right: -3px;
-  width: 7px;
-  height: 7px;
+  top: var(--git-branch-badge-offset, -2px);
+  right: var(--git-branch-badge-offset, -3px);
+  width: var(--git-branch-badge-size, 7px);
+  height: var(--git-branch-badge-size, 7px);
   border-radius: 50%;
   background: var(--chat-editor-accent-color);
   box-shadow: 0 0 0 1.5px var(--chat-editor-bg-primary, transparent);
@@ -1269,6 +1327,80 @@
   text-overflow: ellipsis;
 }
 
+.dropdownSubmenuTrigger {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dropdownSubmenuTrigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dropdownSubmenuTrigger svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+
+.dropdownSubmenuSection {
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.reasoningOptions {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 4px;
+}
+
+.reasoningSectionTitle {
+  padding: 4px 9px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.reasoningThinkingRow,
+.reasoningEffortRow {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 9px;
+}
+
+.reasoningEffortRow {
+  width: 100%;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reasoningEffortRow:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.reasoningEffortRow:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.reasoningDivider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+
 .dropdownItemActive .dropdownItemIcon,
 .dropdownItemActive .dropdownItemCheck {
   color: var(--secondary-foreground);
@@ -1406,6 +1538,20 @@
 
 .widthModeBtn {
   flex-shrink: 0;
+}
+
+.addMenuBtn {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.addMenuBtn .toolBtnIcon svg {
+  width: 18px;
+  height: 18px;
 }
 
 .contextUsageBtn {
@@ -1787,10 +1933,12 @@
 }
 
 .images {
+  position: relative;
+  z-index: 2;
   display: flex;
   flex: 0 0 auto;
   gap: 6px;
-  padding: 4px 0 0;
+  padding: 0 0 8px;
   flex-wrap: wrap;
 }
 
@@ -1809,30 +1957,133 @@
   object-fit: cover;
 }
 
-.imageRemove {
-  position: absolute;
-  top: 0;
-  right: 0;
+.imageRemove,
+.fileChipRemove {
   width: 16px;
   height: 16px;
-  font-size: 12px;
-  line-height: 16px;
-  text-align: center;
-  background: rgba(0, 0, 0, 0.7);
-  color: var(--error-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
   border: none;
   cursor: pointer;
-  border-radius: 0 0 0 4px;
+  border-radius: 50%;
+  padding: 0;
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    background 0.15s ease;
 }
 
-.imageRemove:not(:disabled):hover {
-  background: var(--error-color);
+.imageRemove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+}
+
+.imageRemove svg,
+.fileChipRemove svg {
+  display: block;
+}
+
+.imageThumb:hover .imageRemove:not(:disabled),
+.fileChip:hover .fileChipRemove:not(:disabled),
+.imageRemove:focus-visible,
+.fileChipRemove:focus-visible {
+  opacity: 1;
+}
+
+.imageRemove:not(:disabled):hover,
+.fileChipRemove:not(:disabled):hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.imageRemove:disabled,
+.fileChipRemove:disabled {
+  cursor: default;
+  opacity: 0;
+}
+
+.files {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 4px 0 0;
+  flex-wrap: wrap;
+}
+
+.fileChip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 4px 8px;
+  border: 1px solid var(--chat-editor-border-color);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 16px;
   color: var(--chat-editor-text-primary);
 }
 
-.imageRemove:disabled {
+.fileChipPreviewable {
+  cursor: pointer;
+}
+
+.fileChipPreview:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.fileChipPreview {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: inherit;
+  font: inherit;
+}
+
+.fileChipPreview:disabled {
   cursor: default;
-  opacity: 0.55;
+}
+
+.fileChipIcon {
+  flex: 0 0 auto;
+  color: var(--chat-editor-text-secondary, currentColor);
+}
+
+.fileChipName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileChipRemove {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  z-index: 1;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.fileChip:hover .fileChipRemove:not(:disabled),
+.fileChipRemove:focus-visible {
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .fileChipRemove:not(:disabled) {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .searchPanel {
@@ -1933,4 +2184,172 @@
   padding: 4px 2px 0;
   color: var(--chat-editor-text-dimmed);
   font-size: 12px;
+}
+
+/* File upload ----------------------------------------------------------- */
+
+.hiddenUploadInput {
+  display: none;
+}
+
+.uploadStrip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 0 10px;
+}
+
+.uploadRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--agent-blue-500) 24%, transparent);
+  border-radius: 10px;
+  background: color-mix(
+    in srgb,
+    var(--agent-blue-500) 8%,
+    var(--chat-editor-bg-primary)
+  );
+  color: var(--chat-editor-text-primary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.uploadRow[data-status='done'] {
+  border-color: color-mix(in srgb, var(--success-color) 24%, transparent);
+  background: var(--success-bg);
+}
+
+.uploadRow[data-status='error'] {
+  border-color: var(--error-border);
+  background: var(--error-bg);
+}
+
+.uploadRow[data-previewable='true'] {
+  cursor: pointer;
+}
+
+.uploadRowPreview:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.uploadRowPreview {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: inherit;
+  font: inherit;
+}
+
+.uploadRowPreview:disabled {
+  cursor: default;
+}
+
+.uploadRow svg {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+
+.uploadRowSpinner {
+  color: var(--agent-blue-500);
+  animation: uploadRowSpin 1s linear infinite;
+}
+
+/* Must follow the base rule: equal-specificity cascade resolves to the
+   last declaration, so an earlier override would stay dead code. */
+@media (prefers-reduced-motion: reduce) {
+  .uploadRowSpinner {
+    animation: none;
+  }
+}
+
+@keyframes uploadRowSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.uploadRowName {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.uploadRowStatus {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--chat-editor-text-dimmed);
+  text-align: right;
+}
+
+.uploadRow[data-status='error'] .uploadRowStatus {
+  color: var(--error-color);
+}
+
+.uploadRow[data-status='done'] .uploadRowStatus {
+  color: var(--success-color);
+}
+
+.uploadRow[data-status='done'] .uploadRowPreview > svg {
+  color: var(--success-color);
+}
+
+.uploadRow[data-status='error'] .uploadRowPreview > svg {
+  color: var(--error-color);
+}
+
+.uploadRowAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--chat-editor-text-dimmed);
+  cursor: pointer;
+}
+
+.uploadRowAction:hover {
+  background: var(--chat-editor-border-color);
+  color: var(--chat-editor-text-primary);
+}
+
+.uploadDropOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 2px dashed var(--chat-editor-accent-color);
+  border-radius: 8px;
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-accent-color) 12%,
+    transparent
+  );
+  color: var(--chat-editor-text-primary);
+  font-size: 13px;
+  pointer-events: none;
 }

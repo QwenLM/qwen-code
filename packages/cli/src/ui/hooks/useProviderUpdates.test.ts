@@ -10,6 +10,7 @@ import {
   AuthType,
   CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_ENV_KEY,
+  CODING_PLAN_GLOBAL_BASE_URL,
   codingPlanProvider,
   TOKEN_PLAN_BASE_URL,
   TOKEN_PLAN_ENV_KEY,
@@ -20,9 +21,9 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { useProviderUpdates } from './useProviderUpdates.js';
 
-vi.mock('../../utils/settingsUtils.js', async (importOriginal) => {
+vi.mock('../../config/settingsUtils.js', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../../utils/settingsUtils.js')>();
+    await importOriginal<typeof import('../../config/settingsUtils.js')>();
   return {
     ...actual,
     backupSettingsFile: vi.fn(),
@@ -113,6 +114,32 @@ describe('useProviderUpdates', () => {
     };
     mockSettings.merged['modelProviders'] = {
       [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(result.current.providerUpdateRequest).toBeUndefined();
+  });
+
+  it('uses the stored non-default base URL when versions match', () => {
+    const globalTemplate = buildProviderTemplate(
+      codingPlanProvider,
+      CODING_PLAN_GLOBAL_BASE_URL,
+    );
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+      version: computeModelListVersion(globalTemplate),
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: globalTemplate,
     };
 
     const { result } = renderHook(() =>
@@ -222,7 +249,7 @@ describe('useProviderUpdates', () => {
     expect(entry?.diff.added).toContain(addedModelId);
   });
 
-  it('preserves user-added custom models when executing an update', async () => {
+  it('persists the template version and preserves custom models', async () => {
     const customModel = {
       id: 'my-custom-model',
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
@@ -263,6 +290,11 @@ describe('useProviderUpdates', () => {
       expect.arrayContaining([
         expect.objectContaining({ id: 'my-custom-model' }),
       ]),
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
+      chinaVersion,
     );
   });
 
@@ -305,11 +337,6 @@ describe('useProviderUpdates', () => {
 
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
-      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
-      chinaVersion,
-    );
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
       `${PROVIDER_METADATA_NS}.${METADATA_KEY}.baseUrl`,
       CODING_PLAN_CHINA_BASE_URL,
     );
@@ -320,6 +347,89 @@ describe('useProviderUpdates', () => {
       expect.anything(),
       'security.auth.selectedType',
       expect.anything(),
+    );
+  });
+
+  it('preserves the stored global base URL when updating', async () => {
+    const globalTemplate = buildProviderTemplate(
+      codingPlanProvider,
+      CODING_PLAN_GLOBAL_BASE_URL,
+    );
+    const globalVersion = computeModelListVersion(globalTemplate);
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: globalTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.baseUrl`,
+      CODING_PLAN_GLOBAL_BASE_URL,
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
+      globalVersion,
+    );
+  });
+
+  it('updates both provider metadata keys from a batched prompt', async () => {
+    const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadataNs[METADATA_KEY] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    metadataNs[TOKEN_METADATA_KEY] = {
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...chinaTemplate, ...tokenTemplate],
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest?.entries).toHaveLength(2);
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
+      chinaVersion,
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.version`,
+      tokenVersion,
     );
   });
 
@@ -444,14 +554,11 @@ describe('useProviderUpdates', () => {
     expect(process.env[CODING_PLAN_ENV_KEY]).toBe('sk-sp-existing-key');
   });
 
-  it('switches model when previous model is no longer available', async () => {
-    let activeModel = 'removed-model';
-    mockConfig.getModel.mockImplementation(() => activeModel);
-    mockModelsConfig.syncAfterAuthRefresh.mockImplementation(
-      (_authType, modelId) => {
-        activeModel = modelId;
-      },
-    );
+  it('leaves the model selection alone when the previous model is gone', async () => {
+    // Template updates do not carry a model-selection intent; even when the
+    // current model is absent from the refreshed list the update must not
+    // adopt the provider's default or touch model.name / model.baseUrl.
+    mockConfig.getModel.mockReturnValue('removed-model');
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
@@ -478,18 +585,24 @@ describe('useProviderUpdates', () => {
     await result.current.providerUpdateRequest!.onConfirm('update');
 
     await waitFor(() => {
-      expect(mockSettings.setValue).toHaveBeenCalled();
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
     });
 
-    expect(mockModelsConfig.syncAfterAuthRefresh).toHaveBeenCalledWith(
-      AuthType.USE_OPENAI,
-      'qwen3.5-plus',
-      undefined,
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.name',
+      expect.anything(),
+    );
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.baseUrl',
+      expect.anything(),
     );
     expect(mockAddItem).toHaveBeenCalledWith(
       {
         type: 'info',
-        text: 'Coding Plan configuration updated successfully. Model switched to "qwen3.5-plus".',
+        text: 'Coding Plan configuration updated successfully.',
       },
       expect.any(Number),
     );
@@ -559,6 +672,143 @@ describe('useProviderUpdates', () => {
       },
       expect.any(Number),
     );
+  });
+
+  it('leaves the model selection alone across a multi-provider batch update', async () => {
+    // The worst case reported in #8863: several providers update in one
+    // confirmation, and each executeUpdate in the loop used to rewrite
+    // model.name in turn — the last provider in registry order won,
+    // regardless of the user's intent. Neither provider owns the current
+    // model here, so the whole batch must leave the selection untouched.
+    const foreignModel = {
+      id: 'my-own-model',
+      baseUrl: 'https://my-own-gateway.example.com/v1',
+      envKey: 'MY_OWN_KEY',
+      name: '[Mine] my-own-model',
+    };
+    mockConfig.getModel.mockReturnValue('my-own-model');
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: foreignModel.baseUrl,
+      apiKeyEnvKey: foreignModel.envKey,
+    });
+    const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadataNs[METADATA_KEY] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    metadataNs[TOKEN_METADATA_KEY] = {
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [foreignModel, ...chinaTemplate, ...tokenTemplate],
+    };
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    expect(result.current.providerUpdateRequest!.entries.length).toBe(2);
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
+        chinaVersion,
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.version`,
+        tokenVersion,
+      );
+    });
+
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.name',
+      expect.anything(),
+    );
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.baseUrl',
+      expect.anything(),
+    );
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+  });
+
+  it('leaves the selection alone even for the active provider in a mixed batch', async () => {
+    // A batch mixing the ACTIVE provider (whose plan no longer offers the
+    // current model) with an inactive one: since #8889 a template update
+    // never applies the plan's model selection, so neither entry may touch
+    // model.name — while both updates still run to completion. This pins
+    // the batch-loop side of that invariant; the single-provider side is
+    // pinned by 'leaves the model selection alone when the previous model
+    // is gone' above.
+    const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadataNs[METADATA_KEY] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    metadataNs[TOKEN_METADATA_KEY] = {
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...chinaTemplate, ...tokenTemplate],
+    };
+    // Default mock credentials point at Coding Plan, so only the first entry
+    // is the active provider. The current model exists in neither template.
+    mockConfig.getModel.mockReturnValue('removed-model');
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    expect(result.current.providerUpdateRequest!.entries.length).toBe(2);
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    // Both entries ran to completion, regardless of provider order.
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalledTimes(2);
+    });
+
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.name',
+      expect.anything(),
+    );
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.baseUrl',
+      expect.anything(),
+    );
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
   });
 
   it('persists a cooldown (not a full update) when user chooses "later"', async () => {

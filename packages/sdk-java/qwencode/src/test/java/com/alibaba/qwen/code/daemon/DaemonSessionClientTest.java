@@ -261,11 +261,14 @@ class DaemonSessionClientTest {
         CountDownLatch cancelReceived = new CountDownLatch(1);
         server.createContext("/session/session-1/cancel", exchange -> {
             cancelReceived.countDown();
+            exchange.getResponseHeaders().set("Connection", "close");
             exchange.sendResponseHeaders(204, -1);
             exchange.close();
         });
-        server.createContext("/session/session-1/detach", noContent());
-        server.createContext("/session/session-2/detach", noContent());
+        server.createContext("/session/session-1/detach",
+                noContentAndCloseConnection());
+        server.createContext("/session/session-2/detach",
+                noContentAndCloseConnection());
 
         try (DaemonClient daemon = newClient();
                 DaemonSessionClient first = daemon.createSession()) {
@@ -1681,6 +1684,18 @@ class DaemonSessionClientTest {
     }
 
     @Test
+    void destroyAcceptsAlreadyClosingForCurrentSession() {
+        server.createContext("/session/session-1", exchange ->
+                sendJson(exchange, 404,
+                        "{\"error\":\"closing\",\"code\":\"session_closing\",\"sessionId\":\"session-1\"}"));
+
+        try (DaemonClient daemon = newClient()) {
+            DaemonSessionClient session = daemon.createSession();
+            session.destroySession();
+        }
+    }
+
+    @Test
     void destroyDoesNotTreatGenericNotFoundAsAlreadyDeleted() {
         server.createContext("/session/session-1", exchange ->
                 sendJson(exchange, 404, "{\"error\":\"route not found\"}"));
@@ -2932,6 +2947,14 @@ class DaemonSessionClientTest {
 
     private static HttpHandler noContent() {
         return exchange -> {
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        };
+    }
+
+    private static HttpHandler noContentAndCloseConnection() {
+        return exchange -> {
+            exchange.getResponseHeaders().set("Connection", "close");
             exchange.sendResponseHeaders(204, -1);
             exchange.close();
         };

@@ -28,11 +28,11 @@ import {
   MAX_UNTRACKED_TOTAL_BYTES,
 } from './local-diff.js';
 import { parseDiff, buildDiffPlan, chunksCoverDiff } from './diff-plan.js';
+import { isolateHostGitConfig } from './test-utils.js';
 
 let repo: string;
-let home: string;
 let cwd: string;
-let savedEnv: NodeJS.ProcessEnv;
+let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
 function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
@@ -61,28 +61,18 @@ beforeEach(() => {
   process.chdir(repo);
 
   // `captureLocalDiff` shells out to git through `process.env`, so the fixture
-  // has to isolate the *process* environment, not just its own git calls. Left
-  // inheriting the developer's setup, a global `core.hooksPath` runs during the
-  // test and a global `commit.gpgsign=true` fails it outright for want of a key
-  // — and a stray `~/.gitconfig` silently redefines what the "clean" baseline
-  // is. Matches the neighbouring diff-plan fixture.
-  savedEnv = { ...process.env };
-  // The config lives OUTSIDE the repo. Written inside it, the fixture's own
-  // isolation file becomes an untracked file — and this suite's whole subject is
-  // what the capture does with untracked files.
-  home = realpathSync(mkdtempSync(join(tmpdir(), 'review-home-')));
-  const emptyConfig = join(home, '.gitconfig');
-  writeFileSync(emptyConfig, '');
-  process.env['GIT_CONFIG_NOSYSTEM'] = '1';
-  process.env['GIT_CONFIG_GLOBAL'] = emptyConfig;
-  process.env['HOME'] = home; // belt and braces where the above is unsupported
+  // has to isolate the *process* environment, not just its own git calls
+  // (shared helper — see isolateHostGitConfig for the incident class). The
+  // throwaway config lives OUTSIDE the repo: written inside it, the
+  // fixture's own isolation file becomes an untracked file — and this
+  // suite's whole subject is what the capture does with untracked files.
+  gitIsolation = isolateHostGitConfig();
 });
 
 afterEach(() => {
   process.chdir(cwd);
-  process.env = savedEnv;
   rmSync(repo, { recursive: true, force: true });
-  rmSync(home, { recursive: true, force: true });
+  gitIsolation.dispose();
 });
 
 /** Init a repo with hooks and signing off, so a fixture cannot run either. */
@@ -266,6 +256,153 @@ describe('captureLocalDiff — untracked files', () => {
     expect(res.text).not.toContain('.qwen/tmp');
   });
 
+  it('excludes plumbing a round in ANOTHER directory wrote', () => {
+    // The three `paths.ts` constants are cwd-relative for EVERY invocation,
+    // so a round run from `sub/` writes `sub/.qwen/…`. A filter built from
+    // THIS invocation's cwd matches none of it, and a repo that does not
+    // ignore `.qwen` then hands the next root-invoked round the previous
+    // round's cache, reports and args record as the user's untracked work —
+    // and the cache changes every round by construction, so an incremental
+    // round could never again report "no changes".
+    write('sub/.qwen/review-cache/local.json', '{"lastCommitSha":"abc"}\n');
+    write('sub/.qwen/reviews/2026-01-01-local.md', '# round\n');
+    write('sub/.qwen/tmp/qwen-review-local-cache-candidate.json', '{}\n');
+    write('sub/real.ts', 'export const r = 1;\n');
+
+    const res = capture();
+    expect(res.untracked).toEqual(['sub/real.ts']);
+    expect(res.text).not.toContain('.qwen');
+  });
+
+  it('keeps a directory that merely LOOKS like plumbing', () => {
+    // Segment-exact: `.qwen-notes` and `tmp` are the user's.
+    write('.qwen-notes/tmp/a.md', 'mine\n');
+    write('tmp/reviews/b.md', 'also mine\n');
+
+    const res = capture();
+    expect(res.untracked.sort()).toEqual([
+      '.qwen-notes/tmp/a.md',
+      'tmp/reviews/b.md',
+    ]);
+  });
+
+  it('reviews a plumbing path the user NAMED, instead of dropping it mutely', () => {
+    // `/review .qwen/reviews/round-notes.md` is a deliberate request. Filtered
+    // out, the round reported "the working tree is clean — 0 chunks" over the
+    // one file it was asked about, with no `Not reviewed` record: mute, which
+    // the SkippedFile contract forbids.
+    write('.qwen/reviews/round-notes.md', '# notes\n');
+    write('.qwen/reviews/other.md', '# not asked for\n');
+
+    const res = capture({ file: '.qwen/reviews/round-notes.md' });
+    expect(res.untracked).toEqual(['.qwen/reviews/round-notes.md']);
+    expect(res.text).toContain('round-notes.md');
+    // …and only the named one: its siblings are still plumbing.
+    expect(res.text).not.toContain('other.md');
+  });
+
+  it('reviews the children of a NAMED plumbing directory target', () => {
+    // A directory is a legal file target — a tab-completed `src/` classifies
+    // as one — and `.qwen/reviews/` is the shape the named-path exemption was
+    // designed for. But the exemption matched `p === pathspec`, and a child
+    // path never equals its parent directory: every child was filtered out
+    // with no skipped record, and the round reviewed none of the content the
+    // user named — the same mute drop the file-shaped exemption closed.
+    write('.qwen/reviews/one.md', '# one\n');
+    write('.qwen/reviews/two.md', '# two\n');
+
+    const res = capture({ file: '.qwen/reviews/' });
+    expect(res.untracked.sort()).toEqual([
+      '.qwen/reviews/one.md',
+      '.qwen/reviews/two.md',
+    ]);
+    expect(res.skipped).toEqual([]);
+  });
+
+  it('reviews NAMED plumbing even when ignore rules cover it', () => {
+    // The common configuration is `.qwen/` in `.gitignore` — this repo's own
+    // shape — and `ls-files --others --exclude-standard` applies exclusion to
+    // an explicitly pathspec-NAMED file too, so the named plumbing never
+    // reached the filter at all: empty candidates, empty diff, no skipped
+    // record, and the round reported clean over the one file it was asked
+    // about. A deliberately named path wins over ignore rules.
+    write('.gitignore', '.qwen/*\n');
+    git('add', '.gitignore');
+    git('commit', '-q', '-m', 'ignore');
+    write('.qwen/reviews/round-notes.md', '# notes\n');
+    write('.qwen/reviews/other.md', '# sibling\n');
+
+    const res = capture({ file: '.qwen/reviews/round-notes.md' });
+    expect(res.untracked).toEqual(['.qwen/reviews/round-notes.md']);
+    expect(res.text).toContain('round-notes.md');
+    // …and only the named one: its siblings are still plumbing.
+    expect(res.text).not.toContain('other.md');
+
+    // The directory shape under the same ignore rules.
+    const dir = capture({ file: '.qwen/reviews/' });
+    expect(dir.untracked.sort()).toEqual([
+      '.qwen/reviews/other.md',
+      '.qwen/reviews/round-notes.md',
+    ]);
+  });
+
+  it('drops a TRACKED plumbing section, which ignore rules never reach', () => {
+    // Ignore rules do not apply to tracked files, so a repo that once
+    // committed its `.qwen` plumbing gets the cache back in `git diff HEAD`
+    // every round — and Step 8 rewrites that cache after every clean round,
+    // so the section is there by construction. The round reviews its own
+    // ledger JSON and `changedSince` never empties.
+    write('.qwen/review-cache/local.json', '{"lastCommitSha":"old"}\n');
+    git('add', '-f', '.qwen/review-cache/local.json');
+    git('commit', '-q', '--no-verify', '-m', 'committed plumbing');
+    write('.qwen/review-cache/local.json', '{"lastCommitSha":"new"}\n');
+    write('tracked.ts', 'export const a = 2;\n');
+
+    const res = capture();
+    expect(res.text).not.toContain('.qwen/review-cache');
+    // …while the real tracked change survives.
+    expect(res.text).toContain('tracked.ts');
+  });
+
+  it('drops TRACKED plumbing under a NAMED DIRECTORY target, keeping its other content', () => {
+    // "Whatever came back is what the user asked for" is only true for
+    // FILE-shaped pathspecs. A directory target kept every tracked plumbing
+    // section beneath it while the untracked half dropped plumbing
+    // descendants — the two halves of one capture disagreed, and a repo that
+    // committed its own `.qwen` plumbing reviewed its ledger JSON as user
+    // content, whose every-round churn kept `changedSince` from ever
+    // emptying.
+    write('sub/.qwen/review-cache/local.json', '{"round":1}\n');
+    write('sub/code.ts', 'export const c = 1;\n');
+    git('add', '-f', 'sub/.qwen/review-cache/local.json');
+    git('add', 'sub/code.ts');
+    git('commit', '-q', '--no-verify', '-m', 'committed plumbing');
+    write('sub/.qwen/review-cache/local.json', '{"round":2}\n');
+    write('sub/code.ts', 'export const c = 2;\n');
+    write('sub/note.md', 'user content\n');
+    write('sub/.qwen/tmp/qwen-review-local-plan.json', '{}\n');
+
+    const res = capture({ file: 'sub/' });
+    expect(res.text).toContain('sub/code.ts');
+    expect(res.text).not.toContain('review-cache');
+    // The untracked half agrees: plumbing descendants drop, user content stays.
+    expect(res.untracked).toEqual(['sub/note.md']);
+  });
+
+  it('keeps TRACKED plumbing sections the user NAMED', () => {
+    // The named-path exemption is deliberate: `/review
+    // .qwen/reviews/saved.md` on a committed report file asks for exactly
+    // the section the plumbing drop exists to remove.
+    write('.qwen/reviews/saved.md', '# old\n');
+    git('add', '-f', '.qwen/reviews/saved.md');
+    git('commit', '-q', '--no-verify', '-m', 'committed plumbing');
+    write('.qwen/reviews/saved.md', '# new\n');
+
+    const res = capture({ file: '.qwen/reviews/saved.md' });
+    expect(res.text).toContain('saved.md');
+    expect(res.text).toContain('-# old');
+  });
+
   it('reports an oversized tracked diff instead of inlining it', () => {
     // The aggregate budget covered only untracked files; a tracked diff could
     // grow to the 512 MiB gitRaw buffer. Stage one big tracked file past the
@@ -278,6 +415,29 @@ describe('captureLocalDiff — untracked files', () => {
     const res = capture();
     expect(res.skipped.some((f) => f.path === 'tracked changes')).toBe(true);
     expect(res.text).not.toContain('huge.ts');
+  });
+
+  it('rejects an oversized tracked diff WHOLE — the cap runs before any parse', () => {
+    // The plumbing drop used to decode and section-parse the tracked diff
+    // BEFORE the cap gate, making the pathological case the gate exists for
+    // pay the gate's avoided cost — and near `gitRaw`'s 512 MiB ceiling an
+    // all-ASCII diff decodes past Node's maximum string length, so the
+    // decode threw instead of producing the skip record. An over-cap diff is
+    // never inlined and never parsed: plant one whose plumbing sections
+    // would have shrunk it UNDER the cap, and confirm it is still rejected
+    // whole rather than rescued by the drop.
+    const big = '{"pad":"' + 'x'.repeat(MAX_UNTRACKED_TOTAL_BYTES) + '"}\n';
+    write('.qwen/review-cache/local.json', big);
+    git('add', '-f', '.qwen/review-cache/local.json');
+    git('commit', '-q', '--no-verify', '-m', 'committed plumbing');
+    write('.qwen/review-cache/local.json', big.replace('{"pad"', '{"PAD"'));
+    write('tracked.ts', 'export const a = 2;\n');
+
+    const res = capture();
+    expect(res.skipped.some((f) => f.path === 'tracked changes')).toBe(true);
+    // Nothing was rescued out of it — neither the plumbing nor the real edit.
+    expect(res.text).not.toContain('review-cache');
+    expect(res.text).not.toContain('tracked.ts');
   });
 
   it('reviews a dangling symlink instead of skipping it', () => {

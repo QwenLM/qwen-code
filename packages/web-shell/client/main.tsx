@@ -19,6 +19,8 @@ import './styles/standalone.css';
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
 
+const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu'] as const;
+
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
 
@@ -111,13 +113,15 @@ function replaceStandaloneSessionUrl(
   window.history.replaceState(null, '', url);
 }
 
-function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
+export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [theme, setTheme] = useState<WebShellTheme>(() => getInitialTheme());
   const [language, setLanguage] = useState<WebShellLanguage>(() =>
     getInitialLanguage(),
   );
-  const [sessionId] = useState<string | undefined>(() => getSessionIdFromUrl());
-  const [workspaceId] = useState<string | undefined>(() =>
+  const [sessionId, setSessionId] = useState<string | undefined>(() =>
+    getSessionIdFromUrl(),
+  );
+  const [workspaceId, setWorkspaceId] = useState<string | undefined>(() =>
     getWorkspaceIdFromUrl(),
   );
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
@@ -144,6 +148,8 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   }, []);
   const handleSessionIdChange = useCallback(
     (nextSessionId?: string, nextWorkspaceId?: string) => {
+      setSessionId(nextSessionId);
+      setWorkspaceId(nextWorkspaceId);
       replaceStandaloneSessionUrl(nextSessionId, nextWorkspaceId);
     },
     [],
@@ -168,16 +174,18 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             onSessionIdChange: handleSessionIdChange,
             sidebar: true,
             header: {
-              items: ['title', 'environment', 'rightPanel'],
+              items: ['title', 'environment', 'rightPanel', 'tokenUsage'],
             },
             rightPanel: {
-              items: ['review', 'sideTask'],
+              items: ['review', 'sideTask', 'terminal'],
             },
             environmentPanel: {
               items: ['environment', 'subagents', 'backgroundTasks'],
             },
             compactThinking: true,
             markdownTableMode: 'advanced',
+            composerToolbarAdditionalActions:
+              STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
           }}
         />
       </DaemonWorkspaceProvider>

@@ -3,17 +3,20 @@
 import { act, createElement, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { describe, expect, it, vi } from 'vitest';
-import type {
-  DaemonStatusTranscriptBlock,
-  DaemonTranscriptBlock,
+import {
+  DaemonHttpError,
+  type DaemonStatusTranscriptBlock,
+  type DaemonTranscriptBlock,
+  type DaemonTranscriptBlockChangeSummary,
 } from '@qwen-code/sdk/daemon';
 import {
   type BackgroundAgentResolution,
   getBackgroundAgentNotificationKey,
   getPendingBackgroundAgentKey,
+  projectStreamingTailMessages,
   reconcileBackgroundAgentResolutions,
   transcriptBlocksToLocalizedMessages,
-  useMessages,
+  useMessagesFromBlocks,
 } from './useMessages';
 import type { Message } from '../adapters/types';
 
@@ -29,6 +32,22 @@ const hookState = vi.hoisted(() => {
     },
     client: { resolveSubagentSession },
     resolveSubagentSession,
+  };
+});
+
+const adapterSpies = vi.hoisted(() => ({ project: vi.fn() }));
+
+vi.mock('../adapters/transcriptToMessages', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../adapters/transcriptToMessages')>();
+  return {
+    ...actual,
+    transcriptBlocksToDaemonMessages: (
+      ...args: Parameters<typeof actual.transcriptBlocksToDaemonMessages>
+    ) => {
+      adapterSpies.project();
+      return actual.transcriptBlocksToDaemonMessages(...args);
+    },
   };
 });
 
@@ -77,14 +96,485 @@ describe('transcriptBlocksToLocalizedMessages', () => {
         DaemonStatusTranscriptBlock,
         'clientReceivedAt' | 'createdAt' | 'updatedAt'
       >),
+      baseBlock({
+        id: 'loop',
+        kind: 'error',
+        text: 'internal fallback',
+        errorKind: 'loop_detected',
+      } as Omit<
+        DaemonStatusTranscriptBlock,
+        'clientReceivedAt' | 'createdAt' | 'updatedAt'
+      >),
     ];
 
     expect(transcriptBlocksToLocalizedMessages(blocks, t)).toMatchObject([
       { content: 'localized:request.cancelled' },
       { content: 'branch.success:review' },
       { content: 'localized:error.modelStreamInterrupted' },
+      { content: 'localized:error.loopDetected' },
     ]);
   });
+
+  it.each(['assistant', 'thought'] as const)(
+    'skips complete projection for a streaming %s tail update',
+    async (kind) => {
+      const container = document.createElement('div');
+      const root = createRoot(container);
+      const t = (key: string) => key;
+      const source = {};
+      let latest: Message[] = [];
+      const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
+      const tail = baseBlock({
+        id: kind,
+        kind,
+        text: 'a',
+        streaming: true,
+        serverTimestamp: 1_001,
+      });
+      function Consumer({
+        blocks,
+        summary,
+      }: {
+        blocks: DaemonTranscriptBlock[];
+        summary: DaemonTranscriptBlockChangeSummary;
+      }) {
+        latest = useMessagesFromBlocks(t, blocks, summary);
+        return null;
+      }
+
+      adapterSpies.project.mockClear();
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [user, tail],
+            summary: {
+              source,
+              revision: 1,
+              tailAppendBarrierRevision: 1,
+            },
+          }),
+        ),
+      );
+      const firstProjection = latest;
+      const initialProjectionCount = adapterSpies.project.mock.calls.length;
+      const grownTail = {
+        ...tail,
+        text: 'ab',
+        updatedAt: 2,
+        serverTimestamp: 1_002,
+      };
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [user, grownTail],
+            summary: {
+              source,
+              revision: 2,
+              tailAppendBarrierRevision: 1,
+              tailBlockId: kind,
+            },
+          }),
+        ),
+      );
+
+      expect(adapterSpies.project).toHaveBeenCalledTimes(
+        initialProjectionCount,
+      );
+      expect(latest[0]).toBe(firstProjection[0]);
+      expect(latest[1]).not.toBe(firstProjection[1]);
+      expect(latest[1]).toMatchObject({
+        content: 'ab',
+        isStreaming: true,
+        timestamp: 1_002,
+      });
+
+      const changedUser = { ...user, text: 'changed', updatedAt: 2 };
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [changedUser, grownTail],
+            summary: {
+              source,
+              revision: 3,
+              tailAppendBarrierRevision: 3,
+            },
+          }),
+        ),
+      );
+      expect(adapterSpies.project).toHaveBeenCalledTimes(
+        initialProjectionCount + 1,
+      );
+      expect(latest[0]).not.toBe(firstProjection[0]);
+
+      await act(async () => root.unmount());
+    },
+  );
+
+  it('does not scan transcript history for a summarized tail append', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const history = Array.from({ length: 100 }, (_, index) =>
+      baseBlock({ id: `user-${index}`, kind: 'user', text: `${index}` }),
+    );
+    const tail = baseBlock({
+      id: 'thought',
+      kind: 'thought',
+      text: 'a',
+      streaming: true,
+    });
+    let indexedReads = 0;
+    const countReads = (blocks: DaemonTranscriptBlock[]) =>
+      new Proxy(blocks, {
+        get(target, property, receiver) {
+          if (typeof property === 'string' && /^\d+$/.test(property)) {
+            indexedReads += 1;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: countReads([...history, tail]),
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+
+    indexedReads = 0;
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: countReads([...history, { ...tail, text: 'ab' }]),
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(indexedReads).toBeLessThan(10);
+    await act(async () => root.unmount());
+  });
+
+  it('rejects matching revisions from a different transcript store', () => {
+    const t = (key: string) => key;
+    const thought = baseBlock({
+      id: 'thought',
+      kind: 'thought',
+      text: 'a',
+      streaming: true,
+    });
+    const messages = transcriptBlocksToLocalizedMessages([thought], t);
+
+    expect(
+      projectStreamingTailMessages(
+        {
+          blocks: [thought],
+          messages,
+          t,
+          blockChangeSummary: {
+            source: {},
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        },
+        [{ ...thought, text: 'ab' }],
+        t,
+        {
+          source: {},
+          revision: 2,
+          tailAppendBarrierRevision: 1,
+          tailBlockId: thought.id,
+        },
+      ),
+    ).toBeUndefined();
+  });
+
+  it('reuses only valid streaming history without a block change summary', () => {
+    const t = (key: string) => key;
+    const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
+    const assistant = baseBlock({
+      id: 'assistant',
+      kind: 'assistant',
+      text: 'a',
+      streaming: true,
+    });
+    const messages = transcriptBlocksToLocalizedMessages([user, assistant], t);
+
+    const projected = projectStreamingTailMessages(
+      { blocks: [user, assistant], messages, t },
+      [user, { ...assistant, text: 'ab' }],
+      t,
+    );
+
+    expect(projected?.[0]).toBe(messages[0]);
+    expect(projected?.[1]).not.toBe(messages[1]);
+    expect(projected?.[1]).toMatchObject({ content: 'ab' });
+    expect(
+      projectStreamingTailMessages(
+        { blocks: [user, assistant], messages, t },
+        [
+          { ...user, text: 'changed' },
+          { ...assistant, text: 'ab' },
+        ],
+        t,
+      ),
+    ).toBeUndefined();
+    expect(
+      projectStreamingTailMessages(
+        { blocks: [user, assistant], messages, t },
+        [user, { ...assistant, text: 'replacement' }],
+        t,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('projects an insight marker that spans the appended-text boundary', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const thought = baseBlock({
+      id: 'thought',
+      kind: 'thought',
+      text: 'prefix "insi',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [thought],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    adapterSpies.project.mockClear();
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [{ ...thought, text: 'prefix "insight_progress":{}' }],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: thought.id,
+          },
+        }),
+      ),
+    );
+
+    expect(adapterSpies.project).toHaveBeenCalledOnce();
+    expect(latest).toMatchObject([
+      { role: 'thinking', content: 'prefix "insight_progress":{}' },
+    ]);
+    await act(async () => root.unmount());
+  });
+
+  it('projects a later append that completes an insight message', () => {
+    const t = (key: string) => key;
+    const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
+    const assistant = baseBlock({
+      id: 'assistant',
+      kind: 'assistant',
+      text: '{"insight_progress":{"stage":"scanning","progress":10}',
+      streaming: true,
+    });
+    const completedAssistant = {
+      ...assistant,
+      text: `${assistant.text}}`,
+    };
+    const messages = transcriptBlocksToLocalizedMessages([user, assistant], t);
+    const source = {};
+
+    const projected = projectStreamingTailMessages(
+      {
+        blocks: [user, assistant],
+        messages,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 1,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, completedAssistant],
+      t,
+      {
+        source,
+        revision: 2,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+
+    expect(projected?.[0]).toBe(messages[0]);
+    expect(projected).toMatchObject([
+      { role: 'user' },
+      { role: 'insight_progress' },
+    ]);
+    expect(
+      projectStreamingTailMessages(
+        { blocks: [user, assistant], messages, t },
+        [user, completedAssistant],
+        t,
+      ),
+    ).toMatchObject([{ role: 'user' }, { role: 'insight_progress' }]);
+
+    const partialReady = {
+      ...completedAssistant,
+      text: `${completedAssistant.text}\n{"insight_ready":{"path":"/tmp/report.md"`,
+    };
+    const partialReadyMessages = projectStreamingTailMessages(
+      {
+        blocks: [user, completedAssistant],
+        messages: projected!,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 2,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, partialReady],
+      t,
+      {
+        source,
+        revision: 3,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+    const completedReady = {
+      ...partialReady,
+      text: `${partialReady.text}}}`,
+    };
+    const readyMessages = projectStreamingTailMessages(
+      {
+        blocks: [user, partialReady],
+        messages: partialReadyMessages!,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 3,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, completedReady],
+      t,
+      {
+        source,
+        revision: 4,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+
+    expect(readyMessages?.[0]).toBe(messages[0]);
+    expect(readyMessages).toMatchObject([
+      { role: 'user' },
+      { role: 'insight_ready', path: '/tmp/report.md' },
+    ]);
+  });
+
+  it('falls back when an insight tail has no matching projected message', () => {
+    const t = (key: string) => key;
+    const thought = baseBlock({
+      id: 'merged-thought',
+      kind: 'thought',
+      text: 'prefix "insi',
+      streaming: true,
+    });
+
+    expect(
+      projectStreamingTailMessages(
+        {
+          blocks: [thought],
+          messages: [
+            {
+              id: 'earlier-assistant',
+              role: 'thinking',
+              content: thought.text,
+              isStreaming: true,
+            },
+          ],
+          t,
+        },
+        [{ ...thought, text: 'prefix "insight_progress":{}' }],
+        t,
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each([undefined, ''])(
+    'falls back safely when a streaming block has empty text (%j)',
+    async (text) => {
+      const container = document.createElement('div');
+      const root = createRoot(container);
+      const t = (key: string) => key;
+      let latest: Message[] = [];
+      const assistant = baseBlock({
+        id: 'assistant',
+        kind: 'assistant',
+        text: text as unknown as string,
+        streaming: true,
+      });
+      function Consumer({ blocks }: { blocks: DaemonTranscriptBlock[] }) {
+        latest = useMessagesFromBlocks(t, blocks);
+        return null;
+      }
+
+      await act(async () =>
+        root.render(createElement(Consumer, { blocks: [assistant] })),
+      );
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [{ ...assistant, updatedAt: 2 }],
+          }),
+        ),
+      );
+
+      expect(latest).toEqual([]);
+      await act(async () => root.unmount());
+    },
+  );
 });
 
 function backgroundAgentMessage(status: 'pending' | 'completed' = 'pending') {
@@ -128,13 +618,276 @@ function backgroundAgentBlock(toolCallId: string): DaemonTranscriptBlock {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
+}
+
+function mountStatusConsumer(
+  options: {
+    allTools?: boolean;
+    getBlockChangeSummary?: () =>
+      | DaemonTranscriptBlockChangeSummary
+      | undefined;
+  } = {},
+) {
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const t = (key: string) => key;
+  function Consumer() {
+    const messages = useMessagesFromBlocks(
+      t,
+      hookState.blocks,
+      options.getBlockChangeSummary?.(),
+    );
+    const status = options.allTools
+      ? messages
+          .flatMap((message) =>
+            message.role === 'tool_group'
+              ? message.tools.map((tool) => tool.status)
+              : [],
+          )
+          .join(',')
+      : messages[0]?.role === 'tool_group'
+        ? messages[0].tools[0]?.status
+        : undefined;
+    return createElement('div', null, status);
+  }
+  return {
+    container,
+    render: () =>
+      root.render(createElement(StrictMode, null, createElement(Consumer))),
+    unmount: () => root.unmount(),
+  };
 }
 
 describe('background agent task reconciliation', () => {
+  it('reuses reconciled history across a streaming thought tail append', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    const tail = baseBlock({
+      id: 'thought',
+      kind: 'thought',
+      text: 'a',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+
+    adapterSpies.project.mockClear();
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, { ...tail, text: 'ab' }],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(adapterSpies.project).not.toHaveBeenCalled();
+    expect(latest).toMatchObject([
+      { role: 'tool_group', tools: [{ status: 'completed' }] },
+      { role: 'thinking', content: 'ab' },
+    ]);
+    await act(async () => root.unmount());
+  });
+
+  it('keeps agent reconciliation when an insight tail has no projected message', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    // An empty assistant block projects no message (unlike thought), so the
+    // insight append below hits the "no matching projected message" fallback.
+    const tail = baseBlock({
+      id: 'empty-assistant',
+      kind: 'assistant',
+      text: '',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [
+            agent,
+            { ...tail, text: 'prefix "insight_progress":{}', updatedAt: 2 },
+          ],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(latest[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ status: 'completed' }],
+    });
+    await act(async () => root.unmount());
+  });
+
+  it('keeps agent reconciliation when an insight tail matches a projected message', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    // An empty thought block projects a thinking message (unlike assistant),
+    // so the insight append below matches the tail's projected message.
+    const tail = baseBlock({
+      id: 'empty-thought',
+      kind: 'thought',
+      text: '',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+    const reconciledToolGroup = latest[0];
+
+    adapterSpies.project.mockClear();
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [
+            agent,
+            { ...tail, text: 'prefix "insight_progress":{}', updatedAt: 2 },
+          ],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(adapterSpies.project).toHaveBeenCalled();
+    expect(latest[0]).toBe(reconciledToolGroup);
+    expect(latest).toMatchObject([
+      { role: 'tool_group', tools: [{ status: 'completed' }] },
+      { role: 'thinking', content: 'prefix "insight_progress":{}' },
+    ]);
+    await act(async () => root.unmount());
+  });
+
   it('uses terminal agent notifications as a reconciliation trigger without requiring toolUseId', () => {
     expect(
       getBackgroundAgentNotificationKey([
@@ -225,28 +978,15 @@ describe('background agent task reconciliation', () => {
     ).toMatchObject([{ role: 'tool_group', tools: [{ status: 'pending' }] }]);
   });
 
-  it('queries once for a pending card, ignores streaming, and retries after reconnect', async () => {
+  it('queries once for a pending card and retains terminal state after reconnect', async () => {
     hookState.blocks = [backgroundAgentBlock('agent-call')];
     hookState.resolveSubagentSession.mockReset();
     hookState.resolveSubagentSession.mockResolvedValue(
       backgroundAgentResolution('completed'),
     );
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const messages = useMessages(t);
-      const status =
-        messages[0]?.role === 'tool_group'
-          ? messages[0].tools[0]?.status
-          : undefined;
-      return createElement('div', null, status);
-    }
+    const { container, render, unmount } = mountStatusConsumer();
 
-    const renderConsumer = () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer)));
-
-    await act(async () => renderConsumer());
+    await act(async () => render());
     await vi.waitFor(() => {
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
       expect(hookState.resolveSubagentSession).toHaveBeenCalledWith(
@@ -265,18 +1005,865 @@ describe('background agent task reconciliation', () => {
         streaming: true,
       }),
     ];
-    await act(async () => renderConsumer());
+    await act(async () => render());
 
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
     hookState.connection.status = 'disconnected';
-    await act(async () => renderConsumer());
+    await act(async () => render());
     hookState.connection.status = 'connected';
-    await act(async () => renderConsumer());
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+
+    await act(async () => unmount());
+  });
+
+  it('retries a running background agent with bounded backoff until terminal', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('running'),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toBe('pending');
+
+    // The backoff doubles after each non-terminal result and caps at 60s.
+    // Asserted synchronously at exact 1-ms boundaries: vi.waitFor would
+    // advance fake timers by its poll interval and blur them.
+    for (const [index, delay] of [
+      3_000, 6_000, 12_000, 24_000, 48_000, 60_000,
+    ].entries()) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay - 1));
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(index + 1);
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(index + 2);
+      expect(container.textContent).toBe('pending');
+    }
+
+    hookState.resolveSubagentSession.mockResolvedValueOnce(
+      backgroundAgentResolution('completed'),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8);
+    expect(container.textContent).toBe('completed');
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('treats a missing background agent as terminal after repeated misses', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('recovers a missing background agent that registers after a first miss', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', toolCallId: 'agent-call' },
+          'not found',
+        ),
+      )
+      .mockResolvedValueOnce(backgroundAgentResolution('completed'));
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toBe('completed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('treats a permanent client error as terminal without retrying', async () => {
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(400, { code: 'invalid_tool_call_id' }, 'bad request'),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() => expect(container.textContent).toBe('failed'));
+
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+    await act(async () => unmount());
+  });
+
+  it('retries a rate-limited query instead of failing the agent', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          429,
+          { code: 'rate_limit_exceeded', retryAfterMs: 500 },
+          'rate limited',
+        ),
+      )
+      .mockResolvedValueOnce(backgroundAgentResolution('completed'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+    await vi.waitFor(() =>
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[web-shell] background agent reconciliation retry scheduled',
+        {
+          sessionId: 'session-1',
+          callIds: ['agent-call'],
+          errors: ['HTTP 429 rate_limit_exceeded'],
+        },
+      ),
+    );
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toBe('completed');
+    });
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('stops retrying and fails agents whose errors exhaust the retry budget', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Seven scheduled retries (3s, 6s, 12s, 24s, 48s, then capped at 60s);
+    // the eighth round exhausts the budget instead of scheduling another.
+    for (const delay of [
+      3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000,
+    ]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8);
+      expect(container.textContent).toBe('failed');
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[web-shell] background agent reconciliation retry budget exhausted; marking agents failed',
+      {
+        sessionId: 'session-1',
+        callIds: ['agent-call'],
+        errors: ['HTTP 500 internal_error'],
+      },
+    );
+
+    // The timer chain has stopped: no further polling.
+    await act(async () => vi.advanceTimersByTimeAsync(300_000));
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8);
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('keeps the grown retry delay when other agent notifications arrive', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+
+    // First retry schedules at the 3s base; it errors, so the next delay
+    // grows to 6s.
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
     await vi.waitFor(() =>
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
     );
 
-    await act(async () => root.unmount());
+    // A notification for another agent triggers an immediate round but must
+    // not reset the backoff: the following retry is attempt 3 (12s), not a
+    // fresh 3s base.
+    hookState.blocks = [
+      ...hookState.blocks,
+      baseBlock({
+        id: 'terminal-notification',
+        kind: 'assistant',
+        text: '',
+        meta: {
+          source: 'background_notification',
+          backgroundTask: {
+            kind: 'agent',
+            taskId: 'other-agent',
+            status: 'completed',
+          },
+        },
+      }),
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3),
+    );
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+    await act(async () => vi.advanceTimersByTimeAsync(9_000));
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(4),
+    );
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('does not carry missing-agent miss counts across a reconnect', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    hookState.connection.status = 'disconnected';
+    await act(async () => render());
+    hookState.connection.status = 'connected';
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    // The post-reconnect miss starts a fresh grace window, so the agent
+    // stays pending instead of failing on a stale second miss.
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('does not fail an agent while its launch approval is unanswered', async () => {
+    vi.useFakeTimers();
+    // The agent call is pending with an unresolved permission request for the
+    // same callId; its subagent session cannot exist yet, so the
+    // reconciliation 404 probe must be skipped rather than accumulating
+    // missing-agent misses and painting a failure.
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'session-1',
+        title: 'Launch agent',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      baseBlock({
+        id: 'agent-block-agent-call',
+        kind: 'tool',
+        toolCallId: 'agent-call',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    // The pending-permission agent is excluded from reconciliation, so the
+    // probe never fires and the card cannot be marked failed.
+    expect(hookState.resolveSubagentSession).not.toHaveBeenCalled();
+    expect(container.textContent).toBe('pending');
+
+    // Even after several retry windows of wall-clock time it stays active.
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(hookState.resolveSubagentSession).not.toHaveBeenCalled();
+    expect(container.textContent).toBe('pending');
+
+    // Once the launch approval resolves, the reconciliation must resume
+    // probing: the subagent session may now register, and a missing session
+    // crosses the grace into a visible failure exactly like any other
+    // background agent.
+    hookState.blocks = [
+      {
+        ...hookState.blocks[0],
+        resolved: 'selected:proceed_once',
+      },
+      hookState.blocks[1],
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    // First 404 miss keeps the card pending.
+    expect(container.textContent).toBe('pending');
+    // The retry's second miss crosses the missing-agent grace → failed.
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('probes only the healthy agent while a sibling launch approval is pending', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent-a',
+        kind: 'permission',
+        requestId: 'req-a',
+        sessionId: 'session-1',
+        title: 'Launch agent A',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call-a',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent A',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      baseBlock({
+        id: 'agent-a',
+        kind: 'tool',
+        toolCallId: 'agent-call-a',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+      baseBlock({
+        id: 'agent-b',
+        kind: 'tool',
+        toolCallId: 'agent-call-b',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue({
+      status: 'running',
+      sessionId: 'sub-agent-b',
+    });
+    const { render, unmount } = mountStatusConsumer({ allTools: true });
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalled(),
+    );
+    // Exclusion is per callId: the healthy sibling keeps probing while the
+    // approved agent is skipped.
+    const probed = hookState.resolveSubagentSession.mock.calls.map(
+      (call) => call[1],
+    );
+    expect(probed).toContain('agent-call-b');
+    expect(probed).not.toContain('agent-call-a');
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('resets accumulated missing-agent misses when an approval engages', async () => {
+    vi.useFakeTimers();
+    const source = {};
+    let summary: DaemonTranscriptBlockChangeSummary = {
+      source,
+      revision: 1,
+      tailAppendBarrierRevision: 1,
+    };
+    // Phase 1: no permission yet — one probe fires and 404s (miss 1).
+    hookState.blocks = [
+      baseBlock({
+        id: 'agent-a',
+        kind: 'tool',
+        toolCallId: 'agent-call-a',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call-a' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer({
+      getBlockChangeSummary: () => summary,
+    });
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Phase 2: the launch approval arrives — exclusion engages and must reset
+    // the accumulated miss, so no further probe fires while it is open.
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent-a',
+        kind: 'permission',
+        requestId: 'req-a',
+        sessionId: 'session-1',
+        title: 'Launch agent A',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call-a',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent A',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      hookState.blocks[0],
+    ];
+    summary = {
+      source,
+      revision: 2,
+      tailAppendBarrierRevision: 2,
+    };
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+
+    // Phase 3: the approval resolves — probing resumes with a fresh grace;
+    // the pre-exclusion miss must not carry over, so the second post-approval
+    // 404 still leaves the card pending, and a third marks it failed.
+    hookState.blocks = [
+      {
+        ...hookState.blocks[0],
+        resolved: 'selected:proceed_once',
+      },
+      hookState.blocks[1],
+    ];
+    summary = {
+      source,
+      revision: 3,
+      tailAppendBarrierRevision: 3,
+    };
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('ignores a permanent failure that settles after approval engages', async () => {
+    const probe = deferred<BackgroundAgentResolution>();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockReturnValueOnce(probe.promise);
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent',
+        kind: 'permission',
+        requestId: 'req-agent',
+        sessionId: 'session-1',
+        title: 'Launch agent',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      backgroundAgentBlock('agent-call'),
+    ];
+    await act(async () => render());
+    await act(async () => {
+      probe.reject(
+        new DaemonHttpError(
+          400,
+          { code: 'invalid_subagent_ref' },
+          'bad request',
+        ),
+      );
+    });
+
+    expect(container.textContent).toBe('pending');
+    await act(async () => unmount());
+  });
+
+  it('does not count a late 404 after approval engages', async () => {
+    vi.useFakeTimers();
+    const probe = deferred<BackgroundAgentResolution>();
+    const missing = new DaemonHttpError(
+      404,
+      { code: 'session_not_found', toolCallId: 'agent-call' },
+      'not found',
+    );
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockReturnValueOnce(probe.promise)
+      .mockRejectedValue(missing);
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent',
+        kind: 'permission',
+        requestId: 'req-agent',
+        sessionId: 'session-1',
+        title: 'Launch agent',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      backgroundAgentBlock('agent-call'),
+    ];
+    await act(async () => render());
+    await act(async () => probe.reject(missing));
+    expect(container.textContent).toBe('pending');
+
+    hookState.blocks = [
+      { ...hookState.blocks[0], resolved: 'selected:proceed_once' },
+      hookState.blocks[1],
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => expect(container.textContent).toBe('failed'));
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('paces transient-error attempts across permission churn', async () => {
+    vi.useFakeTimers();
+    const agent = backgroundAgentBlock('agent-call');
+    const permission = baseBlock({
+      id: 'perm-file',
+      kind: 'permission',
+      requestId: 'req-file',
+      sessionId: 'session-1',
+      title: 'Write file',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: {
+        toolCallId: 'file-call',
+        kind: 'other',
+        status: 'pending',
+        title: 'Write file',
+        rawInput: {},
+      },
+      preview: { kind: 'generic' as const },
+    });
+    hookState.blocks = [agent];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    for (let index = 0; index < 8; index += 1) {
+      hookState.blocks = index % 2 === 0 ? [permission, agent] : [agent];
+      await act(async () => render());
+      await vi.waitFor(() =>
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(
+          index + 2,
+        ),
+      );
+    }
+
+    expect(container.textContent).toBe('pending');
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      '[web-shell] background agent reconciliation retry budget exhausted; marking agents failed',
+      expect.anything(),
+    );
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('keeps the missing-agent grace when an unrelated permission re-probes', async () => {
+    vi.useFakeTimers();
+    // Phase 1: a background agent probes and 404s once (miss 1).
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Phase 2: an unrelated permission appears inside the retry window. The
+    // effect re-runs and probes again immediately; that second 404 must not
+    // count toward the grace because the base backoff has not elapsed — the
+    // ladder is wall-clock paced, not round-paced.
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-file',
+        kind: 'permission',
+        requestId: 'req-file',
+        sessionId: 'session-1',
+        title: 'Write file',
+        options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'file-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Write file',
+          rawInput: {},
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      backgroundAgentBlock('agent-call'),
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    // Two immediate 404s inside the backoff window must leave the miss count
+    // at 1, so the card stays pending.
+    expect(container.textContent).toBe('pending');
+
+    // Phase 3: the next probe after the base backoff crosses the grace.
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('gives a session-level 404 the same grace as a missing agent', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', sessionId: 'session-1' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    // The daemon answers this shape for transient workspace states too, so
+    // a first session-level miss keeps polling instead of failing the card.
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('recovers a session-level 404 when the next round reaches the daemon', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', sessionId: 'session-1' },
+          'not found',
+        ),
+      )
+      .mockResolvedValueOnce(backgroundAgentResolution('completed'));
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toBe('completed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('does not fail an agent on a 404 identifying a different tool call', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'other-call' },
+        'not found',
+      ),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // The mismatched 404 is transient; reconciliation must keep polling
+    // instead of abandoning the card at pending.
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
   });
 
   it('reconciles after a terminal agent notification without toolUseId', async () => {
@@ -287,21 +1874,9 @@ describe('background agent task reconciliation', () => {
     hookState.resolveSubagentSession
       .mockResolvedValueOnce(backgroundAgentResolution('running'))
       .mockResolvedValueOnce(backgroundAgentResolution('completed'));
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const messages = useMessages(t);
-      const status =
-        messages[0]?.role === 'tool_group'
-          ? messages[0].tools[0]?.status
-          : undefined;
-      return createElement('div', null, status);
-    }
-    const renderConsumer = () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer)));
+    const { container, render, unmount } = mountStatusConsumer();
 
-    await act(async () => renderConsumer());
+    await act(async () => render());
     expect(container.textContent).toBe('pending');
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
 
@@ -321,13 +1896,13 @@ describe('background agent task reconciliation', () => {
         },
       }),
     ];
-    await act(async () => renderConsumer());
+    await act(async () => render());
     await vi.waitFor(() => {
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
       expect(container.textContent).toBe('completed');
     });
 
-    await act(async () => root.unmount());
+    await act(async () => unmount());
   });
 
   it('ignores an older response after the pending Agent set expands', async () => {
@@ -342,27 +1917,17 @@ describe('background agent task reconciliation', () => {
       .mockReturnValueOnce(older.promise)
       .mockReturnValueOnce(newerA.promise)
       .mockReturnValueOnce(newerB.promise);
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const statuses = useMessages(t).flatMap((message) =>
-        message.role === 'tool_group'
-          ? message.tools.map((tool) => tool.status)
-          : [],
-      );
-      return createElement('div', null, statuses.join(','));
-    }
-    const renderConsumer = () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer)));
+    const { container, render, unmount } = mountStatusConsumer({
+      allTools: true,
+    });
 
-    await act(async () => renderConsumer());
+    await act(async () => render());
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
     hookState.blocks = [
       backgroundAgentBlock('agent-a'),
       backgroundAgentBlock('agent-b'),
     ];
-    await act(async () => renderConsumer());
+    await act(async () => render());
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
 
     await act(async () => {
@@ -373,7 +1938,70 @@ describe('background agent task reconciliation', () => {
     await act(async () => older.resolve(backgroundAgentResolution('running')));
     expect(container.textContent).toBe('completed,completed');
 
-    await act(async () => root.unmount());
+    await act(async () => unmount());
+  });
+
+  it('does not consume grace misses for a superseded round', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    const older = deferred<BackgroundAgentResolution>();
+    const newer = deferred<BackgroundAgentResolution>();
+    hookState.resolveSubagentSession
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise)
+      .mockResolvedValue(backgroundAgentResolution('completed'));
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+
+    // A notification supersedes the in-flight round while it is pending.
+    hookState.blocks = [
+      ...hookState.blocks,
+      baseBlock({
+        id: 'terminal-notification',
+        kind: 'assistant',
+        text: '',
+        meta: {
+          source: 'background_notification',
+          backgroundTask: {
+            kind: 'agent',
+            taskId: 'legacy-agent',
+            status: 'completed',
+          },
+        },
+      }),
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+
+    // Both rounds hit the same unregistered-daemon 404. The stale round's
+    // 404 lands first, then the live round's: only the live round's miss
+    // may count, so the stale one must not pre-increment the counter and
+    // fail the agent on the live round's first miss.
+    const miss = new DaemonHttpError(
+      404,
+      { code: 'session_not_found', toolCallId: 'agent-call' },
+      'not found',
+    );
+    await act(async () => {
+      older.reject(miss);
+      newer.reject(miss);
+    });
+    expect(container.textContent).toBe('pending');
+
+    // The live round keeps polling and reconciles on the next attempt.
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('completed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
   });
 
   it('applies successful resolutions when another pending Agent fails', async () => {
@@ -390,25 +2018,16 @@ describe('background agent task reconciliation', () => {
           ? Promise.resolve(backgroundAgentResolution('completed'))
           : Promise.reject(new Error('not found')),
     );
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const statuses = useMessages(t).flatMap((message) =>
-        message.role === 'tool_group'
-          ? message.tools.map((tool) => tool.status)
-          : [],
-      );
-      return createElement('div', null, statuses.join(','));
-    }
-    const renderConsumer = () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer)));
+    const { container, render, unmount } = mountStatusConsumer({
+      allTools: true,
+    });
 
-    await act(async () => renderConsumer());
+    await act(async () => render());
     await vi.waitFor(() => {
-      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
       expect(container.textContent).toBe('completed,pending');
     });
+    expect(hookState.resolveSubagentSession.mock.calls[2]?.[1]).toBe('agent-b');
 
     hookState.resolveSubagentSession.mockImplementation(
       (_sessionId: string, callId: string) =>
@@ -432,13 +2051,13 @@ describe('background agent task reconciliation', () => {
         },
       }),
     ];
-    await act(async () => renderConsumer());
+    await act(async () => render());
     await vi.waitFor(() => {
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(4);
       expect(container.textContent).toBe('completed,completed');
     });
 
-    await act(async () => root.unmount());
+    await act(async () => unmount());
   });
 
   it('ignores an older response after switching sessions', async () => {
@@ -451,23 +2070,11 @@ describe('background agent task reconciliation', () => {
     hookState.resolveSubagentSession
       .mockReturnValueOnce(sessionA.promise)
       .mockReturnValueOnce(sessionB.promise);
-    const container = document.createElement('div');
-    const root = createRoot(container);
-    const t = (key: string) => key;
-    function Consumer() {
-      const messages = useMessages(t);
-      const status =
-        messages[0]?.role === 'tool_group'
-          ? messages[0].tools[0]?.status
-          : undefined;
-      return createElement('div', null, status);
-    }
-    const renderConsumer = () =>
-      root.render(createElement(StrictMode, null, createElement(Consumer)));
+    const { container, render, unmount } = mountStatusConsumer();
 
-    await act(async () => renderConsumer());
+    await act(async () => render());
     hookState.connection.sessionId = 'session-b';
-    await act(async () => renderConsumer());
+    await act(async () => render());
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
 
     await act(async () =>
@@ -479,7 +2086,412 @@ describe('background agent task reconciliation', () => {
     );
     expect(container.textContent).toBe('completed');
 
-    await act(async () => root.unmount());
+    await act(async () => unmount());
     hookState.connection.sessionId = 'session-1';
+  });
+
+  it('keeps retry tolerance for the completion query of a long-running agent', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('running'),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    // Drive the agent through the full backoff ladder while it answers
+    // running; healthy rounds must not consume the failure budget.
+    for (const delay of [
+      3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000,
+    ]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // The completion notification triggers the final query; a single transient
+    // 500 there must recover rather than permanently fail the completed agent.
+    hookState.resolveSubagentSession
+      .mockRejectedValueOnce(
+        new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+      )
+      .mockResolvedValueOnce(backgroundAgentResolution('completed'));
+    hookState.blocks = [
+      ...hookState.blocks,
+      baseBlock({
+        id: 'terminal-notification',
+        kind: 'assistant',
+        text: '',
+        meta: {
+          source: 'background_notification',
+          backgroundTask: {
+            kind: 'agent',
+            taskId: 'legacy-agent',
+            status: 'completed',
+          },
+        },
+      }),
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(9),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(10);
+      expect(container.textContent).toBe('completed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('fails only the erroring agent when the budget exhausts with several pending agents', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [
+      backgroundAgentBlock('agent-a'),
+      backgroundAgentBlock('agent-b'),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockImplementation(
+      (_sessionId: string, callId: string) =>
+        callId === 'agent-a'
+          ? Promise.reject(
+              new DaemonHttpError(
+                500,
+                { code: 'internal_error' },
+                'server error',
+              ),
+            )
+          : Promise.resolve(backgroundAgentResolution('running')),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer({
+      allTools: true,
+    });
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending,pending');
+
+    // Agent A errors every round while agent B answers running; once the
+    // budget exhausts only the erroring agent is marked failed.
+    for (const delay of [
+      3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000,
+    ]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    await vi.waitFor(() => {
+      expect(container.textContent).toBe('failed,pending');
+    });
+
+    // A's failure shrinks the pending set, opening a fresh retry scope: the
+    // healthy sibling keeps polling and still reconciles terminal.
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenLastCalledWith(
+        'session-1',
+        'agent-b',
+      ),
+    );
+    hookState.resolveSubagentSession.mockImplementation(
+      (_sessionId: string, callId: string) =>
+        callId === 'agent-b'
+          ? Promise.resolve(backgroundAgentResolution('completed'))
+          : Promise.reject(
+              new DaemonHttpError(
+                500,
+                { code: 'internal_error' },
+                'server error',
+              ),
+            ),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(container.textContent).toBe('failed,completed');
+    });
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('does not fail a healthy sibling that blips when another agent exhausts the budget', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [
+      backgroundAgentBlock('agent-a'),
+      backgroundAgentBlock('agent-b'),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    let bCalls = 0;
+    hookState.resolveSubagentSession.mockImplementation(
+      (_sessionId: string, callId: string) => {
+        if (callId === 'agent-a') {
+          return Promise.reject(
+            new DaemonHttpError(
+              500,
+              { code: 'internal_error' },
+              'server error',
+            ),
+          );
+        }
+        bCalls += 1;
+        // Agent B answers running for seven rounds and has a single
+        // transient blip exactly in the round that exhausts agent A.
+        return bCalls === 8
+          ? Promise.reject(
+              new DaemonHttpError(
+                500,
+                { code: 'internal_error' },
+                'server error',
+              ),
+            )
+          : Promise.resolve(backgroundAgentResolution('running'));
+      },
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer({
+      allTools: true,
+    });
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    for (const delay of [
+      3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000,
+    ]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    await vi.waitFor(() => {
+      expect(container.textContent).toBe('failed,pending');
+    });
+
+    // B's own consecutive-error count is one, so it keeps polling on a
+    // fresh scope and still reconciles terminal.
+    hookState.resolveSubagentSession.mockImplementation(
+      (_sessionId: string, callId: string) =>
+        callId === 'agent-b'
+          ? Promise.resolve(backgroundAgentResolution('completed'))
+          : Promise.reject(
+              new DaemonHttpError(
+                500,
+                { code: 'internal_error' },
+                'server error',
+              ),
+            ),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(container.textContent).toBe('failed,completed');
+    });
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('keeps the full retry budget when the client identity changes between rounds', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const originalClient = hookState.client;
+    const { container, render, unmount } = mountStatusConsumer();
+
+    try {
+      await act(async () => render());
+      await vi.waitFor(() =>
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+      );
+      expect(container.textContent).toBe('pending');
+
+      // The embedding host swaps the client identity while staying
+      // connected. The settled round was already processed, so the hook must
+      // issue a fresh query instead of attaching a second handler to the
+      // cached promise and counting the same round twice.
+      hookState.client = {
+        resolveSubagentSession: hookState.resolveSubagentSession,
+      };
+      await act(async () => render());
+      await vi.waitFor(() =>
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+      );
+      expect(container.textContent).toBe('pending');
+
+      // The immediate identity-triggered round is inside the pacing window,
+      // so only wall-clock-paced errors consume the documented budget.
+      for (const delay of [
+        6_000, 12_000, 24_000, 48_000, 60_000, 60_000, 60_000,
+      ]) {
+        await act(async () => vi.advanceTimersByTimeAsync(delay));
+      }
+      await vi.waitFor(() => {
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(9);
+        expect(container.textContent).toBe('failed');
+      });
+    } finally {
+      await act(async () => unmount());
+      hookState.client = originalClient;
+      warnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-arms the missing-agent grace after a successful response', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', toolCallId: 'agent-call' },
+          'not found',
+        ),
+      )
+      .mockResolvedValueOnce(backgroundAgentResolution('running'))
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', toolCallId: 'agent-call' },
+          'not found',
+        ),
+      )
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', toolCallId: 'agent-call' },
+          'not found',
+        ),
+      );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Round 2 answers running, resetting the miss counter.
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Round 3 misses again, but the earlier success re-armed the grace, so a
+    // single fresh miss stays pending instead of failing.
+    await act(async () => vi.advanceTimersByTimeAsync(6_000));
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Round 4 is the second miss of the fresh window and fails the agent.
+    await act(async () => vi.advanceTimersByTimeAsync(12_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(4);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('does not consume the error budget for tolerated missing-agent misses', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    // Alternate in-grace 404 misses and healthy answers for far more rounds
+    // than the error budget allows; each tolerated miss is followed by a
+    // success, so none of them may accumulate toward exhaustion.
+    for (let round = 0; round < 10; round += 1) {
+      hookState.resolveSubagentSession
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            404,
+            { code: 'session_not_found', toolCallId: 'agent-call' },
+            'not found',
+          ),
+        )
+        .mockResolvedValueOnce(backgroundAgentResolution('running'));
+    }
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('running'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Drive nineteen more rounds over the full backoff ladder; each step
+    // advances exactly one retry so the alternating miss/success rounds
+    // interleave with React's flushes.
+    for (let round = 0; round < 19; round += 1) {
+      await act(async () =>
+        vi.advanceTimersByTimeAsync(Math.min(3_000 * 2 ** round, 60_000)),
+      );
+    }
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(20),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('starts a fresh retry budget after a reconnect', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    // Six retries take the budget to one transient error short of exhaustion.
+    for (const delay of [3_000, 6_000, 12_000, 24_000, 48_000, 60_000]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(7),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // A reconnect resets the budget, so the next error opens a fresh ladder
+    // instead of exhausting the pre-disconnect budget.
+    hookState.connection.status = 'disconnected';
+    await act(async () => render());
+    hookState.connection.status = 'connected';
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
   });
 });

@@ -7,6 +7,8 @@
 import type OpenAI from 'openai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import { REASONING_EFFORT_TIERS } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { ensureReasoningContentOnAssistantMessage } from './utils.js';
@@ -14,13 +16,14 @@ import { ensureReasoningContentOnAssistantMessage } from './utils.js';
 /**
  * Hostname-only check used to decide whether `reasoning.effort` should be
  * rewritten into DeepSeek's flat `reasoning_effort` body parameter, and
- * whether to emit `thinking: { type: 'disabled' }` when reasoning is
- * turned off. The broader `isDeepSeekProvider` falls back to model-name
- * matching to cover self-hosted deployments (sglang/vllm/ollama) — that
- * fallback is right for content-part flattening (a model-format
- * constraint) but trusting it for the body-shape rewrite would push a
- * DeepSeek extension at strict OpenAI-compat backends that may not
- * accept it. Keep the two decisions separated.
+ * whether to emit `thinking: { type: 'disabled' }` when reasoning is turned
+ * off. The broader `isDeepSeekProvider` falls back to model-name matching to
+ * cover self-hosted deployments (sglang/vllm/ollama) — that
+ * fallback is right for selecting DeepSeek-specific content handling, but
+ * explicit image support still takes precedence over text-only flattening.
+ * Trusting it for the body-shape rewrite would push a DeepSeek extension at
+ * strict OpenAI-compat backends that may not accept it. Keep the two decisions
+ * separated.
  *
  * Parses the baseUrl with `new URL(...)` and matches the hostname
  * against `api.deepseek.com` (and its subdomains) exactly — a naive
@@ -49,13 +52,13 @@ export function isDeepSeekHostname(
 }
 
 /**
- * Broad detection used to select the DeepSeek provider class for
- * content-part flattening: hostname OR model-name. Self-hosted
- * deployments (sglang/vllm/ollama) running DeepSeek models share the
- * same input-format constraint, so the model-name fallback is
- * intentional. For decisions that depend on the wire shape DeepSeek's
- * own API exposes (e.g. `reasoning_effort`, `thinking`), use
- * `isDeepSeekHostname` instead — see https://github.com/QwenLM/qwen-code/issues/3613.
+ * Broad detection used to select the DeepSeek provider class for content-part
+ * handling: hostname OR model-name. Self-hosted deployments
+ * (sglang/vllm/ollama) running DeepSeek models share the same text-only input
+ * constraint unless image support is explicitly declared. For decisions that
+ * depend on the wire shape DeepSeek's own API exposes (e.g.
+ * `reasoning_effort`, `thinking`), use `isDeepSeekHostname` instead — see
+ * https://github.com/QwenLM/qwen-code/issues/3613.
  */
 export function isDeepSeekProvider(
   contentGeneratorConfig: ContentGeneratorConfig,
@@ -82,16 +85,33 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   static isDeepSeekHostname = isDeepSeekHostname;
 
   /**
-   * DeepSeek's API requires message content to be a plain string, not an
-   * array of content parts. Flatten any text-part arrays into joined
-   * strings; non-text parts (image_url, audio, …) are replaced with a
-   * `[Unsupported content type: <type>]` placeholder so the request still
-   * goes through with a textual breadcrumb rather than silently dropping
-   * the part or raising mid-conversation. Also translate the standard
-   * `reasoning.effort` config into DeepSeek's flat `reasoning_effort`
-   * body parameter — but only on actual DeepSeek hostnames, since the
-   * model-name fallback above can match self-hosted/strict OpenAI-compat
-   * backends that don't accept the DeepSeek extension.
+   * The full ladder, including `max`, only on a verified DeepSeek host.
+   * `isDeepSeekProvider` also routes here on a `deepseek` substring in the
+   * model name, which says nothing about what the endpoint accepts, so the
+   * capability follows the rule the module comment above already states: a
+   * decision about the wire shape DeepSeek's own API exposes uses
+   * `isDeepSeekHostname`. Elsewhere the generic ceiling applies.
+   */
+  protected override supportedReasoningEffortsFor(
+    model: string | undefined,
+  ): readonly ReasoningEffort[] {
+    return isDeepSeekHostname(this.contentGeneratorConfig)
+      ? REASONING_EFFORT_TIERS
+      : super.supportedReasoningEffortsFor(model);
+  }
+
+  /**
+   * Text-only DeepSeek APIs require message content to be a plain string, not
+   * an array of content parts. Flatten text-only request arrays into joined
+   * strings; non-text parts (image_url, audio, …) are replaced with an
+   * `[Unsupported content type: <type>]` placeholder so the request still goes
+   * through with a textual breadcrumb rather than silently dropping the part
+   * or raising mid-conversation. Models that explicitly declare image input
+   * retain multipart content for compatible gateways. Also translate the
+   * standard `reasoning.effort` config into DeepSeek's flat `reasoning_effort`
+   * body parameter — but only on actual DeepSeek hostnames, since the model-name
+   * fallback above can match self-hosted/strict OpenAI-compat backends that
+   * don't accept the DeepSeek extension.
    */
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
@@ -106,10 +126,13 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
       return reshaped;
     }
 
-    const messages = reshaped.messages.map((message) => {
-      const flattened = flattenContentParts(message);
-      return ensureReasoningContentOnAssistantMessage(flattened);
-    });
+    const messages = reshaped.messages.map((message) =>
+      ensureReasoningContentOnAssistantMessage(
+        this.contentGeneratorConfig.modalities?.image
+          ? message
+          : flattenContentParts(message),
+      ),
+    );
 
     return {
       ...reshaped,
