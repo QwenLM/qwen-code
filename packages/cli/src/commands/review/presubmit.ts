@@ -34,7 +34,7 @@ import {
   readClaimHead,
   severityOf,
 } from './lib/inline-counts.js';
-import { carriesCommentMarker } from './lib/review-footer.js';
+import { LINE_ENDING_RE, carriesCommentMarker } from './lib/review-footer.js';
 import {
   LEDGER_ID_READBACK,
   LEDGER_ID_SHAPE,
@@ -101,7 +101,7 @@ function extractCarriedIds(body: string): string[] {
     // the surviving id token bars the id-less fallback.
     line = body
       .trimStart()
-      .split(/\r\n?|\n/)[0]
+      .split(LINE_ENDING_RE)[0]
       .replace(LEADING_INVISIBLE_RE, '')
       .trim();
   }

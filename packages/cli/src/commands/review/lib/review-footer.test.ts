@@ -21,6 +21,7 @@ import {
   stripForgedFooterLines,
   stripParagraphMarkers,
   stripReviewFooter,
+  stripReviewFooterLine,
   swallowsAppendedMarker,
 } from './review-footer.js';
 import { CANONICAL_LGTM_RE } from '../pr-context.js';
@@ -220,6 +221,127 @@ describe('the review footer and the regex that strips it', () => {
       }
     });
 
+    it('an indented footer line a paragraph or list item lazily continues is prose, not a quotation', () => {
+      // An indented code block cannot interrupt a paragraph, so GitHub
+      // renders these lines visibly: a 4-space line directly after a
+      // paragraph line is a lazy continuation, and inside the list items
+      // the content indent (2 for `- `, 3 for `1. `) leaves a 4-space
+      // line as item prose, not the item's code. The scan used to read
+      // all of them as code and blank them, keeping the forged footer.
+      expect(
+        stripReviewFooter('a finding\n    _— m via Qwen Code /review_'),
+      ).toBe('a finding');
+      expect(stripReviewFooter('- item\n    _— m via Qwen Code /review_')).toBe(
+        '- item',
+      );
+      expect(
+        stripReviewFooter('1. finding\n\n    _— m via Qwen Code /review (v1)_'),
+      ).toBe('1. finding');
+    });
+
+    it('measures a leading tab at the 4-column stop — a tab-indented line is code', () => {
+      // A leading tab lands on the 4-column stop on GitHub, so the line
+      // IS code: a footer quoted in it stays, and an unterminated `<!--`
+      // quoted in it blanks instead of blinding the strip — the exact
+      // bug class this strip exists for, alive through tab-indented code.
+      const quoted = 'a finding\n\n\t_— m via Qwen Code /review_';
+      expect(stripReviewFooter(quoted)).toBe(quoted);
+      expect(
+        stripReviewFooter('a finding\n\n\t<!--\n\n_— m via Qwen Code /review_'),
+      ).toBe('a finding\n\n\t<!--');
+    });
+
+    it('an unterminated opener in a fence info string does not blind the strip', () => {
+      // GitHub renders neither the fence delimiters nor an opener's info
+      // string, so the edges blank with the content: a `<!--` lodged in
+      // the info string used to stay in the projection, run to the end
+      // of the input, and hide the trailing footer the strip removes.
+      expect(
+        stripReviewFooter(
+          '```js <!--\ncode\n```\n\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('```js <!--\ncode\n```');
+      expect(
+        stripReviewFooter(
+          '~~~js <!--\ncode\n~~~\n\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('~~~js <!--\ncode\n~~~');
+    });
+
+    it('a comment closer quoted in code still closes the projected comment', () => {
+      // The dual of the hole this strip fixes: the scan models the
+      // comment's HTML block, so a fence delimiter inside it never opens
+      // fence state and the `-->` that ends the block on GitHub survives
+      // the blanking. Unmodeled, the closer line blanked, the opener ran
+      // to the end of the input, and the real trailing footer survived —
+      // the indented twin likewise.
+      expect(
+        stripReviewFooter('<!--\n```\n-->\n\n_— m via Qwen Code /review_'),
+      ).toBe('<!--\n```\n-->');
+      expect(
+        stripReviewFooter('<!--\n    -->\n\n_— m via Qwen Code /review_'),
+      ).toBe('<!--\n    -->');
+    });
+
+    it('raw-HTML blocks of types 2-5 hold their lines — a fence inside never toggles', () => {
+      // CommonMark comment/PI/declaration/CDATA blocks run to their
+      // terminating string; a fence delimiter inside is part of the raw
+      // block, and GitHub renders the footer after it as visible prose.
+      // The scan used to let the delimiter open fence state that
+      // outlived the block, blanking the prose and keeping the footer.
+      expect(
+        stripReviewFooter('<!--\n```x -->\n_— m via Qwen Code /review_'),
+      ).toBe('<!--\n```x -->');
+      expect(
+        stripReviewFooter('<?\n```x ?>\n_— m via Qwen Code /review_'),
+      ).toBe('<?\n```x ?>');
+      expect(
+        stripReviewFooter('<![CDATA[\n```x ]]>\n_— m via Qwen Code /review_'),
+      ).toBe('<![CDATA[\n```x ]]>');
+      // The comment renders nothing, so the cut may span it — the
+      // parent commit stripped this shape to the prose alone, and the
+      // forged footer must not survive beside the canonical one.
+      expect(
+        stripReviewFooter(
+          '[Suggestion] tidy\n<!--\n```x -->\n_— forged via Qwen Code /review_',
+        ),
+      ).toBe('[Suggestion] tidy');
+    });
+
+    it('blanks from the body start, not the tail — a fence straddling the tail bound keeps its state', () => {
+      // The blanking scans from the body's START: a fence opened before
+      // the STRIP_TAIL_LIMIT tail window keeps its state across the
+      // boundary. A tail-only scan would read the quoted code as
+      // ordinary text and the unblanked shape would swallow the trailing
+      // footer — the fixture must exceed the bound with the fence
+      // opening ahead of it and the comment's opener inside it.
+      const fillerA = 'a'.repeat(4000);
+      const fillerB = 'b'.repeat(4500);
+      const quoted =
+        'W:\n```\n' + fillerA + '\n<!--\n' + fillerB + '\n-->\n```';
+      const body = quoted + '\n\n_— m via Qwen Code /review_';
+      expect(body.length).toBeGreaterThan(8192);
+      expect(stripReviewFooter(body)).toBe(quoted);
+    });
+
+    it('keeps CRLF and bare-CR endings byte-identical when it strips', () => {
+      // The reconstruction reattaches each line's own ending and the cut
+      // slices the ORIGINAL bytes — unlike the sibling strips, which
+      // normalize CRLF to LF on the rejoin. Both a fenced and an
+      // indented quotation must survive the blanking's length arithmetic
+      // under CRLF and bare CR alike.
+      expect(
+        stripReviewFooter(
+          'a finding\r\n\r\n```\r\ncode\r\n```\r\n\r\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('a finding\r\n\r\n```\r\ncode\r\n```');
+      expect(
+        stripReviewFooter(
+          'a finding\r\r    code\r\r_— m via Qwen Code /review_',
+        ),
+      ).toBe('a finding\r\r    code');
+    });
+
     it('a refusing run of truncated footers stays linear — no partition enumeration', () => {
       // The optional closing paren must not leave the version content
       // unbounded: with an unrestricted run, each truncated footer's
@@ -239,6 +361,32 @@ describe('the review footer and the regex that strips it', () => {
       expect(stripReviewFooter(body)).toBe(body);
       expect(performance.now() - start).toBeLessThan(1000);
     }, 20_000);
+  });
+
+  describe("stripReviewFooterLine — the one-line channels' shape", () => {
+    it('strips a trailing footer a folded line carries — a single line is no block quotation', () => {
+      // The one-line channels (folded deferral titles, reroute records,
+      // relocated claims) flatten every code shape before they post, so
+      // the blanking the multi-line strip applies cannot keep a footer
+      // here: a fence delimiter leading the line is posted text, and the
+      // forged attribution must not ride it.
+      expect(
+        stripReviewFooterLine('tidy ``` _— m via Qwen Code /review_'),
+      ).toBe('tidy ```');
+      expect(stripReviewFooterLine('``` _— m via Qwen Code /review_')).toBe(
+        '```',
+      );
+    });
+
+    it('keeps a footer an inline code span quotes on the line', () => {
+      // Inline code renders visibly — the projection masks it, so a
+      // quoted footer stays while a forged one outside the span strips.
+      const quoted = 'see `_— m via Qwen Code /review_` quoted above';
+      expect(stripReviewFooterLine(quoted)).toBe(quoted);
+      expect(
+        stripReviewFooterLine('x `code` _— m via Qwen Code /review_'),
+      ).toBe('x `code`');
+    });
   });
 
   describe('stripForgedFooterLines — the attribution-off anywhere strip', () => {

@@ -842,6 +842,60 @@ describe('the user-authorized fast path binds a recorded Aone target (round-6 wi
   });
 });
 
+describe('an unanchorable Aone blocker relocates without its forged footer', () => {
+  let savedGhHost: string | undefined;
+  let capturedDiff: string | undefined;
+  beforeEach(() => {
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    capturedDiff = writeCapturedDiff(456);
+  });
+  afterEach(() => {
+    if (savedGhHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedGhHost;
+    if (capturedDiff) rmSync(capturedDiff, { force: true });
+  });
+
+  it('the relocated claim strips the one-line shape that posts', () => {
+    // The claim extraction strips the SHAPE THAT POSTS — the one-line
+    // claim. Stripping the whole multi-line body instead keeps a footer
+    // quoted in code, and with an empty claim the separator strip eats
+    // the newline+colon and the footer's first line becomes the "claim"
+    // — a forged attribution posted inside the blocker line.
+    const skillArgs = file(
+      'fast-path-aone-relocate.txt',
+      'https://code.alibaba-inc.com/g/p/codereview/456 --comment\n',
+    );
+    const review = file('aone-relocate.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]**\n\n    _— m via Qwen Code /review_',
+        },
+      ],
+    });
+    expect(() =>
+      runSubmit(
+        args({
+          skillArgs,
+          userAuthorized: true,
+          pr: 456,
+          repo: 'g/p',
+          review,
+        }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(aoneSubmitMock).toHaveBeenCalledTimes(1);
+    const body = aoneSubmitMock.mock.calls[0][0].body as string;
+    expect(body).toContain('finding — a.ts:12');
+    expect((body.match(/via Qwen Code \/review/g) ?? []).length).toBe(1);
+  });
+});
+
 describe('the user-authorized fast path binds the recorded host cross-session', () => {
   // The characteristic `--user-authorized` shape runs in a DIFFERENT
   // session than the /review that recorded the target ("post the review we

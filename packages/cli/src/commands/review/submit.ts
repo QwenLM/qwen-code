@@ -105,6 +105,7 @@ import {
   stripForgedFooterLines,
   stripForUnattributedPost,
   stripReviewFooter,
+  stripReviewFooterLine,
   swallowsAppendedMarker,
 } from './lib/review-footer.js';
 
@@ -195,16 +196,19 @@ function isDiffLine(n: unknown): n is number {
  * ingestion carries it as-is.
  */
 function relocatedAoneCriticalEntry(c: ReviewComment): string {
-  // The body arrives footer-appended — strip the canonical footer FIRST,
-  // or an empty claim line lets the extraction fall THROUGH into the
-  // footer text and post it as the claim (the separator strip eats the
-  // newline+colon and the footer's first line becomes the "claim").
-  const body = typeof c.body === 'string' ? stripReviewFooter(c.body) : null;
+  const body = typeof c.body === 'string' ? c.body : null;
   const rawClaim = body === null ? null : carriedClaimLine(body);
   // A looping model drafts stacked markers and every other strip iterates
   // to a fixpoint; compose quotes this entry as-is behind the template
   // marker, so a carried second marker would post inside the blocker line.
-  const claim = rawClaim === null ? null : stripSeverityPrefix(rawClaim);
+  // The trailing strip runs on the CLAIM LINE — the one-line shape this
+  // entry posts as: over the whole multi-line body it keeps a footer
+  // quoted in code, and with an empty claim the separator strip eats the
+  // newline+colon and the footer's first line becomes the "claim".
+  const claim =
+    rawClaim === null
+      ? null
+      : stripReviewFooterLine(stripSeverityPrefix(rawClaim));
   // The gate only relocates bodies with substance past the marker, but the
   // claim line itself can still be empty (content on a later line) or a
   // fence delimiter (a marker-alone body leading into a fence) — junk the

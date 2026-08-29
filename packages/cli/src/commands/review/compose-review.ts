@@ -124,6 +124,7 @@ import {
   type DraftedComment,
 } from './lib/inline-counts.js';
 import {
+  LINE_ENDING_RE,
   MODEL_ID_MAX_CHARS,
   footerVersion,
   isFooterSafeModelId,
@@ -133,6 +134,7 @@ import {
   stripFooterSpans,
   stripForUnattributedPost,
   stripReviewFooter,
+  stripReviewFooterLine,
 } from './lib/review-footer.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { recordedSeverityFloor } from './lib/authorization.js';
@@ -386,7 +388,7 @@ export function renderDeferredEntry(entry: DeferredEntry): string {
  */
 function collapseToLine(text: string): string {
   return text
-    .split(/\r\n?|\n/)
+    .split(LINE_ENDING_RE)
     .map((seg) => seg.trim())
     .filter((seg) => seg !== '')
     .join(' ');
@@ -441,9 +443,13 @@ function toDeferredEntries(value: unknown): DeferredEntry[] {
     }
     const o = raw as Record<string, unknown>;
     const file = typeof o['file'] === 'string' ? o['file'].trim() : '';
+    // Strip AFTER the fold: the one-line render flattens a footer kept
+    // inside a code shape into a single line, destroying the shape that
+    // justified keeping it — a trailing footer is still trailing once
+    // collapsed, so the folded line is the shape to strip.
     const title =
       typeof o['title'] === 'string'
-        ? stripReviewFooter(o['title']).trim()
+        ? stripReviewFooterLine(collapseToLine(o['title'])).trim()
         : '';
     const source = o['source'];
     const severity = o['severity'];
@@ -821,8 +827,10 @@ export function floorEnforcedReroute(
     const record = critical
       ? readClaimHead(first).stripped.replace(head.sourceText ?? '', '')
       : first;
-    const title = collapseToLine(
-      stripReviewFooter(record + (nl === -1 ? '' : stripped.slice(nl))),
+    // Strip AFTER the fold — the collapsed line is the shape that posts,
+    // for the reason toDeferredEntries states.
+    const title = stripReviewFooterLine(
+      collapseToLine(record + (nl === -1 ? '' : stripped.slice(nl))),
     );
     indices.push(i);
     entries.push({
