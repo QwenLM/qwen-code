@@ -2216,6 +2216,15 @@ export class DaemonClient {
     content: string,
     opts: DaemonWorkspaceMemoryRememberOptions = {},
   ): Promise<DaemonWorkspaceMemoryRememberTask> {
+    if (opts.scope) {
+      // An old daemon silently ignores `scope` and auto-routes the write;
+      // pre-flight so the degradation is a loud capability error instead.
+      await this.requireCapability(
+        opts.scope === 'project'
+          ? 'workspace_memory_remember_project_scope'
+          : 'workspace_memory_remember_user_scope',
+      );
+    }
     return await this.jsonRequest<DaemonWorkspaceMemoryRememberTask>(
       WORKSPACE_MEMORY_REMEMBER_PATH,
       `POST ${WORKSPACE_MEMORY_REMEMBER_PATH}`,
@@ -2224,6 +2233,7 @@ export class DaemonClient {
         body: {
           content,
           contextMode: opts.contextMode ?? 'workspace',
+          ...(opts.scope ? { scope: opts.scope } : {}),
         },
         clientId: opts.clientId,
       },
@@ -2245,12 +2255,20 @@ export class DaemonClient {
     query: string,
     opts: DaemonWorkspaceMemoryForgetOptions = {},
   ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    if (opts.scope) {
+      // Without the tag an old daemon runs an UNSCOPED forget that can
+      // delete entries from both stores — pre-flight instead of degrading.
+      await this.requireCapability('workspace_memory_forget_scope');
+    }
     return await this.jsonRequest<DaemonWorkspaceMemoryForgetTask>(
       WORKSPACE_MEMORY_FORGET_PATH,
       `POST ${WORKSPACE_MEMORY_FORGET_PATH}`,
       {
         method: 'POST',
-        body: { query },
+        body: {
+          query,
+          ...(opts.scope ? { scope: opts.scope } : {}),
+        },
         clientId: opts.clientId,
       },
     );

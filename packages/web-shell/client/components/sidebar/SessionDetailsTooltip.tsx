@@ -27,6 +27,7 @@ interface SessionDetailsTooltipProps {
   label: string;
   time: string;
   completedUnread: boolean;
+  worktreeOnly?: boolean;
   children: ReactElement;
 }
 
@@ -35,6 +36,7 @@ export function SessionDetailsTooltip({
   label,
   time,
   completedUnread,
+  worktreeOnly = false,
   children,
 }: SessionDetailsTooltipProps) {
   const { t } = useI18n();
@@ -133,7 +135,7 @@ export function SessionDetailsTooltip({
       </PopoverAnchor>
       <PopoverContent
         side="right"
-        align="start"
+        align={worktreeOnly ? 'center' : 'start'}
         sideOffset={0}
         collisionBoundary={collisionBoundary ?? undefined}
         collisionPadding={8}
@@ -146,16 +148,22 @@ export function SessionDetailsTooltip({
         onPointerLeave={closeAfterDelay}
         className={styles.sessionDetailsTooltip}
       >
-        <div className={styles.sessionDetailsHeader}>
-          <span className={styles.sessionDetailsTitle} title={label}>
-            {label}
-          </span>
-          {time && <span className={styles.sessionDetailsTime}>{time}</span>}
-        </div>
-        <div className={styles.sessionDetailsRow}>
-          <FolderClosedIcon aria-hidden="true" />
-          <span title={folderPath}>{folderName}</span>
-        </div>
+        {!worktreeOnly && (
+          <>
+            <div className={styles.sessionDetailsHeader}>
+              <span className={styles.sessionDetailsTitle} title={label}>
+                {label}
+              </span>
+              {time && (
+                <span className={styles.sessionDetailsTime}>{time}</span>
+              )}
+            </div>
+            <div className={styles.sessionDetailsRow}>
+              <FolderClosedIcon aria-hidden="true" />
+              <span title={folderPath}>{folderName}</span>
+            </div>
+          </>
+        )}
         {branch && (
           <div className={styles.sessionDetailsRow}>
             <GitBranchIcon aria-hidden="true" />
@@ -218,58 +226,64 @@ export function SessionDetailsTooltip({
             </div>
           );
         })}
-        <div className={styles.sessionDetailsRow}>
-          <RadioTowerIcon aria-hidden="true" />
-          <span>{status}</span>
-        </div>
-        <div className={styles.sessionDetailsIdRow}>
-          <span title={session.sessionId}>{session.sessionId}</span>
-          <button
-            type="button"
-            tabIndex={-1}
-            className={styles.sessionDetailsCopyButton}
-            aria-label={t('sidebar.copySessionId')}
-            title={t('sidebar.copySessionId')}
-            onClick={() => {
-              const copyAttempt = ++copyAttemptRef.current;
-              void writeClipboardText(session.sessionId)
-                .then(() => {
-                  if (copyAttemptRef.current === copyAttempt) {
-                    setCopyStatus('copied');
-                    window.clearTimeout(copyResetTimerRef.current);
-                    copyResetTimerRef.current = window.setTimeout(() => {
+        {!worktreeOnly && (
+          <>
+            <div className={styles.sessionDetailsRow}>
+              <RadioTowerIcon aria-hidden="true" />
+              <span>{status}</span>
+            </div>
+            <div className={styles.sessionDetailsIdRow}>
+              <span title={session.sessionId}>{session.sessionId}</span>
+              <button
+                type="button"
+                tabIndex={-1}
+                className={styles.sessionDetailsCopyButton}
+                aria-label={t('sidebar.copySessionId')}
+                title={t('sidebar.copySessionId')}
+                onClick={() => {
+                  const copyAttempt = ++copyAttemptRef.current;
+                  void writeClipboardText(session.sessionId)
+                    .then(() => {
                       if (copyAttemptRef.current === copyAttempt) {
-                        setCopyStatus('idle');
+                        setCopyStatus('copied');
+                        window.clearTimeout(copyResetTimerRef.current);
+                        copyResetTimerRef.current = window.setTimeout(() => {
+                          if (copyAttemptRef.current === copyAttempt) {
+                            setCopyStatus('idle');
+                          }
+                        }, 2000);
                       }
-                    }, 2000);
-                  }
-                })
-                .catch(() => {
-                  if (copyAttemptRef.current === copyAttempt) {
-                    setCopyStatus('failed');
-                  }
-                });
-            }}
-          >
-            {copyStatus === 'copied' ? (
-              <CheckIcon aria-hidden="true" />
-            ) : (
-              <CopyIcon aria-hidden="true" />
-            )}
-          </button>
-          <span
-            className={
-              copyStatus === 'copied' ? 'sr-only' : styles.sessionDetailsCopied
-            }
-            aria-live="polite"
-          >
-            {copyStatus === 'copied'
-              ? t('sidebar.sessionIdCopied')
-              : copyStatus === 'failed'
-                ? t('sidebar.copySessionIdFailed')
-                : ''}
-          </span>
-        </div>
+                    })
+                    .catch(() => {
+                      if (copyAttemptRef.current === copyAttempt) {
+                        setCopyStatus('failed');
+                      }
+                    });
+                }}
+              >
+                {copyStatus === 'copied' ? (
+                  <CheckIcon aria-hidden="true" />
+                ) : (
+                  <CopyIcon aria-hidden="true" />
+                )}
+              </button>
+              <span
+                className={
+                  copyStatus === 'copied'
+                    ? 'sr-only'
+                    : styles.sessionDetailsCopied
+                }
+                aria-live="polite"
+              >
+                {copyStatus === 'copied'
+                  ? t('sidebar.sessionIdCopied')
+                  : copyStatus === 'failed'
+                    ? t('sidebar.copySessionIdFailed')
+                    : ''}
+              </span>
+            </div>
+          </>
+        )}
       </PopoverContent>
     </Popover>
   );
