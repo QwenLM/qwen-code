@@ -33,6 +33,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { MAX_SCREEN_KEYS } from './lib/worktree.js';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import yargs, { type Argv } from 'yargs';
@@ -127,6 +128,23 @@ describe('runScratchTree', () => {
     // a user's own git-lfs install carries are not this surface).
     git(worktree, 'config', '--unset', 'filter.evil.process');
     expect(run().available).toBe(true);
+  });
+
+  it('tells the user how many filter keys it did NOT name', () => {
+    // The cap keeps an attacker-written key list out of the refusal string;
+    // the count keeps the refusal actionable. Naming 12 of 13 sends a user to
+    // remove the 12 and be refused again on the one never mentioned — and the
+    // two refusal surfaces in this pipeline must report the state the same way.
+    for (let i = 0; i < MAX_SCREEN_KEYS + 1; i++) {
+      git(worktree, 'config', `filter.evil${i}.smudge`, 'cat');
+    }
+    writeFileSync(join(worktree, 'a.ts'), 'dirty\n');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('capped enumeration');
+    expect(r.note).toContain(`${MAX_SCREEN_KEYS} shown of ${MAX_SCREEN_KEYS + 1}`);
   });
 
   it("screens ANOTHER worktree's per-worktree config, not just this one's", () => {
