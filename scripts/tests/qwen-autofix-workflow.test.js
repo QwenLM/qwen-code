@@ -23118,6 +23118,62 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     '  expect(four()).toBe(4);',
     '});',
   ];
+  // The skip-freight shielding shape: the branch wraps its 'c' test into
+  // a block comment and adds a shared skip marker; main adds the SAME
+  // shared marker byte-identically plus one further marker, and renames
+  // the 'a' title so the merge conflicts. The resolution unwraps 'c' —
+  // a genuine resolution-introduced skip the whole-blob total subtraction
+  // deflated to zero (the shared marker counted once in the result,
+  // twice in the totals).
+  const WT_SKIP_FREIGHT_BASE = [
+    WT_IMPORT,
+    "it('a', () => {",
+    '  expect(one()).toBe(1);',
+    '});',
+    "it('c', () => {",
+    '  expect(three()).toBe(3);',
+    '});',
+  ];
+  const WT_SKIP_FREIGHT_BRANCH = [
+    WT_IMPORT,
+    "it('a branch', () => {",
+    '  expect(one()).toBe(1);',
+    '});',
+    '/*',
+    "it.skip('c', () => {",
+    '  expect(three()).toBe(3);',
+    '});',
+    '*/',
+    "it.skip('shared', () => {",
+    '  expect(shared()).toBe(7);',
+    '});',
+  ];
+  const WT_SKIP_FREIGHT_MAIN = [
+    WT_IMPORT,
+    "it('a main', () => {",
+    '  expect(one()).toBe(1);',
+    '});',
+    "it('c', () => {",
+    '  expect(three()).toBe(3);',
+    '});',
+    "it.skip('shared', () => {",
+    '  expect(shared()).toBe(7);',
+    '});',
+    "it.todo('extra');",
+  ];
+  const WT_SKIP_FREIGHT_RESOLUTION = [
+    WT_IMPORT,
+    "it('a main', () => {",
+    '  expect(one()).toBe(1);',
+    '});',
+    "it.skip('c', () => {",
+    '  expect(three()).toBe(3);',
+    '});',
+    "it.skip('shared', () => {",
+    '  expect(shared()).toBe(7);',
+    '});',
+    "it.todo('extra');",
+  ];
   // Branch-side drift ADDING an assertion next to a line main REWRITES:
   // the two edits conflict, so the merge resolution itself decides which
   // bytes survive the merge commit.
@@ -24452,6 +24508,251 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         AGENT_COMMIT,
       ],
     },
+    // vitest's fourth collector: suite.skip( disables an entire suite
+    // while the dotted-marker roots name it/test/describe only.
+    'skip-suite-collector': {
+      files: {
+        'pkg/a.test.ts': [
+          "import { suite, it, expect } from 'vitest';",
+          "suite('group', () => {",
+          "  it('a', () => {",
+          '    expect(one()).toBe(1);',
+          '  });',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            "import { suite, it, expect } from 'vitest';",
+            "suite.skip('group', () => {",
+            "  it('a', () => {",
+            '    expect(one()).toBe(1);',
+            '  });',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // suite.todo( disables the suite with no literal skip( token — the
+    // collector-root suite arm is the only arm that can measure it.
+    'skip-suite-todo': {
+      files: {
+        'pkg/a.test.ts': [
+          "import { suite, it, expect } from 'vitest';",
+          "suite('group', () => {});",
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            "import { suite, it, expect } from 'vitest';",
+            "suite.todo('group');",
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The options-object disable: the runner sets the task mode straight
+    // from the options object — no collector modifier anywhere on the
+    // line. The value is the true literal; a condition-valued skip is the
+    // skipIf environment-guard idiom and stays exempt.
+    'skip-options-object': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', { skip: true }, () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The runtime body call: ctx.skip() disables the running test, so a
+    // body-only edit measures zero on every collector-shaped arm.
+    'skip-body-call': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', (ctx) => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', (ctx) => {",
+            '  ctx.skip();',
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // A matcher that is only property-accessed, never called, throws
+    // nothing: the access-only line may earn no addition credit that
+    // cancels the genuine removal.
+    'matcher-access-only': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  const droppedMatcher = expect(two()).toBe;',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // expect.assertions(0) passes when ZERO assertions run: the
+    // count-mismatch throw is unreachable exactly when the test pins
+    // nothing, so the swap must measure as a removal.
+    'assertions-zero': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect.assertions(0);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The string decoy as a SIBLING commit: c1 removes the assertion,
+    // c2 adds the decoy string line. Each single-commit blob backstop
+    // adjudicates its own commit clean, and the per-commit accumulators
+    // net the cross-commit credit to zero — only the verdict-time
+    // whole-round recount sees the removal.
+    'string-decoy-cross-commit': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            '});',
+          ],
+        }),
+        'git add pkg/a.test.ts && git commit -qm remove-assertion',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            "  const note = 'expect(two()).toBe(2)';",
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The skip arm's twin: c1 adds the marker, c2 deletes a string line
+    // carrying marker text and earns the removal credit that nets it.
+    'skip-string-credit-cross-commit': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "const note = 'it.skip(legacy)';",
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "const note = 'it.skip(legacy)';",
+            "it.skip('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        'git add pkg/a.test.ts && git commit -qm add-marker',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it.skip('a', () => {",
+            '  expect(one()).toBe(1);',
+            '  expect(two()).toBe(2);',
+            '});',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    // The round's merge wholesale DISCARDS a test main added during the
+    // round: absent on BOTH sides of the merge result, the status-A
+    // feeder and the net-range arms never see it — only the branch-side
+    // introduction feeder admits the second-parent enumeration's listing.
+    'merge-introduced-discard-ours': {
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE }),
+        'git add pkg/b.test.ts && git commit -qm main-adds-test',
+      ],
+      round: [
+        'git merge -q -s ours origin/main -m discard-main-added',
+        AGENT_COMMIT,
+      ],
+    },
+    'merge-introduced-discard-rm': {
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE }),
+        'git add pkg/b.test.ts && git commit -qm main-adds-test',
+      ],
+      round: [
+        'git merge -q --no-commit origin/main',
+        'git rm -qf pkg/b.test.ts',
+        'git commit -qm discard-main-added',
+        AGENT_COMMIT,
+      ],
+    },
+    // The skip-freight shielding shape: the resolution unwraps a skip
+    // the branch had wrapped into a block comment while both sides added
+    // a byte-identical shared marker and main added one further — the
+    // whole-blob total subtraction deflated the genuine skip to zero.
+    'skip-freight-shared-marker': {
+      onMain: { 'pkg/a.test.ts': WT_SKIP_FREIGHT_BASE },
+      files: { 'pkg/a.test.ts': WT_SKIP_FREIGHT_BRANCH },
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_SKIP_FREIGHT_MAIN }),
+        'git add pkg/a.test.ts && git commit -qm main-moves',
+      ],
+      round: [
+        'git merge -q --no-edit origin/main || true',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_SKIP_FREIGHT_RESOLUTION }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
   };
   const runGate = ({
     failAt = [],
@@ -24500,6 +24801,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // WEAKEN_FIXTURES whose PRE-ROUND ref carries the pinned test and whose
     // agent commit then weakens it in one of the measured shapes.
     weaken = '',
+    // Shadow awk with a POSIX-conforming shim: escape-process the -v
+    // assignment values the way gawk and busybox do (the host awk may
+    // not), pinning the census transport on every lane.
+    escapeAwk = false,
     // Arbitrary extra workdir files — the handoff-classification fixtures
     // drive stop-marker combinations through this. Defaults empty: the
     // summary default is owned by summaryPresent above, not duplicated here.
@@ -24663,6 +24968,37 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         ].join('\n'),
       );
       chmodSync(join(bin, 'npm'), 0o755);
+      if (escapeAwk) {
+        // POSIX mandates escape-sequence substitution on awk -v
+        // assignment values; mawk does not apply it, gawk and busybox
+        // do. Rewrite the escapes a conforming awk would so a -v
+        // transport degrades here exactly like it does on a gawk lane.
+        const realAwk = execFileSync('bash', ['-c', 'command -v awk'], {
+          encoding: 'utf8',
+          env: { ...process.env, ...GIT_ISOLATION },
+        }).trim();
+        writeFileSync(
+          join(bin, 'awk'),
+          [
+            '#!/bin/bash',
+            'args=()',
+            'while (( $# > 0 )); do',
+            '  if [[ "$1" == "-v" ]]; then',
+            '    shift',
+            '    v="$1"',
+            '    v="${v//\\\\(/(}"',
+            '    v="${v//\\\\./.}"',
+            '    args+=("-v" "$v")',
+            '  else',
+            '    args+=("$1")',
+            '  fi',
+            '  shift',
+            'done',
+            `exec '${realAwk}' "\${args[@]}"`,
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'awk'), 0o755);
+      }
       if (commFail) {
         // Shadows the system comm via PATH precedence: the signature
         // comparison itself fails (the SIGPIPE-under-pipefail class), so
@@ -26530,6 +26866,142 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // added-line strip cold-starts and swallows the genuine marker that
     // follows it; the whole-blob census still sees the skip.
     const r = runGate({ weaken: 'skip-block-swallow' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects disabling a whole suite through the suite collector', () => {
+    // suite is vitest's fourth collector; suite.skip( disables every
+    // test inside while the it/test/describe roots measure zero.
+    const r = runGate({ weaken: 'skip-suite-collector' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects a suite disabled through suite.todo', () => {
+    // No literal skip( token: the collector-root suite arm is the only
+    // arm that measures this marker.
+    const r = runGate({ weaken: 'skip-suite-todo' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects an options-object skip on a pre-existing test', () => {
+    // it('x', { skip: true }, fn) carries no collector modifier — the
+    // runner sets the task mode straight from the options object.
+    const r = runGate({ weaken: 'skip-options-object' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects a runtime ctx.skip() injected into a test body', () => {
+    // A body-only edit disabling a pre-existing test measures zero on
+    // every collector arm and leaves the blob assertion counts intact.
+    const r = runGate({ weaken: 'skip-body-call' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+  });
+
+  it('rejects swapping an assertion for a property-accessed matcher', () => {
+    // expect(two()).toBe; throws nothing — the access-only line may earn
+    // no addition credit that cancels the genuine removal.
+    const r = runGate({ weaken: 'matcher-access-only' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects swapping an assertion for expect.assertions(0)', () => {
+    // assertions(0) passes exactly when zero assertions run, so the swap
+    // leaves the test pinning nothing while the counters net to zero.
+    const r = runGate({ weaken: 'assertions-zero' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('rejects a string decoy committed as a sibling to the removal', () => {
+    // c1 removes the assertion, c2 adds the decoy string line: each
+    // single-commit blob backstop adjudicates its own commit clean, and
+    // the accumulators net the cross-commit credit to zero — only the
+    // verdict-time whole-round recount sees the removal.
+    const r = runGate({ weaken: 'string-decoy-cross-commit' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+    expect(r.stdout).not.toContain('measurement UNAVAILABLE');
+  });
+
+  it('rejects a skip netted against a sibling-commit string deletion', () => {
+    // The skip arm's twin: the deleted string line carries marker text
+    // and earns the removal credit that cancels the genuine marker.
+    const r = runGate({ weaken: 'skip-string-credit-cross-commit' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('skip/todo marker(s) added');
+    expect(r.stdout).not.toContain('measurement UNAVAILABLE');
+  });
+
+  it('charges a merge that discards a main-added test via -s ours', () => {
+    // The discarded file never shows at the merge result — absent on
+    // both sides — so only the branch-side introduction feeder admits
+    // the second-parent enumeration's listing; main's newly landed
+    // tests may not be silently deleted in the same round.
+    const r = runGate({ weaken: 'merge-introduced-discard-ours' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/b.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('charges a merge that discards a main-added test via post-merge rm', () => {
+    const r = runGate({ weaken: 'merge-introduced-discard-rm' });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/b.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'keeps the merge freight census intact under an escape-processing awk',
+    () => {
+      // POSIX mandates escape-sequence substitution on awk -v assignment
+      // values — gawk and busybox rewrite the census RE's \( and \. into
+      // ( and . , fatally unbalancing it, so the substitution captures
+      // nothing and the freight correction silently zeroes. The census
+      // must deliver its pattern through a channel no escape processing
+      // touches.
+      const r = runGate({ weaken: 'merge-freight', escapeAwk: true });
+      expect(r.status).toBe(0);
+      expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    'keeps the merge-deletion freight census intact under an escape-processing awk',
+    () => {
+      const r = runGate({ weaken: 'merge-delete-freight', escapeAwk: true });
+      expect(r.status).toBe(0);
+      expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    },
+  );
+
+  it('keeps the --ours weakening charge intact under an escape-processing awk', () => {
+    const r = runGate({ weaken: 'merge-ours-drop', escapeAwk: true });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('assertion line(s) removed');
+  });
+
+  it('charges a resolution-introduced skip shielded by shared markers', () => {
+    // Both sides added a byte-identical marker, main added one further,
+    // and the resolution unwrapped a third: the whole-blob total
+    // subtraction deflated the genuine skip to zero; per-marker freight
+    // charges it.
+    const r = runGate({ weaken: 'skip-freight-shared-marker' });
     expect(r.status).toBe(1);
     expect(r.rejection).toContain('pkg/a.test.ts');
     expect(r.rejection).toContain('skip/todo marker(s) added');

@@ -1036,9 +1036,11 @@ fi
 #   - the file was DELETED;
 #   - assertion lines removed exceed assertion lines added, an assertion
 #     line being one that carries a THROWING assertion: `expect(` or
-#     `expect.poll(` -- with a matcher chain following on the same line
-#     when ADDED, since expect('anything') passes for any value, the
-#     maximal relaxation, while a bare `expect(` removal still counts (a
+#     `expect.poll(` -- with a CALLED matcher chain following on the
+#     same line when ADDED, since expect('anything') passes for any
+#     value and a property-accessed matcher (expect(x).toBe;) throws
+#     nothing, the maximal relaxation, while a bare `expect(` removal
+#     still counts (a
 #     multi-line-formatted assertion measures as a removal: the
 #     fail-closed direction, one ack entry answers it) -- or
 #     `assert(`/`assert.member(` with a left boundary, where the member
@@ -1112,9 +1114,13 @@ WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__
 # list stays a whitelist on purpose: anything(/any(/arrayContaining(
 # are NON-throwing asymmetric matchers and must not count.
 WEAKEN_ASSERT_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.(poll|soft|assertions|hasAssertions|unreachable))?\(|\.expect(\.(poll|soft|assertions|hasAssertions|unreachable))?\('
-# Added lines count an expect( only when a matcher chain follows it on
-# the same line: expect('anything') passes for any return value, the
-# maximal relaxation of an assertion. The del side stays bare on
+# Added lines count an expect( only when a CALLED matcher chain follows
+# it on the same line: expect('anything') passes for any return value,
+# and a matcher that is only property-accessed, never called
+# (expect(x).toBe;) throws nothing — the maximal relaxation of an
+# assertion. The tail therefore demands the member identifier plus a
+# call opener ('(' or an optional-chaining '?'), through any further
+# dotted members (expect(x).not.toBe(...)). The del side stays bare on
 # purpose: a multi-line-formatted expect(...) then measures as a
 # removal — the fail-closed direction, one ack entry answers it. The
 # member form .expect( IS its own assertion, but it carries the same
@@ -1122,7 +1128,12 @@ WEAKEN_ASSERT_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|
 # then measures as removal-only — the fail-closed direction. The
 # throwing members need no tail: the CALL itself fails the test, so an
 # added expect.unreachable( earns addition credit as written.
-WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.poll)?\(.*\)[[:space:]]*\.|(^|[^A-Za-z0-9_$.])expect\.(soft|assertions|hasAssertions|unreachable)\(|\.expect(\.poll)?\(.*\)[[:space:]]*\.'
+# expect.assertions( is NOT whitelisted here: assertions(0) passes
+# exactly when ZERO assertions run — the count-mismatch throw is
+# unreachable precisely when the test pins nothing, so its add-side
+# credit would certify that shape. The del/blob RE above keeps it:
+# REMOVING such a line still counts — the fail-closed asymmetry.
+WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()|(^|[^A-Za-z0-9_$.])expect(\.poll)?\(.*\)[[:space:]]*\.[A-Za-z_$][A-Za-z0-9_$]*([[:space:]]*\.[[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*)*[[:space:]]*[(?]|(^|[^A-Za-z0-9_$.])expect\.(soft|hasAssertions|unreachable)\(|\.expect(\.poll)?\(.*\)[[:space:]]*\.[A-Za-z_$][A-Za-z0-9_$]*([[:space:]]*\.[[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*)*[[:space:]]*[(?]'
 # Marker shapes beyond the dotted one-line form: a concurrent/
 # sequential/shuffle chain ahead of the modifier (test.concurrent.skip(),
 # describe.concurrent.skip()) or BEHIND it (it.skip.concurrent( — vitest
@@ -1132,8 +1143,16 @@ WEAKEN_ASSERT_ADD_RE='(^|[^A-Za-z0-9_$.])assert(\(|\.[A-Za-z_$][A-Za-z0-9_$]*\()
 # a single, double, or BACKTICK quote (it['skip']('a', ...)).
 # Newline-split member chains (it / .skip( on two lines — valid JS
 # running as it.skip) are measured on the joined view
-# weaken_join_markers produces below.
-WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*([?]?[.][[:space:]]*(concurrent|sequential|shuffle)[[:space:]]*)*[?]?[.][[:space:]]*(skip|todo|fails|failing)([[:space:]]*[?]?[.][[:space:]]*(each|for|concurrent|sequential|shuffle)[[:space:]]*)*[[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*\[[[:space:]]*('\''|"|`)(skip|todo|fails|failing)('\''|"|`)[[:space:]]*\][[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\('
+# weaken_join_markers produces below. Three further disable surfaces:
+# suite — vitest's fourth collector — in the collector roots; the
+# options-object form test('x', { skip: true }, fn), which carries no
+# collector modifier (the value must be the true LITERAL: a
+# condition-valued skip is this repo's skipIf environment-guard idiom
+# and stays exempt like .skipIf); and the runtime body call skip( —
+# ctx.skip() disables a pre-existing test with no collector edit. The
+# body arm demands ( immediately after skip so .skipIf( stays exempt.
+# shellcheck disable=SC2016  # the $ bytes are regex character-class literals, not shell expansions
+WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*([?]?[.][[:space:]]*(concurrent|sequential|shuffle)[[:space:]]*)*[?]?[.][[:space:]]*(skip|todo|fails|failing)([[:space:]]*[?]?[.][[:space:]]*(each|for|concurrent|sequential|shuffle)[[:space:]]*)*[[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*\[[[:space:]]*('\''|"|`)(skip|todo|fails|failing)('\''|"|`)[[:space:]]*\][[:space:]]*([?][.])?[(<`]|(^|[^A-Za-z0-9_$.])x(it|describe)([[:space:]]*\.[[:space:]]*each)?[[:space:]]*\(|(^|[^A-Za-z0-9_$.])(it|test|describe|suite)[[:space:]]*\(.+[{,][[:space:]]*(skip|todo)[[:space:]]*:[[:space:]]*true|(^|[^A-Za-z0-9_$])skip\('
 # Measured weakenings travel as parallel indexed arrays, never a
 # newline/tab-joined string: filenames are branch-controlled bytes, and a
 # name carrying a newline or tab splits a delimited record into fragments
@@ -1345,7 +1364,15 @@ weaken_join_markers() {
 # Both blobs arrive through the same strip, so only untouched regions
 # net to zero; the sets compare byte-for-byte on the stripped lines.
 weaken_count_absent() {
-  awk -v re="${3}" '
+  # The pattern travels through ENVIRON, never -v: POSIX mandates escape
+  # processing on -v assignment values, so the shared ERE's \( and \.
+  # would arrive rewritten as ( and . — an unbalanced pattern gawk
+  # fatals on before END (busybox strips it silently), the substitution
+  # captures nothing, and the census silently degrades to zero. ENVIRON
+  # values are not escape-processed; the bytes stay identical to the
+  # grep -cE sites that consume the same variable.
+  WEAKEN_COUNT_RE="${3}" awk '
+    BEGIN { re = ENVIRON["WEAKEN_COUNT_RE"] }
     NR == FNR { seen[$0] = 1; next }
     $0 ~ re && !($0 in seen) { c += 1 }
     END { print c + 0 }
@@ -1356,7 +1383,7 @@ weaken_count_absent() {
 # from origin/main: the same file at that parent decides line authorship,
 # keeping only what the merge resolution itself authored.
 weaken_count_commit_file() {
-  local c="${1}" f="${2}" is_merge="${3}" pre_base="${4:-}" p2='' have_p2='' kept='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot weaken_has_edits='' weaken_old='' weaken_new='' weaken_old_stripped='' weaken_new_stripped='' weaken_old_n weaken_new_n weaken_o weaken_old_skip_n weaken_new_skip_n weaken_s weaken_mb_stripped='' weaken_p2_stripped='' weaken_freight_del weaken_freight_add weaken_mb_skip_n weaken_p2_skip_n
+  local c="${1}" f="${2}" is_merge="${3}" pre_base="${4:-}" p2='' have_p2='' kept='' mb='' base_blob='' l diff_body add_lines del_lines weaken_slot weaken_has_edits='' weaken_old='' weaken_new='' weaken_old_stripped='' weaken_new_stripped='' weaken_old_n weaken_new_n weaken_o weaken_old_skip_n weaken_new_skip_n weaken_s weaken_mb_stripped='' weaken_p2_stripped='' weaken_freight_del weaken_freight_add weaken_skip_freight_del weaken_skip_freight_add
   # A status-A re-add of a pre-existing path measures against the
   # PRE-ROUND blob, not the commit's parent: main's deletion rode the
   # merge in as freight, so the parent side is empty and the re-add
@@ -1496,20 +1523,17 @@ weaken_count_commit_file() {
       weaken_freight_del="$(weaken_count_absent "${weaken_mb_stripped}" "${weaken_p2_stripped}" "${WEAKEN_ASSERT_RE}")"
       weaken_freight_add="$(weaken_count_absent "${weaken_p2_stripped}" "${weaken_mb_stripped}"$'\n'"${weaken_old_stripped}" "${WEAKEN_ASSERT_RE}")"
       weaken_o=$(( weaken_o - (weaken_freight_del - weaken_freight_add) ))
-      # The skip arm keeps the whole-blob census subtraction: its defect
-      # direction is shielding (the subtraction can only DEFLATE weaken_s,
-      # never inflate it), and a resolution-introduced marker that the
-      # line counts miss would need an added marker line at once
-      # freight-filtered (byte-identical to main's side) and
-      # resolution-authored -- unreachable while the line arm counts
-      # added markers on the freight-filtered view. The assert arm's
-      # defect direction is phantom rejection, which IS reachable
-      # (shared byte-identical additions) and fixed above. A byte-copy
-      # duplicate-marker corner can still over-deflate here; the escape
-      # hatch is one ack entry, the fail-closed direction.
-      weaken_mb_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_mb_stripped}" || true)"
-      weaken_p2_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_p2_stripped}" || true)"
-      weaken_s=$(( weaken_s - (weaken_p2_skip_n - weaken_mb_skip_n) ))
+      # The skip arm gets the same per-marker classification, mirrored
+      # for its addition direction: a marker MAIN removed deflates the
+      # result census and is added back; a marker main ADDED that the
+      # branch did not already carry inflates it and is subtracted. The
+      # whole-blob total subtraction this replaces counted a marker both
+      # sides added byte-identically ONCE in the result but twice in the
+      # totals — deflating a genuine resolution-introduced skip, the
+      # shielding direction of the gate's freight invariant.
+      weaken_skip_freight_del="$(weaken_count_absent "${weaken_mb_stripped}" "${weaken_p2_stripped}" "${WEAKEN_SKIP_RE}")"
+      weaken_skip_freight_add="$(weaken_count_absent "${weaken_p2_stripped}" "${weaken_mb_stripped}"$'\n'"${weaken_old_stripped}" "${WEAKEN_SKIP_RE}")"
+      weaken_s=$(( weaken_s - (weaken_skip_freight_add - weaken_skip_freight_del) ))
     fi
     if (( weaken_o > 0 && weaken_o > d - a )); then
       d=$(( a + weaken_o ))
@@ -1560,6 +1584,21 @@ while IFS= read -r c; do
       [[ -n "${weaken_mf}" ]] || continue
       WEAKEN_MERGE_INTRODUCED+=("${weaken_mf}")
     done < <(git diff --name-only -z --no-renames --diff-filter=A "${c}^" "${c}" \
+      -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
+    # A merge that wholesale DISCARDS a test main added during the round
+    # never shows the file at the merge RESULT (absent on both sides):
+    # the status-A feeder above misses it, and the pre-existence guard
+    # then drops the second-parent enumeration's only listing. Seed the
+    # introduction set from what main added relative to the branch side
+    # too; the discard then measures as a weakening of main's newly
+    # landed coverage, while a merge that KEEPS main's file adds a name
+    # both feeders agree on (deduplicated here).
+    while IFS= read -r -d '' weaken_mf; do
+      [[ -n "${weaken_mf}" ]] || continue
+      if ! weaken_member "${weaken_mf}" "${WEAKEN_MERGE_INTRODUCED[@]}"; then
+        WEAKEN_MERGE_INTRODUCED+=("${weaken_mf}")
+      fi
+    done < <(git diff --name-only -z --no-renames --diff-filter=A "${c}^" "${c}^2" \
       -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
   fi
   # M, D, and T: a file deleted in one round commit and re-added weakened in
@@ -1650,6 +1689,33 @@ if [[ "${WEAKEN_MEASURED}" == 'true' ]]; then
     w_add="${WEAKEN_ADD_ACC[weaken_idx]}"
     w_skip_add="${WEAKEN_SKIP_ADD_ACC[weaken_idx]}"
     w_skip_del="${WEAKEN_SKIP_DEL_ACC[weaken_idx]}"
+    # The whole-blob backstops adjudicate within a SINGLE commit while
+    # the accumulators net credits across ALL round commits: a decoy
+    # credit committed as a SIBLING commit to the weakening it cancels
+    # escapes both. Recount the whole round at verdict time — stripped
+    # pre-round and tip densities per arm, the larger signal wins, the
+    # same rule the per-commit arms apply within one commit. Files a
+    # main-derived merge touched are exempt: their per-commit result
+    # carries the freight attribution, and a pre->tip recount would
+    # charge main's own delta that crossed the merge.
+    if ! weaken_member "${f}" "${WEAKEN_MERGE_TOUCHED[@]}" &&
+      git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null &&
+      git cat-file -e "${BRANCH}:${f}" 2> /dev/null; then
+      weaken_round_old="$(git show "origin/${BRANCH}:${f}" 2> /dev/null)" || weaken_round_old=''
+      weaken_round_new="$(git show "${BRANCH}:${f}" 2> /dev/null)" || weaken_round_new=''
+      weaken_round_old_stripped="$(weaken_strip_code <<< "${weaken_round_old}")"
+      weaken_round_new_stripped="$(weaken_strip_code <<< "${weaken_round_new}")"
+      weaken_round_old_n="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${weaken_round_old_stripped}" || true)"
+      weaken_round_new_n="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${weaken_round_new_stripped}" || true)"
+      if (( weaken_round_old_n - weaken_round_new_n > w_del - w_add )); then
+        w_del=$(( w_add + weaken_round_old_n - weaken_round_new_n ))
+      fi
+      weaken_round_old_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_round_old_stripped}" || true)"
+      weaken_round_new_skip_n="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${weaken_round_new_stripped}" || true)"
+      if (( weaken_round_new_skip_n - weaken_round_old_skip_n > w_skip_add - w_skip_del )); then
+        w_skip_add=$(( w_skip_del + weaken_round_new_skip_n - weaken_round_old_skip_n ))
+      fi
+    fi
     if (( w_del > w_add )); then
       WEAKENED_PATHS+=("${f}")
       WEAKENED_SIGNALS+=("net $(( w_del - w_add )) assertion line(s) removed")

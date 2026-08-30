@@ -882,30 +882,103 @@ describe('qwen-autofix.yml design-record pointers', () => {
     expect(listed).toEqual(anchors);
   });
 
-  it('keeps every section anchor outside any fenced code block', () => {
-    // Headings and HTML anchors inside a fenced code block are literal
-    // text on GitHub: a fence one entry leaves OPEN swallows the next
-    // entry's anchor, its heading, and every pointer at it — the entry
-    // renders as code inside its predecessor. Track fence parity line by
-    // line (a closer needs at least the opener's length and nothing but
-    // backticks, so a ``` block cannot close a ```` fence) and require
-    // every anchor to sit outside.
+  // Headings and HTML anchors inside a fenced code block are literal
+  // text on GitHub: a fence one entry leaves OPEN swallows the next
+  // entry's anchor, its heading, and every pointer at it — the entry
+  // renders as code inside its predecessor. Track fence parity line by
+  // line, matching GitHub's CommonMark: an opener is a column-0..3
+  // backtick run whose info string carries NO backtick (a backtick in
+  // the info string renders a paragraph, not a fence); a closer needs at
+  // least the opener's length and nothing but SPACES after it — a
+  // tab-suffixed line is fence CONTENT on GitHub. Fence shapes this
+  // parity model does not prove — tilde fences and fences nested in
+  // blockquotes or indented four columns — fail closed: the design doc
+  // is gate-authored and must contain none. Every anchor AND every
+  // entry heading must sit outside.
+  const scanFenceParity = (text) => {
     let openLen = 0;
     const fencedAnchors = [];
-    for (const line of doc.split('\n')) {
-      const m = /^ {0,3}(`{3,})/.exec(line);
-      if (m) {
-        if (openLen === 0) {
+    const fencedHeadings = [];
+    const unmodeledFences = [];
+    for (const line of text.split('\n')) {
+      if (openLen === 0) {
+        const m = /^ {0,3}(`{3,})([^`]*)$/.exec(line);
+        if (m) {
           openLen = m[1].length;
-        } else if (m[1].length >= openLen && line.trim() === m[1]) {
-          openLen = 0;
+          continue;
         }
-      }
-      if (openLen > 0 && line.includes('<a id="af-')) {
-        fencedAnchors.push(line);
+        if (
+          /^ {0,3}~{3,}|^ {0,3}>.*(`{3,}|~{3,})|^ {4,}(`{3,}|~{3,})/.test(line)
+        ) {
+          unmodeledFences.push(line);
+        }
+      } else {
+        const c = /^ {0,3}(`{3,}) *$/.exec(line);
+        if (c && c[1].length >= openLen) {
+          openLen = 0;
+          continue;
+        }
+        if (line.includes('<a id="af-')) fencedAnchors.push(line);
+        if (/^### \d+\./.test(line)) fencedHeadings.push(line);
       }
     }
-    expect(fencedAnchors).toEqual([]);
-    expect(openLen).toBe(0);
+    return { openLen, fencedAnchors, fencedHeadings, unmodeledFences };
+  };
+
+  it('keeps every section anchor outside any fenced code block', () => {
+    const parity = scanFenceParity(doc);
+    expect(parity.fencedAnchors).toEqual([]);
+    expect(parity.openLen).toBe(0);
+  });
+
+  it('keeps every entry heading outside any fenced code block', () => {
+    // A BALANCED fence pair wrapping an entry's heading and body —
+    // leaving its anchor outside — breaks GitHub rendering while the
+    // anchor-only scan stays green: the heading renders as code under an
+    // invisible anchor, and every pointer at it navigates into the block.
+    const parity = scanFenceParity(doc);
+    expect(parity.fencedHeadings).toEqual([]);
+  });
+
+  it('contains only fence shapes the parity model proves', () => {
+    const parity = scanFenceParity(doc);
+    expect(parity.unmodeledFences).toEqual([]);
+  });
+
+  it('flags every demonstrated fence-swallow shape on synthetic docs', () => {
+    // A fence left open swallows the next entry's anchor.
+    expect(
+      scanFenceParity('```text\n<a id="af-1"></a>').fencedAnchors.length,
+    ).toBeGreaterThan(0);
+    // A tab-suffixed closer is fence CONTENT on GitHub: the anchor after
+    // it is still inside the block while a trim()-based closer would
+    // free it.
+    expect(
+      scanFenceParity('```text\nfoo\n```\t\n<a id="af-2"></a>').fencedAnchors
+        .length,
+    ).toBeGreaterThan(0);
+    // A fence wrapping an entry's heading and body, anchor outside.
+    expect(
+      scanFenceParity('<a id="af-3"></a>\n```text\n### 3. title\n```')
+        .fencedHeadings.length,
+    ).toBeGreaterThan(0);
+    // A tilde fence the parity model does not prove fails closed.
+    expect(
+      scanFenceParity('~~~\n<a id="af-4"></a>\n~~~').unmodeledFences.length,
+    ).toBeGreaterThan(0);
+    // A backtick fence whose info string carries a backtick is NOT an
+    // opener on GitHub (CommonMark §4.5): the next bare fence opens the
+    // block and swallows the anchor after it.
+    const phantom = scanFenceParity(
+      '```note `see` rationale\n```\n<a id="af-5"></a>',
+    );
+    expect(phantom.fencedAnchors.length).toBeGreaterThan(0);
+    // Control: a balanced backtick fence around plain text — the model's
+    // comparator is alive, nothing flagged.
+    const control = scanFenceParity('```text\nplain\n```\n<a id="af-6"></a>');
+    expect(control.fencedAnchors).toEqual([]);
+    expect(control.fencedHeadings).toEqual([]);
+    expect(control.unmodeledFences).toEqual([]);
+    expect(control.openLen).toBe(0);
   });
 });
