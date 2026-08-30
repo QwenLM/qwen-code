@@ -706,6 +706,14 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
    */
   fullDetail?: boolean;
   /**
+   * `ui.showToolCallArgs`. When true, an extra row under the tool header
+   * prints the raw `args` JSON, recovering parameters that
+   * `invocation.getDescription()` summarizes away (Edit shows only the
+   * filename, Read only the path). Independent of `fullDetail`, which owns
+   * result-output expansion; this one only ever adds the args row.
+   */
+  showToolCallArgs?: boolean;
+  /**
    * Whether this subagent owns keyboard input for the inline approval
    * surface — when true the focus-holder banner renders and the
    * underlying ToolConfirmationMessage receives keystrokes; when false
@@ -746,6 +754,8 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   config,
   forceShowResult,
   fullDetail,
+  showToolCallArgs,
+  args,
   isFocused,
   isPending,
   executionStartTime,
@@ -918,6 +928,14 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     (effectiveDisplayRenderer.type === 'string' ||
       effectiveDisplayRenderer.type === 'ansi');
 
+  const inlineToolArgs = React.useMemo(
+    () =>
+      showToolCallArgs
+        ? formatInlineToolArgs(args, description, fullDetail === true)
+        : undefined,
+    [showToolCallArgs, args, description, fullDetail],
+  );
+
   return (
     <Box paddingY={0} flexDirection="column">
       <Box minHeight={1}>
@@ -951,6 +969,13 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
+      {inlineToolArgs !== undefined && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
+          <Text color={theme.text.secondary} wrap="wrap">
+            {inlineToolArgs}
+          </Text>
+        </Box>
+      )}
       {visionBridgeNoticeText && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
           <StringResultRenderer
@@ -1059,6 +1084,65 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     </Box>
   );
 };
+
+/**
+ * Cap for the inline args row in the main view. Generous enough for a real
+ * MCP payload, small enough that a WriteFile `content` arg cannot bury the
+ * conversation. Lifted in full-detail mode — `ui.showToolCallArgs` gives you
+ * the args, Ctrl+O gives you everything.
+ */
+const TOOL_ARGS_INLINE_MAX_CHARS = 1000;
+
+/**
+ * One-line JSON for the `ui.showToolCallArgs` row, or undefined when there is
+ * nothing worth adding.
+ *
+ * Skipped when `description` already IS the args JSON: MCP invocations return
+ * `safeJsonStringify(params)` from `getDescription()`, so rendering both would
+ * print the same payload twice.
+ *
+ * `JSON.stringify` escapes control characters inside string values as
+ * `\uXXXX`, so the result cannot smuggle terminal escapes even before
+ * `escapeAnsiCtrlCodes` runs over the whole history item.
+ */
+export function formatInlineToolArgs(
+  args: Record<string, unknown> | undefined,
+  description: string,
+  uncapped: boolean,
+): string | undefined {
+  if (!args || Object.keys(args).length === 0) {
+    return undefined;
+  }
+
+  let json: string;
+  try {
+    json = JSON.stringify(args);
+  } catch {
+    // Circular or otherwise unserializable args — the header line is all we
+    // can honestly show.
+    return undefined;
+  }
+
+  const trimmedDescription = description.trim();
+  if (trimmedDescription.startsWith('{')) {
+    try {
+      if (
+        JSON.stringify(JSON.parse(trimmedDescription) as unknown) === json ||
+        trimmedDescription === json
+      ) {
+        return undefined;
+      }
+    } catch {
+      // Only looks like JSON — fall through and render the args row.
+    }
+  }
+
+  if (!uncapped && json.length > TOOL_ARGS_INLINE_MAX_CHARS) {
+    const hidden = json.length - TOOL_ARGS_INLINE_MAX_CHARS;
+    return `${json.slice(0, TOOL_ARGS_INLINE_MAX_CHARS)}… +${hidden} chars (ctrl+o)`;
+  }
+  return json;
+}
 
 function isDescriptionRepeatedInPrompt(
   description: string,

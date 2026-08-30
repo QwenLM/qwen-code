@@ -579,6 +579,18 @@ describe('SettingsSchema', () => {
       expect(mouseTracking.requiresRestart).toBe(true);
     });
 
+    it('should have showToolCallArgs in ui settings', () => {
+      const showToolCallArgs =
+        getSettingsSchema().ui.properties.showToolCallArgs;
+      expect(showToolCallArgs).toBeDefined();
+      expect(showToolCallArgs.type).toBe('boolean');
+      // Default must stay false — the compact tool view is the baseline.
+      expect(showToolCallArgs.default).toBe(false);
+      expect(showToolCallArgs.showInDialog).toBe(true);
+      // Read at render time, so no restart is needed.
+      expect(showToolCallArgs.requiresRestart).toBe(false);
+    });
+
     it('should expose response tokens/sec as an opt-in UI setting', () => {
       const responseTokensPerSecond =
         getSettingsSchema().ui.properties.showResponseTokensPerSecond;

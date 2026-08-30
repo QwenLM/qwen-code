@@ -39,6 +39,7 @@ const TUI_ONLY_SETTINGS = new Set([
   'general.outputLanguage',
   'ide.enabled',
   'ui.showLineNumbers',
+  'ui.showToolCallArgs',
   'ui.renderMode',
   'ui.useTerminalBuffer',
   'ui.mouseTracking',

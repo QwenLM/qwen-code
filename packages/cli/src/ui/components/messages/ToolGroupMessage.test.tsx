@@ -19,6 +19,8 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { TOOL_STATUS } from '../../constants.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
+import { SettingsContext } from '../../contexts/SettingsContext.js';
+import type { LoadedSettings } from '../../../config/settings.js';
 // Global compact mode was removed (#5666); type-based tool rendering no longer
 // consumes a compact-mode context.
 
@@ -34,6 +36,7 @@ vi.mock('./ToolMessage.js', () => ({
       resultDisplay,
       isFocused,
       forceShowResult,
+      showToolCallArgs,
     }: {
       callId: string;
       name: string;
@@ -43,6 +46,7 @@ vi.mock('./ToolMessage.js', () => ({
       resultDisplay?: unknown;
       isFocused?: boolean;
       forceShowResult?: boolean;
+      showToolCallArgs?: boolean;
     }) => {
       // Use the same constants as the real component
       const statusSymbolMap: Record<ToolCallStatus, string> = {
@@ -74,6 +78,7 @@ vi.mock('./ToolMessage.js', () => ({
         <Text>
           MockTool[{callId}]: {statusSymbol} {name} - {description} ({emphasis})
           {forceShowResult ? ' [forceShow]' : ''}
+          {showToolCallArgs ? ' [args]' : ''}
         </Text>
       );
     },
@@ -123,6 +128,82 @@ describe('<ToolGroupMessage />', () => {
         {component}
       </ConfigContext.Provider>,
     );
+
+  const renderWithToolCallArgs = (component: React.ReactElement) =>
+    render(
+      <SettingsContext.Provider
+        value={
+          {
+            merged: { ui: { showToolCallArgs: true } },
+          } as LoadedSettings
+        }
+      >
+        <ConfigContext.Provider value={mockConfig}>
+          {component}
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+  describe('ui.showToolCallArgs', () => {
+    const readBatch = [
+      createToolCall({ callId: 'r1', name: 'ReadFile', description: 'a.ts' }),
+      createToolCall({ callId: 'r2', name: 'ReadFile', description: 'b.ts' }),
+      createToolCall({ callId: 'g1', name: 'Grep', description: 'pattern' }),
+    ];
+
+    it('keeps the compact partition summary when the setting is off', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={readBatch} />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('read a.ts, b.ts');
+      expect(frame).not.toContain('MockTool');
+    });
+
+    it('renders every collapsible tool individually when the setting is on', () => {
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={readBatch}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('MockTool[r1]');
+      expect(frame).toContain('MockTool[r2]');
+      expect(frame).toContain('MockTool[g1]');
+      expect(frame).not.toContain('read a.ts, b.ts');
+    });
+
+    it('forwards showToolCallArgs down to each ToolMessage', () => {
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={readBatch}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('[args]');
+    });
+
+    it('does not force result output open (that stays Ctrl+O)', () => {
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={readBatch}
+        />,
+      );
+      expect(lastFrame() ?? '').not.toContain('[forceShow]');
+    });
+
+    it('renders without a SettingsProvider (defaults to off)', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={readBatch} />,
+      );
+      expect(lastFrame() ?? '').toContain('read a.ts, b.ts');
+    });
+  });
 
   describe('Golden Snapshots', () => {
     it('renders single successful tool call', () => {

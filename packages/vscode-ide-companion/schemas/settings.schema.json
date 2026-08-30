@@ -465,6 +465,11 @@
           "type": "boolean",
           "default": true
         },
+        "showToolCallArgs": {
+          "description": "Render every tool call on its own line with its full raw arguments inline, instead of the type-based compact summary that folds read/search/list batches into \"Read 3 files\". Useful when debugging MCP integrations or tool schemas. Does not change result-output truncation — press Ctrl+O for that.",
+          "type": "boolean",
+          "default": false
+        },
         "shellOutputMaxLines": {
           "description": "Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.",
           "type": "number",

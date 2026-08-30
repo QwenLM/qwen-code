@@ -202,6 +202,7 @@ function convertToHistoryItems(
     callId: string;
     name: string;
     description: string;
+    args?: Record<string, unknown>;
     resultDisplay: ToolResultDisplay | undefined;
     visionBridgeNotice?: string;
     detailedDisplay?: string;
@@ -530,6 +531,9 @@ function convertToHistoryItems(
             callId: fc.id,
             name: tool?.displayName || fc.name,
             description: tool ? formatToolDescription(tool, fc.args) : '',
+            // Rendered inline only when `ui.showToolCallArgs` is on, so a
+            // resumed session shows the same args row as a live one.
+            args: fc.args,
             resultDisplay: undefined,
             status: ToolCallStatus.Success, // Will be updated by tool_result
             confirmationDetails: undefined,

@@ -7,7 +7,7 @@
 import React from 'react';
 import { render } from 'ink-testing-library';
 import type { ToolMessageProps } from './ToolMessage.js';
-import { ToolMessage } from './ToolMessage.js';
+import { formatInlineToolArgs, ToolMessage } from './ToolMessage.js';
 import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
@@ -2005,4 +2005,131 @@ describe('<ToolMessage /> localized badge', () => {
     );
     expect(lastFrame() ?? '').toContain('ReadFile');
   }, 15000);
+});
+
+describe('ToolMessage inline tool-call arguments (ui.showToolCallArgs)', () => {
+  const mockConfig = {
+    getShouldUseNodePtyShell: () => false,
+  } as unknown as Config;
+
+  const argsProps: ToolMessageProps = {
+    callId: 'tool-args-1',
+    name: 'Edit',
+    description: 'src/foo.ts',
+    args: { file_path: 'src/foo.ts', old_string: 'a', new_string: 'b' },
+    resultDisplay: undefined,
+    status: ToolCallStatus.Success,
+    contentWidth: 120,
+    confirmationDetails: undefined,
+    emphasis: 'medium',
+    config: mockConfig,
+  };
+
+  describe('formatInlineToolArgs', () => {
+    it('serializes args to one-line JSON', () => {
+      expect(formatInlineToolArgs({ a: 1, b: 'x' }, 'summary', false)).toBe(
+        '{"a":1,"b":"x"}',
+      );
+    });
+
+    it('returns undefined for missing or empty args', () => {
+      expect(formatInlineToolArgs(undefined, 'summary', false)).toBeUndefined();
+      expect(formatInlineToolArgs({}, 'summary', false)).toBeUndefined();
+    });
+
+    it('skips the row when the description already IS the args JSON (MCP)', () => {
+      // DiscoveredMCPToolInvocation.getDescription() returns
+      // safeJsonStringify(params), so rendering both would print it twice.
+      const args = { owner: 'QwenLM', repo: 'qwen-code' };
+      expect(
+        formatInlineToolArgs(args, JSON.stringify(args), false),
+      ).toBeUndefined();
+    });
+
+    it('still renders when the description only resembles JSON', () => {
+      expect(formatInlineToolArgs({ a: 1 }, '{not json', false)).toBe(
+        '{"a":1}',
+      );
+    });
+
+    it('still renders when a JSON description describes different args', () => {
+      expect(formatInlineToolArgs({ a: 1 }, '{"a":2}', false)).toBe('{"a":1}');
+    });
+
+    it('caps long args and reports the hidden character count', () => {
+      const long = formatInlineToolArgs(
+        { content: 'x'.repeat(5000) },
+        'file.txt',
+        false,
+      );
+      expect(long).toBeDefined();
+      expect(long).toContain('chars (ctrl+o)');
+      expect(long!.length).toBeLessThan(1100);
+    });
+
+    it('lifts the cap in full-detail mode', () => {
+      const long = formatInlineToolArgs(
+        { content: 'x'.repeat(5000) },
+        'file.txt',
+        true,
+      );
+      expect(long).toBeDefined();
+      expect(long).not.toContain('chars (ctrl+o)');
+      expect(long!.length).toBeGreaterThan(5000);
+    });
+
+    it('returns undefined for unserializable args instead of throwing', () => {
+      const circular: Record<string, unknown> = {};
+      circular['self'] = circular;
+      expect(formatInlineToolArgs(circular, 'summary', false)).toBeUndefined();
+    });
+  });
+
+  it('does not render the args row when the setting is off', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...argsProps} />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('src/foo.ts');
+    expect(output).not.toContain('old_string');
+  });
+
+  it('renders the full raw args when the setting is on', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...argsProps} showToolCallArgs={true} />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    // The parameters Edit's getDescription() drops are what the setting exists
+    // to recover.
+    expect(output).toContain('old_string');
+    expect(output).toContain('new_string');
+  });
+
+  it('prints an MCP payload once, not twice', () => {
+    const mcpArgs = { owner: 'QwenLM', repo: 'qwen-code' };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...argsProps}
+        name="mcp__github__list_issues"
+        description={JSON.stringify(mcpArgs)}
+        args={mcpArgs}
+        showToolCallArgs={true}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output.split('QwenLM').length - 1).toBe(1);
+  });
+
+  it('renders nothing extra when args are absent (daemon path)', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...argsProps} args={undefined} showToolCallArgs={true} />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('src/foo.ts');
+    expect(output).not.toContain('{');
+  });
 });

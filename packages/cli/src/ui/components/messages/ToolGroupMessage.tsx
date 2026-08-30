@@ -18,6 +18,7 @@ import {
 } from './CompactToolGroupDisplay.js';
 import { InlineParallelAgentsDisplay } from './InlineParallelAgentsDisplay.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
+import { useShowToolCallArgs } from '../../hooks/use-show-tool-call-args.js';
 import { ICON } from '../../constants.js';
 import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
 
@@ -178,6 +179,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   fullDetail = false,
 }) => {
   const config = useConfig();
+  const showToolCallArgs = useShowToolCallArgs();
 
   const hasConfirmingTool = toolCalls.some(
     (t) => t.status === ToolCallStatus.Confirming,
@@ -373,10 +375,13 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // must see full details: confirmation prompts, errors, user-initiated
   // batches, focused shells, terminal subagents. Full-detail
   // mode (fullDetail) also forces it so every tool renders individually
-  // instead of collapsing read/search into a partition summary.
+  // instead of collapsing read/search into a partition summary, as does
+  // `ui.showToolCallArgs` — an args row is meaningless on a batch that
+  // collapsed its calls into a single "Read 3 files" line.
   const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
   const forceExpandAll =
     fullDetail ||
+    showToolCallArgs ||
     hasConfirmingTool ||
     hasSubagentPendingConfirmation ||
     hasErrorTool ||
@@ -513,6 +518,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
                 fullDetail={fullDetail}
+                showToolCallArgs={showToolCallArgs}
                 forceShowResult={
                   fullDetail ||
                   isUserInitiated ||

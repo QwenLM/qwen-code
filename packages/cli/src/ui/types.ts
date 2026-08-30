@@ -74,6 +74,18 @@ export interface IndividualToolCallDisplay {
   callId: string;
   name: string;
   description: string;
+  /**
+   * Raw tool-call arguments, rendered inline under the header when
+   * `ui.showToolCallArgs` is on. `description` is only ever a human summary
+   * (`invocation.getDescription()`) — for most built-in tools it drops the
+   * actual parameters (Edit shows just the filename), which is what the
+   * setting exists to recover.
+   *
+   * Holds the same object reference as the scheduler's `request.args` — no
+   * copy, so it costs nothing in memory. Undefined on the daemon path, which
+   * never carries args across the boundary; the args row is then skipped.
+   */
+  args?: Record<string, unknown>;
   resultDisplay: ToolResultDisplay | string | undefined;
   visionBridgeNotice?: string;
   /**

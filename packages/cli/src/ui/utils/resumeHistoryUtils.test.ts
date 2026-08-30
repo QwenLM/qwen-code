@@ -590,6 +590,7 @@ describe('resumeHistoryUtils', () => {
             callId: 'call-1',
             name: 'Replace',
             description: 'Mocked description',
+            args: { old: 'a', new: 'b' },
             resultDisplay: 'All set',
             status: ToolCallStatus.Success,
             confirmationDetails: undefined,
@@ -953,6 +954,7 @@ describe('resumeHistoryUtils', () => {
             callId: 'missing-call',
             name: 'unknown_tool',
             description: '',
+            args: { foo: 'bar' },
             resultDisplay: { summary: 'failure' },
             status: ToolCallStatus.Error,
             confirmationDetails: undefined,
@@ -1044,6 +1046,7 @@ describe('resumeHistoryUtils', () => {
           callId: 'call-2',
           name: 'Replace',
           description: 'Mocked description',
+          args: { target: 'a' },
           resultDisplay: undefined,
           status: ToolCallStatus.Success,
           confirmationDetails: undefined,
@@ -1444,6 +1447,51 @@ describe('resumeHistoryUtils', () => {
         ],
       },
     ]);
+  });
+
+  describe('raw args on resume (ui.showToolCallArgs)', () => {
+    type ToolGroupItem = Extract<HistoryItem, { type: 'tool_group' }>;
+
+    it('carries the persisted functionCall args onto the display object', () => {
+      const editTool = {
+        name: 'replace',
+        displayName: 'Edit',
+        description: 'Edit a file',
+        build: vi.fn().mockReturnValue({ getDescription: () => 'a.ts' }),
+      } as unknown as AnyDeclarativeTool;
+
+      const conversation = {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: {
+                    id: 'call-1',
+                    name: 'replace',
+                    args: { file_path: 'a.ts', old_string: 'x' },
+                  },
+                } as unknown as Part,
+              ],
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({ replace: editTool }),
+        10,
+      );
+      const tool = (
+        items.find((i) => i.type === 'tool_group') as ToolGroupItem | undefined
+      )?.tools[0];
+
+      // A resumed session must show the same args row as a live one.
+      expect(tool?.description).toBe('a.ts');
+      expect(tool?.args).toEqual({ file_path: 'a.ts', old_string: 'x' });
+    });
   });
 
   describe('detailedDisplay (§4.9 Ctrl+O full detail on resume)', () => {
