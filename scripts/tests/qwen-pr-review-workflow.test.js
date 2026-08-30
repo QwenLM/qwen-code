@@ -43,10 +43,9 @@ describe('qwen pr review runner routing', () => {
   it('isolates the long-running review job on the agent pool', () => {
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
 
-    expect(runsOn).toContain('["self-hosted", "linux", "x64", "ecs-agent"]');
-    expect(runsOn).toContain('["ubuntu-latest"]');
-    expect(runsOn).toContain("github.repository == 'QwenLM/qwen-code'");
-    expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(runsOn).toBe(
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-agent"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+    );
     expect(runsOn).not.toContain('ecs-qwen');
   });
 });

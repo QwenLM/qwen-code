@@ -9963,6 +9963,8 @@ exit 1
       ) ?? [];
     expect(envCheckSteps).toHaveLength(2);
     for (const step of envCheckSteps) {
+      expect(step).toContain('ecs-qwen-*|ecs-agent-*) ;;');
+      expect(step).toContain('not an approved agent pool member');
       expect(step).toContain('docker info');
       expect(step).toContain('exit 1');
     }
@@ -9988,10 +9990,9 @@ exit 1
     expect(routeJob).not.toContain('actions/checkout');
     expect(reviewScanJob).not.toContain('actions/checkout');
     // The scan's per-run WORKDIR must not outlive the run on the pool:
-    // 0700 at creation and an always() cleanup step mirroring the heavy
-    // jobs' teardown. The value pins the autofix* prefix — the contract
-    // with the heavy jobs' age sweep, the only reclaim channel left after
-    // a hard runner kill.
+    // 0700 at creation, an age sweep on the same ecs-qwen pool, and an
+    // always() cleanup step mirroring the heavy jobs' teardown. The value
+    // pins the autofix* prefix used by both cleanup paths.
     expect(reviewScanJob).toContain(
       "WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'",
     );
@@ -9999,6 +10000,9 @@ exit 1
     // alone would accept a dir or symlink pre-planted on the shared /tmp.
     expect(reviewScanJob).toContain(
       'rm -rf "${WORKDIR}"\n          (umask 077; mkdir -p "${WORKDIR}")',
+    );
+    expect(reviewScanJob).toContain(
+      "find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true",
     );
     // The fleet file lives inside WORKDIR so the always() step and the age
     // sweep reclaim it when the EXIT trap cannot (cancelled/killed run).
