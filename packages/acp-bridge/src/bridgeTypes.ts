@@ -267,6 +267,10 @@ export const LOAD_REPLAY_MAX_BYTES = 32 * 1024 * 1024;
 export const LOAD_REPLAY_MAX_UPDATES = 10_000;
 
 export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
+export const SESSION_INITIALIZATION_DEADLINE_META_KEY =
+  'qwen.daemon.sessionInitializationDeadlineMs';
+export const SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND =
+  'session_initialization_timeout';
 
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';

@@ -596,6 +596,42 @@ function parseOptionalApprovalMode(
   return rawApprovalMode as ApprovalMode;
 }
 
+function parseRequestedSessionSource(
+  body: Record<string, unknown>,
+  res: Response,
+): { sourceType?: string; sourceId?: string } | null {
+  if (
+    isReservedStandaloneSessionSource({
+      sourceType:
+        typeof body['sourceType'] === 'string' ? body['sourceType'] : undefined,
+    })
+  ) {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned standalone sessions.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
+  const source = parseSessionSource(body['sourceType'], body['sourceId']);
+  if ('error' in source) {
+    res.status(400).json({
+      error: source.error,
+      code: 'invalid_session_source',
+    });
+    return null;
+  }
+  if (isReservedLiveSessionSource(source)) {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned Live Voice sessions.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
+  return source;
+}
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
@@ -2670,37 +2706,8 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
-    if (
-      isReservedStandaloneSessionSource({
-        sourceType:
-          typeof body['sourceType'] === 'string'
-            ? body['sourceType']
-            : undefined,
-      })
-    ) {
-      res.status(400).json({
-        error:
-          'The requested session source is reserved for daemon-owned standalone sessions.',
-        code: 'reserved_session_source',
-      });
-      return;
-    }
-    const source = parseSessionSource(body['sourceType'], body['sourceId']);
-    if ('error' in source) {
-      res.status(400).json({
-        error: source.error,
-        code: 'invalid_session_source',
-      });
-      return;
-    }
-    if (isReservedLiveSessionSource(source)) {
-      res.status(400).json({
-        error:
-          'The requested session source is reserved for daemon-owned Live Voice sessions.',
-        code: 'reserved_session_source',
-      });
-      return;
-    }
+    const source = parseRequestedSessionSource(body, res);
+    if (source === null) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
 
@@ -3432,6 +3439,8 @@ export function registerSessionRoutes(
       if (historyPageSize === null) return;
       const liveReplayMode = parseLiveReplayMode(body ?? {}, res);
       if (liveReplayMode === null) return;
+      const restoreSource = parseRequestedSessionSource(body, res);
+      if (restoreSource === null) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       if (
@@ -3611,6 +3620,15 @@ export function registerSessionRoutes(
               isReservedStandaloneSessionSource(metadata)
                 ? metadataWithoutSource
                 : metadata;
+            const hasPersistedSource =
+              'sourceType' in restoreMetadata &&
+              restoreMetadata.sourceType !== undefined;
+            const restoreRequestMetadata = {
+              ...restoreMetadata,
+              ...(hasPersistedSource || isInternalWorkspaceRuntime(runtime)
+                ? {}
+                : restoreSource),
+            };
             assertRuntimeGenerationOpen?.();
             if (isInternalWorkspaceRuntime(runtime)) {
               sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
@@ -3648,14 +3666,14 @@ export function registerSessionRoutes(
                     ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...restoreMetadata,
+                    ...restoreRequestMetadata,
                   })
                 : await runtime.bridge.resumeSession({
                     sessionId,
                     workspaceCwd,
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...restoreMetadata,
+                    ...restoreRequestMetadata,
                   });
             // Every path that can register a Live entry relocates it before a
             // prompt can start. Re-queuing cd for an active entry would block
