@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, createRef, type CSSProperties, type ReactNode } from 'react';
+import {
+  act,
+  createRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   DaemonHttpError,
@@ -438,6 +444,15 @@ const {
         isPending: boolean;
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
+      latestSessionOverviewProps: null as {
+        onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
+        onOpenSplit?: (sessionIds: string[]) => void;
+        onCurrentSessionRemoved?: (session: {
+          sessionId: string;
+          workspaceCwd: string;
+        }) => Promise<boolean | void> | boolean | void;
+        manageLiveState?: boolean;
+      } | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
       toolApprovalKeyboardActiveHistory: [] as Array<boolean | null>,
       latestToolApprovalPlanTodos: [] as Array<{ id: string }>,
@@ -535,7 +550,7 @@ const {
   };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
   const ownerGuard = {
     capture: () => {
       const ownerVersion = testState.ownerVersion;
@@ -1079,6 +1094,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onMobileClose?: () => void;
       onNewSession?: () => Promise<boolean> | boolean;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
+      onSelectCurrentSession?: () => void;
       onSessionsDeleted?: (sessionIds: string[]) => void;
       onOpenAddWorkspace?: () => void;
       showSessionSourceSwitch?: boolean;
@@ -1120,6 +1136,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: () => props.onLoadSession?.('session-2'),
           },
           'load session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'select-current-session',
+            type: 'button',
+            onClick: props.onSelectCurrentSession,
+          },
+          'select current session',
         ),
         React.createElement(
           'button',
@@ -1340,7 +1365,25 @@ mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
 mockComponent('./components/tools/ToolsManagerPage', 'ToolsManagerPage');
 mockComponent('./components/skills/SkillsManagerPage', 'SkillsManagerPage');
 mockComponent('./components/dialogs/DaemonStatusDialog', 'DaemonStatusDialog');
-mockComponent('./components/SessionOverviewPanel', 'SessionOverviewPanel');
+vi.doMock('./components/SessionOverviewPanel', async () => {
+  const React = await import('react');
+  return {
+    SessionOverviewPanel: (props: {
+      onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
+      onOpenSplit?: (sessionIds: string[]) => void;
+      onCurrentSessionRemoved?: (session: {
+        sessionId: string;
+        workspaceCwd: string;
+      }) => Promise<boolean | void> | boolean | void;
+      manageLiveState?: boolean;
+    }) => {
+      testState.latestSessionOverviewProps = props;
+      return React.createElement('div', {
+        'data-testid': 'session-overview-panel',
+      });
+    },
+  };
+});
 vi.doMock('./components/channels/ChannelsManagerPage', async () => {
   const React = await import('react');
   return {
@@ -5250,6 +5293,7 @@ beforeEach(() => {
   testState.latestMessageListProps = null;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
+  testState.latestSessionOverviewProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
   testState.latestToolApprovalPlanTodos = [];
@@ -12830,7 +12874,7 @@ describe('App session callbacks', () => {
 
   it('restores the Goal snapshot when the same session learns its workspace', async () => {
     const snapshots: unknown[] = [];
-    mockConnection.workspaceCwd = undefined;
+    mockConnection.workspaceCwd = '';
     mockConnection.goalState = activeGoalSnapshot();
     const { rerender } = renderApp({
       renderFooter: (props) => {
@@ -18321,6 +18365,345 @@ describe('App session callbacks', () => {
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
   });
 
+  it('clears the current session without closing the Session Overview', async () => {
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="session-overview-panel"]'),
+    ).not.toBeNull();
+    expect(testState.latestSessionOverviewProps?.manageLiveState).toBe(false);
+  });
+
+  it('clears a legacy current session without a connection workspace cwd', async () => {
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = {
+      workspaces: [{ id: 'primary', cwd: '/tmp/project', primary: true }],
+    };
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+  });
+
+  it("keeps the deleted current session's workspace for the next chat", async () => {
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'session-1',
+        workspaceCwd: '/work/secondary',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    expect(
+      container.querySelector('[data-testid="session-overview-panel"]'),
+    ).not.toBeNull();
+    // The daemon cleared the session; the next chat's workspace target now
+    // comes from the shell's selected-workspace state, which must stay in
+    // the removed session's workspace instead of bouncing to the primary.
+    mockConnection.sessionId = undefined;
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.selectedWorkspaceCwd).toBe(
+      '/work/secondary',
+    );
+  });
+
+  it('does not clear a different session after an overview mutation finishes', async () => {
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    mockConnection.workspaceCwd = '/other/project';
+    rerender();
+    await flush();
+    onSessionIdChange.mockClear();
+
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+  });
+
+  it('does not clear a session opened while the current session is being cleared', async () => {
+    let resolveClear!: () => void;
+    mockSessionActions.clearSession.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveClear = resolve;
+      }),
+    );
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    let removal: Promise<boolean | void> | boolean | void = undefined;
+    act(() => {
+      removal = testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.(
+        {
+          sessionId: 'session-1',
+          workspaceCwd: '/tmp/project',
+        },
+      );
+    });
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await flush();
+    onSessionIdChange.mockClear();
+    await act(async () => {
+      resolveClear();
+      await removal;
+    });
+
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+  });
+
+  it('reports failure when the current session cannot be cleared', async () => {
+    const onSessionIdChange = vi.fn();
+    mockSessionActions.clearSession.mockRejectedValueOnce(new Error('locked'));
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    onSessionIdChange.mockClear();
+    let cleared: boolean | void;
+    await act(async () => {
+      cleared =
+        await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+          sessionId: 'session-1',
+          workspaceCwd: '/tmp/project',
+        });
+    });
+
+    expect(cleared).toBe(false);
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="session-overview-panel"]'),
+    ).not.toBeNull();
+  });
+
+  it('starts a new session when leaving the Session Overview with Back', async () => {
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    expect(testState.latestChatEditorProps?.selectedWorkspaceCwd).toBe(
+      '/work/secondary',
+    );
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('leaves the Session Overview when a legacy workspace resolves during Back', async () => {
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = {
+      workspaces: [{ id: 'primary', cwd: '/tmp/project', primary: true }],
+    };
+    let resolveClear!: () => void;
+    mockSessionActions.clearSession.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveClear = resolve;
+      }),
+    );
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+        ?.click();
+    });
+    mockConnection.workspaceCwd = '/tmp/project';
+    rerender();
+    await flush();
+    await act(async () => {
+      resolveClear();
+      await Promise.resolve();
+    });
+
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('does not clear a session opened while leaving the Session Overview', async () => {
+    let resolveClear!: () => void;
+    mockSessionActions.clearSession.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveClear = resolve;
+      }),
+    );
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+        ?.click();
+    });
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await flush();
+    onSessionIdChange.mockClear();
+    await act(async () => {
+      resolveClear();
+      await Promise.resolve();
+    });
+
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+  });
+
   it('forwards the session-source switch customization to the sidebar', async () => {
     const { container, rerender } = renderApp({
       sidebar: { enabled: true, showSessionSourceSwitch: false },
@@ -19944,6 +20327,457 @@ describe('App session callbacks', () => {
     }
   });
 
+  it('defers split restoration while the Session Overview is open', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sessions-overview"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        large = true;
+        changeHandler?.({ matches: true });
+        await Promise.resolve();
+      });
+      const panel = container.querySelector('[data-testid="inline-panel"]');
+      expect(panel).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+
+      await act(async () => {
+        panel?.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).not.toBeNull();
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('does not restore a folded split when leaving the Session Overview with Back', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sessions-overview"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        large = true;
+        changeHandler?.({ matches: true });
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+
+      // Back is explicit navigation, not a plain dismiss: the folded split
+      // must not be restored over the fresh chat.
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('does not restore a folded split when opening a session from the Session Overview', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sessions-overview"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        large = true;
+        changeHandler?.({ matches: true });
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+
+      // Opening a session is explicit navigation: the folded split must not
+      // be restored over the session the user chose.
+      await act(async () => {
+        await testState.latestSessionOverviewProps?.onOpenSession?.(
+          'session-2',
+        );
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('does not restore a folded split when the sidebar starts a new chat', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sessions-overview"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        large = true;
+        changeHandler?.({ matches: true });
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+
+      // New chat is explicit navigation: the folded split must not be
+      // restored over the fresh chat.
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('does not restore a folded split when the sidebar loads a session', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sessions-overview"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        large = true;
+        changeHandler?.({ matches: true });
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+
+      // Loading a session is explicit navigation: the folded split must not
+      // be restored over the session the user chose.
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('does not restore a folded split when the sidebar selects the current session', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    window.history.replaceState(null, '', '/?split=s1,s2');
+
+    try {
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        large = false;
+        changeHandler?.({ matches: false });
+        await Promise.resolve();
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sessions-overview"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        large = true;
+        changeHandler?.({ matches: true });
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="select-current-session"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-testid="split-view-page"]'),
+      ).toBeNull();
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  it('does not hand out the overview split action below the large-screen breakpoint', async () => {
+    let large = false;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+
+    const { container } = renderApp();
+    await flush();
+    // The overview itself is reachable below the breakpoint...
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+    // ...but a split cannot exist there, so the panel must not be handed the
+    // split action at all.
+    expect(testState.latestSessionOverviewProps?.onOpenSplit).toBeUndefined();
+    // And a stale capture of the action must not fold-loop a phantom split
+    // into existence that growing the window would resurrect.
+    await act(async () => {
+      testState.latestSessionOverviewProps?.onOpenSplit?.(['s1', 's2']);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      large = true;
+      changeHandler?.({ matches: true });
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+  });
+
   it('auto-collapses the sidebar in a narrow split and expands it when wide', async () => {
     let wide = false;
     let changeHandler: ((event: { matches: boolean }) => void) | undefined;
@@ -20086,9 +20920,9 @@ describe('App session callbacks', () => {
     }
   });
 
-  it('auto-closes the Session Overview when the screen shrinks below the breakpoint', async () => {
-    // Drive isLargeScreen through a controllable media query: open the panel on
-    // a large screen, then flip below the breakpoint and confirm it closes.
+  it('keeps the Session Overview open when the screen shrinks below the breakpoint', async () => {
+    // The table handles narrow widths itself, so only split view remains gated
+    // by the large-screen breakpoint.
     let large = true;
     let changeHandler: ((event: { matches: boolean }) => void) | undefined;
     Object.defineProperty(window, 'matchMedia', {
@@ -20128,7 +20962,9 @@ describe('App session callbacks', () => {
       changeHandler?.({ matches: false });
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
   });
 
   it('dismisses the Scheduled Tasks page when an approval becomes pending', async () => {
@@ -24486,5 +25322,99 @@ describe('fileUploadEnabled customization plumbing', () => {
     const { container } = renderApp({});
     const composer = container.querySelector('[data-web-shell-composer]');
     expect(composer?.hasAttribute('data-file-upload-directory')).toBe(false);
+  });
+});
+
+describe('App connection error reporting (#10406)', () => {
+  it('reports a persistent connection error once even while host re-renders pass a fresh inline onError', async () => {
+    // Daemon unreachable: connection.error persists. A host may store each
+    // reported error in its own state, which re-renders the host and hands
+    // App an onError with a fresh identity (inline or otherwise). Before the
+    // fix, every new callback identity re-fired the notification effect for
+    // the same persistent error — an infinite re-render loop.
+    mockConnection.error = 'daemon unreachable';
+    const calls: string[] = [];
+    const HOST_NOTICE_CAP = 5;
+
+    function Host() {
+      const [noticeCount, setNoticeCount] = useState(0);
+      return (
+        <App
+          sidebar={{ enabled: true }}
+          header={{}}
+          onError={(error: Error) => {
+            calls.push(error.message);
+            if (noticeCount < HOST_NOTICE_CAP) {
+              setNoticeCount((count) => count + 1);
+            }
+          }}
+        />
+      );
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<Host />);
+    });
+    await flush();
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+
+    expect(calls).toEqual(['daemon unreachable']);
+  });
+
+  it('still reports when the connection error changes to a different value', async () => {
+    mockConnection.error = 'daemon unreachable';
+    const calls: string[] = [];
+    const { rerender } = renderApp({
+      onError: (error) => calls.push(error.message),
+    });
+    await flush();
+    expect(calls).toEqual(['daemon unreachable']);
+
+    mockConnection.error = 'session missing';
+    rerender({ onError: (error) => calls.push(error.message) });
+    await flush();
+
+    expect(calls).toEqual(['daemon unreachable', 'session missing']);
+  });
+
+  it('reports a recurring error again after the connection recovers', async () => {
+    mockConnection.error = 'daemon unreachable';
+    const calls: string[] = [];
+    const onError = (error: Error) => calls.push(error.message);
+    const { rerender } = renderApp({ onError });
+    await flush();
+    expect(calls).toEqual(['daemon unreachable']);
+
+    mockConnection.error = undefined;
+    rerender({ onError });
+    await flush();
+
+    mockConnection.error = 'daemon unreachable';
+    rerender({ onError });
+    await flush();
+
+    expect(calls).toEqual(['daemon unreachable', 'daemon unreachable']);
+  });
+
+  it('delivers a persistent error once when the host attaches onError after it appears', async () => {
+    // onError is optional: a host may mount while a connection error is
+    // already active and only attach its handler on a later render. The
+    // pending error must still be delivered exactly once.
+    mockConnection.error = 'daemon unreachable';
+    const calls: string[] = [];
+    const { rerender } = renderApp({});
+    await flush();
+    expect(calls).toEqual([]);
+
+    rerender({ onError: (error) => calls.push(error.message) });
+    await flush();
+
+    expect(calls).toEqual(['daemon unreachable']);
   });
 });

@@ -304,7 +304,13 @@ async function writeLifecycleFixture(input: {
       sessionId: input.sessionId,
       cwd: SECONDARY_CWD,
       timestamp: '2026-07-08T00:00:00.000Z',
-      prompt: 'orphan lifecycle fixture',
+      // Unique per session id: the qualified and unqualified rows share this
+      // fixture and, for the unarchive case, land in the same project one
+      // after the other. An identical prompt would derive an identical
+      // display name, tripping the (correct, separately tested) unarchive
+      // title-collision guard and appending an unrelated custom_title
+      // record that this test's byte-exact comparison doesn't expect.
+      prompt: `orphan lifecycle fixture ${input.sessionId}`,
       mtime: new Date('2026-07-08T00:00:00.000Z'),
       parentSessionId: '00000000-0000-4000-8000-000000000000',
     });

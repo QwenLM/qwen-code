@@ -8325,6 +8325,7 @@ describe('createServeApp', () => {
               persistence: expected,
             },
           });
+          expect(captured?.installMetadata).not.toHaveProperty('networkPolicy');
           await vi.waitFor(() =>
             expect(bridge.extensionEvents.at(-1)).toMatchObject({
               status: 'installed',
@@ -14416,32 +14417,36 @@ describe('createServeApp', () => {
       });
     });
 
-    it('503s fresh session work while restore cleanup is quarantined', async () => {
-      const bridge = fakeBridge({
-        resumeImpl: async () => {
-          throw new BridgeChannelQuarantinedError(
-            'restore_settlement_overdue',
-            90,
-          );
-        },
-      });
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      const res = await request(app)
-        .post('/session/persisted-quarantined/resume')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({});
+    it('503s fresh session work for every channel quarantine reason', async () => {
+      for (const reason of [
+        'restore_cleanup_failed',
+        'restore_settlement_overdue',
+        'new_session_cleanup_failed',
+        'new_session_settlement_overdue',
+      ] as const) {
+        const bridge = fakeBridge({
+          resumeImpl: async () => {
+            throw new BridgeChannelQuarantinedError(reason, 90);
+          },
+        });
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session/persisted-quarantined/resume')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
 
-      expect(res.status).toBe(503);
-      // Quarantine lasts until the channel drains — strictly longer than the
-      // fence — and a fresh-id caller never sees the 409 that would tell it so.
-      expect(res.headers['retry-after']).toBe('90');
-      expect(res.body).toMatchObject({
-        code: 'acp_channel_unavailable',
-        errorKind: 'acp_channel_unavailable',
-        retryable: true,
-        reason: 'restore_settlement_overdue',
-        retryAfterSeconds: 90,
-      });
+        expect(res.status).toBe(503);
+        // Fresh-id callers never see the same-id 409, so the 503 must carry the
+        // operation-budget-scale retry hint itself.
+        expect(res.headers['retry-after']).toBe('90');
+        expect(res.body).toMatchObject({
+          code: 'acp_channel_unavailable',
+          errorKind: 'acp_channel_unavailable',
+          retryable: true,
+          reason,
+          retryAfterSeconds: 90,
+        });
+      }
     });
 
     it('400 workspace_mismatch before touching the bridge for non-primary cwd', async () => {
@@ -14736,6 +14741,157 @@ describe('createServeApp', () => {
         limit: 20,
       });
     });
+
+    it('forwards resume-time source metadata to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-channel/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        });
+
+      expect(res.status).toBe(200);
+      expect(bridge.resumeCalls[0]).toMatchObject({
+        sessionId: 'persisted-channel',
+        workspaceCwd: WS_BOUND,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+    });
+
+    it('forwards load-time source metadata to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-channel/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        });
+
+      expect(res.status).toBe(200);
+      expect(bridge.loadCalls[0]).toMatchObject({
+        sessionId: 'persisted-channel',
+        workspaceCwd: WS_BOUND,
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      });
+    });
+
+    it('does not let restore-time source metadata replace persisted attribution', async () => {
+      const bridge = fakeBridge();
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadata')
+        .mockResolvedValue({ sourceType: 'channel', sourceId: 'feishu-main' });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      try {
+        const res = await request(app)
+          .post('/session/persisted-channel/resume')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
+          });
+
+        expect(res.status).toBe(200);
+        expect(bridge.resumeCalls[0]).toMatchObject({
+          sessionId: 'persisted-channel',
+          workspaceCwd: WS_BOUND,
+          sourceType: 'channel',
+          sourceId: 'feishu-main',
+        });
+      } finally {
+        readCreationMetadata.mockRestore();
+      }
+    });
+
+    it.each(['load', 'resume'] as const)(
+      'rejects reserved standalone source metadata on %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-channel/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sourceType: 'standalone' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'rejects sourceId without sourceType on %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-channel/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sourceId: 'dingtalk-main' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_session_source');
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'rejects daemon-owned live source metadata on %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-channel/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            sourceType: 'default',
+            sourceId: 'realtime_voice:p1:h1:a1:forged',
+          });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      },
+    );
 
     // The restore handler's `!res.writable` cleanup branch (kill on
     // !attached, detach on attached) is line-for-line identical to
@@ -19874,6 +20030,64 @@ describe('createServeApp', () => {
             sessionId: '550e8400-e29b-41d4-a716-446655440101',
             sourceType: 'scheduled_task',
             sourceId: 'task-123',
+          }),
+        ]);
+      });
+
+      it('filters a restored legacy session by live source metadata', async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440301';
+        await writeStoredSession({
+          sessionId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'legacy channel session',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+        });
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId,
+              workspaceCwd: WS_BOUND,
+              createdAt: '2026-05-17T12:00:00.000Z',
+              updatedAt: '2026-05-17T12:03:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+              sourceType: 'channel',
+              sourceId: 'dingtalk-main',
+            },
+          ],
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+
+        const filtered = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?sourceType=channel&sourceId=dingtalk-main`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(filtered.status).toBe(200);
+        expect(filtered.body.sessions).toEqual([
+          expect.objectContaining({
+            sessionId,
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
+          }),
+        ]);
+
+        const organized = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=all&sourceType=channel&sourceId=dingtalk-main`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(organized.status).toBe(200);
+        expect(organized.body.sessions).toEqual([
+          expect.objectContaining({
+            sessionId,
+            sourceType: 'channel',
+            sourceId: 'dingtalk-main',
           }),
         ]);
       });
@@ -36182,6 +36396,52 @@ describe('Live conversation runtime lifecycle', () => {
       getLocation.mockRestore();
       readCreationMetadata.mockRestore();
       readCreationMetadataIfReadable.mockRestore();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+    }
+  });
+
+  it('does not apply caller-supplied restore source metadata on the internal Live runtime', async () => {
+    const sessionId = 'legacy-live-channel';
+    const setup = setupLiveRuntime();
+    setup.registry.add(setup.liveRuntime);
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValue(sessionId);
+    const getLocation = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockResolvedValue('active');
+    const readCreationMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockResolvedValue({});
+    const readCreationMetadataIfReadable = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockImplementation(async (id, _location) => readCreationMetadata(id));
+    try {
+      const response = await request(setup.app)
+        .post(`/session/${sessionId}/resume`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          cwd: setup.root.canonicalRoot,
+          sourceType: 'channel',
+          sourceId: 'dingtalk-main',
+        });
+
+      expect(response.status).toBe(200);
+      expect(setup.liveBridge.resumeCalls).toContainEqual(
+        expect.objectContaining({
+          sessionId,
+          workspaceCwd: setup.root.canonicalRoot,
+        }),
+      );
+      expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty('sourceType');
+      expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty('sourceId');
+    } finally {
+      readCreationMetadataIfReadable.mockRestore();
+      readCreationMetadata.mockRestore();
+      getLocation.mockRestore();
+      findSessionId.mockRestore();
       await (
         setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
       )();
