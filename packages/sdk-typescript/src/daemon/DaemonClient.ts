@@ -385,6 +385,9 @@ export interface DaemonClientOptions {
 const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+// Provider mutations persist before their bounded runtime sync. A default
+// client deadline could report failure while the daemon still completes it.
+const DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS = 0;
 const DEFAULT_SESSION_RESTORE_TIMEOUT_MS = 70_000;
 const SESSION_RESTORE_TIMEOUT_HEADROOM_MS = 10_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
@@ -622,6 +625,10 @@ export interface RestoreSessionRequest {
   historyPageSize?: number;
   /** Load-only live-turn replay projection. Omit for the complete journal. */
   liveReplayMode?: 'full' | 'summary';
+  /** Restore-time attribution for legacy/unattributed sessions. */
+  sourceType?: string;
+  /** Optional source-specific identifier. Requires `sourceType`. */
+  sourceId?: string;
   /**
    * Client-side deadline for this restore request. `0` disables the client
    * timer and relies on the daemon's own restore deadline.
@@ -1827,22 +1834,21 @@ export class DaemonClient {
     } = {},
     clientId?: string,
   ): Promise<DaemonWorkspaceFile> {
-    const url = new URL(`${this.baseUrl}/file`);
-    url.searchParams.set('path', filePath);
+    const query = new URLSearchParams({ path: filePath });
     if (opts.maxBytes !== undefined) {
-      url.searchParams.set('maxBytes', String(opts.maxBytes));
+      query.set('maxBytes', String(opts.maxBytes));
     }
     if (opts.line !== undefined) {
-      url.searchParams.set('line', String(opts.line));
+      query.set('line', String(opts.line));
     }
     if (opts.limit !== undefined) {
-      url.searchParams.set('limit', String(opts.limit));
+      query.set('limit', String(opts.limit));
     }
     if (opts.cursor !== undefined) {
-      url.searchParams.set('cursor', opts.cursor);
+      query.set('cursor', opts.cursor);
     }
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/file?${query.toString()}`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /file');
@@ -1874,10 +1880,9 @@ export class DaemonClient {
   }
 
   async fileStat(filePath: string): Promise<unknown> {
-    const url = new URL(`${this.baseUrl}/stat`);
-    url.searchParams.set('path', filePath);
+    const query = new URLSearchParams({ path: filePath });
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/stat?${query.toString()}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /stat');
@@ -1887,10 +1892,9 @@ export class DaemonClient {
   }
 
   async dirList(dirPath: string): Promise<unknown> {
-    const url = new URL(`${this.baseUrl}/list`);
-    url.searchParams.set('path', dirPath);
+    const query = new URLSearchParams({ path: dirPath });
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/list?${query.toString()}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /list');
@@ -1904,10 +1908,9 @@ export class DaemonClient {
    * pick a path outside any registered workspace (e.g. "Add workspace").
    */
   async workspacePathSuggestions(prefix: string): Promise<unknown> {
-    const url = new URL(`${this.baseUrl}/workspace-path-suggestions`);
-    url.searchParams.set('prefix', prefix);
+    const query = new URLSearchParams({ prefix });
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/workspace-path-suggestions?${query.toString()}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) {
@@ -1932,10 +1935,9 @@ export class DaemonClient {
   }
 
   async glob(pattern: string): Promise<unknown> {
-    const url = new URL(`${this.baseUrl}/glob`);
-    url.searchParams.set('pattern', pattern);
+    const query = new URLSearchParams({ pattern });
     return await this.fetchWithTimeout(
-      url.toString(),
+      `${this.baseUrl}/glob?${query.toString()}`,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /glob');
@@ -1999,9 +2001,8 @@ export class DaemonClient {
     req: DaemonWorkspaceFileUploadRequest,
     clientId?: string,
   ): Promise<DaemonWorkspaceFileUploadResult> {
-    const target = new URL(`${this.baseUrl}${uploadPath}`);
-    target.searchParams.set('path', req.path);
-    const url = target.toString();
+    const query = new URLSearchParams({ path: req.path });
+    const url = `${this.baseUrl}${uploadPath}?${query.toString()}`;
     const headers = this.headers(
       { 'Content-Type': 'application/octet-stream' },
       clientId,
@@ -2182,10 +2183,11 @@ export class DaemonClient {
 
   /**
    * Append to or replace `QWEN.md` at workspace or global scope.
-   * Strict mutation gate (`token_required` on no-token loopback
-   * defaults). When the daemon advertises `workspace_memory`, expect
-   * 200 with `{ ok, filePath, bytesWritten, mode }`; older daemons
-   * without the capability return 404.
+   * The strict mutation gate accepts trusted-loopback callers without a token;
+   * older daemons and non-trusted embeds can still return `token_required`.
+   * When the daemon advertises `workspace_memory`, expect 200 with
+   * `{ ok, filePath, bytesWritten, mode }`; older daemons without the
+   * capability return 404.
    */
   async writeWorkspaceMemory(
     req: DaemonWriteMemoryRequest,
@@ -2216,6 +2218,15 @@ export class DaemonClient {
     content: string,
     opts: DaemonWorkspaceMemoryRememberOptions = {},
   ): Promise<DaemonWorkspaceMemoryRememberTask> {
+    if (opts.scope) {
+      // An old daemon silently ignores `scope` and auto-routes the write;
+      // pre-flight so the degradation is a loud capability error instead.
+      await this.requireCapability(
+        opts.scope === 'project'
+          ? 'workspace_memory_remember_project_scope'
+          : 'workspace_memory_remember_user_scope',
+      );
+    }
     return await this.jsonRequest<DaemonWorkspaceMemoryRememberTask>(
       WORKSPACE_MEMORY_REMEMBER_PATH,
       `POST ${WORKSPACE_MEMORY_REMEMBER_PATH}`,
@@ -2224,6 +2235,7 @@ export class DaemonClient {
         body: {
           content,
           contextMode: opts.contextMode ?? 'workspace',
+          ...(opts.scope ? { scope: opts.scope } : {}),
         },
         clientId: opts.clientId,
       },
@@ -2245,12 +2257,20 @@ export class DaemonClient {
     query: string,
     opts: DaemonWorkspaceMemoryForgetOptions = {},
   ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    if (opts.scope) {
+      // Without the tag an old daemon runs an UNSCOPED forget that can
+      // delete entries from both stores — pre-flight instead of degrading.
+      await this.requireCapability('workspace_memory_forget_scope');
+    }
     return await this.jsonRequest<DaemonWorkspaceMemoryForgetTask>(
       WORKSPACE_MEMORY_FORGET_PATH,
       `POST ${WORKSPACE_MEMORY_FORGET_PATH}`,
       {
         method: 'POST',
-        body: { query },
+        body: {
+          query,
+          ...(opts.scope ? { scope: opts.scope } : {}),
+        },
         clientId: opts.clientId,
       },
     );
@@ -3372,6 +3392,19 @@ export class DaemonClient {
     req: RestoreSessionRequest,
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
+    let sourceType = req.sourceType;
+    let sourceId = req.sourceId;
+    if (req.sourceType !== undefined || req.sourceId !== undefined) {
+      try {
+        await this.requireCapability('session_source_metadata');
+      } catch (error) {
+        if (!(error instanceof DaemonCapabilityMissingError)) {
+          throw error;
+        }
+        sourceType = undefined;
+        sourceId = undefined;
+      }
+    }
     const timeoutMs = this.resolveRestoreTimeoutMs(req.timeoutMs);
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/${action}`,
@@ -3389,6 +3422,8 @@ export class DaemonClient {
           ...(action === 'load' && req.liveReplayMode !== undefined
             ? { liveReplayMode: req.liveReplayMode }
             : {}),
+          ...(sourceType !== undefined ? { sourceType } : {}),
+          ...(sourceId !== undefined ? { sourceId } : {}),
         }),
       },
       async (res) => {
@@ -3847,8 +3882,9 @@ export class DaemonClient {
 
   /**
    * Execute a direct daemon-side shell command for a session. The daemon must
-   * be started with direct session shell enabled and bearer auth configured;
-   * callers must also provide a client id already bound to this session.
+   * be started with direct session shell enabled and either bearer auth or
+   * trusted-loopback operator authority; callers must also provide a client id
+   * already bound to this session.
    * Prefer `DaemonSessionClient.shellCommand()` when available because it
    * forwards the session-bound client id automatically.
    */
@@ -3875,9 +3911,9 @@ export class DaemonClient {
 
   /**
    * Toggle a tool name in the workspace's
-   * `tools.disabled` settings list. Strict-gated mutation route — the
-   * daemon must be configured with a bearer token. The daemon writes
-   * the settings file directly and fan-outs a `tool_toggled` event to
+   * `tools.disabled` settings list. The strict mutation gate accepts
+   * trusted-loopback operator authority or listener credentials. The daemon
+   * writes the settings file directly and fan-outs a `tool_toggled` event to
    * every live session SSE bus.
    *
    * Already-registered tools in active sessions are NOT retroactively
@@ -4074,6 +4110,9 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonModelDeleteResult;
       },
+      this.hasExplicitFetchTimeout
+        ? undefined
+        : DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS,
     );
   }
 
@@ -5506,6 +5545,9 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonAuthProviderInstallResult;
       },
+      this.hasExplicitFetchTimeout
+        ? undefined
+        : DEFAULT_PROVIDER_MUTATION_TIMEOUT_MS,
     );
   }
 

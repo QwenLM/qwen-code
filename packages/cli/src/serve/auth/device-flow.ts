@@ -1489,8 +1489,8 @@ export class DeviceFlowRegistry {
   /**
    * For diagnostics / GET /workspace/auth/status: report only pending
    * flows. Terminal entries are an implementation detail of the SDK
-   * reconnect path and shouldn't be enumerated to all bearer-token
-   * holders.
+   * reconnect path and shouldn't be enumerated to all authorized status
+   * callers.
    */
   listPending(): DeviceFlowPublicView[] {
     const out: DeviceFlowPublicView[] = [];
