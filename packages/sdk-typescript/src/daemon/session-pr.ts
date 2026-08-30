@@ -9,6 +9,9 @@ import type { DaemonSessionIssueInfo, DaemonSessionPrInfo } from './types.js';
 /** Upper bound for a bound PR URL; generous for enterprise hosts + long paths. */
 export const MAX_SESSION_PR_URL_LENGTH = 2048;
 
+/** Issues kept per PR — mirrors the daemon sidecar's per-PR cap. */
+export const MAX_SESSION_PR_ISSUES = 10;
+
 // Mirrors the bridge's hasControlCharacter (ESLint forbids control-char
 // regexes).
 function hasControlCharacter(value: string): boolean {
@@ -66,6 +69,7 @@ export function isDaemonSessionPrInfo(
       v['state'] === 'closed') &&
     (v['issues'] === undefined ||
       (Array.isArray(v['issues']) &&
+        v['issues'].length <= MAX_SESSION_PR_ISSUES &&
         v['issues'].every(isDaemonSessionIssueInfo)))
   );
 }

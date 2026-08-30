@@ -237,10 +237,12 @@ describe('SessionDetailsTooltip', () => {
                   url: 'https://github.com/o/r/pull/9500',
                   state: 'merged',
                   issues: [
+                    // The older PR's copy of #7 carries a stale state; the
+                    // newest PR's copy (listed first) must win.
                     {
                       number: 7,
                       url: 'https://github.com/o/r/issues/7',
-                      state: 'completed',
+                      state: 'open',
                     },
                     // A hand-edited sidecar can carry non-openable schemes.
                     { number: 99, url: 'javascript:alert(1)' },

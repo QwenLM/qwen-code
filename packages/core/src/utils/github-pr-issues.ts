@@ -40,7 +40,17 @@ export type FetchGitHubPullRequestIssuesResult =
   | { kind: 'ok'; pullRequests: Map<number, GitHubPullRequestIssues> }
   | { kind: 'not_a_repo' }
   | { kind: 'cli_unavailable' }
+  /**
+   * gh could not resolve the repository from the git remotes (none, or none
+   * on a known GitHub host) — structural, unlike a transient `failed`.
+   */
+  | { kind: 'repo_unresolved' }
   | { kind: 'failed'; message: string; gitRoot: string };
+
+// gh resolves the `{owner}`/`{repo}` placeholders before any request; these
+// are its diagnostics when the workspace has no usable GitHub remote.
+const GH_REPO_UNRESOLVED_PATTERN =
+  /no git remotes found|point to a known GitHub host|error parsing "(owner|name)" value/i;
 
 /**
  * One aliased `pullRequest(number:)` lookup per number against the repository
@@ -103,17 +113,41 @@ function mapIssue(node: GhIssueNode): GitHubClosingIssue | null {
   };
 }
 
+interface GhGraphqlError {
+  type?: unknown;
+  path?: unknown;
+}
+
 /**
  * Parses a `gh api graphql` response. A PR that does not resolve (a binding
  * to another repository's same-numbered PR) comes back as a null alias plus a
- * top-level NOT_FOUND error; it is simply absent from the result, and the
- * caller's url guard keeps the wrong repository's PR from matching anyway.
+ * top-level NOT_FOUND error on that alias; it is simply absent from the
+ * result, and the caller's url guard keeps the wrong repository's PR from
+ * matching anyway. Any other partial error — a server error nulling an
+ * alias, a sub-field error nulling the closing references of a resolved PR
+ * — throws: absence must mean "the repository has no such PR", never "the
+ * platform hiccupped", because the caller retires merged bindings on it.
  * Throws when the payload carries no repository data at all.
  */
 export function parsePullRequestIssuesResponse(
   stdout: string,
 ): Map<number, GitHubPullRequestIssues> {
   const parsed: unknown = JSON.parse(stdout);
+  const errors = (parsed as { errors?: unknown } | null)?.errors;
+  if (Array.isArray(errors)) {
+    for (const error of errors as GhGraphqlError[]) {
+      const aliasNotFound =
+        error.type === 'NOT_FOUND' &&
+        Array.isArray(error.path) &&
+        error.path.length === 2 &&
+        error.path[0] === 'repository';
+      if (!aliasNotFound) {
+        throw new Error(
+          `gh api graphql partial error: ${JSON.stringify(error).slice(0, 200)}`,
+        );
+      }
+    }
+  }
   const repository = (parsed as { data?: { repository?: unknown } } | null)
     ?.data?.repository;
   if (repository === null || typeof repository !== 'object') {
@@ -161,13 +195,15 @@ function runGhGraphql(
         encoding: 'utf8',
         env: gitEnv(env),
       },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
         // gh exits non-zero whenever the response carries GraphQL errors,
         // even with the data of every other alias intact (a NOT_FOUND on
         // one number). Hand the payload back and let the parser decide; a
         // timeout kill leaves a truncated payload and must keep its message.
         if (error && (error.killed || !stdout.trim())) {
-          reject(error);
+          // execFile's error carries no stderr of its own; the caller
+          // classifies gh's repository-resolution diagnostics from it.
+          reject(Object.assign(error, { stderr }));
         } else {
           resolve(stdout);
         }
@@ -209,6 +245,13 @@ export async function fetchGitHubPullRequestIssues(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return { kind: 'cli_unavailable' };
+      }
+      const stderr = (error as { stderr?: unknown }).stderr;
+      if (
+        typeof stderr === 'string' &&
+        GH_REPO_UNRESOLVED_PATTERN.test(stderr)
+      ) {
+        return { kind: 'repo_unresolved' };
       }
       return {
         kind: 'failed',

@@ -27695,12 +27695,18 @@ describe('createAcpSessionBridge', () => {
           number: 3,
           url: 'https://github.com/o/r/pull/3',
           state: 'merged',
+          issues: [{ number: 7, url: 'https://github.com/o/r/issues/7' }],
         },
         { number: 4, url: 'https://github.com/o/r/pull/4' },
       ]);
 
       expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([
-        { number: 3, url: 'https://github.com/o/r/pull/3', state: 'merged' },
+        {
+          number: 3,
+          url: 'https://github.com/o/r/pull/3',
+          state: 'merged',
+          issues: [{ number: 7, url: 'https://github.com/o/r/issues/7' }],
+        },
         { number: 4, url: 'https://github.com/o/r/pull/4' },
       ]);
 

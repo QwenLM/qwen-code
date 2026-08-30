@@ -31,6 +31,18 @@ describe('isDaemonSessionPrInfo', () => {
   it('accepts an issue snapshot and rejects malformed issues', () => {
     const issue = { number: 7, url: 'https://github.com/o/r/issues/7' };
     expect(isDaemonSessionPrInfo({ ...valid, issues: [] })).toBe(true);
+    // A state-less issue (older sidecar) is served by the daemon and must
+    // not drop the whole binding here.
+    expect(isDaemonSessionPrInfo({ ...valid, issues: [issue] })).toBe(true);
+    expect(
+      isDaemonSessionPrInfo({
+        ...valid,
+        issues: Array.from({ length: 11 }, (_, index) => ({
+          ...issue,
+          number: index + 1,
+        })),
+      }),
+    ).toBe(false);
     for (const state of ['open', 'completed', 'not_planned'] as const) {
       expect(
         isDaemonSessionPrInfo({ ...valid, issues: [{ ...issue, state }] }),

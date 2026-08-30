@@ -26,16 +26,19 @@ const mockExecFile = vi.mocked(execFile);
 
 type ExecCallback = (err: Error | null, stdout: string, stderr: string) => void;
 
+// Mirrors execFile's real callback shape: stderr arrives as the third
+// argument, and the error object itself carries none.
 function mockGh(
   responder: (args: string[]) => {
-    error?: Error & { code?: string; stderr?: string };
+    error?: Error & { code?: string; killed?: boolean };
     stdout?: string;
+    stderr?: string;
   },
 ) {
   mockExecFile.mockImplementation(
     (_cmd: unknown, args: unknown, _opts: unknown, cb: unknown) => {
-      const { error, stdout } = responder(args as string[]);
-      (cb as ExecCallback)(error ?? null, stdout ?? '', error?.stderr ?? '');
+      const { error, stdout, stderr } = responder(args as string[]);
+      (cb as ExecCallback)(error ?? null, stdout ?? '', stderr ?? '');
       return {} as ReturnType<typeof execFile>;
     },
   );
@@ -94,7 +97,12 @@ describe('parsePullRequestIssuesResponse', () => {
             number: 2,
             url: 'https://github.com/o/r/pull/2',
             closingIssuesReferences: {
-              nodes: [{ number: 'x', url: 'https://github.com/o/r/issues/9' }],
+              nodes: [
+                { number: 'x', url: 'https://github.com/o/r/issues/9' },
+                { number: 0, url: 'https://github.com/o/r/issues/0' },
+                { number: 1.5, url: 'https://github.com/o/r/issues/1' },
+                { number: 3 },
+              ],
             },
           },
           p3: null,
@@ -122,6 +130,41 @@ describe('parsePullRequestIssuesResponse', () => {
       url: 'https://github.com/o/r/pull/2',
       issues: [],
     });
+  });
+
+  it('rejects any partial error other than an alias-level NOT_FOUND', () => {
+    // Absence must mean "no such PR": a server error nulling one alias, or
+    // a sub-field error nulling a resolved PR's closing references, would
+    // otherwise retire a merged binding with a false empty snapshot.
+    const withError = (error: unknown) =>
+      JSON.stringify({
+        data: { repository: { p1: prNode(1, []), p2: null } },
+        errors: [error],
+      });
+    expect(() =>
+      parsePullRequestIssuesResponse(
+        withError({
+          type: 'INTERNAL_SERVER_ERROR',
+          path: ['repository', 'p2'],
+        }),
+      ),
+    ).toThrow(/partial error/);
+    expect(() =>
+      parsePullRequestIssuesResponse(
+        withError({
+          type: 'NOT_FOUND',
+          path: ['repository', 'p1', 'closingIssuesReferences'],
+        }),
+      ),
+    ).toThrow(/partial error/);
+    expect(() =>
+      parsePullRequestIssuesResponse(withError({ message: 'no type at all' })),
+    ).toThrow(/partial error/);
+    expect(
+      parsePullRequestIssuesResponse(
+        withError({ type: 'NOT_FOUND', path: ['repository', 'p2'] }),
+      ).size,
+    ).toBe(1);
   });
 
   it('throws when the payload carries no repository data', () => {
@@ -169,7 +212,9 @@ describe('fetchGitHubPullRequestIssues', () => {
 
     const result = await fetchGitHubPullRequestIssues(
       nested,
-      { GH_TOKEN: 'x' },
+      // GH_REPO would redirect gh's `{owner}`/`{repo}` placeholders to
+      // another repository; the sanitized env must not carry it.
+      { GH_TOKEN: 'x', GH_REPO: 'other/repo' },
       [42],
     );
 
@@ -210,6 +255,14 @@ describe('fetchGitHubPullRequestIssues', () => {
       }),
       expect.any(Function),
     );
+    expect(mockExecFile).toHaveBeenCalledWith(
+      'gh',
+      expect.any(Array),
+      expect.objectContaining({
+        env: expect.not.objectContaining({ GH_REPO: 'other/repo' }),
+      }),
+      expect.any(Function),
+    );
   });
 
   it('keeps the resolved aliases when gh exits non-zero over a NOT_FOUND number', async () => {
@@ -218,9 +271,8 @@ describe('fetchGitHubPullRequestIssues', () => {
     // prints every other alias.
     fs.mkdirSync(path.join(dir, '.git'));
     mockGh(() => ({
-      error: Object.assign(new Error('gh: Could not resolve'), {
-        stderr: 'gh: Could not resolve to a PullRequest',
-      }),
+      error: new Error('gh: Could not resolve'),
+      stderr: 'gh: Could not resolve to a PullRequest',
       stdout: JSON.stringify({
         data: { repository: { p1: prNode(1, []), p2: null } },
         errors: [{ type: 'NOT_FOUND', path: ['repository', 'p2'] }],
@@ -249,6 +301,44 @@ describe('fetchGitHubPullRequestIssues', () => {
     });
   });
 
+  it('fails the call on a partial error that is not an alias-level NOT_FOUND', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockGh(() => ({
+      error: new Error('exit 1'),
+      stderr: 'gh: server error',
+      stdout: JSON.stringify({
+        data: { repository: { p1: prNode(1, []), p2: null } },
+        errors: [{ type: 'INTERNAL_SERVER_ERROR', path: ['repository', 'p2'] }],
+      }),
+    }));
+
+    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1, 2])).toEqual({
+      kind: 'failed',
+      message: expect.stringContaining('partial error'),
+      gitRoot: dir,
+    });
+  });
+
+  it('maps a repository gh cannot resolve to repo_unresolved', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockGh(() => ({
+      error: new Error('exit 1'),
+      stderr: 'error parsing "owner" value: no git remotes found\n',
+    }));
+    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
+      kind: 'repo_unresolved',
+    });
+
+    mockGh(() => ({
+      error: new Error('exit 1'),
+      stderr:
+        'none of the git remotes configured for this repository point to a known GitHub host',
+    }));
+    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
+      kind: 'repo_unresolved',
+    });
+  });
+
   it('maps a missing gh binary to cli_unavailable', async () => {
     fs.mkdirSync(path.join(dir, '.git'));
     mockGh(() => ({
@@ -263,9 +353,8 @@ describe('fetchGitHubPullRequestIssues', () => {
   it('reports a failure without output and a payload without data', async () => {
     fs.mkdirSync(path.join(dir, '.git'));
     mockGh(() => ({
-      error: Object.assign(new Error('exit 1'), {
-        stderr: 'HTTP 401: Bad credentials',
-      }),
+      error: new Error('exit 1'),
+      stderr: 'HTTP 401: Bad credentials',
     }));
     expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
       kind: 'failed',
@@ -322,6 +411,7 @@ describe('fetchGitHubPullRequestIssues', () => {
       `p${GITHUB_PR_ISSUES_BATCH_SIZE + 1}: pullRequest`,
     );
     expect(queries[1]).not.toContain('p1: pullRequest');
+    expect(queries.join(' ')).not.toMatch(/number: (-3|0|2\.5)\)/);
   });
 
   it('never puts a non-safe integer into the document', async () => {
@@ -347,7 +437,7 @@ describe('fetchGitHubPullRequestIssues', () => {
     expect(result.kind).toBe('ok');
     expect(query).toContain('p7: pullRequest(number: 7)');
     expect(query).not.toContain('1e+21');
-    expect(query).not.toContain('9007199254740993');
+    expect(query).not.toContain(String(Number.MAX_SAFE_INTEGER + 2));
   });
 
   it('fails the whole call when a later chunk fails', async () => {
@@ -361,7 +451,7 @@ describe('fetchGitHubPullRequestIssues', () => {
               data: { repository: { p1: prNode(1, []) } },
             }),
           }
-        : { error: Object.assign(new Error('boom'), { stderr: 'timeout' }) };
+        : { error: new Error('boom'), stderr: 'timeout' };
     });
     const numbers = Array.from(
       { length: GITHUB_PR_ISSUES_BATCH_SIZE + 1 },

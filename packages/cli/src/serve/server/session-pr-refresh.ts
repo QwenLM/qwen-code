@@ -13,7 +13,6 @@
 // static barrel importer (ACP agent included).
 import { existsSync } from 'node:fs';
 import {
-  canonicalSessionPrUrl,
   fetchGitHubPullRequestIssues,
   fetchGitHubPullRequests,
   readSessionPrs,
@@ -52,6 +51,44 @@ const FIRST_RUN_DELAY_MS = 60_000;
  * rotating window retries it on later sweeps.
  */
 export const AONE_SWEEP_VIEW_BUDGET_MS = 60_000;
+
+/**
+ * Identity of a PR url as `host/owner/repo` plus number, tolerant of the
+ * spellings the bind path accepts (`www.`, `http:`, a `/files` suffix,
+ * case). Wider than `canonicalSessionPrUrl` on purpose and local to this
+ * sweep's lookup matching: same-PR identity everywhere else (re-binds, the
+ * sidecar's write gate, the session-list merge) keeps the canonical rule.
+ */
+function pullRequestKey(
+  url: string,
+): { repo: string; number: number } | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  const match = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/.exec(
+    parsed.pathname,
+  );
+  if (!match) return undefined;
+  const host = parsed.hostname.replace(/^www\./, '');
+  return {
+    repo: `${host}/${match[1]}/${match[2]}`.toLowerCase(),
+    number: Number(match[3]),
+  };
+}
+
+function samePullRequest(left: string, right: string): boolean {
+  const a = pullRequestKey(left);
+  const b = pullRequestKey(right);
+  return (
+    a !== undefined &&
+    b !== undefined &&
+    a.repo === b.repo &&
+    a.number === b.number
+  );
+}
 
 /**
  * The slice of {@link SessionArchiveCoordinator} the sweep needs: the
@@ -243,15 +280,14 @@ export async function refreshWorkspaceSessionPrStates(
   // git root), or the platform has no closing references at all (Aone).
   // A transient failure never converges — the PR may well have references.
   let convergeMerged = false;
-  // The repository the list query resolved, as a canonical `…/owner/repo`
-  // prefix. A binding outside it (another repository's same-numbered PR)
-  // can never resolve here, so it stays out of the lookup — the GitHub
-  // twin of the Aone refreshability filter. Unknown (no list result) fails
-  // open into the lookup, whose per-alias NOT_FOUND then converges it.
-  let repoPrefix: string | undefined;
+  // The repository the list query resolved, as a `host/owner/repo` key. A
+  // binding outside it (another repository's same-numbered PR) can never
+  // resolve here, so it stays out of the lookup — the GitHub twin of the
+  // Aone refreshability filter. Unknown (no list result) fails open into
+  // the lookup, whose per-alias NOT_FOUND then converges it.
+  let repoKey: string | undefined;
   const isForeign = (url: string): boolean =>
-    repoPrefix !== undefined &&
-    !canonicalSessionPrUrl(url).startsWith(`${repoPrefix}/pull/`);
+    repoKey !== undefined && pullRequestKey(url)?.repo !== repoKey;
   const aoneRepo = await resolveAoneWorkspaceRepo(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
@@ -333,12 +369,7 @@ export async function refreshWorkspaceSessionPrStates(
           });
         }
         const sample = result.pullRequests[0]?.url;
-        if (sample !== undefined && /\/pull\/\d+$/.test(sample)) {
-          repoPrefix = canonicalSessionPrUrl(sample).replace(
-            /\/pull\/\d+$/,
-            '',
-          );
-        }
+        if (sample !== undefined) repoKey = pullRequestKey(sample)?.repo;
       }
     }
     const issueNumbers = [
@@ -370,7 +401,8 @@ export async function refreshWorkspaceSessionPrStates(
         }
       } else if (
         issuesResult.kind === 'cli_unavailable' ||
-        issuesResult.kind === 'not_a_repo'
+        issuesResult.kind === 'not_a_repo' ||
+        issuesResult.kind === 'repo_unresolved'
       ) {
         convergeMerged = true;
       }
@@ -395,9 +427,11 @@ export async function refreshWorkspaceSessionPrStates(
       const fetched = numberToFetch.get(entry.number);
       if (
         fetched?.issues !== undefined &&
-        canonicalSessionPrUrl(fetched.url) === canonicalSessionPrUrl(entry.url)
+        samePullRequest(fetched.url, entry.url)
       ) {
-        states.set(entry.number, fetched);
+        // Written under the entry's own url: the sidecar's canonical gate
+        // would drop a `/files`-spelled binding's snapshot otherwise.
+        states.set(entry.number, { ...fetched, url: entry.url });
       } else if (entry.merged && (convergeMerged || isForeign(entry.url))) {
         // No lookup will ever snapshot this merged binding; an empty
         // snapshot (renders as none) retires it from the sweep. Open ones
