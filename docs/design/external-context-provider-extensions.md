@@ -9,6 +9,9 @@
 **Existing direct integration:**
 [Direct External Context Provider](./direct-external-context-provider.md)
 
+**Mem0 family extension:**
+[Configurable Mem0 Provider Extension](./external-context-mem0-extension.md)
+
 ## Decision
 
 External context integrations owned by other teams use Qwen Code Extensions

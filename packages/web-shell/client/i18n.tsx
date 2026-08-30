@@ -54,6 +54,20 @@ const EN: Messages = {
   'branchPicker.createdBranch': (v) => `Created branch ${v?.branch ?? ''}`,
   'branchPicker.pushSuccess': 'Pushed successfully',
   'branchPicker.pullSuccess': 'Updated successfully',
+  'branchPicker.hint.upToDate': 'Up to date',
+  'branchPicker.hint.noUpstream': 'No upstream',
+  'branchPicker.hint.upstreamGone': 'Upstream gone',
+  'branchPicker.hint.behindDirty': (v) =>
+    `↓${v?.count ?? 0} · uncommitted changes`,
+  'branchPicker.hint.setsUpstream': 'Sets upstream on push',
+  'branchPicker.hint.aheadBehind': (v) =>
+    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · update first`,
+  'branchPicker.hint.nothingToPush': 'Nothing to push',
+  'branchPicker.hint.noChanges': 'No changes',
+  'branchPicker.hint.changes': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'change' : 'changes'}`,
+  'branchPicker.hint.changesUntracked': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'change' : 'changes'} (${v?.untracked ?? 0} untracked)`,
   'gitCommit.title': 'Commit',
   'gitCommit.messagePlaceholder': 'Commit message (⌘/Ctrl+Enter to commit)',
   'gitCommit.generating': 'Generating commit message…',
@@ -506,6 +520,15 @@ const EN: Messages = {
   'toast.dismissShort': 'Dismiss',
   'insight.ready': 'Insight report generated successfully!',
   'request.cancelled': 'Request cancelled.',
+  'visionBridge.model': 'vision model',
+  'visionBridge.skipped': (v) =>
+    `Vision bridge cancelled.${v?.egressOccurred === 1 ? ` Your image and prompt/context were sent to ${v?.target ?? ''}.` : ''}`,
+  'visionBridge.failed': (v) =>
+    v?.egressOccurred === 1
+      ? `Vision bridge (${v?.modelName ?? ''}) failed: the vision model request failed. Your image and prompt/context were sent to ${v?.target ?? ''}. The image was not interpreted.`
+      : `Vision bridge (${v?.target ?? ''}) failed: the vision bridge could not run. The image was not interpreted.`,
+  'visionBridge.ok': (v) =>
+    `Converted ${v?.convertedCount ?? 0} image(s)${Number(v?.omittedCount ?? 0) > 0 ? ` (${v?.omittedCount ?? 0} image(s) omitted)` : ''} to text via ${v?.target ?? ''}.${v?.egressOccurred === 1 ? ' Your image and prompt/context were sent to that model.' : ''}`,
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
@@ -550,6 +573,21 @@ const EN: Messages = {
   'composer.dropChoice.upload': 'Upload to workspace',
   'composer.dropChoice.reference': 'Attach to message',
   'composer.dropChoice.moreFiles': (v) => `and ${v?.count ?? 0} more files`,
+  'composerAdd.trigger': 'Add to message',
+  'composerAdd.emptyState': 'No add actions are available here',
+  'composerAdd.noResults': 'No results',
+  'composerAdd.loadError': 'Failed to load results',
+  'composerAdd.unavailable': 'Unavailable',
+  'composerAdd.file.label': 'Add file',
+  'composerAdd.file.attachDisabled': 'Message attachments are unavailable',
+  'composerAdd.file.uploadDisabled': 'Workspace upload is unavailable',
+  'composerAdd.referenceFile.label': 'Reference file',
+  'composerAdd.referenceFile.searchPlaceholder': 'Search workspace files',
+  'composerAdd.extensions.label': 'Extensions',
+  'composerAdd.extensions.empty': 'No extensions are enabled',
+  'composerAdd.mcp.label': 'MCP',
+  'composerAdd.mcp.empty': 'No MCP servers are available',
+  'composerAdd.skills.label': 'Skills',
   'at.category.mcpResources': 'MCP resources',
   'at.category.mcpResources.description': 'Reference MCP server resources',
   'at.menu': 'Reference menu',
@@ -575,7 +613,7 @@ const EN: Messages = {
   'common.previous': 'previous',
   'common.expand': 'Expand',
   'common.collapse': 'Collapse',
-  'common.refresh': 'refresh',
+  'common.refresh': 'Refresh',
   'common.search': 'Search',
   'common.valid': 'valid',
   'common.clients': (v) => `${v?.count ?? 0} clients`,
@@ -1089,6 +1127,25 @@ const EN: Messages = {
     'Help me set up a recurring scheduled task (keep it long-term). What I want: ',
   'scheduledTasks.name': 'Name',
   'scheduledTasks.workspace': 'Workspace',
+  'scheduledTasks.session.label': 'Conversation',
+  'scheduledTasks.session.dedicated': 'Dedicated task conversation',
+  'scheduledTasks.session.current': 'Current conversation',
+  'scheduledTasks.session.dedicatedHint':
+    'Runs are kept in a separate conversation created for this task.',
+  'scheduledTasks.session.currentHint':
+    'Future runs continue in the conversation that is open now.',
+  'scheduledTasks.session.currentUnsupported':
+    'Current-conversation scheduling is unavailable on this daemon.',
+  'scheduledTasks.session.currentUnavailable':
+    'Open an existing conversation before selecting the current conversation.',
+  'scheduledTasks.session.currentBusy':
+    'Wait for the current turn or pending interaction to finish.',
+  'scheduledTasks.session.currentIneligible':
+    'This conversation type cannot own a scheduled task.',
+  'scheduledTasks.session.currentWorkspaceMismatch':
+    'The current conversation belongs to a different workspace.',
+  'scheduledTasks.session.currentAlreadyBound':
+    'The current conversation is already bound to a scheduled task.',
   'scheduledTasks.taskId': 'Task ID',
   'scheduledTasks.schedule': 'Schedule',
   'scheduledTasks.type': 'Type',
@@ -1159,6 +1216,17 @@ const EN: Messages = {
   'scheduledTasks.runKind.catchUp': 'late',
   'scheduledTasks.runKind.manual': 'manual',
   'scheduledTasks.runKind.withheld': 'skipped',
+  'scheduledTasks.runKind.sessionDispatchFailed':
+    'new session failed, nothing ran',
+  'scheduledTasks.runKind.sessionDispatchFallback':
+    'new session failed, ran in the task session',
+  'scheduledTasks.openRunSession': 'Open this run session',
+  'scheduledTasks.runContext.title': 'Scheduled task run',
+  'scheduledTasks.runContext.taskId': 'Task ID',
+  'scheduledTasks.runContext.schedule': 'Schedule',
+  'scheduledTasks.runContext.triggeredAt': 'Triggered',
+  'scheduledTasks.runContext.trigger.scheduled': 'Scheduled',
+  'scheduledTasks.runContext.trigger.manual': 'Run manually',
   'scheduledTasks.error.runFailed': 'Failed to record the run',
   'scheduledTasks.error.oneShotConsumedButFailed':
     'The task was deleted but the prompt could not be delivered — it never ran. Recreate it to try again.',
@@ -1168,13 +1236,13 @@ const EN: Messages = {
   'scheduledTasks.dur.h': 'h',
   'scheduledTasks.dur.m': 'm',
   'scheduledTasks.dur.s': 's',
-  'scheduledTasks.runMode': 'Run mode',
-  'scheduledTasks.runMode.shared': 'Shared session',
-  'scheduledTasks.runMode.isolated': 'Isolated (fresh session per run)',
-  'scheduledTasks.runMode.shared.hint':
-    'Runs accumulate in one session transcript.',
-  'scheduledTasks.runMode.isolated.hint':
-    'Each run gets a clean session context.',
+  'scheduledTasks.runIn': 'Run in',
+  'scheduledTasks.sessionMode.perRun': 'A new session every run',
+  'scheduledTasks.sessionMode.persistent': 'Persistent task session',
+  'scheduledTasks.sessionMode.perRun.hint':
+    'Each run gets a clean context and its own conversation.',
+  'scheduledTasks.sessionMode.persistent.hint':
+    'All runs continue in the same task conversation.',
   'scheduledTasks.condition': 'Precondition (optional)',
   'scheduledTasks.conditionPlaceholder':
     'e.g. Check whether anything landed on main since yesterday. If nothing did, the task should not run.',
@@ -1226,6 +1294,13 @@ const EN: Messages = {
   'sideTask.description': 'View or create side tasks',
   'sideTask.new': 'New',
   'sideTask.create': 'New side task',
+  'terminal.title': 'Terminal',
+  'terminal.open': 'Open a terminal',
+  'terminal.notice.exited': (v) =>
+    `Process exited with code ${v?.exitCode ?? '?'}`,
+  'terminal.notice.error': (v) => `Error: ${v?.message ?? ''}`,
+  'terminal.notice.unknownError': 'Unknown error',
+  'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -1354,6 +1429,8 @@ const EN: Messages = {
   'sidebar.unarchive': 'Restore',
   'sidebar.moreActions': 'More actions',
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
+  'sidebar.archiveRunningDisabled':
+    'A running session cannot be archived; archiving would end its turn',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.archivedEmpty': 'No archived sessions.',
   'sidebar.archiveFailed': 'Failed to archive session',
@@ -1370,10 +1447,14 @@ const EN: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.waitingForApproval': 'Waiting for approval',
+  'sidebar.waitingForApprovalShort': 'Approval',
   'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
+  'sidebar.sessionPrStateMerged': 'Merged',
+  'sidebar.sessionPrStateClosed': 'Closed',
   'sidebar.userInputNeeded': 'User input needed',
+  'sidebar.userInputNeededShort': 'Input',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
   'sidebar.unpin': 'Unpin',
@@ -1487,7 +1568,6 @@ const EN: Messages = {
   'help.shortcut.shell': 'Run shell commands',
   'help.shortcut.togglePanel': 'Toggle this panel',
   'help.shortcut.retry': 'Retry last request',
-  'help.shortcut.compact': 'Toggle compact mode',
   'retry.hint': 'Press Ctrl+Y to retry or click to retry',
   'retry.none': 'No failed request to retry.',
   'system.taskNotification': 'Task notification',
@@ -1553,9 +1633,6 @@ const EN: Messages = {
   'error.loopDetected':
     'The model got stuck while using tools or reached a safety limit, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
   'shell.command': 'Shell Command',
-  'compact.enabled': 'Compact mode enabled',
-  'compact.disabled': 'Compact mode disabled',
-  'compact.saveFailed': 'Failed to save compact mode',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'Built-in commands',
   'help.tab.custom': 'custom-commands',
@@ -1608,6 +1685,8 @@ const EN: Messages = {
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
     'Create, test, and customize Qwen Code extensions',
+  'skilldesc.goalDraft':
+    'Turn a fuzzy intention into a verifiable /goal objective',
   'skilldesc.loop': 'Run a prompt on a schedule or self-paced wakeups',
   'skilldesc.newApp': 'Workflow for building a new app from scratch',
   'skilldesc.qcHelper': 'Answer questions about using Qwen Code',
@@ -1623,15 +1702,12 @@ const EN: Messages = {
   'skilldesc.bugfix': 'Fix a bug from a GitHub issue, reproduce-first',
   'skilldesc.codegraph': 'Analyze the codebase via graph and vector index',
   'skilldesc.createIssue': 'Draft and submit a GitHub issue from an idea',
-  'skilldesc.desktopPet': 'Create a pixel-art desktop pet for Qwen Code',
   'skilldesc.docsAuditAndRefresh':
     'Audit and refresh docs/ against the codebase',
   'skilldesc.docsUpdateFromDiff': 'Update official docs from local git diff',
   'skilldesc.e2eTesting': 'Run end-to-end tests of the Qwen Code CLI',
   'skilldesc.featDev': 'End-to-end workflow for a non-trivial feature',
   'skilldesc.memoryLeakDebug': 'Diagnose CLI memory leaks via heap snapshots',
-  'skilldesc.openworkDesktopSync':
-    'Sync packages/desktop with openwork commit-by-commit',
   'skilldesc.preparePr': 'Prepare a GitHub PR title and body from the branch',
   'skilldesc.qwenCodeClaw': 'Use Qwen Code as a code-understanding agent',
   'skilldesc.structuredDebugging':
@@ -2093,7 +2169,8 @@ const EN: Messages = {
   'goals.newHint':
     'The goal starts in a new session and runs until its condition holds.',
   'goals.condition': 'Condition',
-  'goals.conditionPlaceholder': 'e.g. all tests pass and the lint is clean',
+  'goals.conditionPlaceholder':
+    'e.g. `npm test` exits 0 and `npm run lint` reports no warnings (paste the output); do not modify test files; stop as blocked after 20 turns',
   'goals.cancel': 'Cancel',
   'goals.create': 'Set goal',
   'goals.creating': 'Starting…',
@@ -2362,6 +2439,11 @@ const EN: Messages = {
   'skills.notToggleable': 'This skill cannot be enabled or disabled.',
   'skills.run': 'Reference skill',
   'skills.search': 'Search skills…',
+  'skills.settingUpdated': 'Workspace setting updated.',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace setting updated. Effective Skill availability did not change.',
+  'skills.settingUnchanged':
+    'Skill already has the requested workspace setting; no setting was changed.',
   'skills.status': 'Status',
   'skills.status.disabled': 'disabled',
   'skills.status.enabled': 'enabled',
@@ -2419,6 +2501,27 @@ const EN: Messages = {
   'stats.toolTime': 'Tool Time',
   'stats.total': 'Total',
   'stats.totalReviewed': 'Total Reviewed Suggestions:',
+  'tokenUsage.avgLatency': 'Avg latency',
+  'tokenUsage.cached': 'Cached input',
+  'tokenUsage.input': 'Input',
+  'tokenUsage.loadError': 'Failed to load token usage.',
+  'tokenUsage.models': 'By model',
+  'tokenUsage.noData': 'No API calls in this session yet.',
+  'tokenUsage.noSubagents': 'No subagent calls in this session yet.',
+  'tokenUsage.noTools': 'No tool calls in this session yet.',
+  'tokenUsage.open': 'Session token usage',
+  'tokenUsage.output': 'Total output',
+  'tokenUsage.refresh': 'Refresh',
+  'tokenUsage.requests': 'Requests',
+  'tokenUsage.retry': 'Retry',
+  'tokenUsage.subagents': 'Subagents',
+  'tokenUsage.thoughts': 'Reasoning (included in total output)',
+  'tokenUsage.title': 'Token Usage',
+  'tokenUsage.toolRow': (v) =>
+    `${v?.count ?? 0} calls · ${v?.rate ?? 0}% ok · ${v?.duration ?? ''}`,
+  'tokenUsage.tools': 'Tools',
+  'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
+  'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
   'status.contextUsed': (v) => `${v?.pct ?? '0.0'}% context used`,
   'status.disconnected': 'Disconnected',
   'status.modeHint': '(shift + tab or click to switch)',
@@ -2611,11 +2714,11 @@ const EN: Messages = {
   'toolGroup.summary.ranAgents': (v) =>
     `Ran ${v?.count ?? 0} agent${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.editedFiles': (v) =>
-    `Edited ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
+    `Edited files ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.ranCommands': (v) =>
     `Ran ${v?.count ?? 0} command${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.readFiles': (v) =>
-    `Read ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
+    `Read files ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.searched': (v) =>
     `Searched ${v?.count ?? 0} time${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.updatedTodos': (v) =>
@@ -2646,15 +2749,16 @@ const EN: Messages = {
   'thinking.closeTranslation': 'Close',
   'thinking.inputTokens': (v) => `Input tokens: ${v?.count ?? '--'}`,
   'thinking.outputTokens': (v) => `Output tokens: ${v?.count ?? '--'}`,
-  'sessionsOverview.count': (v) => `${v?.count ?? 0} sessions`,
   'sessionsOverview.current': 'Current',
   'sessionsOverview.empty': 'No sessions yet',
   'sessionsOverview.loadFailed': 'Failed to load sessions',
   'sessionsOverview.loading': 'Loading sessions…',
-  'sessionsOverview.openElsewhere': 'Currently open in another window',
+  'sessionsOverview.noData': 'No data',
   'sessionsOverview.openInSplit': 'Open in split',
   'sessionsOverview.openInSplitHint':
     'Show the selected sessions side by side in this window',
+  'sessionsOverview.splitLimit': (v) =>
+    `Select at most ${v?.max ?? 6} sessions to open them together`,
   'sessionsOverview.openInTab': 'Open in new tab',
   'sessionsOverview.openInTabHint':
     'Open the selected sessions as a split view in a new browser tab',
@@ -2662,10 +2766,48 @@ const EN: Messages = {
     'Pop-up blocked. Allow pop-ups for this site to open sessions in new tabs.',
   'sessionsOverview.refresh': 'Refresh',
   'sessionsOverview.selectAll': 'Select all',
-  'sessionsOverview.splitCap': (v) =>
-    `Only the first ${v?.max ?? 6} selected sessions will open in the split.`,
+  'sessionsOverview.titleColumn': 'Title',
+  'sessionsOverview.sessionId': 'Session ID',
+  'sessionsOverview.actions': 'Actions',
+  'sessionsOverview.folder': 'Workspace',
+  'sessionsOverview.time': 'Time',
+  'sessionsOverview.worktree': 'Worktree',
+  'sessionsOverview.selectedRows': (v) =>
+    `${v?.count ?? 0} of ${v?.total ?? 0} row(s) selected.`,
+  'sessionsOverview.previousPage': 'Previous',
+  'sessionsOverview.nextPage': 'Next',
+  'sessionsOverview.pageInfo': (v) =>
+    `Page ${v?.page ?? 0} of ${v?.total ?? 0}`,
+  'sessionsOverview.rowsPerPage': 'Rows per page',
+  'sessionsOverview.workspaceFilter': 'Filter by workspace',
+  'sessionsOverview.allWorkspaces': 'All',
+  'sessionsOverview.searchPlaceholder': 'Search sessions…',
+  'sessionsOverview.confirmArchiveTitle': 'Archive session?',
+  'sessionsOverview.confirmArchive': (v) =>
+    `"${v?.name ?? ''}" will be moved to archived sessions.`,
+  'sessionsOverview.confirmArchiveBulkTitle': (v) =>
+    `Archive ${v?.count ?? 0} sessions?`,
+  'sessionsOverview.confirmArchiveBulk': (v) =>
+    `${v?.count ?? 0} selected sessions will be moved to archived sessions.`,
+  'sessionsOverview.confirmDeleteTitle': 'Delete session?',
+  'sessionsOverview.confirmDelete': (v) =>
+    `"${v?.name ?? ''}" and its conversation history will be permanently deleted. This cannot be undone.`,
+  'sessionsOverview.deleteFailed': 'Failed to delete session',
+  'sessionsOverview.archiveFailed': 'Failed to archive session',
+  'sessionsOverview.actionUnavailable':
+    'This action is unavailable for the selected session or workspace',
+  'sessionsOverview.bulkArchive': 'Archive',
+  'sessionsOverview.bulkArchiveHint': (v) =>
+    `Archive ${v?.count ?? 0} selected sessions`,
+  'sessionsOverview.bulkDelete': 'Delete',
+  'sessionsOverview.bulkDeleteHint': (v) =>
+    `Delete ${v?.count ?? 0} selected sessions`,
+  'sessionsOverview.confirmDeleteBulkTitle': (v) =>
+    `Delete ${v?.count ?? 0} sessions?`,
+  'sessionsOverview.confirmDeleteBulk': (v) =>
+    `${v?.count ?? 0} selected sessions and their conversation history will be permanently deleted. This cannot be undone.`,
   'sessionsOverview.selectSession': (v) => `Select ${v?.name ?? ''}`,
-  'sessionsOverview.status.idle': 'Idle',
+  'sessionsOverview.status.askUserQuestion': 'User input needed',
   'sessionsOverview.status.needsApproval': 'Needs approval',
   'sessionsOverview.status.running': 'Running',
   'sessionsOverview.title': 'Session Overview',
@@ -2891,6 +3033,9 @@ const EN: Messages = {
     'Messages in the same group or topic share one conversation; best for collaboration.',
   'channels.editor.field.shared.sessionScope.detail.single':
     'Every message shares one conversation; best for a single-bot duty channel.',
+  'channels.editor.field.shared.multiSession': 'Named tasks',
+  'channels.editor.field.shared.multiSession.description':
+    'Keep a separate owner-scoped catalog of named tasks in daemon-managed mode.',
   'channels.editor.policy.pairing.title': 'Pairing',
   'channels.editor.policy.pairing.description':
     'People receive a pairing code and can chat after you approve them.',
@@ -2997,6 +3142,10 @@ const EN: Messages = {
   'settings.localControl.maySleep': 'This Mac may sleep',
   'settings.localControl.urlRedacted':
     'The pairing URL is not shown here because this daemon has no bearer token. It was printed to the terminal where the daemon is running — pair from there.',
+  'localControl.open': 'Mobile access',
+  'localControl.disabledHint':
+    'Local Control is off. Turn it on in Settings to pair a phone on the same network.',
+  'localControl.openSettings': 'Open Settings',
   'settings.models.title': 'Models',
   'settings.models.add': '+ Add Model',
   'settings.models.setCurrent': 'Set current',
@@ -3008,6 +3157,8 @@ const EN: Messages = {
   'settings.models.empty': 'No configured models yet.',
   'settings.models.loading': 'Loading models…',
   'settings.models.deleteFailed': 'Failed to delete model',
+  'settings.models.runtimeSyncFailed':
+    'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
   'settings.models.fallbacks.title': 'Model Fallbacks',
   'settings.models.fallbacks.hint': (v) =>
     `Select up to ${v?.max ?? 3}; tried in order when the main model is at capacity.`,
@@ -3074,6 +3225,18 @@ const ZH: Messages = {
   'branchPicker.createdBranch': (v) => `已创建分支 ${v?.branch ?? ''}`,
   'branchPicker.pushSuccess': '推送成功',
   'branchPicker.pullSuccess': '更新成功',
+  'branchPicker.hint.upToDate': '已是最新',
+  'branchPicker.hint.noUpstream': '无上游分支',
+  'branchPicker.hint.upstreamGone': '上游分支已不存在',
+  'branchPicker.hint.behindDirty': (v) => `↓${v?.count ?? 0} · 有未提交更改`,
+  'branchPicker.hint.setsUpstream': '推送时设置上游',
+  'branchPicker.hint.aheadBehind': (v) =>
+    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · 请先更新`,
+  'branchPicker.hint.nothingToPush': '无待推送',
+  'branchPicker.hint.noChanges': '无更改',
+  'branchPicker.hint.changes': (v) => `${v?.count ?? 0} 处更改`,
+  'branchPicker.hint.changesUntracked': (v) =>
+    `${v?.count ?? 0} 处更改（${v?.untracked ?? 0} 未跟踪）`,
   'gitCommit.title': '提交',
   'gitCommit.messagePlaceholder': '提交信息（⌘/Ctrl+Enter 提交）',
   'gitCommit.generating': '正在生成提交信息…',
@@ -3162,21 +3325,20 @@ const ZH: Messages = {
   'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
-  // `localizeToolDisplayName`. Proper tool names / acronyms stay in English
-  // (Agent, Grep, Glob, LSP); a product name (e.g. `Notebook`) stays verbatim.
+  // `localizeToolDisplayName`. Acronyms and product names stay verbatim.
   'toolName.edit': '编辑',
   'toolName.write_file': '写入文件',
   'toolName.read_file': '读取文件',
   'toolName.zoom_image': '图片放大',
   'toolName.grep': '搜索内容',
   'toolName.grep_search': '搜索内容',
-  'toolName.glob': 'Glob',
+  'toolName.glob': '查找文件',
   'toolName.run_shell_command': '运行命令',
   'toolName.todo_write': '任务清单',
   'toolName.get_goal': '目标',
   'toolName.update_goal': '更新目标',
   'toolName.save_memory': '保存记忆',
-  'toolName.agent': 'Agent',
+  'toolName.agent': '智能体',
   'toolName.skill': '查看技能',
   'toolName.enter_plan_mode': '进入计划模式',
   'toolName.exit_plan_mode': '退出计划模式',
@@ -3212,6 +3374,7 @@ const ZH: Messages = {
   'toolName.read_mcp_resource': '读取 MCP 资源',
   'toolName.artifact': '制品',
   'toolName.record_artifact': '记录制品',
+  'toolName.report_findings': '上报评审发现',
   'toolName.image_gen': '生成图片',
   'toolName.display_image': '显示图片',
   // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
@@ -3573,6 +3736,15 @@ const ZH: Messages = {
   'toast.dismissShort': '关闭',
   'insight.ready': 'Insight 报告已生成！',
   'request.cancelled': '请求已取消。',
+  'visionBridge.model': '视觉模型',
+  'visionBridge.skipped': (v) =>
+    `视觉桥接已取消。${v?.egressOccurred === 1 ? `你的图片及提示词/上下文已发送至 ${v?.target ?? ''}。` : ''}`,
+  'visionBridge.failed': (v) =>
+    v?.egressOccurred === 1
+      ? `视觉桥接（${v?.modelName ?? ''}）失败：视觉模型请求失败。你的图片及提示词/上下文已发送至 ${v?.target ?? ''}。图片未被解析。`
+      : `视觉桥接（${v?.target ?? ''}）失败：视觉桥接无法运行。图片未被解析。`,
+  'visionBridge.ok': (v) =>
+    `已通过 ${v?.target ?? ''} 将 ${v?.convertedCount ?? 0} 张图片转换为文本${Number(v?.omittedCount ?? 0) > 0 ? `（已忽略 ${v?.omittedCount ?? 0} 张图片）` : ''}。${v?.egressOccurred === 1 ? '你的图片及提示词/上下文已发送至该模型。' : ''}`,
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
@@ -3613,6 +3785,21 @@ const ZH: Messages = {
   'composer.dropChoice.upload': '上传到工作区',
   'composer.dropChoice.reference': '添加为附件',
   'composer.dropChoice.moreFiles': (v) => `另有 ${v?.count ?? 0} 个文件`,
+  'composerAdd.trigger': '添加到消息',
+  'composerAdd.emptyState': '此处没有可用的添加操作',
+  'composerAdd.noResults': '没有结果',
+  'composerAdd.loadError': '加载失败',
+  'composerAdd.unavailable': '不可用',
+  'composerAdd.file.label': '添加文件',
+  'composerAdd.file.attachDisabled': '当前无法添加消息附件',
+  'composerAdd.file.uploadDisabled': '当前工作区不可上传',
+  'composerAdd.referenceFile.label': '引用文件',
+  'composerAdd.referenceFile.searchPlaceholder': '搜索工作区文件',
+  'composerAdd.extensions.label': '扩展',
+  'composerAdd.extensions.empty': '没有已启用的扩展',
+  'composerAdd.mcp.label': 'MCP',
+  'composerAdd.mcp.empty': '没有可用的 MCP 服务',
+  'composerAdd.skills.label': '技能',
   'at.category.mcpResources': 'MCP 资源',
   'at.category.mcpResources.description': '引用 MCP server 资源',
   'at.menu': '引用菜单',
@@ -4115,6 +4302,20 @@ const ZH: Messages = {
   'scheduledTasks.chatStarter': '帮我创建一个长期保留的定时任务，我想：',
   'scheduledTasks.name': '名称',
   'scheduledTasks.workspace': '工作区',
+  'scheduledTasks.session.label': '会话',
+  'scheduledTasks.session.dedicated': '独立任务会话',
+  'scheduledTasks.session.current': '当前会话',
+  'scheduledTasks.session.dedicatedHint':
+    '任务运行记录保存在单独创建的会话中。',
+  'scheduledTasks.session.currentHint': '后续运行继续在当前打开的会话中。',
+  'scheduledTasks.session.currentUnsupported':
+    '当前 daemon 不支持绑定当前会话。',
+  'scheduledTasks.session.currentUnavailable': '请先打开一个已有会话。',
+  'scheduledTasks.session.currentBusy': '请等待当前执行或待处理交互结束。',
+  'scheduledTasks.session.currentIneligible': '此类会话不能绑定定时任务。',
+  'scheduledTasks.session.currentWorkspaceMismatch':
+    '当前会话属于另一个工作区。',
+  'scheduledTasks.session.currentAlreadyBound': '当前会话已绑定其他定时任务。',
   'scheduledTasks.taskId': '任务 ID',
   'scheduledTasks.schedule': '计划',
   'scheduledTasks.type': '类型',
@@ -4183,6 +4384,16 @@ const ZH: Messages = {
   'scheduledTasks.runKind.catchUp': '补跑',
   'scheduledTasks.runKind.manual': '手动',
   'scheduledTasks.runKind.withheld': '已跳过',
+  'scheduledTasks.runKind.sessionDispatchFailed': '新建会话失败，未运行',
+  'scheduledTasks.runKind.sessionDispatchFallback':
+    '新建会话失败，已在任务会话中运行',
+  'scheduledTasks.openRunSession': '打开本次运行会话',
+  'scheduledTasks.runContext.title': '定时任务运行',
+  'scheduledTasks.runContext.taskId': '任务 ID',
+  'scheduledTasks.runContext.schedule': '计划',
+  'scheduledTasks.runContext.triggeredAt': '触发于',
+  'scheduledTasks.runContext.trigger.scheduled': '定时触发',
+  'scheduledTasks.runContext.trigger.manual': '手动运行',
   'scheduledTasks.error.runFailed': '记录运行失败',
   'scheduledTasks.error.oneShotConsumedButFailed':
     '任务已删除,但提示词未能送达——它没有运行。请重新创建后重试。',
@@ -4192,11 +4403,13 @@ const ZH: Messages = {
   'scheduledTasks.dur.h': '小时',
   'scheduledTasks.dur.m': '分',
   'scheduledTasks.dur.s': '秒',
-  'scheduledTasks.runMode': '运行模式',
-  'scheduledTasks.runMode.shared': '共享会话',
-  'scheduledTasks.runMode.isolated': '隔离（每次运行新建会话）',
-  'scheduledTasks.runMode.shared.hint': '所有运行记录累积在同一个会话中。',
-  'scheduledTasks.runMode.isolated.hint': '每次运行获得独立的会话上下文。',
+  'scheduledTasks.runIn': '运行于',
+  'scheduledTasks.sessionMode.perRun': '每次新会话',
+  'scheduledTasks.sessionMode.persistent': '固定会话',
+  'scheduledTasks.sessionMode.perRun.hint':
+    '每次运行都创建独立会话，使用干净的上下文。',
+  'scheduledTasks.sessionMode.persistent.hint':
+    '所有运行都继续使用同一个任务会话。',
   'scheduledTasks.condition': '前置条件（可选）',
   'scheduledTasks.conditionPlaceholder':
     '例如：检查昨天以来 main 分支有没有新提交。如果没有，则本次不应执行。',
@@ -4246,6 +4459,12 @@ const ZH: Messages = {
   'sideTask.description': '查看或新增侧边任务',
   'sideTask.new': '新增',
   'sideTask.create': '新建侧边任务',
+  'terminal.title': '终端',
+  'terminal.open': '打开终端',
+  'terminal.notice.exited': (v) => `进程已退出，退出码 ${v?.exitCode ?? '?'}`,
+  'terminal.notice.error': (v) => `错误：${v?.message ?? ''}`,
+  'terminal.notice.unknownError': '未知错误',
+  'terminal.notice.reconnecting': '连接已断开，正在重连…',
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -4364,6 +4583,8 @@ const ZH: Messages = {
   'sidebar.unarchive': '恢复',
   'sidebar.moreActions': '更多操作',
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
+  'sidebar.archiveRunningDisabled':
+    '不能归档运行中的会话，归档会终止其当前回合',
   'sidebar.archivedTitle': '已归档',
   'sidebar.archivedEmpty': '没有已归档的会话。',
   'sidebar.archiveFailed': '归档会话失败',
@@ -4380,10 +4601,14 @@ const ZH: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.waitingForApproval': '等待批准',
+  'sidebar.waitingForApprovalShort': '待批准',
   'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
+  'sidebar.sessionPrStateMerged': '已合入',
+  'sidebar.sessionPrStateClosed': '已关闭',
   'sidebar.userInputNeeded': '需要用户输入',
+  'sidebar.userInputNeededShort': '需输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
   'sidebar.unpin': '取消置顶',
@@ -4486,7 +4711,6 @@ const ZH: Messages = {
   'help.shortcut.shell': '运行 shell 命令',
   'help.shortcut.togglePanel': '切换此面板',
   'help.shortcut.retry': '重试上次请求',
-  'help.shortcut.compact': '切换紧凑模式',
   'retry.hint': '按 Ctrl+Y 重试或点击重试',
   'retry.none': '没有可重试的失败请求。',
   'system.taskNotification': '后台任务通知',
@@ -4542,9 +4766,6 @@ const ZH: Messages = {
   'error.loopDetected':
     '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
   'shell.command': 'Shell 命令',
-  'compact.enabled': '紧凑模式已开启',
-  'compact.disabled': '紧凑模式已关闭',
-  'compact.saveFailed': '保存紧凑模式失败',
   'help.subcommands': '子命令',
   'help.tab.commands': '内置命令',
   'help.tab.custom': '自定义命令',
@@ -4591,6 +4812,7 @@ const ZH: Messages = {
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',
+  'skilldesc.goalDraft': '将模糊意图改写为可验证的 /goal 目标',
   'skilldesc.loop': '按计划或自定节奏循环运行提示词',
   'skilldesc.newApp': '从零构建新应用的工作流',
   'skilldesc.qcHelper': '解答 Qwen Code 使用相关问题',
@@ -4604,13 +4826,11 @@ const ZH: Messages = {
   'skilldesc.bugfix': '按先复现流程修复 GitHub issue 中的 bug',
   'skilldesc.codegraph': '通过图数据库和向量索引分析代码库',
   'skilldesc.createIssue': '根据想法或 bug 描述起草并提交 GitHub issue',
-  'skilldesc.desktopPet': '为 Qwen Code 创建像素风桌面宠物',
   'skilldesc.docsAuditAndRefresh': '对照代码库审计并刷新 docs/ 文档',
   'skilldesc.docsUpdateFromDiff': '按本地 git diff 更新官方文档',
   'skilldesc.e2eTesting': '运行 Qwen Code CLI 的端到端测试',
   'skilldesc.featDev': '实现非平凡功能的端到端工作流',
   'skilldesc.memoryLeakDebug': '用堆快照诊断 CLI 内存泄漏',
-  'skilldesc.openworkDesktopSync': '将 packages/desktop 与 openwork 逐提交同步',
   'skilldesc.preparePr': '从当前分支准备 GitHub PR 标题和正文',
   'skilldesc.qwenCodeClaw': '将 Qwen Code 用作代码理解智能体',
   'skilldesc.structuredDebugging': '假设驱动的疑难 bug 调试方法',
@@ -5035,7 +5255,8 @@ const ZH: Messages = {
   'goals.new': '新建目标',
   'goals.newHint': '目标会在一个新会话中启动，并持续运行直到条件满足。',
   'goals.condition': '条件',
-  'goals.conditionPlaceholder': '例如：所有测试通过且 lint 无告警',
+  'goals.conditionPlaceholder':
+    '例如：`npm test` 退出码为 0 且 `npm run lint` 无告警（贴出输出）；不得修改测试文件；20 轮内未达成则以 blocked 结束',
   'goals.cancel': '取消',
   'goals.create': '设置目标',
   'goals.creating': '正在启动…',
@@ -5285,6 +5506,10 @@ const ZH: Messages = {
   'skills.notToggleable': '此 Skill 不支持启用或禁用。',
   'skills.run': '引用 skill',
   'skills.search': '搜索 Skills…',
+  'skills.settingUpdated': 'Workspace 设置已更新。',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace 设置已更新，Skill 的实际可用状态未改变。',
+  'skills.settingUnchanged': 'Skill 已处于请求的 Workspace 设置，无需更改。',
   'skills.status': '状态',
   'skills.status.disabled': '已禁用',
   'skills.status.enabled': '已启用',
@@ -5340,6 +5565,27 @@ const ZH: Messages = {
   'stats.toolTime': '工具耗时',
   'stats.total': '总计',
   'stats.totalReviewed': '已审核建议总数：',
+  'tokenUsage.avgLatency': '平均延迟',
+  'tokenUsage.cached': '缓存输入',
+  'tokenUsage.input': '输入',
+  'tokenUsage.loadError': 'Token 消耗加载失败。',
+  'tokenUsage.models': '按模型',
+  'tokenUsage.noData': '本会话还没有 API 调用。',
+  'tokenUsage.noSubagents': '本会话还没有子 agent 调用。',
+  'tokenUsage.noTools': '本会话还没有工具调用。',
+  'tokenUsage.open': '会话 Token 消耗',
+  'tokenUsage.output': '总输出',
+  'tokenUsage.refresh': '刷新',
+  'tokenUsage.requests': '请求',
+  'tokenUsage.retry': '重试',
+  'tokenUsage.subagents': '子agent',
+  'tokenUsage.thoughts': '思考（包含在总输出中）',
+  'tokenUsage.title': 'Token 消耗',
+  'tokenUsage.toolRow': (v) =>
+    `${v?.count ?? 0} 次 · 成功率 ${v?.rate ?? 0}% · ${v?.duration ?? ''}`,
+  'tokenUsage.tools': '工具',
+  'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
+  'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
   'status.contextUsed': (v) => `上下文已用 ${v?.pct ?? '0.0'}%`,
   'status.disconnected': '断开连接',
   'status.modeHint': '(shift + tab 或点击切换)',
@@ -5519,9 +5765,9 @@ const ZH: Messages = {
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.summary.ranAgents': (v) => `已运行 ${v?.count ?? 0} 个智能体`,
-  'toolGroup.summary.editedFiles': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
+  'toolGroup.summary.editedFiles': (v) => `已编辑文件 ${v?.count ?? 0} 次`,
   'toolGroup.summary.ranCommands': (v) => `已运行 ${v?.count ?? 0} 条命令`,
-  'toolGroup.summary.readFiles': (v) => `已读取 ${v?.count ?? 0} 个文件`,
+  'toolGroup.summary.readFiles': (v) => `已读取文件 ${v?.count ?? 0} 次`,
   'toolGroup.summary.searched': (v) => `已搜索 ${v?.count ?? 0} 次`,
   'toolGroup.summary.updatedTodos': (v) =>
     Number(v?.count ?? 0) > 1
@@ -5552,24 +5798,62 @@ const ZH: Messages = {
   'thinking.outputTokens': (v) => `生成 Token：${v?.count ?? '--'}`,
   'welcome.changeModel': '(/model 切换)',
   'welcome.defaultModel': '未知模型',
-  'sessionsOverview.count': (v) => `${v?.count ?? 0} 个会话`,
   'sessionsOverview.current': '当前',
   'sessionsOverview.empty': '暂无会话',
   'sessionsOverview.loadFailed': '加载会话失败',
   'sessionsOverview.loading': '正在加载会话…',
-  'sessionsOverview.openElsewhere': '已在其他窗口打开',
-  'sessionsOverview.openInSplit': '打开到分屏',
+  'sessionsOverview.noData': '暂无数据',
+  'sessionsOverview.openInSplit': '分屏打开',
   'sessionsOverview.openInSplitHint': '在本窗口内并排显示选中的会话',
-  'sessionsOverview.openInTab': '在新标签页打开',
+  'sessionsOverview.splitLimit': (v) =>
+    `最多选择 ${v?.max ?? 6} 个会话同时打开`,
+  'sessionsOverview.openInTab': '新标签页打开',
   'sessionsOverview.openInTabHint': '在新标签页中以分屏并排打开选中的会话',
   'sessionsOverview.popupBlocked':
     '弹出窗口被拦截。请允许本站弹窗，以便在新标签页中打开会话。',
   'sessionsOverview.refresh': '刷新',
   'sessionsOverview.selectAll': '全选',
-  'sessionsOverview.splitCap': (v) =>
-    `只有前 ${v?.max ?? 6} 个选中的会话会进入分屏。`,
+  'sessionsOverview.titleColumn': '标题',
+  'sessionsOverview.sessionId': '会话 ID',
+  'sessionsOverview.actions': '操作',
+  'sessionsOverview.folder': '工作区',
+  'sessionsOverview.time': '时间',
+  'sessionsOverview.worktree': 'Worktree',
+  'sessionsOverview.selectedRows': (v) =>
+    `${v?.count ?? 0} / ${v?.total ?? 0} 行已选`,
+  'sessionsOverview.previousPage': '上一页',
+  'sessionsOverview.nextPage': '下一页',
+  'sessionsOverview.pageInfo': (v) =>
+    `第 ${v?.page ?? 0} / ${v?.total ?? 0} 页`,
+  'sessionsOverview.rowsPerPage': '每页行数',
+  'sessionsOverview.workspaceFilter': '按工作区筛选',
+  'sessionsOverview.allWorkspaces': '全部',
+  'sessionsOverview.searchPlaceholder': '搜索会话…',
+  'sessionsOverview.confirmArchiveTitle': '归档会话？',
+  'sessionsOverview.confirmArchive': (v) =>
+    `“${v?.name ?? ''}” 将移至已归档会话。`,
+  'sessionsOverview.confirmArchiveBulkTitle': (v) =>
+    `归档 ${v?.count ?? 0} 个会话？`,
+  'sessionsOverview.confirmArchiveBulk': (v) =>
+    `选中的 ${v?.count ?? 0} 个会话将移至已归档会话。`,
+  'sessionsOverview.confirmDeleteTitle': '删除会话？',
+  'sessionsOverview.confirmDelete': (v) =>
+    `"${v?.name ?? ''}" 及其对话记录将被永久删除，此操作无法撤销。`,
+  'sessionsOverview.deleteFailed': '删除会话失败',
+  'sessionsOverview.archiveFailed': '归档会话失败',
+  'sessionsOverview.actionUnavailable': '所选会话或工作区不支持此操作',
+  'sessionsOverview.bulkArchive': '归档',
+  'sessionsOverview.bulkArchiveHint': (v) =>
+    `归档选中的 ${v?.count ?? 0} 个会话`,
+  'sessionsOverview.bulkDelete': '删除',
+  'sessionsOverview.bulkDeleteHint': (v) =>
+    `删除选中的 ${v?.count ?? 0} 个会话`,
+  'sessionsOverview.confirmDeleteBulkTitle': (v) =>
+    `删除 ${v?.count ?? 0} 个会话？`,
+  'sessionsOverview.confirmDeleteBulk': (v) =>
+    `选中的 ${v?.count ?? 0} 个会话及其对话记录将被永久删除，此操作无法撤销。`,
   'sessionsOverview.selectSession': (v) => `选择 ${v?.name ?? ''}`,
-  'sessionsOverview.status.idle': '空闲',
+  'sessionsOverview.status.askUserQuestion': '需要用户输入',
   'sessionsOverview.status.needsApproval': '待审批',
   'sessionsOverview.status.running': '运行中',
   'sessionsOverview.title': '会话总览',
@@ -5780,6 +6064,9 @@ const ZH: Messages = {
     '同一群聊或话题进入同一个对话，适合群内协作。',
   'channels.editor.field.shared.sessionScope.detail.single':
     '所有消息共用一个对话，适合单一机器人值守场景。',
+  'channels.editor.field.shared.multiSession': '命名任务',
+  'channels.editor.field.shared.multiSession.description':
+    '在 daemon 托管模式下，为每位用户保留相互隔离的命名任务目录。',
   'channels.editor.policy.pairing.title': '配对模式',
   'channels.editor.policy.pairing.description':
     '用户会收到配对码，经您批准后才能开始对话。',
@@ -5881,6 +6168,10 @@ const ZH: Messages = {
   'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
   'settings.localControl.urlRedacted':
     '由于该守护进程未配置 bearer token，配对 URL 不在此显示。它已打印到运行守护进程的终端，请到该终端获取配对 URL 完成配对。',
+  'localControl.open': '手机访问',
+  'localControl.disabledHint':
+    '本地控制未开启。请在设置中开启后，配对同一网络下的手机。',
+  'localControl.openSettings': '打开设置',
   'settings.models.title': '模型',
   'settings.models.add': '+ 增加模型',
   'settings.models.setCurrent': '设为当前',
@@ -5892,6 +6183,8 @@ const ZH: Messages = {
   'settings.models.empty': '暂无配置的模型。',
   'settings.models.loading': '正在加载模型…',
   'settings.models.deleteFailed': '删除模型失败',
+  'settings.models.runtimeSyncFailed':
+    '更改已保存，但无法刷新正在运行的会话。请重启 qwen serve 后再使用更新后的模型列表。',
   'settings.models.fallbacks.title': '模型回退',
   'settings.models.fallbacks.hint': (v) =>
     `最多选择 ${v?.max ?? 3} 个；主模型容量不足时按顺序回退。`,
@@ -5937,9 +6230,6 @@ const ZH: Messages = {
   'settings.label.general.language': '语言：界面',
   'settings.description.general.language':
     '用户界面的语言。使用 auto 可根据系统设置自动检测；也可以在 ~/.qwen/locales/ 中放置 JS 语言文件来使用自定义语言代码。',
-  'settings.label.general.dynamicCommandTranslation': '语言：动态命令翻译',
-  'settings.description.general.dynamicCommandTranslation':
-    '为动态 slash command 描述启用 AI 翻译。关闭后动态命令使用原始描述，也不会触发翻译模型调用。',
   'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
   'settings.description.general.preventSystemSleep':
     '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',
@@ -5956,12 +6246,6 @@ const ZH: Messages = {
   'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
   'settings.description.ui.enableFollowupSuggestions':
     '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键接受，按 Enter 接受并提交。',
-  'settings.label.ui.compactMode': '紧凑模式',
-  'settings.description.ui.compactMode':
-    '隐藏工具输出和思考内容，显示更简洁的视图（可用 Ctrl+O 切换）。',
-  'settings.label.ui.compactInline': '紧凑内联',
-  'settings.description.ui.compactInline':
-    '在每个分组内紧凑显示工具内容，而不是跨分组合并。需要先启用紧凑模式。',
   'settings.label.ui.shellOutputMaxLines': 'Shell 输出最大行数',
   'settings.description.ui.shellOutputMaxLines':
     '内联显示的 shell 输出最大行数。设为 0 可取消限制并显示完整输出；隐藏行数仍会通过 +N lines 指示器展示。',
@@ -6003,7 +6287,7 @@ const ZH: Messages = {
     '显示 Session Workflow DAG，并将 Plan 模式展示为计划并审阅。',
   'settings.label.experimental.emitToolUseSummaries': '工具使用摘要',
   'settings.description.experimental.emitToolUseSummaries':
-    '每个工具批次完成后生成一个简短的 LLM 标签。紧凑模式下会替代通用的 Tool × N 标题；完整模式下显示为工具组下方的弱化 ● <label> 行。需要配置快速模型。',
+    '每个工具批次完成后生成一个简短的 LLM 标签。已完成工具组的标签会替代通用的 Tool × N 标题；强制展开的工具组下方显示弱化的 ● <label> 行。需要配置快速模型。',
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
   'settings.description.agents.arena.preserveArtifacts':
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',

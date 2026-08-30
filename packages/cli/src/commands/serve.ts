@@ -46,8 +46,8 @@ import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarning
  * Pause the current async function indefinitely. Used after the daemon
  * listener is up so yargs `parse()` never resolves — if it did, the
  * top-level CLI would fall through to the interactive (TUI) entry point
- * in `gemini.tsx`. SIGINT / SIGTERM in `runQwenServe` is the sole exit
- * route.
+ * in `llm.tsx`. SIGINT / SIGTERM / SIGHUP in `runQwenServe` is the sole
+ * exit route.
  */
 function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
@@ -269,7 +269,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         default: DEFAULT_SERVE_HOSTNAME,
         description:
-          'Interface to bind. Loopback (127.0.0.1, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
+          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
       })
       .option('token', {
         type: 'string',
@@ -337,7 +337,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
+          'Enable direct POST /session/:id/shell execution. Available with bearer auth or trusted loopback; each call still requires a session-bound client id.',
       })
       .option('tls-cert', {
         type: 'string',

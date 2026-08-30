@@ -989,6 +989,8 @@ export class BackgroundAgentResumeService {
           resumeHistory ?? [],
           currentForkRuntime!,
           meta.executionAllowedTools,
+          meta.agentId,
+          meta.description,
         );
       } else {
         const resumeSubagentConfig =
@@ -999,6 +1001,8 @@ export class BackgroundAgentResumeService {
           .getSubagentManager()
           .createAgentHeadless(resumeSubagentConfig, activeAgentConfig, {
             eventEmitter: bgEventEmitter,
+            taskName: meta.description,
+            subagentId: meta.agentId,
             promptConfigOverrides: {
               initialMessages: resumeHistory,
             },
@@ -1585,11 +1589,11 @@ export class BackgroundAgentResumeService {
     CurrentForkRuntime | undefined
   > {
     try {
-      const geminiClient = this.config.getGeminiClient();
-      const generationConfig = geminiClient?.getChat().getGenerationConfig();
+      const llmClient = this.config.getLlmClient();
+      const generationConfig = llmClient?.getChat().getGenerationConfig();
       if (!generationConfig?.systemInstruction) {
         debugLogger.debug(
-          '[BackgroundAgentResume] Current fork runtime unavailable (no_system_instruction): parent Gemini client or system instruction is missing.',
+          '[BackgroundAgentResume] Current fork runtime unavailable (no_system_instruction): parent LLM client or system instruction is missing.',
         );
         return undefined;
       }
@@ -1670,6 +1674,8 @@ export class BackgroundAgentResumeService {
     initialMessages: Content[],
     runtime: CurrentForkRuntime,
     executionAllowedTools?: string[],
+    subagentId?: string,
+    taskName?: string,
   ): Promise<AgentHeadless> {
     const promptConfig: PromptConfig = {
       renderedSystemPrompt: structuredClone(runtime.systemInstruction),
@@ -1695,6 +1701,10 @@ export class BackgroundAgentResumeService {
       { max_turns: FORK_DEFAULT_MAX_TURNS },
       toolConfig,
       eventEmitter,
+      undefined,
+      undefined,
+      taskName,
+      subagentId,
     );
   }
 

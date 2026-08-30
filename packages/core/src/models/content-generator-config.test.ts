@@ -193,6 +193,24 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.extra_body).toBeUndefined();
     });
 
+    it('should preserve a zero stream idle timeout from the registry', () => {
+      const config = createMockConfig(parentConfig, {
+        ...resolvedModel,
+        generationConfig: {
+          ...resolvedModel.generationConfig,
+          streamIdleTimeoutMs: 0,
+        },
+      });
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model-id',
+        { authType: 'anthropic' },
+      );
+
+      expect(result.streamIdleTimeoutMs).toBe(0);
+    });
+
     it('should prefer explicit auth overrides over registry values', () => {
       const config = createMockConfig(parentConfig, resolvedModel);
 

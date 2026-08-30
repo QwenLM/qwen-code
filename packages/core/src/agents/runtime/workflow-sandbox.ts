@@ -124,7 +124,7 @@ function findMetaBlockBounds(source: string): {
   // silently — the worst possible failure mode.
   if (depth !== 0) {
     throw new Error(
-      'stripExportMeta: unbalanced braces in export const meta declaration — ' +
+      'unbalanced braces in export const meta declaration — ' +
         'the workflow script cannot be safely stripped. Check the meta block syntax.',
     );
   }
@@ -191,11 +191,153 @@ export function extractAndStripMeta(source: string): {
     raw = parseWorkflowMetaLiteral(metaSource);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`extractAndStripMeta: invalid meta object literal: ${msg}`);
+    throw new Error(`invalid meta object literal: ${msg}`);
   }
 
   const meta = validateMeta(raw);
   return { stripped, meta };
+}
+
+/** Filename V8 attributes the compiled workflow body to, in errors and stacks. */
+const WORKFLOW_SCRIPT_FILENAME = 'workflow.js';
+
+/**
+ * Wrap a stripped script body in the async IIFE the vm actually executes.
+ *
+ * `'use strict'` shares its line with the arrow deliberately. The wrapper
+ * already shifts every body line number by one, and putting the directive on
+ * its own line would shift them by two — so the directive costs nothing in
+ * error legibility. Strict mode matters here because the body is
+ * model-authored: in sloppy mode an undeclared assignment silently creates a
+ * property on the sandbox global instead of throwing, which turns a typo into
+ * state that outlives the statement that made it.
+ */
+function wrapWorkflowBody(strippedSource: string): string {
+  return `(async () => {'use strict';\n${strippedSource}\n})()`;
+}
+
+/**
+ * Parse `export const meta`, strip it, and compile the remaining body.
+ *
+ * Exported so the pre-launch gate in `WorkflowRunner.start` and the run itself
+ * compile through one function rather than two lookalikes. Throws exactly what
+ * either step would throw: `extractAndStripMeta`'s errors for a malformed meta
+ * literal, and V8's `SyntaxError` for a body that does not parse. The compile
+ * copy masks the meta declaration instead of deleting it so V8's source lines
+ * still match the author's original script.
+ */
+export function compileWorkflowScript(scriptSource: string): {
+  script: vm.Script;
+  meta: WorkflowMeta | null;
+} {
+  const { stripped, meta } = extractAndStripMeta(scriptSource);
+  const bounds = findMetaBlockBounds(scriptSource);
+  const compilable = bounds
+    ? scriptSource.slice(0, bounds.exportIdx) +
+      scriptSource
+        .slice(bounds.exportIdx, bounds.afterMeta)
+        .replace(/[^\r\n\u2028\u2029]/g, ' ') +
+      scriptSource.slice(bounds.afterMeta)
+    : stripped;
+  const script = new vm.Script(wrapWorkflowBody(compilable), {
+    filename: WORKFLOW_SCRIPT_FILENAME,
+  });
+  return { script, meta };
+}
+
+/**
+ * The error a cancelled run settles with. Named `AbortError` so every
+ * `isAbortError` check on the way up classifies it as a cancellation rather
+ * than a failure.
+ */
+function workflowCancelledError(): Error {
+  const error = new Error('Workflow run was aborted (cancelled).');
+  error.name = 'AbortError';
+  return error;
+}
+
+/** Longest source line rendered in a compile-failure message. */
+const COMPILE_ERROR_LINE_WIDTH = 80;
+
+/**
+ * Turn a compile failure into something a script author can act on.
+ *
+ * V8 already builds the useful part — the offending source line with a caret
+ * under the exact column — and puts it at the head of `error.stack`, ahead of
+ * the host frames. Reuse it rather than reconstructing a caret from column
+ * numbers, then fix the one thing it gets wrong for our purposes: the line
+ * number counts the IIFE wrapper, so `workflow.js:2` is the script's line 1.
+ *
+ * Falls back to the bare message when the stack carries no source frame.
+ */
+export function describeWorkflowCompileError(
+  error: unknown,
+  authorLineCount: number,
+): string {
+  const err = error instanceof Error ? error : new Error(String(error));
+  const stack = typeof err.stack === 'string' ? err.stack : '';
+  const frame: string[] = [];
+  for (const line of stack.split('\n')) {
+    if (frame.length >= 3 && /^\s+at\s/.test(line)) break;
+    frame.push(line);
+  }
+
+  const header = frame[0] ?? '';
+  const match = /^.*?:(\d+)$/.exec(header);
+  if (frame.length < 3 || !match) {
+    return err.message;
+  }
+
+  // Undo the wrapper's one-line offset. A later line is on the closing wrapper,
+  // so describe the author's incomplete ending instead of naming our token.
+  const bodyLine = Number(match[1]) - 1;
+  if (bodyLine < 1) return err.message;
+  if (bodyLine > authorLineCount) {
+    return (
+      'The script ends with unmatched or incomplete syntax. Check ' +
+      'parentheses, brackets, braces, quotes, and template literals near the end.'
+    );
+  }
+
+  const rendered = clampSourceFrame(frame[1] ?? '', frame[2] ?? '');
+  const tail = frame
+    .slice(3)
+    .filter((l) => l.trim().length > 0)
+    .join('\n');
+  return [`line ${bodyLine}`, rendered, tail].filter(Boolean).join('\n');
+}
+
+/**
+ * Keep a long source line readable without breaking caret alignment: slide a
+ * window over the line and shift the caret by the same amount.
+ */
+function clampSourceFrame(sourceLine: string, caretLine: string): string {
+  if (sourceLine.length <= COMPILE_ERROR_LINE_WIDTH) {
+    return `${sourceLine}\n${caretLine}`;
+  }
+  const caret = /\^+/.exec(caretLine);
+  if (!caret) return '';
+  const caretCol = caret.index;
+  const start = Math.max(
+    0,
+    Math.min(
+      caretCol - Math.floor(COMPILE_ERROR_LINE_WIDTH / 2),
+      sourceLine.length - COMPILE_ERROR_LINE_WIDTH,
+    ),
+  );
+  const prefix = start > 0 ? '…' : '';
+  const window = sourceLine.slice(start, start + COMPILE_ERROR_LINE_WIDTH);
+  const suffix =
+    start + COMPILE_ERROR_LINE_WIDTH < sourceLine.length ? '…' : '';
+  const visibleCaretStart = Math.max(caretCol, start);
+  const visibleCaretEnd = Math.min(
+    caretCol + caret[0].length,
+    start + COMPILE_ERROR_LINE_WIDTH,
+  );
+  const shiftedCaret =
+    ' '.repeat(prefix.length + visibleCaretStart - start) +
+    '^'.repeat(visibleCaretEnd - visibleCaretStart);
+  return `${prefix}${window}${suffix}\n${shiftedCaret}`;
 }
 
 /**
@@ -1729,18 +1871,28 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       let watchdog: WallClockWatchdog | undefined;
       let stopWatchingState: (() => void) | undefined;
       let rearmWatchdogOnAbort: (() => void) | undefined;
+      let settleOnAbort: (() => void) | undefined;
+      let wallClockFired = false;
       process.on('unhandledRejection', adoptionEscapeHook);
       try {
         // P4: extract `export const meta = {...}` once before the body runs.
         // The stripped source is what the vm executes; the meta object is
         // surfaced via `getMeta()` after the run (or after a malformed-meta
         // throw, in which case the caller's catch block sees a clear error).
-        const { stripped, meta } = extractAndStripMeta(scriptSource);
+        //
+        // Compilation goes through the same exported helper the pre-launch
+        // gate calls. Sharing the function is the whole point: a gate that
+        // compiled the script even slightly differently from the run would
+        // wave through something that then fails after the run is registered,
+        // which is the failure the gate exists to prevent.
+        const { script, meta } = compileWorkflowScript(scriptSource);
         extractedMeta = meta;
-        const wrapped = `(async () => {\n${stripped}\n})()`;
-        const script = new vm.Script(wrapped, {
-          filename: 'workflow.js',
-        });
+        // A run cancelled before its script started must not start it: the
+        // registry pre-registers the run and shares this controller, so a
+        // user cancel can land before `run()` is entered.
+        if (opts.abortOnTimeout?.signal.aborted) {
+          throw workflowCancelledError();
+        }
         // 30s sync wall-clock cap inside vm — covers `while(true){}` style
         // synchronous loops only. Once the IIFE hits its first `await`,
         // `runInContext` returns and this timer is disarmed.
@@ -1759,7 +1911,10 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
             // T40 (PR #4732 R4): abort linked controller BEFORE rejecting so
             // in-flight subagents see the cancellation and stop. Order
             // matters: rejecting first then aborting would race the
-            // caller's finally block.
+            // caller's finally block. The abort arm below must let this
+            // abort through untouched — a timeout is not a cancellation,
+            // and it has to be reported as the timeout it is.
+            wallClockFired = true;
             opts.abortOnTimeout?.abort();
             reject(
               new Error(
@@ -1796,25 +1951,48 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         if (opts.scheduler?.snapshot().state === 'paused' && !aborted()) {
           watchdog?.pause();
         }
-        // Cancellation must settle the run even when the script hangs in
-        // ungated code: `registry.cancel()` aborts this controller, but
-        // `abortPending()` emits no state transition, so a pause-suspended
-        // watchdog would never re-arm and the race below has no abort arm
-        // — the hung run would never reach its settlement `finally`
-        // (snapshot, telemetry, and handle release all skipped). Re-arm
-        // with the banked remainder on abort to restore the bound.
+        // Belt to the abort arm's braces below: `registry.cancel()` aborts
+        // this controller, but `abortPending()` emits no state transition,
+        // so a pause-suspended watchdog would otherwise stay suspended.
+        // Re-arm it with the banked remainder so the wall clock keeps
+        // bounding the run independently of the abort arm.
         rearmWatchdogOnAbort = (): void => watchdog?.resume();
         opts.abortOnTimeout?.signal.addEventListener(
           'abort',
           rearmWatchdogOnAbort,
           { once: true },
         );
-        return await Promise.race([result, timeoutPromise]);
+        // Cancellation settles the run now, not when the wall clock runs
+        // out. Without this arm a script that is not currently blocked on a
+        // dispatch — sitting in ungated `await`s, or simply hung — keeps the
+        // run open until the banked remainder of the clock expires, and the
+        // user watches a cancelled run refuse to end. The script's own
+        // promise is left to settle by itself: its dispatches see the
+        // aborted signal and reject, so its `finally` blocks still run, and
+        // `Promise.race` keeps a handler attached so that later rejection
+        // is never an unhandled one.
+        const abortPromise = new Promise<never>((_, reject) => {
+          const signal = opts.abortOnTimeout?.signal;
+          if (!signal) return;
+          settleOnAbort = (): void => {
+            // The watchdog aborts the controller itself on the way to
+            // rejecting with the timeout; that abort is not a cancellation.
+            if (!wallClockFired) reject(workflowCancelledError());
+          };
+          signal.addEventListener('abort', settleOnAbort, { once: true });
+        });
+        return await Promise.race([result, timeoutPromise, abortPromise]);
       } finally {
         if (rearmWatchdogOnAbort) {
           opts.abortOnTimeout?.signal.removeEventListener(
             'abort',
             rearmWatchdogOnAbort,
+          );
+        }
+        if (settleOnAbort) {
+          opts.abortOnTimeout?.signal.removeEventListener(
+            'abort',
+            settleOnAbort,
           );
         }
         stopWatchingState?.();

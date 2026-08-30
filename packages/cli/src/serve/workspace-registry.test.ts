@@ -270,6 +270,52 @@ describe('createWorkspaceRegistry', () => {
     ]);
   });
 
+  it('keeps an internal owner unavailable after terminal drain completes', () => {
+    const sessionId = 'duplicate-session';
+    const primary = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      bridge: bridgeWithSummary(() => ({
+        sessionId,
+        workspaceCwd: '/work/primary',
+      })),
+    });
+    const internal = makeRuntime('/work/conversations', {
+      workspaceId: 'ws-conversations',
+      provenance: 'live-conversation',
+      removable: false,
+      bridge: bridgeWithSummary(() => ({
+        sessionId,
+        workspaceCwd: '/work/conversations',
+      })),
+    });
+    const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
+    sessionOwnerIndex.register(sessionId, primary.workspaceCwd);
+    sessionOwnerIndex.register(sessionId, internal.workspaceCwd);
+    const registry = createWorkspaceRegistry([primary, internal], {
+      sessionOwnerIndex,
+      scanUnindexedOwners: true,
+    });
+
+    expect(registry.beginDrain(internal)).toBe(true);
+    registry.commitDrain(internal);
+    sessionOwnerIndex.handleBridgeSessionLifecycle({
+      type: 'removed',
+      sessionId,
+      workspaceCwd: internal.workspaceCwd,
+    });
+    registry.completeDrain(internal);
+
+    expect(registry.listAll()).toEqual([primary]);
+    expect(sessionOwnerIndex.getWorkspaceCwds(sessionId)).toEqual([
+      primary.workspaceCwd,
+      internal.workspaceCwd,
+    ]);
+    expect(registry.resolveLiveSessionOwner(sessionId)).toEqual({
+      kind: 'unavailable',
+    });
+  });
+
   it('keeps runtime order frozen and uses the marked primary runtime', () => {
     const primary = makeRuntime('/work/primary', {
       workspaceId: 'ws-primary',

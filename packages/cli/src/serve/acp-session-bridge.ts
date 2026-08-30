@@ -94,6 +94,7 @@ export type {
   BridgeHeartbeatResult,
   BridgeHeartbeatState,
   BridgeWorkspaceMemoryRememberContextMode,
+  BridgeWorkspaceMemoryRememberTargetScope,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
   BridgeAutoMemoryTopic,
@@ -105,6 +106,8 @@ export type {
   BridgeDaemonSessionDiagnostic,
   BridgeDaemonStatusSnapshot,
   BridgeShutdownOptions,
+  WorkspaceEventPublisher,
+  WorkspaceEventBridge,
   AcpSessionBridge,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -146,7 +149,10 @@ export {
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
-export { SessionRestoreTimeoutError } from '@qwen-code/acp-bridge/status';
+export {
+  BridgeTimeoutError,
+  SessionRestoreTimeoutError,
+} from '@qwen-code/acp-bridge/status';
 
 export {
   MAX_WORKSPACE_PATH_LENGTH,
