@@ -8,6 +8,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { estimateJsonStringBytes } from './json-string-bytes.js';
 
 describe('estimateJsonStringBytes', () => {
+  // The exhaustive 65,536-iteration sweep spends most of its time in
+  // per-iteration assertion overhead, which exceeds vitest's default 5s
+  // timeout on slow or contended CI runners.
   it('matches JSON.stringify UTF-8 bytes for every UTF-16 code unit', () => {
     for (let code = 0; code <= 0xffff; code++) {
       const value = String.fromCharCode(code);
@@ -15,7 +18,7 @@ describe('estimateJsonStringBytes', () => {
         Buffer.byteLength(JSON.stringify(value)),
       );
     }
-  });
+  }, 60_000);
 
   it('matches JSON.stringify for paired surrogates and mixed escaping', () => {
     const samples = [
