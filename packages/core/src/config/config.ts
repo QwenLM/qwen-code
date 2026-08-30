@@ -8354,15 +8354,15 @@ export class Config {
     return this.goalRuntime;
   }
 
-  getGoalRuntimeReady(): Promise<GoalRuntime> {
+  async getGoalRuntimeReady(): Promise<GoalRuntime> {
     const runtime = this.getGoalRuntime();
     if (!Object.hasOwn(this, 'goalRuntimeReady') || !this.goalRuntimeReady) {
-      return Promise.reject(new GoalPersistenceUnavailableError());
+      throw new GoalPersistenceUnavailableError();
     }
     return this.goalRuntimeReady.then(() => runtime);
   }
 
-  getGoalRuntimePrepared(): Promise<GoalRuntime> {
+  async getGoalRuntimePrepared(): Promise<GoalRuntime> {
     const runtime = this.getGoalRuntime();
     if (!this.sessionRestoreRuntime) return this.getGoalRuntimeReady();
     return runtime.getPreparedRestore().then(() => runtime);
