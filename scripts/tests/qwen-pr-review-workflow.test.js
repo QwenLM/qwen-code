@@ -4159,6 +4159,12 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       context_touch)
         git checkout -q main; write_f TWELVE 12; git commit -qam context-touch
         git checkout -q pr; git merge -q --no-edit main >/dev/null ;;
+      clean_both_sides)
+        # Both parents change f.txt (main line 1, PR line 10): the
+        # refresh merge stays clean, but merge-tree runs a content merge
+        # on f.txt — the shape where a planted merge driver fires.
+        git checkout -q main; write_f ONE 1; git commit -qam both-sides
+        git checkout -q pr; git merge -q --no-edit main >/dev/null ;;
       far_touch)
         git checkout -q main; write_f NINETEEN 19; git commit -qam far-touch
         git checkout -q pr; git merge -q --no-edit main >/dev/null ;;
@@ -4258,6 +4264,7 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       shapeEnv = {},
       baseRef = 'main',
       plant = '',
+      gateEnv = {},
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'base-refresh-'));
@@ -4328,6 +4335,7 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
         env: {
           ...process.env,
           ...GIT_ISOLATION,
+          ...gateEnv,
           PATH: `${bin}:${process.env.PATH}`,
           GITHUB_OUTPUT: output,
           GITHUB_STEP_SUMMARY: summary,
@@ -4363,6 +4371,8 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
         summary: readFileSync(summary, 'utf8'),
         externalRan: existsSync(join(dir, 'external-ran')),
         textconvRan: existsSync(join(dir, 'textconv-ran')),
+        mergeDriverRan: existsSync(join(dir, 'merge-driver-ran')),
+        hookRan: existsSync(join(dir, 'hook-ran')),
       };
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -4799,11 +4809,14 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
     set -euo pipefail
     printf '#!/bin/bash\ntouch "%s/external-ran"\n' "$PWD" > ext-payload.sh
     printf '#!/bin/bash\ntouch "%s/textconv-ran"\ncat "$1"\n' "$PWD" > textconv-payload.sh
-    chmod +x ext-payload.sh textconv-payload.sh
-    printf '* diff=evil\n' > evil-attributes
+    printf '#!/bin/bash\ntouch "%s/merge-driver-ran"\nexit 0\n' "$PWD" > merge-payload.sh
+    chmod +x ext-payload.sh textconv-payload.sh merge-payload.sh
+    printf '* diff=evil\n* merge=evil\n' > evil-attributes
     git -C workspace config diff.external "$PWD/ext-payload.sh"
     git -C workspace config diff.evil.textconv "$PWD/textconv-payload.sh"
+    git -C workspace config merge.evil.driver "$PWD/merge-payload.sh"
     git -C workspace config core.attributesFile "$PWD/evil-attributes"
+    git -C workspace config diff.context 0
   `;
 
   it.skipIf(skipExecuted)(
@@ -4878,6 +4891,179 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       expect(r.textconvRan).toBe(false);
       expect(r.out.skip).toBe('false');
       expect(r.out.reason).toMatch(/non-merge commit/);
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'a malformed newest marker fails open instead of falling through to an older marker',
+    () => {
+      // The newest marker-CARRYING review decides: a payload that fails
+      // fromjson — a writer bug, a hand-edit, a body truncated mid-marker
+      // — is the same unreadable state as a withheld sha and must fail
+      // open, not drop out inside the candidate array and certify from
+      // the older marker beside it.
+      for (const payload of [
+        '{corrupted}', // braces present, unparseable JSON
+        '{corrupted', // truncated before the closing brace
+        'not-json', // no braces at all
+      ]) {
+        const r = runGate('update_branch_only', {
+          reviewsFor: (R) =>
+            reviewsFixture(
+              reviewEntry({ sha: R }),
+              reviewEntry({
+                sha: R,
+                submittedAt: '2026-08-27T00:00:00Z',
+                body: `marker\n\n<!-- qwen-review-ledger ${payload} -->`,
+              }),
+            ),
+        });
+        expect(r.status, payload).toBe(0);
+        expect(r.out.skip, payload).toBe('false');
+        expect(r.out.reason, payload).toBe(
+          'no completed automatic round on this PR',
+        );
+      }
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'never runs a planted merge driver on a both-sides-modified refresh merge',
+    () => {
+      // merge-tree runs a content merge — and any merge.<name>.driver the
+      // attributes map the path to — on a file both parents changed; no
+      // git flag disables a merge driver, so the gate scrubs the
+      // code-executing config keys instead. The payload must not run and
+      // the natural skip must survive the plant.
+      const r = runGate('clean_both_sides', { plant: plantAttackChannels() });
+      expect(r.status).toBe(0);
+      expect(r.mergeDriverRan).toBe(false);
+      expect(r.externalRan).toBe(false);
+      expect(r.textconvRan).toBe(false);
+      expect(r.out.skip).toBe('true');
+      expect(r.out.reviewed_sha).toBe(r.R);
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'a planted info/attributes fails open without running the driver',
+    () => {
+      // info/attributes lives inside the git dir, where the config scrub
+      // does not reach: its presence fails the gate open instead of the
+      // step deleting a file it does not own.
+      const r = runGate('clean_both_sides', {
+        plant:
+          plantAttackChannels() +
+          `
+    set -euo pipefail
+    printf '* merge=evil\n' > workspace/.git/info/attributes
+  `,
+      });
+      expect(r.status).toBe(0);
+      expect(r.mergeDriverRan).toBe(false);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toBe('planted git attributes present');
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'a context-touching refresh still reviews under a planted diff.context',
+    () => {
+      // diff.context=0 collapses both digests to changed-only lines and
+      // hides a base touch inside the PR hunks' context; the -U3 pin
+      // keeps the hashed geometry at the header contract (every changed
+      // AND context byte) so the verdict survives the plant.
+      const r = runGate('context_touch', { plant: plantAttackChannels() });
+      expect(r.status).toBe(0);
+      expect(r.mergeDriverRan).toBe(false);
+      expect(r.externalRan).toBe(false);
+      expect(r.textconvRan).toBe(false);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toBe('the PR-side diff changed');
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'a planted reference-transaction hook never fires during the fallback fetch',
+    () => {
+      // The fallback base fetch updates refs/remotes/origin/<base>, and a
+      // ref update executes a planted reference-transaction hook inside
+      // this PAT-bearing step; core.hooksPath=/dev/null on every git call
+      // defeats both a .git/hooks plant and a core.hooksPath plant.
+      for (const hookPlant of [
+        `
+    set -euo pipefail
+    printf '#!/bin/bash\ntouch "%s/hook-ran"\nexit 0\n' "$PWD" \
+      > workspace/.git/hooks/reference-transaction
+    chmod +x workspace/.git/hooks/reference-transaction
+  `,
+        `
+    set -euo pipefail
+    mkdir -p hooks-dir
+    printf '#!/bin/bash\ntouch "%s/hook-ran"\nexit 0\n' "$PWD" \
+      > hooks-dir/reference-transaction
+    chmod +x hooks-dir/reference-transaction
+    git -C workspace config core.hooksPath "$PWD/hooks-dir"
+  `,
+      ]) {
+        const r = runGate('update_branch_only', {
+          plant:
+            // The ref deletion that forces the fallback fetch also fires a
+            // planted reference-transaction hook, so it must precede the
+            // hook plant: only the gate's own fetch may be under test.
+            `
+    set -euo pipefail
+    git -C workspace update-ref -d refs/remotes/origin/main
+  ` +
+            plantAttackChannels() +
+            hookPlant,
+        });
+        expect(r.status).toBe(0);
+        expect(r.hookRan).toBe(false);
+        expect(r.mergeDriverRan).toBe(false);
+        expect(r.out.skip).toBe('true');
+        expect(r.out.reviewed_sha).toBe(r.R);
+      }
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'ambient global gitconfig cannot reach the gate through its own isolation',
+    () => {
+      // The harness's GIT_ISOLATION must not be what defeats this poison:
+      // the gate process inherits a poisoned GIT_CONFIG_GLOBAL that the
+      // script's own export has to mask. A global core.attributesFile +
+      // merge.evil.driver reaches merge-tree through no repo-local config
+      // the scrub inspects, and diff.context=0 would collapse the digest
+      // geometry — both must stay inert.
+      const poisonDir = mkdtempSync(join(tmpdir(), 'ambient-poison-'));
+      try {
+        const payload = join(poisonDir, 'merge-payload.sh');
+        writeFileSync(
+          payload,
+          `#!/bin/bash\ntouch "${poisonDir}/merge-driver-ran"\nexit 0\n`,
+        );
+        chmodSync(payload, 0o755);
+        const attributes = join(poisonDir, 'attributes');
+        writeFileSync(attributes, '* merge=evil\n');
+        const gitconfig = join(poisonDir, 'gitconfig');
+        writeFileSync(
+          gitconfig,
+          `[core]\n\tattributesFile = ${attributes}\n` +
+            `[merge "evil"]\n\tdriver = ${payload}\n` +
+            `[diff]\n\tcontext = 0\n`,
+        );
+        const r = runGate('clean_both_sides', {
+          gateEnv: { GIT_CONFIG_GLOBAL: gitconfig },
+        });
+        expect(r.status).toBe(0);
+        expect(existsSync(join(poisonDir, 'merge-driver-ran'))).toBe(false);
+        expect(r.mergeDriverRan).toBe(false);
+        expect(r.out.skip).toBe('true');
+        expect(r.out.reviewed_sha).toBe(r.R);
+      } finally {
+        rmSync(poisonDir, { recursive: true, force: true });
+      }
     },
   );
 });
