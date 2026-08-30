@@ -329,7 +329,7 @@ describe('package scripts', () => {
     expect(packageJson.scripts['test:release']).toBe(
       [
         'cross-env NODE_OPTIONS="--max-old-space-size=3072"',
-        'npm run test:ci --workspaces --if-present --parallel -- --coverage.enabled=false',
+        'npm run test:ci --workspaces --if-present -- --coverage.enabled=false',
         '&& npm run test:scripts',
       ].join(' '),
     );
