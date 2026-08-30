@@ -37,7 +37,8 @@ if (opts.requireAuth && !token) {
 }
 ```
 
-The allow-origin wildcard has its own refuse rule:
+Tokenless allow-origin configuration is limited to loopback HTTP(S) origins;
+non-HTTP(S) entries retain their existing handling:
 
 ```ts
 const parsed = parseAllowOriginPatterns(opts.allowOrigins);
@@ -46,9 +47,14 @@ if (parsed.allowAny && !token) {
     "Refusing to start with --allow-origin '*' but no bearer token configured. ...",
   );
 }
+if (findNonLoopbackHttpOrigin(parsed) && !token) {
+  throw new Error(
+    'Refusing to start with a non-loopback HTTP(S) --allow-origin but no bearer token configured. ...',
+  );
+}
 ```
 
-All three refusals are explicit boot failures (visible in stderr / thrown to the embedder),
+These refusals are explicit boot failures (visible in stderr / thrown to the embedder),
 never silent. The threat model from #3803 explicitly forbids silently letting a
 daemon bind beyond loopback in the open.
 
@@ -118,7 +124,8 @@ Control is enabled (the LAN origin is added/removed with the listener):
 - Non-matching `Origin` values receive the same deterministic
   `403 { error: 'Request denied by CORS policy' }` as deny mode.
 - `--allow-origin '*'` requires `--token`; otherwise boot refuses.
-- A specific `--allow-origin` is permitted without a token in trusted-loopback mode, but explicitly grants that browser origin the same full operator API authority as a local primary-listener caller. Startup logs this boundary expansion.
+- Without a token, HTTP(S) `--allow-origin` values are limited to loopback hosts. A non-loopback browser origin requires a token because it could otherwise exercise the full operator API, including code execution as the daemon user.
+- Explicit browser-extension origins retain their tokenless local-automation path. Startup logs that any tokenless allowed browser origin receives full operator authority.
 - `parseAllowOriginPatterns()` validates pattern syntax at boot.
 - The `allow_origin` capability tag is advertised only when this mode is
   configured.
@@ -296,15 +303,15 @@ sequenceDiagram
 
 ## Configuration
 
-| Source          | Knob                                                                                    | Effect                                                                  |
-| --------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Env             | `QWEN_SERVER_TOKEN`                                                                     | Bearer token (trimmed).                                                 |
-| Flag            | `--token`                                                                               | Bearer token (overrides env).                                           |
-| CLI flags       | `--open-with-auth`                                                                      | Reuse or generate a loopback Web Shell bearer before daemon boot.       |
-| Flag            | `--require-auth`                                                                        | Extends bearer to loopback + `/health`. Boots only with a token.        |
-| Flag            | `--hostname`                                                                            | Non-loopback bind requires `--token` (or env).                          |
-| Flag            | `--allow-origin <pattern>`                                                              | Switch to CORS allowlist mode. `'*'` requires a token.                  |
-| Capability tags | `require_auth` (conditional), `auth_device_flow` (always), `allow_origin` (conditional) | See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md). |
+| Source          | Knob                                                                                    | Effect                                                                                    |
+| --------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Env             | `QWEN_SERVER_TOKEN`                                                                     | Bearer token (trimmed).                                                                   |
+| Flag            | `--token`                                                                               | Bearer token (overrides env).                                                             |
+| CLI flags       | `--open-with-auth`                                                                      | Reuse or generate a loopback Web Shell bearer before daemon boot.                         |
+| Flag            | `--require-auth`                                                                        | Extends bearer to loopback + `/health`. Boots only with a token.                          |
+| Flag            | `--hostname`                                                                            | Non-loopback bind requires `--token` (or env).                                            |
+| Flag            | `--allow-origin <pattern>`                                                              | Switch to CORS allowlist mode. Wildcard and non-loopback HTTP(S) origins require a token. |
+| Capability tags | `require_auth` (conditional), `auth_device_flow` (always), `allow_origin` (conditional) | See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).                   |
 
 ## Caveats & Known Limits
 

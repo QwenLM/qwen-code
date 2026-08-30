@@ -8,7 +8,7 @@
 
 - Parse and validate `ServeOptions`: listen address, auth, workspace, session / connection caps, MCP budget / pool, CORS, prompt / SSE / session idle timeouts, rate limit, and related toggles.
 - **Canonicalize** the primary workspace exactly once, and canonicalize every repeated `--workspace` before registering session runtimes. The primary canonical form is shared by `/capabilities.workspaceCwd`, the `POST /session` fallback, and the primary bridge.
-- Reject unsafe or invalid startup configurations: non-loopback bind without token, `--require-auth` without token, `--allow-origin '*'` without token, `mcpBudgetMode='enforce'` without a positive `mcpClientBudget`, a nonexistent or non-directory `--workspace`, and invalid timeout or rate-limit values.
+- Reject unsafe or invalid startup configurations: non-loopback bind without token, `--require-auth` without token, wildcard or non-loopback HTTP(S) `--allow-origin` without token, `mcpBudgetMode='enforce'` without a positive `mcpClientBudget`, a nonexistent or non-directory `--workspace`, and invalid timeout or rate-limit values.
 - Construct the `WorkspaceFileSystem` factory, permission audit publisher, `DaemonStatusProvider`, and `acp-bridge`.
 - Build the Express app, wire middleware (`allowOriginCors` over the mutable origin allowlist -> `hostAllowlist` -> access log -> `bearerAuth` -> rate limit -> JSON parser -> telemetry -> per-route `mutationGate`), and mount session, workspace CRUD, file, device-flow auth, permission vote, and ACP HTTP routes. (The unconditional `denyBrowserOriginCors` wall remains only in the bootstrap app, `run-qwen-serve.ts`.)
 - Bind the listening port and register signal handlers.
@@ -72,7 +72,7 @@ Before `runQwenServe()` starts this sequence, the CLI-only `--open-with-auth` mo
 5. **Canonicalize workspace**: `canonicalizeWorkspace(rawWorkspace)` runs `realpathSync.native` once and feeds `/capabilities`, the `POST /session` fallback, and the bridge.
 6. **MCP budget validation**: positive integer; `enforce` requires a budget.
 7. **MCP pool toggle inference**: parent env `QWEN_SERVE_NO_MCP_POOL=1` makes `mcpPoolActive=false`, so capabilities honestly omit `mcp_workspace_pool` and `mcp_pool_restart`.
-8. **CORS / timeout / rate-limit validation**: `--allow-origin '*'` requires token; prompt, writer, channel idle, session idle, reaper, and rate-limit window values fail fast when invalid.
+8. **CORS / timeout / rate-limit validation**: wildcard and non-loopback HTTP(S) `--allow-origin` values require a token; prompt, writer, channel idle, session idle, reaper, and rate-limit window values fail fast when invalid.
 9. **Per-handle `childEnvOverrides`**: pass `QWEN_SERVE_MCP_CLIENT_BUDGET` and `QWEN_SERVE_MCP_BUDGET_MODE` to the ACP child through `BridgeOptions.childEnvOverrides` instead of mutating `process.env`.
 10. **Load `settings.json` once**: read `context.fileName`, `policy.permissionStrategy`, and `policy.consensusQuorum`. Corrupt files fall back to defaults. `validatePolicyConfig()` checks `policy.*` against `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes`; unknown strategies or non-positive `consensusQuorum` throw `InvalidPolicyConfigError`. A quorum set under a non-`consensus` strategy logs a stderr warning.
 11. **Allocate `PermissionAuditRing`** (512 entries).

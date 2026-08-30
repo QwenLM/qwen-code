@@ -115,6 +115,21 @@ export function parseAllowOriginPatterns(
   return { allowAny, origins };
 }
 
+export function findNonLoopbackHttpOrigin(
+  patterns: ParsedAllowOriginPatterns,
+): string | undefined {
+  for (const origin of patterns.origins) {
+    const parsed = new URL(origin);
+    if (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      !isLoopbackBind(parsed.hostname)
+    ) {
+      return origin;
+    }
+  }
+  return undefined;
+}
+
 /**
  * The read side of the CORS allowlist, so the middleware can be built once at
  * app construction over a set that changes later.

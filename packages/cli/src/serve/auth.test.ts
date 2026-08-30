@@ -12,6 +12,7 @@ import {
   bearerAuth,
   createMutationGate,
   denyBrowserOriginCors,
+  findNonLoopbackHttpOrigin,
   InvalidAllowOriginPatternError,
   isTrustedLoopbackMode,
   parseAllowOriginPatterns,
@@ -451,6 +452,31 @@ describe('parseAllowOriginPatterns (T2.4 #4514)', () => {
       expect(e.pattern).toBe('http://broken/');
       expect(e.message).toContain('http://broken/');
     }
+  });
+});
+
+describe('findNonLoopbackHttpOrigin', () => {
+  it.each([
+    'http://localhost:3000',
+    'http://127.0.0.2:3000',
+    'https://[::1]:3000',
+    'chrome-extension://idkijaaipeeinemigojbjkmfmabokbdk',
+  ])('does not classify %s as a remote browser origin', (origin) => {
+    expect(
+      findNonLoopbackHttpOrigin(parseAllowOriginPatterns([origin])),
+    ).toBeUndefined();
+  });
+
+  it('returns the first non-loopback HTTP(S) origin', () => {
+    expect(
+      findNonLoopbackHttpOrigin(
+        parseAllowOriginPatterns([
+          'http://localhost:3000',
+          'https://app.example.com',
+          'http://192.0.2.1:4170',
+        ]),
+      ),
+    ).toBe('https://app.example.com');
   });
 });
 

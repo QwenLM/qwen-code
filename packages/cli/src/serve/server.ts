@@ -36,6 +36,7 @@ import {
   allowOriginCors,
   bearerAuth,
   createMutationGate,
+  findNonLoopbackHttpOrigin,
   hostAllowlist,
   isTrustedLoopbackMode,
   MutableOriginAllowlist,
@@ -1861,7 +1862,7 @@ export function createServeApp(
   // returned, so the no-`--allow-origin` posture is unchanged, and there is
   // one middleware to reason about instead of two interchangeable ones.
   // Pattern parsing happens in `run-qwen-serve.ts` for validation; here we
-  // still keep the wildcard/no-token invariant for embedded callers that
+  // still keep the tokenless origin restrictions for embedded callers that
   // construct the app directly.
   const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins ?? []);
   if (parsedAllowOrigins.allowAny && !opts.token) {
@@ -1870,6 +1871,16 @@ export function createServeApp(
         `configured. '*' admits any cross-origin browser to the API; ` +
         `without a token, any local page can drive the daemon. Set a ` +
         `token or list specific origins instead of '*'.`,
+    );
+  }
+  const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsedAllowOrigins);
+  if (nonLoopbackHttpOrigin && !opts.token) {
+    throw new Error(
+      `Refusing to start with --allow-origin ${JSON.stringify(
+        nonLoopbackHttpOrigin,
+      )} but no bearer token configured. Non-loopback HTTP(S) browser ` +
+        `origins can drive the full operator API, including code execution ` +
+        `as the daemon user. Set a token or use a loopback origin.`,
     );
   }
   // One CORS middleware for both deployments, over a set that can change.

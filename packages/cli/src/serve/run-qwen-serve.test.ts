@@ -6817,7 +6817,7 @@ describe('runQwenServe runtime startup failures', () => {
   it('does not advertise browser automation MCP without an active CDP tunnel', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(
       undefined,
-      'https://example.com',
+      'http://localhost:5173',
       '/opt/qwen-cdp-mcp-adapter',
     );
 
@@ -8125,7 +8125,7 @@ describe('runQwenServe runtime startup failures', () => {
   it('keeps browser MCP features disabled for non-extension origins when the env flag is unset', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(
       undefined,
-      'https://example.com',
+      'http://localhost:5173',
     );
 
     expect(features).not.toContain('client_mcp_over_ws');

@@ -95,6 +95,7 @@ import {
   allowOriginCors,
   bearerAuth,
   denyBrowserOriginCors,
+  findNonLoopbackHttpOrigin,
   hostAllowlist,
   isTrustedLoopbackMode,
   parseAllowOriginPatterns,
@@ -3516,14 +3517,8 @@ async function runQwenServeImpl(
     // `InvalidAllowOriginPatternError` already names the bad pattern
     // and the canonical form; surface it verbatim.
     const parsed = parseAllowOriginPatterns(opts.allowOrigins);
-    // `*` admits cross-origin requests from any browser tab on the
-    // host. On a token-less loopback default that's a wide-open API
-    // surface — any page (https://evil.example.com, attacker-controlled
-    // ad-frame) can read every route. Refuse to start so operators
-    // don't ship this combination by accident. Mirrors the
-    // `--require-auth + no token` boot-refusal above. A token (any
-    // source: --token, env, --require-auth) makes the bearer the
-    // security boundary, so `*` is acceptable under that posture.
+    // A token (any source: --token, env, --require-auth) makes the bearer the
+    // security boundary for wildcard and remotely hosted browser origins.
     if (parsed.allowAny && !token) {
       throw new Error(
         `Refusing to start with --allow-origin '*' but no bearer token ` +
@@ -3531,6 +3526,17 @@ async function runQwenServeImpl(
           `without a token, any local page can drive the daemon. Set ` +
           `${QWEN_SERVER_TOKEN_ENV} or pass --token, or list specific ` +
           `origins instead of '*'.`,
+      );
+    }
+    const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsed);
+    if (nonLoopbackHttpOrigin && !token) {
+      throw new Error(
+        `Refusing to start with --allow-origin ${JSON.stringify(
+          nonLoopbackHttpOrigin,
+        )} but no bearer token configured. Non-loopback HTTP(S) browser ` +
+          `origins can drive the full operator API, including code execution ` +
+          `as the daemon user. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, ` +
+          `or use a loopback origin.`,
       );
     }
     writeStderrLine(
@@ -3542,7 +3548,8 @@ async function runQwenServeImpl(
             'pre-auth on loopback unless --require-auth is set)'
           : trustedLoopbackMode
             ? ' (WARNING: these browser origins receive full API authority ' +
-              'without a bearer token in trusted loopback mode)'
+              'without a bearer token in trusted loopback mode and can ' +
+              'execute code as the daemon user)'
             : ''),
     );
   }
@@ -9054,7 +9061,8 @@ async function runQwenServeImpl(
       if (!token) {
         writeStderrLine(
           `qwen serve: trusted loopback mode; local callers have full API ` +
-            `access without bearer authentication. Use --require-auth with ` +
+            `access without bearer authentication, including code execution ` +
+            `as the daemon user. Use --require-auth with ` +
             `${QWEN_SERVER_TOKEN_ENV} on shared or untrusted hosts.`,
         );
         if (opts.clientMcpOverWs === true) {

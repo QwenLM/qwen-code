@@ -29510,6 +29510,7 @@ describe('createServeApp', () => {
           {
             ...baseOpts,
             workspace,
+            token: 'secret',
             allowOrigins: ['https://hooks.example'],
           },
           undefined,
@@ -29955,6 +29956,38 @@ describe('runQwenServe', () => {
     );
   });
 
+  it('refuses a non-loopback HTTP(S) allow-origin without a token', async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        allowOrigins: ['https://app.example.com'],
+      }),
+    ).rejects.toThrow(/Non-loopback HTTP\(S\).*code execution/);
+  });
+
+  it('starts with a non-loopback HTTP(S) allow-origin when a token is configured', async () => {
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      token: 'secret',
+      allowOrigins: ['https://app.example.com'],
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/capabilities`, {
+      headers: {
+        Origin: 'https://app.example.com',
+        Authorization: 'Bearer secret',
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe(
+      'https://app.example.com',
+    );
+  });
+
   it('warns that a specific origin receives full trusted-loopback authority', async () => {
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
@@ -29974,6 +30007,11 @@ describe('runQwenServe', () => {
       expect(
         stderrSpy.mock.calls.some(([chunk]) =>
           String(chunk).includes('trusted loopback mode'),
+        ),
+      ).toBe(true);
+      expect(
+        stderrSpy.mock.calls.some(([chunk]) =>
+          String(chunk).includes('execute code as the daemon user'),
         ),
       ).toBe(true);
     } finally {
@@ -32655,6 +32693,34 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
         bridge: fakeBridge(),
       }),
     ).toThrow(/--allow-origin '\*'/);
+  });
+
+  it('rejects an embedded non-loopback HTTP(S) allowlist without a token', () => {
+    const remoteOpts = {
+      ...baseOpts,
+      allowOrigins: ['https://app.example.com'],
+    };
+    expect(() =>
+      createServeApp(remoteOpts, () => 4170, {
+        bridge: fakeBridge(),
+      }),
+    ).toThrow(/Non-loopback HTTP\(S\).*code execution/);
+  });
+
+  it('preserves tokenless browser-extension origins for local automation', async () => {
+    const extensionOrigin =
+      'chrome-extension://idkijaaipeeinemigojbjkmfmabokbdk';
+    const app = createServeApp(
+      { ...baseOpts, allowOrigins: [extensionOrigin] },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', extensionOrigin);
+    expect(res.status).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBe(extensionOrigin);
   });
 
   it('`*` pattern with a token admits any cross-origin request', async () => {
@@ -36148,9 +36214,7 @@ describe('Live conversation runtime lifecycle', () => {
           workspaceCwd: setup.root.canonicalRoot,
         }),
       );
-      expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty(
-        'sourceType',
-      );
+      expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty('sourceType');
       expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty('sourceId');
     } finally {
       readCreationMetadataIfReadable.mockRestore();

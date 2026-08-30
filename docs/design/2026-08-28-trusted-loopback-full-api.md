@@ -216,9 +216,9 @@ remain separate concepts.
    fencing, permission mediation, and route-specific validation run after this
    authorization decision exactly as they do today.
 8. `--enable-session-shell` remains a separate explicit operator decision.
-9. `--allow-origin '*'` without a token remains a boot error. Wildcard CORS
-   actively admits arbitrary web origins and is not implied by local-process
-   trust.
+9. Wildcard and non-loopback HTTP(S) `--allow-origin` values without a token
+   are boot errors. Remote browser trust is not implied by local-process trust;
+   explicit browser-extension origins retain their existing tokenless path.
 10. Static Web Shell assets and loopback `/health` retain their current
     pre-authentication behavior. `--require-auth` continues to protect
     loopback `/health`.
@@ -394,8 +394,8 @@ widening. The enforcement mechanisms and remaining defenses stay unchanged:
 
 - loopback Host validation still rejects unrelated authorities, and
   non-loopback boot checks are unchanged;
-- REST CORS deny-by-default behavior and the explicit origin allowlist are
-  unchanged;
+- REST CORS remains deny-by-default; without a token, explicit HTTP(S) origins
+  are limited to loopback hosts;
 - same-loopback-origin normalization for the Web Shell admits the exact bound
   loopback address without admitting unrelated origins;
 - WebSocket Host and Origin checks admit the same exact bound loopback address,
@@ -405,10 +405,12 @@ widening. The enforcement mechanisms and remaining defenses stay unchanged:
 - channel webhook shared-secret authentication;
 - static Web Shell pre-authentication mounting.
 
-Specific `--allow-origin <origin>` entries continue to be an explicit operator
-choice. In trusted-loopback mode, an allowlisted browser origin can call the
-full API without a bearer. The wildcard form remains forbidden without a
-token because it removes that explicit-origin boundary entirely.
+Without a token, explicit HTTP(S) `--allow-origin <origin>` entries are limited
+to loopback hosts. A remotely hosted browser origin must be paired with a
+configured bearer token because otherwise that page could call the full API,
+including executing code as the daemon user. The wildcard form remains
+forbidden without a token. Explicit browser-extension origins retain their
+existing tokenless local-automation path.
 
 ### 7. Preserve the existing CDP/browser-automation exception
 
@@ -443,8 +445,8 @@ Update the tokenless startup breadcrumb so operators see the actual boundary:
 
 ```text
 qwen serve: trusted loopback mode; local callers have full API access without
-bearer authentication. Use --require-auth with QWEN_SERVER_TOKEN on shared or
-untrusted hosts.
+bearer authentication, including code execution as the daemon user. Use
+--require-auth with QWEN_SERVER_TOKEN on shared or untrusted hosts.
 ```
 
 Keep the separate warning when client-hosted MCP over WebSocket is enabled
@@ -643,9 +645,10 @@ to success assertions. At the baseline, 34 `token_required` references across
 - non-loopback without token still fails before listen;
 - `--require-auth` without token still fails before listen;
 - wrong/missing bearer still returns 401 in protected modes;
-- `--allow-origin '*'` without token still fails before listen;
-- specific-origin, Host, self-origin, and WebSocket CSRF tests retain their
-  current results;
+- wildcard or non-loopback HTTP(S) `--allow-origin` without token fails before
+  listen; loopback HTTP(S) and explicit browser-extension origins retain their
+  tokenless behavior;
+- Host, self-origin, and WebSocket CSRF tests retain their current results;
 - `--open-with-auth` continues to generate/reuse and deliver its bearer;
 - tokenless browser-automation MCP remains available under its existing
   feature conditions.
