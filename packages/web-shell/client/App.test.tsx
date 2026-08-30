@@ -1144,6 +1144,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
         React.createElement(
           'button',
           {
+            'data-testid': 'new-worktree-session-other',
+            type: 'button',
+            onClick: () => void props.onNewWorktreeSession?.('/other'),
+          },
+          'new worktree session in other',
+        ),
+        React.createElement(
+          'button',
+          {
             'data-testid': 'select-other-workspace',
             type: 'button',
             onClick: () => props.onSelectWorkspace?.('/other'),
@@ -11286,6 +11295,174 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
       mode: 'current',
     });
+  });
+
+  it('keeps the worktree intent when the composer re-selects the draft workspace', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      workspaceGit: vi
+        .fn()
+        .mockResolvedValue({ v: 2, workspaceCwd: cwd, branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/other');
+    });
+    await flush();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onGitModeIntentChange?.({
+        mode: 'worktree',
+        slug: 'feat-a',
+      });
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+
+    // Radix fires onValueChange for the already-checked radio row too; a
+    // re-select of the draft's own workspace changes nothing.
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/other');
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+
+    // A real switch still drops it.
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.(undefined);
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it("keeps a worktree intent armed for another workspace across the draft's stale no-branch status", async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
+      ],
+    };
+    // The primary is not a repository; the daemon answers a definitive
+    // no-branch status for it. The secondary is a repo on main.
+    mockWorkspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      workspaceGit: vi
+        .fn()
+        .mockResolvedValue(
+          cwd === '/other'
+            ? { v: 2, workspaceCwd: '/other', branch: 'main' }
+            : { v: 2, workspaceCwd: '/workspace', branch: null },
+        ),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+
+    // "New worktree task" on the secondary's row while the draft still
+    // holds the primary's no-branch answer.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-worktree-session-other"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: '/other',
+        worktree: { slug: undefined },
+      }),
+    );
+  });
+
+  it("clears the worktree intent once the draft workspace's own status turns definitively no-branch", async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    const workspaceGit = vi
+      .fn()
+      .mockResolvedValue({ v: 2, workspaceCwd: '/workspace', branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onGitModeIntentChange?.({
+        mode: 'worktree',
+        slug: 'feat-a',
+      });
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+      slug: 'feat-a',
+    });
+
+    // The repository is gone (.git removed): the daemon now answers a
+    // definitive no-branch status for this very workspace.
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/workspace',
+      branch: null,
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    // The chip is gone with the branch; the reset is observable on the
+    // session the next prompt creates.
+    expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.not.objectContaining({ worktree: expect.anything() }),
+    );
   });
 
   it('reloads skills from the target workspace when starting a new session', async () => {

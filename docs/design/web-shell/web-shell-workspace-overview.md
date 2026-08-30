@@ -120,9 +120,12 @@ workspace, whose sessions the sidebar lists itself, gets its counts passed in.
   submitted while the clear is still in flight gets the worktree, and any
   later session start or draft workspace switch resets it like any other
   intent. An armed intent survives a transient git-status gap — only a
-  session, an untrusted workspace, a no-branch answer or a draft workspace
-  switch clears it, and an intent set while a session already exists is
-  cleared immediately.
+  session, an untrusted workspace, a no-branch answer for the draft's own
+  workspace (the status is keyed by `workspaceCwd`, so the answer of a
+  workspace being left never clears an intent armed for the new one) or a
+  draft workspace switch clears it; re-selecting the draft's own workspace
+  from the composer picker is a no-op, and an intent set while a session
+  already exists is cleared immediately.
 
 ## Follow-ups (layers B and C in the issue)
 

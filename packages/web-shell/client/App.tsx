@@ -6781,10 +6781,18 @@ export function App({
   // failed poll round, a refetch still in flight); only a definitive answer
   // clears it. The chip stays hidden meanwhile because it keys on
   // `gitModeEligible`.
+  // The status is keyed by workspace: right after a draft re-target the
+  // state still holds the previous workspace's answer (the git-status effect
+  // clears it only after this commit), and a definitive no-branch answer for
+  // the workspace being left must not clear an intent armed for the new one.
+  // Same cwd-keying as the `git_status_changed` mirror effect above.
   const gitModeIntentInvalid = gitModeIntentMustReset({
     sessionId: connection.sessionId,
     workspaceTrusted: activeWorkspaceTrusted,
-    gitStatus: selectedWorkspaceGitStatus,
+    gitStatus:
+      selectedWorkspaceGitStatus?.workspaceCwd === activeWorkspaceCwd
+        ? selectedWorkspaceGitStatus
+        : undefined,
   });
   // Re-run on intent changes as well: an intent set while a session already
   // exists (or the workspace is untrusted / not a repo) has nothing to apply
@@ -8764,12 +8772,17 @@ export function App({
           await createNewSession(workspaceCwd);
           return;
         }
+        // The composer picker fires for its checked row too; re-selecting
+        // the draft's own workspace changes nothing and must keep an armed
+        // intent. Compared before the ref is overwritten below. `undefined`
+        // is the primary selection on both sides.
+        const sameTarget = workspaceCwd === selectedWorkspaceCwdRef.current;
         composerSourceVersionRef.current += 1;
         selectedWorkspaceCwdRef.current = workspaceCwd;
         setSelectedWorkspaceCwd(workspaceCwd);
         // The intent was armed for the previous draft workspace; a switch
         // must not carry a branch/worktree request over to another repo.
-        setGitModeIntent({ mode: 'current' });
+        if (!sameTarget) setGitModeIntent({ mode: 'current' });
       } finally {
         if (workspaceSwitchTokenRef.current === token) {
           workspaceSwitchTokenRef.current = null;
