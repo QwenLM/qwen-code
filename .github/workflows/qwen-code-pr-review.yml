@@ -2920,7 +2920,10 @@ jobs:
         if: "${{ always() && steps.prepare.outputs.decision == 'run' }}"
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          name: 'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}'
+          # The name carries run_attempt: a re-run keeps the run_id, and the
+          # publish job downloads by this exact name — without the suffix the
+          # re-run 409s on attempt 1's artifact and republishes the stale one.
+          name: 'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}-attempt-${{ github.run_attempt }}'
           path: '${{ env.WORKDIR }}/'
           if-no-files-found: 'ignore'
 
@@ -2985,12 +2988,12 @@ jobs:
         continue-on-error: true
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
-          name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}'
+          name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ github.run_attempt }}'
           path: '/tmp/qwen-resolve'
 
       - name: 'Resolution check'
         id: 'verify'
-        if: "${{ always() }}"
+        if: '${{ always() }}'
         # Refs are passed as env vars and only referenced as "$BASE_REF" /
         # "$HEAD_FETCH_REF" inside the script. They must never be inlined as
         # ${{ ... }}: branch names legally contain `$(...)`/backticks, so textual
@@ -3158,7 +3161,7 @@ jobs:
           echo "outcome=fixed" >> "$GITHUB_OUTPUT"
 
       - name: 'Report result'
-        if: "${{ always() }}"
+        if: '${{ always() }}'
         env:
           GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           PUSH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
@@ -3273,16 +3276,16 @@ jobs:
                 if [ "$push_failed" = "true" ]; then
                   case "$push_fail_reason" in
                     workflow_scope)
-                      echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`: resolving merges the base branch in, which includes its \`.github/workflows/**\` changes, and GitHub blocks a token without the **\`workflow\`** scope from updating workflow files. A maintainer needs to grant that scope to the push bot (classic PAT: check \`workflow\`; fine-grained PAT: Workflows → Read and write), then re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+                      echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`: resolving merges the base branch in, which includes its \`.github/workflows/**\` changes, and GitHub blocks a token without the **\`workflow\`** scope from updating workflow files. A maintainer needs to grant that scope to the push bot (classic PAT: check \`workflow\`; fine-grained PAT: Workflows → Read and write), then re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${{ github.run_attempt }}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                     permission)
-                      echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`. For a fork PR this needs **Allow edits by maintainers** enabled, and GitHub blocks maintainer edits on forks owned by an organization. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+                      echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`. For a fork PR this needs **Allow edits by maintainers** enabled, and GitHub blocks maintainer edits on forks owned by an organization. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${{ github.run_attempt }}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                     moved)
-                      echo "Qwen Code resolved the merge conflicts, but the head branch changed while resolving, so the update was not pushed. Re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+                      echo "Qwen Code resolved the merge conflicts, but the head branch changed while resolving, so the update was not pushed. Re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${{ github.run_attempt }}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                     *)
-                      echo "Qwen Code resolved the merge conflicts, but pushing to \`${HEAD_REPO}\` failed. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+                      echo "Qwen Code resolved the merge conflicts, but pushing to \`${HEAD_REPO}\` failed. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${{ github.run_attempt }}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                   esac
                 elif [ "$DRY_RUN" = "true" ]; then

@@ -535,21 +535,23 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
       'lineage must be checked before any content check',
     );
     // The artifact is the same one the agent job uploads; its absence is an
-    // infrastructure failure, not a silent job failure.
+    // infrastructure failure, not a silent job failure. The name carries
+    // run_attempt on both sides: a re-run keeps the run_id, and without the
+    // suffix the re-run would republish attempt 1's stale bundle.
     const download = publish.steps.find((s) =>
       s.uses?.startsWith('actions/download-artifact@'),
     );
     assert.equal(download['continue-on-error'], true);
     assert.equal(
       download.with.name,
-      "qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}",
+      'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ github.run_attempt }}',
     );
     const upload = resolvePrJob.steps.find((s) =>
       s.uses?.startsWith('actions/upload-artifact@'),
     );
     assert.equal(
       upload.with.name,
-      "qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}",
+      'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}-attempt-${{ github.run_attempt }}',
     );
     assert.ok(verify.run.includes('failure_kind=infra'));
     assert.ok(verify.run.includes('uploaded no run artifact'));

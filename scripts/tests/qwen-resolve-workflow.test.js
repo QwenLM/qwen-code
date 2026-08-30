@@ -906,16 +906,19 @@ describe('qwen resolve workflow', () => {
     expect(step(publishJob, 'Download run artifacts')).toContain(
       'continue-on-error: true',
     );
-    // The two halves agree on the artifact name and the bundle's shape.
+    // The two halves agree on the artifact name and the bundle's shape. The
+    // name carries run_attempt on BOTH sides: a re-run keeps the run_id, and
+    // without the suffix the second attempt 409s on the first attempt's upload
+    // while the by-name download republishes the stale first-attempt bundle.
     const packageStep = step(resolveJob, 'Package resolution');
     expect(packageStep).toContain(
       'git bundle create "${WORKDIR}/resolution.bundle" "${HEAD_SHA}..refs/heads/qwen-resolve/pr-${PR_NUMBER}"',
     );
     expect(step(resolveJob, 'Upload run artifacts')).toContain(
-      "name: 'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}'",
+      "name: 'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}-attempt-${{ github.run_attempt }}'",
     );
     expect(step(publishJob, 'Download run artifacts')).toContain(
-      "name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}'",
+      "name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ github.run_attempt }}'",
     );
     expect(step(publishJob, 'Download run artifacts')).toContain(
       "path: '/tmp/qwen-resolve'",
