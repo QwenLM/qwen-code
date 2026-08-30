@@ -20,6 +20,7 @@ import {
   ApprovalMode,
   type Config,
   type MCPServerConfig,
+  type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings, Settings } from './settings.js';
 import type {
@@ -28,6 +29,7 @@ import type {
 } from './settingsWatcher.js';
 import {
   registerMcpHotReload,
+  registerModelProvidersHotReload,
   mcpServersEqual,
   mcpGatingEqual,
 } from './hot-reload.js';
@@ -576,5 +578,88 @@ describe('registerMcpHotReload', () => {
     } finally {
       appEvents.off(AppEvent.McpPendingApprovalChanged, spy);
     }
+  });
+});
+
+// ── modelProviders hot-reload (#10568) ────────────────────────────────
+
+describe('registerModelProvidersHotReload', () => {
+  let listener: SettingsChangeListener;
+  let watcher: SettingsWatcher;
+  let unsubscribe: Mock;
+  let settings: LoadedSettings;
+  let merged: Settings;
+  let reloadModelProvidersConfig: Mock;
+  let config: Config;
+
+  beforeEach(() => {
+    unsubscribe = vi.fn();
+    watcher = {
+      addChangeListener: vi.fn((l: SettingsChangeListener) => {
+        listener = l;
+        return unsubscribe;
+      }),
+    } as unknown as SettingsWatcher;
+
+    merged = {} as Settings;
+    settings = { merged } as LoadedSettings;
+    reloadModelProvidersConfig = vi.fn();
+    config = { reloadModelProvidersConfig } as unknown as Config;
+  });
+
+  it('returns the watcher unsubscribe fn', () => {
+    const dispose = registerModelProvidersHotReload(watcher, settings, config);
+    expect(watcher.addChangeListener).toHaveBeenCalledOnce();
+    dispose();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('reloads the registry with the merged modelProviders on change', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-new', baseUrl: 'https://example.com' }],
+    } as ModelProvidersConfig;
+    await listener([]);
+
+    // providerProtocol is boot-frozen (requiresRestart), so it must NOT be
+    // passed — reloadModels preserves the existing protocol map.
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(reloadModelProvidersConfig).toHaveBeenCalledWith(
+      merged.modelProviders,
+    );
+  });
+
+  it('skips the reload when an unrelated settings key changed', async () => {
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    (merged as Settings & { theme?: string }).theme = 'dark';
+    await listener([]);
+
+    expect(reloadModelProvidersConfig).not.toHaveBeenCalled();
+  });
+
+  it('treats absent and {} modelProviders as unchanged', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    merged.modelProviders = {} as ModelProvidersConfig;
+    await listener([]);
+
+    expect(reloadModelProvidersConfig).not.toHaveBeenCalled();
+  });
+
+  it('does not re-reload the same snapshot on repeat events', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    await listener([]);
+    await listener([]);
+
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
   });
 });

@@ -261,3 +261,37 @@ export function registerMcpHotReload(
     }
   });
 }
+
+/**
+ * Subscribe the running {@link Config} to settings changes so `modelProviders`
+ * edits take effect without a session restart (issue #10568). Mirrors
+ * {@link registerMcpHotReload}: the watcher already debounces and filters out
+ * restart-required keys, so this listener only diffs the merged
+ * `modelProviders` against the last applied snapshot and calls the existing
+ * reload primitive. The diff gate keeps unrelated settings edits (theme, …)
+ * from rebuilding the model registry. Called once at startup, after
+ * `settingsWatcher.startWatching()`; returns a disposer that unsubscribes.
+ *
+ * `providerProtocol` stays boot-frozen: it is `requiresRestart` in the
+ * schema, so it is passed as `undefined` — `ModelRegistry.reloadModels`
+ * preserves the existing protocol map in that case.
+ */
+export function registerModelProvidersHotReload(
+  watcher: SettingsWatcher,
+  settings: LoadedSettings,
+  config: Config,
+): () => void {
+  debugLogger.debug(
+    'registered modelProviders hot-reload listener on SettingsWatcher',
+  );
+  let lastApplied = settings.merged.modelProviders;
+  return watcher.addChangeListener(() => {
+    const next = settings.merged.modelProviders;
+    if (equal(lastApplied ?? {}, next ?? {})) {
+      return;
+    }
+    lastApplied = next;
+    debugLogger.debug('modelProviders changed — reloading model registry');
+    config.reloadModelProvidersConfig(next);
+  });
+}

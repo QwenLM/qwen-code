@@ -52,7 +52,10 @@ import {
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
 import { SettingsWatcher } from './config/settingsWatcher.js';
-import { registerMcpHotReload } from './config/hot-reload.js';
+import {
+  registerMcpHotReload,
+  registerModelProvidersHotReload,
+} from './config/hot-reload.js';
 import { LspConfigWatcher } from './config/lsp-config-watcher.js';
 import { ExtensionFileWatcher } from './config/extension-file-watcher.js';
 import { ExtensionRefreshState } from './config/extension-refresh-state.js';
@@ -899,6 +902,16 @@ export async function main() {
         config.getTopTierMcpServers(),
       );
       registerCleanup(disposeMcpHotReload);
+
+      // Same plumbing for modelProviders edits (#10568): reload the model
+      // registry in place so `/model` picks up new providers without a
+      // session restart.
+      const disposeModelProvidersHotReload = registerModelProvidersHotReload(
+        settingsWatcher,
+        settings,
+        config,
+      );
+      registerCleanup(disposeModelProvidersHotReload);
     }
 
     registerLspHotReload(config, registerCleanup);
