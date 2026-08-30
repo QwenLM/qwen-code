@@ -11,6 +11,7 @@ import {
   type PreparedUsageBeforeTranscriptDeletion,
 } from './usageHistoryService.js';
 import { getProjectHash } from '../utils/paths.js';
+import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -63,6 +64,7 @@ import {
   type SessionRestoreProjection,
 } from './session-transcript-reader.js';
 import {
+  SessionWriterError,
   SessionWriterLease,
   SessionTranscriptChangedError,
   SessionTranscriptIdentityUnavailableError,
@@ -306,6 +308,7 @@ export interface RemoveSessionsResult {
 export interface RemoveSessionOptions {
   assertStorageUnchanged?: () => Promise<void>;
   assertCanMutate?: () => void;
+  assertCleanupOwned?: () => void;
 }
 
 export interface ArchiveSessionsResult {
@@ -321,6 +324,7 @@ export interface ArchiveSessionsOptions {
   resolveConflicts?: boolean;
   assertStorageUnchanged?: () => Promise<void>;
   assertCanMutate?: () => void;
+  assertCleanupOwned?: () => void;
 }
 
 export interface UnarchiveSessionsResult {
@@ -336,6 +340,7 @@ export interface UnarchiveSessionsOptions {
   resolveConflicts?: boolean;
   assertStorageUnchanged?: () => Promise<void>;
   assertCanMutate?: () => void;
+  assertCleanupOwned?: () => void;
 }
 
 export interface SessionServiceOptions {
@@ -1041,7 +1046,7 @@ export class SessionService {
         ) {
           continue;
         }
-        return this.extractCreationMetadataFromRecords(records);
+        return this.extractCreationMetadataFromFile(filePath, records);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
         this.warn(
@@ -1529,7 +1534,7 @@ export class SessionService {
 
   private async removeSessionOrganization(
     sessionId: string,
-    assertCanMutate?: () => void,
+    assertCleanupOwned?: () => void,
     propagateFailure = false,
   ): Promise<void> {
     try {
@@ -1539,15 +1544,16 @@ export class SessionService {
           this.warn(message);
         },
       );
-      if (assertCanMutate) {
+      if (assertCleanupOwned) {
         await service.removeSession(sessionId, {
-          assertCanCommit: assertCanMutate,
+          assertCanCommit: assertCleanupOwned,
         });
       } else {
         await service.removeSession(sessionId);
       }
     } catch (error) {
-      assertCanMutate?.();
+      if (error instanceof SessionWriterError) throw error;
+      assertCleanupOwned?.();
       if (propagateFailure) throw error;
       this.warn(
         `removeSession: failed to clear session organization for ${sessionId}: ${error}`,
@@ -1587,12 +1593,17 @@ export class SessionService {
   /**
    * Move a prompt terminal ledger sidecar across archive states. Unlike a
    * bare rename, an existing destination does not wedge the pair forever:
-   * the ledger is append-only JSONL, so the source records are concatenated
-   * onto the destination (preserving write order) and the source is
-   * unlinked. Throws propagate to the caller, which owns the warn-only
-   * policy — a ledger problem must never block the transcript move.
+   * the ledger is append-only JSONL, so the older half is concatenated before
+   * the newer half (preserving write order) and the source is unlinked. Throws
+   * propagate to the caller, which owns the warn-only policy — a ledger
+   * problem must never block the transcript move.
    */
-  private moveLedgerSidecar(sourcePath: string, destinationPath: string): void {
+  private moveLedgerSidecar(
+    sourcePath: string,
+    destinationPath: string,
+    action: 'archive' | 'unarchive',
+    assertCanCommit?: () => void,
+  ): void {
     if (!fs.existsSync(sourcePath)) {
       return;
     }
@@ -1611,8 +1622,19 @@ export class SessionService {
       const payload = sourceContents.endsWith('\n')
         ? sourceContents
         : `${sourceContents}\n`;
-      fs.appendFileSync(destinationPath, `\n${payload}`, 'utf8');
+      if (action === 'archive') {
+        assertCanCommit?.();
+        fs.appendFileSync(destinationPath, `\n${payload}`, 'utf8');
+      } else {
+        const destinationContents = fs.readFileSync(destinationPath, 'utf8');
+        atomicWriteFileSync(
+          destinationPath,
+          `${payload}${destinationContents.length > 0 ? '\n' : ''}${destinationContents}`,
+          { encoding: 'utf8', assertCanCommit },
+        );
+      }
     }
+    assertCanCommit?.();
     fs.unlinkSync(sourcePath);
   }
 
@@ -1654,6 +1676,67 @@ export class SessionService {
     }
     assertCanMutate?.();
     fs.unlinkSync(sourcePath);
+  }
+
+  private async moveArchiveSidecars(
+    sessionId: string,
+    action: 'archive' | 'unarchive',
+    assertCleanupOwned?: () => void,
+  ): Promise<void> {
+    const sourceState = action === 'archive' ? 'active' : 'archived';
+    const destinationState = action === 'archive' ? 'archived' : 'active';
+    const sourceWorktree = this.getWorktreeSessionPathForState(
+      sessionId,
+      sourceState,
+    );
+    const destinationWorktree = this.getWorktreeSessionPathForState(
+      sessionId,
+      destinationState,
+    );
+    assertCleanupOwned?.();
+    try {
+      this.moveOptionalFile(sourceWorktree, destinationWorktree);
+    } catch (error) {
+      this.warn(
+        `${action}Sessions: failed to move worktree sidecar for ${sessionId} from ${sourceWorktree} to ${destinationWorktree}: ${error}`,
+      );
+    }
+    try {
+      await this.movePrSidecar(
+        this.getPrSessionPathForState(sessionId, sourceState),
+        this.getPrSessionPathForState(sessionId, destinationState),
+        assertCleanupOwned,
+      );
+    } catch (error) {
+      if (error instanceof SessionWriterError) throw error;
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move pr sidecar for ${sessionId}: ${error}`,
+      );
+    }
+    const sourceLedger = this.getPromptLedgerPathForState(
+      sessionId,
+      sourceState,
+    );
+    const destinationLedger = this.getPromptLedgerPathForState(
+      sessionId,
+      destinationState,
+    );
+    try {
+      assertCleanupOwned?.();
+      this.moveLedgerSidecar(
+        sourceLedger,
+        destinationLedger,
+        action,
+        assertCleanupOwned,
+      );
+    } catch (error) {
+      if (error instanceof SessionWriterError) throw error;
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move prompt ledger for ${sessionId} from ${sourceLedger} to ${destinationLedger}: ${error}`,
+      );
+    }
   }
 
   private sessionFileMoveError(
@@ -1759,6 +1842,89 @@ export class SessionService {
       ...(sourceType ? { sourceType } : {}),
       ...(sourceId !== undefined ? { sourceId } : {}),
     };
+  }
+
+  private extractCreationMetadataFromFile(
+    filePath: string,
+    records: ChatRecord[],
+    tailBuffer?: Buffer,
+  ): {
+    parentSessionId?: string;
+    sourceType?: string;
+    sourceId?: string;
+  } {
+    const metadata = this.extractCreationMetadataFromRecords(records);
+    if (metadata.sourceType !== undefined) return metadata;
+
+    const tailSource = this.readSessionSourceFromTail(filePath, tailBuffer);
+    if (tailSource.sourceType === undefined) return metadata;
+    return {
+      ...metadata,
+      ...tailSource,
+    };
+  }
+
+  private readSessionSourceFromTail(
+    filePath: string,
+    scratchBuffer?: Buffer,
+  ): { sourceType?: string; sourceId?: string } {
+    let fd: number | undefined;
+    try {
+      const fileSize = fs.statSync(filePath).size;
+      if (fileSize === 0) return {};
+      const readStart = Math.max(0, fileSize - TAIL_READ_SIZE);
+      const readLength = Math.min(fileSize, TAIL_READ_SIZE);
+      const buffer =
+        scratchBuffer && scratchBuffer.length >= readLength
+          ? scratchBuffer
+          : Buffer.alloc(readLength);
+
+      fd = fs.openSync(filePath, 'r');
+      const bytesRead = fs.readSync(fd, buffer, 0, readLength, readStart);
+      let firstSegmentIsPartial = false;
+      if (readStart > 0) {
+        const peek = Buffer.alloc(1);
+        fs.readSync(fd, peek, 0, 1, readStart - 1);
+        firstSegmentIsPartial = peek[0] !== 0x0a;
+      }
+
+      const lines = buffer.toString('utf8', 0, bytesRead).split('\n');
+      if (firstSegmentIsPartial) lines.shift();
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const trimmed = lines[i].trim();
+        if (!trimmed) continue;
+        let record: ChatRecord;
+        try {
+          record = JSON.parse(trimmed) as ChatRecord;
+        } catch {
+          continue;
+        }
+        if (record.type !== 'system' || record.subtype !== 'session_source') {
+          continue;
+        }
+        const payload = record.systemPayload as
+          | { sourceType?: unknown; sourceId?: unknown }
+          | undefined;
+        if (typeof payload?.sourceType !== 'string') continue;
+        return {
+          sourceType: payload.sourceType,
+          ...(typeof payload.sourceId === 'string'
+            ? { sourceId: payload.sourceId }
+            : {}),
+        };
+      }
+      return {};
+    } catch {
+      return {};
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // Best-effort after the metadata result has already been decided.
+        }
+      }
+    }
   }
 
   /**
@@ -2103,7 +2269,11 @@ export class SessionService {
       signal?.throwIfAborted();
       const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
       signal?.throwIfAborted();
-      const source = this.extractCreationMetadataFromRecords(records);
+      const source = this.extractCreationMetadataFromFile(
+        filePath,
+        records,
+        tailBuffer,
+      );
       items.push({
         sessionId: firstRecord.sessionId,
         cwd: firstRecord.cwd,
@@ -2168,7 +2338,7 @@ export class SessionService {
       return undefined;
     }
     const titleInfo = this.readSessionTitleInfoFromFile(filePath);
-    const source = this.extractCreationMetadataFromRecords(records);
+    const source = this.extractCreationMetadataFromFile(filePath, records);
     return {
       sessionId: firstRecord.sessionId,
       cwd: firstRecord.cwd,
@@ -2600,7 +2770,7 @@ export class SessionService {
         await assertDurableDirectoryHandle(parent);
       }
       await this.cleanupRemovedSessionStateInternal(sessionId, options, true);
-      options.assertCanMutate?.();
+      (options.assertCleanupOwned ?? options.assertCanMutate)?.();
       for (const parent of parents) {
         await syncDurableDirectory(parent);
       }
@@ -2742,10 +2912,12 @@ export class SessionService {
     propagateOrganizationFailure: boolean,
   ): Promise<void> {
     this.cleanupRemovedSessionFiles(sessionId, options);
-    options.assertCanMutate?.();
+    const assertCleanupOwned =
+      options.assertCleanupOwned ?? options.assertCanMutate;
+    assertCleanupOwned?.();
     await this.removeSessionOrganization(
       sessionId,
-      options.assertCanMutate,
+      assertCleanupOwned,
       propagateOrganizationFailure,
     );
   }
@@ -2754,13 +2926,15 @@ export class SessionService {
     sessionId: string,
     options: RemoveSessionOptions,
   ): void {
-    options.assertCanMutate?.();
+    const assertCleanupOwned =
+      options.assertCleanupOwned ?? options.assertCanMutate;
+    assertCleanupOwned?.();
     this.removeWorktreeSidecars(sessionId);
-    options.assertCanMutate?.();
+    assertCleanupOwned?.();
     this.removePrSidecars(sessionId);
-    options.assertCanMutate?.();
+    assertCleanupOwned?.();
     this.removePromptLedgers(sessionId);
-    options.assertCanMutate?.();
+    assertCleanupOwned?.();
     this.removeFileHistoryBackups(sessionId);
   }
 
@@ -2794,6 +2968,12 @@ export class SessionService {
           continue;
         }
         if (location === 'archived') {
+          if (options.assertCleanupOwned) {
+            await this.moveArchiveSidecars(sessionId, 'archive', () => {
+              options.assertCanMutate?.();
+              options.assertCleanupOwned?.();
+            });
+          }
           alreadyArchived.push(sessionId);
           continue;
         }
@@ -2809,23 +2989,26 @@ export class SessionService {
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
           this.removeFileIfExists(active.filePath);
           try {
-            options.assertCanMutate?.();
+            options.assertCleanupOwned?.();
             await this.movePrSidecar(
               this.getPrSessionPathForState(sessionId, 'active'),
               this.getPrSessionPathForState(sessionId, 'archived'),
-              options.assertCanMutate,
+              options.assertCleanupOwned,
             );
           } catch (sidecarError) {
-            options.assertCanMutate?.();
+            if (sidecarError instanceof SessionWriterError) {
+              throw sidecarError;
+            }
+            options.assertCleanupOwned?.();
             this.warn(
               `archiveSessions: failed to merge active pr sidecar for ${sessionId}: ${sidecarError}`,
             );
           }
-          options.assertCanMutate?.();
+          options.assertCleanupOwned?.();
           this.removeFileIfExists(
             this.getWorktreeSessionPathForState(sessionId, 'active'),
           );
-          options.assertCanMutate?.();
+          options.assertCleanupOwned?.();
           this.removeFileIfExists(
             this.getPromptLedgerPathForState(sessionId, 'active'),
           );
@@ -2837,22 +3020,6 @@ export class SessionService {
         const sourcePath = this.getSessionFilePath(sessionId, 'active');
         const targetPath = this.getSessionFilePath(sessionId, 'archived');
         fs.mkdirSync(this.getArchiveChatsDir(), { recursive: true });
-        const activeSidecar = this.getWorktreeSessionPathForState(
-          sessionId,
-          'active',
-        );
-        const archivedSidecar = this.getWorktreeSessionPathForState(
-          sessionId,
-          'archived',
-        );
-        const activeLedger = this.getPromptLedgerPathForState(
-          sessionId,
-          'active',
-        );
-        const archivedLedger = this.getPromptLedgerPathForState(
-          sessionId,
-          'archived',
-        );
         await options.assertStorageUnchanged?.();
         options.assertCanMutate?.();
         this.assertMaintainableSessionUnchanged(sessionId, snapshot);
@@ -2861,35 +3028,11 @@ export class SessionService {
         } catch (error) {
           throw this.sessionFileMoveError('archive', error);
         }
-        options.assertCanMutate?.();
-        try {
-          this.moveOptionalFile(activeSidecar, archivedSidecar);
-        } catch (sidecarError) {
-          this.warn(
-            `archiveSessions: failed to move worktree sidecar for ${sessionId} from ${activeSidecar} to ${archivedSidecar}: ${sidecarError}`,
-          );
-        }
-        try {
-          await this.movePrSidecar(
-            this.getPrSessionPathForState(sessionId, 'active'),
-            this.getPrSessionPathForState(sessionId, 'archived'),
-            options.assertCanMutate,
-          );
-        } catch (sidecarError) {
-          options.assertCanMutate?.();
-          this.warn(
-            `archiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
-          );
-        }
-        try {
-          options.assertCanMutate?.();
-          this.moveLedgerSidecar(activeLedger, archivedLedger);
-        } catch (ledgerError) {
-          options.assertCanMutate?.();
-          this.warn(
-            `archiveSessions: failed to move prompt ledger for ${sessionId} from ${activeLedger} to ${archivedLedger}: ${ledgerError}`,
-          );
-        }
+        await this.moveArchiveSidecars(
+          sessionId,
+          'archive',
+          options.assertCleanupOwned,
+        );
         archived.push(sessionId);
       } catch (error) {
         if (
@@ -2963,6 +3106,12 @@ export class SessionService {
           continue;
         }
         if (location === 'active') {
+          if (options.assertCleanupOwned) {
+            await this.moveArchiveSidecars(sessionId, 'unarchive', () => {
+              options.assertCanMutate?.();
+              options.assertCleanupOwned?.();
+            });
+          }
           alreadyActive.push(sessionId);
           continue;
         }
@@ -2978,23 +3127,26 @@ export class SessionService {
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
           this.removeFileIfExists(archived.filePath);
           try {
-            options.assertCanMutate?.();
+            options.assertCleanupOwned?.();
             await this.movePrSidecar(
               this.getPrSessionPathForState(sessionId, 'archived'),
               this.getPrSessionPathForState(sessionId, 'active'),
-              options.assertCanMutate,
+              options.assertCleanupOwned,
             );
           } catch (sidecarError) {
-            options.assertCanMutate?.();
+            if (sidecarError instanceof SessionWriterError) {
+              throw sidecarError;
+            }
+            options.assertCleanupOwned?.();
             this.warn(
               `unarchiveSessions: failed to merge archived pr sidecar for ${sessionId}: ${sidecarError}`,
             );
           }
-          options.assertCanMutate?.();
+          options.assertCleanupOwned?.();
           this.removeFileIfExists(
             this.getWorktreeSessionPathForState(sessionId, 'archived'),
           );
-          options.assertCanMutate?.();
+          options.assertCleanupOwned?.();
           this.removeFileIfExists(
             this.getPromptLedgerPathForState(sessionId, 'archived'),
           );
@@ -3005,14 +3157,6 @@ export class SessionService {
 
         const sourcePath = this.getSessionFilePath(sessionId, 'archived');
         const targetPath = this.getSessionFilePath(sessionId, 'active');
-        const archivedSidecar = this.getWorktreeSessionPathForState(
-          sessionId,
-          'archived',
-        );
-        const activeSidecar = this.getWorktreeSessionPathForState(
-          sessionId,
-          'active',
-        );
         fs.mkdirSync(path.dirname(targetPath), { recursive: true });
         await options.assertStorageUnchanged?.();
         options.assertCanMutate?.();
@@ -3023,43 +3167,11 @@ export class SessionService {
         } catch (error) {
           throw this.sessionFileMoveError('unarchive', error);
         }
-        options.assertCanMutate?.();
-        try {
-          this.moveOptionalFile(archivedSidecar, activeSidecar);
-        } catch (sidecarError) {
-          this.warn(
-            `unarchiveSessions: failed to move worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${sidecarError}`,
-          );
-        }
-        try {
-          await this.movePrSidecar(
-            this.getPrSessionPathForState(sessionId, 'archived'),
-            this.getPrSessionPathForState(sessionId, 'active'),
-            options.assertCanMutate,
-          );
-        } catch (sidecarError) {
-          options.assertCanMutate?.();
-          this.warn(
-            `unarchiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
-          );
-        }
-        const archivedLedger = this.getPromptLedgerPathForState(
+        await this.moveArchiveSidecars(
           sessionId,
-          'archived',
+          'unarchive',
+          options.assertCleanupOwned,
         );
-        const activeLedger = this.getPromptLedgerPathForState(
-          sessionId,
-          'active',
-        );
-        try {
-          options.assertCanMutate?.();
-          this.moveLedgerSidecar(archivedLedger, activeLedger);
-        } catch (ledgerError) {
-          options.assertCanMutate?.();
-          this.warn(
-            `unarchiveSessions: failed to move prompt ledger for ${sessionId} from ${archivedLedger} to ${activeLedger}: ${ledgerError}`,
-          );
-        }
         unarchived.push(sessionId);
       } catch (error) {
         if (
