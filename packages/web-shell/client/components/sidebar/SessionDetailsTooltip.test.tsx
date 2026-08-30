@@ -231,33 +231,24 @@ describe('SessionDetailsTooltip', () => {
               sessionId: 'session-1',
               workspaceCwd: '/work/qwen-code',
               clientCount: 1,
+              // Binding order, not number order: the lower-numbered PR
+              // was bound last and is therefore the newest.
               prs: [
-                {
-                  number: 9500,
-                  url: 'https://github.com/o/r/pull/9500',
-                  state: 'merged',
-                  issues: [
-                    // The older PR's copy of #7 carries a stale state; the
-                    // newest PR's copy (listed first) must win.
-                    {
-                      number: 7,
-                      url: 'https://github.com/o/r/issues/7',
-                      state: 'open',
-                    },
-                    // A hand-edited sidecar can carry non-openable schemes.
-                    { number: 99, url: 'javascript:alert(1)' },
-                  ],
-                },
                 {
                   number: 9517,
                   url: 'https://github.com/o/r/pull/9517',
                   state: 'open',
                   issues: [
-                    // Stacked PRs closing the same issue list it once.
+                    // The older PR's copy of #7 carries a stale state.
                     {
                       number: 7,
                       url: 'https://github.com/o/r/issues/7',
-                      state: 'completed',
+                      state: 'open',
+                    },
+                    // Same number in another repository: a distinct issue.
+                    {
+                      number: 7,
+                      url: 'https://github.com/other-org/other-repo/issues/7',
                     },
                     {
                       number: 8,
@@ -269,6 +260,38 @@ describe('SessionDetailsTooltip', () => {
                       number: 10,
                       url: 'https://github.com/o/r/issues/10',
                       state: 'open',
+                    },
+                  ],
+                },
+                // A hand-edited sidecar can carry non-openable schemes; a
+                // filtered PR takes its issues with it.
+                {
+                  number: 9998,
+                  url: 'javascript:alert(1)',
+                  issues: [
+                    {
+                      number: 5,
+                      url: 'https://github.com/o/r/issues/5',
+                      state: 'open',
+                    },
+                  ],
+                },
+                {
+                  number: 9500,
+                  url: 'https://github.com/o/r/pull/9500',
+                  state: 'merged',
+                  issues: [
+                    // Newest PR: its copy of #7 wins the dedupe.
+                    {
+                      number: 7,
+                      url: 'https://github.com/o/r/issues/7',
+                      state: 'completed',
+                    },
+                    { number: 99, url: 'javascript:alert(1)' },
+                    {
+                      number: 11,
+                      url: 'https://github.com/o/r/issues/11',
+                      state: 'completed',
                     },
                   ],
                 },
@@ -288,15 +311,21 @@ describe('SessionDetailsTooltip', () => {
 
     const details = document.querySelector('[role="dialog"]');
     const issueLinks = details?.querySelectorAll('a[href*="/issues/"]');
+    // Newest PR's issues first (binding order, not number order), then the
+    // older PR's, minus the url-deduped copy of #7.
     expect(
       [...(issueLinks ?? [])].map((link) => link.getAttribute('href')),
     ).toEqual([
       'https://github.com/o/r/issues/7',
+      'https://github.com/o/r/issues/11',
+      'https://github.com/other-org/other-repo/issues/7',
       'https://github.com/o/r/issues/8',
       'https://github.com/o/r/issues/9',
       'https://github.com/o/r/issues/10',
     ]);
     expect(details?.querySelector('a[href^="javascript:"]')).toBeNull();
+    expect(details?.textContent).not.toContain('Issue #99');
+    expect(details?.textContent).not.toContain('Issue #5');
     const byNumber = (number: number) =>
       details?.querySelector(
         `a[href="https://github.com/o/r/issues/${number}"]`,
@@ -311,8 +340,16 @@ describe('SessionDetailsTooltip', () => {
     expect(
       rowIcon(8)?.classList.contains(styles.sessionIssueStateNotPlanned),
     ).toBe(true);
+    // State-less: the neutral glyph with no state color (an SVG's
+    // className is an SVGAnimatedString in jsdom, so check the token list).
     expect(rowIcon(9)?.classList.contains('lucide-circle-dot')).toBe(true);
-    expect(rowIcon(9)?.className).not.toContain('sessionIssueState');
+    for (const stateClass of [
+      styles.sessionIssueStateOpen,
+      styles.sessionIssueStateCompleted,
+      styles.sessionIssueStateNotPlanned,
+    ]) {
+      expect(rowIcon(9)?.classList.contains(stateClass)).toBe(false);
+    }
     // Open is the dominant live state: green circle-dot, no sr-only suffix.
     expect(rowIcon(10)?.classList.contains('lucide-circle-dot')).toBe(true);
     expect(rowIcon(10)?.classList.contains(styles.sessionIssueStateOpen)).toBe(
@@ -322,12 +359,15 @@ describe('SessionDetailsTooltip', () => {
     expect(byNumber(8)?.textContent).toBe('Issue #8 · Not planned');
     expect(byNumber(9)?.textContent).toBe('Issue #9');
     expect(byNumber(10)?.textContent).toBe('Issue #10');
+    expect(byNumber(11)?.textContent).toBe('Issue #11 · Completed');
     // Issues follow the PR rows.
     const links = [...(details?.querySelectorAll('a[href^="https://"]') ?? [])];
     expect(links.map((link) => link.getAttribute('href'))).toEqual([
-      'https://github.com/o/r/pull/9517',
       'https://github.com/o/r/pull/9500',
+      'https://github.com/o/r/pull/9517',
       'https://github.com/o/r/issues/7',
+      'https://github.com/o/r/issues/11',
+      'https://github.com/other-org/other-repo/issues/7',
       'https://github.com/o/r/issues/8',
       'https://github.com/o/r/issues/9',
       'https://github.com/o/r/issues/10',

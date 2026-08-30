@@ -34,13 +34,15 @@ describe('isDaemonSessionPrInfo', () => {
     // A state-less issue (older sidecar) is served by the daemon and must
     // not drop the whole binding here.
     expect(isDaemonSessionPrInfo({ ...valid, issues: [issue] })).toBe(true);
+    const issues = (length: number) =>
+      Array.from({ length }, (_, index) => ({ ...issue, number: index + 1 }));
+    expect(isDaemonSessionPrInfo({ ...valid, issues: issues(10) })).toBe(true);
+    expect(isDaemonSessionPrInfo({ ...valid, issues: issues(11) })).toBe(false);
+    // Control characters would forge the daemon's audit line.
     expect(
       isDaemonSessionPrInfo({
         ...valid,
-        issues: Array.from({ length: 11 }, (_, index) => ({
-          ...issue,
-          number: index + 1,
-        })),
+        issues: [{ ...issue, url: `${issue.url}\u0007` }],
       }),
     ).toBe(false);
     for (const state of ['open', 'completed', 'not_planned'] as const) {

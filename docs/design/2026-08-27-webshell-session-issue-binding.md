@@ -68,7 +68,7 @@ p10303: pullRequest(number: 10303) {
 5. 收敛：merged 且无快照、又永远不可能被查询解析到的绑定写入空快照 `issues: []`（渲染上等同于没有），否则它会永远重新进入查询，违背"全 merged 且有快照零调用"的不变量。触发条件：查询成功但仓库不认识该编号（外仓同号 PR）、查询结构上不可能（无 gh / 无 git root）、平台根本没有 closing references（Aone）。瞬时失败（`failed`）不收敛。
 6. 可解析性过滤：用列表查询返回的 PR url 推出本 workspace 仓库的 `host/owner/repo` 键，url 不在该仓库下的绑定不进入查询（与 Aone 的 refreshable 过滤对称），merged 的直接本地收敛；列表没跑或为空则放行进查询，由逐别名 NOT_FOUND 收敛。
 7. 查询结果与绑定的匹配按 `host/owner/repo` + 编号（容忍 `www.`、`http:`、`/files` 后缀、大小写），命中后以绑定自己的 url 写入——sidecar 的写入门仍按 canonical url 比对，这一宽松匹配只限 sweep 内部，其它同 PR 判定（重绑、session-list 合并）不放宽。
-8. GraphQL 响应的顶层 `errors[]` 必须检查：只有 `path: ['repository', '<alias>']` 的 NOT_FOUND 才代表"仓库没有该 PR"；其它局部错误（服务端错误置空某别名、子字段错误置空 closingIssuesReferences）一律当 `failed`，否则一次瞬时错误会被洗成 `ok` 并永久写空快照。gh 因无远端 / 远端不是 GitHub 而解析不了仓库（stderr 里的 placeholder 解析报错）归为结构性的 `repo_unresolved`，参与收敛。
+8. GraphQL 响应的顶层 `errors[]` 必须检查：只有 `path: ['repository', '<alias>']` 的 NOT_FOUND 才代表"仓库没有该 PR"；其它局部错误（服务端错误置空某别名、子字段错误置空 closingIssuesReferences）一律当 `failed`，否则一次瞬时错误会被洗成 `ok` 并永久写空快照。gh 因无远端 / 远端不是 GitHub 而解析不了仓库（stderr 里的 placeholder 解析报错），或仓库在 GitHub 侧已不存在（`NOT_FOUND` 且 `path: ['repository']`、`data.repository` 为 null），都归为结构性的 `repo_unresolved`，参与收敛。
 
 成本：全 merged 且已有快照的 workspace 零调用；否则多一条 ~1–3s 的 GraphQL。已合入 PR 的 issue 之后被 reopen 不再跟踪（与"merged 是终态"同一取舍）。
 

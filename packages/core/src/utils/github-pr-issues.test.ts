@@ -321,19 +321,35 @@ describe('fetchGitHubPullRequestIssues', () => {
 
   it('maps a repository gh cannot resolve to repo_unresolved', async () => {
     fs.mkdirSync(path.join(dir, '.git'));
-    mockGh(() => ({
-      error: new Error('exit 1'),
-      stderr: 'error parsing "owner" value: no git remotes found\n',
-    }));
-    expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
-      kind: 'repo_unresolved',
-    });
+    // One fixture per diagnostic the classifier accepts — gh's wording is
+    // no contract, so each alternative is pinned on its own.
+    for (const stderr of [
+      'no git remotes found\n',
+      'error parsing "owner" value: could not determine the repository',
+      'error parsing "name" value: could not determine the repository',
+      'none of the git remotes configured for this repository point to a known GitHub host',
+    ]) {
+      mockGh(() => ({ error: new Error('exit 1'), stderr }));
+      expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
+        kind: 'repo_unresolved',
+      });
+    }
+  });
 
+  it('maps a repository GitHub no longer serves to repo_unresolved', async () => {
+    // Renamed, deleted, or access revoked: gh resolves the placeholders
+    // from the remote, and GitHub answers NOT_FOUND on the repository
+    // itself — structural, so merged bindings must converge on it.
+    fs.mkdirSync(path.join(dir, '.git'));
     mockGh(() => ({
       error: new Error('exit 1'),
-      stderr:
-        'none of the git remotes configured for this repository point to a known GitHub host',
+      stderr: 'gh: Could not resolve to a Repository',
+      stdout: JSON.stringify({
+        data: { repository: null },
+        errors: [{ type: 'NOT_FOUND', path: ['repository'] }],
+      }),
     }));
+
     expect(await fetchGitHubPullRequestIssues(dir, undefined, [1])).toEqual({
       kind: 'repo_unresolved',
     });

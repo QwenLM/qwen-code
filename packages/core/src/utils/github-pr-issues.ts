@@ -41,8 +41,10 @@ export type FetchGitHubPullRequestIssuesResult =
   | { kind: 'not_a_repo' }
   | { kind: 'cli_unavailable' }
   /**
-   * gh could not resolve the repository from the git remotes (none, or none
-   * on a known GitHub host) — structural, unlike a transient `failed`.
+   * The repository cannot be looked up at all: gh found no usable GitHub
+   * remote, or the remote names a repository GitHub no longer serves
+   * (renamed, deleted, access revoked) — structural, unlike a transient
+   * `failed`.
    */
   | { kind: 'repo_unresolved' }
   | { kind: 'failed'; message: string; gitRoot: string };
@@ -118,6 +120,13 @@ interface GhGraphqlError {
   path?: unknown;
 }
 
+/** The repository itself resolved to NOT_FOUND (`path: ['repository']`). */
+class GhRepositoryNotFoundError extends Error {
+  constructor() {
+    super('gh api graphql: the repository could not be resolved');
+  }
+}
+
 /**
  * Parses a `gh api graphql` response. A PR that does not resolve (a binding
  * to another repository's same-numbered PR) comes back as a null alias plus a
@@ -136,11 +145,15 @@ export function parsePullRequestIssuesResponse(
   const errors = (parsed as { errors?: unknown } | null)?.errors;
   if (Array.isArray(errors)) {
     for (const error of errors as GhGraphqlError[]) {
+      const notFoundAt =
+        error.type === 'NOT_FOUND' && Array.isArray(error.path)
+          ? error.path
+          : undefined;
+      if (notFoundAt?.length === 1 && notFoundAt[0] === 'repository') {
+        throw new GhRepositoryNotFoundError();
+      }
       const aliasNotFound =
-        error.type === 'NOT_FOUND' &&
-        Array.isArray(error.path) &&
-        error.path.length === 2 &&
-        error.path[0] === 'repository';
+        notFoundAt?.length === 2 && notFoundAt[0] === 'repository';
       if (!aliasNotFound) {
         throw new Error(
           `gh api graphql partial error: ${JSON.stringify(error).slice(0, 200)}`,
@@ -264,6 +277,9 @@ export async function fetchGitHubPullRequestIssues(
         pullRequests.set(number, entry);
       }
     } catch (error) {
+      if (error instanceof GhRepositoryNotFoundError) {
+        return { kind: 'repo_unresolved' };
+      }
       return {
         kind: 'failed',
         message: ghErrorMessage(error, 'gh api graphql', GH_TIMEOUT_MS),
