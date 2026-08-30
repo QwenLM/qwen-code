@@ -1,33 +1,33 @@
-name: Install ossutil
-description: Download, verify, and install the pinned ossutil binary
+name: 'Install ossutil'
+description: 'Download, verify, and install the pinned ossutil binary'
 inputs:
   install-dir:
-    description: Directory where the verified binary is installed
+    description: 'Directory where the verified binary is installed'
     required: true
   retry:
-    description: Retry transient download failures
+    description: 'Retry transient download failures'
     required: false
     default: 'false'
   connect-timeout:
-    description: curl connection timeout in seconds
+    description: 'curl connection timeout in seconds'
     required: false
     default: '15'
   max-time:
-    description: curl maximum transfer time in seconds
+    description: 'curl maximum transfer time in seconds'
     required: false
     default: '300'
 runs:
-  using: composite
+  using: 'composite'
   steps:
-    - name: Download and verify ossutil
-      shell: bash
+    - name: 'Download and verify ossutil'
+      shell: 'bash'
       env:
-        OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
-        OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
-        INSTALL_DIR: ${{ inputs.install-dir }}
-        RETRY: ${{ inputs.retry }}
-        CONNECT_TIMEOUT: ${{ inputs.connect-timeout }}
-        MAX_TIME: ${{ inputs.max-time }}
+        OSSUTIL_URL: '${{ vars.OSSUTIL_URL || ''https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip'' }}'
+        OSSUTIL_SHA256: '${{ vars.OSSUTIL_SHA256 || ''dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343'' }}'
+        INSTALL_DIR: '${{ inputs.install-dir }}'
+        RETRY: '${{ inputs.retry }}'
+        CONNECT_TIMEOUT: '${{ inputs.connect-timeout }}'
+        MAX_TIME: '${{ inputs.max-time }}'
       run: |
         set -euo pipefail
         tmp_dir="$(mktemp -d)"
