@@ -984,6 +984,10 @@ export class AgentCore {
             DEFAULT_QWEN_MODEL,
           messageParams,
           promptId,
+          undefined,
+          stickyMaxOutputTokens !== undefined
+            ? { maxOutputTokensFromRecovery: true }
+            : undefined,
         );
         this.eventEmitter?.emit(AgentEventType.ROUND_START, {
           subagentId: this.subagentId,
@@ -1030,8 +1034,10 @@ export class AgentCore {
               stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
             }
             functionCalls.length = 0;
-            roundText = '';
-            roundThoughtText = '';
+            if (!streamEvent.isContinuation) {
+              roundText = '';
+              roundThoughtText = '';
+            }
             lastUsage = undefined;
             currentResponseId = undefined;
             wasOutputTruncated = false;

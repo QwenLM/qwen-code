@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
@@ -14,6 +15,12 @@ export interface ResumeTokenCounts {
   promptTokenCount: number;
   outputTokenCount: number;
   isEstimated: boolean;
+}
+
+export function hasResumeTokenCountsUsage(
+  usage: GenerateContentResponseUsageMetadata | undefined,
+): boolean {
+  return Boolean(usage?.promptTokenCount ?? usage?.totalTokenCount);
 }
 
 export class ResumeTokenCountsAccumulator {
@@ -54,8 +61,7 @@ export class ResumeTokenCountsAccumulator {
 
 export function isResumeTokenCountsCandidate(record: ChatRecord): boolean {
   if (record.type === 'assistant') {
-    const usage = record.usageMetadata;
-    return Boolean(usage?.promptTokenCount ?? usage?.totalTokenCount);
+    return hasResumeTokenCountsUsage(record.usageMetadata);
   }
   if (record.type !== 'system' || record.subtype !== 'chat_compression') {
     return false;

@@ -3492,6 +3492,45 @@ describe('subagent.ts', () => {
         },
       );
 
+      it('preserves the recovered prefix across continuation retries', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockResolvedValue(
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [{ content: { parts: [{ text: 'prefix ' }] } }],
+              },
+            };
+            yield { type: 'retry', isContinuation: true };
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    finishReason: 'STOP',
+                    content: { parts: [{ text: 'suffix' }] },
+                  },
+                ],
+              },
+            };
+          })(),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          { tools: [] },
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getFinalText()).toBe('prefix suffix');
+      });
+
       it('keeps automatic max token escalation warm for the next agent round', async () => {
         const writeFileToolDef: FunctionDeclaration = {
           name: WriteFileTool.Name,
@@ -3580,6 +3619,9 @@ describe('subagent.ts', () => {
         expect(
           mockSendMessageStream.mock.calls[1][1].config.maxOutputTokens,
         ).toBe(65_536);
+        expect(mockSendMessageStream.mock.calls[1][4]).toEqual({
+          maxOutputTokensFromRecovery: true,
+        });
       });
     });
   });

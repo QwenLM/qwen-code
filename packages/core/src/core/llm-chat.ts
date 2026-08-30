@@ -96,6 +96,7 @@ import {
   estimatePromptTokens,
   getUsageOutputTokenCountForPromptEstimate,
 } from '../services/tokenEstimation.js';
+import { hasResumeTokenCountsUsage } from '../services/session-resume-token-counts.js';
 import {
   microcompactHistory,
   type MicrocompactMeta,
@@ -343,17 +344,22 @@ function buildThoughtContentParts(parts: readonly Part[]): Part[] {
   const result: Part[] = [];
   let text = '';
   let signature = '';
+  let partMetadata: Record<string, unknown> | undefined;
   const flush = () => {
     const thoughtText = signature ? text : text.trim();
-    if (thoughtText || signature) {
+    if (thoughtText || signature || partMetadata) {
       const thoughtPart: Part = { text: thoughtText, thought: true };
       if (signature) {
         thoughtPart.thoughtSignature = signature;
+      }
+      if (partMetadata) {
+        thoughtPart.partMetadata = partMetadata;
       }
       result.push(thoughtPart);
     }
     text = '';
     signature = '';
+    partMetadata = undefined;
   };
 
   for (const part of parts) {
@@ -370,9 +376,40 @@ function buildThoughtContentParts(parts: readonly Part[]): Part[] {
     if (partSignature) {
       signature += partSignature;
     }
+    if (part.partMetadata) {
+      partMetadata = { ...partMetadata, ...part.partMetadata };
+    }
   }
   flush();
   return result;
+}
+
+function normalizeStreamedModelParts(parts: readonly Part[]): {
+  thoughtContentParts: Part[];
+  consolidatedHistoryParts: Part[];
+} {
+  const thoughtContentParts = buildThoughtContentParts(parts);
+  const consolidatedHistoryParts: Part[] = [];
+  for (const part of parts) {
+    if (part.thought) continue;
+    const lastPart = consolidatedHistoryParts.at(-1);
+    if (
+      lastPart?.text &&
+      isValidNonThoughtTextPart(lastPart) &&
+      isValidNonThoughtTextPart(part)
+    ) {
+      lastPart.text += part.text;
+      if (part.partMetadata) {
+        lastPart.partMetadata = {
+          ...lastPart.partMetadata,
+          ...part.partMetadata,
+        };
+      }
+    } else if (isValidContentPart(part)) {
+      consolidatedHistoryParts.push(part);
+    }
+  }
+  return { thoughtContentParts, consolidatedHistoryParts };
 }
 
 /**
@@ -466,6 +503,54 @@ function coerceUsageCount(value: unknown, field?: string): number {
   return 0;
 }
 
+function coerceUsageMetadata(
+  usage: GenerateContentResponseUsageMetadata,
+): GenerateContentResponseUsageMetadata {
+  return {
+    ...usage,
+    ...(usage.promptTokenCount !== undefined
+      ? {
+          promptTokenCount: coerceUsageCount(
+            usage.promptTokenCount,
+            'promptTokenCount',
+          ),
+        }
+      : {}),
+    ...(usage.totalTokenCount !== undefined
+      ? {
+          totalTokenCount: coerceUsageCount(
+            usage.totalTokenCount,
+            'totalTokenCount',
+          ),
+        }
+      : {}),
+    ...(usage.candidatesTokenCount !== undefined
+      ? {
+          candidatesTokenCount: coerceUsageCount(
+            usage.candidatesTokenCount,
+            'candidatesTokenCount',
+          ),
+        }
+      : {}),
+    ...(usage.cachedContentTokenCount !== undefined
+      ? {
+          cachedContentTokenCount: coerceUsageCount(
+            usage.cachedContentTokenCount,
+            'cachedContentTokenCount',
+          ),
+        }
+      : {}),
+    ...(usage.thoughtsTokenCount !== undefined
+      ? {
+          thoughtsTokenCount: coerceUsageCount(
+            usage.thoughtsTokenCount,
+            'thoughtsTokenCount',
+          ),
+        }
+      : {}),
+  };
+}
+
 export enum StreamEventType {
   /** A regular content chunk from the API. */
   CHUNK = 'chunk',
@@ -514,6 +599,8 @@ export type StreamEvent =
 export interface LlmChatSendOptions {
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
+  /** The request maxOutputTokens came from this chat's prior escalation. */
+  maxOutputTokensFromRecovery?: boolean;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -523,19 +610,8 @@ function hasDisplayableStreamOutput(
   response: GenerateContentResponse,
 ): boolean {
   const candidate = response.candidates?.[0];
-  const hasDisplayablePart = (candidate?.content?.parts ?? []).some(
-    (part) =>
-      (typeof part.text === 'string' && part.text.length > 0) ||
-      part.functionCall !== undefined ||
-      part.executableCode !== undefined ||
-      part.codeExecutionResult !== undefined ||
-      part.fileData !== undefined ||
-      (typeof part.inlineData?.data === 'string' &&
-        part.inlineData.data.length > 0 &&
-        part.inlineData.mimeType?.trim().toLowerCase().startsWith('image/')),
-  );
   return (
-    hasDisplayablePart ||
+    hasNonThoughtCandidateParts(response) ||
     candidate?.citationMetadata?.citations?.some(
       (citation) => citation.uri !== undefined,
     ) === true
@@ -979,6 +1055,73 @@ function getRecoveryContinuationSuffix(
   return continuationText;
 }
 
+function getRecoveryReplayLength(
+  previousText: string,
+  continuationParts: readonly Part[],
+): number {
+  const continuationText = continuationParts
+    .filter(isPlainTextPart)
+    .map((part) => part.text)
+    .join('');
+  return (
+    continuationText.length -
+    getRecoveryContinuationSuffix(previousText, continuationText).length
+  );
+}
+
+function stripRecoveryOverlapFromParts(
+  parts: readonly Part[],
+  replay: { remaining: number },
+): Part[] {
+  return parts.flatMap((part) => {
+    if (!isPlainTextPart(part) || replay.remaining === 0) return [part];
+    const consumed = Math.min(replay.remaining, part.text.length);
+    replay.remaining -= consumed;
+    const text = part.text.slice(consumed);
+    return text.length > 0 ? [{ ...part, text }] : [];
+  });
+}
+
+function stripRecoveryOverlapFromChunks(
+  previousText: string,
+  chunks: readonly GenerateContentResponse[],
+): GenerateContentResponse[] {
+  const allParts = chunks.flatMap(
+    (chunk) => chunk.candidates?.[0]?.content?.parts ?? [],
+  );
+  const replay = {
+    remaining: getRecoveryReplayLength(previousText, allParts),
+  };
+  if (replay.remaining === 0) return [...chunks];
+
+  return chunks.map((chunk) => {
+    const candidates = chunk.candidates;
+    const content = candidates?.[0]?.content;
+    if (!candidates || !content?.parts || replay.remaining === 0) return chunk;
+    const parts = stripRecoveryOverlapFromParts(content.parts, replay);
+    return Object.assign(chunk, {
+      candidates: [
+        { ...candidates[0]!, content: { ...content, parts } },
+        ...candidates.slice(1),
+      ],
+    });
+  });
+}
+
+function getPotentialRecoveryOverlapLengths(previousText: string): number[] {
+  const maxOverlap = Math.min(
+    previousText.length,
+    RECOVERY_OVERLAP_MAX_SCAN_CHARS,
+  );
+  const lengths: number[] = [];
+  for (let length = maxOverlap; length > 0; length -= 1) {
+    if (isSignificantRecoveryOverlap(previousText.slice(-length))) {
+      lengths.push(length);
+    }
+  }
+  return lengths;
+}
+
 /**
  * Join already-delivered text to the continuation that resumes it, dropping
  * any tail the model replayed.
@@ -1090,30 +1233,22 @@ function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
  * turn, dropping any replayed overlap.
  *
  * Coupling with `processStreamResponse`. This function assumes the parts
- * arrays it receives were produced by {@link LlmChat.processStreamResponse}
- * — i.e. all plain-text streaming chunks from a given turn have been
- * consolidated in place into a single text part via `lastPart.text +=
- * part.text`. The dedup logic only inspects the *last* plain-text part of
- * `previousParts` and the *first* plain-text part of `continuationParts`, so
- * if a future refactor of `processStreamResponse` ever emits multiple adjacent
- * unconsolidated text parts per turn, this function would compare the
- * continuation against only the trailing fragment and miss real overlaps with
- * earlier fragments. Both functions live in this file precisely so the
- * coupling is reviewable in a single window.
+ * arrays it receives were produced by {@link LlmChat.processStreamResponse}.
+ * Replay detection uses all plain text from both turns and removes the replay
+ * across successive continuation text parts, preserving interleaved media,
+ * code, and tool parts in provider order.
  *
- * Return-value shape. The returned array preserves the *shape convention* of
- * `processStreamResponse` output: `[thoughtPart?, ...consolidatedTextParts,
- * ...nonTextParts]`. {@link LlmChat.coalesceRecoveryPairs} relies on this
- * by feeding the merged result back as `previousParts` on the next recovery
- * iteration; if the shape ever diverges, multi-iteration recovery dedup would
- * fail silently against the wrong part.
+ * Non-text parts preserve their provider order across attempt boundaries.
+ * Leading thought parts may move ahead of the previous text anchor to preserve
+ * thought-signature provenance; media, code, and tool parts never move across
+ * text.
  */
 function appendRecoveryContinuationParts(
   previousParts: Part[] | undefined,
   continuationParts: Part[] | undefined,
 ): Part[] {
   const mergedParts = [...(previousParts ?? [])];
-  const nextParts = [...(continuationParts ?? [])];
+  let nextParts = [...(continuationParts ?? [])];
 
   // `processStreamResponse` orders parts as
   // `[thoughtPart?, ...consolidatedHistoryParts]`, so for thinking models the
@@ -1124,52 +1259,37 @@ function appendRecoveryContinuationParts(
   // models leak duplicated text into durable history because the dedup block
   // gets skipped wholesale.
   const previousTextIndex = findLastPlainTextPartIndex(mergedParts);
-  const continuationTextIndex = nextParts.findIndex(isPlainTextPart);
-
-  if (previousTextIndex >= 0 && continuationTextIndex >= 0) {
-    const previousTextPart = mergedParts[previousTextIndex] as Part & {
-      text: string;
-    };
-    const continuationTextPart = nextParts[continuationTextIndex] as Part & {
-      text: string;
-    };
-    const suffix = getRecoveryContinuationSuffix(
-      previousTextPart.text,
-      continuationTextPart.text,
-    );
-    if (suffix.length > 0) {
-      // Allocate a fresh part rather than mutating in place: `mergedParts`
-      // shares element references with the caller's history slot, and any
-      // downstream caller that cached a `part` reference would observe the
-      // mutation. Cheap allocation; eliminates a fragile invariant.
-      mergedParts[previousTextIndex] = {
-        ...previousTextPart,
-        text: previousTextPart.text + suffix,
-      };
-    }
-    // Drop the matched continuation text part: a non-empty suffix has already
-    // been appended above, and an empty suffix means the part was a pure
-    // replay of the previous tail and should be discarded so it does not
-    // duplicate into history. Hoist any non-text parts that preceded the
-    // matched text on the continuation side (typically the recovery turn's
-    // thought) so they land *before* the merged text part — thinking-model
-    // providers (Gemini 2.5+, Anthropic, OpenAI o-series) validate
-    // thought-signature provenance and expect a thought to precede the
-    // content it generated. Trailing non-text parts (tool calls etc.) keep
-    // their position via the final `[...mergedParts, ...nextParts]` concat.
-    const leadingNonTextParts = nextParts.splice(0, continuationTextIndex);
-    nextParts.shift();
-    if (leadingNonTextParts.length > 0) {
-      mergedParts.splice(previousTextIndex, 0, ...leadingNonTextParts);
-    }
-  } else if (previousTextIndex >= 0 && continuationTextIndex < 0) {
-    const leadingThoughtParts: Part[] = [];
+  const leadingThoughtParts: Part[] = [];
+  if (previousTextIndex >= 0) {
     while (nextParts[0]?.thought) {
       leadingThoughtParts.push(nextParts.shift()!);
     }
     if (leadingThoughtParts.length > 0) {
       mergedParts.splice(previousTextIndex, 0, ...leadingThoughtParts);
     }
+  }
+
+  if (previousTextIndex >= 0) {
+    const replay = {
+      remaining: getRecoveryReplayLength(
+        getPlainTextFromParts(mergedParts),
+        nextParts,
+      ),
+    };
+    nextParts = stripRecoveryOverlapFromParts(nextParts, replay);
+  }
+
+  const previousBoundaryPart = mergedParts.at(-1);
+  const continuationBoundaryPart = nextParts[0];
+  if (
+    isPlainTextPart(previousBoundaryPart) &&
+    isPlainTextPart(continuationBoundaryPart)
+  ) {
+    mergedParts[mergedParts.length - 1] = {
+      ...previousBoundaryPart,
+      text: previousBoundaryPart.text + continuationBoundaryPart.text,
+    };
+    nextParts.shift();
   }
 
   return [...mergedParts, ...nextParts];
@@ -2200,9 +2320,7 @@ export class LlmChat {
     const finalRecord = ownedRecords[ownedRecords.length - 1]!.record;
     const hasResumeBoundary = (
       record: Parameters<ChatRecordingService['recordAssistantTurn']>[0],
-    ) =>
-      (record.tokens?.promptTokenCount ?? 0) > 0 ||
-      (record.tokens?.totalTokenCount ?? 0) > 0;
+    ) => hasResumeTokenCountsUsage(record.tokens);
     const latestRecordWithResumeBoundary = ownedRecords.findLast(({ record }) =>
       hasResumeBoundary(record),
     )?.record;
@@ -3352,7 +3470,9 @@ export class LlmChat {
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
-    return (async function* () {
+    let streamStarted = false;
+    const responseStream = (async function* (): AsyncGenerator<StreamEvent> {
+      streamStarted = true;
       const sleepInhibitorHandle = acquireSleepInhibitor(
         self.config,
         'Qwen Code is streaming a model response',
@@ -3448,7 +3568,9 @@ export class LlmChat {
         // Max output tokens escalation: when no user/env override is set and
         // the model hits MAX_TOKENS, retry once with the escalated limit.
         let maxTokensEscalated = false;
-        const hasUserMaxTokensOverride = explicitOutputCeiling !== undefined;
+        const hasUserMaxTokensOverride =
+          explicitOutputCeiling !== undefined &&
+          !options?.maxOutputTokensFromRecovery;
         // params.config.maxOutputTokens is set by the first-send clamp; the
         // outputCeiling fallback is defensive and should not fire in practice.
         const effectiveInitialMaxOutputTokens =
@@ -3580,6 +3702,8 @@ export class LlmChat {
               // turn records normally.
               hasUserMaxTokensOverride ? undefined : 'on-max-tokens',
               acceptQuietToolResultCompletion,
+              undefined,
+              shouldEscalateMaxOutputTokens,
             );
 
             lastFinishReason = undefined;
@@ -4147,9 +4271,14 @@ export class LlmChat {
             rollbackActiveRecoveryAttempt?.();
             return;
           }
+          const normalizedVisibleParts = normalizeStreamedModelParts(
+            activeRecoveryVisibleParts,
+          );
           recoveryBase.parts = appendRecoveryContinuationParts(
             recoveryBase.parts,
-            activeRecoveryVisibleParts,
+            normalizedVisibleParts.thoughtContentParts.concat(
+              normalizedVisibleParts.consolidatedHistoryParts,
+            ),
           );
           if (activeRecoveryVisibleTokens) {
             const deferredRecord = self.deferredMaxTokensRecords.findLast(
@@ -4233,6 +4362,7 @@ export class LlmChat {
             params: SendMessageParameters;
             rollback: () => void;
             isCurrent?: () => boolean;
+            onMutationAbort?: () => void;
             recordDeferral?: 'on-max-tokens' | 'always';
             onModelTurnCommitted?: (content: Content) => void;
             preserveVisibleOutputOnFailure?: boolean;
@@ -4247,9 +4377,12 @@ export class LlmChat {
           for (;;) {
             const attemptState = buildAttempt();
             let yieldedVisibleOutput = false;
+            const bufferedContinuationChunks: GenerateContentResponse[] = [];
             try {
               if (attemptState.isCurrent && !attemptState.isCurrent()) {
                 attemptState.rollback();
+                attemptState.onMutationAbort?.();
+                yield { type: StreamEventType.RETRY };
                 yield makeRecoveryStopEvent();
                 return;
               }
@@ -4275,12 +4408,16 @@ export class LlmChat {
                 for (;;) {
                   if (attemptState.isCurrent && !attemptState.isCurrent()) {
                     attemptState.rollback();
+                    attemptState.onMutationAbort?.();
+                    yield { type: StreamEventType.RETRY };
                     yield makeRecoveryStopEvent();
                     return;
                   }
                   const next = await streamIterator.next();
                   if (attemptState.isCurrent && !attemptState.isCurrent()) {
                     attemptState.rollback();
+                    attemptState.onMutationAbort?.();
+                    yield { type: StreamEventType.RETRY };
                     yield makeRecoveryStopEvent();
                     return;
                   }
@@ -4292,13 +4429,29 @@ export class LlmChat {
                       firstCandidateFinishReason(chunk) !== undefined)
                   ) {
                     (terminalChunks ??= []).push(chunk);
+                  } else if (
+                    retryEvent.isContinuation &&
+                    !yieldedVisibleOutput &&
+                    !hasDisplayableStreamOutput(chunk)
+                  ) {
+                    bufferedContinuationChunks.push(chunk);
                   } else {
+                    for (const bufferedChunk of bufferedContinuationChunks) {
+                      yield {
+                        type: StreamEventType.CHUNK,
+                        value: bufferedChunk,
+                      };
+                    }
+                    bufferedContinuationChunks.length = 0;
                     yieldedVisibleOutput ||= hasDisplayableStreamOutput(chunk);
                     yield { type: StreamEventType.CHUNK, value: chunk };
                   }
                 }
               } finally {
                 await streamIterator.return?.(undefined);
+              }
+              for (const chunk of bufferedContinuationChunks) {
+                yield { type: StreamEventType.CHUNK, value: chunk };
               }
               for (const chunk of terminalChunks ?? []) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -4378,30 +4531,42 @@ export class LlmChat {
           if (shouldEscalateMaxOutputTokens) {
             let escalatedCommittedModelContent: Content | undefined;
             let escalatedCommittedHistoryMutationVersion: number | undefined;
+            let escalatedMaxTokensObserved = false;
+            let escalationAborted = false;
             debugLogger.info(
               `Output truncated at ${effectiveInitialMaxOutputTokens} tokens. ` +
                 `Escalating to ${escalatedLimit} tokens.`,
             );
-            // Remove partial model response from history
-            // (processStreamResponse already pushed it)
-            if (
-              self.history.length > 0 &&
-              self.history[self.history.length - 1].role === 'model'
-            ) {
-              self.history.pop();
-            }
-            // The truncated turn's deferred record must follow history: the
-            // escalated attempt replaces it wholesale, so discard the stash to
-            // avoid persisting an output the live session threw away.
-            if (self.deferredMaxTokensRecords.length > 0) {
-              debugLogger.debug(
-                `[MAX_TOKENS_DEFER] Discarding ` +
-                  `${self.deferredMaxTokensRecords.length} deferred ` +
-                  `record(s) replaced by the escalated attempt`,
-              );
-            }
-            self.clearDeferredMaxTokensRecords();
             const escalatedHistoryMutationVersion = self.historyMutationVersion;
+            const truncatedModelContent = self.history.at(-1);
+            const truncatedModelIndex = self.history.length - 1;
+            const truncatedHistoryPrefix = self.history.slice(
+              0,
+              truncatedModelIndex,
+            );
+            const truncatedDeferredRecords = [...self.deferredMaxTokensRecords];
+            const restoreTruncatedTurnOnAbort = () => {
+              if (
+                truncatedModelContent?.role !== 'model' ||
+                self.history.includes(truncatedModelContent)
+              ) {
+                self.settleDeferredMaxTokensRecords();
+                return;
+              }
+              const prefixSurvives = truncatedHistoryPrefix.every(
+                (entry, index) => self.history[index] === entry,
+              );
+              if (prefixSurvives) {
+                self.history.splice(
+                  truncatedModelIndex,
+                  0,
+                  truncatedModelContent,
+                );
+                self.deferredMaxTokensRecords = truncatedDeferredRecords;
+                self.deferredMaxTokensRecordTarget = truncatedModelContent;
+              }
+              self.settleDeferredMaxTokensRecords();
+            };
             let escalatedVisibleParts: Part[] = [];
             let escalatedVisibleTokens:
               | GenerateContentResponseUsageMetadata
@@ -4418,11 +4583,16 @@ export class LlmChat {
                 self.popPendingPartialAssistantTurn();
                 return;
               }
+              const normalizedVisibleParts = normalizeStreamedModelParts(
+                escalatedVisibleParts,
+              );
               const modelContent: Content = {
                 role: 'model',
                 parts: appendRecoveryContinuationParts(
                   undefined,
-                  escalatedVisibleParts,
+                  normalizedVisibleParts.thoughtContentParts.concat(
+                    normalizedVisibleParts.consolidatedHistoryParts,
+                  ),
                 ),
               };
               self.history.push(modelContent);
@@ -4455,6 +4625,20 @@ export class LlmChat {
               type: StreamEventType.RETRY,
               maxOutputTokensEscalated: escalatedLimit,
             };
+            if (
+              self.historyMutationVersion !== escalatedHistoryMutationVersion
+            ) {
+              restoreTruncatedTurnOnAbort();
+              recoveryFinishReason = FinishReason.STOP;
+              escalationAborted = true;
+              yield makeRecoveryStopEvent();
+            } else if (
+              truncatedModelContent?.role === 'model' &&
+              self.history.at(-1) === truncatedModelContent
+            ) {
+              self.history.pop();
+              self.clearDeferredMaxTokensRecords();
+            }
             // Retry with escalated max_tokens
             const escalatedParams: SendMessageParameters = {
               ...params,
@@ -4464,56 +4648,63 @@ export class LlmChat {
               },
             };
             recoveryParams = escalatedParams;
-            recoveryFinishReason = undefined;
+            if (!escalationAborted) {
+              recoveryFinishReason = undefined;
+            }
             try {
-              for await (const event of streamWithInvalidStreamRetries(() => {
-                escalatedVisibleParts = [];
-                escalatedVisibleTokens = undefined;
-                escalatedAttemptCommitted = false;
-                return {
-                  requestContents,
-                  params: escalatedParams,
-                  rollback: () => {
-                    self.popPendingPartialAssistantTurn();
-                    escalatedVisibleParts = [];
-                    escalatedVisibleTokens = undefined;
-                  },
-                  isCurrent: () =>
-                    self.historyMutationVersion ===
-                    escalatedHistoryMutationVersion,
-                  // The escalated turn replaces the initial truncated turn, so
-                  // its record remains owned until either STOP or MAX_TOKENS is
-                  // committed.
-                  recordDeferral: 'always',
-                  preserveVisibleOutputOnFailure: true,
-                };
-              })) {
-                if (event.type === StreamEventType.RETRY) {
-                  yield event;
-                  continue;
-                }
-                const fr = firstCandidateFinishReason(event.value);
-                escalatedVisibleTokens =
-                  event.value.usageMetadata ?? escalatedVisibleTokens;
-                if (!fr) {
-                  escalatedVisibleParts.push(
-                    ...(event.value.candidates?.[0]?.content?.parts ?? []),
-                  );
-                }
-                if (fr) {
-                  escalatedAttemptCommitted = true;
+              if (!escalationAborted) {
+                for await (const event of streamWithInvalidStreamRetries(() => {
                   escalatedVisibleParts = [];
-                  recoveryFinishReason = fr;
-                  if (fr === FinishReason.MAX_TOKENS) {
-                    const committedModel = self.history.at(-1);
-                    if (committedModel?.role === 'model') {
-                      escalatedCommittedModelContent = committedModel;
+                  escalatedVisibleTokens = undefined;
+                  escalatedAttemptCommitted = false;
+                  return {
+                    requestContents,
+                    params: escalatedParams,
+                    rollback: () => {
+                      self.popPendingPartialAssistantTurn();
+                      escalatedVisibleParts = [];
+                      escalatedVisibleTokens = undefined;
+                    },
+                    onMutationAbort: restoreTruncatedTurnOnAbort,
+                    isCurrent: () =>
+                      self.historyMutationVersion ===
+                      escalatedHistoryMutationVersion,
+                    // The escalated turn replaces the initial truncated turn, so
+                    // its record remains owned until either STOP or MAX_TOKENS is
+                    // committed.
+                    recordDeferral: 'always',
+                    onModelTurnCommitted: (content) => {
+                      escalatedCommittedModelContent = content;
                       escalatedCommittedHistoryMutationVersion =
                         self.historyMutationVersion;
-                    }
+                    },
+                    preserveVisibleOutputOnFailure: true,
+                  };
+                })) {
+                  if (event.type === StreamEventType.RETRY) {
+                    yield event;
+                    continue;
                   }
+                  const fr = firstCandidateFinishReason(event.value);
+                  escalatedVisibleTokens = event.value.usageMetadata
+                    ? coerceUsageMetadata(event.value.usageMetadata)
+                    : escalatedVisibleTokens;
+                  if (!fr) {
+                    escalatedVisibleParts.push(
+                      ...(
+                        event.value.candidates?.[0]?.content?.parts ?? []
+                      ).map((part) => ({ ...part })),
+                    );
+                  }
+                  if (fr) {
+                    escalatedMaxTokensObserved ||=
+                      fr === FinishReason.MAX_TOKENS;
+                    escalatedAttemptCommitted = true;
+                    escalatedVisibleParts = [];
+                    recoveryFinishReason = fr;
+                  }
+                  yield event;
                 }
-                yield event;
               }
             } catch (escalationError) {
               const exposedFunctionCall = escalatedVisibleParts.some(
@@ -4537,10 +4728,10 @@ export class LlmChat {
             escalatedAttemptCommitted = true;
             escalatedVisibleParts = [];
             if (
-              recoveryFinishReason === FinishReason.MAX_TOKENS &&
-              escalatedCommittedModelContent !== undefined &&
-              (self.historyMutationVersion !==
-                escalatedCommittedHistoryMutationVersion ||
+              escalatedMaxTokensObserved &&
+              (escalatedCommittedModelContent === undefined ||
+                self.historyMutationVersion !==
+                  escalatedCommittedHistoryMutationVersion ||
                 self.history.at(-1) !== escalatedCommittedModelContent)
             ) {
               recoveryFinishReason = FinishReason.STOP;
@@ -4602,6 +4793,65 @@ export class LlmChat {
               { text: buildOutputRecoveryMessage(lastEntry) },
             ]);
             const recoveryBaseModelContent = lastEntry;
+            const recoveryDeliveryBaseText = getPlainTextFromParts(
+              recoveryBaseModelContent.parts,
+            );
+            let recoveryDeliveryResolved =
+              recoveryDeliveryBaseText.length === 0;
+            let recoveryDeliveryText = '';
+            let possibleRecoveryOverlapLengths =
+              getPotentialRecoveryOverlapLengths(recoveryDeliveryBaseText);
+            let recoveryDeliveryChunks: GenerateContentResponse[] = [];
+            const takeRecoveryDeliveryChunks = (
+              chunk?: GenerateContentResponse,
+              force = false,
+            ): GenerateContentResponse[] => {
+              if (chunk) {
+                if (recoveryDeliveryResolved) return [chunk];
+                recoveryDeliveryChunks.push(chunk);
+                const chunkText = getPlainTextFromParts(
+                  chunk.candidates?.[0]?.content?.parts,
+                );
+                const previousLength = recoveryDeliveryText.length;
+                recoveryDeliveryText += chunkText;
+                if (chunkText.length > 0) {
+                  possibleRecoveryOverlapLengths =
+                    possibleRecoveryOverlapLengths.filter((length) => {
+                      if (length <= recoveryDeliveryText.length) return false;
+                      const candidateStart =
+                        recoveryDeliveryBaseText.length - length;
+                      return (
+                        recoveryDeliveryBaseText.slice(
+                          candidateStart + previousLength,
+                          candidateStart + recoveryDeliveryText.length,
+                        ) === chunkText
+                      );
+                    });
+                }
+              }
+              const trimmedDeliveryText = recoveryDeliveryText.replace(
+                /^\s+/,
+                '',
+              );
+              const couldStartStructuralReplay =
+                trimmedDeliveryText.length === 0 ||
+                /^[#|`>\-*+\d]/.test(trimmedDeliveryText);
+              const couldExtendOverlap =
+                possibleRecoveryOverlapLengths.length > 0 ||
+                (couldStartStructuralReplay &&
+                  recoveryDeliveryText.length <=
+                    RECOVERY_CONTAINED_TAIL_LOOKBACK_CHARS);
+              if (recoveryDeliveryResolved || (!force && couldExtendOverlap)) {
+                return [];
+              }
+              recoveryDeliveryResolved = true;
+              const chunks = stripRecoveryOverlapFromChunks(
+                recoveryDeliveryBaseText,
+                recoveryDeliveryChunks,
+              );
+              recoveryDeliveryChunks = [];
+              return chunks;
+            };
             const recoveryHistoryMutationVersion =
               recoverySessionHistoryMutationVersion;
             self.activeRecoveryUserContent = recoveryUserContent;
@@ -4737,21 +4987,35 @@ export class LlmChat {
                 const fr = firstCandidateFinishReason(event.value);
                 if (!fr) {
                   activeRecoveryVisibleParts.push(
-                    ...(event.value.candidates?.[0]?.content?.parts ?? []),
+                    ...(event.value.candidates?.[0]?.content?.parts ?? []).map(
+                      (part) => ({ ...part }),
+                    ),
                   );
                 }
-                activeRecoveryVisibleTokens =
-                  event.value.usageMetadata ?? activeRecoveryVisibleTokens;
+                activeRecoveryVisibleTokens = event.value.usageMetadata
+                  ? coerceUsageMetadata(event.value.usageMetadata)
+                  : activeRecoveryVisibleTokens;
                 if (fr) {
                   recoveryFinishReason = fr;
                   completeActiveRecoveryAttempt();
                 }
-                yield event;
+                for (const chunk of takeRecoveryDeliveryChunks(
+                  event.value,
+                  fr !== undefined,
+                )) {
+                  yield { type: StreamEventType.CHUNK, value: chunk };
+                }
+              }
+              for (const chunk of takeRecoveryDeliveryChunks(undefined, true)) {
+                yield { type: StreamEventType.CHUNK, value: chunk };
               }
               if (recoveryAttemptInFlight) {
                 completeActiveRecoveryAttempt();
               }
             } catch (recoveryError) {
+              for (const chunk of takeRecoveryDeliveryChunks(undefined, true)) {
+                yield { type: StreamEventType.CHUNK, value: chunk };
+              }
               const exposedFunctionCall = activeRecoveryVisibleParts.some(
                 (part) => part.functionCall !== undefined,
               );
@@ -5079,6 +5343,24 @@ export class LlmChat {
         streamDoneResolver!();
       }
     })();
+    const returnResponseStream = responseStream.return.bind(responseStream);
+    responseStream.return = async (value) => {
+      if (!streamStarted) {
+        if (userContentAdded && self.history.at(-1) === currentUserContent) {
+          self.history.pop();
+          self.userContentPushCount--;
+          userContentAdded = false;
+        }
+        if (manualPlanExitNoticeVersion !== undefined) {
+          self.config.restorePendingManualPlanExitNotice(
+            manualPlanExitNoticeVersion,
+          );
+        }
+        streamDoneResolver!();
+      }
+      return returnResponseStream(value);
+    };
+    return responseStream;
   }
 
   /**
@@ -5106,6 +5388,7 @@ export class LlmChat {
     recordDeferral?: 'on-max-tokens' | 'always',
     acceptQuietToolResultCompletion = false,
     onModelTurnCommitted?: (content: Content) => void,
+    allowEmptyMaxTokensRecovery = false,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -5201,6 +5484,7 @@ export class LlmChat {
       acceptQuietToolResultCompletion,
       onModelTurnCommitted,
       () => streamAbortController.abort(),
+      allowEmptyMaxTokensRecovery,
     );
   }
 
@@ -5428,6 +5712,8 @@ export class LlmChat {
     // entry). The deferred record is dropped because its target no longer
     // survives in the now-empty live history.
     this.clearPendingPartialState();
+    this.activeRecoveryUserContent = undefined;
+    this.activeRecoveryModelContent = undefined;
     this.settleDeferredMaxTokensRecords();
   }
 
@@ -5693,17 +5979,19 @@ export class LlmChat {
       'active recovery user turn',
       activeRecoveryUserIndex,
     );
-    if (replacementRecoveryUser?.role === 'user') {
-      this.activeRecoveryUserContent = replacementRecoveryUser;
-    }
+    this.activeRecoveryUserContent =
+      replacementRecoveryUser?.role === 'user'
+        ? replacementRecoveryUser
+        : undefined;
     const replacementRecoveryModel = findReplacement(
       activeRecoveryModel,
       'active recovery model turn',
       activeRecoveryModelIndex,
     );
-    if (replacementRecoveryModel?.role === 'model') {
-      this.activeRecoveryModelContent = replacementRecoveryModel;
-    }
+    this.activeRecoveryModelContent =
+      replacementRecoveryModel?.role === 'model'
+        ? replacementRecoveryModel
+        : undefined;
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The
     // marker MUST be cleared — otherwise `popPendingPartialAssistantTurn` could find
@@ -5748,6 +6036,8 @@ export class LlmChat {
       );
     }
     this.clearPendingPartialState();
+    this.activeRecoveryUserContent = undefined;
+    this.activeRecoveryModelContent = undefined;
     this.settleDeferredMaxTokensRecords();
   }
 
@@ -5968,6 +6258,7 @@ export class LlmChat {
     acceptQuietToolResultCompletion = false,
     onModelTurnCommitted?: (content: Content) => void,
     abortStream?: () => void,
+    allowEmptyMaxTokensRecovery = false,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const streamHistoryMutationVersion = this.historyMutationVersion;
@@ -6191,45 +6482,13 @@ export class LlmChat {
             typeof usageMetadata.totalTokenCount === 'number' &&
             Number.isFinite(usageMetadata.totalTokenCount) &&
             usageMetadata.totalTokenCount >= 0;
-          const promptTokenCount = coerceUsageCount(
-            usageMetadata.promptTokenCount,
-            'promptTokenCount',
-          );
-          const totalTokenCount = coerceUsageCount(
-            usageMetadata.totalTokenCount,
-            'totalTokenCount',
-          );
-          const candidatesTokenCount = coerceUsageCount(
-            usageMetadata.candidatesTokenCount,
-            'candidatesTokenCount',
-          );
-          const cachedContentTokenCount = coerceUsageCount(
-            usageMetadata.cachedContentTokenCount,
-            'cachedContentTokenCount',
-          );
-          const thoughtsTokenCount = coerceUsageCount(
-            usageMetadata.thoughtsTokenCount,
-            'thoughtsTokenCount',
-          );
-          // Stash coerced values so recordAssistantTurn can reuse them
-          // without re-calling coerceUsageCount inline.
-          coercedUsage = {
-            ...(usageMetadata.promptTokenCount !== undefined
-              ? { promptTokenCount }
-              : {}),
-            ...(usageMetadata.totalTokenCount !== undefined
-              ? { totalTokenCount }
-              : {}),
-            ...(usageMetadata.candidatesTokenCount !== undefined
-              ? { candidatesTokenCount }
-              : {}),
-            ...(usageMetadata.cachedContentTokenCount !== undefined
-              ? { cachedContentTokenCount }
-              : {}),
-            ...(usageMetadata.thoughtsTokenCount !== undefined
-              ? { thoughtsTokenCount }
-              : {}),
-          };
+          coercedUsage = coerceUsageMetadata(usageMetadata);
+          const promptTokenCount = coercedUsage.promptTokenCount ?? 0;
+          const totalTokenCount = coercedUsage.totalTokenCount ?? 0;
+          const candidatesTokenCount = coercedUsage.candidatesTokenCount ?? 0;
+          const cachedContentTokenCount =
+            coercedUsage.cachedContentTokenCount ?? 0;
+          const thoughtsTokenCount = coercedUsage.thoughtsTokenCount ?? 0;
           const lastPromptTokenCount = hasUsablePromptTokenCount
             ? promptTokenCount
             : totalTokenCount;
@@ -6340,10 +6599,10 @@ export class LlmChat {
       terminalDrainTimeout?.skip();
       if (!streamFinished) {
         const returnPromise = streamIterator.return?.(undefined);
-        if (terminalDrainTimedOut) {
+        if (terminalDrainTimedOut || terminalChunks.length > 0) {
           void returnPromise?.catch(() => undefined);
         } else {
-          await returnPromise;
+          await returnPromise?.catch(() => undefined);
         }
       }
     }
@@ -6402,23 +6661,10 @@ export class LlmChat {
       }
     }
 
-    const thoughtContentParts = buildThoughtContentParts(allModelParts);
+    const { thoughtContentParts, consolidatedHistoryParts } =
+      normalizeStreamedModelParts(allModelParts);
 
     let contentParts = allModelParts.filter((part) => !part.thought);
-    const consolidatedHistoryParts: Part[] = [];
-    for (const part of contentParts) {
-      const lastPart =
-        consolidatedHistoryParts[consolidatedHistoryParts.length - 1];
-      if (
-        lastPart?.text &&
-        isValidNonThoughtTextPart(lastPart) &&
-        isValidNonThoughtTextPart(part)
-      ) {
-        lastPart.text += part.text;
-      } else if (isValidContentPart(part)) {
-        consolidatedHistoryParts.push(part);
-      }
-    }
 
     let contentText = consolidatedHistoryParts
       .filter((part) => part.text)
@@ -6519,6 +6765,7 @@ export class LlmChat {
       isToolResultContinuation &&
       (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
     const emptyMaxTokensOwnedByRecovery =
+      allowEmptyMaxTokensRecovery &&
       !isToolResultContinuation &&
       recordDeferral === 'on-max-tokens' &&
       yieldedFinishReason === FinishReason.MAX_TOKENS;
