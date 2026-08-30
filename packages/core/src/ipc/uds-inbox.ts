@@ -35,6 +35,7 @@ import {
   resolvePeerSocketCandidates,
   SOCKET_DIR_NAME,
 } from './socket-path.js';
+import { probePeerSocket } from './uds-client.js';
 
 const debugLogger = createDebugLogger('PEER_IPC');
 
@@ -68,6 +69,7 @@ export const LINE_DEADLINE_MS = 30_000;
  * Why the inbox could not bind, in terms a user can act on.
  *
  * - `non_local`: the configured path is not an absolute local path.
+ * - `unsupported_platform`: automatic inbox paths are unavailable here.
  * - `not_directory`: something that is not a directory (a file, a
  *   symlink) sits where the socket directory should be.
  * - `foreign_owner`: the socket directory belongs to another uid.
@@ -82,6 +84,7 @@ export const LINE_DEADLINE_MS = 30_000;
  */
 export type PeerInboxFailureCause =
   | 'non_local'
+  | 'unsupported_platform'
   | 'not_directory'
   | 'foreign_owner'
   | 'permission'
@@ -123,25 +126,29 @@ export function describePeerInboxFailure(
   failure: PeerInboxStartFailure,
 ): string {
   const where = path.dirname(failure.socketPath);
+  const attempts =
+    failure.attempts > 1 ? ` Tried ${failure.attempts} candidate paths.` : '';
   switch (failure.cause) {
     case 'non_local':
-      return `the socket path "${failure.socketPath}" is not an absolute local path.`;
+      return `the socket path "${failure.socketPath}" is not an absolute local path. ${failure.hint}${attempts}`;
+    case 'unsupported_platform':
+      return `cross-session messaging is not available on this platform. ${failure.hint}${attempts}`;
     case 'not_directory':
-      return `"${where}" exists but is not a plain directory. ${failure.hint}`;
+      return `"${where}" could not be created or is not a plain directory (${failure.detail}). ${failure.hint}${attempts}`;
     case 'foreign_owner':
-      return `"${where}" belongs to another user. ${failure.hint}`;
+      return `"${where}" belongs to another user. ${failure.hint}${attempts}`;
     case 'permission':
-      return `this user cannot create or lock down "${where}" (${failure.detail}). ${failure.hint}`;
+      return `this user cannot create or lock down "${where}" (${failure.detail}). ${failure.hint}${attempts}`;
     case 'missing_ancestor':
-      return `a parent of "${where}" does not exist. ${failure.hint}`;
+      return `a parent of "${where}" does not exist. ${failure.hint}${attempts}`;
     case 'path_too_long':
-      return `"${failure.socketPath}" is longer than the ${MAX_SOCKET_PATH_BYTES}-byte socket path limit. ${failure.hint}`;
+      return `"${failure.socketPath}" is longer than the ${MAX_SOCKET_PATH_BYTES}-byte socket path limit. ${failure.hint}${attempts}`;
     case 'bind_failed':
-      return `the socket could not be bound at "${failure.socketPath}" (${failure.detail}). ${failure.hint}`;
+      return `the socket could not be bound at "${failure.socketPath}" (${failure.detail}). ${failure.hint}${attempts}`;
     case 'chmod_failed':
-      return `the socket at "${failure.socketPath}" could not be restricted to this user (${failure.detail}).`;
+      return `the socket at "${failure.socketPath}" could not be restricted to this user (${failure.detail}). ${failure.hint}${attempts}`;
     default:
-      return `${failure.detail} (at "${failure.socketPath}").`;
+      return `${failure.detail} (at "${failure.socketPath}"). ${failure.hint}${attempts}`;
   }
 }
 
@@ -296,6 +303,7 @@ export async function sweepOrphanSockets(
       if (fullPath === selfSocketPath) return;
       const pid = Number.parseInt(name.slice(0, -'.sock'.length), 10);
       if (!Number.isInteger(pid) || pid <= 0 || isPidAlive(pid)) return;
+      if (await probePeerSocket(fullPath)) return;
       try {
         await fs.unlink(fullPath);
         swept += 1;
@@ -346,6 +354,7 @@ export async function sweepOrphanSocketDirs(
           if (!SOCKET_FILENAME.test(file)) return;
           const pid = Number.parseInt(file.slice(0, -'.sock'.length), 10);
           if (!Number.isInteger(pid) || pid <= 0 || isPidAlive(pid)) return;
+          if (await probePeerSocket(path.join(dir, file))) return;
         }
         for (const file of files) await fs.unlink(path.join(dir, file));
         await fs.rmdir(dir);
@@ -392,7 +401,11 @@ export async function startPeerInbox(
 
   let failure: PeerInboxStartFailure | null = null;
   for (const [index, candidate] of candidates.entries()) {
-    const result = await bindAt(candidate, options);
+    const result = await bindAt(
+      candidate,
+      options,
+      options.socketPath === undefined,
+    );
     if ('inbox' in result) {
       lastStartFailure = null;
       if (index > 0) {
@@ -427,14 +440,20 @@ export async function startPeerInbox(
 async function bindAt(
   socketPath: string,
   options: PeerInboxOptions,
+  automaticPath: boolean,
 ): Promise<{ inbox: PeerInbox } | { failure: PeerInboxStartFailure }> {
   if (!isLocalIpcPath(socketPath)) {
+    const unsupportedPlatform = automaticPath && process.platform === 'win32';
     return {
       failure: classify(
         new InboxSetupError(
-          'non_local',
-          `refusing to bind a non-local IPC path: ${socketPath}`,
-          'Use an absolute local path.',
+          unsupportedPlatform ? 'unsupported_platform' : 'non_local',
+          unsupportedPlatform
+            ? 'automatic peer inbox paths are not supported on Windows'
+            : `refusing to bind a non-local IPC path: ${socketPath}`,
+          unsupportedPlatform
+            ? 'Disable cross-session messaging for this session.'
+            : 'Use an absolute local path.',
         ),
         socketPath,
       ),

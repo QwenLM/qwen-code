@@ -127,7 +127,7 @@ describe('isLocalIpcPath', () => {
   });
 });
 
-describe('resolvePeerSocketCandidates', () => {
+describe.skipIf(isWindows)('resolvePeerSocketCandidates', () => {
   it('lists the runtime directory first, then a nonce directory under tmpdir, then /tmp', () => {
     const restore = withEnv({
       XDG_RUNTIME_DIR: '/run/user/1000',
@@ -163,16 +163,28 @@ describe('resolvePeerSocketCandidates', () => {
     }
   });
 
-  it('keeps one candidate even when nothing fits, so the failure can name it', () => {
+  it('deduplicates the /tmp fallback', () => {
+    const restore = withEnv({
+      XDG_RUNTIME_DIR: '/run/user/1000',
+      TMPDIR: undefined,
+    });
+    try {
+      const candidates = resolvePeerSocketCandidates(42);
+      expect(candidates).toHaveLength(2);
+      expect(new Set(candidates).size).toBe(candidates.length);
+    } finally {
+      restore();
+    }
+  });
+
+  it('drops an over-long temp-dir candidate and keeps the short /tmp one', () => {
     const restore = withEnv({
       XDG_RUNTIME_DIR: undefined,
       TMPDIR: '/' + 't'.repeat(200),
     });
     try {
-      // /tmp/qwen-socks-<16hex>/<pid>.sock always fits; force a giant pid to
-      // push even that over the limit is not possible, so check the shape.
       const candidates = resolvePeerSocketCandidates(42);
-      expect(candidates.length).toBeGreaterThan(0);
+      expect(candidates).toHaveLength(1);
       expect(candidates.at(-1)).toMatch(/^\/tmp\/qwen-socks-/);
     } finally {
       restore();

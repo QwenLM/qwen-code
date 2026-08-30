@@ -7482,13 +7482,14 @@ describe('AppContainer State Management', () => {
 
     it('announces once, with the cause, when the inbox could not bind', () => {
       const addItem = mockedUseHistory().addItem as Mock;
-      peerMessagingHolder.failure = {
+      const failure = {
         cause: 'foreign_owner',
         socketPath: '/run/user/1000/qwen-socks/1.sock',
         detail: 'belongs to uid 65534, not 1000',
         hint: 'Set XDG_RUNTIME_DIR to a directory you own, then restart.',
         attempts: 3,
       };
+      peerMessagingHolder.failure = failure;
       try {
         const { rerender } = render(
           <AppContainer
@@ -7498,6 +7499,7 @@ describe('AppContainer State Management', () => {
             initializationResult={mockInitResult}
           />,
         );
+        peerMessagingHolder.failure = { ...failure };
         rerender(
           <AppContainer
             config={mockConfig}

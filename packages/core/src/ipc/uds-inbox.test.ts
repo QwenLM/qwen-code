@@ -10,7 +10,7 @@
  * bits, cleanup on close — only exist at the socket boundary.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -197,6 +197,38 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     expect(describePeerInboxFailure(failure!)).toContain('XDG_RUNTIME_DIR');
   });
 
+  it('includes the errno when a parent is not a directory', async () => {
+    const broken = path.join(tmpDir, 'broken');
+    await fs.writeFile(broken, 'a file');
+    await startPeerInbox({
+      socketPath: path.join(broken, 'socks', 'a.sock'),
+      onFrame: () => {},
+    });
+    const failure = getLastPeerInboxFailure();
+    expect(failure?.cause).toBe('not_directory');
+    expect(describePeerInboxFailure(failure!)).toContain('ENOTDIR');
+  });
+
+  it('surfaces remediation and multi-candidate diagnostics', () => {
+    const failure = {
+      cause: 'unknown' as const,
+      socketPath: '/tmp/qwen-socks/a.sock',
+      detail: 'ENOSPC: no space left on device',
+      hint: 'Free disk space, then restart.',
+      attempts: 3,
+    };
+    expect(describePeerInboxFailure(failure)).toContain(failure.hint);
+    expect(describePeerInboxFailure(failure)).toContain(
+      'Tried 3 candidate paths',
+    );
+    expect(
+      describePeerInboxFailure({ ...failure, cause: 'chmod_failed' }),
+    ).toContain(failure.hint);
+    expect(
+      describePeerInboxFailure({ ...failure, cause: 'non_local' }),
+    ).toContain(failure.hint);
+  });
+
   it('names the cause when a planted symlink sits where the directory should be', async () => {
     const elsewhere = path.join(tmpDir, 'elsewhere');
     await fs.mkdir(elsewhere);
@@ -249,8 +281,7 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     // looks like from inside; the session must still get an inbox.
     const runtime = path.join(tmpDir, 'runtime');
     await fs.writeFile(runtime, 'not a directory');
-    const tmp = path.join(tmpDir, 'tmp');
-    await fs.mkdir(tmp);
+    const tmp = await fs.mkdtemp('/tmp/qwen-inbox-fallback-');
     const restore = withEnv({ XDG_RUNTIME_DIR: runtime, TMPDIR: tmp });
     try {
       const started = await startPeerInbox({ onFrame: () => {} });
@@ -260,6 +291,23 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
       expect(getLastPeerInboxFailure()).toBeNull();
     } finally {
       restore();
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports automatic Windows paths as an unsupported platform', async () => {
+    const platform = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
+      const started = await startPeerInbox({ onFrame: () => {} });
+      expect(started).toBeNull();
+      expect(getLastPeerInboxFailure()?.cause).toBe('unsupported_platform');
+      expect(describePeerInboxFailure(getLastPeerInboxFailure()!)).toContain(
+        'not available on this platform',
+      );
+    } finally {
+      platform.mockRestore();
     }
   });
 
@@ -565,6 +613,22 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     await expect(fs.stat(dead)).rejects.toThrow();
   });
 
+  it('keeps a listening socket even when its filename PID is absent', async () => {
+    const dir = path.join(tmpDir, 'qwen-socks');
+    const live = path.join(dir, '4194303.sock');
+    await fs.mkdir(dir);
+    const server = net.createServer((socket) => socket.end());
+    await new Promise<void>((resolve) => server.listen(live, resolve));
+    try {
+      expect(
+        await sweepOrphanSockets(dir, path.join(dir, '4194302.sock')),
+      ).toBe(0);
+      await expect(fs.stat(live)).resolves.toBeDefined();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it('removes a fallback directory holding only dead sockets, never one with anything else', async () => {
     const parent = path.join(tmpDir, 'tmp');
     const nonce = (n: string) =>
@@ -593,6 +657,24 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     expect(left).not.toContain(path.basename(empty));
   });
 
+  it('keeps a fallback directory with a listening absent-PID socket', async () => {
+    const parent = await fs.mkdtemp('/tmp/qwen-inbox-sweep-');
+    const liveDir = path.join(parent, `qwen-socks-${'a'.repeat(16)}`);
+    const ownDir = path.join(parent, `qwen-socks-${'b'.repeat(16)}`);
+    const live = path.join(liveDir, '4194303.sock');
+    await fs.mkdir(liveDir, { recursive: true });
+    await fs.mkdir(ownDir);
+    const server = net.createServer((socket) => socket.end());
+    await new Promise<void>((resolve) => server.listen(live, resolve));
+    try {
+      expect(await sweepOrphanSocketDirs(parent, ownDir)).toBe(0);
+      await expect(fs.stat(live)).resolves.toBeDefined();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await fs.rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it('sweeps the shared runtime directory on bind', async () => {
     const runtime = path.join(tmpDir, 'runtime');
     const dir = path.join(runtime, 'qwen-socks');
@@ -608,6 +690,27 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
       await expect(fs.stat(path.join(dir, '4194303.sock'))).rejects.toThrow();
     } finally {
       restore();
+    }
+  });
+
+  it('sweeps fallback directories when binding through a fallback', async () => {
+    const runtime = path.join(tmpDir, 'runtime');
+    await fs.writeFile(runtime, 'not a directory');
+    const temp = await fs.mkdtemp('/tmp/qwen-inbox-bind-');
+    const stale = path.join(temp, `qwen-socks-${'a'.repeat(16)}`);
+    await fs.mkdir(stale, { recursive: true });
+    await fs.writeFile(path.join(stale, '4194303.sock'), '');
+    const restore = withEnv({ XDG_RUNTIME_DIR: runtime, TMPDIR: temp });
+    try {
+      const started = await startPeerInbox({ onFrame: () => {} });
+      if (!started) throw new Error('inbox failed to start');
+      inbox = started;
+      expect(path.dirname(path.dirname(started.socketPath))).toBe(temp);
+      await settle();
+      await expect(fs.stat(stale)).rejects.toThrow();
+    } finally {
+      restore();
+      await fs.rm(temp, { recursive: true, force: true });
     }
   });
 });

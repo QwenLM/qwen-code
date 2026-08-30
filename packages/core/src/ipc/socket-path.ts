@@ -71,14 +71,11 @@ export function resolvePeerSocketCandidates(
     path.join('/tmp', `${SOCKET_DIR_NAME}-${nonce}`, `${pid}.sock`),
   );
 
-  const fitting = candidates.filter(
+  return candidates.filter(
     (candidate, index) =>
       Buffer.byteLength(candidate) <= MAX_SOCKET_PATH_BYTES &&
       candidates.indexOf(candidate) === index,
   );
-  // Nothing fits: keep the last (shortest) candidate so the bind can fail
-  // with a path-too-long cause that names it, rather than with nothing.
-  return fitting.length > 0 ? fitting : [candidates[candidates.length - 1]!];
 }
 
 /**
