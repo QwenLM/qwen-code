@@ -2183,10 +2183,11 @@ export class DaemonClient {
 
   /**
    * Append to or replace `QWEN.md` at workspace or global scope.
-   * Strict mutation gate (`token_required` on no-token loopback
-   * defaults). When the daemon advertises `workspace_memory`, expect
-   * 200 with `{ ok, filePath, bytesWritten, mode }`; older daemons
-   * without the capability return 404.
+   * The strict mutation gate accepts trusted-loopback callers without a token;
+   * older daemons and non-trusted embeds can still return `token_required`.
+   * When the daemon advertises `workspace_memory`, expect 200 with
+   * `{ ok, filePath, bytesWritten, mode }`; older daemons without the
+   * capability return 404.
    */
   async writeWorkspaceMemory(
     req: DaemonWriteMemoryRequest,
@@ -3881,8 +3882,9 @@ export class DaemonClient {
 
   /**
    * Execute a direct daemon-side shell command for a session. The daemon must
-   * be started with direct session shell enabled and bearer auth configured;
-   * callers must also provide a client id already bound to this session.
+   * be started with direct session shell enabled and either bearer auth or
+   * trusted-loopback operator authority; callers must also provide a client id
+   * already bound to this session.
    * Prefer `DaemonSessionClient.shellCommand()` when available because it
    * forwards the session-bound client id automatically.
    */
@@ -3909,9 +3911,9 @@ export class DaemonClient {
 
   /**
    * Toggle a tool name in the workspace's
-   * `tools.disabled` settings list. Strict-gated mutation route — the
-   * daemon must be configured with a bearer token. The daemon writes
-   * the settings file directly and fan-outs a `tool_toggled` event to
+   * `tools.disabled` settings list. The strict mutation gate accepts
+   * trusted-loopback operator authority or listener credentials. The daemon
+   * writes the settings file directly and fan-outs a `tool_toggled` event to
    * every live session SSE bus.
    *
    * Already-registered tools in active sessions are NOT retroactively

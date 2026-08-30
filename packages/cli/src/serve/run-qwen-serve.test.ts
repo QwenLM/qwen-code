@@ -1535,34 +1535,18 @@ describe('assertChannelWorkerDaemonUrlIsLocal', () => {
     ).toThrow(/does not name an address on this host/);
   });
 
-  // R18-1: the primary Host gate (auth.ts) answers only 127.0.0.1, localhost,
-  // and [::1] — the kernel routes every other 127.x.y.z to loopback too, and
-  // the certifier used to accept all of them, but a worker dialing such a
-  // spelling gets `403 Invalid Host header` from the daemon it is trying to
-  // reach: the first worker's failure exits the daemon, channels added later
-  // restart-loop while /health stays green. Refuse what the gate refuses,
-  // once, at boot.
-  it('refuses loopback spellings the Host gate answers 403', () => {
-    expect(() =>
-      assertChannelWorkerDaemonUrlIsLocal('http://127.0.0.2:8080', '127.0.0.2'),
-    ).toThrow(/is a loopback address the daemon's Host header gate refuses/);
+  it('accepts all IPv4 loopback spellings the Host gate can answer', () => {
     for (const host of ['127.0.0.2', '127.0.1.1', '127.255.255.254']) {
       expect(() =>
         assertChannelWorkerDaemonUrlIsLocal(
           formatChannelWorkerDaemonUrl(host, 4170, true),
           host,
         ),
-      ).toThrow(/Channels cannot start: --hostname/);
+      ).not.toThrow();
     }
   });
 
-  // The refusals above are host-state-dependent: on a host that ASSIGNS the
-  // wide spelling (`ip addr add 127.0.0.2/8 dev lo`, a standard
-  // container-mesh pattern), the own-interface escape used to accept it
-  // before the refusal ran, and every worker dial then got `403 Invalid Host
-  // header`. Pin the assigned state so the ordering — Host-gate refusal
-  // before the own-interface escape — is witnessed on every host.
-  it('refuses an assigned wide loopback the Host gate answers 403', () => {
+  it('accepts an assigned wide loopback', () => {
     mockNetworkInterfaces.value = {
       lo: [
         {
@@ -1592,15 +1576,13 @@ describe('assertChannelWorkerDaemonUrlIsLocal', () => {
         },
       ],
     };
-    // Witness the assigned state: without this assert a broken mock would
-    // let the throw below pass for the wrong (unassigned) reason.
     expect(isOwnInterfaceAddress('127.0.0.2')).toBe(true);
     expect(() =>
       assertChannelWorkerDaemonUrlIsLocal('http://127.0.0.2:8080', '127.0.0.2'),
-    ).toThrow(/is a loopback address the daemon's Host header gate refuses/);
+    ).not.toThrow();
   });
 
-  it('still accepts the loopback spellings the Host gate answers', () => {
+  it('accepts the canonical loopback spellings', () => {
     for (const host of ['localhost', 'LOCALHOST', '127.0.0.1', '[::1]']) {
       expect(() =>
         assertChannelWorkerDaemonUrlIsLocal(
@@ -7039,7 +7021,7 @@ describe('runQwenServe runtime startup failures', () => {
   it('does not advertise browser automation MCP without an active CDP tunnel', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(
       undefined,
-      'https://example.com',
+      'http://localhost:5173',
       '/opt/qwen-cdp-mcp-adapter',
     );
 
@@ -8516,7 +8498,7 @@ describe('runQwenServe runtime startup failures', () => {
   it('keeps browser MCP features disabled for non-extension origins when the env flag is unset', async () => {
     const features = await readBrowserMcpFeatureFlagsForEnv(
       undefined,
-      'https://example.com',
+      'http://localhost:5173',
     );
 
     expect(features).not.toContain('client_mcp_over_ws');
@@ -12086,6 +12068,106 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(hostname).toBe('127.0.0.1');
       expect(daemonUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       expect(factory).toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('preserves localhost in the TLS channel worker daemon URL after resolving the bind', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-localhost-tls-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const channelWorkerUrlCertifier = vi.fn();
+    const bindHostnameLookup = vi.fn(async () => ({
+      address: '127.0.0.1',
+      family: 4,
+    }));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: 'localhost',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        bindHostnameLookup,
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        channelWorkerUrlCertifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bindHostnameLookup).toHaveBeenCalledWith('localhost');
+      expect(channelWorkerUrlCertifier).toHaveBeenCalledTimes(1);
+      const [daemonUrl, hostname] = channelWorkerUrlCertifier.mock.calls[0]!;
+      expect(hostname).toBe('localhost');
+      expect(daemonUrl).toMatch(/^https:\/\/localhost:\d+$/);
+      expect(factory.mock.calls[0]![0].daemonUrl).toBe(daemonUrl);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps the resolved address in a non-TLS channel worker daemon URL', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-localhost-http-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const channelWorkerUrlCertifier = vi.fn();
+    const bindHostnameLookup = vi.fn(async () => ({
+      address: '127.0.0.1',
+      family: 4,
+    }));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: 'localhost',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        bindHostnameLookup,
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        channelWorkerUrlCertifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bindHostnameLookup).toHaveBeenCalledWith('localhost');
+      expect(channelWorkerUrlCertifier).toHaveBeenCalledTimes(1);
+      const [daemonUrl, hostname] = channelWorkerUrlCertifier.mock.calls[0]!;
+      expect(hostname).toBe('127.0.0.1');
+      expect(daemonUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(factory.mock.calls[0]![0].daemonUrl).toBe(daemonUrl);
     } finally {
       await handle.close();
     }
