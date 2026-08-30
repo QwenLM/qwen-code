@@ -188,10 +188,11 @@ export class DiffManager {
   async showDiff(
     filePath: string,
     a: string,
-    b?: string,
+    b?: string | ShowDiffOptions,
     options?: ShowDiffOptions,
   ): Promise<void> {
     const haveOld = typeof b === 'string';
+    const resolvedOptions = haveOld ? options : b;
     const oldContent = haveOld ? a : await this.readOldContentFromFs(filePath);
     const newContent = haveOld ? (b as string) : a;
     const normalizedPath = path.normalize(filePath);
@@ -268,7 +269,7 @@ export class DiffManager {
     // content before accepting; that only round-trips when an IDE-mode
     // resolver consumes the edited text. Read-only callers (web-shell
     // permission approvals) would silently lose edits, so keep them locked.
-    if (!options?.readOnly) {
+    if (!resolvedOptions?.readOnly) {
       await vscode.commands.executeCommand(
         'workbench.action.files.setActiveEditorWriteableInSession',
       );
