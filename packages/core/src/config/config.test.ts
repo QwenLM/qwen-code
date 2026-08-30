@@ -1788,35 +1788,41 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('rebinds worktree getters and private field reads together', () => {
+      const worktreeDir = path.resolve('/tmp/worktree');
       const parent = new Config({
         ...baseParams,
         fileFiltering: { customIgnoreFiles: ['.cursorignore'] },
       });
-      const child = deriveWorktreeConfig(parent, '/tmp/worktree', {
+      const child = deriveWorktreeConfig(parent, worktreeDir, {
         customIgnoreFiles: ['.cursorignore'],
       });
 
-      expect(child.getTargetDir()).toBe('/tmp/worktree');
-      expect(child.getCwd()).toBe('/tmp/worktree');
-      expect(child.getWorkingDir()).toBe('/tmp/worktree');
-      expect(child.getProjectRoot()).toBe('/tmp/worktree');
+      expect(child.getTargetDir()).toBe(worktreeDir);
+      expect(child.getCwd()).toBe(worktreeDir);
+      expect(child.getWorkingDir()).toBe(worktreeDir);
+      expect(child.getProjectRoot()).toBe(worktreeDir);
       expect([...child.getWorkspaceContext().getDirectories()]).toEqual([
-        '/tmp/worktree',
+        worktreeDir,
       ]);
       expect(child.getFileService()).not.toBe(parent.getFileService());
       expect(child.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
         '.qwenignore, .cursorignore',
       );
       const workspaceState = child as unknown as Record<string, unknown>;
-      expect(workspaceState['targetDir']).toBe('/tmp/worktree');
-      expect(workspaceState['cwd']).toBe('/tmp/worktree');
+      expect(workspaceState['targetDir']).toBe(worktreeDir);
+      expect(workspaceState['cwd']).toBe(worktreeDir);
       expect(Object.hasOwn(child, 'workspaceContext')).toBe(true);
       expect(Object.hasOwn(child, 'fileDiscoveryService')).toBe(true);
-      expect(parent.getTargetDir()).toBe(TARGET_DIR);
+      expect(parent.getTargetDir()).toBe(path.resolve(TARGET_DIR));
+      // getWorkingDir() returns the raw stored cwd: the constructor resolves
+      // only targetDir (config.ts stores `params.cwd` verbatim), so this
+      // assertion must NOT path.resolve() — that re-broke both tests on the
+      // windows-latest lane, where resolve('/tmp') is drive-qualified.
       expect(parent.getWorkingDir()).toBe('/tmp');
     });
 
     it('rebinds agent workspace getters and private field reads together', () => {
+      const agentWorkspace = path.resolve('/tmp/agent-workspace');
       const parent = new Config({
         ...baseParams,
         fileFiltering: { customIgnoreFiles: ['.cursorignore'] },
@@ -1826,19 +1832,19 @@ describe('Server Config (config.ts)', () => {
         config: child,
         fileService,
         workspaceContext,
-      } = deriveAgentConfig(parent, '/tmp/agent-workspace', {
+      } = deriveAgentConfig(parent, agentWorkspace, {
         customIgnoreFiles: ['.cursorignore'],
         getPlanFilePath: () => agentPlanPath,
       });
 
-      expect(child.getTargetDir()).toBe('/tmp/agent-workspace');
-      expect(child.getCwd()).toBe('/tmp/agent-workspace');
-      expect(child.getWorkingDir()).toBe('/tmp/agent-workspace');
-      expect(child.getProjectRoot()).toBe('/tmp/agent-workspace');
+      expect(child.getTargetDir()).toBe(agentWorkspace);
+      expect(child.getCwd()).toBe(agentWorkspace);
+      expect(child.getWorkingDir()).toBe(agentWorkspace);
+      expect(child.getProjectRoot()).toBe(agentWorkspace);
       expect(child.getPlanFilePath()).toBe(agentPlanPath);
       expect(child.getWorkspaceContext()).toBe(workspaceContext);
       expect([...child.getWorkspaceContext().getDirectories()]).toEqual([
-        '/tmp/agent-workspace',
+        agentWorkspace,
       ]);
       expect(child.getFileService()).toBe(fileService);
       expect(child.getFileService()).not.toBe(parent.getFileService());
@@ -1846,11 +1852,15 @@ describe('Server Config (config.ts)', () => {
         '.qwenignore, .cursorignore',
       );
       const workspaceState = child as unknown as Record<string, unknown>;
-      expect(workspaceState['targetDir']).toBe('/tmp/agent-workspace');
-      expect(workspaceState['cwd']).toBe('/tmp/agent-workspace');
+      expect(workspaceState['targetDir']).toBe(agentWorkspace);
+      expect(workspaceState['cwd']).toBe(agentWorkspace);
       expect(Object.hasOwn(child, 'workspaceContext')).toBe(true);
       expect(Object.hasOwn(child, 'fileDiscoveryService')).toBe(true);
-      expect(parent.getTargetDir()).toBe(TARGET_DIR);
+      expect(parent.getTargetDir()).toBe(path.resolve(TARGET_DIR));
+      // getWorkingDir() returns the raw stored cwd: the constructor resolves
+      // only targetDir (config.ts stores `params.cwd` verbatim), so this
+      // assertion must NOT path.resolve() — that re-broke both tests on the
+      // windows-latest lane, where resolve('/tmp') is drive-qualified.
       expect(parent.getWorkingDir()).toBe('/tmp');
     });
 
@@ -3817,6 +3827,14 @@ describe('Server Config (config.ts)', () => {
           }
           return result;
         });
+      const actualFs =
+        await vi.importActual<typeof import('node:fs')>('node:fs');
+      (fs.readFileSync as Mock).mockImplementation(
+        (pathOrDescriptor: unknown) =>
+          typeof pathOrDescriptor === 'number'
+            ? actualFs.readFileSync(pathOrDescriptor, 'utf8')
+            : undefined,
+      );
 
       try {
         const initialize = config.initialize();
@@ -11700,9 +11718,11 @@ describe('BaseLlmClient Lifecycle', () => {
     await config.refreshAuth(AuthType.USE_GEMINI);
 
     const llmService = config.getBaseLlmClient();
+    const activeGenerator = config.getContentGenerator();
     config.reloadModelProvidersConfig({});
 
     expect(llmService.clearPerModelGeneratorCache).toHaveBeenCalledOnce();
+    expect(config.getContentGenerator()).toBe(activeGenerator);
   });
 });
 

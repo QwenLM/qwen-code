@@ -527,7 +527,7 @@ describe('NamedSessionManager', () => {
     expect(bridge.loadSession).toHaveBeenCalledWith(
       review.sessionId,
       '/workspace',
-      undefined,
+      { sourceId: 'channel-a' },
       expect.anything(),
     );
 
