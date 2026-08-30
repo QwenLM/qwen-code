@@ -515,4 +515,61 @@ describe('LlmContentGenerator', () => {
       'Unsupported media type for Gemini: video/mp4.',
     );
   });
+
+  it('converts mixed-case audio/video MIME in functionResponse parts (RFC 6838 case-insensitivity, R52-49)', async () => {
+    const request = {
+      model: 'gemini-1.5-flash',
+      contents: [
+        {
+          role: 'user' as const,
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'Read',
+                response: { output: 'content' },
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'image/png',
+                      data: 'imagedata',
+                    },
+                  },
+                  {
+                    inlineData: {
+                      mimeType: 'AUDIO/WAV',
+                      data: 'audiodata',
+                    },
+                  },
+                  {
+                    inlineData: {
+                      mimeType: 'Video/MP4',
+                      data: 'videodata',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    await generator.generateContent(request, 'prompt-id');
+
+    const calledWith = mockGoogleGenAI.models.generateContent.mock.calls[0][0];
+    const functionResponseParts =
+      calledWith.contents[0].parts[0].functionResponse.parts;
+
+    // Mixed-case media must convert exactly like the lowercase contract above;
+    // the image stays inline. The message keeps the original casing.
+    expect(functionResponseParts).toHaveLength(3);
+    expect(functionResponseParts[0].inlineData.mimeType).toBe('image/png');
+    expect(functionResponseParts[1].text).toBe(
+      'Unsupported media type for Gemini: AUDIO/WAV.',
+    );
+    expect(functionResponseParts[2].text).toBe(
+      'Unsupported media type for Gemini: Video/MP4.',
+    );
+  });
 });

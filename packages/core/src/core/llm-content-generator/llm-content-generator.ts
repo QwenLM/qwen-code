@@ -336,10 +336,19 @@ export class LlmContentGenerator implements ContentGenerator {
 
     const inlineMimeType = part.inlineData?.mimeType || '';
     const fileMimeType = part.fileData?.mimeType || '';
+    // RFC 6838 media types are case-insensitive: compare the lowercased form
+    // so mixed-case MIME (the verbatim shape MCP tools emit, e.g. 'AUDIO/WAV')
+    // still converts instead of slipping past this gate to a Gemini send —
+    // compactionInputSlimming's keep/drop decision is case-insensitive, and a
+    // case mismatch here would let the carrier survive slimming only to ship
+    // raw nested inlineData (R52-49). The explanatory message keeps the
+    // original casing.
+    const inlineMimeTypeLower = inlineMimeType.toLowerCase();
+    const fileMimeTypeLower = fileMimeType.toLowerCase();
 
     if (
-      inlineMimeType.startsWith('audio/') ||
-      inlineMimeType.startsWith('video/')
+      inlineMimeTypeLower.startsWith('audio/') ||
+      inlineMimeTypeLower.startsWith('video/')
     ) {
       const displayName = (part.inlineData as { displayName?: string })
         ?.displayName;
@@ -350,8 +359,8 @@ export class LlmContentGenerator implements ContentGenerator {
     }
 
     if (
-      fileMimeType.startsWith('audio/') ||
-      fileMimeType.startsWith('video/')
+      fileMimeTypeLower.startsWith('audio/') ||
+      fileMimeTypeLower.startsWith('video/')
     ) {
       const displayName = (part.fileData as { displayName?: string })
         ?.displayName;
