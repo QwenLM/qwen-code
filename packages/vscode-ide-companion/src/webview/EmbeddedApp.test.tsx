@@ -484,11 +484,11 @@ describe('EmbeddedApp host wiring', () => {
     });
     expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
       type: 'webShellPermissionState',
-      data: { pending: true, paths: ['/workspace/new.ts'] },
+      data: { pending: true, requestId: 'req-write' },
     });
   });
 
-  it('keeps host permission-state paths in sync while pending stays true', async () => {
+  it('keeps host permission ownership in sync while pending stays true', async () => {
     const props = await renderApp();
     const onTranscriptChange = callback<(blocks: unknown[]) => void>(
       props,
@@ -516,10 +516,7 @@ describe('EmbeddedApp host wiring', () => {
 
     expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
       type: 'webShellPermissionState',
-      data: {
-        pending: true,
-        paths: ['/workspace/a.ts', '/workspace/b.ts'],
-      },
+      data: { pending: true, requestId: 'req-a' },
     });
 
     await act(async () => {
@@ -530,11 +527,11 @@ describe('EmbeddedApp host wiring', () => {
       await Promise.resolve();
     });
 
-    // pending stays true, but the host vote gate must shrink to the
-    // remaining diff so a stale accept cannot vote on the wrong approval.
+    // Pending stays true, but ownership moves to the remaining request so a
+    // stale accept cannot vote on the wrong approval.
     expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
       type: 'webShellPermissionState',
-      data: { pending: true, paths: ['/workspace/b.ts'] },
+      data: { pending: true, requestId: 'req-b' },
     });
   });
 
@@ -571,7 +568,7 @@ describe('EmbeddedApp host wiring', () => {
 
     expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
       type: 'webShellPermissionState',
-      data: { pending: true, paths: ['/workspace/a.ts'] },
+      data: { pending: true, requestId: 'req-a' },
     });
 
     // Closing the host tab/view unmounts the app. The teardown must tell
@@ -586,10 +583,13 @@ describe('EmbeddedApp host wiring', () => {
 
     expect(postMessagesOfType('webShellPermissionState').at(-1)).toEqual({
       type: 'webShellPermissionState',
-      data: { pending: false, paths: [] },
+      data: { pending: false },
     });
     expect(postMessagesOfType('closeDiff')).toEqual([
-      { type: 'closeDiff', data: { path: '/workspace/a.ts' } },
+      {
+        type: 'closeDiff',
+        data: { path: '/workspace/a.ts', requestId: 'req-a' },
+      },
     ]);
   });
 

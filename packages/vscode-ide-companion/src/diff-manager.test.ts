@@ -47,7 +47,7 @@ vi.mock('vscode', () => {
         return uri;
       },
     },
-    ViewColumn: { Beside: -2 },
+    ViewColumn: { Active: -1, Beside: -2 },
     commands: { executeCommand },
     window: {
       activeTextEditor: undefined,

@@ -94,6 +94,38 @@ export class DiffManager {
   // Timed suppression window (e.g. immediately after permission allow)
   private suppressUntil: number | null = null;
 
+  private getTargetViewColumn(
+    leftDocUri?: vscode.Uri,
+    rightDocUri?: vscode.Uri,
+  ): vscode.ViewColumn {
+    if (leftDocUri && rightDocUri) {
+      const leftUri = leftDocUri.toString();
+      const rightUri = rightDocUri.toString();
+      for (const group of vscode.window.tabGroups.all) {
+        const containsDiff = group.tabs.some((tab) => {
+          const input = tab.input as {
+            original?: vscode.Uri;
+            modified?: vscode.Uri;
+          } | undefined;
+          return (
+            input?.original?.toString() === leftUri &&
+            input?.modified?.toString() === rightUri
+          );
+        });
+        if (containsDiff) {
+          return group.viewColumn;
+        }
+      }
+    }
+
+    return (
+      findLeftGroupOfChatWebview() ??
+      findRightGroupOfChatWebview() ??
+      vscode.window.activeTextEditor?.viewColumn ??
+      vscode.ViewColumn.Active
+    );
+  }
+
   constructor(
     private readonly log: (message: string) => void,
     private readonly diffContentProvider: DiffContentProvider,
@@ -176,7 +208,7 @@ export class DiffManager {
             rightDocUri,
             diffTitle,
             {
-              viewColumn: vscode.ViewColumn.Beside,
+              viewColumn: this.getTargetViewColumn(leftDocUri, rightDocUri),
               preview: false,
               preserveFocus: true,
             },
@@ -288,12 +320,9 @@ export class DiffManager {
 
     // Prefer opening the diff in the group to the left of the chat webview.
     // When that isn't available (e.g. chat is in the leftmost group), try the
-    // group to the right so we reuse existing layout. Only fall back to
-    // ViewColumn.Beside when neither neighbor exists or the webview is missing.
-    const targetViewColumn =
-      findLeftGroupOfChatWebview() ??
-      findRightGroupOfChatWebview() ??
-      vscode.ViewColumn.Beside;
+    // group to the right so we reuse existing layout. Sidebar chat has no
+    // editor group, so fall back to the active group rather than creating one.
+    const targetViewColumn = this.getTargetViewColumn();
 
     await vscode.commands.executeCommand(
       'vscode.diff',

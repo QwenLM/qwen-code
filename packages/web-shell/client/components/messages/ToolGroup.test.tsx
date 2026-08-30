@@ -2242,13 +2242,22 @@ describe('pending edit approval rows', () => {
     expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
   });
 
-  it('keeps edit rows expandable when no approval is pending for them', () => {
+  it('keeps pending edit rows expandable when the host does not own the diff', () => {
     const tool = makeTool({
       toolName: 'WriteFile',
       status: 'in_progress',
       args: { file_path: 'package.json' },
     });
-    const container = renderToolLine(tool);
+    const container = renderToolLine(tool, {
+      approval: {
+        id: 'perm-edit',
+        toolCallId: tool.callId,
+        toolName: 'WriteFile',
+        hasDiffPreview: true,
+        content: [],
+        options: [],
+      },
+    });
 
     expect(container.querySelector('[class*="lineExpandable"]')).not.toBeNull();
   });

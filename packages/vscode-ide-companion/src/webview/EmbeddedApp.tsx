@@ -340,7 +340,7 @@ export function EmbeddedApp() {
   const currentModelIdRef = useRef<string | undefined>(undefined);
   const transcriptBlocksRef = useRef<readonly DaemonTranscriptBlock[]>([]);
   const openPermissionDiffsRef = useRef(new Map<string, string>());
-  const webShellPermissionRequestIdRef = useRef<string>();
+  const webShellPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const focusedPermissionRequestIdRef = useRef<string | undefined>(undefined);
   const contextMenuRowKeyRef = useRef<string | null>(null);
   const previousActiveFilePathRef = useRef<string | undefined>(undefined);
@@ -501,7 +501,7 @@ export function EmbeddedApp() {
       webShellPermissionRequestIdRef.current = undefined;
       vscode.postMessage({
         type: 'webShellPermissionState',
-        data: { pending: false, paths: [] },
+        data: { pending: false },
       });
     }
   }, [vscode]);
@@ -557,10 +557,9 @@ export function EmbeddedApp() {
         webShellPermissionRequestIdRef.current = pendingDiffRequestId;
         vscode.postMessage({
           type: 'webShellPermissionState',
-          data: {
-            pending: Boolean(pendingDiffRequestId),
-            requestId: pendingDiffRequestId,
-          },
+          data: pendingDiffRequestId
+            ? { pending: true, requestId: pendingDiffRequestId }
+            : { pending: false },
         });
       }
       if (

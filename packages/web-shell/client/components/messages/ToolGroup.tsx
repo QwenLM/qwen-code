@@ -1088,16 +1088,13 @@ export const ToolLine = memo(function ToolLine({
   const mcpApp = getMcpAppDisplay(tool.rawOutput);
   const isForcedExpanded = forceExpanded || Boolean(mcpApp);
   const hasApproval = approval?.toolCallId === tool.callId;
-  const isPendingEditApproval = hasApproval && isEditToolName(tool.toolName);
   const isHostOwnedEditApproval = Boolean(
     hostOwnsEditDiffPreview &&
       hasApproval &&
       approval?.hasDiffPreview &&
       isEditToolName(approval?.toolName ?? tool.toolName),
   );
-  const locksPendingEditApproval = hostOwnsEditDiffPreview
-    ? isHostOwnedEditApproval
-    : isPendingEditApproval;
+  const locksPendingEditApproval = isHostOwnedEditApproval;
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [expanded, setExpanded] = useState(
@@ -1137,7 +1134,13 @@ export const ToolLine = memo(function ToolLine({
     approval?.toolCallId &&
     isAgent &&
     toolContainsCallId(tool, approval.toolCallId);
-  const waitingForApproval = Boolean(hasApproval || hasSubToolApproval);
+  const waitingForApproval = Boolean(
+    isHostOwnedEditApproval ||
+      (hostOwnsEditDiffPreview &&
+        hasSubToolApproval &&
+        approval?.hasDiffPreview &&
+        isEditToolName(approval.toolName ?? '')),
+  );
   const isRunningTool = isActiveToolStatus(tool.status);
   const showsLiveElapsed =
     isRunningTool &&

@@ -2494,7 +2494,7 @@ describe('WebViewProvider web-shell permission bridge', () => {
     expect(decisionCalls(postMessage)).toHaveLength(0);
   });
 
-  it('falls back to the active webview while preserving the exact request id', async () => {
+  it('does not route an unknown request id to the active webview', async () => {
     const { postMessage, provider } = await setupPendingWebShellPermission();
     const activePostMessage = vi.fn();
     mockGetPanel.mockReturnValue({
@@ -2507,10 +2507,7 @@ describe('WebViewProvider web-shell permission bridge', () => {
     });
 
     expect(decisionCalls(postMessage)).toHaveLength(0);
-    expect(activePostMessage).toHaveBeenCalledWith({
-      type: 'webShellPermissionDecision',
-      data: { decision: 'allow', requestId: 'req-not-yet-mapped' },
-    });
+    expect(decisionCalls(activePostMessage)).toHaveLength(0);
   });
 
   it('does not vote when the trigger is the original workspace file', async () => {
@@ -2528,7 +2525,7 @@ describe('WebViewProvider web-shell permission bridge', () => {
     expect(decisionCalls(postMessage)).toHaveLength(0);
   });
 
-  it('uses the active webview before permission ownership state arrives', async () => {
+  it('does not vote before permission ownership state arrives', async () => {
     const setup = await setupAttachedProvider({ captureMessageHandler: true });
 
     setup.provider.respondToPendingPermission('allow', {
@@ -2536,10 +2533,7 @@ describe('WebViewProvider web-shell permission bridge', () => {
       permissionRequestId: 'req-1',
     });
 
-    expect(setup.postMessage).toHaveBeenCalledWith({
-      type: 'webShellPermissionDecision',
-      data: { decision: 'allow', requestId: 'req-1' },
-    });
+    expect(decisionCalls(setup.postMessage)).toHaveLength(0);
   });
 
   it('reports hasPendingPermission from the webview-pushed state', async () => {
@@ -2552,13 +2546,13 @@ describe('WebViewProvider web-shell permission bridge', () => {
 
     await setup.messageHandler?.({
       type: 'webShellPermissionState',
-      data: { pending: true, paths: [PENDING_DIFF_PATH] },
+      data: { pending: true, requestId: 'req-1' },
     });
     expect(setup.provider.hasPendingPermission()).toBe(true);
 
     await setup.messageHandler?.({
       type: 'webShellPermissionState',
-      data: { pending: false, paths: [] },
+      data: { pending: false },
     });
     expect(setup.provider.hasPendingPermission()).toBe(false);
   });
@@ -2568,14 +2562,14 @@ describe('WebViewProvider web-shell permission bridge', () => {
 
     await setup.messageHandler?.({
       type: 'webShellPermissionState',
-      data: { pending: true, paths: [PENDING_DIFF_PATH] },
+      data: { pending: true, requestId: 'req-1' },
     });
     expect(setup.provider.hasPendingPermission()).toBe(true);
 
     for (const listener of setup.viewDisposeListeners) listener();
 
     // Without a webview there is no route for the decision; leaving the
-    // flag true would let a diff-editor accept find hasPendingPermission()
+    // ownership entry would let a diff-editor accept find hasPendingPermission()
     // true, skip the vote, and close the diff while the daemon stays
     // blocked. The panel dispose path already resets it; the view-hosted
     // path must too.

@@ -67,7 +67,7 @@ const vscodeMock = vi.hoisted(() => {
     Selection,
     Range,
     TextEditorRevealType: { InCenter: 2 },
-    ViewColumn: { One: 1, Two: 2, Three: 3, Beside: -2 },
+    ViewColumn: { Active: -1, One: 1, Two: 2, Three: 3, Beside: -2 },
     workspace: {
       findFiles: vi.fn(),
       getWorkspaceFolder: vi.fn(),
@@ -406,7 +406,7 @@ describe('FileMessageHandler', () => {
       expect(options.viewColumn).toBe(2);
     });
 
-    it('falls back to ViewColumn.Beside when neither left nor right neighbor exists', async () => {
+    it('falls back to the active group when neither neighbor exists', async () => {
       vscodeMock.window.tabGroups.all = [{ tabs: [chatTab()], viewColumn: 1 }];
 
       const sendToWebView = vi.fn();
@@ -426,7 +426,7 @@ describe('FileMessageHandler', () => {
       const options = vscodeMock.window.showTextDocument.mock.calls[0]?.[1] as {
         viewColumn: number;
       };
-      expect(options.viewColumn).toBe(vscodeMock.ViewColumn.Beside);
+      expect(options.viewColumn).toBe(vscodeMock.ViewColumn.Active);
     });
   });
 

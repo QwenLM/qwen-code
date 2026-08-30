@@ -763,11 +763,13 @@ export class FileMessageHandler extends BaseMessageHandler {
       }
 
       // Find the nearest editor group to the left or right of the chat webview.
-      // Fall back to ViewColumn.Beside when neither neighbor exists or the webview is missing.
+      // Sidebar chat has no editor group, so reuse the active group instead of
+      // creating a new group for every opened file.
       const targetViewColumn =
         findLeftGroupOfChatWebview() ??
         findRightGroupOfChatWebview() ??
-        vscode.ViewColumn.Beside;
+        vscode.window.activeTextEditor?.viewColumn ??
+        vscode.ViewColumn.Active;
 
       // Open as readonly document in the selected neighboring group and focus it (single click should be enough)
       const document = await vscode.workspace.openTextDocument(uri);
@@ -781,7 +783,7 @@ export class FileMessageHandler extends BaseMessageHandler {
         '[FileMessageHandler] Created and opened readonly file:',
         uri.toString(),
         'in viewColumn:',
-        targetViewColumn ?? 'Beside',
+        targetViewColumn,
       );
     } catch (error) {
       logger.error(
