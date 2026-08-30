@@ -285,8 +285,8 @@ export function registerMcpHotReload(
  * `providerProtocol` stays boot-frozen: it is `requiresRestart` in the
  * schema, so it is passed as `undefined` — `ModelRegistry.reloadModels`
  * preserves the existing protocol map in that case. If the on-disk map
- * drifted from the boot map anyway (combined edit), a one-shot restart
- * notice is surfaced so the half-applied state is never silent.
+ * drifts from the applied map anyway (combined edit), an edge-triggered
+ * restart notice is surfaced so the half-applied state is never silent.
  */
 export function registerModelProvidersHotReload(
   watcher: SettingsWatcher,
@@ -296,22 +296,31 @@ export function registerModelProvidersHotReload(
   modelProvidersDebugLogger.debug(
     'registered modelProviders hot-reload listener on SettingsWatcher',
   );
-  const bootProtocol = settings.merged.providerProtocol;
-  let protocolDriftNotified = false;
+  // Edge-triggered drift notice: notify on the false→true transition only, so
+  // a second independent drift (drift → revert → drift) notifies again.
+  let protocolDriftActive = false;
   const reconcile = () => {
-    const next = settings.merged.modelProviders;
-    if (equal(config.getModelProvidersConfig() ?? {}, next ?? {})) {
-      return;
-    }
-    if (
-      !protocolDriftNotified &&
-      !equal(bootProtocol ?? {}, settings.merged.providerProtocol ?? {})
-    ) {
-      protocolDriftNotified = true;
+    // Drift check runs on EVERY event (before the modelProviders gate): a
+    // protocol revert/edit that leaves providers unchanged must still update
+    // the edge state. Diff against the APPLIED protocol map, not a boot-time
+    // snapshot: an edit that lands before this listener attaches (or an
+    // out-of-band protocol reload, e.g. ACP) would otherwise misfire the
+    // notice in both directions (silently never, or spuriously).
+    const drifted = !equal(
+      config.getProviderProtocolConfig() ?? {},
+      settings.merged.providerProtocol ?? {},
+    );
+    if (drifted && !protocolDriftActive) {
       appEvents.emit(
         AppEvent.LogError,
         'providerProtocol changed; protocol mappings for custom providers require a restart to take effect.',
       );
+    }
+    protocolDriftActive = drifted;
+
+    const next = settings.merged.modelProviders;
+    if (equal(config.getModelProvidersConfig() ?? {}, next ?? {})) {
+      return;
     }
     modelProvidersDebugLogger.debug(
       'modelProviders changed — reloading model registry',

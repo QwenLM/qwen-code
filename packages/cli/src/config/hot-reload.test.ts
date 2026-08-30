@@ -593,15 +593,19 @@ describe('registerModelProvidersHotReload', () => {
   let config: Config;
   /** The registry's APPLIED providers config (what the gate diffs against). */
   let applied: ModelProvidersConfig | undefined;
+  /** The registry's APPLIED provider->protocol map. */
+  let appliedProtocol: Record<string, string>;
 
   function makeModelConfig(initialApplied?: ModelProvidersConfig): void {
     applied = initialApplied;
+    appliedProtocol = {};
     reloadModelProvidersConfig = vi.fn((next?: ModelProvidersConfig) => {
       applied = next;
     });
     config = {
       reloadModelProvidersConfig,
       getModelProvidersConfig: () => applied,
+      getProviderProtocolConfig: () => appliedProtocol,
     } as unknown as Config;
   }
 
@@ -753,7 +757,7 @@ describe('registerModelProvidersHotReload', () => {
     );
   });
 
-  it('emits a one-shot restart notice when providerProtocol drifted from boot', async () => {
+  it('notifies on each providerProtocol drift against the APPLIED map (edge-triggered)', async () => {
     registerModelProvidersHotReload(watcher, settings, config);
 
     const spy = vi.fn();
@@ -771,12 +775,48 @@ describe('registerModelProvidersHotReload', () => {
       expect(spy).toHaveBeenCalledOnce();
       expect(String(spy.mock.calls[0][0])).toContain('providerProtocol');
 
-      // A later hot-reload must not re-emit the notice.
+      // While the drift persists, further hot-reloads do not re-emit.
       merged.modelProviders = {
         idealab: [{ id: 'm-2', baseUrl: 'https://x' }],
       } as ModelProvidersConfig;
       await listener([]);
       expect(spy).toHaveBeenCalledOnce();
+
+      // Reverting the protocol clears the drift…
+      merged.providerProtocol = {} as Settings['providerProtocol'];
+      await listener([]);
+      expect(spy).toHaveBeenCalledOnce();
+
+      // …so a second independent drift notifies again.
+      merged.providerProtocol = {
+        idealab: 'anthropic',
+      } as Settings['providerProtocol'];
+      await listener([]);
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      appEvents.off(AppEvent.LogError, spy);
+    }
+  });
+
+  it('does not emit a spurious drift notice after an out-of-band protocol reload', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    const spy = vi.fn();
+    appEvents.on(AppEvent.LogError, spy);
+    try {
+      // An ACP-style out-of-band reload applies a new protocol map; settings
+      // already carry the same value.
+      appliedProtocol = { idealab: 'openai' };
+      merged.providerProtocol = {
+        idealab: 'openai',
+      } as Settings['providerProtocol'];
+      merged.modelProviders = {
+        idealab: [{ id: 'm-1', baseUrl: 'https://x' }],
+      } as ModelProvidersConfig;
+      await listener([]);
+
+      expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+      expect(spy).not.toHaveBeenCalled();
     } finally {
       appEvents.off(AppEvent.LogError, spy);
     }

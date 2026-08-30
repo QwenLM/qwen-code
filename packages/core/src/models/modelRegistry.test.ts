@@ -880,6 +880,40 @@ describe('ModelRegistry', () => {
       );
     });
 
+    it('exposes the applied providers config so hot-reload can diff against registry state', () => {
+      const boot: ModelProvidersConfig = {
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+      };
+      const registry = new ModelRegistry(boot);
+      expect(registry.getModelProvidersConfig()).toBe(boot);
+
+      const next: ModelProvidersConfig = {
+        openai: [{ id: 'gpt-5', name: 'GPT-5' }],
+      };
+      registry.reloadModels(next);
+      // The copy in reloadModels is load-bearing: without it the hot-reload
+      // gate in registerModelProvidersHotReload would diff against a stale
+      // value and rebuild the registry on every settings event.
+      expect(registry.getModelProvidersConfig()).toBe(next);
+
+      registry.reloadModels(undefined);
+      expect(registry.getModelProvidersConfig()).toBeUndefined();
+    });
+
+    it('exposes the applied protocol map and preserves it when reload omits it', () => {
+      const bootProtocol: ProviderProtocolConfig = { idealab: 'openai' };
+      const registry = new ModelRegistry(undefined, bootProtocol);
+      expect(registry.getProviderProtocolConfig()).toEqual(bootProtocol);
+
+      // undefined preserves (hot-reload of modelProviders only)…
+      registry.reloadModels({ openai: [{ id: 'gpt-4' }] }, undefined);
+      expect(registry.getProviderProtocolConfig()).toEqual(bootProtocol);
+
+      // …while an explicit value replaces.
+      registry.reloadModels(undefined, {});
+      expect(registry.getProviderProtocolConfig()).toEqual({});
+    });
+
     it('should handle reload replacing same-id entries when baseUrls change', () => {
       const registry = new ModelRegistry({
         openai: [

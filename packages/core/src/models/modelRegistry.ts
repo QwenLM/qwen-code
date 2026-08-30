@@ -386,4 +386,9 @@ export class ModelRegistry {
   getModelProvidersConfig(): ModelProvidersConfig | undefined {
     return this.modelProvidersConfig;
   }
+
+  /** The provider->protocol map currently applied by this registry. */
+  getProviderProtocolConfig(): ProviderProtocolConfig {
+    return this.providerProtocolConfig;
+  }
 }
