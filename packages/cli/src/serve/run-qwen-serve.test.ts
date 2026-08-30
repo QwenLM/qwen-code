@@ -11700,6 +11700,106 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('preserves localhost in the TLS channel worker daemon URL after resolving the bind', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-localhost-tls-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const channelWorkerUrlCertifier = vi.fn();
+    const bindHostnameLookup = vi.fn(async () => ({
+      address: '127.0.0.1',
+      family: 4,
+    }));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: 'localhost',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        bindHostnameLookup,
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        channelWorkerUrlCertifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bindHostnameLookup).toHaveBeenCalledWith('localhost');
+      expect(channelWorkerUrlCertifier).toHaveBeenCalledTimes(1);
+      const [daemonUrl, hostname] = channelWorkerUrlCertifier.mock.calls[0]!;
+      expect(hostname).toBe('localhost');
+      expect(daemonUrl).toMatch(/^https:\/\/localhost:\d+$/);
+      expect(factory.mock.calls[0]![0].daemonUrl).toBe(daemonUrl);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps the resolved address in a non-TLS channel worker daemon URL', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-localhost-http-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const channelWorkerUrlCertifier = vi.fn();
+    const bindHostnameLookup = vi.fn(async () => ({
+      address: '127.0.0.1',
+      family: 4,
+    }));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: 'localhost',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        bindHostnameLookup,
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        channelWorkerUrlCertifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bindHostnameLookup).toHaveBeenCalledWith('localhost');
+      expect(channelWorkerUrlCertifier).toHaveBeenCalledTimes(1);
+      const [daemonUrl, hostname] = channelWorkerUrlCertifier.mock.calls[0]!;
+      expect(hostname).toBe('127.0.0.1');
+      expect(daemonUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(factory.mock.calls[0]![0].daemonUrl).toBe(daemonUrl);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('fails the channel boot when the worker URL certification refuses the bind', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-url-refuse-')),

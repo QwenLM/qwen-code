@@ -8314,8 +8314,11 @@ async function runQwenServeImpl(
             );
           }
           const workerRuntime = await ensureChannelRuntime();
+          // TLS needs the operator spelling for SNI/SAN matching; plain HTTP
+          // keeps the DNS-pinned bind address so workers do not resolve again.
+          const workerHostname = tlsOptions ? optsIn.hostname : opts.hostname;
           const workerDaemonUrl = formatChannelWorkerDaemonUrl(
-            opts.hostname,
+            workerHostname,
             actualPort,
             tlsOptions !== undefined,
             typeof addr === 'object' &&
@@ -8328,7 +8331,7 @@ async function runQwenServeImpl(
           (
             deps.channelWorkerUrlCertifier ??
             assertChannelWorkerDaemonUrlIsLocal
-          )(workerDaemonUrl, opts.hostname);
+          )(workerDaemonUrl, workerHostname);
           if (
             tlsOptions &&
             tlsCertPath &&
