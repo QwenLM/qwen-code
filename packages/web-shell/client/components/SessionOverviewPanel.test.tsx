@@ -78,7 +78,7 @@ let workspaceActions: {
 const sessionsReload = vi.fn(async () => sessionsState.sessions);
 const statusReload = vi.fn(async () => statusState.report);
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => connectionState,
   useActions: () => workspaceActions,
   useStatusReport: (options: { autoLoad?: boolean; detail?: string } = {}) => {
