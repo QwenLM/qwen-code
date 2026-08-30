@@ -434,7 +434,7 @@ function stubProcessSend(send: NodeJS.Process['send'] | undefined): () => void {
 }
 
 describe('createDaemonSessionFactory', () => {
-  it('tags created channel sessions without changing loaded sessions', async () => {
+  it('tags created and resumed channel sessions', async () => {
     const sdk = createSdk();
     const factory = createDaemonSessionFactory({
       client: sdk.client,
@@ -466,6 +466,7 @@ describe('createDaemonSessionFactory', () => {
         workspaceCwd: '/workspace',
         modelServiceId: 'qwen-plus',
         sessionScope: 'thread',
+        sourceType: 'channel',
       },
       'qwen-channel-worker',
     );
@@ -506,12 +507,13 @@ describe('createDaemonSessionFactory', () => {
         workspaceCwd: '/workspace',
         approvalMode: 'yolo',
         sessionScope: 'thread',
+        sourceType: 'channel',
       },
       'qwen-channel-worker',
     );
   });
 
-  it('stamps channel sourceId on created sessions only', async () => {
+  it('stamps channel sourceId on created and resumed sessions', async () => {
     const sdk = createSdk();
     const factory = createDaemonSessionFactory({
       client: sdk.client,
@@ -536,14 +538,14 @@ describe('createDaemonSessionFactory', () => {
       },
       'qwen-channel-worker',
     );
-    // The load branch never re-stamps creation attribution: no sourceId in the
-    // load request even when the factory request carried one.
     expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
       sdk.client,
       'existing-session',
       {
         workspaceCwd: '/workspace',
         sessionScope: 'thread',
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
       },
       'qwen-channel-worker',
     );
@@ -1578,33 +1580,31 @@ describe('runChannelDaemonWorker', () => {
     expect(sdk.DaemonClient).not.toHaveBeenCalled();
   });
 
-  // R18-1: mirrors the boot certifier — the primary Host gate answers only
-  // 127.0.0.1, localhost, and [::1], so a worker aimed at any other 127/8
-  // spelling is refused by the daemon itself with 403 Invalid Host header.
-  // Reject it here too instead of letting it restart-loop.
-  it('rejects loopback spellings the daemon Host gate refuses', async () => {
+  it('accepts an IPv4 loopback spelling the daemon bound', async () => {
     const sdk = createSdk();
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      telegram: { type: 'telegram' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
 
-    await expect(
-      runChannelDaemonWorker({
-        daemonUrl: 'http://127.0.0.2:4170',
-        workspace: '/workspace',
-        selection: { mode: 'names', names: ['telegram'] },
-        loadDaemonSdk: async () => sdk,
-      }),
-    ).rejects.toThrow(
-      /points at a loopback address the daemon's Host header gate refuses/,
-    );
-    expect(sdk.DaemonClient).not.toHaveBeenCalled();
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.2:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(sdk.DaemonClient).toHaveBeenCalledWith({
+      baseUrl: 'http://127.0.0.2:4170',
+    });
   });
 
-  // The refusal above is host-state-dependent: on a host that ASSIGNS the
-  // wide spelling (`ip addr add 127.0.0.2/8 dev lo`, a standard
-  // container-mesh pattern), the own-interface escape used to accept the URL
-  // and every worker dial then got `403 Invalid Host header`. Pin the
-  // assigned state so the refusal is witnessed on every host.
-  it('rejects an assigned wide loopback the Host gate answers 403', async () => {
+  it('accepts an assigned wide loopback', async () => {
     const sdk = createSdk();
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      telegram: { type: 'telegram' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
     mockNetworkInterfaces.value = {
       lo: [
         {
@@ -1635,26 +1635,22 @@ describe('runChannelDaemonWorker', () => {
       ],
     };
     try {
-      // Witness the assigned state: without this assert a broken mock would
-      // let the rejection below pass for the wrong (unassigned) reason.
       expect(isOwnInterfaceAddress('127.0.0.2')).toBe(true);
-      await expect(
-        runChannelDaemonWorker({
-          daemonUrl: 'http://127.0.0.2:4170',
-          workspace: '/workspace',
-          selection: { mode: 'names', names: ['telegram'] },
-          loadDaemonSdk: async () => sdk,
-        }),
-      ).rejects.toThrow(
-        /points at a loopback address the daemon's Host header gate refuses/,
-      );
-      expect(sdk.DaemonClient).not.toHaveBeenCalled();
+      await runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.2:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      });
+      expect(sdk.DaemonClient).toHaveBeenCalledWith({
+        baseUrl: 'http://127.0.0.2:4170',
+      });
     } finally {
       mockNetworkInterfaces.value = undefined;
     }
   });
 
-  it('still accepts the loopback spellings the Host gate answers', async () => {
+  it('accepts the canonical loopback spellings', async () => {
     const sdk = createSdk();
     mockLoadChannelsConfig.mockReturnValueOnce({
       telegram: { type: 'telegram' },
