@@ -301,8 +301,14 @@ jobs:
           # time, and every consumer following the dist-tag died on
           # `npm error notarget` when it moved to an unresolvable version on
           # 2026-08-15. resolve-pr pins the same version for the same reason.
-          # The action wires this input as step-level env, which masks any
-          # inherited org/repo QWEN_CLI_VERSION variable — the pin wins.
+          # The pin governs only runners WITHOUT `qwen` on PATH: the action's
+          # 'Install Qwen Code' step skips when the CLI is already present
+          # (verified in the pinned action SHA). On the ecs-qwen pool — this
+          # job's default lane — the fleet-installed CLI maintained at
+          # `@latest` by update-ecs-runner-qwen.yml is therefore
+          # authoritative; the pin binds the ubuntu-latest fallback lane,
+          # where the action wires this input as step-level env, masking any
+          # inherited org/repo QWEN_CLI_VERSION variable.
           qwen_cli_version: '0.21.10'
           # The input name is `settings` — this action version has no
           # `settings_json` input, and an unknown input is silently dropped,

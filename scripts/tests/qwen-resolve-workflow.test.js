@@ -900,9 +900,12 @@ describe('qwen resolve workflow', () => {
     expect(verifyStep.indexOf('git merge-base --is-ancestor')).toBeLessThan(
       verifyStep.indexOf('git ls-files -u'),
     );
-    // A missing artifact (agent job cancelled or crashed before packaging)
-    // is reported as an infrastructure failure, not silently.
-    expect(verifyStep).toContain('uploaded no run artifact');
+    // A missing artifact is classified, never silent. This branch is only
+    // reachable with a SUCCESSFUL agent step (any other outcome exits in the
+    // never-ran block), so it classifies the LOST ARTIFACT — upload failed
+    // or expired — never the agent run itself.
+    expect(verifyStep).toContain('its run artifact is missing');
+    expect(verifyStep).toContain('failure_kind=artifact_missing');
     expect(step(publishJob, 'Download run artifacts')).toContain(
       'continue-on-error: true',
     );
@@ -910,15 +913,29 @@ describe('qwen resolve workflow', () => {
     // name carries run_attempt on BOTH sides: a re-run keeps the run_id, and
     // without the suffix the second attempt 409s on the first attempt's upload
     // while the by-name download republishes the stale first-attempt bundle.
+    // The DOWNLOAD side spells the attempt that RAN THE AGENT, not the
+    // publish job's own github.run_attempt: a partial "Re-run failed jobs"
+    // re-runs only the publish job, whose attempt number has no artifact —
+    // the upload's does. The attempt crosses the job boundary as an output
+    // the agent never writes (the runner provides GITHUB_RUN_ATTEMPT).
     const packageStep = step(resolveJob, 'Package resolution');
     expect(packageStep).toContain(
       'git bundle create "${WORKDIR}/resolution.bundle" "${HEAD_SHA}..refs/heads/qwen-resolve/pr-${PR_NUMBER}"',
+    );
+    // A gitfile-replaced .git packages nothing: the guard fails closed
+    // before any bundle exists for the publish job to verify.
+    expect(packageStep).toContain('if [ ! -d .git ]; then');
+    expect(step(resolveJob, 'Resolve pull request')).toContain(
+      'echo "run_attempt=${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"',
+    );
+    expect(resolveJob).toContain(
+      "agent_run_attempt: '${{ steps.resolve.outputs.run_attempt }}'",
     );
     expect(step(resolveJob, 'Upload run artifacts')).toContain(
       "name: 'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}-attempt-${{ github.run_attempt }}'",
     );
     expect(step(publishJob, 'Download run artifacts')).toContain(
-      "name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ github.run_attempt }}'",
+      "name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ needs.resolve-pr.outputs.agent_run_attempt }}'",
     );
     expect(step(publishJob, 'Download run artifacts')).toContain(
       "path: '/tmp/qwen-resolve'",
@@ -937,8 +954,18 @@ describe('qwen resolve workflow', () => {
         "group: 'qwen-pr-head-write-${{ github.event.issue.number || github.event.inputs.pr_number }}'",
       );
     }
-    // The push itself is verify-less, so a hook could never receive the URL.
-    expect(step(publishJob, 'Report result')).toContain('git push --no-verify');
+    // The push itself is verify-less, so a hook could never receive the URL,
+    // and it never answers a credential prompt against a rewritten one.
+    const reportStep = step(publishJob, 'Report result');
+    expect(reportStep).toContain('git push --no-verify');
+    expect(reportStep).toContain('export GIT_TERMINAL_PROMPT=0');
+    expect(reportStep).toContain(
+      "AGENT_RUN_ATTEMPT: '${{ needs.resolve-pr.outputs.agent_run_attempt }}'",
+    );
+    // The push-failure comments cite the artifact that actually exists —
+    // the agent's attempt, not this job's.
+    expect(reportStep).toContain('attempt-${AGENT_RUN_ATTEMPT}');
+    expect(reportStep).not.toContain('attempt-${{ github.run_attempt }}');
   });
 
   it('pins the CLI version and bounds the agent step', () => {
@@ -954,8 +981,10 @@ describe('qwen resolve workflow', () => {
     expect(installStep).not.toContain("QWEN_CLI_VERSION: 'latest'");
     expect(installStep).toContain('@qwen-code/qwen-code@${QWEN_CLI_VERSION}');
     // Direct invocation, not the action: the action runs the CLI with the
-    // runner's real $GITHUB_ENV/$GITHUB_PATH, which the scrub in the later
-    // steps cannot fully undo (see 'hardens the post-agent steps').
+    // runner's real $GITHUB_ENV/$GITHUB_PATH; the direct call decoys them
+    // per invocation instead. Containment of everything else the agent
+    // plants lives in the publish split — see 'publishes from a job whose
+    // runner never executed the agent'.
     expect(agentStep).not.toContain('qwen-code-action');
     expect(agentStep).toContain('GITHUB_ENV="$decoy_dir/github-env"');
     expect(agentStep).toContain('GITHUB_PATH="$decoy_dir/github-path"');
@@ -1069,9 +1098,27 @@ describe('qwen resolve workflow', () => {
     // Pin the branch CONDITION literal, then slice the two arms of the `*)`
     // case so a transposition of the bodies fails — unordered toContain kept
     // both texts present in either arm.
-    const infraCond = 'if [ "$FAILURE_KIND" = "infra" ]; then';
+    // The lost-artifact arm comes FIRST: the agent SUCCEEDED, so neither
+    // the infra wording (it blames a run that did not fail, and forbids the
+    // one re-run shape that re-produces the artifact) nor the verdict
+    // wording may post for it.
+    const missingCond = 'if [ "$FAILURE_KIND" = "artifact_missing" ]; then';
+    const missingStart = reportStep.indexOf(missingCond);
+    expect(missingStart).toBeGreaterThan(-1);
+    const missingArm = reportStep.slice(
+      missingStart,
+      reportStep.indexOf('elif', missingStart),
+    );
+    expect(missingArm).toContain('finished successfully');
+    expect(missingArm).toContain('**Re-run all jobs**');
+    expect(missingArm).toContain(
+      're-running only the failed jobs cannot recover the missing artifact',
+    );
+    expect(missingArm).not.toContain('will fail the same way');
+    expect(missingArm).not.toContain('Requesting /resolve again');
+    const infraCond = 'elif [ "$FAILURE_KIND" = "infra" ]; then';
     const infraStart = reportStep.indexOf(infraCond);
-    expect(infraStart).toBeGreaterThan(-1);
+    expect(infraStart).toBeGreaterThan(missingStart);
     const infraArm = reportStep.slice(
       infraStart,
       reportStep.indexOf('else', infraStart),
@@ -1332,12 +1379,25 @@ describe('qwen resolve workflow', () => {
         'Branch still has merge conflicts with main',
       );
 
-      // (d) No artifact at all (agent job died before packaging) → an
-      // infrastructure failure, never a silent job failure.
+      // (d) A SUCCESSFUL agent step whose artifact is gone (its upload
+      // failed or expired) — the shape a partial "Re-run failed jobs" used
+      // to hit when the download missed the artifact. Classify the lost
+      // artifact, never the agent run: the infra comment would blame a run
+      // that succeeded and forbid the re-run that re-produces the artifact.
       const v4 = verify(path.join(root, 'missing'));
       expect(v4.status).toBe(1);
       expect(v4.outputs).toContain('outcome=failed');
-      expect(v4.outputs).toContain('failure_kind=infra');
+      expect(v4.outputs).toContain('failure_kind=artifact_missing');
+      expect(v4.outputs).not.toContain('failure_kind=infra');
+
+      // (d2) A non-success agent step keeps the infra contract whatever the
+      // artifact state: the never-ran block fires before the import.
+      const v4b = verify(path.join(root, 'missing'), {
+        RESOLVE_OUTCOME: 'failure',
+      });
+      expect(v4b.status).toBe(1);
+      expect(v4b.outputs).toContain('outcome=failed');
+      expect(v4b.outputs).toContain('failure_kind=infra');
 
       // (e) The scope guard still bites on the imported bundle: an extra file
       // outside the base-changed set travels in the bundle and is refused.

@@ -534,17 +534,32 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
         verify.run.indexOf('git ls-files -u'),
       'lineage must be checked before any content check',
     );
-    // The artifact is the same one the agent job uploads; its absence is an
-    // infrastructure failure, not a silent job failure. The name carries
+    // The artifact is the same one the agent job uploads. The name carries
     // run_attempt on both sides: a re-run keeps the run_id, and without the
-    // suffix the re-run would republish attempt 1's stale bundle.
+    // suffix the re-run would republish attempt 1's stale bundle. The
+    // DOWNLOAD spells the attempt that RAN THE AGENT, not the publish job's
+    // own run_attempt: a partial "Re-run failed jobs" re-runs only the
+    // publish job, whose attempt number has no artifact. A missing artifact
+    // with a successful agent step is the lost artifact, never an infra
+    // failure of the agent run.
     const download = publish.steps.find((s) =>
       s.uses?.startsWith('actions/download-artifact@'),
     );
     assert.equal(download['continue-on-error'], true);
     assert.equal(
       download.with.name,
-      'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ github.run_attempt }}',
+      'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ needs.resolve-pr.outputs.agent_run_attempt }}',
+    );
+    assert.equal(
+      resolvePrJob.outputs.agent_run_attempt,
+      '${{ steps.resolve.outputs.run_attempt }}',
+    );
+    const resolveStep = resolvePrJob.steps.find((s) => s.id === 'resolve');
+    assert.ok(
+      resolveStep.run.includes(
+        'echo "run_attempt=${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"',
+      ),
+      'the attempt that ran the agent must cross the job boundary',
     );
     const upload = resolvePrJob.steps.find((s) =>
       s.uses?.startsWith('actions/upload-artifact@'),
@@ -554,7 +569,8 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
       'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}-attempt-${{ github.run_attempt }}',
     );
     assert.ok(verify.run.includes('failure_kind=infra'));
-    assert.ok(verify.run.includes('uploaded no run artifact'));
+    assert.ok(verify.run.includes('failure_kind=artifact_missing'));
+    assert.ok(verify.run.includes('its run artifact is missing'));
   });
 
   it('keeps both /resolve jobs on ephemeral hosted runners', () => {
@@ -582,7 +598,10 @@ describe('qwen-issue-followup-bot.yml: agent settings', () => {
     // notarget outage is why the pin exists: without a contract test a
     // future rename silently reverts the bot to the dist-tag with nothing
     // red at merge time. resolve-pr's equivalent pin has two tests; this one
-    // keeps the follow-up bot's covered too.
+    // keeps the follow-up bot's covered too. The pin governs runners without
+    // `qwen` on PATH — the action's install step skips when the CLI is
+    // already present — so it binds the ubuntu-latest fallback lane; on the
+    // ecs-qwen lane the fleet-installed CLI is authoritative.
     assert.match(
       String(followupStep.with?.qwen_cli_version),
       /^\d+\.\d+\.\d+$/,

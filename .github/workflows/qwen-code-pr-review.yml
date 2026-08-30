@@ -2475,6 +2475,7 @@ jobs:
       decision: '${{ steps.prepare.outputs.decision }}'
       pr_number: '${{ steps.resolve.outputs.pr_number }}'
       agent_outcome: '${{ steps.resolve_conflicts.outcome }}'
+      agent_run_attempt: '${{ steps.resolve.outputs.run_attempt }}'
       head_ref: '${{ steps.prepare.outputs.head_ref }}'
       head_sha: '${{ steps.prepare.outputs.head_sha }}'
       head_repo: '${{ steps.prepare.outputs.head_repo }}'
@@ -2526,6 +2527,10 @@ jobs:
             pr_number="$ISSUE_NUMBER"
           fi
           echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+          # The attempt that runs the agent — publish-resolution downloads
+          # the run artifact by THIS number, not its own github.run_attempt
+          # (a partial "Re-run failed jobs" re-runs only the publish job).
+          echo "run_attempt=${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
       - name: 'Checkout base branch'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -2985,10 +2990,15 @@ jobs:
         # A cancelled or crashed agent job may have uploaded nothing; the
         # import in 'Resolution check' reports that as an infrastructure
         # failure instead of letting this step end the job without a comment.
+        # The name ends in the attempt that RAN THE AGENT, not this job's own
+        # github.run_attempt: a partial "Re-run failed jobs" re-runs only the
+        # publish job, and only the agent's attempt uploaded an artifact —
+        # downloading by this attempt's name would miss it and wedge the
+        # re-run on a contradictory failure comment.
         continue-on-error: true
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
-          name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ github.run_attempt }}'
+          name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ needs.resolve-pr.outputs.agent_run_attempt }}'
           path: '/tmp/qwen-resolve'
 
       - name: 'Resolution check'
@@ -3069,9 +3079,14 @@ jobs:
           elif [ -d "$WORKDIR" ]; then
             git checkout -q -B "qwen-resolve/pr-${PR_NUMBER}" "$HEAD_FETCH_REF"
           else
-            echo "The agent job uploaded no run artifact (cancelled or crashed before packaging); nothing to verify."
+            # Only reachable with RESOLVE_OUTCOME=success — any other outcome
+            # exits in the never-ran block above. The agent finished, but its
+            # artifact is gone (the upload step failed or it expired), so the
+            # result cannot be verified or published; classify the LOST
+            # ARTIFACT, never the agent run, and word the comment accordingly.
+            echo "The agent step succeeded, but its run artifact is missing (the upload failed or the artifact expired); nothing to verify."
             echo "outcome=failed" >> "$GITHUB_OUTPUT"
-            echo "failure_kind=infra" >> "$GITHUB_OUTPUT"
+            echo "failure_kind=artifact_missing" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
@@ -3140,7 +3155,7 @@ jobs:
           # defense-in-depth layer.
           merge_base="$(git merge-base "origin/${BASE_REF}" "$HEAD_FETCH_REF")"
           # -z/sort -zu mirrors the conflict-marker check above so unusual
-          # filenames in the diff are handled consistently. ponytail: tr back to
+          # filenames in the diff are handled consistently, then tr back to
           # newlines because bash vars can't hold NUL — a filename containing a
           # literal newline still splits, but that's covered by the
           # write-authorization + no-token containment this guard backstops.
@@ -3171,6 +3186,10 @@ jobs:
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           FAILURE_KIND: '${{ steps.verify.outputs.failure_kind }}'
           RESOLVE_OUTCOME: '${{ needs.resolve-pr.outputs.agent_outcome }}'
+          # The attempt that ran the agent; the artifact name cited below
+          # carries it (this job's own github.run_attempt is one ahead on a
+          # partial "Re-run failed jobs").
+          AGENT_RUN_ATTEMPT: '${{ needs.resolve-pr.outputs.agent_run_attempt }}'
           # Mirrors timeout-minutes on 'Resolve conflicts'; a test pins the pair.
           AGENT_TIMEOUT_MINUTES: '75'
           DRY_RUN: '${{ env.DRY_RUN }}'
@@ -3276,16 +3295,16 @@ jobs:
                 if [ "$push_failed" = "true" ]; then
                   case "$push_fail_reason" in
                     workflow_scope)
-                      echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`: resolving merges the base branch in, which includes its \`.github/workflows/**\` changes, and GitHub blocks a token without the **\`workflow\`** scope from updating workflow files. A maintainer needs to grant that scope to the push bot (classic PAT: check \`workflow\`; fine-grained PAT: Workflows → Read and write), then re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${{ github.run_attempt }}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+                      echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`: resolving merges the base branch in, which includes its \`.github/workflows/**\` changes, and GitHub blocks a token without the **\`workflow\`** scope from updating workflow files. A maintainer needs to grant that scope to the push bot (classic PAT: check \`workflow\`; fine-grained PAT: Workflows → Read and write), then re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${AGENT_RUN_ATTEMPT}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                     permission)
-                      echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`. For a fork PR this needs **Allow edits by maintainers** enabled, and GitHub blocks maintainer edits on forks owned by an organization. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${{ github.run_attempt }}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+                      echo "Qwen Code resolved the merge conflicts, but could not push to \`${HEAD_REPO}\`. For a fork PR this needs **Allow edits by maintainers** enabled, and GitHub blocks maintainer edits on forks owned by an organization. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${AGENT_RUN_ATTEMPT}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                     moved)
-                      echo "Qwen Code resolved the merge conflicts, but the head branch changed while resolving, so the update was not pushed. Re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${{ github.run_attempt }}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+                      echo "Qwen Code resolved the merge conflicts, but the head branch changed while resolving, so the update was not pushed. Re-run /resolve. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${AGENT_RUN_ATTEMPT}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                     *)
-                      echo "Qwen Code resolved the merge conflicts, but pushing to \`${HEAD_REPO}\` failed. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${{ github.run_attempt }}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+                      echo "Qwen Code resolved the merge conflicts, but pushing to \`${HEAD_REPO}\` failed. The resolved diff is attached as the \`qwen-resolve-pr-${PR_NUMBER}-attempt-${AGENT_RUN_ATTEMPT}\` artifact on the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
                       ;;
                   esac
                 elif [ "$DRY_RUN" = "true" ]; then
@@ -3302,7 +3321,13 @@ jobs:
                 append_safe_file "${WORKDIR}/no-action.md"
                 ;;
               *)
-                if [ "$FAILURE_KIND" = "infra" ]; then
+                if [ "$FAILURE_KIND" = "artifact_missing" ]; then
+                  # The agent SUCCEEDED: the infra wording below would blame
+                  # a run that did not fail, and a partial re-run cannot
+                  # bring the artifact back. Say the agent finished, and
+                  # point at the one recovery that re-produces the artifact.
+                  echo "Qwen Code's conflict-resolution agent finished successfully, but its run artifact never reached the publish job — the upload failed or the artifact expired — so the result could not be verified or published. This is not a verdict on the conflict. Use **Re-run all jobs** on the [workflow run](${RUN_URL}) to run the agent again and publish a fresh result; re-running only the failed jobs cannot recover the missing artifact."
+                elif [ "$FAILURE_KIND" = "infra" ]; then
                   # The agent never reached a verdict: outcome=failure (CLI
                   # install, model endpoint, crash) or outcome=cancelled (its
                   # step timeout). Say which, and do not invite a re-run: the
