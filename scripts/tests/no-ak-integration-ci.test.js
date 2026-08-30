@@ -223,6 +223,7 @@ describe('no-AK integration CI wiring', () => {
     for (const stepName of [
       'Setup Node.js (hosted)',
       'Use pre-installed Node.js (self-hosted)',
+      'Disk floor gate (self-hosted)',
       'Install Dependencies',
       'Run required no-AK integration gate',
     ]) {
@@ -231,6 +232,18 @@ describe('no-AK integration CI wiring', () => {
         `${stepName} must honour the CI profile`,
       ).toContain("steps.ci_profile.outputs.ci_profile == 'full'");
     }
+
+    const diskFloorGate = getWorkflowStep(
+      gateJob,
+      'Disk floor gate (self-hosted)',
+    );
+    expect(diskFloorGate).toContain("runner.environment == 'self-hosted'");
+    expect(diskFloorGate).toContain(
+      'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"',
+    );
+    expect(
+      gateJob.indexOf("name: 'Disk floor gate (self-hosted)'"),
+    ).toBeLessThan(gateJob.indexOf("name: 'Install Dependencies'"));
 
     const gateStep = getWorkflowStep(
       gateJob,
