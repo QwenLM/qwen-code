@@ -748,7 +748,7 @@ function setupAcpTest(
       })) as { sessionId: string };
       expect(newSession.sessionId).toBeTruthy();
 
-      await rig.poll(
+      const receivedCommandsUpdate = await rig.poll(
         () =>
           sessionUpdates.some(
             (update) =>
@@ -757,6 +757,10 @@ function setupAcpTest(
         5000,
         100,
       );
+      expect(
+        receivedCommandsUpdate,
+        'available_commands_update not received within 5s',
+      ).toBe(true);
 
       // Verify available_commands_update is received
       const commandsUpdate = sessionUpdates.find(
