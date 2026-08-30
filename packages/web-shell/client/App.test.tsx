@@ -21947,8 +21947,11 @@ describe('App session callbacks', () => {
     expect(testState.latestModelManagement?.busy).toBe(false);
   });
 
-  it('does not let an A-to-B-to-A deletion clear a newer selection', async () => {
-    const deletion = deferred<undefined>();
+  it('does not let an A-to-B-to-A deletion affect the newer owner', async () => {
+    const deletion = deferred<{
+      removed: true;
+      runtimeSync: { status: 'failed' };
+    }>();
     const selection = deferred<void>();
     mockWorkspaceActions.deleteModel.mockReturnValueOnce(deletion.promise);
     mockSessionActions.setModel.mockReturnValueOnce(selection.promise);
@@ -21984,16 +21987,137 @@ describe('App session callbacks', () => {
     expect(testState.latestModelManagement?.busy).toBe(true);
 
     await act(async () => {
-      deletion.resolve(undefined);
+      deletion.resolve({
+        removed: true,
+        runtimeSync: { status: 'failed' },
+      });
       await deletion.promise;
     });
     expect(testState.latestModelManagement?.busy).toBe(true);
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      {
+        type: 'status',
+        text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+      },
+    ]);
 
     await act(async () => {
       selection.resolve();
       await selection.promise;
     });
     expect(testState.latestModelManagement?.busy).toBe(false);
+  });
+
+  it('warns when a deleted model was saved but runtime sync failed', async () => {
+    mockWorkspaceActions.deleteModel.mockResolvedValueOnce({
+      removed: true,
+      runtimeSync: { status: 'failed' },
+    });
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      testState.latestModelManagement?.onDeleteModel?.({
+        authType: 'api-key',
+        modelId: 'old-model',
+      });
+      await Promise.resolve();
+    });
+
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      {
+        type: 'status',
+        text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+      },
+    ]);
+  });
+
+  it('does not publish stale deletion warnings into a replacement session', async () => {
+    const deletion = deferred<{
+      removed: true;
+      requiresRestart: true;
+      runtimeSync: { status: 'failed' };
+    }>();
+    mockWorkspaceActions.deleteModel.mockReturnValueOnce(deletion.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    act(() =>
+      testState.latestModelManagement?.onDeleteModel?.({
+        authType: 'api-key',
+        modelId: 'old-model',
+      }),
+    );
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await flush();
+    await act(async () => {
+      deletion.resolve({
+        removed: true,
+        requiresRestart: true,
+        runtimeSync: { status: 'failed' },
+      });
+      await deletion.promise;
+    });
+
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      {
+        type: 'status',
+        text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+      },
+    ]);
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      {
+        type: 'status',
+        text: 'This change requires a restart to take effect.',
+      },
+    ]);
+  });
+
+  it('does not report a stale deletion error in a replacement session', async () => {
+    const deletion = deferred<never>();
+    mockWorkspaceActions.deleteModel.mockReturnValueOnce(deletion.promise);
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    act(() =>
+      testState.latestModelManagement?.onDeleteModel?.({
+        authType: 'api-key',
+        modelId: 'old-model',
+      }),
+    );
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await flush();
+    await act(async () => {
+      deletion.reject(new Error('delete failed'));
+      await deletion.promise.catch(() => undefined);
+    });
+
+    expect(consoleError).not.toHaveBeenCalledWith(
+      '[web-shell]',
+      expect.stringContaining('delete failed'),
+      expect.anything(),
+    );
+    consoleError.mockRestore();
   });
 
   it('sends /model --fast with --global when the fast-model picker is opened from the User tab', async () => {
