@@ -192,6 +192,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionTurnStatus: 'qwen/control/session/turn_status',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
+  workspaceModelProvidersReload:
+    'qwen/control/workspace/model-providers/reload',
   workspaceReload: 'qwen/control/workspace/reload',
   workspaceSkillsRefresh: 'qwen/control/workspace/skills/refresh',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',

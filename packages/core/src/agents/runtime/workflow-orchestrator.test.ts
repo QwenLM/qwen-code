@@ -2472,7 +2472,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         args: undefined,
       });
       // 50 thunks >> window, so the window fully fills: peak === cap.
-      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
   });
@@ -2545,7 +2545,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         );`,
         args: undefined,
       });
-      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
 
@@ -2840,16 +2840,31 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       }
     });
 
-    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [1,16]', () => {
+    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [2,16]', () => {
       expect(
         resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '4' }),
       ).toBe(4);
-      // invalid → cpu-derived default, always within [1, 16]
+      // invalid → cpu-derived default, always within [2, 16]
       const fallback = resolveConcurrencyLimit({
         QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '-1',
       });
-      expect(fallback).toBeGreaterThanOrEqual(1);
+      expect(fallback).toBeGreaterThanOrEqual(2);
       expect(fallback).toBeLessThanOrEqual(16);
+    });
+
+    // The default reads `availableParallelism()`, which honours the CPU
+    // affinity mask and container limits, where `os.cpus()` reports the
+    // host and can return an empty array. The floor is 2, not 1: a window
+    // of 1 turns every `parallel()` into a sequence on a small machine.
+    it('resolveConcurrencyLimit derives the default from availableParallelism, floored at 2', () => {
+      const at = (parallelism: number) =>
+        resolveConcurrencyLimit({}, () => parallelism);
+      expect(at(0)).toBe(2);
+      expect(at(1)).toBe(2);
+      expect(at(3)).toBe(2);
+      expect(at(6)).toBe(4);
+      expect(at(18)).toBe(16);
+      expect(at(64)).toBe(16);
     });
 
     // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must

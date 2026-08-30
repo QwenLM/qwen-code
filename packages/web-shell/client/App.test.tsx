@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, createRef, type CSSProperties, type ReactNode } from 'react';
+import {
+  act,
+  createRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   DaemonHttpError,
@@ -557,7 +563,7 @@ const {
   };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
   const ownerGuard = {
     capture: () => {
       const ownerVersion = testState.ownerVersion;
@@ -22502,8 +22508,11 @@ describe('App session callbacks', () => {
     expect(testState.latestModelManagement?.busy).toBe(false);
   });
 
-  it('does not let an A-to-B-to-A deletion clear a newer selection', async () => {
-    const deletion = deferred<undefined>();
+  it('does not let an A-to-B-to-A deletion affect the newer owner', async () => {
+    const deletion = deferred<{
+      removed: true;
+      runtimeSync: { status: 'failed' };
+    }>();
     const selection = deferred<void>();
     mockWorkspaceActions.deleteModel.mockReturnValueOnce(deletion.promise);
     mockSessionActions.setModel.mockReturnValueOnce(selection.promise);
@@ -22539,16 +22548,137 @@ describe('App session callbacks', () => {
     expect(testState.latestModelManagement?.busy).toBe(true);
 
     await act(async () => {
-      deletion.resolve(undefined);
+      deletion.resolve({
+        removed: true,
+        runtimeSync: { status: 'failed' },
+      });
       await deletion.promise;
     });
     expect(testState.latestModelManagement?.busy).toBe(true);
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      {
+        type: 'status',
+        text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+      },
+    ]);
 
     await act(async () => {
       selection.resolve();
       await selection.promise;
     });
     expect(testState.latestModelManagement?.busy).toBe(false);
+  });
+
+  it('warns when a deleted model was saved but runtime sync failed', async () => {
+    mockWorkspaceActions.deleteModel.mockResolvedValueOnce({
+      removed: true,
+      runtimeSync: { status: 'failed' },
+    });
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      testState.latestModelManagement?.onDeleteModel?.({
+        authType: 'api-key',
+        modelId: 'old-model',
+      });
+      await Promise.resolve();
+    });
+
+    expect(mockStore.dispatch).toHaveBeenCalledWith([
+      {
+        type: 'status',
+        text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+      },
+    ]);
+  });
+
+  it('does not publish stale deletion warnings into a replacement session', async () => {
+    const deletion = deferred<{
+      removed: true;
+      requiresRestart: true;
+      runtimeSync: { status: 'failed' };
+    }>();
+    mockWorkspaceActions.deleteModel.mockReturnValueOnce(deletion.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    act(() =>
+      testState.latestModelManagement?.onDeleteModel?.({
+        authType: 'api-key',
+        modelId: 'old-model',
+      }),
+    );
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await flush();
+    await act(async () => {
+      deletion.resolve({
+        removed: true,
+        requiresRestart: true,
+        runtimeSync: { status: 'failed' },
+      });
+      await deletion.promise;
+    });
+
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      {
+        type: 'status',
+        text: 'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
+      },
+    ]);
+    expect(mockStore.dispatch).not.toHaveBeenCalledWith([
+      {
+        type: 'status',
+        text: 'This change requires a restart to take effect.',
+      },
+    ]);
+  });
+
+  it('does not report a stale deletion error in a replacement session', async () => {
+    const deletion = deferred<never>();
+    mockWorkspaceActions.deleteModel.mockReturnValueOnce(deletion.promise);
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    act(() =>
+      testState.latestModelManagement?.onDeleteModel?.({
+        authType: 'api-key',
+        modelId: 'old-model',
+      }),
+    );
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'session-2';
+      rerender();
+    });
+    await flush();
+    await act(async () => {
+      deletion.reject(new Error('delete failed'));
+      await deletion.promise.catch(() => undefined);
+    });
+
+    expect(consoleError).not.toHaveBeenCalledWith(
+      '[web-shell]',
+      expect.stringContaining('delete failed'),
+      expect.anything(),
+    );
+    consoleError.mockRestore();
   });
 
   it('sends /model --fast with --global when the fast-model picker is opened from the User tab', async () => {
@@ -26270,5 +26400,99 @@ describe('fileUploadEnabled customization plumbing', () => {
     const { container } = renderApp({});
     const composer = container.querySelector('[data-web-shell-composer]');
     expect(composer?.hasAttribute('data-file-upload-directory')).toBe(false);
+  });
+});
+
+describe('App connection error reporting (#10406)', () => {
+  it('reports a persistent connection error once even while host re-renders pass a fresh inline onError', async () => {
+    // Daemon unreachable: connection.error persists. A host may store each
+    // reported error in its own state, which re-renders the host and hands
+    // App an onError with a fresh identity (inline or otherwise). Before the
+    // fix, every new callback identity re-fired the notification effect for
+    // the same persistent error — an infinite re-render loop.
+    mockConnection.error = 'daemon unreachable';
+    const calls: string[] = [];
+    const HOST_NOTICE_CAP = 5;
+
+    function Host() {
+      const [noticeCount, setNoticeCount] = useState(0);
+      return (
+        <App
+          sidebar={{ enabled: true }}
+          header={{}}
+          onError={(error: Error) => {
+            calls.push(error.message);
+            if (noticeCount < HOST_NOTICE_CAP) {
+              setNoticeCount((count) => count + 1);
+            }
+          }}
+        />
+      );
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<Host />);
+    });
+    await flush();
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+
+    expect(calls).toEqual(['daemon unreachable']);
+  });
+
+  it('still reports when the connection error changes to a different value', async () => {
+    mockConnection.error = 'daemon unreachable';
+    const calls: string[] = [];
+    const { rerender } = renderApp({
+      onError: (error) => calls.push(error.message),
+    });
+    await flush();
+    expect(calls).toEqual(['daemon unreachable']);
+
+    mockConnection.error = 'session missing';
+    rerender({ onError: (error) => calls.push(error.message) });
+    await flush();
+
+    expect(calls).toEqual(['daemon unreachable', 'session missing']);
+  });
+
+  it('reports a recurring error again after the connection recovers', async () => {
+    mockConnection.error = 'daemon unreachable';
+    const calls: string[] = [];
+    const onError = (error: Error) => calls.push(error.message);
+    const { rerender } = renderApp({ onError });
+    await flush();
+    expect(calls).toEqual(['daemon unreachable']);
+
+    mockConnection.error = undefined;
+    rerender({ onError });
+    await flush();
+
+    mockConnection.error = 'daemon unreachable';
+    rerender({ onError });
+    await flush();
+
+    expect(calls).toEqual(['daemon unreachable', 'daemon unreachable']);
+  });
+
+  it('delivers a persistent error once when the host attaches onError after it appears', async () => {
+    // onError is optional: a host may mount while a connection error is
+    // already active and only attach its handler on a later render. The
+    // pending error must still be delivered exactly once.
+    mockConnection.error = 'daemon unreachable';
+    const calls: string[] = [];
+    const { rerender } = renderApp({});
+    await flush();
+    expect(calls).toEqual([]);
+
+    rerender({ onError: (error) => calls.push(error.message) });
+    await flush();
+
+    expect(calls).toEqual(['daemon unreachable']);
   });
 });
