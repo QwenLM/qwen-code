@@ -9,6 +9,7 @@ import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import {
   findLiveJournalRepairSuffix,
   findLiveJournalRepairTarget,
+  resolveLiveJournalMarkerPromptId,
 } from './live-journal-repair.js';
 
 const marker = (promptId?: string): DaemonEvent => ({
@@ -76,6 +77,27 @@ describe('live journal repair validation', () => {
         false,
       ),
     ).toBeUndefined();
+  });
+
+  it('resolves marker ownership independently of recoverability', () => {
+    const unavailableMarker = marker('prompt-owned');
+    unavailableMarker.data = {
+      ...(unavailableMarker.data as Record<string, unknown>),
+      fullTranscriptAvailable: false,
+    };
+    expect(
+      resolveLiveJournalMarkerPromptId(unavailableMarker, [
+        unavailableMarker,
+        update(5, 'prompt-other', 'agent_message_chunk'),
+      ]),
+    ).toBe('prompt-owned');
+    const unownedMarker = marker();
+    expect(
+      resolveLiveJournalMarkerPromptId(unownedMarker, [
+        unownedMarker,
+        update(5, 'prompt-fallback', 'agent_message_chunk'),
+      ]),
+    ).toBe('prompt-fallback');
   });
 
   it('rejects degraded or non-recoverable live markers', () => {

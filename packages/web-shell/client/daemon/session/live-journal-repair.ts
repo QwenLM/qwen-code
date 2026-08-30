@@ -27,8 +27,7 @@ export function findLiveJournalRepairTarget(
   if (replayDegraded) return undefined;
   const marker = liveJournal.find(isRecoverableLiveJournalMarker);
   if (!marker) return undefined;
-  const promptId =
-    nonEmptyString(marker.promptId) ?? uniqueRetainedPromptId(liveJournal);
+  const promptId = resolveLiveJournalMarkerPromptId(marker, liveJournal);
   if (!promptId) return undefined;
   const truncatedEvents = isRecord(marker.data)
     ? marker.data['truncatedEvents']
@@ -43,6 +42,13 @@ export function findLiveJournalRepairTarget(
       typeof truncatedEvents === 'number' ? truncatedEvents : 'unknown',
     ].join(':'),
   };
+}
+
+export function resolveLiveJournalMarkerPromptId(
+  marker: DaemonEvent,
+  liveJournal: readonly DaemonEvent[],
+): string | undefined {
+  return eventPromptId(marker) ?? uniqueRetainedPromptId(liveJournal);
 }
 
 export function findLiveJournalRepairSuffix(

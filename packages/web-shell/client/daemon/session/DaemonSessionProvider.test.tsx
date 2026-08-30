@@ -14172,6 +14172,229 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('attributes an unrecoverable live-journal marker to its owning prompt', async () => {
+    const firstTerminalDelivered = createDeferred<void>();
+    const secondTerminal = createDeferred<void>();
+    const secondTerminalDelivered = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-owned-live-journal-marker',
+      events: async function* terminalEvents() {
+        yield {
+          id: 10,
+          v: 1,
+          type: 'history_truncated',
+          promptId: 'prompt-b',
+          data: {
+            reason: 'replay_window_exceeded',
+            scope: 'live_journal',
+            truncatedEvents: 8,
+            retainedEvents: 2,
+            maxBytes: 1024,
+            maxEvents: 2,
+            fullTranscriptAvailable: false,
+          },
+        } satisfies DaemonEvent;
+        yield {
+          id: 11,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-a',
+          data: { promptId: 'prompt-a', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        firstTerminalDelivered.resolve();
+        await secondTerminal.promise;
+        yield {
+          id: 12,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-b',
+          data: { promptId: 'prompt-b', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        secondTerminalDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    const settlements: DaemonPromptSettledEvent[] = [];
+    function Harness() {
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await firstTerminalDelivered.promise;
+      await flushPromises();
+    });
+    expect(settlements).toEqual([
+      expect.objectContaining({
+        promptId: 'prompt-a',
+        transcriptComplete: true,
+      }),
+    ]);
+
+    await act(async () => {
+      secondTerminal.resolve();
+      await secondTerminalDelivered.promise;
+      await flushPromises();
+    });
+    expect(settlements).toEqual([
+      expect.objectContaining({
+        promptId: 'prompt-a',
+        transcriptComplete: true,
+      }),
+      expect.objectContaining({
+        promptId: 'prompt-b',
+        transcriptComplete: false,
+      }),
+    ]);
+  });
+
+  it('does not reclaim an unowned live-journal marker after a same-session rebuild', async () => {
+    const firstTerminalDelivered = createDeferred<void>();
+    const ringEvicted = createDeferred<void>();
+    const reloadedStreamStarted = createDeferred<void>();
+    const nextTerminal = createDeferred<void>();
+    const nextTerminalDelivered = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-replayed-live-journal-marker',
+      events: async function* firstEvents() {
+        yield {
+          id: 10,
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            scope: 'live_journal',
+            truncatedEvents: 8,
+            retainedEvents: 2,
+            maxBytes: 1024,
+            maxEvents: 2,
+            fullTranscriptAvailable: false,
+          },
+        } satisfies DaemonEvent;
+        yield {
+          id: 11,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-a',
+          data: { promptId: 'prompt-a', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        firstTerminalDelivered.resolve();
+        await ringEvicted.promise;
+        yield {
+          id: 12,
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'ring_evicted' },
+        } satisfies DaemonEvent;
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: firstSession.sessionId,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 7,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-old-a',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'older prefix a' },
+              },
+            },
+          },
+        ],
+        liveJournal: [
+          {
+            id: 8,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-old-b',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'older prefix b' },
+              },
+            },
+          },
+          {
+            id: 10,
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              scope: 'live_journal',
+              truncatedEvents: 8,
+              retainedEvents: 2,
+              maxBytes: 1024,
+              maxEvents: 2,
+              fullTranscriptAvailable: false,
+            },
+          },
+        ],
+      },
+      events: async function* reloadedEvents() {
+        reloadedStreamStarted.resolve();
+        await nextTerminal.promise;
+        yield {
+          id: 13,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-b',
+          data: { promptId: 'prompt-b', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        nextTerminalDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+
+    const settlements: DaemonPromptSettledEvent[] = [];
+    function Harness() {
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await firstTerminalDelivered.promise;
+      await flushPromises();
+    });
+    expect(settlements).toEqual([
+      expect.objectContaining({
+        promptId: 'prompt-a',
+        transcriptComplete: false,
+      }),
+    ]);
+
+    await act(async () => {
+      ringEvicted.resolve();
+      await reloadedStreamStarted.promise;
+      await flushPromises();
+    });
+    await act(async () => {
+      nextTerminal.resolve();
+      await nextTerminalDelivered.promise;
+      await flushPromises();
+    });
+    expect(settlements).toEqual([
+      expect.objectContaining({
+        promptId: 'prompt-a',
+        transcriptComplete: false,
+      }),
+      expect.objectContaining({
+        promptId: 'prompt-b',
+        transcriptComplete: true,
+      }),
+    ]);
+  });
+
   it('publishes a restored prompt terminal received in a reconnect replay', async () => {
     const ringEvicted = createDeferred<void>();
     const reloaded = createDeferred<void>();

@@ -57,6 +57,7 @@ import {
   findLiveJournalRepairSuffix,
   findLiveJournalRepairTarget,
   isLiveJournalMarker,
+  resolveLiveJournalMarkerPromptId,
   type LiveJournalRepairSuffix,
   type LiveJournalRepairTarget,
 } from './live-journal-repair.js';
@@ -1111,7 +1112,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     new Set(),
   );
   const publishedPromptSettlementsRef = useRef<Set<string>>(new Set());
-  const settledLiveJournalMarkerIdsRef = useRef<Set<string>>(new Set());
+  const settledLiveJournalMarkerEventIdsRef = useRef<Set<number>>(new Set());
+  const liveJournalMarkerPromptIdsByEventIdRef = useRef<Map<number, string>>(
+    new Map(),
+  );
   const promptSettlementSource = useMemo<DaemonPromptSettlementSource>(
     () => ({
       subscribe(listener) {
@@ -1160,8 +1164,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const settlement = repair.pendingSettlement;
       if (!settlement) return;
       repair.pendingSettlement = undefined;
-      if (!transcriptComplete && repair.markerBlockId !== undefined) {
-        settledLiveJournalMarkerIdsRef.current.add(repair.markerBlockId);
+      if (!transcriptComplete && typeof repair.target.marker.id === 'number') {
+        settledLiveJournalMarkerEventIdsRef.current.add(
+          repair.target.marker.id,
+        );
       }
       publishPromptSettlement({ ...settlement, transcriptComplete });
     },
@@ -1422,24 +1428,49 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       flushTranscriptSync();
       store.dispatch(events);
     };
-    const claimCommittedLiveJournalMarkers = () => {
-      const markerIds = store
-        .getSnapshot()
-        .blocks.flatMap((block) =>
-          block.kind === 'status' &&
-          block.source === 'history_truncated' &&
-          isRecord(block.data) &&
-          block.data['scope'] === 'live_journal'
-            ? [block.id]
-            : [],
-        );
+    const claimCommittedLiveJournalMarkers = (promptId: string) => {
+      const markers = store.getSnapshot().blocks.flatMap((block) =>
+        block.kind === 'status' &&
+        block.source === 'history_truncated' &&
+        isRecord(block.data) &&
+        block.data['scope'] === 'live_journal'
+          ? [
+              {
+                eventId: block.eventId,
+                promptId:
+                  typeof block.data['promptId'] === 'string'
+                    ? block.data['promptId']
+                    : block.eventId === undefined
+                      ? undefined
+                      : liveJournalMarkerPromptIdsByEventIdRef.current.get(
+                          block.eventId,
+                        ),
+              },
+            ]
+          : [],
+      );
       let claimed = false;
-      for (const markerId of markerIds) {
-        if (settledLiveJournalMarkerIdsRef.current.has(markerId)) continue;
-        settledLiveJournalMarkerIdsRef.current.add(markerId);
+      let present = false;
+      for (const marker of markers) {
+        // An unowned marker is conservatively assigned to the first terminal
+        // that observes it. The daemon event id makes that claim stable across
+        // same-session transcript rebuilds; without an id, fail closed on
+        // every observation rather than certify an incomplete transcript.
+        if (marker.promptId !== undefined && marker.promptId !== promptId) {
+          continue;
+        }
+        present = true;
+        if (marker.eventId === undefined) {
+          claimed = true;
+          continue;
+        }
+        if (settledLiveJournalMarkerEventIdsRef.current.has(marker.eventId)) {
+          continue;
+        }
+        settledLiveJournalMarkerEventIdsRef.current.add(marker.eventId);
         claimed = true;
       }
-      return { claimed, present: markerIds.length > 0 };
+      return { claimed, present };
     };
     // Drop buffered events. Used before `store.reset()`: pending events belong
     // to the epoch the reset is discarding, so flushing them would be wrong.
@@ -2083,7 +2114,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const previousSessionId = lastSessionIdRef.current;
             if (previousSessionId !== nextSession.sessionId) {
               clearNotices();
-              settledLiveJournalMarkerIdsRef.current.clear();
+              settledLiveJournalMarkerEventIdsRef.current.clear();
+              liveJournalMarkerPromptIdsByEventIdRef.current.clear();
             }
             // Defer store.reset() until right before replay dispatch
             // (after the await below) so that reset + dispatch share a
@@ -2232,6 +2264,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
+          for (const marker of replayEvents) {
+            if (!isLiveJournalMarker(marker) || marker.id === undefined) {
+              continue;
+            }
+            const markerPromptId = resolveLiveJournalMarkerPromptId(
+              marker,
+              liveJournal,
+            );
+            if (markerPromptId !== undefined) {
+              liveJournalMarkerPromptIdsByEventIdRef.current.set(
+                marker.id,
+                markerPromptId,
+              );
+            }
+          }
           if (
             restoredActivePrompt &&
             activeSession.hasActivePrompt === true &&
@@ -2702,10 +2749,23 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 repair.terminalSeen = true;
                 queueMicrotask(tryLiveJournalRepair);
               } else {
-                const replayHasLiveJournalMarker =
-                  replayEvents.some(isLiveJournalMarker);
+                let replayHasLiveJournalMarker = false;
+                for (const replayEvent of replayEvents) {
+                  if (!isLiveJournalMarker(replayEvent)) continue;
+                  const markerPromptId = resolveLiveJournalMarkerPromptId(
+                    replayEvent,
+                    liveJournal,
+                  );
+                  if (
+                    markerPromptId !== undefined &&
+                    markerPromptId !== settlement.promptId
+                  ) {
+                    continue;
+                  }
+                  replayHasLiveJournalMarker = true;
+                }
                 const claimedMarkers = replayHasLiveJournalMarker
-                  ? claimCommittedLiveJournalMarkers()
+                  ? claimCommittedLiveJournalMarkers(settlement.promptId)
                   : undefined;
                 publishPromptSettlement({
                   ...settlement,
@@ -3128,6 +3188,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (sessionRef.current !== activeSession) {
               break;
             }
+            if (isLiveJournalMarker(event) && event.id !== undefined) {
+              const markerPromptId = eventPromptId(event);
+              if (markerPromptId !== undefined) {
+                liveJournalMarkerPromptIdsByEventIdRef.current.set(
+                  event.id,
+                  markerPromptId,
+                );
+              }
+            }
             if (!sawEvent) {
               sawEvent = true;
               reconnectAttempt = 0;
@@ -3432,7 +3501,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }
               if (settlement && !settlementDelayedForRepair) {
                 const { claimed: committedTranscriptHasLiveJournalMarker } =
-                  claimCommittedLiveJournalMarkers();
+                  claimCommittedLiveJournalMarkers(settlement.promptId);
                 publishPromptSettlement(
                   committedTranscriptHasLiveJournalMarker
                     ? { ...settlement, transcriptComplete: false }
