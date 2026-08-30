@@ -34,7 +34,7 @@ import {
   committedSymlinkProbes,
 } from './test-efficacy.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
-import { sanitizedGitEnv } from './lib/worktree.js';
+import { MAX_SCREEN_KEYS, sanitizedGitEnv } from './lib/worktree.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -710,6 +710,38 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
 
       expect(r.verdict).toBe('inconclusive');
       expect(r.detail).toContain('could not be read to the end');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('says the enumeration was capped when more keys were planted than shown', () => {
+    // The cap exists so an attacker-written key list cannot become the whole
+    // refusal string; the count exists so the message does not send a user to
+    // remove the keys it named and leave the rest standing.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-capmsg-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      let cfg = '';
+      for (let i = 0; i < MAX_SCREEN_KEYS + 1; i++) {
+        cfg += `[filter "evil${i}"]\n\tsmudge = cat\n`;
+      }
+      appendFileSync(join(dir, '.git', 'config'), cfg);
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('capped enumeration');
+      expect(r.detail).toContain(
+        `${MAX_SCREEN_KEYS} shown of ${MAX_SCREEN_KEYS + 1}`,
+      );
     } finally {
       isolation.dispose();
       rmSync(dir, { recursive: true, force: true });

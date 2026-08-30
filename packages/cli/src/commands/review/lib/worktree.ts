@@ -36,6 +36,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { inertPath } from './paths.js';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -637,6 +638,16 @@ export interface LocalFilterScreen {
   /** How many distinct keys the screen found, before the cap on `keys`. */
   total: number;
   /**
+   * Why the screen stopped, when it did.
+   *
+   * `unreadable` and `over-cap` both refuse, but they call for opposite
+   * remedies: an unreadable candidate is a file to fix or remove, while an
+   * over-cap admin directory was read perfectly well and holds more
+   * registered worktrees than the bound — "remove that file" there would
+   * deregister every legitimate linked worktree, the pipeline's own included.
+   */
+  stopped: 'unreadable' | 'over-cap' | null;
+  /**
    * The first candidate file the screen could not read to completion, when one
    * stopped it — otherwise null.
    *
@@ -651,18 +662,65 @@ export interface LocalFilterScreen {
   unreadable: string | null;
 }
 
+/**
+ * The screened keys, flattened and counted, for a refusal message.
+ *
+ * `keys` arrives already capped by the producer, so this never re-slices; it
+ * reports the shortfall instead. Both halves matter: `inertPath` because a
+ * config subsection name legally carries control and format characters that
+ * `--get-regexp` prints verbatim, and these strings land in the agent-facing
+ * report; the count because a message naming 12 of 13 keys sends a user to
+ * remove the 12 and be refused again on the one it never mentioned.
+ */
+export function screenKeyList(screen: LocalFilterScreen): string {
+  const shown = screen.keys.map(inertPath).join(', ');
+  return screen.total > screen.keys.length
+    ? `${shown} (capped enumeration: ${screen.keys.length} shown of ${screen.total})`
+    : shown;
+}
+
+/**
+ * Why a screen that stopped could not finish, phrased for the reader who has
+ * to act on it.
+ *
+ * The two causes need opposite remedies, so they must not share a sentence:
+ * an unreadable candidate is a file to fix or remove, while an over-cap admin
+ * directory was read perfectly well — telling that reader to "remove that
+ * file" would deregister every legitimate linked worktree they have.
+ */
+export function screenStopDetail(screen: LocalFilterScreen): string {
+  const where = inertPath(screen.unreadable ?? '');
+  return screen.stopped === 'over-cap'
+    ? `more than ${MAX_SCREEN_CANDIDATES} worktrees are registered under ${where} — more than this screen will walk, so it cannot tell whether one of them defines a content filter. Prune stale ones (\`git worktree prune\`) and re-run`
+    : `${where} could not be read to the end`;
+}
+
 export function localFilterCommands(worktree: string): LocalFilterScreen {
-  const files = spawnSync(
-    'git',
-    ['rev-parse', '--git-common-dir', '--git-dir'],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
-  );
-  if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
+  // One invocation per value, the shape `worktreeResidue`'s `discover` already
+  // uses in this file and for the same reason: the answers are filesystem
+  // paths, a POSIX path may carry a newline, and a combined newline-delimited
+  // answer cannot then be split unambiguously. A linked worktree under such a
+  // directory parses to four records instead of two, `commonDir` gets the head
+  // of the path and `gitDir` its tail, every candidate resolves to nothing,
+  // the admin readdir hits ENOENT — the branch this code calls ordinary — and
+  // the screen answers CLEAN over a live plant. Measured with exactly such a
+  // directory. Strip only git's terminal delimiter; every other byte is path.
+  const askPath = (flag: string): string | null => {
+    const r = spawnSync('git', ['rev-parse', flag], {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+    });
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return null;
+    return r.stdout.endsWith('\n') ? r.stdout.slice(0, -1) : r.stdout;
+  };
+  const commonDir = askPath('--git-common-dir');
+  const gitDir = askPath('--git-dir');
+  if (commonDir === null || gitDir === null) {
     // Not a usable repository from here: the checkout this screen guards has
     // nothing to run in either, and its own failure is the caller's answer.
-    return { keys: [], total: 0, unreadable: null };
+    return { keys: [], total: 0, unreadable: null, stopped: null };
   }
-  const [commonDir, gitDir] = files.stdout.trim().split('\n');
   const common = resolve(worktree, commonDir);
   const candidates = [
     join(common, 'config'),
@@ -694,11 +752,21 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
     // would answer clean on candidates that were never read. Refuse instead:
     // this is the directory-level twin of the per-file readability gate below.
     if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-      return { keys: [], total: 0, unreadable: join(common, 'worktrees') };
+      return {
+        keys: [],
+        total: 0,
+        unreadable: join(common, 'worktrees'),
+        stopped: 'unreadable',
+      };
     }
   }
   if (worktreeEntries && worktreeEntries.length > MAX_SCREEN_CANDIDATES) {
-    return { keys: [], total: 0, unreadable: join(common, 'worktrees') };
+    return {
+      keys: [],
+      total: 0,
+      unreadable: join(common, 'worktrees'),
+      stopped: 'over-cap',
+    };
   }
   for (const entry of worktreeEntries ?? []) {
     candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
@@ -731,6 +799,14 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
         'config',
         '--file',
         file,
+        // BEFORE the pattern: `--name-only` after it silently prints nothing
+        // and exits 1 even with live keys. With it, each line is the whole key
+        // and nothing has to be parsed out of a `key value` pair — a config
+        // subsection name may legally carry whitespace, and splitting on it
+        // named `filter.evil` for a planted `filter.evil name.smudge`, so the
+        // refusal prescribed an unset that exits 5 while the plant stood. Key
+        // names cannot contain newlines, so line-per-key is unambiguous.
+        '--name-only',
         '--get-regexp',
         // `process` beside the pair: it is the third executable key (a
         // long-running filter git speaks a protocol to), and enumerating two
@@ -758,7 +834,7 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
     }
     if (r.status === 1 || typeof r.stdout !== 'string') continue;
     for (const line of r.stdout.split('\n')) {
-      const key = line.split(/\s+/)[0];
+      const key = line;
       // A Set, not `Array.includes`: the values here are attacker-written and
       // the 64 MiB ceiling above admits millions of distinct keys, so a linear
       // membership test per line is quadratic on exactly the input this screen
@@ -772,6 +848,7 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
     keys: [...found].slice(0, MAX_SCREEN_KEYS),
     total: found.size,
     unreadable,
+    stopped: unreadable === null ? null : 'unreadable',
   };
 }
 

@@ -1957,20 +1957,92 @@ describe('localFilterCommands', () => {
 
     expect(screen.unreadable).toBe(join(dir, '.git', 'worktrees'));
     expect(screen.keys).toEqual([]);
+    // Read fine, just too many — a different remedy from an unreadable file.
+    expect(screen.stopped).toBe('over-cap');
   });
 
-  it('refuses when the worktrees admin dir cannot be read', () => {
-    // git opens each `worktrees/<e>/config.worktree` by direct path — the
-    // search bit alone suffices — so a readdir that fails with EACCES means
-    // the screen never saw candidates git will still honour. Swallowing that
-    // as "no linked worktrees" answers clean on a config it did not read.
-    const admin = join(dir, '.git', 'worktrees');
-    mkdirSync(admin, { recursive: true });
-    chmodSync(admin, 0o111);
+  // POSIX DAC bits only: Windows does not restrict listing through chmod, and
+  // root bypasses the mode entirely — the fixture would be red on both rather
+  // than pinning anything. Same guard as the other permission-bit fixture in
+  // this file.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'refuses when the worktrees admin dir cannot be read',
+    () => {
+      // git opens each `worktrees/<e>/config.worktree` by direct path — the
+      // search bit alone suffices — so a readdir that fails with EACCES means
+      // the screen never saw candidates git will still honour. Swallowing that
+      // as "no linked worktrees" answers clean on a config it did not read.
+      const admin = join(dir, '.git', 'worktrees');
+      mkdirSync(admin, { recursive: true });
+      chmodSync(admin, 0o111);
+
+      const screen = localFilterCommands(dir);
+
+      expect(screen.unreadable).toBe(admin);
+      // The two refusal causes must stay distinguishable: this one is a file
+      // to fix, the over-cap one is a directory to prune.
+      expect(screen.stopped).toBe('unreadable');
+    },
+  );
+
+  it('names a key whose subsection carries whitespace, intact', () => {
+    // A config subsection name may legally hold spaces, and `--get-regexp`
+    // prints `key value` on one line — so splitting on whitespace named
+    // `filter.evil` for a planted `filter.evil name.smudge`. The refusal then
+    // prescribed an unset that exits 5 while the plant stood, and two distinct
+    // keys sharing a truncated prefix collapsed into one, understating `total`.
+    execFileSync('git', ['config', 'filter.evil name.smudge', 'CMD'], {
+      cwd: dir,
+    });
+    execFileSync('git', ['config', 'filter.evil other.smudge', 'CMD2'], {
+      cwd: dir,
+    });
 
     const screen = localFilterCommands(dir);
 
-    expect(screen.unreadable).toBe(admin);
+    expect(screen.keys.sort()).toEqual([
+      'filter.evil name.smudge',
+      'filter.evil other.smudge',
+    ]);
+    expect(screen.total).toBe(2);
+  });
+
+  it('sees a filter through a repo path that carries a newline', () => {
+    // The screened trees are linked worktrees inheriting the user's repo path.
+    // A combined `rev-parse --git-common-dir --git-dir` answer splits into four
+    // records under such a path instead of two, every candidate resolves to
+    // nothing, the admin readdir hits ENOENT — the branch treated as ordinary —
+    // and the screen answers clean over a live plant.
+    const base = mkdtempSync(join(tmpdir(), 'qwen-nl-'));
+    try {
+      const holder = join(base, 'nl\ndir');
+      mkdirSync(holder, { recursive: true });
+      const main = join(holder, 'main');
+      mkdirSync(main);
+      initRepo(main);
+      writeFileSync(join(main, 'a.ts'), 'x\n');
+      execFileSync('git', ['add', '-A'], { cwd: main });
+      execFileSync(
+        'git',
+        ['-c', 'user.email=t@t.t', '-c', 'user.name=t', 'commit', '-qm', 'i'],
+        { cwd: main },
+      );
+      execFileSync('git', ['config', 'filter.evil.smudge', 'cat'], {
+        cwd: main,
+      });
+      const linked = join(holder, 'wt');
+      execFileSync(
+        'git',
+        ['worktree', 'add', '-q', '--detach', linked, 'HEAD'],
+        { cwd: main },
+      );
+
+      const screen = localFilterCommands(linked);
+
+      expect(screen.keys).toEqual(['filter.evil.smudge']);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it('stays clean on a repo with no linked worktrees at all', () => {
@@ -1979,7 +2051,12 @@ describe('localFilterCommands', () => {
 
     const screen = localFilterCommands(dir);
 
-    expect(screen).toEqual({ keys: [], total: 0, unreadable: null });
+    expect(screen).toEqual({
+      keys: [],
+      total: 0,
+      unreadable: null,
+      stopped: null,
+    });
   });
 
   it('refuses a candidate git cannot parse', () => {

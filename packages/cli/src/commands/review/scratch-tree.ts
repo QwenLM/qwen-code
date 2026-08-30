@@ -55,13 +55,14 @@ import {
 } from './lib/paths.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
-  MAX_SCREEN_KEYS,
   RESIDUE_PATH_CAP,
   discardWorktree,
   exposeDependencies,
   localFilterCommands,
   redirectedAncestor,
   sanitizedGitEnv,
+  screenKeyList,
+  screenStopDetail,
   worktreeCreateFailureDetail,
   worktreeResidue,
   type DependencyFarm,
@@ -425,20 +426,18 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   // BEFORE any checkout runs — the reuse path's reset and the rebuild path's
   // `worktree add` both execute configured content filters.
   const filters = localFilterCommands(worktree);
-  if (filters.unreadable) {
+  if (filters.stopped) {
     return unavailable(
-      `the repository's local config file ${inertPath(filters.unreadable)} ` +
-        'could not be read to the end, so this command cannot tell whether it ' +
-        'defines a content filter the checkouts below would EXECUTE. A screen ' +
-        'that did not finish is not a clean result — fix or remove that file.',
+      `the screen could not clear this repository: ${screenStopDetail(filters)}. ` +
+        'A screen that did not finish is not a clean result — the checkouts ' +
+        'below would EXECUTE any content filter it failed to see.',
     );
   }
   if (filters.keys.length > 0) {
     return unavailable(
-      `the repository's local config defines content filter(s) ${filters.keys
-        .slice(0, MAX_SCREEN_KEYS)
-        .map(inertPath)
-        .join(', ')} — ` +
+      `the repository's local config defines content filter(s) ${screenKeyList(
+        filters,
+      )} — ` +
         'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +
         'filters are config-driven), and two plain writes into the common dir are ' +
         'enough to plant both the filter and the attributes that select it. Remove ' +
