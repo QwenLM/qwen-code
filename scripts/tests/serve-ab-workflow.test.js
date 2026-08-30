@@ -112,14 +112,17 @@ describe('serve-ab pre-checkout workspace wipe', () => {
     // workspace fails the job here instead of building both checkouts on
     // top of the leftovers. `|| true` may appear only on the kept-.git
     // defang scrub — the config.worktree defang pair and the allowlist
-    // sweep — mirroring qwen-triage.yml's config-sanitize.
+    // scrub's enumeration, count, and bounded unset — mirroring
+    // qwen-triage.yml's config-sanitize.
     const loosened = wipe.run
       .split('\n')
       .filter((line) => line.includes('|| true'));
-    expect(loosened).toHaveLength(3);
+    expect(loosened).toHaveLength(5);
     expect(loosened[0]).toContain('--git-path config.worktree');
     expect(loosened[1]).toContain('--unset-all extensions.worktreeConfig');
     expect(loosened[2]).toContain('config --local --name-only --list');
+    expect(loosened[3]).toContain('grep -c .');
+    expect(loosened[4]).toContain('config --local --unset-all "$key"');
   });
 
   it('carries the symlink heal, ordered and bounded (#9480)', () => {
@@ -377,6 +380,49 @@ describe('serve-ab pre-checkout workspace wipe', () => {
         expect(
           readFileSync(calls, 'utf8'),
           `rm was invoked for ${bad || '<empty>'}`,
+        ).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // /bin, /sbin, /snap, /media and the unbounded device tree under /dev
+  // passed the old denylists: a mangled RUNNER_WORKSPACE there admitted
+  // the heal's rm/mkdir outside the workspace — the mutate-then-refuse
+  // shape the step's own comments forbid. The recorder proves the refusal
+  // happens BEFORE any mutation.
+  it('refuses gap containment roots without invoking rm', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-gaproots-'));
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      for (const bad of ['/bin', '/sbin', '/snap', '/media', '/dev/null']) {
+        writeFileSync(calls, '');
+        const guard = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipe.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: `${bad}/repo`,
+              RUNNER_WORKSPACE: bad,
+            },
+          },
+        );
+        expect(
+          guard.status,
+          `runner workspace ${bad} was not refused`,
+        ).not.toBe(0);
+        expect(
+          readFileSync(calls, 'utf8'),
+          `rm was invoked for runner workspace ${bad}`,
         ).toBe('');
       }
     } finally {
@@ -893,6 +939,118 @@ describe('serve-ab pre-checkout workspace wipe', () => {
         );
         expect(res.status).not.toBe(0);
         expect(res.stdout + res.stderr).toContain('could not recreate');
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('refuses a runner workspace under a non-directory ancestor, naming it', () => {
+    // A regular-file ancestor (the runner's _work renamed aside and
+    // replaced by a file) passed the symlink-only walk, wedged the root
+    // heal's mkdir with ENOTDIR, and the refusal misdirected at $RWS
+    // instead of naming the plant — every later job died identically
+    // until manual cleanup. Refuse, never heal an ancestor.
+    const plant = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-ancestor-'));
+    try {
+      writeFileSync(join(plant, 'work'), 'plant');
+      const rws = join(plant, 'work', 'qwen-code');
+      const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_WORKSPACE: join(rws, 'repo'),
+          RUNNER_WORKSPACE: rws,
+        },
+      });
+      expect(res.status).not.toBe(0);
+      expect(res.stdout + res.stderr).toContain(
+        'an ancestor of the runner workspace is not a plain directory',
+      );
+      expect(res.stdout + res.stderr).toContain(join(plant, 'work'));
+    } finally {
+      rmSync(plant, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!hasGnuRealpath)(
+    'heals an untraversable runner-workspace root instead of wedging on it',
+    () => {
+      // chmod 000 passes stat as healthy; the first traversal through it
+      // dies EACCES and every later job dies identically. The heal is the
+      // owner chmod — the pool's sudo allowlist refuses chmod, and none
+      // is needed for a same-user plant.
+      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-heal-000-'));
+      const ws = join(parent, 'repo');
+      mkdirSync(ws);
+      writeFileSync(join(ws, 'leftover'), 'x');
+      chmodSync(parent, 0o000);
+      try {
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipe.run],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: parent,
+            },
+          },
+        );
+        expect(res.status).toBe(0);
+        expect(res.stdout + res.stderr).toContain('it was not traversable');
+        expect(statSync(parent).mode & 0o700).toBe(0o700);
+        expect(readdirSync(ws)).toEqual([]);
+      } finally {
+        chmodSync(parent, 0o755);
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath)(
+    'removes a bulk-planted kept config wholesale instead of looping per key',
+    () => {
+      // The per-key unset loop respawns git once per key and every spawn
+      // re-parses AND re-writes the whole planted config — a bulk plant
+      // grows the scrub superlinearly into the job timeout, and a killed
+      // scrub clears almost nothing, so every later job times out too.
+      // Past the bound the gitdir is removed wholesale and the next job
+      // re-fetches.
+      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-bulkcfg-'));
+      const ws = join(parent, 'repo');
+      execFileSync('git', ['init', '--quiet', ws]);
+      const junk = Array.from(
+        { length: 3000 },
+        (_, i) => `\tjunkkey${i} = x`,
+      ).join('\n');
+      writeFileSync(
+        join(ws, '.git', 'config'),
+        readFileSync(join(ws, '.git', 'config'), 'utf8') + `[junk]\n${junk}\n`,
+      );
+      try {
+        const started = Date.now();
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipe.run],
+          {
+            encoding: 'utf8',
+            timeout: 30000,
+            env: {
+              ...process.env,
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: parent,
+            },
+          },
+        );
+        const elapsed = Date.now() - started;
+        expect(res.status).toBe(0);
+        expect(res.stdout + res.stderr).toContain(
+          'non-allowlisted config keys',
+        );
+        expect(existsSync(join(ws, '.git'))).toBe(false);
+        expect(elapsed).toBeLessThan(20000);
       } finally {
         rmSync(parent, { recursive: true, force: true });
       }

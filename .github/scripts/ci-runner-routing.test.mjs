@@ -410,8 +410,11 @@ function initProbeRepo(home, dir) {
 // Executes the REAL wipe step under GitHub's default bash wrapper with the
 // runner env it reads, against a fixture workspace the caller planted.
 // extraEnv merges earlier-step publications (e.g. the ownership step's
-// GITHUB_ENV exports) into the step env, as Actions would.
-function runWipeStep(runText, { home, ws, rws, extraEnv }) {
+// GITHUB_ENV exports) into the step env, as Actions would. cwd overrides
+// the GITHUB_WORKSPACE start when the planted state makes the workspace
+// unstandable (an untraversable component) — the step anchors every path
+// on the env, never on its CWD.
+function runWipeStep(runText, { home, ws, rws, extraEnv, cwd }) {
   const bashPath = hostToolPath('bash');
   assert.ok(bashPath, 'bash must be resolvable to execute the wipe step');
   assert.ok(realGit, 'git must be resolvable to execute the wipe step');
@@ -419,26 +422,26 @@ function runWipeStep(runText, { home, ws, rws, extraEnv }) {
   // the harness does too — a symlinked path opens the link's target as the
   // CWD, exactly the shape the step must contain. A missing or
   // non-directory workspace pins the parent instead.
-  let cwd = ws;
+  let stepCwd = cwd ?? ws;
   for (;;) {
     try {
-      if (statSync(cwd).isDirectory()) {
+      if (statSync(stepCwd).isDirectory()) {
         break;
       }
     } catch {
       // resolve-through failures and missing paths climb alike
     }
-    const parent = dirname(cwd);
-    if (parent === cwd) {
+    const parent = dirname(stepCwd);
+    if (parent === stepCwd) {
       break;
     }
-    cwd = parent;
+    stepCwd = parent;
   }
   return spawnSync(
     bashPath,
     ['--noprofile', '--norc', '-eo', 'pipefail', '-c', runText],
     {
-      cwd,
+      cwd: stepCwd,
       encoding: 'utf8',
       // A regression of the relative-RWS guard spins the ancestor walk
       // forever; kill it so the witness turns red instead of hanging.
@@ -775,12 +778,27 @@ describe('serve-ab.yml runner routing', () => {
       /::warning::healing workspace path .*: it was a symlink/,
       'a symlinked intermediate component must be healed, not refused — a refusal removes nothing and wedges every later job reading the same env',
     );
+    assert.match(
+      wipe.run,
+      /::error::refusing to wipe: an ancestor of the runner workspace is not a plain directory/,
+      'a regular-file or FIFO ancestor wedges the root heal mkdir with ENOTDIR and misdirects the refusal at $RWS — the walk must fail closed and name the plant',
+    );
+    assert.match(
+      wipe.run,
+      /it was not traversable/,
+      'a mode-000 directory passes stat as healthy and wedges the first traversal through it — the heals must judge permissions, not only type',
+    );
+    assert.match(
+      wipe.run,
+      /\/dev\|\/dev\/\*\|\/proc\|\/sys\|\/run\|\/srv\|\/mnt\*\|\/lib\*\|\/bin\|\/sbin\|\/snap\|\/media\) echo "::error::refusing suspicious runner workspace path/,
+      'the canonical refusal must close the gap containment roots — exact arms, plus the unbounded /dev/* device tree that admitted the /dev/null spelling',
+    );
     const executed = wipe.run
       .split('\n')
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('#'));
     assert.equal(executed[0], 'set -uo pipefail');
-    const tail = executed.slice(-28);
+    const tail = executed.slice(-35);
     assert.equal(
       tail[0],
       'find "$WS" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
@@ -853,58 +871,149 @@ describe('serve-ab.yml runner routing', () => {
     );
     assert.equal(
       tail[14],
-      '{ git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\\..+\\.(url|fetch|pushurl)|branch\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done',
-      "the kept .git config must be scrubbed to an allowlist that keeps NO extensions.* key — a planted extension makes every later git call exit 128 — remote narrowed to url/fetch/pushurl (any other remote key is a knob: vcs execs git-remote-<vcs> on the next fetch), core.worktree dropped (redirects the next checkout outside the workspace) — anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
+      'scrub_keys="$(git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\\..+\\.(url|fetch|pushurl)|branch\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } || true)"',
+      "enumerate the scrub targets ONCE — the config is planted bytes and every git spawn re-parses it, so the per-key loop may only run over a bounded count — the allowlist keeps NO extensions.* key, remote narrowed to url/fetch/pushurl, core.worktree dropped — anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
     );
     assert.equal(
       tail[15],
-      'if [ -d "$WS/.git" ]; then',
-      'the replace strip and its fail-open guard on a real kept repo: a healed-empty workspace has no refs to strip and must not fail the job here',
+      'scrub_count="$(printf \'%s\\n\' "${scrub_keys}" | grep -c . || true)"',
+      'count the targets the single enumeration produced',
     );
     assert.equal(
       tail[16],
-      'if ! replace_refs="$(git --git-dir="$WS/.git" for-each-ref --format=\'%(refname)\' refs/replace 2>/dev/null)"; then',
-      'enumerate the replace refs; an unenumerable gitdir cannot be proven clean',
+      'if [ "${scrub_count}" -gt 1000 ]; then',
+      'a healthy actions/checkout gitdir holds a handful of local keys — a bulk plant must not reach the per-key loop',
     );
     assert.equal(
       tail[17],
-      'echo "::warning::removing kept .git whose refs cannot be enumerated: ${WS}/.git"',
-      'the fail-open reports why the reuse is being paid back',
+      'echo "::warning::removing kept .git with ${scrub_count} non-allowlisted config keys: the per-key scrub cost is unbounded, re-fetching instead: ${WS}/.git"',
+      'the bound reports why the reuse is being paid back',
     );
     assert.equal(
       tail[18],
       'rm -rf "$WS/.git"',
-      'fail open: remove the unprovable gitdir instead of carrying it — the next job re-fetches',
+      'fail open past the bound — the identical shape the unenumerable-refs arm uses — instead of looping into the job timeout',
     );
-    assert.equal(tail[19], 'else', 'an enumerable gitdir keeps the strip');
+    assert.equal(
+      tail[19],
+      'elif [ "${scrub_count}" != "0" ]; then',
+      'a bounded count keeps the per-key unset',
+    );
     assert.equal(
       tail[20],
+      'printf \'%s\\n\' "${scrub_keys}" | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done',
+      'the kept .git config must be scrubbed to the allowlist — bounded by the count above',
+    );
+    assert.equal(tail[21], 'fi', 'close the scrub bound');
+    assert.equal(
+      tail[22],
+      'if [ -d "$WS/.git" ]; then',
+      'the replace strip and its fail-open guard on a real kept repo: a healed-empty workspace has no refs to strip and must not fail the job here',
+    );
+    assert.equal(
+      tail[23],
+      'if ! replace_refs="$(git --git-dir="$WS/.git" for-each-ref --format=\'%(refname)\' refs/replace 2>/dev/null)"; then',
+      'enumerate the replace refs; an unenumerable gitdir cannot be proven clean',
+    );
+    assert.equal(
+      tail[24],
+      'echo "::warning::removing kept .git whose refs cannot be enumerated: ${WS}/.git"',
+      'the fail-open reports why the reuse is being paid back',
+    );
+    assert.equal(
+      tail[25],
+      'rm -rf "$WS/.git"',
+      'fail open: remove the unprovable gitdir instead of carrying it — the next job re-fetches',
+    );
+    assert.equal(tail[26], 'else', 'an enumerable gitdir keeps the strip');
+    assert.equal(
+      tail[27],
       'printf \'%s\\n\' "${replace_refs}" | while IFS= read -r ref; do',
       "a planted refs/replace entry silently substitutes file content in the next job's checkout (actions/checkout passes no --no-replace-objects) — delete every one through git so packed entries drop too",
     );
     assert.equal(
-      tail[21],
+      tail[28],
       'if [ -n "${ref}" ]; then',
       'an empty enumeration yields one empty line — the loop must skip it without failing the pipe',
     );
     assert.equal(
-      tail[22],
+      tail[29],
       'git --git-dir="$WS/.git" update-ref -d "${ref}"',
       'delete each planted replace ref',
     );
-    assert.equal(tail[23], 'fi', 'keep the empty-line skip an if-block');
-    assert.equal(tail[24], 'done', 'close the strip loop');
-    assert.equal(tail[25], 'fi', 'close the fail-open if/else');
+    assert.equal(tail[30], 'fi', 'keep the empty-line skip an if-block');
+    assert.equal(tail[31], 'done', 'close the strip loop');
+    assert.equal(tail[32], 'fi', 'close the fail-open if/else');
     assert.equal(
-      tail[26],
+      tail[33],
       'fi',
       'the strip and fail-open stay inside the kept-.git guard',
     );
     assert.equal(
-      tail[27],
+      tail[34],
       'rm -rf "$WS/.git/refs/replace"',
       'and remove the namespace itself so nothing under it survives',
     );
+  });
+
+  it('leaves a symlinked workspace target untouched by the serve-ab ownership heal', () => {
+    // Port of the visuals witness: this step runs the same recursive
+    // chown/chmod; without the real-directory gate chmod -R dereferences
+    // a planted workspace symlink and flips modes out of bounds — and
+    // this step runs BEFORE the wipe heal that unlinks the plant.
+    const heal = serveAbDoc.jobs.ab.steps.find(
+      (s) => s.name === 'Restore workspace ownership',
+    );
+    const bashPath = hostToolPath('bash');
+    const root = mkdtempSync(join(tmpdir(), 'serve-ab-ownership-link-'));
+    const outside = join(root, 'outside');
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      const runnerTemp = join(root, 'runner-temp');
+      mkdirSync(runnerTemp);
+      mkdirSync(outside);
+      mkdirSync(join(outside, 'sub'));
+      writeFileSync(join(outside, 'canary'), 'x\n');
+      chmodSync(join(outside, 'canary'), 0o000);
+      writeFileSync(join(outside, 'sub', 'deep'), 'x\n');
+      chmodSync(join(outside, 'sub', 'deep'), 0o000);
+      const rws = join(root, 'rws');
+      mkdirSync(rws);
+      const ws = join(rws, 'qwen-code');
+      symlinkSync(outside, ws);
+      const envFile = join(root, 'github_env');
+      writeFileSync(envFile, '');
+      const res = spawnSync(
+        bashPath,
+        ['--noprofile', '--norc', '-eo', 'pipefail', '-c', heal.run],
+        {
+          encoding: 'utf8',
+          env: {
+            PATH: process.env.PATH,
+            HOME: home,
+            RUNNER_TEMP: runnerTemp,
+            GITHUB_WORKSPACE: ws,
+            GITHUB_ENV: envFile,
+          },
+        },
+      );
+      assert.equal(
+        res.status,
+        0,
+        `the heal must skip a symlinked operand: ${res.stdout}${res.stderr}`,
+      );
+      assert.ok(
+        lstatSync(ws).isSymbolicLink(),
+        'the plant must stay for the wipe heal to own',
+      );
+      assert.equal(statSync(join(outside, 'canary')).mode & 0o777, 0);
+      assert.equal(statSync(join(outside, 'sub', 'deep')).mode & 0o777, 0);
+    } finally {
+      chmodSync(join(outside, 'canary'), 0o644);
+      chmodSync(join(outside, 'sub', 'deep'), 0o644);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1149,6 +1258,8 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     try {
       const home = join(root, 'home');
       mkdirSync(home);
+      const runnerTemp = join(root, 'runner-temp');
+      mkdirSync(runnerTemp);
       mkdirSync(outside);
       mkdirSync(join(outside, 'sub'));
       writeFileSync(join(outside, 'canary'), 'x\n');
@@ -1169,6 +1280,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
           env: {
             PATH: process.env.PATH,
             HOME: home,
+            RUNNER_TEMP: runnerTemp,
             GITHUB_WORKSPACE: ws,
             GITHUB_ENV: envFile,
           },
@@ -1185,9 +1297,30 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       );
       assert.equal(statSync(join(outside, 'canary')).mode & 0o777, 0);
       assert.equal(statSync(join(outside, 'sub', 'deep')).mode & 0o777, 0);
-      // The GIT_CONFIG bypasses must reach every later step of the job.
+      // The GIT_CONFIG bypasses must reach every later step of the job —
+      // the global one as a fresh WRITABLE file (actions/checkout's
+      // safe.directory registration dies on /dev/null), the system one as
+      // the read-only null device.
       const envText = readFileSync(envFile, 'utf8');
-      assert.match(envText, /^GIT_CONFIG_GLOBAL=\/dev\/null$/m);
+      assert.match(envText, /^GIT_CONFIG_GLOBAL=/m);
+      const globalFile = envText
+        .split('\n')
+        .find((l) => l.startsWith('GIT_CONFIG_GLOBAL='))
+        .slice('GIT_CONFIG_GLOBAL='.length);
+      assert.match(globalFile, /pool-gitconfig\./);
+      assert.ok(
+        !globalFile.startsWith(`${home}/`),
+        'the publication must never be a persistent ${HOME} path',
+      );
+      assert.ok(
+        statSync(globalFile).isFile(),
+        'the published gitconfig must exist',
+      );
+      assert.notEqual(
+        statSync(globalFile).mode & 0o200,
+        0,
+        'and be writable — checkout registers safe.directory in it',
+      );
       assert.match(envText, /^GIT_CONFIG_SYSTEM=\/dev\/null$/m);
     } finally {
       chmodSync(join(outside, 'canary'), 0o644);
@@ -1300,12 +1433,27 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       /::warning::healing workspace path .*: it was a symlink/,
       'a symlinked intermediate component must be healed, not refused — a refusal removes nothing and wedges every later job reading the same env',
     );
+    assert.match(
+      wipe.run,
+      /::error::refusing to wipe: an ancestor of the runner workspace is not a plain directory/,
+      'a regular-file or FIFO ancestor wedges the root heal mkdir with ENOTDIR and misdirects the refusal at $RWS — the walk must fail closed and name the plant',
+    );
+    assert.match(
+      wipe.run,
+      /it was not traversable/,
+      'a mode-000 directory passes stat as healthy and wedges the first traversal through it — the heals must judge permissions, not only type',
+    );
+    assert.match(
+      wipe.run,
+      /\/dev\|\/dev\/\*\|\/proc\|\/sys\|\/run\|\/srv\|\/mnt\*\|\/lib\*\|\/bin\|\/sbin\|\/snap\|\/media\) echo "::error::refusing suspicious runner workspace path/,
+      'the canonical refusal must close the gap containment roots — exact arms, plus the unbounded /dev/* device tree that admitted the /dev/null spelling',
+    );
     const executed = wipe.run
       .split('\n')
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('#'));
     assert.equal(executed[0], 'set -uo pipefail');
-    const tail = executed.slice(-28);
+    const tail = executed.slice(-35);
     assert.equal(
       tail[0],
       'find "$WS" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
@@ -1378,55 +1526,86 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     assert.equal(
       tail[14],
-      '{ git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\\..+\\.(url|fetch|pushurl)|branch\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done',
-      "the kept .git config must be scrubbed to an allowlist that keeps NO extensions.* key — a planted extension makes every later git call exit 128 — remote narrowed to url/fetch/pushurl (any other remote key is a knob: vcs execs git-remote-<vcs> on the next fetch), core.worktree dropped (redirects the next checkout outside the workspace) — anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
+      'scrub_keys="$(git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\\..+\\.(url|fetch|pushurl)|branch\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } || true)"',
+      "enumerate the scrub targets ONCE — the config is planted bytes and every git spawn re-parses it, so the per-key loop may only run over a bounded count — the allowlist keeps NO extensions.* key, remote narrowed to url/fetch/pushurl, core.worktree dropped — anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
     );
     assert.equal(
       tail[15],
-      'if [ -d "$WS/.git" ]; then',
-      'the replace strip and its fail-open guard on a real kept repo: a healed-empty workspace has no refs to strip and must not fail the job here',
+      'scrub_count="$(printf \'%s\\n\' "${scrub_keys}" | grep -c . || true)"',
+      'count the targets the single enumeration produced',
     );
     assert.equal(
       tail[16],
-      'if ! replace_refs="$(git --git-dir="$WS/.git" for-each-ref --format=\'%(refname)\' refs/replace 2>/dev/null)"; then',
-      'enumerate the replace refs; an unenumerable gitdir cannot be proven clean',
+      'if [ "${scrub_count}" -gt 1000 ]; then',
+      'a healthy actions/checkout gitdir holds a handful of local keys — a bulk plant must not reach the per-key loop',
     );
     assert.equal(
       tail[17],
-      'echo "::warning::removing kept .git whose refs cannot be enumerated: ${WS}/.git"',
-      'the fail-open reports why the reuse is being paid back',
+      'echo "::warning::removing kept .git with ${scrub_count} non-allowlisted config keys: the per-key scrub cost is unbounded, re-fetching instead: ${WS}/.git"',
+      'the bound reports why the reuse is being paid back',
     );
     assert.equal(
       tail[18],
       'rm -rf "$WS/.git"',
-      'fail open: remove the unprovable gitdir instead of carrying it — the next job re-fetches',
+      'fail open past the bound — the identical shape the unenumerable-refs arm uses — instead of looping into the job timeout',
     );
-    assert.equal(tail[19], 'else', 'an enumerable gitdir keeps the strip');
+    assert.equal(
+      tail[19],
+      'elif [ "${scrub_count}" != "0" ]; then',
+      'a bounded count keeps the per-key unset',
+    );
     assert.equal(
       tail[20],
+      'printf \'%s\\n\' "${scrub_keys}" | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done',
+      'the kept .git config must be scrubbed to the allowlist — bounded by the count above',
+    );
+    assert.equal(tail[21], 'fi', 'close the scrub bound');
+    assert.equal(
+      tail[22],
+      'if [ -d "$WS/.git" ]; then',
+      'the replace strip and its fail-open guard on a real kept repo: a healed-empty workspace has no refs to strip and must not fail the job here',
+    );
+    assert.equal(
+      tail[23],
+      'if ! replace_refs="$(git --git-dir="$WS/.git" for-each-ref --format=\'%(refname)\' refs/replace 2>/dev/null)"; then',
+      'enumerate the replace refs; an unenumerable gitdir cannot be proven clean',
+    );
+    assert.equal(
+      tail[24],
+      'echo "::warning::removing kept .git whose refs cannot be enumerated: ${WS}/.git"',
+      'the fail-open reports why the reuse is being paid back',
+    );
+    assert.equal(
+      tail[25],
+      'rm -rf "$WS/.git"',
+      'fail open: remove the unprovable gitdir instead of carrying it — the next job re-fetches',
+    );
+    assert.equal(tail[26], 'else', 'an enumerable gitdir keeps the strip');
+    assert.equal(
+      tail[27],
       'printf \'%s\\n\' "${replace_refs}" | while IFS= read -r ref; do',
       "a planted refs/replace entry silently substitutes file content in the next job's checkout (actions/checkout passes no --no-replace-objects) — delete every one through git so packed entries drop too",
     );
     assert.equal(
-      tail[21],
+      tail[28],
       'if [ -n "${ref}" ]; then',
       'an empty enumeration yields one empty line — the loop must skip it without failing the pipe',
     );
     assert.equal(
-      tail[22],
+      tail[29],
       'git --git-dir="$WS/.git" update-ref -d "${ref}"',
       'delete each planted replace ref',
     );
-    assert.equal(tail[23], 'fi', 'keep the empty-line skip an if-block');
-    assert.equal(tail[24], 'done', 'close the strip loop');
-    assert.equal(tail[25], 'fi', 'close the fail-open if/else');
+    assert.equal(tail[30], 'fi', 'keep the empty-line skip an if-block');
+    assert.equal(tail[31], 'done', 'close the strip loop');
+    assert.equal(tail[32], 'fi', 'close the fail-open if/else');
     assert.equal(
-      tail[26],
+      tail[33],
       'fi',
       'the strip and fail-open stay inside the kept-.git guard',
     );
     assert.equal(
-      tail[27],
+      tail[34],
       'rm -rf "$WS/.git/refs/replace"',
       'and remove the namespace itself so nothing under it survives',
     );
@@ -2318,6 +2497,8 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     try {
       const home = join(root, 'home');
       mkdirSync(home);
+      const runnerTemp = join(root, 'runner-temp');
+      mkdirSync(runnerTemp);
       const hooksDir = join(root, 'evil-hooks');
       mkdirSync(hooksDir);
       const marker = join(root, 'hook-fired');
@@ -2344,6 +2525,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
           env: {
             PATH: process.env.PATH,
             HOME: home,
+            RUNNER_TEMP: runnerTemp,
             GITHUB_WORKSPACE: ws,
             GITHUB_ENV: envFile,
           },
@@ -2532,6 +2714,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       'parent-file',
       'intermediate-symlink',
       'unremovable-leaf',
+      'unremovable-symlink',
       'mode-000-leaf',
       'hostile-subtree',
     ]) {
@@ -2555,6 +2738,12 @@ describe('web-shell-visuals.yml capture runner routing', () => {
           symlinkSync(outside, dirname(cacheDir));
         } else if (plant === 'unremovable-leaf') {
           writeFileSync(cacheDir, 'plant');
+          chmodSync(dirname(cacheDir), 0o555);
+        } else if (plant === 'unremovable-symlink') {
+          mkdirSync(outside);
+          writeFileSync(join(outside, 'victim.txt'), 'x\n');
+          chmodSync(join(outside, 'victim.txt'), 0o000);
+          symlinkSync(outside, cacheDir);
           chmodSync(dirname(cacheDir), 0o555);
         } else if (plant === 'mode-000-leaf') {
           mkdirSync(cacheDir, { recursive: true });
@@ -2580,11 +2769,26 @@ describe('web-shell-visuals.yml capture runner routing', () => {
           0,
           `the cache step must survive the ${plant} plant: ${res.stdout}${res.stderr}`,
         );
-        if (plant === 'parent-file' || plant === 'unremovable-leaf') {
+        if (
+          plant === 'parent-file' ||
+          plant === 'unremovable-leaf' ||
+          plant === 'unremovable-symlink'
+        ) {
           assert.ok(
             !envText.includes('NPM_CONFIG_CACHE'),
             'a cache that cannot be prepared must degrade to the default cache, not export the plant',
           );
+          if (plant === 'unremovable-symlink') {
+            assert.ok(
+              lstatSync(cacheDir).isSymbolicLink(),
+              'the unremovable plant must survive — the heal never unlinks through an unwritable parent',
+            );
+            assert.equal(
+              statSync(join(outside, 'victim.txt')).mode & 0o777,
+              0,
+              'chmod must not reach through the surviving link',
+            );
+          }
         } else {
           assert.match(
             envText,
@@ -2919,6 +3123,275 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       !stdout.includes('libplant'),
       'the fabricated missing list must not surface',
     );
+  });
+
+  it('gives the pool lane a budget above the observed pool worst case', () => {
+    // The pool lane pays hygiene + wipe + 2x npm ci + a full Chromium
+    // re-download over the slow egress before the render starts: pool
+    // runs measured 28-30 minutes, and the old 30-minute bound cancelled
+    // the capture mid-render — the visuals this PR exists to deliver.
+    assert.ok(
+      visualsCaptureJob['timeout-minutes'] >= 45,
+      'the capture must fit the pool worst case with margin',
+    );
+  });
+
+  it('publishes a gitconfig actions/checkout can register safe.directory in', () => {
+    // The /dev/null publication broke every pool-lane checkout's
+    // safe.directory registration — `git config --global --add` dies
+    // "could not lock config file /dev/null: Permission denied" — and
+    // checkout lost its only tolerance for the root-owned leftovers the
+    // ownership heal warns about. The repo's own precedent publishes a
+    // writable file (qwen-autofix.yml's pool lanes), never /dev/null.
+    const heal = visualsCaptureJob.steps.find(
+      (s) => s.name === 'Restore workspace ownership',
+    );
+    const bashPath = hostToolPath('bash');
+    const root = mkdtempSync(join(tmpdir(), 'visuals-safedir-'));
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      const runnerTemp = join(root, 'runner-temp');
+      mkdirSync(runnerTemp);
+      const rws = join(root, 'rws');
+      const ws = join(rws, 'qwen-code');
+      mkdirSync(ws, { recursive: true });
+      const envFile = join(root, 'github_env');
+      writeFileSync(envFile, '');
+      const res = spawnSync(
+        bashPath,
+        ['--noprofile', '--norc', '-eo', 'pipefail', '-c', heal.run],
+        {
+          encoding: 'utf8',
+          env: {
+            PATH: process.env.PATH,
+            HOME: home,
+            RUNNER_TEMP: runnerTemp,
+            GITHUB_WORKSPACE: ws,
+            GITHUB_ENV: envFile,
+          },
+        },
+      );
+      assert.equal(res.status, 0, `heal failed: ${res.stdout}${res.stderr}`);
+      const published = Object.fromEntries(
+        readFileSync(envFile, 'utf8')
+          .split('\n')
+          .filter((l) => l.includes('='))
+          .map((l) => [
+            l.slice(0, l.indexOf('=')),
+            l.slice(l.indexOf('=') + 1),
+          ]),
+      );
+      const gitEnv = {
+        PATH: process.env.PATH,
+        HOME: home,
+        GIT_CONFIG_GLOBAL: published.GIT_CONFIG_GLOBAL,
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        ...(process.env.QWEN_CI_REAL_GIT
+          ? { QWEN_CI_REAL_GIT: process.env.QWEN_CI_REAL_GIT }
+          : {}),
+      };
+      // The registration actions/checkout performs on every checkout.
+      const add = spawnSync(
+        realGit,
+        ['config', '--global', '--add', 'safe.directory', ws],
+        { encoding: 'utf8', env: gitEnv },
+      );
+      assert.equal(
+        add.status,
+        0,
+        `checkout's safe.directory registration must survive the published env: ${add.stderr}`,
+      );
+      const getAll = spawnSync(
+        realGit,
+        ['config', '--global', '--get-all', 'safe.directory'],
+        { encoding: 'utf8', env: gitEnv },
+      );
+      assert.ok(
+        getAll.stdout.includes(ws),
+        'the registration must land in the published gitconfig',
+      );
+      // The defect this witness pins: the /dev/null spelling fails the
+      // same registration, so reverting the publication turns this red.
+      const broken = spawnSync(
+        realGit,
+        ['config', '--global', '--add', 'safe.directory', ws],
+        {
+          encoding: 'utf8',
+          env: { ...gitEnv, GIT_CONFIG_GLOBAL: '/dev/null' },
+        },
+      );
+      assert.notEqual(
+        broken.status,
+        0,
+        'the /dev/null spelling must break registration',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a runner workspace at a gap containment root before any heal', () => {
+    // /bin, /sbin, /snap, /media and the unbounded device tree under
+    // /dev passed the old denylists, admitting the heal's rm/mkdir
+    // outside the workspace — the mutate-then-refuse shape the step's
+    // own comments forbid. Refusal before any mutation is the property,
+    // so the assertion is on the decision, not on filesystem effects.
+    for (const bad of ['/bin', '/sbin', '/snap', '/media', '/dev/null']) {
+      const root = mkdtempSync(
+        join(tmpdir(), `visuals-wipe-gaproot-${bad.replace(/\W/g, '_')}-`),
+      );
+      try {
+        const home = join(root, 'home');
+        mkdirSync(home);
+        const res = runWipeStep(wipeStep.run, {
+          home,
+          ws: `${bad}/repo`,
+          rws: bad,
+        });
+        assert.notEqual(
+          res.status,
+          0,
+          `runner workspace ${bad} must fail the wipe closed: ${res.stdout}${res.stderr}`,
+        );
+        assert.doesNotMatch(
+          res.stdout,
+          /healing/,
+          `no heal may fire on the gap root ${bad} — refusal, never mutation`,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('refuses a wipe whose runner workspace sits under a non-directory ancestor', () => {
+    // A regular-file ancestor (the runner's _work renamed aside and
+    // replaced by a file) passed the symlink-only walk, wedged the root
+    // heal's mkdir with ENOTDIR, and the refusal misdirected at $RWS
+    // instead of naming the plant — every later job died identically
+    // until manual cleanup. Refuse, never heal an ancestor.
+    const root = mkdtempSync(join(tmpdir(), 'visuals-wipe-ancestorfile-'));
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      writeFileSync(join(root, 'work'), 'plant');
+      const rws = join(root, 'work', 'qwen-code');
+      const res = runWipeStep(wipeStep.run, {
+        home,
+        ws: join(rws, 'repo'),
+        rws,
+      });
+      assert.notEqual(
+        res.status,
+        0,
+        `a non-directory ancestor must fail the wipe closed: ${res.stdout}${res.stderr}`,
+      );
+      assert.match(
+        res.stdout,
+        /::error::refusing to wipe: an ancestor of the runner workspace is not a plain directory/,
+        'the refusal must surface the planted ancestor class',
+      );
+      assert.ok(
+        res.stdout.includes(join(root, 'work')),
+        'the refusal must name the planted ancestor, not $RWS',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('heals a mode-000 runner-workspace root instead of wedging on it', () => {
+    // A chmod-000 plant at the root passed stat as healthy — the old
+    // checks never judged permissions — and the first operation that
+    // traversed it died EACCES, permanently red-laning the runner. The
+    // heal is the owner chmod; no sudo is needed or allowed.
+    const root = mkdtempSync(join(tmpdir(), 'visuals-wipe-rws000-'));
+    const rws = join(root, 'rws');
+    const ws = join(rws, 'qwen-code');
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      mkdirSync(ws, { recursive: true });
+      writeFileSync(join(ws, 'stale.txt'), 'x\n');
+      chmodSync(rws, 0o000);
+      const res = runWipeStep(wipeStep.run, { home, ws, rws, cwd: root });
+      assert.equal(
+        res.status,
+        0,
+        `the heal must clear the untraversable root: ${res.stdout}${res.stderr}`,
+      );
+      assert.match(
+        res.stdout,
+        /healing runner workspace .*: it was not traversable/,
+        'the heal must report the permission plant',
+      );
+      assert.equal(statSync(rws).mode & 0o700, 0o700);
+      assert.ok(statSync(ws).isDirectory());
+      assert.deepEqual(readdirSync(ws), []);
+    } finally {
+      chmodSync(rws, 0o755);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('heals a mode-000 intermediate component instead of wedging on it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'visuals-wipe-mid000-'));
+    const rws = join(root, 'rws');
+    const ws = join(rws, 'sub', 'qwen-code');
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      mkdirSync(ws, { recursive: true });
+      writeFileSync(join(ws, 'stale.txt'), 'x\n');
+      chmodSync(join(rws, 'sub'), 0o000);
+      const res = runWipeStep(wipeStep.run, { home, ws, rws, cwd: rws });
+      assert.equal(
+        res.status,
+        0,
+        `the heal must clear the untraversable component: ${res.stdout}${res.stderr}`,
+      );
+      assert.match(
+        res.stdout,
+        /healing workspace path .*: it was not traversable/,
+        'the intermediate heal must report the permission plant',
+      );
+      assert.equal(statSync(join(rws, 'sub')).mode & 0o700, 0o700);
+      assert.ok(statSync(ws).isDirectory());
+      assert.deepEqual(readdirSync(ws), []);
+    } finally {
+      chmodSync(join(rws, 'sub'), 0o755);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('heals a mode-000 workspace instead of wedging on it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'visuals-wipe-ws000-'));
+    const rws = join(root, 'rws');
+    const ws = join(rws, 'qwen-code');
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      mkdirSync(ws, { recursive: true });
+      writeFileSync(join(ws, 'stale.txt'), 'x\n');
+      chmodSync(ws, 0o000);
+      const res = runWipeStep(wipeStep.run, { home, ws, rws, cwd: rws });
+      assert.equal(
+        res.status,
+        0,
+        `the heal must clear the untraversable workspace: ${res.stdout}${res.stderr}`,
+      );
+      assert.match(
+        res.stdout,
+        /healing workspace .*: it was not traversable/,
+        'the workspace heal must report the permission plant',
+      );
+      assert.equal(statSync(ws).mode & 0o700, 0o700);
+      assert.deepEqual(readdirSync(ws), []);
+    } finally {
+      chmodSync(ws, 0o755);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
