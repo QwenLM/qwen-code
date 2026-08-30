@@ -173,6 +173,7 @@ describe('registerNewCommands', () => {
       '/workspace/src/app.ts',
       'old',
       'new',
+      { readOnly: false },
     );
   });
 
@@ -243,6 +244,35 @@ describe('registerNewCommands', () => {
       '\\\\server\\share\\app.ts',
       'old',
       'new',
+      { readOnly: false },
+    );
+  });
+
+  it('showDiff forwards the readOnly flag', async () => {
+    workspaceMock.workspaceFolders = [
+      { uri: { fsPath: '/workspace' }, name: 'workspace', index: 0 },
+    ];
+
+    registerNewCommands(
+      context as never,
+      log,
+      diffManager as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    await getRegisteredHandler(showDiffCommand)({
+      path: '/workspace/src/app.ts',
+      oldText: 'old',
+      newText: 'new',
+      readOnly: true,
+    });
+
+    expect(diffManager.showDiff).toHaveBeenCalledWith(
+      '/workspace/src/app.ts',
+      'old',
+      'new',
+      { readOnly: true },
     );
   });
 });
