@@ -483,6 +483,78 @@ describe('resolve-health: assessment', () => {
     assert.equal(a.alarm, false);
   });
 
+  it('counts a request aged exactly the stale window', () => {
+    // The boundary is inclusive (`>=`): a request aged exactly staleHours
+    // counts; one one second younger does not.
+    const prs = [
+      {
+        number: 30,
+        state: 'open',
+        comments: [
+          request('2026-08-27T09:00:00Z', 30),
+          request('2026-08-27T09:00:01Z', 30),
+        ],
+      },
+    ];
+    const a = assess(prs, { now, staleHours: 3, unansweredThreshold: 1 });
+    assert.deepEqual(
+      a.unanswered.map((u) => u.at),
+      ['2026-08-27T09:00:00Z'],
+    );
+  });
+
+  it('does not count result comments edited after posting', () => {
+    // The producer posts a fresh comment per run and never edits one; anyone
+    // with triage-or-better on the repo can still edit one, so an edited
+    // result must count as no result at all — a failure edited into a
+    // success must not pose as recovery evidence, and a success edited into
+    // a failure phrase must not build a streak.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 29),
+    );
+    const editedPushed = comment(
+      BOT,
+      '2026-08-26T00:00:00Z',
+      `${RESULT_MARKER}\n${PUSHED}`,
+      29,
+      '2026-08-26T06:00:00Z',
+    );
+    const a = assess(
+      [{ number: 29, state: 'open', comments: [...failures, editedPushed] }],
+      { now },
+    );
+    assert.equal(a.streak, 5);
+    assert.equal(a.alarm, true);
+    assert.equal(a.latestAttempt.kind, 'agent_failed');
+    // The other direction: a success edited into a failure phrase builds
+    // no streak either.
+    const editedFailure = comment(
+      BOT,
+      '2026-08-26T00:00:00Z',
+      `${RESULT_MARKER}\n${AGENT_FAILED}`,
+      29,
+      '2026-08-26T06:00:00Z',
+    );
+    const b = assess(
+      [
+        {
+          number: 29,
+          state: 'open',
+          comments: [
+            result('2026-08-25T00:00:00Z', PUSHED, 29),
+            editedFailure,
+          ],
+        },
+      ],
+      { now },
+    );
+    assert.equal(b.streak, 0);
+    assert.deepEqual(
+      b.attempts.map((r) => r.kind),
+      ['pushed'],
+    );
+  });
+
   it('counts no-conflict and dry-run results neither way', () => {
     // Neither pushes anything: they must not break a push-failure streak
     // (masking a push outage) and cannot serve as recovery evidence.
@@ -541,6 +613,7 @@ describe('resolve-health: decisions', () => {
     assert.deepEqual(readState([actions[0].body]), {
       streak: 5,
       unanswered: [],
+      newestUnanswered: null,
       latest: failing.latestAttempt.id,
     });
     assert.ok(
@@ -569,10 +642,12 @@ describe('resolve-health: decisions', () => {
     assert.match(actions[0].title, /0 consecutive failures, 3 unanswered/);
     assert.ok(actions[0].body.includes('Requests with no result comment:'));
     assert.ok(actions[0].body.includes('#12 by @writer2'));
-    // The state records WHICH requests are unanswered, not how many.
+    // The state records WHICH requests are unanswered, not how many, and
+    // the newest of them — the barrier decide() postdates recovery pushes by.
     assert.deepEqual(readState([actions[0].body]), {
       streak: 0,
       unanswered: stale.unanswered.map((u) => u.id),
+      newestUnanswered: stale.unanswered.at(-1).at,
       latest: null,
     });
   });
@@ -734,9 +809,21 @@ describe('resolve-health: decisions', () => {
     );
     assert.equal(belowThreshold.alarm, false);
     assert.deepEqual(decide(belowThreshold, existing), []);
-    // A success after the issue was filed is what closes it.
+    // The shared `healthy` push (2026-08-26) PREDATES this issue's requests
+    // (2026-08-27), so it is no evidence that anything ran after them.
+    assert.deepEqual(decide(healthy, existing), []);
+    // A success NEWER than the requests is what closes it.
+    const recovered = assess(
+      [
+        {
+          number: 3,
+          comments: [result('2026-08-27T04:00:00Z', PUSHED, 3)],
+        },
+      ],
+      { now },
+    );
     assert.deepEqual(
-      decide(healthy, existing).map((a) => a.type),
+      decide(recovered, existing).map((a) => a.type),
       ['comment', 'close'],
     );
   });
@@ -824,6 +911,150 @@ describe('resolve-health: decisions', () => {
       decide(cleared, { number: 44, texts }).map((a) => a.type),
       ['comment', 'close'],
     );
+  });
+
+  it('never closes on a push older than the unanswered requests', () => {
+    // A `pushed` attempt that landed BEFORE the requests the issue was
+    // opened on cannot be evidence that anything ran after them — yet the
+    // alarm clears as those requests stop counting while the stale push
+    // stays in the window. Two entrances: their PRs close without ever
+    // receiving a result (assess() drops closed-PR requests by design), or
+    // enough of them get answered to fall below the threshold.
+    const prsWith = (states) => [
+      {
+        number: 24,
+        state: 'open',
+        comments: [result('2026-08-24T00:00:00Z', PUSHED, 24)],
+      },
+      ...states.map((state, i) => ({
+        number: 25 + i,
+        state,
+        comments: [request(`2026-08-2${5 + i}T01:00:00Z`, 25 + i)],
+      })),
+    ];
+    const opened = assess(prsWith(['open', 'open', 'open']), { now });
+    assert.equal(opened.unanswered.length, 3);
+    const existing = { number: 45, texts: [decide(opened, null)[0].body] };
+
+    // (a) all three PRs close unanswered; the stale push stays the latest.
+    const closedPrs = assess(prsWith(['closed', 'closed', 'closed']), { now });
+    assert.equal(closedPrs.alarm, false);
+    assert.equal(closedPrs.latestAttempt.kind, 'pushed');
+    assert.deepEqual(decide(closedPrs, existing), []);
+
+    // (b) one request gets a skip, two stay unanswered: below the threshold
+    // the alarm clears with the same stale push still the latest attempt.
+    const partialPrs = prsWith(['open', 'open', 'open']);
+    partialPrs[1].comments.push(result('2026-08-25T02:00:00Z', SKIPPED, 25));
+    const partial = assess(partialPrs, { now });
+    assert.equal(partial.alarm, false);
+    assert.deepEqual(decide(partial, existing), []);
+
+    // A push that postdates the requests still closes once the alarm clears.
+    const healedPrs = prsWith(['closed', 'closed', 'closed']);
+    healedPrs[0].comments.push(result('2026-08-27T02:00:00Z', PUSHED, 24));
+    assert.deepEqual(
+      decide(assess(healedPrs, { now }), existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+
+  it('keeps the newest unanswered request on record through alarm updates', () => {
+    // The recovery barrier is the newest unanswered request seen since the
+    // issue opened, so an alarm update whose roster SHRINKS must not lower
+    // it: if the update's marker recorded only the current roster, a push
+    // between that and a dropped request would close the issue although the
+    // dropped request never got an attempt.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 30),
+    );
+    const tick1 = assess(
+      [
+        { number: 30, state: 'open', comments: [...failures] },
+        {
+          number: 31,
+          state: 'open',
+          comments: [request('2026-08-25T01:00:00Z', 31)],
+        },
+        {
+          number: 32,
+          state: 'open',
+          comments: [request('2026-08-26T01:00:00Z', 32)],
+        },
+        {
+          number: 33,
+          state: 'open',
+          comments: [request('2026-08-27T01:00:00Z', 33)],
+        },
+      ],
+      { now },
+    );
+    const texts = [decide(tick1, null)[0].body];
+
+    // The newest request's PR closes unanswered while the oldest gets a
+    // skip; the streak still alarms, so the watch posts an update — which
+    // must carry the dropped request's timestamp forward.
+    const tick2 = assess(
+      [
+        { number: 30, state: 'open', comments: [...failures] },
+        {
+          number: 31,
+          state: 'open',
+          comments: [
+            request('2026-08-25T01:00:00Z', 31),
+            result('2026-08-25T02:00:00Z', SKIPPED, 31),
+          ],
+        },
+        {
+          number: 32,
+          state: 'open',
+          comments: [request('2026-08-26T01:00:00Z', 32)],
+        },
+        {
+          number: 33,
+          state: 'closed',
+          comments: [request('2026-08-27T01:00:00Z', 33)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(tick2.alarm, true);
+    const update = decide(tick2, { number: 46, texts })[0];
+    assert.equal(update.type, 'comment');
+    texts.push(update.body);
+
+    // The last request is answered by a push that postdates it but PREDATES
+    // the dropped one: the alarm clears, yet the issue must stay open.
+    const tick3 = assess(
+      [
+        { number: 30, state: 'open', comments: [...failures] },
+        {
+          number: 31,
+          state: 'open',
+          comments: [
+            request('2026-08-25T01:00:00Z', 31),
+            result('2026-08-25T02:00:00Z', SKIPPED, 31),
+          ],
+        },
+        {
+          number: 32,
+          state: 'open',
+          comments: [
+            request('2026-08-26T01:00:00Z', 32),
+            result('2026-08-26T02:00:00Z', PUSHED, 32),
+          ],
+        },
+        {
+          number: 33,
+          state: 'closed',
+          comments: [request('2026-08-27T01:00:00Z', 33)],
+        },
+      ],
+      { now },
+    );
+    assert.equal(tick3.alarm, false);
+    assert.equal(tick3.latestAttempt.kind, 'pushed');
+    assert.deepEqual(decide(tick3, { number: 46, texts }), []);
   });
 
   it('does nothing when healthy and no issue is open', () => {

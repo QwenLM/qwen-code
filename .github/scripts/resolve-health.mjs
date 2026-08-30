@@ -146,6 +146,13 @@ export function assess(prs, options = {}) {
       if (c.user !== opts.bot) {
         continue;
       }
+      // The producer posts a fresh comment per run and never edits one, so
+      // an edited result comment is not the producer's word: anyone with
+      // triage-or-better can edit it into a forged recovery (or a success
+      // into a failure phrase), and the edit must count as no result at all.
+      if (c.updated_at !== c.created_at) {
+        continue;
+      }
       const kind = classifyResult(c.body);
       if (kind) {
         prResults.push({
@@ -225,16 +232,27 @@ export function assess(prs, options = {}) {
 // whether the picture moved. `unanswered` is the MEMBERSHIP (request ids),
 // not the count: during a never-ran outage one request gets answered by a
 // skip while another ages past the stale window, the count holds and the
-// roster the issue shows would otherwise freeze on week one. Kept single-line
-// (STATE_RE) — JSON.stringify of a flat object never emits a newline.
-function stateOf(assessment) {
+// roster the issue shows would otherwise freeze on week one.
+// `newestUnanswered` is the newest unanswered-request timestamp seen since
+// the issue opened — carried forward, never lowered: a request answered by
+// its PR closing or by ageing out of the window leaves no trace in a later
+// assessment, yet the recovery gate must keep postdating it (see decide()).
+// Kept single-line (STATE_RE) — JSON.stringify of a flat object never emits
+// a newline.
+function stateOf(assessment, previous = null) {
+  const newest = assessment.unanswered.at(-1)?.at ?? null;
+  const carried = previous?.newestUnanswered ?? null;
   return {
     streak: assessment.streak,
     unanswered: assessment.unanswered.map((u) => u.id),
+    newestUnanswered:
+      carried && (!newest || carried > newest) ? carried : newest,
     latest: assessment.latestAttempt?.id ?? null,
   };
 }
 
+// `newestUnanswered` is deliberately not compared: the carried maximum can
+// legitimately differ from the current roster's without the picture moving.
 function sameState(previous, current) {
   return (
     previous !== null &&
@@ -259,8 +277,8 @@ export function readState(issueBodyAndComments) {
   return state;
 }
 
-function stateMarker(assessment) {
-  return `<!-- qwen-resolve-health-state ${JSON.stringify(stateOf(assessment))} -->`;
+function stateMarker(state) {
+  return `<!-- qwen-resolve-health-state ${JSON.stringify(state)} -->`;
 }
 
 function fmt(at) {
@@ -315,7 +333,7 @@ export function renderReport(assessment, options = {}) {
 export function renderIssueBody(assessment, options = {}) {
   return [
     HEALTH_MARKER,
-    stateMarker(assessment),
+    stateMarker(stateOf(assessment)),
     '`@qwen-code /resolve` is failing in a row. Its baseline is ~84% of agent runs pushing a resolution, so a streak this long almost always means the lane itself is broken — an npm `latest` that does not resolve, a sandbox image that was never published, a workflow file that no longer parses — not the conflicts. Re-running requests will not help until the cause is fixed.',
     '',
     'How to read the outcomes: `infra_failed` means the agent step ended without running (install, model endpoint, timeout, cancellation — open the workflow run linked from the comment); `agent_failed` means the agent ran and gave up or failed verification; `push_failed` means it resolved the conflict but the push was rejected for a reason a retry repeats (token scope, fork permissions); `unknown` means the result comment used wording this watch does not recognise — check for a producer change. A request with no result comment at all usually means the workflow never started (an invalid workflow file produces exactly that, with no run to look at).',
@@ -325,10 +343,10 @@ export function renderIssueBody(assessment, options = {}) {
   ].join('\n');
 }
 
-export function renderUpdate(assessment, options = {}) {
+export function renderUpdate(assessment, options = {}, previous = null) {
   return [
     HEALTH_MARKER,
-    stateMarker(assessment),
+    stateMarker(stateOf(assessment, previous)),
     'Still failing; the picture has changed since the last report.',
     '',
     renderReport(assessment, options),
@@ -337,12 +355,12 @@ export function renderUpdate(assessment, options = {}) {
 
 // decide() only emits this once a `pushed` attempt exists, so the comment
 // always names the attempt that recovered the lane.
-export function renderRecovery(assessment, options = {}) {
+export function renderRecovery(assessment, options = {}, previous = null) {
   const latest = assessment.latestAttempt;
   return [
     HEALTH_MARKER,
     `<!-- qwen-resolve-health-state ${JSON.stringify({
-      ...stateOf(assessment),
+      ...stateOf(assessment, previous),
       recovered: latest.id,
     })} -->`,
     `Recovered: the latest attempt ([#${latest.pr}](${latest.url}), ${fmt(latest.at)}) is \`${latest.kind}\`. Closing.`,
@@ -369,7 +387,7 @@ export function decide(assessment, existing, options = {}) {
         actions.push({
           type: 'comment',
           number: existing.number,
-          body: renderUpdate(assessment, options),
+          body: renderUpdate(assessment, options, previous),
         });
       }
     }
@@ -382,7 +400,18 @@ export function decide(assessment, existing, options = {}) {
     // would hide a lane that is still broken.
     const previous = readState(existing.texts);
     const latest = assessment.latestAttempt;
-    if (latest && latest.kind === 'pushed') {
+    // ...and the push must postdate every unanswered request the watch has
+    // seen since the issue opened: a push that landed before those requests
+    // cannot be evidence that anything ran after them. Requests answered by
+    // a closed PR or by ageing out of the window leave no trace in the
+    // current assessment, so their newest timestamp survives in the state
+    // markers written on the issue.
+    const barrier = stateOf(assessment, previous).newestUnanswered;
+    if (
+      latest &&
+      latest.kind === 'pushed' &&
+      (!barrier || latest.at > barrier)
+    ) {
       // Comment-then-close is not atomic: if the close fails after the
       // comment lands, the `recovered` field the comment wrote keeps the
       // next tick from repeating it while it retries the close. A success
@@ -392,7 +421,7 @@ export function decide(assessment, existing, options = {}) {
         actions.push({
           type: 'comment',
           number: existing.number,
-          body: renderRecovery(assessment, options),
+          body: renderRecovery(assessment, options, previous),
         });
       }
       actions.push({ type: 'close', number: existing.number });
