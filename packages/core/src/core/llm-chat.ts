@@ -5585,17 +5585,33 @@ export class LlmChat {
       if (!target) return undefined;
       const identical = history.find((entry) => entry === target);
       if (identical) return identical;
+      if (previousIndex < 0) return undefined;
+      const matchesPreviousContext = (candidateIndex: number) => {
+        const previousBefore = previousHistory[previousIndex - 1];
+        const previousAfter = previousHistory[previousIndex + 1];
+        return (
+          (!previousBefore ||
+            isDeepStrictEqual(history[candidateIndex - 1], previousBefore)) &&
+          (!previousAfter ||
+            isDeepStrictEqual(history[candidateIndex + 1], previousAfter))
+        );
+      };
       const positional = history[previousIndex];
-      if (positional && isDeepStrictEqual(positional, target)) {
+      if (
+        positional &&
+        isDeepStrictEqual(positional, target) &&
+        matchesPreviousContext(previousIndex)
+      ) {
         return positional;
       }
       let equivalent: Content | undefined;
-      for (const entry of history) {
+      for (const [index, entry] of history.entries()) {
         if (!isDeepStrictEqual(entry, target)) continue;
+        if (!matchesPreviousContext(index)) continue;
         if (equivalent) {
           debugLogger.warn(
             `[MAX_TOKENS_DEFER] Cannot rebind ${label}: replacement ` +
-              'history contains multiple equivalent entries.',
+              'history contains multiple context-equivalent entries.',
           );
           return undefined;
         }
@@ -5682,20 +5698,30 @@ export class LlmChat {
   stripThoughtsFromHistory(): void {
     const deferredTarget = this.deferredMaxTokensRecordTarget;
     let nextDeferredTarget = deferredTarget;
+    const activeRecoveryUser = this.activeRecoveryUserContent;
+    const activeRecoveryModel = this.activeRecoveryModelContent;
+    let nextActiveRecoveryUser = activeRecoveryUser;
+    let nextActiveRecoveryModel = activeRecoveryModel;
     let changed = false;
     const nextHistory = this.history
       .map((content) => {
         const stripped = stripThoughtPartsFromContent(content);
         changed ||= stripped !== content;
-        if (content === deferredTarget) {
-          nextDeferredTarget = stripped ?? undefined;
-          if (stripped) {
-            for (const deferred of this.deferredMaxTokensRecords) {
-              if (deferred.modelContent === content) {
-                deferred.modelContent = stripped;
-              }
+        if (content === activeRecoveryUser) {
+          nextActiveRecoveryUser = stripped ?? undefined;
+        }
+        if (content === activeRecoveryModel) {
+          nextActiveRecoveryModel = stripped ?? undefined;
+        }
+        if (stripped && stripped !== content) {
+          for (const deferred of this.deferredMaxTokensRecords) {
+            if (deferred.modelContent === content) {
+              deferred.modelContent = stripped;
             }
           }
+        }
+        if (content === deferredTarget) {
+          nextDeferredTarget = stripped ?? undefined;
         }
         return stripped;
       })
@@ -5707,6 +5733,8 @@ export class LlmChat {
     this.historyMutationVersion++;
     this.history = nextHistory;
     this.deferredMaxTokensRecordTarget = nextDeferredTarget;
+    this.activeRecoveryUserContent = nextActiveRecoveryUser;
+    this.activeRecoveryModelContent = nextActiveRecoveryModel;
     // Filter+map replaces `this.history` with a new array, so any pending
     // partial-push marker is now indexed against an array that no longer
     // exists. Clear it for the same reason setHistory does, then settle the
@@ -5743,7 +5771,14 @@ export class LlmChat {
       if (lastEntry && isSystemReminderContent(lastEntry)) {
         break;
       }
-      strippedEntries.unshift(this.history.pop()!);
+      const stripped = this.history.pop()!;
+      strippedEntries.unshift(stripped);
+      if (stripped === this.activeRecoveryUserContent) {
+        this.activeRecoveryUserContent = undefined;
+      }
+      if (stripped === this.activeRecoveryModelContent) {
+        this.activeRecoveryModelContent = undefined;
+      }
     }
     if (strippedEntries.length > 0) {
       this.historyMutationVersion++;

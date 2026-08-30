@@ -17367,6 +17367,104 @@ describe('LlmChat', async () => {
       expect(recordedText(recordAssistantTurn)).toBe('same');
     });
 
+    it('does not transfer deferred ownership to an unrelated equal turn', () => {
+      const recordAssistantTurn = vi.fn();
+      const target: Content = {
+        role: 'model',
+        parts: [{ text: 'same answer' }],
+      };
+      const recordingChat = new LlmChat(
+        mockConfig,
+        config,
+        [{ role: 'user', parts: [{ text: 'original question' }] }, target],
+        {
+          recordAssistantTurn,
+        } as unknown as ConstructorParameters<typeof LlmChat>[3],
+        uiTelemetryService,
+      );
+      const internal = recordingChat as unknown as {
+        deferredMaxTokensRecords: Array<{
+          record: Parameters<ChatRecordingService['recordAssistantTurn']>[0];
+          modelContent: Content;
+        }>;
+        deferredMaxTokensRecordTarget: Content | undefined;
+      };
+      internal.deferredMaxTokensRecords = [
+        {
+          record: {
+            model: 'gemini-3-pro',
+            message: target.parts,
+          },
+          modelContent: target,
+        },
+      ];
+      internal.deferredMaxTokensRecordTarget = target;
+
+      recordingChat.setHistory([
+        { role: 'user', parts: [{ text: 'different question' }] },
+        { role: 'model', parts: [{ text: 'same answer' }] },
+      ]);
+
+      expect(recordAssistantTurn).not.toHaveBeenCalled();
+    });
+
+    it('rebinds active recovery content when thoughts are stripped', () => {
+      const recoveryUser: Content = {
+        role: 'user',
+        parts: [{ text: 'continue' }],
+      };
+      const recoveryModel: Content = {
+        role: 'model',
+        parts: [
+          { text: 'thinking', thought: true },
+          { text: 'visible continuation' },
+        ],
+      };
+      const recordingChat = chatWithRecorder(vi.fn());
+      recordingChat.setHistory([
+        { role: 'user', parts: [{ text: 'question' }] },
+        { role: 'model', parts: [{ text: 'base' }] },
+        recoveryUser,
+        recoveryModel,
+      ]);
+      const internal = recordingChat as unknown as {
+        history: Content[];
+        activeRecoveryUserContent: Content | undefined;
+        activeRecoveryModelContent: Content | undefined;
+      };
+      internal.activeRecoveryUserContent = recoveryUser;
+      internal.activeRecoveryModelContent = recoveryModel;
+
+      recordingChat.stripThoughtsFromHistory();
+
+      expect(internal.activeRecoveryUserContent).toBe(internal.history.at(-2));
+      expect(internal.activeRecoveryModelContent).toBe(internal.history.at(-1));
+      expect(internal.activeRecoveryModelContent).not.toBe(recoveryModel);
+    });
+
+    it('clears active recovery ownership when its user turn is orphaned', () => {
+      const recoveryUser: Content = {
+        role: 'user',
+        parts: [{ text: 'continue' }],
+      };
+      const recordingChat = chatWithRecorder(vi.fn());
+      recordingChat.setHistory([
+        { role: 'user', parts: [{ text: 'question' }] },
+        { role: 'model', parts: [{ text: 'base' }] },
+        recoveryUser,
+      ]);
+      const internal = recordingChat as unknown as {
+        activeRecoveryUserContent: Content | undefined;
+      };
+      internal.activeRecoveryUserContent = recoveryUser;
+
+      expect(recordingChat.stripOrphanedUserEntriesFromHistory()).toEqual([
+        recoveryUser,
+      ]);
+
+      expect(internal.activeRecoveryUserContent).toBeUndefined();
+    });
+
     it('coalesceRecoveryPairs rejects a role-mismatched tail atomically', () => {
       const chat = new LlmChat(
         mockConfig,
