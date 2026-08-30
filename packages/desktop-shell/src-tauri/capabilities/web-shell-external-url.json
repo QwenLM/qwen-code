@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "web-shell-external-url",
+  "description": "Allows the daemon-served Web Shell to open browser-safe external URLs.",
+  "local": false,
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "windows": ["main"],
+  "permissions": [
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "http://*" },
+        { "url": "https://*" },
+        { "url": "mailto:*" }
+      ]
+    }
+  ]
+}

@@ -139,6 +139,9 @@ function makeHarness(
     ),
     killSession: vi.fn(async () => true),
     detachClient: vi.fn(async () => undefined),
+    // Present so a rollback mark cannot fail silently inside its swallowing
+    // catch — the production bridge always implements it.
+    markSessionCatalogChanged: vi.fn(),
     getSessionLastEventId: vi.fn(() => 0),
     getSessionSummary: vi.fn(() => ({
       pendingInteractions: options.pendingInteractions ?? [],
@@ -418,6 +421,31 @@ describe('LiveSessionCoordinator', () => {
       new Uint8Array([1, 0]),
     );
     expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('rolls back a fresh coordinator session and marks the catalog when the setup aborts before admission', async () => {
+    // The coordinator session is spawned fresh, then the host admission step
+    // rejects. The rollback kills the unattached session, removes its
+    // transcript (mocked removal resolves true), and the removal must advance
+    // the catalog clock. `start()` converts the abort into a call failure
+    // rather than rejecting.
+    const harness = makeHarness();
+    harness.host.setCoordinator.mockReturnValueOnce(false);
+
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+
+    expect(harness.host.failCall).toHaveBeenCalledWith(
+      1,
+      expect.stringContaining('Live call ended.'),
+    );
+    expect(harness.bridge.killSession).toHaveBeenCalledWith('live-new', {
+      requireZeroAttaches: true,
+    });
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
   });
 
   it('releases completed input and delegation tracking during a long call', async () => {
@@ -972,6 +1000,36 @@ describe('LiveSessionCoordinator', () => {
     });
     expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
     await harness.finishTurn(0, [{ type: 'message', text: '继续完成。' }]);
+  });
+
+  it('registers a mixed-case resumed Live session by its canonical id', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const persistedSessionId = sessionId.toUpperCase();
+    const sourceId = LIVE_SESSION_SOURCE_PREFIX + 'mixed-case';
+    const harness = makeHarness({
+      recent: [
+        {
+          sessionId: persistedSessionId,
+          sourceType: 'default',
+          sourceId,
+        } as SessionListItem,
+      ],
+    });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'resume',
+    });
+
+    expect(harness.bridge.resumeSession).toHaveBeenCalledWith({
+      sessionId,
+      workspaceCwd: '/conversations',
+      sourceType: 'default',
+      sourceId,
+    });
+    expect(harness.bridge.resumeSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: persistedSessionId }),
+    );
   });
 
   it('tracks a task session only from a completed built-in create_sub_session result', async () => {

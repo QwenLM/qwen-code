@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildDiffPlan, chunksCoverDiff, parseDiff } from './diff-plan.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './diff-flags.js';
+import { isolateHostGitConfig } from './test-utils.js';
 
 // Driven from the production constants, not a copy of them. Hand-maintained
 // duplicates of the flag list let a flag be deleted from the capture paths while
@@ -40,11 +41,16 @@ const HOSTILE_CONFIG = [
   'diff.ignoreSubmodules=all',
   // Prints a blank context line as a physically empty record, not a lone space.
   'diff.suppressBlankEmpty=true',
+  // Already git's default, so it is set here for the same reason the others
+  // are: to state what the pin is defending against, rather than resting the
+  // control on a default git is free to change.
+  'core.quotePath=true',
 ].flatMap((kv) => ['-c', kv]);
 
 let repo: string;
 let subRepo: string;
 let env: NodeJS.ProcessEnv;
+let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
 /** Run git with the developer's system and global config switched off. */
 const git = (...args: string[]) =>
@@ -55,14 +61,13 @@ const gitIn = (cwd: string, ...args: string[]) =>
 
 beforeAll(() => {
   repo = mkdtempSync(join(tmpdir(), 'diff-plan-it-'));
-  const emptyConfig = join(repo, '.empty-gitconfig');
-  writeFileSync(emptyConfig, '');
+  // Shared host-git-config isolation (see isolateHostGitConfig for the
+  // incident class). This suite passes `env` explicitly to every child git
+  // rather than relying on process.env, so it snapshots the isolated env
+  // and adds its one real delta, the terminal-prompt guard.
+  gitIsolation = isolateHostGitConfig();
   env = {
     ...process.env,
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: emptyConfig,
-    // Belt and braces on platforms where the above is unsupported.
-    HOME: repo,
     GIT_TERMINAL_PROMPT: '0',
   };
 
@@ -88,7 +93,7 @@ beforeAll(() => {
   init(repo);
   mkdirSync(join(repo, 'd'), { recursive: true });
   writeFileSync(join(repo, 'plain.ts'), 'a\n\nb\n'); // line 2 is blank context
-  writeFileSync(join(repo, 'sub中文.ts'), 'a\n'); // non-ASCII: git C-quotes it
+  writeFileSync(join(repo, 'sub中文.ts'), 'a\n'); // C-quoted unless pinned off
   writeFileSync(join(repo, 'img with space.png'), Buffer.from([0, 1, 2]));
   writeFileSync(join(repo, 'mode file.sh'), 'x\n');
   writeFileSync(join(repo, 'd', 'old.ts'), 'q\n');
@@ -125,6 +130,7 @@ afterAll(() => {
   // submodule, so it must outlive the tests.
   if (repo) rmSync(repo, { recursive: true, force: true });
   if (subRepo) rmSync(subRepo, { recursive: true, force: true });
+  gitIsolation.dispose();
 });
 
 /** Capture exactly as `fetch-pr` does, but under hostile config. */
@@ -146,7 +152,7 @@ describe('real git capture', () => {
       'plus.txt', // its payload line looks like a `+++` header
       'q.sql', // its payload line looks like a `---` header
       'sub', // a gitlink `diff.ignoreSubmodules=all` would have hidden
-      'sub中文.ts', // C-quoted octal escapes
+      'sub中文.ts', // non-ASCII; arrives unquoted under the core.quotePath pin
     ]);
   });
 
@@ -197,6 +203,27 @@ describe('real git capture', () => {
     expect(unpinned).toContain('\n\n b\n'); // the blank record is empty
     const plain = parseDiff(unpinned).files.find((f) => f.path === 'plain.ts')!;
     expect(plain.addedRanges).toEqual([{ start: 4, end: 4 }]);
+  });
+
+  it('pins core.quotePath=false, so a non-ASCII path arrives as itself', () => {
+    // Every path assertion above is blind to this pin. `parseDiff` unquotes
+    // defensively, so it reports `sub中文.ts` either way, and deleting
+    // `core.quotePath=false` from PINNED_DIFF_CONFIG leaves the whole suite
+    // green — while every consumer that reads the raw capture rather than the
+    // parse tree starts seeing a shape it was never written against. So the
+    // two shapes are asserted against the raw text, on both sides of the pin.
+    const octal = 'sub\\344\\270\\255\\346\\226\\207.ts';
+    const unpinned = execFileSync(
+      'git',
+      [...HOSTILE_CONFIG, 'diff', '--cached', ...CAPTURE_FLAGS],
+      { cwd: repo, maxBuffer: 1 << 28, env },
+    ).toString('utf8');
+    expect(unpinned).toContain(`"a/${octal}"`);
+    expect(unpinned).not.toContain('a/sub中文.ts');
+
+    const pinned = capture();
+    expect(pinned).toContain('a/sub中文.ts');
+    expect(pinned).not.toContain(octal);
   });
 
   it('produces a plan that tiles the whole diff', () => {

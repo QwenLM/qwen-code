@@ -29,7 +29,7 @@ let workspaceClient: {
 // which depend on `reload`'s identity, don't re-fire on every render.
 let reloadMock: ReturnType<typeof vi.fn>;
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: (props: any) => (
     <div
       data-session={props.sessionId}
@@ -94,7 +94,6 @@ vi.mock('./ChatPane', () => ({
         data-testid="chat-pane"
         data-pane-workspace={props.workspaceCwd}
         data-maximized={props.isMaximized ? 'true' : 'false'}
-        data-pane-restart-sse={props.restartSseOnPrompt ? 'true' : 'false'}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
         data-hidden={props.hidden ? 'true' : 'false'}
         data-report-catalog-turn-completion={
@@ -257,11 +256,6 @@ describe('SplitView', () => {
       container!
         .querySelector('[data-session="s1"]')
         ?.getAttribute('data-restart-sse'),
-    ).toBe('true');
-    expect(
-      container!
-        .querySelector('[data-session="s1"] [data-testid="chat-pane"]')
-        ?.getAttribute('data-pane-restart-sse'),
     ).toBe('true');
   });
 

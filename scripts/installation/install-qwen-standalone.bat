@@ -784,7 +784,7 @@ if "!EXPECTED_HASH!"=="" (
 
 set "ACTUAL_HASH="
 set "QWEN_HASH_FILE=!ARCHIVE_FILE!"
-for /f "delims=" %%H in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; (Get-FileHash -Algorithm SHA256 -LiteralPath $env:QWEN_HASH_FILE).Hash" 2^>nul') do (
+for /f "delims=" %%H in ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $stream = $null; $sha256 = $null; try { $stream = [IO.File]::OpenRead($env:QWEN_HASH_FILE); $sha256 = [Security.Cryptography.SHA256]::Create(); if ($null -eq $sha256) { throw 'SHA-256 provider unavailable.' }; $hash = [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', ''); if ($hash -cnotmatch '\A[0-9A-F]{64}\z') { throw 'Invalid SHA-256 result.' } } catch { [Console]::Error.WriteLine('SHA-256 calculation failed: ' + $_.Exception.Message); exit 1 } finally { if ($null -ne $stream) { $stream.Dispose() }; if ($null -ne $sha256) { $sha256.Dispose() } }; [Console]::Write($hash)"') do (
     if "!ACTUAL_HASH!"=="" set "ACTUAL_HASH=%%H"
 )
 set "QWEN_HASH_FILE="

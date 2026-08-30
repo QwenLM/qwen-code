@@ -8,17 +8,12 @@ import {
   isValidRotationBound,
   isValidTurnCount,
 } from '@qwen-code/channel-base';
+import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
 import { resolveChannelCwd } from './channel-cwd.js';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
-const CHANNEL_APPROVAL_MODES = new Set([
-  'plan',
-  'default',
-  'auto-edit',
-  'auto',
-  'yolo',
-]);
+const CHANNEL_APPROVAL_MODES = new Set<string>(APPROVAL_MODES);
 
 export { findCliEntryPath } from './cli-entry-path.js';
 
@@ -74,6 +69,43 @@ function resolveOptionalStringField(
  */
 type EnvResolution = boolean | 'available';
 const KNOWN_CREDENTIAL_FIELDS = new Set(['token', 'clientId', 'clientSecret']);
+
+interface MultiSessionCompatibilityConfig {
+  multiSession?: boolean;
+  sessionScope: ChannelConfig['sessionScope'];
+  groupHistoryLimit?: unknown;
+  groups?: Record<string, unknown>;
+  webhooks?: unknown;
+}
+
+export function multiSessionCompatibilityError(
+  name: string,
+  config: MultiSessionCompatibilityConfig,
+): string | undefined {
+  if (!config.multiSession) return undefined;
+  if (config.sessionScope !== 'user') {
+    return `Channel "${name}" requires sessionScope "user" when multiSession is enabled.`;
+  }
+  if (
+    typeof config.groupHistoryLimit === 'number' &&
+    config.groupHistoryLimit !== 0
+  ) {
+    return `Channel "${name}" cannot use groupHistoryLimit when multiSession is enabled.`;
+  }
+  for (const [groupId, group] of Object.entries(config.groups ?? {})) {
+    const groupHistoryLimit =
+      group !== null && typeof group === 'object' && !Array.isArray(group)
+        ? (group as Record<string, unknown>)['groupHistoryLimit']
+        : undefined;
+    if (typeof groupHistoryLimit === 'number' && groupHistoryLimit !== 0) {
+      return `Channel "${name}" group "${groupId}" cannot use groupHistoryLimit when multiSession is enabled.`;
+    }
+  }
+  if (config.webhooks !== undefined && config.webhooks !== null) {
+    return `Channel "${name}" cannot use webhooks when multiSession is enabled.`;
+  }
+  return undefined;
+}
 
 function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
   if (mode === false) return value;
@@ -492,6 +524,26 @@ export async function parseChannelConfig(
     'clientSecret',
     envResolution,
   );
+  const configuredSessionScope =
+    (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
+    plugin.defaultSessionScope ||
+    'user';
+  const multiSession = optionalBooleanField(
+    name,
+    'multiSession',
+    rawConfig['multiSession'],
+  );
+  const groups = (rawConfig['groups'] as ChannelConfig['groups']) || {};
+  const webhooks = parseWebhookConfig(name, rawConfig);
+
+  const multiSessionError = multiSessionCompatibilityError(name, {
+    multiSession,
+    sessionScope: configuredSessionScope,
+    groupHistoryLimit: rawConfig['groupHistoryLimit'],
+    groups,
+    webhooks,
+  });
+  if (multiSessionError) throw new Error(multiSessionError);
 
   return {
     ...resolvedRawConfig,
@@ -503,10 +555,8 @@ export async function parseChannelConfig(
       (rawConfig['senderPolicy'] as ChannelConfig['senderPolicy']) ||
       'allowlist',
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
-    sessionScope:
-      (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
-      plugin?.defaultSessionScope ||
-      'user',
+    sessionScope: configuredSessionScope,
+    multiSession,
     sessionRotation: parseSessionRotationConfig(name, rawConfig),
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
@@ -521,7 +571,7 @@ export async function parseChannelConfig(
     groupPolicy:
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',
     dmPolicy: (rawConfig['dmPolicy'] as ChannelConfig['dmPolicy']) || 'open',
-    groups: (rawConfig['groups'] as ChannelConfig['groups']) || {},
-    webhooks: parseWebhookConfig(name, rawConfig),
+    groups,
+    webhooks,
   };
 }

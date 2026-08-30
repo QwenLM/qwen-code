@@ -10,7 +10,7 @@
 - **Canonicalize** the primary workspace exactly once, and canonicalize every repeated `--workspace` before registering session runtimes. The primary canonical form is shared by `/capabilities.workspaceCwd`, the `POST /session` fallback, and the primary bridge.
 - Reject unsafe or invalid startup configurations: non-loopback bind without token, `--require-auth` without token, `--allow-origin '*'` without token, `mcpBudgetMode='enforce'` without a positive `mcpClientBudget`, a nonexistent or non-directory `--workspace`, and invalid timeout or rate-limit values.
 - Construct the `WorkspaceFileSystem` factory, permission audit publisher, `DaemonStatusProvider`, and `acp-bridge`.
-- Build the Express app, wire middleware (`denyBrowserOriginCors` / `allowOriginCors` -> `hostAllowlist` -> access log -> `bearerAuth` -> rate limit -> JSON parser -> telemetry -> per-route `mutationGate`), and mount session, workspace CRUD, file, device-flow auth, permission vote, and ACP HTTP routes.
+- Build the Express app, wire middleware (`allowOriginCors` over the mutable origin allowlist -> `hostAllowlist` -> access log -> `bearerAuth` -> rate limit -> JSON parser -> telemetry -> per-route `mutationGate`), and mount session, workspace CRUD, file, device-flow auth, permission vote, and ACP HTTP routes. (The unconditional `denyBrowserOriginCors` wall remains only in the bootstrap app, `run-qwen-serve.ts`.)
 - Bind the listening port and register signal handlers.
 - Run two-phase shutdown on SIGINT/SIGTERM; force-exit on a second signal.
 
@@ -24,16 +24,16 @@
 
 **Middleware** (`packages/cli/src/serve/auth.ts` and `server.ts`):
 
-| Middleware, in registration order           | Purpose                                                                                                                    | Notes                                                                                                                                                                                   |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `denyBrowserOriginCors` / `allowOriginCors` | Deny all `Origin` headers by default; switch to an allowlist when `--allow-origin <pattern>` is configured.                | See [`12-auth-security.md`](./12-auth-security.md).                                                                                                                                     |
-| `hostAllowlist(bind, getPort)`              | On loopback, validate `Host` belongs to `localhost`, `127.0.0.1`, `[::1]`, or `host.docker.internal` plus the actual port. | Defense against DNS rebinding. Comparison is case-insensitive and cached per port.                                                                                                      |
-| Access-log middleware                       | Records method, path, status, durationMs, sessionId, and clientId to `DaemonLogger` when a request finishes.               | Registered **before** `bearerAuth`, so 401 denials are logged too. Skips `/health` and heartbeat.                                                                                       |
-| `bearerAuth(token)`                         | SHA-256 plus `timingSafeEqual` constant-time bearer comparison.                                                            | Open passthrough when no token is configured (loopback dev default). `Bearer` scheme is case-insensitive.                                                                               |
-| Rate-limit middleware                       | Optional per-tier token bucket for prompt, mutation, and read routes.                                                      | Registered after `bearerAuth` and before JSON parsing; returns 429 before parsing when a bucket is exhausted.                                                                           |
-| `express.json({ limit: '10mb' })`           | JSON body parsing.                                                                                                         | Parse errors return 400.                                                                                                                                                                |
-| `daemonTelemetryMiddleware`                 | Wraps classified daemon API requests that reach this point in an OpenTelemetry span through `withDaemonRequestSpan`.       | Attributes include canonical route, resolved workspace hash, sessionId, clientId, and status code. Earlier auth, rate-limit, and body-parser rejections are outside this span boundary. |
-| `createMutationGate` (per-route)            | Route-level opt-in gate for mutation routes that require token even on loopback.                                           | Returns `401 { code: 'token_required' }`. Not global `app.use`; routes call `mutate({ strict: true })` as needed.                                                                       |
+| Middleware, in registration order | Purpose                                                                                                                                                                                                        | Notes                                                                                                                                                                                                |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allowOriginCors`                 | Always installed on the runtime app over a `MutableOriginAllowlist`: `--allow-origin <pattern>` entries seed it, Local Control adds the LAN origin while enabled; unmatched origins get the 403 deny envelope. | See [`12-auth-security.md`](./12-auth-security.md).                                                                                                                                                  |
+| `hostAllowlist(bind, getPort)`    | On loopback, validate `Host` belongs to `localhost`, `127.0.0.1`, `[::1]`, or `host.docker.internal` plus the actual port.                                                                                     | Defense against DNS rebinding. Comparison is case-insensitive and cached per port. The Local Control LAN listener always enforces its advertised-authority Host check, whatever the primary bind is. |
+| Access-log middleware             | Records method, path, status, durationMs, sessionId, and clientId to `DaemonLogger` when a request finishes.                                                                                                   | Registered **before** `bearerAuth`, so 401 denials are logged too. Skips `/health` and heartbeat.                                                                                                    |
+| `bearerAuth(token)`               | SHA-256 plus `timingSafeEqual` constant-time bearer comparison.                                                                                                                                                | Open passthrough when no token is configured (loopback dev default). `Bearer` scheme is case-insensitive.                                                                                            |
+| Rate-limit middleware             | Optional per-tier token bucket for prompt, mutation, and read routes.                                                                                                                                          | Registered after `bearerAuth` and before JSON parsing; returns 429 before parsing when a bucket is exhausted.                                                                                        |
+| `express.json({ limit: '10mb' })` | JSON body parsing.                                                                                                                                                                                             | Parse errors return 400.                                                                                                                                                                             |
+| `daemonTelemetryMiddleware`       | Wraps classified daemon API requests that reach this point in an OpenTelemetry span through `withDaemonRequestSpan`.                                                                                           | Attributes include canonical route, resolved workspace hash, sessionId, clientId, and status code. Earlier auth, rate-limit, and body-parser rejections are outside this span boundary.              |
+| `createMutationGate` (per-route)  | Route-level opt-in gate for mutation routes that require token even on loopback.                                                                                                                               | Returns `401 { code: 'token_required' }`. Not global `app.use`; routes call `mutate({ strict: true })` as needed.                                                                                    |
 
 **Subsystems**:
 
@@ -61,6 +61,8 @@
 
 ### Boot sequence
 
+Before `runQwenServe()` starts this sequence, the CLI-only `--open-with-auth` mode validates loopback/Web Shell eligibility and fills `ServeOptions.token` with the selected configured token, or with 32 random bytes encoded as base64url when that selection is empty. Direct embedders and invocations without that default-off flag do not generate a token.
+
 1. **Resolve and trim token** from `opts.token` or `QWEN_SERVER_TOKEN`; this
    avoids a trailing newline from `cat token.txt` silently breaking bearer
    comparison.
@@ -77,19 +79,20 @@
 12. **Build `fsFactory`**: `runQwenServe` defaults to `trusted: true`; direct `createServeApp` callers default to `trusted: false` and warn once.
 13. **`createHttpAcpBridge`**, see [`03-acp-bridge.md`](./03-acp-bridge.md).
 14. **`createServeApp`** assembles Express.
-15. **`server.listen(port, hostname)`**, then resolve the actual `getPort()` for host allowlist.
-16. **Register SIGINT / SIGTERM handlers** for graceful shutdown.
+15. **Create and lifecycle-bind the HTTP(S) server before listening**, then call `server.listen(port, hostname)` and resolve the actual `getPort()` for host allowlist. Conversations ownership cannot start until this listener and the remaining host startup gates are ready.
+16. **Register SIGINT / SIGTERM handlers** for graceful shutdown through the shared app lifecycle.
 
 ### Graceful shutdown
 
-1. **Phase 1 - bridge teardown** on first signal:
+1. **Seal admission and begin all drains** on the first signal:
    - Dispose the device-flow registry and cancel pending flows.
    - `bridge.shutdown()` marks each channel `isDying = true`, sends graceful close to each ACP child stdin, waits `KILL_HARD_DEADLINE_MS` (10s) per channel, then calls `channel.kill()` if needed.
-2. **Phase 2 - HTTP teardown**:
+2. **Close the listener while app and host drains run**:
    - `server.close()` stops accepting new connections and lets in-flight requests finish.
    - `SHUTDOWN_FORCE_CLOSE_MS` (5s) triggers `server.closeAllConnections()`.
    - A second 2s deadline escalates again if needed.
-3. **Second signal while exiting**:
+3. **Release Conversations ownership only after positive shutdown proof** from the listener, app-local work, host-owned work, Live discovery cleanup, and runtime drains. Any incomplete proof rejects shutdown instead of allowing an unsafe handoff.
+4. **Second signal while exiting**:
    - `bridge.killAllSync()` + `process.exit(1)` to avoid orphaned children blocking daemon exit.
 
 ## State and lifecycle
@@ -98,16 +101,16 @@
 
 - `url`: resolved listen URL, after ephemeral port resolution.
 - `port`: actual port, including `0` resolution.
-- `close({ timeoutMs? })`: programmatic shutdown for embedders and tests.
+- `close()`: programmatic shutdown for embedders and tests.
 
-Calling `createServeApp` directly returns only an `Application`; the embedder owns `listen` and shutdown.
+Calling `createServeApp` directly still returns only an `Application`. An embedder that needs Live/Conversations must create the actual Node server, call `getServeAppLifecycle(app).bindServer(server)` before its first `listen()`, and await `lifecycle.close()` during shutdown. Without binding, ordinary routes remain available but Live/Conversations fail closed. Calling raw `server.close()` triggers event-driven cleanup, but the embedder must still await `lifecycle.close()` to observe drain or ownership-release failures.
 
 ## Dependencies
 
 | Upstream used by `serve/`                                                                       | Downstream using `serve/`                 |
 | ----------------------------------------------------------------------------------------------- | ----------------------------------------- |
 | `@qwen-code/acp-bridge`: bridge, event bus, status types                                        | The `qwen` CLI `serve` subcommand handler |
-| `packages/core`: `loadSettings`, `getCurrentGeminiMdFilename`, `Config`, `WorkspaceContext`     | Direct embedders, tests                   |
+| `packages/core`: `getAllMemoryFilenames`, `Config`, `WorkspaceContext`                          | Direct embedders, tests                   |
 | ACP SDK (`@agentclientprotocol/sdk`): `PROTOCOL_VERSION`, `ClientSideConnection` through bridge |                                           |
 | Express + body-parser, `node:crypto`, `node:fs`, `node:path`                                    |                                           |
 
@@ -123,6 +126,7 @@ Calling `createServeApp` directly returns only an `Application`; the embedder ow
 | Env             | `QWEN_SERVE_DEBUG=1`                                                                                       | Verbose stderr logs. See [`19-observability.md`](./19-observability.md).                                   |
 | Flags           | `--hostname`, `--port`                                                                                     | Listen binding.                                                                                            |
 | Flags           | `--token`, `--require-auth`, `--enable-session-shell`                                                      | Bearer token, loopback auth hardening, and explicit shell execution switch.                                |
+| CLI flags       | `--open-with-auth`                                                                                         | Default-off loopback Web Shell launch that reuses or generates a process-lifetime bearer before runtime.   |
 | Flag            | `--workspace`                                                                                              | Overrides `process.cwd()`; repeat to register additional isolated workspace runtimes.                      |
 | Flags           | `--max-sessions`, `--max-pending-prompts-per-session`, `--max-connections`, `--event-ring-size`            | Bridge / Express caps.                                                                                     |
 | Flags           | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}`                                            | Forwarded to the ACP child.                                                                                |
@@ -132,14 +136,14 @@ Calling `createServeApp` directly returns only an `Application`; the embedder ow
 | Flags           | `--session-reap-interval-ms`, `--session-idle-timeout-ms`                                                  | Disconnected-session reaping control.                                                                      |
 | Flags           | `--rate-limit*`                                                                                            | Per-tier HTTP rate limit.                                                                                  |
 | `settings.json` | `policy.permissionStrategy`, `policy.consensusQuorum`                                                      | `MultiClientPermissionMediator` policy and quorum.                                                         |
-| `settings.json` | `context.fileName`                                                                                         | `getCurrentGeminiMdFilename` override for the bridge.                                                      |
+| `settings.json` | `context.fileName`                                                                                         | Workspace memory filename passed to `/workspace/init` through the workspace-service `contextFilename`.     |
 
 See [`17-configuration.md`](./17-configuration.md) for the merged reference.
 
 ## Caveats and known limits
 
 - Direct `createServeApp` without `deps.fsFactory` or `deps.bridge` defaults to `trusted: false`; agent-side ACP `writeTextFile` rejects as `untrusted_workspace`. The warning is printed once.
-- `denyBrowserOriginCors` rejects **all** requests carrying `Origin`; the **loopback** Web Shell works because another middleware strips matching loopback same-origin values first — non-loopback binds require `--allow-origin` for the shell's XHRs.
+- The runtime app runs `allowOriginCors` over the mutable allowlist; unmatched `Origin` values get the 403 deny envelope (the unconditional `denyBrowserOriginCors` wall survives only in the bootstrap app). The **loopback** Web Shell works because another middleware strips matching loopback same-origin values first — non-loopback binds require `--allow-origin` for the shell's XHRs.
 - Body-parser ordering: routes using `mutate({ strict: true })` return 401 only after `express.json()`. The worst case is `--max-connections × express.json({limit: '10mb'})`, up to about 2.5 GB of transient memory on a saturated loopback listener; this tradeoff is intentional.
 - Multiple daemons in one process must use per-handle `childEnvOverrides`; mutating `process.env` races because `defaultSpawnChannelFactory` snapshots env at spawn time.
 

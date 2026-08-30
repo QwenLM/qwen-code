@@ -27,6 +27,9 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_RUNTIME_DIR',
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
+  // This points to a host temp file that carries build warnings. A project
+  // `.env` must not redirect it to an arbitrary file to read or delete.
+  'QWEN_CODE_WARNINGS_FILE',
   // Runtime attribution markers are stamped by trusted launchers. A project
   // `.env` must not spoof client channel telemetry.
   QWEN_CODE_SERVE_ENV,
@@ -39,6 +42,10 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // Project memory routing is frozen daemon-wide before workspace env files
   // load, so only the operator's launch environment or CLI flag may set it.
   'QWEN_CODE_MEMORY_PROJECT_SCOPE',
+  // Workflow execution is an explicit user opt-in. A project must not enable
+  // it or override a user opt-in through settings.env or a project .env.
+  'QWEN_CODE_ENABLE_WORKFLOWS',
+  'QWEN_CODE_DISABLE_WORKFLOWS',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo
@@ -180,6 +187,14 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // operator set in the daemon's launch env still apply.
   'QWEN_CDP_MCP_COMMAND',
   'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
+  // QWEN_SERVE_NEW_FILE_MODE decides the creation mode of every agent-written
+  // NEW file (owner-only 0600 vs umask-derived). A project `.env` flipping it
+  // to `system` would silently widen file visibility daemon-wide — including
+  // files written for OTHER workspaces — with no warning, since `system` is a
+  // valid value. The fail-closed 0600 posture is an operator decision
+  // (documented as a per-daemon opt-in), so only the daemon's launch
+  // environment or a home `.env` may set it.
+  'QWEN_SERVE_NEW_FILE_MODE',
   // DEV gates the daemon's inherited-loader-env scrub (run-qwen-serve.ts);
   // only the dev harness (scripts/dev.js) stamps it into the launch env. A
   // project file setting it would silently keep loader vars in the base env

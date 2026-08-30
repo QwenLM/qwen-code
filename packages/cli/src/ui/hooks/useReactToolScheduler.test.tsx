@@ -4,9 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { act, renderHook } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
 import type { Part } from '@google/genai';
-import { mapToDisplay, type TrackedToolCall } from './useReactToolScheduler.js';
+import type { Config } from '@qwen-code/qwen-code-core';
+import { CoreToolScheduler } from '@qwen-code/qwen-code-core';
+import {
+  mapToDisplay,
+  type TrackedToolCall,
+  useReactToolScheduler,
+} from './useReactToolScheduler.js';
 import { MAX_INLINE_IMAGES_PER_ITEM } from '../utils/inline-image-parts.js';
 
 // Build a minimal successful tracked tool call with the fields mapToDisplay's
@@ -102,5 +109,43 @@ describe('mapToDisplay — detailedDisplay (§4.9 live path)', () => {
         .map((part) => part.inlineData),
     );
     expect(tool.omittedImageCount).toBe(2);
+  });
+});
+
+describe('useReactToolScheduler', () => {
+  it('handles a queued tool cancellation at the fire-and-forget boundary', async () => {
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('Tool call cancelled while in queue.'));
+    const abortController = new AbortController();
+    abortController.abort();
+
+    const { result } = renderHook(() =>
+      useReactToolScheduler(
+        vi.fn(),
+        { getToolRegistry: () => ({}) } as unknown as Config,
+        () => undefined,
+        vi.fn(),
+      ),
+    );
+
+    act(() => {
+      result.current[1](
+        {
+          callId: 'queued-call',
+          name: 'read_file',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'queued-prompt',
+        },
+        abortController.signal,
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(scheduleSpy).toHaveBeenCalledOnce();
+    scheduleSpy.mockRestore();
   });
 });

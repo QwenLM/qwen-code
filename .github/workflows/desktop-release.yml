@@ -15,7 +15,7 @@ on:
         default: 'main'
         type: 'string'
       electron_bridge:
-        description: 'Publish the one-time macOS Electron-to-Tauri update bridge.'
+        description: 'Publish the one-time Electron-to-Tauri update bridge for macOS, Windows, and Linux.'
         required: true
         default: false
         type: 'boolean'
@@ -581,10 +581,15 @@ jobs:
             --version "$RELEASE_VERSION" \
             --output desktop-latest.json
           if [ "$ELECTRON_BRIDGE" = 'true' ]; then
-            node ../.github/scripts/create-electron-bridge-manifest.mjs \
-              --assets . \
-              --version "$RELEASE_VERSION" \
-              --output latest-mac.yml
+            for manifest in macos:latest-mac.yml windows:latest.yml linux:latest-linux.yml; do
+              platform="${manifest%%:*}"
+              output="${manifest#*:}"
+              node ../.github/scripts/create-electron-bridge-manifest.mjs \
+                --assets . \
+                --platform "$platform" \
+                --version "$RELEASE_VERSION" \
+                --output "$output"
+            done
           fi
           sha256sum -- * > SHA256SUMS.txt
 
@@ -629,12 +634,23 @@ jobs:
           set -euo pipefail
           feed_assets=(release-assets/desktop-latest.json)
           if [ "$ELECTRON_BRIDGE" = 'true' ]; then
+            shopt -s nullglob
+            windows_installers=(release-assets/*-setup.exe)
+            linux_appimages=(release-assets/*.AppImage)
+            if [ "${#windows_installers[@]}" -ne 1 ] || [ "${#linux_appimages[@]}" -ne 1 ]; then
+              echo '::error::The Electron bridge requires one Windows installer and one Linux AppImage.'
+              exit 1
+            fi
             feed_assets+=(
               release-assets/latest-mac.yml
+              release-assets/latest.yml
+              release-assets/latest-linux.yml
               release-assets/Qwen-Code-Desktop-arm64.zip
               release-assets/Qwen-Code-Desktop-x64.zip
               release-assets/Qwen-Code-Desktop-arm64.dmg
               release-assets/Qwen-Code-Desktop-x64.dmg
+              "${windows_installers[0]}"
+              "${linux_appimages[0]}"
             )
           fi
           if gh release view "$FEED_TAG" >/dev/null 2>&1; then
@@ -648,6 +664,10 @@ jobs:
             fi
             newest="$(printf '%s\n%s\n' "$RELEASE_VERSION" "$current" | sort -V | tail -n 1)"
             if [ "$current" != "$RELEASE_VERSION" ] && [ "$newest" = "$current" ]; then
+              if [ "$ELECTRON_BRIDGE" = 'true' ]; then
+                echo "::error::Electron bridge $RELEASE_VERSION cannot replace newer stable feed $current."
+                exit 1
+              fi
               echo "::notice::Desktop $RELEASE_VERSION will not replace newer stable feed $current."
               exit 0
             fi

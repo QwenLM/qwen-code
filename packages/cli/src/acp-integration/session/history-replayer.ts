@@ -11,6 +11,11 @@ import type {
   HistoryGap,
 } from '@qwen-code/qwen-code-core';
 import {
+  parseGoalSnapshotV2,
+  parseGoalStateCause,
+  projectGoalStateToLegacy,
+} from '@qwen-code/qwen-code-core';
+import {
   createTranscriptReplayMachine,
   MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE,
   type PendingTranscriptToolCall,
@@ -39,6 +44,7 @@ export interface PendingReplayToolCall {
 export interface HistoryReplayPageOptions {
   pendingToolCalls?: PendingReplayToolCall[];
   finalizeDangling?: boolean;
+  skipFinalizeCallIds?: ReadonlySet<string>;
   gaps?: HistoryGap[];
   goalState?: GoalSnapshotV2;
   goalCause?: GoalStateCause;
@@ -47,6 +53,18 @@ export interface HistoryReplayPageOptions {
 export interface HistoryReplayPageState {
   pendingToolCalls: PendingReplayToolCall[];
   replay: TranscriptReplayStateV1;
+}
+
+export interface HistoryReplayGoalBootstrap {
+  goalStatus: {
+    kind: 'set' | 'checking';
+    condition: string;
+    iterations?: number;
+    setAt?: number;
+    durationMs?: number;
+    lastReason?: string;
+  };
+  goalState?: GoalSnapshotV2;
 }
 
 /**
@@ -65,15 +83,68 @@ export class HistoryReplayer {
     this.machine = this.createMachine();
   }
 
-  async replay(records: ChatRecord[], gaps?: HistoryGap[]): Promise<void> {
+  async replay(
+    records: ChatRecord[],
+    gaps?: HistoryGap[],
+    options: {
+      initialGoalState?: GoalSnapshotV2;
+      initialGoalCause?: GoalStateCause;
+      goalBootstrap?: HistoryReplayGoalBootstrap;
+      skipFinalizeCallIds?: ReadonlySet<string>;
+      finalizeDangling?: boolean;
+    } = {},
+  ): Promise<void> {
     try {
+      if (options.goalBootstrap) {
+        const update = {
+          sessionUpdate: 'agent_message_chunk' as const,
+          content: { type: 'text' as const, text: '' },
+          _meta: {
+            ...(options.goalBootstrap.goalState
+              ? { goalState: options.goalBootstrap.goalState }
+              : {}),
+            goalStatus: options.goalBootstrap.goalStatus,
+          },
+        };
+        await this.sendUpdate(update);
+      }
       await this.replayPage(records, {
-        finalizeDangling: true,
+        finalizeDangling: options.finalizeDangling ?? true,
         gaps,
+        ...(options.skipFinalizeCallIds
+          ? { skipFinalizeCallIds: options.skipFinalizeCallIds }
+          : {}),
+        ...(options.initialGoalState
+          ? { goalState: options.initialGoalState }
+          : {}),
+        ...(options.initialGoalCause
+          ? { goalCause: options.initialGoalCause }
+          : {}),
       });
     } finally {
       this.setActiveRecordId(null);
     }
+  }
+
+  static v2GoalBootstrap(
+    rawGoalState: unknown,
+    rawGoalCause: unknown,
+  ): HistoryReplayGoalBootstrap | undefined {
+    const goalState = parseGoalSnapshotV2(rawGoalState);
+    const goalCause = parseGoalStateCause(rawGoalCause);
+    if (!goalState?.goal || goalState.goal.status !== 'active' || !goalCause) {
+      return undefined;
+    }
+    const projection = projectGoalStateToLegacy({
+      v: 2,
+      cause: goalCause,
+      snapshot: goalState,
+    });
+    const { type: _type, kind, ...goalStatus } = projection.goalStatus;
+    if (kind !== 'set' && kind !== 'checking') {
+      return undefined;
+    }
+    return { goalStatus: { ...goalStatus, kind }, goalState };
   }
 
   async replayPage(
@@ -114,10 +185,7 @@ export class HistoryReplayer {
     const replay = this.machine.snapshot();
     this.copyCumulativeUsage(replay);
     const state = {
-      pendingToolCalls:
-        options.finalizeDangling === true
-          ? []
-          : replay.pendingToolCalls.map(toLegacyPendingToolCall),
+      pendingToolCalls: replay.pendingToolCalls.map(toLegacyPendingToolCall),
       replay,
     };
     this.setActiveRecordId(null);
@@ -167,6 +235,9 @@ export class HistoryReplayer {
       initialState,
       gaps: options.gaps,
       presentation: this.presentationAdapter(),
+      ...(options.skipFinalizeCallIds
+        ? { skipFinalizeCallIds: options.skipFinalizeCallIds }
+        : {}),
       onDiagnostic: (diagnostic) => {
         if (
           diagnostic.code === 'malformed_part' &&

@@ -15,6 +15,7 @@ import {
   getPlugin,
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
+import { multiSessionCompatibilityError } from '../commands/channel/config-utils.js';
 import { loadSettings, saveSettings } from '../config/settings.js';
 
 export type ChannelSecretUpdate =
@@ -143,7 +144,17 @@ function assertNumberRecord(
   }
 }
 
-function assertSharedField(key: string, value: unknown): boolean {
+function assertSharedField(
+  key: string,
+  value: unknown,
+  previous?: unknown,
+): boolean {
+  if (key === 'multiSession') {
+    if (typeof value !== 'boolean') {
+      throw invalidConfig(`Channel field "${key}" must be a boolean.`);
+    }
+    return true;
+  }
   const enumValues: Record<string, ReadonlySet<string>> = {
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
@@ -170,6 +181,64 @@ function assertSharedField(key: string, value: unknown): boolean {
       value.some((item) => typeof item !== 'string')
     ) {
       throw invalidConfig(`Channel field "${key}" must be a string array.`);
+    }
+    return true;
+  }
+  if (key === 'groups') {
+    if (!isRecord(value)) {
+      if (
+        containsUnsafeObjectKey(value) ||
+        !isDeepStrictEqual(previous, value)
+      ) {
+        throw invalidConfig(`Channel field "${key}" must be an object.`);
+      }
+      return true;
+    }
+    const previousGroups = isRecord(previous) ? previous : {};
+    for (const [groupId, groupConfig] of Object.entries(value)) {
+      if (UNSAFE_OBJECT_KEYS.has(groupId) || !isRecord(groupConfig)) {
+        throw invalidConfig(`Channel field "${key}.${groupId}" is invalid.`);
+      }
+      const previousGroup = isRecord(previousGroups[groupId])
+        ? previousGroups[groupId]
+        : {};
+      for (const [nestedKey, nestedValue] of Object.entries(groupConfig)) {
+        const known = [
+          'requireMention',
+          'dispatchMode',
+          'groupHistoryLimit',
+        ].includes(nestedKey);
+        const valid =
+          (nestedKey === 'requireMention' &&
+            typeof nestedValue === 'boolean') ||
+          (nestedKey === 'dispatchMode' &&
+            typeof nestedValue === 'string' &&
+            ['collect', 'steer', 'followup'].includes(nestedValue)) ||
+          (nestedKey === 'groupHistoryLimit' &&
+            typeof nestedValue === 'number' &&
+            Number.isFinite(nestedValue));
+        if (
+          known &&
+          !valid &&
+          !(
+            Object.hasOwn(previousGroup, nestedKey) &&
+            isDeepStrictEqual(previousGroup[nestedKey], nestedValue) &&
+            !containsUnsafeObjectKey(nestedValue)
+          )
+        ) {
+          throw invalidConfig(
+            `Channel field "${key}.${groupId}.${nestedKey}" is invalid.`,
+          );
+        }
+        if (!known) {
+          assertPreservedUnknownField(
+            `${key}.${groupId}`,
+            nestedKey,
+            nestedValue,
+            previousGroup,
+          );
+        }
+      }
     }
     return true;
   }
@@ -369,7 +438,15 @@ function assertManagedConfig(
       );
       continue;
     }
-    if (assertSharedField(key, value)) continue;
+    if (
+      assertSharedField(
+        key,
+        value,
+        Object.hasOwn(previous, key) ? previous[key] : undefined,
+      )
+    ) {
+      continue;
+    }
     assertPreservedUnknownField(undefined, key, value, previous);
   }
   assertRequiredFields(fields, config);
@@ -489,6 +566,22 @@ export class WorkspaceChannelSettingsStore {
       if (value !== undefined) nextConfig[key] = value;
     }
     assertManagedConfig(nextConfig, previous, plugin.management.fields);
+    const multiSessionError = multiSessionCompatibilityError(name, {
+      multiSession: nextConfig['multiSession'] === true,
+      sessionScope:
+        (nextConfig['sessionScope'] as
+          | 'user'
+          | 'thread'
+          | 'chat_thread'
+          | 'single'
+          | undefined) ??
+        plugin.defaultSessionScope ??
+        'user',
+      groupHistoryLimit: nextConfig['groupHistoryLimit'],
+      groups: isRecord(nextConfig['groups']) ? nextConfig['groups'] : {},
+      webhooks: nextConfig['webhooks'],
+    });
+    if (multiSessionError) throw invalidConfig(multiSessionError);
     let crossFieldError: unknown;
     try {
       crossFieldError = plugin.management.validateConfig?.(nextConfig);

@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { ReactNode } from 'react';
 import type {
   DaemonClient,
+  DaemonSessionGroupCatalog,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
@@ -46,9 +47,11 @@ const {
 });
 
 // Mock useWorkspace so BranchPickerPopover can render without a real provider.
-vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
   return {
     ...actual,
     useWorkspace: () => ({
@@ -82,6 +85,9 @@ function makeClient(): DaemonClient {
 
 const { I18nProvider } = await import('../../i18n');
 const { WorkspaceSection } = await import('./WorkspaceSection');
+const { readWorkspaceExpanded, writeWorkspaceExpanded } = await import(
+  './workspaceExpansion'
+);
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 if (!globalThis.PointerEvent) {
@@ -126,6 +132,11 @@ function renderSection(
     sourceType: string;
     channelGroupingEnabled: boolean;
     organizationEnabled: boolean;
+    sessionCatalogRequestsEnabled: boolean;
+    sessionGroupCatalog: DaemonSessionGroupCatalog;
+    sessionLiveStateEnabled: boolean;
+    excludePinned: boolean;
+    searchQuery: string;
   }> = {},
 ): void {
   act(() => {
@@ -142,10 +153,16 @@ function renderSection(
           noSessionsLabel="No sessions"
           loadErrorLabel="Load failed"
           organizationEnabled={overrides.organizationEnabled ?? false}
+          sessionCatalogRequestsEnabled={
+            overrides.sessionCatalogRequestsEnabled
+          }
+          sessionGroupCatalog={overrides.sessionGroupCatalog}
+          sessionLiveStateEnabled={overrides.sessionLiveStateEnabled}
+          excludePinned={overrides.excludePinned}
+          searchQuery={overrides.searchQuery}
           sourceType={overrides.sourceType}
           channelGroupingEnabled={overrides.channelGroupingEnabled}
           ungroupedLabel="Ungrouped"
-          formatTime={() => ''}
           renderSession={(session: DaemonSessionSummary): ReactNode => (
             <div key={session.sessionId}>{session.displayName}</div>
           )}
@@ -167,6 +184,7 @@ function gitChip(): HTMLElement | null {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -190,6 +208,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -206,7 +225,7 @@ describe('WorkspaceSection label', () => {
     expect(container.textContent).not.toContain('project');
   });
 
-  it('shows the complete read-only session name in a native tooltip', async () => {
+  it('shows read-only session details from row hover', async () => {
     const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({
       sessions: [
         {
@@ -233,7 +252,33 @@ describe('WorkspaceSection label', () => {
 
     expect(
       container.querySelector('[title="A very long session name"]'),
-    ).not.toBeNull();
+    ).toBeNull();
+    const row = container.querySelector<HTMLElement>('[role="note"]');
+    if (!row) throw new Error('read-only row was not rendered');
+    expect(row.tabIndex).toBe(-1);
+    vi.useFakeTimers();
+    act(() => {
+      row.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+    });
+    const tooltip = document.querySelector('[role="dialog"]');
+    expect(tooltip?.textContent).toContain('A very long session name');
+    expect(tooltip?.textContent).toContain('danger');
+    expect(tooltip?.querySelector('[title="/tmp/danger"]')).not.toBeNull();
+    vi.useRealTimers();
+  });
+
+  it('restores and writes the workspace expansion preference', () => {
+    writeWorkspaceExpanded(trustedWorkspace.id, false);
+    renderSection();
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-expanded]',
+    );
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    act(() => toggle?.click());
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(readWorkspaceExpanded(trustedWorkspace.id)).toBe(true);
   });
 
   it('does not render sessions loaded for the previous source', async () => {
@@ -451,6 +496,75 @@ describe('WorkspaceSection label', () => {
     // Channel mode discards the organization sections, so the catalog fetch
     // must be skipped too, mirroring the sidebar's own org prefetch gates.
     expect(listSessionGroups).not.toHaveBeenCalled();
+  });
+
+  it('never bypasses a fenced group catalog for a global reload token', async () => {
+    const listSessionGroups = vi
+      .fn()
+      .mockResolvedValue({ groups: [], colorOptions: [] });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
+        listSessionGroups,
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      expanded: true,
+      organizationEnabled: true,
+      sessionLiveStateEnabled: true,
+      reloadToken: 0,
+    });
+    await flush();
+    expect(listSessionGroups).not.toHaveBeenCalled();
+
+    renderSection({
+      client,
+      expanded: true,
+      organizationEnabled: true,
+      sessionLiveStateEnabled: true,
+      reloadToken: 1,
+    });
+    await flush();
+    expect(listSessionGroups).not.toHaveBeenCalled();
+  });
+
+  it('defers legacy catalog requests until capability discovery completes', async () => {
+    const listWorkspaceSessionsPage = vi
+      .fn()
+      .mockResolvedValue({ sessions: [] });
+    const listSessionGroups = vi
+      .fn()
+      .mockResolvedValue({ groups: [], colorOptions: [] });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups,
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      client,
+      expanded: true,
+      organizationEnabled: true,
+      sessionCatalogRequestsEnabled: false,
+    });
+    await flush();
+    expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
+    expect(listSessionGroups).not.toHaveBeenCalled();
+
+    renderSection({
+      client,
+      expanded: true,
+      organizationEnabled: true,
+      sessionCatalogRequestsEnabled: true,
+    });
+    await flush();
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+    expect(listSessionGroups).toHaveBeenCalledTimes(1);
   });
 
   it('renders channel sessions flat while the channel catalog failed to load', async () => {
@@ -671,6 +785,39 @@ describe('WorkspaceSection label', () => {
 });
 
 describe('WorkspaceSection session loading', () => {
+  it('shows five sessions and resets Show all after the workspace closes', async () => {
+    const sessions = Array.from({ length: 6 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Session ${index + 1}`,
+      workspaceCwd: trustedWorkspace.cwd,
+    }));
+    const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({ sessions });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({ client, expanded: true });
+    await flush();
+    expect(container.textContent).toContain('Session 5');
+    expect(container.textContent).not.toContain('Session 6');
+
+    const showAll = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Show all',
+    );
+    act(() => showAll?.click());
+    expect(container.textContent).toContain('Session 6');
+
+    renderSection({ client, expanded: false });
+    await flush();
+    renderSection({ client, expanded: true });
+    await flush();
+    expect(container.textContent).not.toContain('Session 6');
+  });
+
   it('refreshes the catalog when an expanded workspace loses trust', async () => {
     const listWorkspaceSessionsPage = vi
       .fn()
@@ -771,6 +918,43 @@ describe('WorkspaceSection session loading', () => {
     expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
     expect(container.textContent).toContain('Updated session');
   });
+
+  it('does not refresh a retained catalog when live-state owns freshness', async () => {
+    const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'session-1',
+          displayName: 'Initial session',
+        } as DaemonSessionSummary,
+      ],
+    });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({ client, expanded: true });
+    await flush();
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+
+    renderSection({
+      client,
+      expanded: false,
+      sessionLiveStateEnabled: true,
+    });
+    await flush();
+    renderSection({
+      client,
+      expanded: true,
+      sessionLiveStateEnabled: true,
+    });
+    await flush();
+
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('WorkspaceSection git chip', () => {
@@ -845,6 +1029,9 @@ describe('WorkspaceSection git chip', () => {
       chipButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flush();
+    // Opening the picker fetches a fresh status for its action hints and
+    // hands it back to the chip.
+    expect(workspaceGit).toHaveBeenCalledTimes(2);
 
     // The picker content is portaled outside the section container.
     const mainItem = Array.from(document.body.querySelectorAll('button')).find(
@@ -857,7 +1044,7 @@ describe('WorkspaceSection git chip', () => {
     await flush();
 
     expect(workspaceGitCheckout).toHaveBeenCalledWith('main', undefined);
-    expect(workspaceGit).toHaveBeenCalledTimes(2);
+    expect(workspaceGit).toHaveBeenCalledTimes(3);
   });
 
   it('hides the chip for an untrusted workspace and never queries git', async () => {
@@ -960,5 +1147,211 @@ describe('WorkspaceSection git chip', () => {
     await flush();
 
     expect(gitChip()).toBeNull();
+  });
+});
+
+describe('isAbsolutePath', () => {
+  it('accepts unix, Windows and UNC absolute paths and rejects relative ones', async () => {
+    const { isAbsolutePath } = await import('./WorkspaceSection');
+    expect(isAbsolutePath('/x')).toBe(true);
+    expect(isAbsolutePath('C:\\x')).toBe(true);
+    expect(isAbsolutePath('\\\\server\\share')).toBe(true);
+    expect(isAbsolutePath('relative/path')).toBe(false);
+    expect(isAbsolutePath('name')).toBe(false);
+  });
+});
+
+describe('WorkspaceSection pinned group members (issue #10391)', () => {
+  function makeOrganizationClient(
+    sessions: Array<Partial<DaemonSessionSummary>>,
+  ): DaemonClient {
+    return {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({
+          groups: [
+            {
+              id: 'design-group',
+              name: 'Design',
+              color: 'blue',
+              order: 0,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+      })),
+    } as unknown as DaemonClient;
+  }
+
+  it('keeps pinned members in their group section and count', async () => {
+    renderSection({
+      client: makeOrganizationClient([
+        {
+          sessionId: 'pinned-member',
+          displayName: 'Pinned member',
+          groupId: 'design-group',
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          sessionId: 'plain-session',
+          displayName: 'Plain session',
+          groupId: null,
+        },
+      ] as Array<Partial<DaemonSessionSummary>>),
+      expanded: true,
+      organizationEnabled: true,
+      excludePinned: true,
+    });
+    await flush();
+
+    const groupSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(groupSection).not.toBeNull();
+    // The reported symptom: a group whose members are all pinned rendered
+    // `· 0`, visually identical to lost memberships.
+    expect(groupSection?.textContent).toContain('· 1');
+    expect(groupSection?.textContent).toContain('Pinned member');
+
+    // Pinned members keep their group and must not fall into Ungrouped.
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped?.textContent).toContain('Plain session');
+    expect(ungrouped?.textContent ?? '').not.toContain('Pinned member');
+  });
+
+  it('still renders unpinned members when pinned rows are lifted into the group', async () => {
+    renderSection({
+      client: makeOrganizationClient([
+        {
+          sessionId: 'pinned-member',
+          displayName: 'Pinned member',
+          groupId: 'design-group',
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          sessionId: 'active-member',
+          displayName: 'Active member',
+          groupId: 'design-group',
+        },
+      ] as Array<Partial<DaemonSessionSummary>>),
+      expanded: true,
+      organizationEnabled: true,
+      excludePinned: true,
+    });
+    await flush();
+
+    const groupSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(groupSection?.textContent).toContain('· 2');
+    expect(groupSection?.textContent).toContain('Active member');
+    expect(groupSection?.textContent).toContain('Pinned member');
+    // Every session belongs to the group, so no Ungrouped bucket renders.
+    expect(
+      container.querySelector('section[aria-label="Ungrouped"]'),
+    ).toBeNull();
+  });
+
+  it('renders group sections instead of the empty label when every session is pinned', async () => {
+    renderSection({
+      client: makeOrganizationClient([
+        {
+          sessionId: 'pinned-member',
+          displayName: 'Pinned member',
+          groupId: 'design-group',
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        },
+      ] as Array<Partial<DaemonSessionSummary>>),
+      expanded: true,
+      organizationEnabled: true,
+      excludePinned: true,
+    });
+    await flush();
+
+    // Every session is a pinned group member, so the pinned-filtered list is
+    // empty; the grouped view must still render the member instead of the
+    // empty label.
+    const groupSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(groupSection).not.toBeNull();
+    expect(groupSection?.textContent).toContain('\u00b7 1');
+    expect(groupSection?.textContent).toContain('Pinned member');
+    expect(container.textContent ?? '').not.toContain('No sessions');
+  });
+
+  it('keeps a pinned member in its group while searching matches only it', async () => {
+    renderSection({
+      client: makeOrganizationClient([
+        {
+          sessionId: 'pinned-member',
+          displayName: 'Pinned member',
+          groupId: 'design-group',
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          sessionId: 'active-member',
+          displayName: 'Active member',
+          groupId: 'design-group',
+        },
+      ] as Array<Partial<DaemonSessionSummary>>),
+      expanded: true,
+      organizationEnabled: true,
+      excludePinned: true,
+      searchQuery: 'pinned',
+    });
+    await flush();
+
+    // The query matches only the pinned member, so group items must derive
+    // from the search-filtered list: it stays in its group while the
+    // non-matching member disappears.
+    const groupSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(groupSection).not.toBeNull();
+    expect(groupSection?.textContent).toContain('\u00b7 1');
+    expect(groupSection?.textContent).toContain('Pinned member');
+    expect(groupSection?.textContent ?? '').not.toContain('Active member');
+  });
+
+  it('keeps a group-less pinned session out of the Ungrouped section', async () => {
+    renderSection({
+      client: makeOrganizationClient([
+        {
+          sessionId: 'pinned-free',
+          displayName: 'Pinned free',
+          groupId: null,
+          isPinned: true,
+          pinnedAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          sessionId: 'plain-session',
+          displayName: 'Plain session',
+          groupId: null,
+        },
+      ] as Array<Partial<DaemonSessionSummary>>),
+      expanded: true,
+      organizationEnabled: true,
+      excludePinned: true,
+    });
+    await flush();
+
+    // `ungrouped` derives from the pinned-filtered list, so the group-less
+    // pinned session never duplicates the Pinned section inside Ungrouped.
+    const ungrouped = container.querySelector<HTMLElement>(
+      'section[aria-label="Ungrouped"]',
+    );
+    expect(ungrouped).not.toBeNull();
+    expect(ungrouped?.textContent).toContain('\u00b7 1');
+    expect(ungrouped?.textContent).toContain('Plain session');
+    expect(ungrouped?.textContent ?? '').not.toContain('Pinned free');
   });
 });
