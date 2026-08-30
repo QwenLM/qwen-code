@@ -1145,6 +1145,56 @@ describe('CoreToolScheduler', () => {
     }
   });
 
+  it.each(['Tool_Call', ' tool_call ', 'TOOL_CALL'])(
+    'denies the bridge when the legacy deny entry is a case/whitespace variant (%s)',
+    async (denyEntry) => {
+      // R2-1: Config stores permissions.deny entries verbatim (getPermissionsDeny
+      // does no normalization), and the _schedule legacy-deny fallback matches
+      // case- and whitespace-insensitively (excludedTool.toLowerCase().trim()
+      // === normalizedToolName). The pre-resolution bridge gate must apply the
+      // same normalization, otherwise 'Tool_Call' slips past the gate's exact
+      // compare, the envelope is unwrapped, and only the resolved TARGET name
+      // is checked against the deny list — executing a denied call.
+      const execute = vi.fn();
+      const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+      const deferred = new MockTool({
+        name: 'mcp__github__create_issue',
+        shouldDefer: true,
+        execute,
+      });
+      const { scheduler, ensureTool, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: new Map([
+            [bridge.name, bridge],
+            [deferred.name, deferred],
+          ]),
+          deferredHiddenNames: new Set([deferred.name]),
+          getPermissionsDeny: () => [denyEntry],
+        });
+
+      await scheduler.schedule(
+        {
+          callId: 'bridge-legacy-deny-variant',
+          name: ToolNames.TOOL_CALL,
+          args: { name: deferred.name, arguments: {} },
+          isClientInitiated: false,
+          prompt_id: 'prompt-bridge-legacy-deny-variant',
+        },
+        new AbortController().signal,
+      );
+
+      expect(ensureTool).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+      expect(completed.status).toBe('error');
+      if (completed.status === 'error') {
+        expect(completed.response.errorType).toBe(
+          ToolErrorType.EXECUTION_DENIED,
+        );
+      }
+    },
+  );
+
   it('does not unwrap tool_call denied by the PermissionManager bridge gate', async () => {
     // Twin of the legacy-deny test for the PermissionManager half of the
     // bridge gate: isToolEnabled(tool_call) resolving false must keep the
@@ -1285,9 +1335,7 @@ describe('CoreToolScheduler', () => {
     }
     expect(third.status).toBe('error');
     if (third.status === 'error') {
-      expect(third.response.errorType).toBe(
-        ToolErrorType.INVALID_TOOL_PARAMS,
-      );
+      expect(third.response.errorType).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
       expect(third.response.error?.message).toContain('RETRY LOOP DETECTED');
       expect(third.response.responseParts[0]?.functionResponse?.name).toBe(
         ToolNames.TOOL_CALL,

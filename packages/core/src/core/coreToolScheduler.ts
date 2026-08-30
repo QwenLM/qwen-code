@@ -2315,11 +2315,19 @@ export class CoreToolScheduler {
       }
     } else if (
       (this.config.getPermissionsDeny?.() ?? []).some(
-        (name) => canonicalToolName(name) === ToolNames.TOOL_CALL,
+        (name) =>
+          canonicalToolName(name).toLowerCase().trim() === ToolNames.TOOL_CALL,
       )
     ) {
       // Preserve the legacy no-PermissionManager deny path: leave the bridge
       // wrapped so the normal pre-registry permission check rejects it.
+      // Mirror the loop's legacy-deny normalization exactly
+      // (toLowerCase().trim(), see the getPermissionsDeny fallback in
+      // _schedule): Config stores deny entries verbatim, so an entry like
+      // 'Tool_Call' must deny the bridge here exactly as it would deny a
+      // direct tool_call in the loop — without this the envelope would be
+      // unwrapped and only the resolved TARGET name would be checked against
+      // the deny list, converting a denied call into an executed one (R2-1).
       return request;
     }
 
