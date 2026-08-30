@@ -337,6 +337,19 @@ connection.sessionContext`) so draft standalone chats hide project
   command discovery, and block its submit-time handler; tests assert no
   generic branch request is issued. `/fork` stays separate — guarded
   background fork-agent work is supported.
+- **The workspace Web Terminal is gated off in non-workspace contexts**
+  (review P1): `webTerminalAvailable` (`App.tsx:3206`) checks only the
+  `web_terminal` capability, but a standalone connection exposes no product
+  `workspaceCwd`, so `TerminalPanel` would open the terminal route without
+  a cwd and the daemon rejects it with `Terminal workspace unavailable` —
+  the generic route resolves only registered trusted workspaces. Standalone
+  sessions still run ordinary Shell/tool commands in their private
+  directory through the session permission pipeline; this gates only the
+  separate terminal surface. Terminal availability and the open handler
+  require `effectiveContext.kind === 'workspace'`, inherited terminal tabs
+  are discarded or closed when entering a non-workspace context, and tests
+  assert pending and attached standalone/Live contexts create no terminal
+  WebSocket while workspace terminals remain unchanged.
 - **The legacy input-history fallback is disabled for standalone
   identities** (review P1): `useComposerCore`/`useInputHistory` fall back
   to the unscoped `qwen-web-shell-history` key whenever a scoped history is
@@ -558,6 +571,8 @@ Unit/component (vitest, `packages/web-shell`):
   blocked from pending and attached standalone contexts; `/resume <id>`
   for a standalone session routes only through the explicit standalone
   context (review P1).
+- Standalone and Live contexts create no terminal WebSocket and discard
+  inherited terminal tabs; workspace terminals unchanged (review P1).
 
 E2E (Playwright, `packages/web-shell/client/e2e`):
 
