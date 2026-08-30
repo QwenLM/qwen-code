@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import MarkdownIt from 'markdown-it';
+
 import { stripSeverityPrefix } from './inline-counts.js';
 
 // The attribution footer every posted review carries, stated once.
@@ -205,7 +207,18 @@ function projectInvisibles(input: string): Projection {
     }
     if (ch === '<' && input.startsWith('<!--', i)) {
       const close = input.indexOf('-->', i + 4);
-      i = close === -1 ? n : close + 3;
+      // A closer past blanked code cannot close this opener — a code
+      // block between them ends the opener's paragraph on GitHub — and
+      // an unclosed opener renders as escaped literal prose (`&lt;!--`),
+      // not a comment running to the end of the input: swallowing the
+      // tail there hid a forged footer the render shows.
+      const nul = input.indexOf('\u0000', i);
+      if (close === -1 || (nul !== -1 && nul < close + 3)) {
+        push(input.slice(i, i + 4), i, i + 4);
+        i += 4;
+        continue;
+      }
+      i = close + 3;
       continue;
     }
     if (ch === '&') {
@@ -437,34 +450,51 @@ const STRIP_TAIL_LIMIT = 8192;
  * before the projection, for the reason `blankQuotedCode` states.
  */
 export function stripReviewFooter(body: string): string {
+  // Call arguments evaluate eagerly — checked BEFORE the blanking, or the
+  // dominant marker-less shape would pay the structural parse anyway.
+  if (!canProjectFooterMarker(body)) return body;
   return stripTrailingFooter(body, blankQuotedCode(body));
+}
+
+/**
+ * Whether the string can project a footer marker at all: the projection
+ * assembles the marker only out of literal characters, entity decodes
+ * (which need a literal `&`), or a comment removal joining the halves a
+ * literal `<!--` sits between. One predicate, both gate sites — the
+ * `stripReviewFooter` hoist and `stripTrailingFooter`, which
+ * `stripReviewFooterLine` reaches with its raw line.
+ */
+function canProjectFooterMarker(s: string): boolean {
+  return s.includes(FOOTER_MARKER) || s.includes('&') || s.includes('<!--');
 }
 
 /**
  * A trailing footer off a SINGLE line — the shape the one-line channels
  * post: `compose-review`'s folded deferral titles and reroute records,
- * `submit`'s relocated claim. A folded line carries no block structure —
+ * its ingested body-Critical and cannot-tell entries, its two verbatim
+ * body exits, and `submit`'s relocated claim. A folded line carries no block structure —
  * the collapse flattened it — so a footer on it is never a quotation the
  * blanking of `stripReviewFooter` keeps: a fence delimiter leading the
  * line is posted text, not a code edge, and must not blind the strip.
+ *
+ * Comment grammar goes inert SAME-LENGTH before the scan: an
+ * unterminated `<!--` ahead of a forged footer is escaped literal prose
+ * in the render, so the cut must see the footer through it, and a
+ * dangling opener surviving the cut would blind the raw-body readers
+ * the posted line joins. The replacements stay length-equal to the
+ * line, or the cut arithmetic would map into the wrong bytes.
  */
 export function stripReviewFooterLine(line: string): string {
-  return stripTrailingFooter(line, line);
+  return stripTrailingFooter(
+    line,
+    line.replace(/<!--/g, '    ').replace(/-->/g, '   '),
+  );
 }
 
 function stripTrailingFooter(body: string, scanned: string): string {
-  // The projection assembles the marker only out of literal characters,
-  // entity decodes (which need a literal `&`), or a comment removal
-  // joining the halves a literal `<!--` sits between — a body carrying
-  // none of the three cannot project a marker, and the dominant
-  // marker-less shape returns here, before the scan.
-  if (
-    !body.includes(FOOTER_MARKER) &&
-    !body.includes('&') &&
-    !body.includes('<!--')
-  ) {
-    return body;
-  }
+  // The dominant marker-less shape returns here, before the scan — the
+  // raw line `stripReviewFooterLine` passes in meets the same gate.
+  if (!canProjectFooterMarker(body)) return body;
   const tail = scanned.slice(-STRIP_TAIL_LIMIT);
   const proj = projectInvisibles(tail);
   if (!proj.text.includes(FOOTER_MARKER)) return body;
@@ -474,12 +504,27 @@ function stripTrailingFooter(body: string, scanned: string): string {
   return body.slice(0, body.length - tail.length + keep);
 }
 
+// The CommonMark classifier the blanking delegates to. `html: true` is
+// load-bearing: with raw-HTML blocks parsed as paragraphs instead, a fence
+// delimiter inside `<div>…</div>` would open code state GitHub does not
+// render. Same construction as `audit-layers.ts`.
+const BLOCK_PARSER = new MarkdownIt({ html: true });
+
 /**
- * The body with fenced- and indented-code CONTENT, and the fence EDGES
- * around it, blanked to same-length NULs: the structural scan `scanLines`
- * gives the line-aware strips, in the one shape a trailing-anchored strip
- * can use — blanking is length-preserving, so the projection's index map
- * still points into the original bytes.
+ * The body's code-block lines blanked to same-length NULs — fenced- and
+ * indented-code CONTENT, and the fence EDGES around them (a fence token's
+ * line map covers both) — in the one shape a trailing-anchored strip can
+ * use: blanking is length-preserving, so the projection's index map still
+ * points into the original bytes.
+ *
+ * Which lines GitHub renders as code is delegated to a CommonMark parser
+ * instead of hand-modeled: the hand-built block scan disagreed with the
+ * renderers on lazy continuation, list content indents, fence-closer
+ * bounds, quote prefixes, and paragraph interruption — and each
+ * disagreement kept a forged trailing footer the strip exists to remove,
+ * a new entrance every time the model was patched. The parser's token
+ * map is the authority; code is the one shape where a footer is a
+ * quotation, not attribution.
  *
  * Code content is a quotation. GitHub renders it literally, so it can
  * neither BE attribution nor hide any: unblanked, a `<!--` with no `-->`
@@ -492,28 +537,26 @@ function stripTrailingFooter(body: string, scanned: string): string {
  * lodged in the info string would otherwise blind the strip exactly like
  * one quoted in the content.
  *
- * Scanned from the body's START, not from the tail the strip matches on: a
+ * Parsed from the body's START, not from the tail the strip matches on: a
  * fence's state is only knowable from where it opened, and a tail cut
- * inside one reads its code as ordinary text. The scan is one linear pass,
- * so the tail bound the regex needs is untouched.
+ * inside one reads its code as ordinary text. The parse is one linear
+ * pass, so the tail bound the regex needs is untouched.
  */
 function blankQuotedCode(body: string): string {
-  const kinds = scanLines(body).map(({ kind }) => kind);
-  if (
-    !kinds.some(
-      (kind) => kind === 'fence' || kind === 'code' || kind === 'fenceEdge',
-    )
-  ) {
-    return body;
+  const codeLines = new Set<number>();
+  for (const token of BLOCK_PARSER.parse(body, {})) {
+    if (token.map === null) continue;
+    if (token.type !== 'fence' && token.type !== 'code_block') continue;
+    for (let l = token.map[0]; l < token.map[1]; l += 1) codeLines.add(l);
   }
+  if (codeLines.size === 0) return body;
   const lines = body.split(LINE_ENDING_RE);
   const endings = body.match(LINE_ENDING_RE) ?? [];
   return lines
     .map(
       (line, i) =>
-        (kinds[i] === 'fence' || kinds[i] === 'code' || kinds[i] === 'fenceEdge'
-          ? '\u0000'.repeat(line.length)
-          : line) + (endings[i] ?? ''),
+        (codeLines.has(i) ? '\u0000'.repeat(line.length) : line) +
+        (endings[i] ?? ''),
     )
     .join('');
 }
@@ -521,8 +564,8 @@ function blankQuotedCode(body: string): string {
 /**
  * Every CommonMark line ending — `\n`, `\r\n`, and a bare `\r`. The ONE
  * spelling: shared by `scanLines` and `blankQuotedCode` here (the blanking
- * indexes into the scan's lines, so a second spelling would misalign the
- * two) and by the segmentations the consumers run on the same bodies —
+ * indexes lines the CommonMark parser counted under the same newline
+ * definition, so a second spelling would misalign the two) and by the segmentations the consumers run on the same bodies —
  * `compose-review`'s `collapseToLine` and `presubmit`'s carried-id read.
  * Carries the `g` flag; `.split()` clones the regex and `.match()` resets
  * `lastIndex`, so both are safe new call sites — an `.exec()`-style

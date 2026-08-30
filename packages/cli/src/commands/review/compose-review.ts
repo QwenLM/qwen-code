@@ -1552,7 +1552,8 @@ function formatCannotTell(
     // first — a leading space used to leak the marker past this strip into
     // the posted body), and the strip is iterative — a looping model drafts
     // stacked markers and a single slice posts the second one.
-    const source = quotedProse(raw, attribution);
+    // End on the one-line strip, for the reason bodyCriticalBlock states.
+    const source = stripReviewFooterLine(quotedProse(raw, attribution));
     const unmarked =
       severityOf({ body: source }) === null
         ? source
@@ -3028,7 +3029,7 @@ function ingestEntryList(value: unknown, field: string): string[] {
   // No emptiness filter: an entry that normalizes to nothing must reach
   // the renders-nothing gates and fail the draft, not vanish — see the
   // invariant at the gates below.
-  return raw.map(collapseEntry).map(stripReviewFooter);
+  return raw.map(collapseEntry).map(stripReviewFooterLine);
 }
 
 /**
@@ -5067,7 +5068,10 @@ function composeReviewBody(
   // together, until neither has work left (`quotedProse`).
   const bodyCriticalBlock: Bi[] = bodyCriticals
     .map((l) => {
-      const quoted = quotedProse(l, attribution);
+      // End on the one-line strip: the entry arrives collapsed, and the
+      // multi-line strip's blanking keeps a forged footer this leg's own
+      // comment-grammar neutralization exposes on an indented line.
+      const quoted = stripReviewFooterLine(quotedProse(l, attribution));
       return attribution ? withMarker(quoted) : quoted;
     })
     .map((l) => ({ keep: 2, en: l, zh: l }));
@@ -5088,7 +5092,11 @@ function composeReviewBody(
   // overflow item names what the cap cut.
   const duplicatesShown = suggestionsDroppedAsDuplicates
     .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
-    .map((entry) => asListLine(boundDeferredLine(entry), pr));
+    // Strip AFTER the fold — the collapsed line is the shape that posts,
+    // for the reason toDeferredEntries states.
+    .map((entry) =>
+      asListLine(stripReviewFooterLine(boundDeferredLine(entry)), pr),
+    );
   const duplicatesMore =
     suggestionsDroppedAsDuplicates.length - duplicatesShown.length;
   const duplicatesBlock: Bi[] =

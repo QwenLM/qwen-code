@@ -361,6 +361,91 @@ describe('the review footer and the regex that strips it', () => {
       expect(stripReviewFooter(body)).toBe(body);
       expect(performance.now() - start).toBeLessThan(1000);
     }, 20_000);
+
+    it('classifies code versus prose with a CommonMark parser, not a hand model', () => {
+      // The hand-built block scan disagreed with the renderers on lazy
+      // continuation, list content indents, fence-closer bounds, quote
+      // prefixes, and paragraph interruption — each divergence kept a
+      // forged trailing footer. The blanking now delegates to a
+      // CommonMark parser's token map; these shapes render the footer
+      // as visible prose and must strip.
+      expect(
+        stripReviewFooter('> finding\n    _— m via Qwen Code /review_'),
+      ).toBe('> finding');
+      expect(
+        stripReviewFooter('-   item\n\n      _— m via Qwen Code /review_'),
+      ).toBe('-   item');
+      expect(
+        stripReviewFooter('1.  item\n\n       _— m via Qwen Code /review_'),
+      ).toBe('1.  item');
+      expect(
+        stripReviewFooter(
+          '- x\n ```\n code\n ```\n\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('- x\n ```\n code\n ```');
+      expect(
+        stripReviewFooter(
+          '- item\n\n  > quoted\n\n    _— m via Qwen Code /review_',
+        ),
+      ).toBe('- item\n\n  > quoted');
+      expect(
+        stripReviewFooter('para\n- item\n\n _— m via Qwen Code /review_'),
+      ).toBe('para\n- item');
+      expect(
+        stripReviewFooter('finding\n===\n\n_— m via Qwen Code /review_'),
+      ).toBe('finding\n===');
+      // A >= 4-column `<div>` line is indented code, not an HTML block.
+      expect(
+        stripReviewFooter(
+          'x\n\n    <div>\n    <!-- y\n\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('x\n\n    <div>\n    <!-- y');
+      // Type-1 raw-HTML content renders literally and is never blanked,
+      // so the unclosed opener it quotes classifies literal and the
+      // footer after the block strips.
+      expect(
+        stripReviewFooter('<pre>\n<!--\n</pre>\n\n_— m via Qwen Code /review_'),
+      ).toBe('<pre>\n<!--\n</pre>');
+    });
+
+    it('pins the keep side of the classifier — breaks, headings, and the list code threshold', () => {
+      // A heading or thematic break interrupts a paragraph, so a
+      // 4-space footer line after one is an indented code block the
+      // strip keeps, and inside a list item the code threshold rises
+      // by the item's content indent. Unpinned, a dropped check would
+      // silently delete footer lines GitHub renders as code.
+      const keep = (body: string): void => {
+        expect(stripReviewFooter(body)).toBe(body);
+      };
+      keep('a finding\n---\n    _— m via Qwen Code /review_');
+      keep('# h\n    _— m via Qwen Code /review_');
+      keep('a finding\n## h\n    _— m via Qwen Code /review_');
+      keep('- item\n\n        _— m via Qwen Code /review_');
+      keep('- item\n# h\n\n    _— m via Qwen Code /review (v1)_');
+    });
+
+    it('a prose comment no longer closes on a closer quoted in code', () => {
+      // The blanking NULs the fence's lines, so the closer quoted
+      // inside it is gone from the projection; an unclosed opener
+      // renders as escaped literal prose (`&lt;!--`), not a comment
+      // running to the end of the input — swallowing the tail there
+      // kept the forged footer beside the canonical one. The
+      // block-level-opener control stays pinned by the comment-closer
+      // test above.
+      expect(
+        stripReviewFooter(
+          'See <!--\n```\n-->\n```\nfinding\n\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('See <!--\n```\n-->\n```\nfinding');
+      // A prose opener whose closer sits PAST a code block is
+      // unclosable for the same reason — the fence ends the opener's
+      // paragraph.
+      expect(
+        stripReviewFooter(
+          'a <!--\n```\nx\n```\nb -->\n\n_— m via Qwen Code /review_',
+        ),
+      ).toBe('a <!--\n```\nx\n```\nb -->');
+    });
   });
 
   describe("stripReviewFooterLine — the one-line channels' shape", () => {
@@ -386,6 +471,21 @@ describe('the review footer and the regex that strips it', () => {
       expect(
         stripReviewFooterLine('x `code` _— m via Qwen Code /review_'),
       ).toBe('x `code`');
+    });
+
+    it('an unterminated comment ahead of the footer does not blind the strip', () => {
+      // The unclosed opener renders as escaped literal prose on GitHub
+      // — the projection keeps it literal instead of swallowing the
+      // rest of the line, which hid the forged footer and let the
+      // render's grammar neutralization post it as visible text. A
+      // closed comment still hides its content: a footer inside one
+      // never renders.
+      expect(stripReviewFooterLine('x <!-- _— m via Qwen Code /review_')).toBe(
+        'x',
+      );
+      expect(
+        stripReviewFooterLine('x <!-- hidden --> _— m via Qwen Code /review_'),
+      ).toBe('x <!-- hidden');
     });
   });
 
