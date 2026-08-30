@@ -348,7 +348,7 @@ export class SessionShellDisabledError extends Error {
 
 /**
  * Thrown when a direct daemon shell command has no client id bound to the
- * addressed session. The bearer token authenticates the caller to the daemon;
+ * addressed session. Deployment policy authorizes the caller to the daemon;
  * this error means the caller has not proven ownership of the session.
  */
 export class SessionShellClientRequiredError extends Error {
