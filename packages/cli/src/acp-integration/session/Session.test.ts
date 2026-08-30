@@ -15700,6 +15700,243 @@ describe('Session', () => {
         expect(preservedJson).not.toContain('audio/wav');
       });
 
+      it('fail-closes staged tool media when cancelled during the tool-loop drain with the override surviving (R52-11 variant A)', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: [
+            { text: 'captured screen' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'STAGEDIMAGEPROBE==',
+              },
+            },
+          ],
+          returnDisplay: 'captured screen',
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'screenshot_tool',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: {},
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Capture screen'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        // The override RESOLVES and survives the drain: the recheck never
+        // runs, so the tool-loop abort gate is the abort exit and must
+        // fail-close the staged media itself (R52-11).
+        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+          resolveForModel: vi.fn().mockResolvedValue({
+            contentGenerator: {},
+            contentGeneratorConfig: {
+              model: 'vision-agent',
+              modalities: { image: true },
+            },
+            model: 'vision-agent',
+          }),
+        });
+        bridgeToolResultImagesSpy.mockImplementation(
+          async ({
+            responseParts,
+            onFullTurnModel: selectFullTurnModel,
+          }: {
+            responseParts: Part[];
+            onFullTurnModel?: (model: string) => boolean;
+          }) => {
+            selectFullTurnModel?.(
+              'vision-agent\0https://vision.example.com/v1\0',
+            );
+            return responseParts;
+          },
+        );
+        // Hang the tool-loop drain so the cancellation lands between the
+        // staging and the abort gate, then release it.
+        let releaseDrain!: () => void;
+        const drainGate = new Promise<void>((resolve) => {
+          releaseDrain = resolve;
+        });
+        let extCalls = 0;
+        mockClient.extMethod = vi.fn().mockImplementation(async () => {
+          extCalls += 1;
+          if (extCalls === 1) {
+            await drainGate;
+          }
+          return { items: [] };
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    { id: 'call-screen', name: 'screenshot_tool', args: {} },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          const prompt = session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'capture a screen' }],
+          });
+          await vi.waitFor(() => expect(extCalls).toBeGreaterThan(0));
+          await session.cancelPendingPrompt();
+          releaseDrain();
+          await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+        } finally {
+          releaseDrain();
+        }
+
+        const preservedUserEntries = vi
+          .mocked(mockChat.addHistory)
+          .mock.calls.map(([entry]) => entry)
+          .filter((entry) => (entry as { role?: string }).role === 'user');
+        expect(preservedUserEntries.length).toBeGreaterThan(0);
+        const preservedJson = JSON.stringify(preservedUserEntries);
+        expect(preservedJson).not.toContain('STAGEDIMAGEPROBE==');
+        expect(preservedJson).not.toContain('image/png');
+        expect(preservedJson).toContain('the turn was cancelled');
+      });
+
+      it('fail-closes staged tool media when cancelled during the second tool of a batch (R52-11 variant B)', async () => {
+        const screenshotExecute = vi.fn().mockResolvedValue({
+          llmContent: [
+            { text: 'captured screen' },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'STAGEDIMAGEPROBE==',
+              },
+            },
+          ],
+          returnDisplay: 'captured screen',
+        });
+        let releaseSlowTool!: () => void;
+        const slowToolGate = new Promise<void>((resolve) => {
+          releaseSlowTool = resolve;
+        });
+        const slowExecute = vi.fn().mockImplementation(async () => {
+          await slowToolGate;
+          return {
+            llmContent: [{ text: 'slow tool done' }],
+            returnDisplay: 'slow tool done',
+          };
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === 'slow_tool'
+            ? {
+                name: 'slow_tool',
+                kind: core.Kind.Read,
+                build: vi.fn().mockReturnValue({
+                  params: {},
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('Slow tool'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute: slowExecute,
+                }),
+              }
+            : {
+                name: 'screenshot_tool',
+                kind: core.Kind.Read,
+                build: vi.fn().mockReturnValue({
+                  params: {},
+                  getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                  getDescription: vi.fn().mockReturnValue('Capture screen'),
+                  toolLocations: vi.fn().mockReturnValue([]),
+                  execute: screenshotExecute,
+                }),
+              },
+        );
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+          resolveForModel: vi.fn().mockResolvedValue({
+            contentGenerator: {},
+            contentGeneratorConfig: {
+              model: 'vision-agent',
+              modalities: { image: true },
+            },
+            model: 'vision-agent',
+          }),
+        });
+        bridgeToolResultImagesSpy.mockImplementation(
+          async ({
+            responseParts,
+            onFullTurnModel: selectFullTurnModel,
+          }: {
+            responseParts: Part[];
+            onFullTurnModel?: (model: string) => boolean;
+          }) => {
+            selectFullTurnModel?.(
+              'vision-agent\0https://vision.example.com/v1\0',
+            );
+            return responseParts;
+          },
+        );
+        mockClient.extMethod = vi.fn().mockResolvedValue({ items: [] });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    { id: 'call-screen', name: 'screenshot_tool', args: {} },
+                    { id: 'call-slow', name: 'slow_tool', args: {} },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          const prompt = session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'capture and wait' }],
+          });
+          // Cancel while the SECOND tool is still running: the first tool's
+          // staged image is in toolRun.parts when the turn stops, and
+          // #preserveStoppedToolRun must fail-close it (R52-11).
+          await vi.waitFor(() => expect(slowExecute).toHaveBeenCalledTimes(1));
+          await session.cancelPendingPrompt();
+          releaseSlowTool();
+          await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+        } finally {
+          releaseSlowTool();
+        }
+
+        const preservedUserEntries = vi
+          .mocked(mockChat.addHistory)
+          .mock.calls.map(([entry]) => entry)
+          .filter((entry) => (entry as { role?: string }).role === 'user');
+        expect(preservedUserEntries.length).toBeGreaterThan(0);
+        const preservedJson = JSON.stringify(preservedUserEntries);
+        expect(preservedJson).not.toContain('STAGEDIMAGEPROBE==');
+        expect(preservedJson).not.toContain('image/png');
+        expect(preservedJson).toContain('the turn was cancelled');
+      });
+
       it('keeps mixed audio and image raw when the active full-turn model supports both', async () => {
         const inlineMediaLimit =
           process.env['QWEN_CODE_MAX_INLINE_MEDIA_BYTES'];

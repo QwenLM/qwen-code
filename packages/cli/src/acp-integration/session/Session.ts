@@ -7518,7 +7518,13 @@ export class Session implements SessionContext {
       {
         role: 'user',
         parts: [
-          ...toolRun.parts,
+          // On abort this is a persisting abort exit: fail-close the tool
+          // run's staged media so the saved history never carries unbridged
+          // inlineData (R52-11). The non-abort path preserves the parts
+          // unchanged — the send path owns bridging there.
+          ...(abortSignal.aborted
+            ? this.#failClosePartsForCancelledTurn(toolRun.parts)
+            : toolRun.parts),
           ...(toolRun.loopDetected
             ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
             : []),
@@ -7554,14 +7560,15 @@ export class Session implements SessionContext {
     // No abort gate here: a cancellation landing between the drain and the
     // recheck must not leak the raw staged parts into the preserved message —
     // the recheck's own abort branches fail close instead (R51-6).
-    const toolRunParts =
+    const recheckRan =
       modelOverrideBeforeDrain !== undefined &&
-      getModelOverride?.() === undefined
-        ? await this.#recheckPartsAfterModelOverrideFallback(
-            toolRun.parts,
-            abortSignal,
-          )
-        : toolRun.parts;
+      getModelOverride?.() === undefined;
+    const toolRunParts = recheckRan
+      ? await this.#recheckPartsAfterModelOverrideFallback(
+          toolRun.parts,
+          abortSignal,
+        )
+      : toolRun.parts;
     const hadMidTurnUserInput = drained.parts.length > 0;
     if (hadMidTurnUserInput) {
       this.todoStopGuard.acceptMidTurnUserInput();
@@ -7572,7 +7579,15 @@ export class Session implements SessionContext {
         message: {
           role: 'user',
           parts: [
-            ...toolRunParts,
+            // When the recheck ran, its own abort branches already fail-closed
+            // the parts (R51-6). Otherwise this gate is the abort exit and must
+            // fail-close the still-raw staged media itself (R52-11): a
+            // cancelled turn must never persist unbridged media, and an
+            // `interrupted_prompt` continuation re-sends these parts without
+            // re-bridging.
+            ...(recheckRan
+              ? toolRunParts
+              : this.#failClosePartsForCancelledTurn(toolRunParts)),
             ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
             ...drained.parts,
           ],
