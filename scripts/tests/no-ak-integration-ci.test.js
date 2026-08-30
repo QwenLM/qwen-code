@@ -237,9 +237,17 @@ describe('no-AK integration CI wiring', () => {
       gateJob,
       'Disk floor gate (self-hosted)',
     );
-    expect(diskFloorGate).toContain("runner.environment == 'self-hosted'");
     expect(diskFloorGate).toContain(
-      'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"',
+      "if: \"${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}\"",
+    );
+    expect(diskFloorGate).toContain(
+      'run: \'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"\'',
+    );
+    expect(diskFloorGate).not.toContain('continue-on-error');
+    expect(diskFloorGate).not.toContain('|| true');
+    expect(diskFloorGate).not.toContain('env:');
+    expect(gateJob.indexOf("id: 'ci_profile'")).toBeLessThan(
+      gateJob.indexOf("name: 'Disk floor gate (self-hosted)'"),
     );
     expect(
       gateJob.indexOf("name: 'Disk floor gate (self-hosted)'"),
