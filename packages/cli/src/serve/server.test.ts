@@ -770,6 +770,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'writer_idle_timeout',
   'non_blocking_prompt',
   'session_language',
+  'user_language_sync',
   'session_rewind',
   'workspace_hooks',
   'session_hooks',
@@ -3012,7 +3013,11 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'workspace_settings' || feature === 'workspace_voice') {
+        if (
+          feature === 'workspace_settings' ||
+          feature === 'workspace_voice' ||
+          feature === 'user_language_sync'
+        ) {
           expect(predicate({ persistSettingAvailable: true })).toBe(true);
           expect(predicate({ persistSettingAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
