@@ -1035,18 +1035,12 @@ export function createDaemonWorkspaceActions({
 
     async installAuthProvider(req) {
       const client = requireClient(getClient, 'Install auth provider failed');
-      return withActionTimeout(
-        client.installAuthProvider(req),
-        'Install auth provider timed out',
-      );
+      return client.installAuthProvider(req);
     },
 
     async deleteModel(target) {
       const client = requireClient(getClient, 'Delete model failed');
-      return withActionTimeout(
-        client.deleteModel(target),
-        'Delete model timed out',
-      );
+      return client.deleteModel(target);
     },
 
     async addWorkspace(cwd, options) {
