@@ -12292,30 +12292,33 @@ describe('createServeApp', () => {
       }
     });
 
-    it('400 when worktree slug is invalid', async () => {
-      const bridge = fakeBridge();
-      const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
-      mockWt.impl = () => ({
-        isGitRepository: () => Promise.resolve(true),
-      });
+    it.each(['../escape', 'agent-1234567'])(
+      '400 when worktree slug %s is invalid',
+      async (slug) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        mockWt.impl = () => ({
+          isGitRepository: () => Promise.resolve(true),
+        });
 
-      try {
-        const res = await request(app)
-          .post('/session')
-          .set('Host', `127.0.0.1:${baseOpts.port}`)
-          .send({ worktree: { slug: '../escape' } });
+        try {
+          const res = await request(app)
+            .post('/session')
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ worktree: { slug } });
 
-        expect(res.status).toBe(400);
-        expect(res.body.code).toBe('worktree_invalid_slug');
-        expect(bridge.calls).toHaveLength(0);
-      } finally {
-        mockWt.impl = undefined;
-      }
-    });
+          expect(res.status).toBe(400);
+          expect(res.body.code).toBe('worktree_invalid_slug');
+          expect(bridge.calls).toHaveLength(0);
+        } finally {
+          mockWt.impl = undefined;
+        }
+      },
+    );
 
     it('400 when worktree is not an object', async () => {
       const bridge = fakeBridge();
@@ -16800,7 +16803,9 @@ describe('createServeApp', () => {
         originalBranch: 'main',
         originalHeadCommit: 'abc123',
       }));
+      const readMarker = vi.fn(async () => sessionId);
       mockWt.readSidecar = readSidecar;
+      mockWt.readMarker = readMarker;
 
       try {
         const readOptions = { runtimeBaseDir: runtimeDir };
@@ -16838,6 +16843,7 @@ describe('createServeApp', () => {
         ]);
         expect(listSessionsSpy).toHaveBeenCalledTimes(1);
         expect(readSidecar).toHaveBeenCalledTimes(1);
+        expect(readMarker).toHaveBeenCalledTimes(1);
 
         sourced.sessions[0]!.worktree!.slug = 'request-local-change';
         await new qwenCore.SessionOrganizationService(
@@ -16865,6 +16871,56 @@ describe('createServeApp', () => {
       } finally {
         listSessionsSpy.mockRestore();
         mockWt.readSidecar = undefined;
+        mockWt.readMarker = undefined;
+      }
+    });
+
+    it('does not enrich a worktree sidecar owned by another session', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440011';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:30:00.000Z',
+        prompt: 'reowned worktree',
+        mtime: new Date('2026-05-17T12:30:00.000Z'),
+        sourceType: 'web_shell',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:30:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+      mockWt.readSidecar = async () => ({
+        slug: 'reowned',
+        worktreePath: `${WS_BOUND}/.qwen/worktrees/reowned`,
+        worktreeBranch: 'worktree-reowned',
+        originalCwd: WS_BOUND,
+        originalBranch: 'main',
+        originalHeadCommit: 'abc123',
+      });
+      mockWt.readMarker = async () => 'another-session';
+
+      try {
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          {},
+          { runtimeBaseDir: path.join(runtimeDir, 'reowned-list') },
+        );
+
+        expect(result.sessions).toEqual([
+          expect.objectContaining({ sessionId }),
+        ]);
+        expect(result.sessions[0]).not.toHaveProperty('worktree');
+      } finally {
+        mockWt.readSidecar = undefined;
+        mockWt.readMarker = undefined;
       }
     });
 
@@ -21468,6 +21524,41 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('branch_while_prompt_active');
+      expect(branchSession).not.toHaveBeenCalled();
+      expect(getSessionExecutionSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('rejects an ephemeral agent slug before preparing a worktree', async () => {
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-08-16T00:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      const branchSession = vi.fn();
+      bridge.branchSession = branchSession;
+      const getSessionExecutionSnapshot = vi.fn();
+      bridge.getSessionExecutionSnapshot = getSessionExecutionSnapshot;
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'branch-worktree-primary',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge,
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        workspaceRegistry: createWorkspaceRegistry([runtime]),
+      });
+
+      const res = await request(app)
+        .post('/session/session-A/branch')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ worktree: { slug: 'agent-1234567' } });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('worktree_invalid_slug');
       expect(branchSession).not.toHaveBeenCalled();
       expect(getSessionExecutionSnapshot).not.toHaveBeenCalled();
     });
@@ -36365,9 +36456,7 @@ describe('Live conversation runtime lifecycle', () => {
           workspaceCwd: setup.root.canonicalRoot,
         }),
       );
-      expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty(
-        'sourceType',
-      );
+      expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty('sourceType');
       expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty('sourceId');
     } finally {
       readCreationMetadataIfReadable.mockRestore();

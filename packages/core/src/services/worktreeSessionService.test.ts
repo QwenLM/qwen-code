@@ -273,7 +273,16 @@ describe('restoreWorktreeContext', () => {
       worktreePath: liveWorktree,
     };
     await writeWorktreeSession(filePath, live);
-    const result = await restoreWorktreeContext(filePath);
+    await fs.writeFile(
+      path.join(liveWorktree, '.qwen-session'),
+      'session-owner',
+      'utf8',
+    );
+    const result = await restoreWorktreeContext(
+      filePath,
+      undefined,
+      'session-owner',
+    );
 
     expect(result.session).toEqual(live);
     expect(result.contextMessage).toContain(`"${live.slug}"`);
@@ -281,6 +290,33 @@ describe('restoreWorktreeContext', () => {
     expect(result.contextMessage).toContain(live.worktreeBranch);
     // Sidecar should remain on disk so subsequent reads still see it.
     expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
+
+  it('rejects and clears a sidecar when the marker has another owner', async () => {
+    const liveCwd = path.join(tmpDir, 'repo');
+    const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'reowned');
+    await fs.mkdir(liveWorktree, { recursive: true });
+    const live: WorktreeSession = {
+      ...sample,
+      slug: 'reowned',
+      originalCwd: liveCwd,
+      worktreePath: liveWorktree,
+    };
+    await writeWorktreeSession(filePath, live);
+    await fs.writeFile(
+      path.join(liveWorktree, '.qwen-session'),
+      'new-owner',
+      'utf8',
+    );
+
+    const result = await restoreWorktreeContext(
+      filePath,
+      undefined,
+      'old-owner',
+    );
+
+    expect(result).toEqual({ contextMessage: null, session: null });
+    expect(await readWorktreeSession(filePath)).toBeNull();
   });
 
   it('rejects and clears a sidecar whose worktreePath escapes the managed subtree', async () => {

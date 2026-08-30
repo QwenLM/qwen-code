@@ -160,6 +160,11 @@ describe('BranchPickerPopover actions', () => {
       tags: [],
       recent: [],
     });
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/repo/.qwen/worktrees/test',
+      branch: 'worktree-test',
+    });
     mount({
       gitCwd: '/repo/.qwen/worktrees/test',
       gitSessionId: 'session-1',
@@ -170,6 +175,10 @@ describe('BranchPickerPopover actions', () => {
       '/repo/.qwen/worktrees/test',
       'session-1',
     );
+    expect(workspaceGit).toHaveBeenCalledWith({
+      cwd: '/repo/.qwen/worktrees/test',
+      sessionId: 'session-1',
+    });
   });
 
   it('binds worktree checkout mutations to the owning session', async () => {

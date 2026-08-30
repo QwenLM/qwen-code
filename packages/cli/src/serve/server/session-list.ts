@@ -10,6 +10,7 @@ import {
   SessionOrganizationError,
   Storage,
   readWorktreeSession,
+  readWorktreeSessionMarker,
   readSessionPrs,
   type SessionArchiveState,
   type SessionGroupPresetColor,
@@ -410,7 +411,10 @@ async function enrichWorktreeSidecars(
       signal?.throwIfAborted();
       sidecar = null;
     }
-    if (sidecar) {
+    if (
+      sidecar &&
+      (await readWorktreeSessionMarker(sidecar.worktreePath)) === sessionId
+    ) {
       bySessionId.set(sessionId, {
         ...summary,
         worktree: {

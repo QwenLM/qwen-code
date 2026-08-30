@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { Request, Response } from 'express';
-import { WORKTREE_SESSION_FILE } from '@qwen-code/qwen-code-core';
+import { gitEnv, WORKTREE_SESSION_FILE } from '@qwen-code/qwen-code-core';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
 import { parseCallerSuppliedSessionId } from '../config/session-id.js';
@@ -406,20 +406,13 @@ export function resolveContainedCwdOrFail(
   return null;
 }
 
-function pathIsWithin(candidate: string, root: string): boolean {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === '' ||
-    (!relative.startsWith('..') && !path.isAbsolute(relative))
-  );
-}
-
 function resolveGitCommonDir(cwd: string): string | null {
   try {
     const raw = execFileSync('git', ['rev-parse', '--git-common-dir'], {
       cwd,
       encoding: 'utf8',
       timeout: 30_000,
+      env: gitEnv(),
     }).trim();
     return fs.realpathSync(path.resolve(cwd, raw));
   } catch {
@@ -433,6 +426,7 @@ function resolveAbsoluteGitDir(cwd: string): string | null {
       cwd,
       encoding: 'utf8',
       timeout: 30_000,
+      env: gitEnv(),
     }).trim();
     return fs.realpathSync(raw);
   } catch {
@@ -514,6 +508,7 @@ export function resolveSessionManagedGitCwd(
         cwd: workspace,
         encoding: 'utf8',
         timeout: 30_000,
+        env: gitEnv(),
       }).trim(),
     );
   } catch (error) {
@@ -521,7 +516,7 @@ export function resolveSessionManagedGitCwd(
     if (
       typeof stderr === 'string' &&
       /not a git repository/i.test(stderr) &&
-      pathIsWithin(requested, workspace)
+      isWithinRoot(requested, workspace)
     ) {
       return requested;
     }
@@ -529,12 +524,12 @@ export function resolveSessionManagedGitCwd(
   }
   const managedRoot = path.join(repoTop, '.qwen', 'worktrees');
   if (
-    pathIsWithin(requested, workspace) &&
-    !pathIsWithin(requested, managedRoot)
+    isWithinRoot(requested, workspace) &&
+    !isWithinRoot(requested, managedRoot)
   ) {
     return requested;
   }
-  if (!pathIsWithin(requested, managedRoot)) return null;
+  if (!isWithinRoot(requested, managedRoot)) return null;
   const workspaceCommonDir = resolveGitCommonDir(workspace);
   const requestedCommonDir = resolveGitCommonDir(requested);
   if (
@@ -564,7 +559,7 @@ export function resolveSessionManagedGitCwd(
     const worktreeRoot = fs.realpathSync(snapshot.worktree.path);
     if (
       path.dirname(worktreeRoot) !== managedRoot ||
-      !pathIsWithin(requested, worktreeRoot)
+      !isWithinRoot(requested, worktreeRoot)
     ) {
       return null;
     }

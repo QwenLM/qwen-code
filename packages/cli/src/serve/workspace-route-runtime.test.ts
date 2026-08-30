@@ -248,6 +248,33 @@ describe('resolveSessionManagedGitCwd', () => {
       fs.realpathSync(nested),
     );
 
+    const decoy = fs.mkdtempSync(path.join(os.tmpdir(), 'git-env-decoy-'));
+    execFileSync('git', ['init', '-q'], { cwd: decoy });
+    const previousGitDir = process.env['GIT_DIR'];
+    const previousGitWorkTree = process.env['GIT_WORK_TREE'];
+    process.env['GIT_DIR'] = path.join(decoy, '.git');
+    process.env['GIT_WORK_TREE'] = decoy;
+    try {
+      expect(resolveSessionManagedGitCwd(owned, runtime)).toBe(
+        fs.realpathSync(worktree),
+      );
+      expect(
+        resolveSessionManagedGitCwd(
+          { query: { cwd: worktree } } as unknown as Request,
+          runtime,
+        ),
+      ).toBeNull();
+    } finally {
+      if (previousGitDir === undefined) delete process.env['GIT_DIR'];
+      else process.env['GIT_DIR'] = previousGitDir;
+      if (previousGitWorkTree === undefined) {
+        delete process.env['GIT_WORK_TREE'];
+      } else {
+        process.env['GIT_WORK_TREE'] = previousGitWorkTree;
+      }
+      fs.rmSync(decoy, { recursive: true, force: true });
+    }
+
     fs.writeFileSync(path.join(worktree, '.qwen-session'), 'x'.repeat(257));
     expect(resolveSessionManagedGitCwd(owned, runtime)).toBeNull();
     fs.writeFileSync(path.join(worktree, '.qwen-session'), sessionId);
@@ -446,6 +473,20 @@ describe('resolveSessionManagedGitCwd', () => {
       fs.rmSync(workspace, { recursive: true, force: true });
     }
   });
+
+  it.each(['...', '..cache'])(
+    'accepts a contained cwd under a %s directory',
+    (segment) => {
+      const nested = path.join(repo, segment, 'sub');
+      fs.mkdirSync(nested, { recursive: true });
+
+      expect(
+        resolveSessionManagedGitCwd(fakeReq(nested), {
+          workspaceCwd: repo,
+        } as unknown as WorkspaceRuntime),
+      ).toBe(fs.realpathSync(nested));
+    },
+  );
 });
 
 function makeRuntime(): WorkspaceRuntime {

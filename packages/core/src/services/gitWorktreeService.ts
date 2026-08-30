@@ -19,6 +19,7 @@ import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
+import { gitEnv } from '../utils/git-branches.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
@@ -73,7 +74,7 @@ export async function ensureWorktreeSessionMarkerExcluded(
   // `.git` naively.
   try {
     const { simpleGit } = await loadSimpleGit();
-    const wtGit = simpleGit(worktreePath);
+    const wtGit = simpleGit(worktreePath).env(gitEnv());
     const gitDir = (await wtGit.revparse(['--git-common-dir'])).trim();
     const excludePath = path.isAbsolute(gitDir)
       ? path.join(gitDir, 'info', 'exclude')

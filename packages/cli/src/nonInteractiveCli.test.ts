@@ -8168,6 +8168,11 @@ describe('runNonInteractive', () => {
         'worktree-real',
       );
       await fs.mkdir(worktreeDir, { recursive: true });
+      await fs.writeFile(
+        path.join(worktreeDir, '.qwen-session'),
+        'test-session-id',
+        'utf8',
+      );
       const sidecarPath = path.join(realTmpDir, 'sidecar.worktree.json');
       const sidecar = {
         slug: 'resume-test',

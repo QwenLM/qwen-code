@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   APPROVAL_MODES,
+  AGENT_WORKTREE_SLUG_PATTERN,
   BTW_MAX_INPUT_LENGTH,
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
@@ -3021,7 +3022,9 @@ export function registerSessionRoutes(
         } else {
           slug = rawSlug;
         }
-        const slugError = GitWorktreeService.validateUserWorktreeSlug(slug);
+        const slugError = AGENT_WORKTREE_SLUG_PATTERN.test(slug)
+          ? 'Worktree name is reserved for ephemeral agent worktrees.'
+          : GitWorktreeService.validateUserWorktreeSlug(slug);
         if (slugError) {
           res
             .status(400)
@@ -4141,7 +4144,9 @@ export function registerSessionRoutes(
             });
             return;
           }
-          const slugError = GitWorktreeService.validateUserWorktreeSlug(slug);
+          const slugError = AGENT_WORKTREE_SLUG_PATTERN.test(slug)
+            ? 'Worktree name is reserved for ephemeral agent worktrees.'
+            : GitWorktreeService.validateUserWorktreeSlug(slug);
           if (slugError) {
             res.status(400).json({
               error: slugError,

@@ -88,6 +88,34 @@ describe('strict worktree session markers', () => {
     await expect(readWorktreeSessionMarker(repo)).resolves.toBeNull();
     expect(await fs.readFile(target, 'utf8')).toBe('session-a');
   });
+
+  it('writes the exclude rule to the owning repo despite inherited git env', async () => {
+    const decoy = await fs.mkdtemp(path.join(os.tmpdir(), 'git-env-decoy-'));
+    execFileSync('git', ['init', '-q'], { cwd: decoy });
+    const previousGitDir = process.env['GIT_DIR'];
+    const previousGitWorkTree = process.env['GIT_WORK_TREE'];
+    process.env['GIT_DIR'] = path.join(decoy, '.git');
+    process.env['GIT_WORK_TREE'] = decoy;
+    try {
+      await createWorktreeSessionMarker(repo, 'session-a');
+    } finally {
+      if (previousGitDir === undefined) delete process.env['GIT_DIR'];
+      else process.env['GIT_DIR'] = previousGitDir;
+      if (previousGitWorkTree === undefined) {
+        delete process.env['GIT_WORK_TREE'];
+      } else {
+        process.env['GIT_WORK_TREE'] = previousGitWorkTree;
+      }
+    }
+
+    await expect(
+      fs.readFile(path.join(repo, '.git', 'info', 'exclude'), 'utf8'),
+    ).resolves.toContain('/.qwen-session');
+    await expect(
+      fs.readFile(path.join(decoy, '.git', 'info', 'exclude'), 'utf8'),
+    ).resolves.not.toContain('/.qwen-session');
+    await fs.rm(decoy, { recursive: true, force: true });
+  });
 });
 
 describe('prepared worktree cleanup', () => {

@@ -12,6 +12,7 @@ import { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
+import { readWorktreeSessionMarker } from './gitWorktreeService.js';
 
 const RUNTIME_STATUS_SCAN_MAX_DIRS = 5000;
 const WORKTREE_SESSION_MAX_BYTES = 64 * 1024;
@@ -503,7 +504,7 @@ export interface WorktreeRestoreResult {
  * - returns a context message + the live session, or
  * - deletes the stale sidecar and returns nulls.
  *
- * Three "stale" cases produce sidecar cleanup so future `--resume` calls
+ * Four "stale" cases produce sidecar cleanup so future `--resume` calls
  * don't keep tripping on the same broken state:
  * 1. ENOENT-followed-by-malformed-JSON (handled inside readWorktreeSession,
  *    which returns null without throwing for parse errors).
@@ -511,6 +512,7 @@ export interface WorktreeRestoreResult {
  * 3. The sidecar exists but `readWorktreeSession` threw a non-ENOENT I/O
  *    error (e.g. permission, EIO) — we still attempt cleanup so the next
  *    resume isn't stuck reading the same broken file.
+ * 4. The worktree marker is missing or no longer names the resumed session.
  *
  * Shared by TUI / headless / ACP entry points so all three behave
  * consistently on `--resume`. Failures are logged via the supplied
@@ -520,6 +522,7 @@ export interface WorktreeRestoreResult {
 export async function restoreWorktreeContext(
   sidecarPath: string,
   onWarn?: (error: unknown) => void,
+  expectedSessionId?: string,
 ): Promise<WorktreeRestoreResult> {
   let session: WorktreeSession | null = null;
   try {
@@ -594,6 +597,24 @@ export async function restoreWorktreeContext(
       onWarn?.(error);
     }
     return { contextMessage: null, session: null };
+  }
+
+  if (expectedSessionId !== undefined) {
+    const markerOwner = await readWorktreeSessionMarker(session.worktreePath);
+    if (markerOwner !== expectedSessionId) {
+      onWarn?.(
+        new Error(
+          `Worktree marker owner ${markerOwner ?? '(missing)'} does not match ` +
+            `session ${expectedSessionId}; clearing stale sidecar.`,
+        ),
+      );
+      try {
+        await clearWorktreeSession(sidecarPath);
+      } catch (error) {
+        onWarn?.(error);
+      }
+      return { contextMessage: null, session: null };
+    }
   }
 
   return {

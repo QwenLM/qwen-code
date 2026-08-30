@@ -305,7 +305,7 @@ export function BranchPickerPopover({
       // Mirrors the app-level poll: a worktree `?cwd=` read always computes
       // directly, so `wait` only matters for the workspace root.
       const fresh = await ws.workspaceGit(
-        gitCwd ? { cwd: gitCwd } : { wait: true },
+        gitCwd ? { cwd: gitCwd, sessionId: gitSessionId } : { wait: true },
       );
       if (requestId !== statusRequestIdRef.current) return;
       setLiveStatus(fresh);
@@ -313,7 +313,7 @@ export function BranchPickerPopover({
     } catch {
       // Keep whatever the caller passed; the hints degrade to the listing.
     }
-  }, [ws, gitCwd]);
+  }, [ws, gitCwd, gitSessionId]);
 
   // A status fetched for a previous workspace must not seed the next one.
   useEffect(() => {

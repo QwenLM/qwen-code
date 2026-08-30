@@ -13,6 +13,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
   GitWorktreeService,
+  gitEnv,
   WORKTREE_SESSION_FILE,
   clearWorktreeSessionDurable,
   readWorktreeSession,
@@ -21,6 +22,7 @@ import {
   type SessionService,
 } from '@qwen-code/qwen-code-core';
 import type { BridgeSessionExecutionSnapshot } from '@qwen-code/acp-bridge/bridgeTypes';
+import { isWithinRoot } from '../config/path-comparison.js';
 import { getHeadCommit } from './server/git-branch-ops.js';
 
 const execFileAsync = promisify(execFile);
@@ -622,20 +624,17 @@ export function recoverBranchWorktreePreparations(args: {
   return recovery;
 }
 
-function isWithinRoot(candidate: string, root: string): boolean {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === '' ||
-    (!relative.startsWith('..') && !path.isAbsolute(relative))
-  );
-}
-
 async function resolveGitCommonDir(cwd: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
       'git',
       ['rev-parse', '--git-common-dir'],
-      { cwd, timeout: 30_000, maxBuffer: 1024 * 1024 },
+      {
+        cwd,
+        timeout: 30_000,
+        maxBuffer: 1024 * 1024,
+        env: gitEnv(),
+      },
     );
     return await fs.realpath(path.resolve(cwd, stdout.trim()));
   } catch {
@@ -743,6 +742,7 @@ export async function isBranchWorktreeCreationSupported(
         cwd: base.checkoutCwd,
         timeout: 30_000,
         maxBuffer: 1024 * 1024,
+        env: gitEnv(),
       }),
       execFileAsync(
         'git',
@@ -758,6 +758,7 @@ export async function isBranchWorktreeCreationSupported(
           cwd: base.checkoutCwd,
           timeout: 30_000,
           maxBuffer: 1024 * 1024,
+          env: gitEnv(),
         },
       ),
     ]);
