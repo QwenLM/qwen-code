@@ -226,6 +226,21 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     [isPending, toolCalls],
   );
 
+  // `ui.showToolCallArgs` may only tear down the compact partition when this
+  // group can actually pay for it with an args row. Daemon-built groups never
+  // carry args across the boundary (see `daemon-tui-adapter.ts`), so gating on
+  // the raw setting alone would expand every `Read 3 files` fold on an attached
+  // session and render zero args — a noisier transcript that reads as "these
+  // tools were called with no arguments".
+  const hasRenderableToolCallArgs = useMemo(
+    () =>
+      showToolCallArgs &&
+      inlineToolCalls.some(
+        (t) => t.args != null && Object.keys(t.args).length > 0,
+      ),
+    [showToolCallArgs, inlineToolCalls],
+  );
+
   // Determine which subagent tools currently have a pending confirmation.
   // Must be called unconditionally (Rules of Hooks) — before any early return.
   const subagentsAwaitingApproval = useMemo(
@@ -339,10 +354,13 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // Memory-only groups get their own compact rendering with read/write
   // counts. Check BEFORE the partition logic so they aren't routed through
   // the collapsible/non-collapsible split. Skipped in full-detail
-  // mode (fullDetail) so each memory op renders as its own full ToolMessage
-  // rather than collapsing to the "Recalled/Wrote N memories" badge.
+  // mode (fullDetail), and under `ui.showToolCallArgs`, so each memory op
+  // renders as its own full ToolMessage — otherwise "Wrote 1 memory" would
+  // hide the very parameters the setting exists to surface — rather than
+  // collapsing to the "Recalled/Wrote N memories" badge.
   const allMemOpsComplete =
     !fullDetail &&
+    !hasRenderableToolCallArgs &&
     isMemoryOnlyGroup &&
     !hasErrorTool &&
     toolCalls.every((t) => t.status === ToolCallStatus.Success);
@@ -381,7 +399,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
   const forceExpandAll =
     fullDetail ||
-    showToolCallArgs ||
+    hasRenderableToolCallArgs ||
     hasConfirmingTool ||
     hasSubagentPendingConfirmation ||
     hasErrorTool ||

@@ -466,7 +466,7 @@
           "default": true
         },
         "showToolCallArgs": {
-          "description": "Render every tool call on its own line with its full raw arguments inline, instead of the type-based compact summary that folds read/search/list batches into \"Read 3 files\". Useful when debugging MCP integrations or tool schemas. Does not change result-output truncation — press Ctrl+O for that.",
+          "description": "Render tool calls on their own line with their full raw arguments inline, instead of the type-based compact summary that folds read/search/list batches into \"Read 3 files\". Useful when debugging MCP integrations or tool schemas. Applies wherever the arguments are available: live, resumed, agent-view and speculated turns. Groups of running parallel subagents keep their compact roster, and daemon-attached sessions carry no arguments, so both keep the compact view — press Ctrl+O there. Does not change result-output truncation.",
           "type": "boolean",
           "default": false
         },

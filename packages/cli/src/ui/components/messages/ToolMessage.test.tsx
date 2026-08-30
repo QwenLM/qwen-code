@@ -8,6 +8,7 @@ import React from 'react';
 import { render } from 'ink-testing-library';
 import type { ToolMessageProps } from './ToolMessage.js';
 import { formatInlineToolArgs, ToolMessage } from './ToolMessage.js';
+import { toggleKeyHint } from './ConversationMessages.js';
 import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
@@ -2056,26 +2057,37 @@ describe('ToolMessage inline tool-call arguments (ui.showToolCallArgs)', () => {
       expect(formatInlineToolArgs({ a: 1 }, '{"a":2}', false)).toBe('{"a":1}');
     });
 
-    it('caps long args and reports the hidden character count', () => {
-      const long = formatInlineToolArgs(
-        { content: 'x'.repeat(5000) },
-        'file.txt',
-        false,
+    it('caps long args at exactly 1000 chars and reports the hidden count', () => {
+      // Pinned against the JSON.stringify oracle with the cap as a literal:
+      // docs/users/configuration/settings.md promises "capped at 1000
+      // characters inline", so a drifting cap or a corrupted `+N chars`
+      // counter must turn this red rather than ship green.
+      const args = { content: 'x'.repeat(5000) };
+      const json = JSON.stringify(args);
+      expect(formatInlineToolArgs(args, 'file.txt', false)).toBe(
+        `${json.slice(0, 1000)}… +${json.length - 1000} chars (${toggleKeyHint})`,
       );
-      expect(long).toBeDefined();
-      expect(long).toContain('chars (ctrl+o)');
-      expect(long!.length).toBeLessThan(1100);
     });
 
     it('lifts the cap in full-detail mode', () => {
-      const long = formatInlineToolArgs(
-        { content: 'x'.repeat(5000) },
-        'file.txt',
-        true,
+      const args = { content: 'x'.repeat(5000) };
+      expect(formatInlineToolArgs(args, 'file.txt', true)).toBe(
+        JSON.stringify(args),
       );
-      expect(long).toBeDefined();
-      expect(long).not.toContain('chars (ctrl+o)');
-      expect(long!.length).toBeGreaterThan(5000);
+    });
+
+    it('strips bidi override characters from the rendered args', () => {
+      // Trojan Source (CVE-2021-42572): JSON.stringify escapes C0 controls but
+      // leaves U+202E alone, which would visually reorder the very payload
+      // this row exists to expose.
+      const out = formatInlineToolArgs(
+        { file_path: 'report\u202egpj.exe' },
+        'report',
+        false,
+      );
+      expect(out).toBeDefined();
+      expect(out).not.toMatch(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+      expect(out).toContain('file_path');
     });
 
     it('returns undefined for unserializable args instead of throwing', () => {

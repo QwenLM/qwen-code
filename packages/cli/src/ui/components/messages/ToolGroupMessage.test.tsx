@@ -146,9 +146,24 @@ describe('<ToolGroupMessage />', () => {
 
   describe('ui.showToolCallArgs', () => {
     const readBatch = [
-      createToolCall({ callId: 'r1', name: 'ReadFile', description: 'a.ts' }),
-      createToolCall({ callId: 'r2', name: 'ReadFile', description: 'b.ts' }),
-      createToolCall({ callId: 'g1', name: 'Grep', description: 'pattern' }),
+      createToolCall({
+        callId: 'r1',
+        name: 'ReadFile',
+        description: 'a.ts',
+        args: { absolute_path: 'a.ts' },
+      }),
+      createToolCall({
+        callId: 'r2',
+        name: 'ReadFile',
+        description: 'b.ts',
+        args: { absolute_path: 'b.ts' },
+      }),
+      createToolCall({
+        callId: 'g1',
+        name: 'Grep',
+        description: 'pattern',
+        args: { pattern: 'pattern' },
+      }),
     ];
 
     it('keeps the compact partition summary when the setting is off', () => {
@@ -195,6 +210,72 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       expect(lastFrame() ?? '').not.toContain('[forceShow]');
+    });
+
+    it('keeps the compact partition when no tool carries args (daemon path)', () => {
+      // Daemon-built groups never carry args across the boundary. Expanding
+      // them would give a noisier transcript and zero args rows, reading as
+      // "these tools were called with no arguments".
+      const daemonShaped = readBatch.map(({ args: _args, ...rest }) => rest);
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage {...baseProps} toolCalls={daemonShaped} />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('read a.ts, b.ts');
+      expect(frame).not.toContain('MockTool');
+    });
+
+    it('treats an empty args object as nothing to render', () => {
+      const emptyArgs = readBatch.map((t) => ({ ...t, args: {} }));
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage {...baseProps} toolCalls={emptyArgs} />,
+      );
+      expect(lastFrame() ?? '').toContain('read a.ts, b.ts');
+    });
+
+    it('expands a memory-only group instead of collapsing to the badge', () => {
+      // "Wrote 1 memory" would hide the very parameters the setting exists to
+      // surface.
+      const memoryOps = [
+        createToolCall({
+          callId: 'm1',
+          name: 'WriteFile',
+          description: 'QWEN.md',
+          args: { file_path: 'QWEN.md', content: 'remember this' },
+          isMemoryOp: 'write',
+        }),
+      ];
+      const { lastFrame } = renderWithToolCallArgs(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={120}
+          toolCalls={memoryOps}
+          memoryWriteCount={1}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('MockTool[m1]');
+      expect(frame).not.toContain('Wrote 1 memory');
+    });
+
+    it('keeps the memory badge when the setting is off', () => {
+      const memoryOps = [
+        createToolCall({
+          callId: 'm1',
+          name: 'WriteFile',
+          description: 'QWEN.md',
+          args: { file_path: 'QWEN.md' },
+          isMemoryOp: 'write',
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={memoryOps}
+          memoryWriteCount={1}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('Wrote 1 memory');
     });
 
     it('renders without a SettingsProvider (defaults to off)', () => {

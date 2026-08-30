@@ -3009,6 +3009,10 @@ export const AppContainer = (props: AppContainerProps) => {
                           Object.entries(args)
                             .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
                             .join(', ') || name,
+                        // Carried like the live and resume builders so
+                        // `ui.showToolCallArgs` renders the args row for an
+                        // accepted speculation too.
+                        args,
                         resultDisplay: speculativeResult.text.slice(0, 500),
                         status: speculativeResult.status,
                         confirmationDetails: undefined,

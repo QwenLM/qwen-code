@@ -53,6 +53,7 @@ import {
   toCodePoints,
 } from '../../utils/textUtils.js';
 import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
+import { toggleKeyHint } from './ConversationMessages.js';
 
 import {
   ToolStatusIndicator,
@@ -1101,9 +1102,17 @@ const TOOL_ARGS_INLINE_MAX_CHARS = 1000;
  * `safeJsonStringify(params)` from `getDescription()`, so rendering both would
  * print the same payload twice.
  *
- * `JSON.stringify` escapes control characters inside string values as
- * `\uXXXX`, so the result cannot smuggle terminal escapes even before
- * `escapeAnsiCtrlCodes` runs over the whole history item.
+ * The result is model- and MCP-controlled text, so it goes through the same
+ * `sanitizeTerminalText` pipeline as the other untrusted renders in this
+ * component (`detailedDisplay`, the vision-bridge notice). `JSON.stringify`
+ * escapes C0 controls and `escapeAnsiCtrlCodes` neutralizes ESC-prefixed
+ * sequences, but neither touches Unicode bidi overrides — which would let a
+ * malicious arg visually reorder the very payload this row exists to expose
+ * (Trojan Source, CVE-2021-42572).
+ *
+ * Sanitization runs last, on the returned string: the dedup comparison and the
+ * `+N chars` accounting below both read the raw `json`, so the hidden-character
+ * count stays honest about the actual arguments.
  */
 export function formatInlineToolArgs(
   args: Record<string, unknown> | undefined,
@@ -1139,9 +1148,11 @@ export function formatInlineToolArgs(
 
   if (!uncapped && json.length > TOOL_ARGS_INLINE_MAX_CHARS) {
     const hidden = json.length - TOOL_ARGS_INLINE_MAX_CHARS;
-    return `${json.slice(0, TOOL_ARGS_INLINE_MAX_CHARS)}… +${hidden} chars (ctrl+o)`;
+    return sanitizeTerminalText(
+      `${json.slice(0, TOOL_ARGS_INLINE_MAX_CHARS)}… +${hidden} chars (${toggleKeyHint})`,
+    );
   }
-  return json;
+  return sanitizeTerminalText(json);
 }
 
 function isDescriptionRepeatedInPrompt(
