@@ -197,18 +197,31 @@ jobs:
           PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
         run: |-
           can_trust=false
+          reason='not a pull_request event'
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
             if [[ "${SAME_REPO}" == "true" ]]; then
               can_trust=true
-            elif [[ -n "${PR_AUTHOR}" ]]; then
+              reason='same-repo PR'
+            elif [[ -z "${PR_AUTHOR}" ]]; then
+              reason='PR author missing from the event payload'
+            else
               permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" --jq '.permission' 2>/dev/null || true)"
               case "${permission}" in
-                admin|maintain|write) can_trust=true ;;
+                admin|maintain|write)
+                  can_trust=true
+                  reason="base repo permission '${permission}'"
+                  ;;
+                '')
+                  reason='permission lookup returned nothing (API error or not a collaborator)'
+                  ;;
+                *)
+                  reason="base repo permission '${permission}' is below write"
+                  ;;
               esac
             fi
           fi
           echo "can_trust_pr_classifier=${can_trust}" >> "${GITHUB_OUTPUT}"
-          echo "PR classifier trusted: ${can_trust}"
+          echo "PR classifier trusted: ${can_trust} (${reason})"
 
   #
   # Test: Node

@@ -49,7 +49,8 @@ function runClassifierTrust(step, { sameRepo, permission, apiFails = false }) {
     );
     chmodSync(gh, 0o755);
     writeFileSync(output, '');
-    execFileSync('bash', ['-c', script], {
+    const stdout = execFileSync('bash', ['-c', script], {
+      encoding: 'utf8',
       env: {
         ...process.env,
         PATH: `${dir}:${process.env.PATH ?? ''}`,
@@ -62,7 +63,10 @@ function runClassifierTrust(step, { sameRepo, permission, apiFails = false }) {
         GH_STUB_FAIL: String(apiFails),
       },
     });
-    return readFileSync(output, 'utf8').trim();
+    return {
+      output: readFileSync(output, 'utf8').trim(),
+      stdout,
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -90,21 +94,72 @@ describe('no-AK integration CI wiring', () => {
           sameRepo: true,
           permission: '',
           apiFails: true,
-        }),
+        }).output,
       ).toBe('can_trust_pr_classifier=true');
       expect(
-        runClassifierTrust(step, { sameRepo: false, permission: 'write' }),
+        runClassifierTrust(step, { sameRepo: false, permission: 'write' })
+          .output,
       ).toBe('can_trust_pr_classifier=true');
       expect(
-        runClassifierTrust(step, { sameRepo: false, permission: 'read' }),
+        runClassifierTrust(step, { sameRepo: false, permission: 'read' })
+          .output,
       ).toBe('can_trust_pr_classifier=false');
       expect(
         runClassifierTrust(step, {
           sameRepo: false,
           permission: '',
           apiFails: true,
-        }),
+        }).output,
       ).toBe('can_trust_pr_classifier=false');
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'logs the reason behind the classifier trust verdict',
+    () => {
+      // A lookup failure, a below-write permission, and a granted write
+      // used to print the identical trusted true/false line, so a real API
+      // outage was indistinguishable from an actual permission decision.
+      const workflow = readFileSync(
+        path.join(ROOT, '.github/workflows/ci.yml'),
+        'utf8',
+      );
+      const step = getWorkflowStep(
+        getWorkflowJob(workflow, 'classify_pr'),
+        'Determine classifier trust',
+      );
+
+      const trusted = runClassifierTrust(step, {
+        sameRepo: true,
+        permission: '',
+        apiFails: true,
+      });
+      expect(trusted.stdout).toContain('PR classifier trusted: true');
+      expect(trusted.stdout).toContain('same-repo');
+
+      const deniedApi = runClassifierTrust(step, {
+        sameRepo: false,
+        permission: '',
+        apiFails: true,
+      });
+      const deniedRead = runClassifierTrust(step, {
+        sameRepo: false,
+        permission: 'read',
+      });
+      const granted = runClassifierTrust(step, {
+        sameRepo: false,
+        permission: 'write',
+      });
+
+      expect(deniedApi.stdout).toContain('PR classifier trusted: false');
+      expect(deniedRead.stdout).toContain('PR classifier trusted: false');
+      expect(granted.stdout).toContain('PR classifier trusted: true');
+      expect(granted.stdout).toContain('write');
+      expect(deniedRead.stdout).toContain('read');
+      // The two denials must stay distinguishable: an API outage (empty
+      // permission) and a real below-write permission are different
+      // remedies, and the verdict line alone cannot tell them apart.
+      expect(deniedApi.stdout).not.toBe(deniedRead.stdout);
     },
   );
 
