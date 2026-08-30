@@ -235,7 +235,22 @@ jobs:
           if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
             npx cross-env QWEN_SANDBOX=docker vitest run --root ./integration-tests --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
           else
-            npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
+            run_shard() {
+              npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
+            }
+            # One bounded retry: pool runners' sandbox:none shards die under
+            # shared-host pressure with every test green and no vitest FAIL
+            # line — runs 33293739505, 33302550436 and 33317457036 failed
+            # this leg on three different hosts while sibling shards of the
+            # same runs passed, and the shard passes on re-run. The same
+            # transient class the sandbox-image build retry above covers
+            # (#10355). A deterministic test failure fails both attempts and
+            # keeps the shard red. The docker leg keeps no retry: two ~30min
+            # attempts would outrun the job's timeout-minutes.
+            run_shard || {
+              echo "::warning::sandbox:none shard failed on ${RUNNER_NAME:-this runner}; retrying once (transient shared-host pressure class)"
+              run_shard
+            }
           fi
 
       # The sandbox build retags the same image name every run, so on a

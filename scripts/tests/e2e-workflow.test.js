@@ -87,6 +87,38 @@ describe('e2e workflow', () => {
     });
   });
 
+  describe('sandbox:none shard retry', () => {
+    // Runs 33293739505, 33302550436 and 33317457036 each failed the
+    // sandbox:none leg at the 'Run E2E tests' step with zero vitest FAIL
+    // lines — an all-green shard exiting red under shared-host pressure,
+    // with sibling shards of the same runs green and the shard green on
+    // re-run. The bounded retry absorbs one such transient death; a
+    // deterministic test failure fails both attempts and keeps the job red.
+    const runStep = yml.jobs['e2e-test-linux'].steps.find(
+      (step) => step.name === 'Run E2E tests',
+    );
+
+    it('wraps the sandbox:none shard command in a retryable function', () => {
+      expect(runStep.run).toContain('run_shard() {');
+      expect(runStep.run).toContain('npm run test:integration:sandbox:none');
+    });
+
+    it('retries the sandbox:none shard exactly once', () => {
+      expect(runStep.run).toContain('run_shard || {');
+      // Definition + first attempt + one retry: the second attempt's exit
+      // status is the step's, and a third attempt would burn pool time for
+      // nothing.
+      expect(runStep.run.match(/run_shard/g)).toHaveLength(3);
+    });
+
+    it('does not retry the docker leg', () => {
+      // Two ~30min docker attempts would outrun the job's timeout-minutes.
+      expect(runStep.run.match(/QWEN_SANDBOX=docker vitest run/g)).toHaveLength(
+        1,
+      );
+    });
+  });
+
   it('routes Linux E2E scratch files away from /tmp', () => {
     const runStep = yml.jobs['e2e-test-linux'].steps.find(
       (step) => step.name === 'Run E2E tests',
