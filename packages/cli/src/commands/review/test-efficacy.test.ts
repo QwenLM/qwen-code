@@ -716,6 +716,40 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
+  it('flattens control characters in the filter key it names', () => {
+    // A config subsection name legally carries control and format characters,
+    // and `--get-regexp` prints them verbatim. These detail strings reach the
+    // agent-facing report through JSON.stringify, which escapes Cc but NOT Cf
+    // (bidi overrides), Zl/Zp, or backticks — so the flattening has to happen
+    // here, through the same helper scratch-tree already uses.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-inert-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      asCheckout(dir);
+      // ESC (Cc) and a right-to-left override (Cf) inside the subsection name.
+      execFileSync(
+        'git',
+        ['config', 'filter.ev\u001bil\u202eX.smudge', 'cat'],
+        { cwd: dir },
+      );
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.ev il X.smudge');
+      expect(r.detail).not.toContain('\u001b');
+      expect(r.detail).not.toContain('\u202e');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses when git cannot PARSE a candidate config — not "clean"', () => {
     // The readability gate above answers "can this process open it"; this is
     // the other half — a file that opens fine and that git then dies on. A
