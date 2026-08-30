@@ -230,6 +230,7 @@ function runHostingBlockIn(
   mkdirSync(runnerTemp, { recursive: true });
   mkdirSync(stage, { recursive: true });
   mkdirSync(join(work, 'scripts'), { recursive: true });
+  writeFileSync(join(work, 'package.json'), '{"type":"commonjs"}\n');
   // The block installs its job-private ossutil copy from here; the stub
   // uploader never executes it, but the install must succeed.
   writeFileSync(join(runnerTemp, 'ossutil'), 'fake ossutil\n');
