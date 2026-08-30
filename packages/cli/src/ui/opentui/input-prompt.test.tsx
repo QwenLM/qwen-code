@@ -33,6 +33,7 @@ import {
 
 interface FakeEditor {
   plainText: string;
+  cursorOffset: number;
   deleteCharBackwardCalls: number;
   deleteWordBackwardCalls: number;
   newLineCalls: number;
