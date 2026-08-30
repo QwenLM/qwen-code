@@ -340,26 +340,35 @@ export function redactStructuredOutputArgsForRecording(
 
 /** Join fragments of one thought block without collapsing signed blocks. */
 function buildThoughtContentParts(parts: readonly Part[]): Part[] {
-  const thoughtParts = parts.filter((part) => part.thought);
-  const signedThoughtParts = thoughtParts.filter(
-    (part) => part.thoughtSignature,
-  );
-  if (signedThoughtParts.length > 1) {
-    return thoughtParts.map((part) => ({ ...part }));
+  const result: Part[] = [];
+  let text = '';
+  let signature = '';
+  const flush = () => {
+    const thoughtText = signature ? text : text.trim();
+    if (thoughtText) {
+      const thoughtPart: Part = { text: thoughtText, thought: true };
+      if (signature) {
+        thoughtPart.thoughtSignature = signature;
+      }
+      result.push(thoughtPart);
+    }
+    text = '';
+    signature = '';
+  };
+
+  for (const part of parts) {
+    if (!part.thought) continue;
+    const partText = typeof part.text === 'string' ? part.text : '';
+    if (partText && signature) {
+      flush();
+    }
+    text += partText;
+    if (part.thoughtSignature) {
+      signature += part.thoughtSignature;
+    }
   }
-  const texts = thoughtParts.map((part) =>
-    typeof part.text === 'string' ? part.text : '',
-  );
-  const thoughtText = texts.join('').trim();
-  if (thoughtText === '') {
-    return [];
-  }
-  const thoughtPart: Part = { text: thoughtText, thought: true };
-  const thoughtSignature = signedThoughtParts[0]?.thoughtSignature;
-  if (thoughtSignature) {
-    thoughtPart.thoughtSignature = thoughtSignature;
-  }
-  return [thoughtPart];
+  flush();
+  return result;
 }
 
 /**
@@ -5973,14 +5982,14 @@ export class LlmChat {
     let streamError: unknown = null;
     const streamIterator = streamResponse[Symbol.asyncIterator]();
     let streamFinished = false;
-    let recoveryTerminalObserved = false;
+    let withheldTerminalObserved = false;
     let terminalDrainTimedOut = false;
     let terminalDrainTimeout: ReturnType<typeof delay> | undefined;
 
     try {
       for (;;) {
         let next: IteratorResult<GenerateContentResponse>;
-        if (recoveryTerminalObserved) {
+        if (withheldTerminalObserved) {
           terminalDrainTimeout ??= delay(TERMINAL_CHUNK_DRAIN_TIMEOUT_MS);
           const nextPromise = streamIterator.next();
           const outcome = await Promise.race([
@@ -6227,7 +6236,10 @@ export class LlmChat {
           (recordDeferral === 'always' ||
             (recordDeferral === 'on-max-tokens' &&
               observedTerminalFinishReason === FinishReason.MAX_TOKENS));
-        recoveryTerminalObserved ||= observedOwnedTerminal;
+        withheldTerminalObserved ||=
+          observedOwnedTerminal ||
+          (isToolResultContinuation &&
+            observedTerminalFinishReason !== undefined);
         if (isToolResultContinuation) {
           // Do not let consumers commit Finished before post-stream validation
           // can reject a semantically empty continuation.

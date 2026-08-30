@@ -3338,7 +3338,7 @@ describe('LlmChat', async () => {
       }
     });
 
-    it('yields a user-capped tool-result terminal chunk without a drain stall', async () => {
+    it('bounds a user-capped tool-result terminal drain', async () => {
       vi.useFakeTimers();
       try {
         vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
@@ -3361,19 +3361,32 @@ describe('LlmChat', async () => {
             ],
           },
         ]);
-        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        let providerClosed = false;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async (request) =>
           (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ thought: true, text: 'I need more tokens.' }],
+            try {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Truncated result' }],
+                    },
+                    finishReason: 'MAX_TOKENS',
                   },
-                  finishReason: 'MAX_TOKENS',
-                },
-              ],
-            } as GenerateContentResponse;
-            await new Promise<void>(() => undefined);
+                ],
+              } as GenerateContentResponse;
+              await new Promise<void>((resolve) => {
+                request.config?.abortSignal?.addEventListener(
+                  'abort',
+                  () => resolve(),
+                  { once: true },
+                );
+              });
+            } finally {
+              providerClosed = true;
+            }
           })(),
         );
 
@@ -3399,13 +3412,31 @@ describe('LlmChat', async () => {
           return result;
         });
 
-        await vi.advanceTimersByTimeAsync(999);
+        await vi.advanceTimersByTimeAsync(0);
 
         expect(firstEventSettled).toBe(true);
         expect((await firstEventPromise).value?.type).toBe(
           StreamEventType.CHUNK,
         );
-        await iterator.return?.(undefined);
+
+        let terminalSettled = false;
+        const terminalPromise = iterator.next().then((result) => {
+          terminalSettled = true;
+          return result;
+        });
+        await vi.advanceTimersByTimeAsync(999);
+        expect(terminalSettled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect(terminalSettled).toBe(true);
+        const terminal = await terminalPromise;
+        expect(terminal.value?.type).toBe(StreamEventType.CHUNK);
+        expect(
+          terminal.value?.type === StreamEventType.CHUNK
+            ? terminal.value.value.candidates?.[0]?.finishReason
+            : undefined,
+        ).toBe(FinishReason.MAX_TOKENS);
+        expect(providerClosed).toBe(true);
       } finally {
         vi.useRealTimers();
       }
@@ -17832,24 +17863,20 @@ describe('LlmChat', async () => {
       );
     });
 
-    it('preserves separately signed thought blocks within one attempt', async () => {
+    it('assembles Anthropic thought and signature deltas by block', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);
-      const signedThoughts: Part[] = [
-        {
-          text: 'First block.',
-          thought: true,
-          thoughtSignature: 'sig-1',
-        },
-        {
-          text: 'Second block.',
-          thought: true,
-          thoughtSignature: 'sig-2',
-        },
+      const wireThoughtParts: Part[] = [
+        { text: 'First ', thought: true },
+        { text: 'block.', thought: true },
+        { thought: true, thoughtSignature: 'sig-' },
+        { thought: true, thoughtSignature: '1' },
+        { text: 'Second block.', thought: true },
+        { thought: true, thoughtSignature: 'sig-2' },
       ];
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
         makeStream([
-          makeChunk([...signedThoughts, { text: 'Answer.' }], 'STOP'),
+          makeChunk([...wireThoughtParts, { text: 'Answer.' }], 'STOP'),
         ]),
       );
 
@@ -17863,7 +17890,16 @@ describe('LlmChat', async () => {
       }
 
       expect(recordingChat.getHistory().at(-1)?.parts).toEqual([
-        ...signedThoughts,
+        {
+          text: 'First block.',
+          thought: true,
+          thoughtSignature: 'sig-1',
+        },
+        {
+          text: 'Second block.',
+          thought: true,
+          thoughtSignature: 'sig-2',
+        },
         { text: 'Answer.' },
       ]);
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
@@ -17930,7 +17966,7 @@ describe('LlmChat', async () => {
       const message = recordAssistantTurn.mock.calls[0]![0].message as Part[];
       expect(message).toEqual([
         {
-          text: 'First thinking.',
+          text: 'First thinking. ',
           thought: true,
           thoughtSignature: 'sig-1',
         },
@@ -18041,7 +18077,7 @@ describe('LlmChat', async () => {
       const thoughtParts = recordedMessage.filter((part) => part.thought);
       expect(thoughtParts).toEqual([
         {
-          text: 'First thinking.',
+          text: 'First thinking. ',
           thought: true,
           thoughtSignature: 'sig-1',
         },
