@@ -2401,3 +2401,87 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     expect(firstErrors).toHaveLength(0);
   });
 });
+
+describe('WebViewProvider web-shell permission bridge', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMessageHandlerInstances.length = 0;
+    mockQwenAgentManagerInstances.length = 0;
+    mockGetPanel.mockReturnValue(null);
+    mockConfigGet.mockImplementation(
+      (_key: string, defaultValue: unknown) => defaultValue,
+    );
+    vi.spyOn(
+      WebViewProvider.prototype as unknown as {
+        initializeAgentConnection: () => Promise<void>;
+      },
+      'initializeAgentConnection',
+    ).mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function setupPendingWebShellPermission() {
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: true },
+    });
+    return setup;
+  }
+
+  function decisionCalls(postMessage: ReturnType<typeof vi.fn>) {
+    return postMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type?: string }).type === 'webShellPermissionDecision',
+    );
+  }
+
+  it('routes accept to the webview when triggered from a qwen diff editor', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.respondToPendingPermission('allow', { fromDiffEditor: true });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'webShellPermissionDecision',
+      data: { decision: 'allow' },
+    });
+  });
+
+  it('routes cancel as a reject decision', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.respondToPendingPermission('cancel', { fromDiffEditor: true });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'webShellPermissionDecision',
+      data: { decision: 'reject' },
+    });
+  });
+
+  it('does not vote when the trigger is the original workspace file', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    // qwen.diff.isVisible is also true on the user's own file while a diff
+    // is open, so Ctrl+S there invokes qwen.diff.accept with a file: uri.
+    // That must not resolve an approval the user may never have looked at.
+    provider.respondToPendingPermission('allow', { fromDiffEditor: false });
+    provider.respondToPendingPermission('allow');
+
+    expect(decisionCalls(postMessage)).toHaveLength(0);
+  });
+
+  it('does not vote when no web-shell permission is pending', async () => {
+    const setup = await setupAttachedProvider({ captureMessageHandler: true });
+
+    setup.provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+    });
+
+    expect(decisionCalls(setup.postMessage)).toHaveLength(0);
+  });
+});

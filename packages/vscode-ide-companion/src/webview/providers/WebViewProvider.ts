@@ -2393,8 +2393,18 @@ export class WebViewProvider {
    */
   respondToPendingPermission(
     choice: { optionId: string } | 'accept' | 'allow' | 'reject' | 'cancel',
+    context?: { fromDiffEditor?: boolean },
   ): void {
-    if (this.webShellPermissionPending && typeof choice === 'string') {
+    // Web-shell approvals may only be voted from the permission diff itself.
+    // `qwen.diff.isVisible` is also true on the user's original file while a
+    // diff is open, so without this guard Ctrl+S (or the check/cross title
+    // buttons) on that file would silently approve/reject an edit the user
+    // may never have looked at instead of saving it.
+    if (
+      this.webShellPermissionPending &&
+      typeof choice === 'string' &&
+      context?.fromDiffEditor
+    ) {
       const decision =
         choice === 'accept' || choice === 'allow'
           ? 'allow'

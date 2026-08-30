@@ -258,7 +258,9 @@ export async function activate(context: vscode.ExtensionContext) {
         for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
           []) {
           if (provider?.hasPendingPermission()) {
-            provider.respondToPendingPermission('allow');
+            provider.respondToPendingPermission('allow', {
+              fromDiffEditor: !!docUri && docUri.scheme === DIFF_SCHEME,
+            });
           }
         }
       } catch (err) {
@@ -276,7 +278,9 @@ export async function activate(context: vscode.ExtensionContext) {
         for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
           []) {
           if (provider?.hasPendingPermission()) {
-            provider.respondToPendingPermission('cancel');
+            provider.respondToPendingPermission('cancel', {
+              fromDiffEditor: !!docUri && docUri.scheme === DIFF_SCHEME,
+            });
           }
         }
       } catch (err) {
