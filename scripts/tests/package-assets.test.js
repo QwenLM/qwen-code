@@ -1296,6 +1296,9 @@ describe('package asset scripts', () => {
 
   function createBundleArtifacts(rootDir) {
     writeFile(rootDir, 'dist/cli.js', '');
+    // CodeModeOnly worker (prepare-package.js verifyBundleArtifacts): the
+    // isolated QuickJS runtime host ships with the published package.
+    writeFile(rootDir, 'dist/codeModeWorker.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'vendor'), { recursive: true });
     mkdirSync(path.join(rootDir, 'dist', 'bundled', 'qc-helper', 'docs'), {
       recursive: true,
