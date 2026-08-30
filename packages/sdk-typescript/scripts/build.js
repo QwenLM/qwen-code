@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import {
   rmSync,
   mkdirSync,
@@ -16,6 +16,7 @@ import {
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
+import { serveBridgeBinBuildOptions } from './serve-bridge-bin-build-options.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -316,23 +317,18 @@ await esbuild.build({
   treeShaking: true,
 });
 
-// Build serve-bridge CLI bin entry.
-// No hashbang `banner` here: esbuild already carries the entry point's own
-// `#!/usr/bin/env node` into the output, so a banner would emit a SECOND one on
-// line 2 — which esbuild accepts and node rejects.
-await esbuild.build({
-  entryPoints: [join(rootDir, 'src', 'daemon-mcp', 'serve-bridge', 'bin.ts')],
-  bundle: true,
-  format: 'esm',
-  platform: 'node',
-  target: 'node22',
-  outfile: join(rootDir, 'dist', 'daemon-mcp', 'serve-bridge', 'bin.js'),
-  external: ['@modelcontextprotocol/sdk'],
-  sourcemap: false,
-});
-assertExecutableBin(
-  join(rootDir, 'dist', 'daemon-mcp', 'serve-bridge', 'bin.js'),
+// Build serve-bridge CLI bin entry. The options — including the absence of a
+// hashbang `banner`, see `serveBridgeBinBuildOptions` — are shared with the
+// test that pins the emitted bytes.
+const serveBridgeBinPath = join(
+  rootDir,
+  'dist',
+  'daemon-mcp',
+  'serve-bridge',
+  'bin.js',
 );
+await esbuild.build(serveBridgeBinBuildOptions(rootDir, serveBridgeBinPath));
+assertExecutableBin(serveBridgeBinPath);
 
 // Copy LICENSE from root directory to dist
 const licenseSource = join(rootDir, '..', '..', 'LICENSE');
@@ -358,7 +354,11 @@ function assertExecutableBin(filePath) {
     throw new Error(`Bin ${filePath} must start with a hashbang line`);
   }
   try {
-    execSync(`node --check ${JSON.stringify(filePath)}`, { stdio: 'pipe' });
+    // argv form, not a command string: `execSync` would run this through
+    // `/bin/sh -c`, where a checkout path containing `$(…)`, a backtick or
+    // `$VAR` still expands — `JSON.stringify` is JSON quoting, not shell
+    // quoting.
+    execFileSync('node', ['--check', filePath], { stdio: 'pipe' });
   } catch (error) {
     throw new Error(
       `Bin ${filePath} does not parse: ${String(error.stderr ?? error.message).trim()}`,
