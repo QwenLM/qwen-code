@@ -17,9 +17,8 @@ entry points.
   including false and negated forms that are not forwarded to the worker.
 - A hibernated worker is treated like an exited worker for foreground
   `--continue` takeover.
-- A startup worktree created before managed-session routing is discarded on an
-  early attach or rejection, so it cannot pin a branch without a session
-  sidecar.
+- Resume and continue only re-attach existing startup worktrees, so their early
+  exits never need to delete a worktree owned by another process.
 
 Roster rendering, peek, answer, redraw, and general worker-control polling stay
 in PR 7803.

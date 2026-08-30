@@ -137,6 +137,25 @@ describe('setupStartupWorktree', () => {
     }
   });
 
+  it('does not create a missing worktree when an existing one is required', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const res = await setupStartupWorktree('resume-missing', {
+      requireExisting: true,
+    });
+
+    expect(res).not.toBeNull();
+    expect(res!.ok).toBe(false);
+    if (!res!.ok) {
+      expect(res!.error).toContain('can only re-attach');
+    }
+    await expect(
+      fs.stat(path.join(tempRepo, '.qwen', 'worktrees', 'resume-missing')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(process.cwd()).toBe(tempRepo);
+  });
+
   it('rejects invalid slug characters before any git operation', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);
@@ -296,7 +315,9 @@ describe('setupStartupWorktree', () => {
     process.chdir(tempRepo);
 
     // Second call with the same slug now re-attaches, doesn't create.
-    const second = await setupStartupWorktree('reattach-test');
+    const second = await setupStartupWorktree('reattach-test', {
+      requireExisting: true,
+    });
     expect(second).not.toBeNull();
     expect(second!.ok).toBe(true);
     if (!second!.ok) return;

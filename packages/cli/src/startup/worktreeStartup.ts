@@ -102,6 +102,7 @@ export interface SetupStartupWorktreeOptions {
    * symlinks as `enter_worktree` and agent isolation worktrees do.
    */
   symlinkDirectories?: readonly string[];
+  requireExisting?: boolean;
 }
 
 export async function setupStartupWorktree(
@@ -256,6 +257,13 @@ export async function setupStartupWorktree(
     };
   }
 
+  if (options?.requireExisting) {
+    return {
+      ok: false,
+      error: `--worktree: ${expectedWorktreePath} is not an existing registered worktree. Resume and continue can only re-attach an existing worktree.`,
+    };
+  }
+
   // Phase D-3: fetch the PR ref BEFORE creating the worktree, so the
   // base ref (FETCH_HEAD) is available to `git worktree add`. Skipped
   // on re-attach above. Fail-close: any fetch error stops startup before
@@ -332,23 +340,6 @@ export async function setupStartupWorktree(
       wasReattached: false,
     },
   };
-}
-
-export async function discardStartupWorktree(
-  context: StartupWorktreeContext,
-): Promise<void> {
-  if (context.wasReattached) return;
-
-  process.chdir(context.repoRoot);
-  const result = await new GitWorktreeService(
-    context.repoRoot,
-  ).removeUserWorktree(context.slug, {
-    deleteBranch: true,
-    forceDeleteBranch: true,
-  });
-  if (!result.success) {
-    throw new Error(result.error ?? 'failed to remove startup worktree');
-  }
 }
 
 /**
