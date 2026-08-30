@@ -269,7 +269,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         default: DEFAULT_SERVE_HOSTNAME,
         description:
-          'Interface to bind. Loopback (127.0.0.1, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
+          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
       })
       .option('token', {
         type: 'string',
