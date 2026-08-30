@@ -1778,6 +1778,40 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
+    it('fails closed when a nested closer is truncated across a chunk boundary (issue #9348 accepted degradation)', () => {
+      // Accepted-degradation pin: chunks '<thinking>b' /
+      // '<thinking>b</thinking' / '>c</thinking>Answer' — the nested closer
+      // is split across a chunk boundary, so the strip re-assembles the
+      // nested opener into a flat candidate and finish emits a stray closer
+      // the post-demotion gate rejects. The single-chunk twin
+      // ('<thinking>b<thinking>b</thinking>c</thinking>Answer') demotes
+      // cleanly; the two shapes are undecidable at the decision site, so
+      // this pin documents the chosen fail-closed horn (the sibling
+      // undecidable corners are pinned the same way above and below).
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('opening', { content: '<thinking>b' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('nested-split', { content: '<thinking>b</thinking' }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          streamChunk('rest', { content: '>c</thinking>Answer' }, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
     it('appends a demoted-block replay arriving while a sub-word rest is held and fails closed when the rest never recombines (issue #9348 inverted direction)', () => {
       // Inverted failure direction: the replay re-sending the demoted block
       // is a proper prefix of the baseline carrying a full tag. It is no
@@ -2266,6 +2300,44 @@ describe('OpenAIContentConverter', () => {
       );
       expect(rest.candidates?.[0]?.content?.parts).toEqual([
         { thought: true, text: '<thinking>inner</thinking>outer' },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('demotes a nested balanced inline thinking block with trailing text split across chunks (issue #9348)', () => {
+      // Chunked twin of 'demotes a nested balanced inline thinking block':
+      // the nested block completes inside one delta with visible text
+      // trailing it ('<thinking>inner</thinking>More'). Entrance 3 used to
+      // require an empty rest, so this shape missed every entrance, the
+      // superset strip demoted early to thought 'inner' + visible 'More',
+      // and the genuine outer closer then failed the turn closed while the
+      // single-chunk twin demoted cleanly. A balanced leading block marks
+      // the delta genuine regardless of trailing text; restoring the
+      // `rest === ''` requirement on entrance 3 must turn this test red.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('opening', { content: '<thinking>' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('nested-block', {
+          content: '<thinking>inner</thinking>More',
+        }),
+        stream,
+      );
+      const rest = converter.convertOpenAIChunkToLlm(
+        streamChunk('rest', { content: '</thinking>Answer' }, 'stop'),
+        stream,
+      );
+
+      expect(rest.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: '<thinking>inner</thinking>More' },
         { text: 'Answer' },
       ]);
     });
@@ -3211,6 +3283,32 @@ describe('OpenAIContentConverter', () => {
       );
       converter.convertOpenAIChunkToLlm(
         streamChunk('fragment', { content: '<think' }),
+        stream,
+      );
+
+      expect(() => finishStream(stream, 'length')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('fails closed on a content-only full tag word truncated at finish (issue #9348 fail-closed)', () => {
+      // Pure content-only twin of the pin above: no reasoning chunk ever
+      // arrives (the default OpenAI-compatible route), the turn is cut by
+      // max_tokens mid opening tag ('<think' then 'ing', finish 'length').
+      // The finish-time release used to emit the held '<thinking' as
+      // visible text while every sibling finish site throws on the same
+      // shape — adding one reasoning chunk, one byte, or a clean EOF flips
+      // the outcome. The release-branch tag-word gate restores the
+      // fail-closed policy; removing it must turn this test red.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('fragment', { content: '<think' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToLlm(
+        streamChunk('fragment-rest', { content: 'ing' }),
         stream,
       );
 

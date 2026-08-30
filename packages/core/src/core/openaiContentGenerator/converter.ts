@@ -1993,9 +1993,16 @@ export function convertOpenAIChunkToLlm(
         //    exactly the completing bytes (issue #9348 R11-2 entrance 2).
         //    A fresh delta re-spelling the candidate stays undecidable and
         //    keeps the R8-1 append direction;
-        //  (entrance 3) the candidate is a bare opener and the delta is a
-        //    complete balanced block — held '<thinking>' + nested
-        //    '<thinking>inner</thinking>'.
+        //  (entrance 3) the candidate is a bare opener and the delta starts
+        //    with a complete balanced block — held '<thinking>' + nested
+        //    '<thinking>inner</thinking>' — with or without trailing text
+        //    ('<thinking>inner</thinking>More'): the balanced prefix marks
+        //    the delta as genuine nested content; the depth-counting scanner
+        //    absorbs the block and the trailing text together. Requiring an
+        //    empty rest sent the trailing-text twin to the superset strip,
+        //    which demoted early and hard-failed the turn on the genuine
+        //    outer closer while the single-chunk twin demoted cleanly
+        //    (issue #9348).
         // Closing-shaped candidates are exempt: their re-send MUST strip to
         // re-assemble the closingTagName route (R10-1).
         const candidateIsBareOpener = /^\s*<think(?:ing)?\s*>$/i.test(
@@ -2009,9 +2016,7 @@ export function convertOpenAIChunkToLlm(
           (remainder === '' ||
             (!tagHoldVerbatimEmission &&
               /^\s*<\/think(?:ing)?\s*>/i.test(remainder)) ||
-            (candidateIsBareOpener &&
-              deltaBalancedBlocks !== undefined &&
-              deltaBalancedBlocks.rest === ''));
+            (candidateIsBareOpener && deltaBalancedBlocks !== undefined));
         if (!genuineNestedRespell) {
           visibleText = remainder;
           parts = parts.filter((part) => !getVisibleText(part));
@@ -2180,6 +2185,22 @@ export function convertOpenAIChunkToLlm(
           visibleText = '';
         }
       } else if (finishedWhitespaceCandidate || releaseContentOnlyCandidate) {
+        // Fail closed when a finished stream still holds a full tag word
+        // (e.g. a content-only '<thinking' truncated by max_tokens before
+        // '>'): every sibling finish site — the isPossibleTag finish check
+        // above, the post-demotion finish gate, and the pipeline EOF
+        // backstop — rejects the same shape, and releasing it here would
+        // emit the tag word as visible text on a chunking-dependent branch.
+        // The release itself stays: sub-word fragments ('<thi') can no
+        // longer become a tag after the stream ends, and the mid-stream
+        // length-cap release of undecided prefixes is untouched because this
+        // gate fires only on the finish chunk (issue #9348).
+        if (
+          choice.finish_reason &&
+          /<\/?think(?:ing)?/i.test(combinedCandidateText)
+        ) {
+          throwProtocolTagLeak(requestContext);
+        }
         parts = parts.filter((part) => !getVisibleText(part));
         if (combinedCandidateText) {
           parts.push({ text: combinedCandidateText });
