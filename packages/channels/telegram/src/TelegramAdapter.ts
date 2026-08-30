@@ -437,33 +437,27 @@ export class TelegramChannel extends ChannelBase {
       sourceLabel && text.trim().length > 0
         ? `${escapeTelegramHtml(sourceLabel)} `
         : undefined;
-    const chunks = splitAttributedTelegramHtml(html, prefix);
-    if (
-      !chunks ||
-      chunks.some((chunk) => chunk.length > TELEGRAM_MESSAGE_LIMIT)
-    ) {
-      const plainChunks = splitAttributedTelegramText(text, sourceLabel);
-      for (const chunk of plainChunks) {
-        await this.bot.api.sendMessage(
-          chatId,
-          chunk,
-          threadId === undefined
-            ? undefined
-            : { message_thread_id: Number(threadId) },
-        );
-      }
-      return;
-    }
-    const options =
-      threadId === undefined
-        ? { parse_mode: 'HTML' as const }
-        : { parse_mode: 'HTML' as const, message_thread_id: Number(threadId) };
+    const chunks = splitAttributedTelegramHtml(html, prefix, sourceLabel);
     for (const chunk of chunks) {
+      const options = chunk.isHtml
+        ? threadId === undefined
+          ? { parse_mode: 'HTML' as const }
+          : {
+              parse_mode: 'HTML' as const,
+              message_thread_id: Number(threadId),
+            }
+        : threadId === undefined
+          ? undefined
+          : { message_thread_id: Number(threadId) };
+      if (!chunk.isHtml) {
+        await this.bot.api.sendMessage(chatId, chunk.text, options);
+        continue;
+      }
       try {
-        await this.bot.api.sendMessage(chatId, chunk, options);
+        await this.bot.api.sendMessage(chatId, chunk.text, options);
       } catch {
         // Fallback to plain text for the failed chunk only
-        const withoutTags = chunk.replace(/<[^>]*>/g, '');
+        const withoutTags = chunk.text.replace(/<[^>]*>/g, '');
         const plainText =
           prefix && sourceLabel && withoutTags.startsWith(prefix)
             ? `${sourceLabel} ${withoutTags.slice(prefix.length)}`
@@ -553,34 +547,98 @@ export class TelegramChannel extends ChannelBase {
 function splitAttributedTelegramHtml(
   html: string,
   prefix: string | undefined,
-): string[] | undefined {
+  sourceLabel: string | undefined,
+): Array<{ text: string; isHtml: boolean }> {
   const chunks = splitHtmlForTelegram(html);
-  if (chunks.some((chunk) => chunk.length > TELEGRAM_MESSAGE_LIMIT)) {
-    return undefined;
+  const contentLimit = TELEGRAM_MESSAGE_LIMIT - (prefix?.length ?? 0);
+  if (contentLimit <= 0) {
+    throw new Error('Telegram source label exceeds the message limit.');
   }
-  if (!prefix) return chunks;
 
-  const attributed: string[] = [];
-  const pending = [...chunks];
-  while (pending.length > 0) {
-    const chunk = pending.shift();
-    if (chunk === undefined) break;
-    const split = splitHtmlForTelegram(`${prefix}${chunk}`);
-    if (split.some((part) => part.length > TELEGRAM_MESSAGE_LIMIT)) {
-      return undefined;
-    }
-    if (split.length === 1) {
-      attributed.push(split[0]);
+  const attributed: Array<{ text: string; isHtml: boolean }> = [];
+  for (const chunk of chunks) {
+    const split = splitTelegramHtmlAtLimit(chunk, contentLimit);
+    if (split) {
+      attributed.push(
+        ...split.map((part) => ({
+          text: `${prefix ?? ''}${part}`,
+          isHtml: true,
+        })),
+      );
       continue;
     }
-    const remainder = split.slice(1);
-    if (remainder.some((part) => part.length >= chunk.length)) {
-      return undefined;
-    }
-    attributed.push(split[0]);
-    pending.unshift(...remainder);
+    attributed.push(
+      ...splitAttributedTelegramText(
+        chunk.replace(/<[^>]*>/g, ''),
+        sourceLabel,
+      ).map((text) => ({ text, isHtml: false })),
+    );
   }
   return attributed;
+}
+
+function splitTelegramHtmlAtLimit(
+  html: string,
+  limit: number,
+): string[] | undefined {
+  const tokens = html.match(
+    /<[^>]+>|&(?:#\d+|#x[\da-f]+|[a-z][\da-z]+);|[\s\S]/giu,
+  );
+  if (!tokens) return [];
+
+  const chunks: string[] = [];
+  const openTags: Array<{ name: string; html: string }> = [];
+  let current = '';
+  let hasContent = false;
+  const closingTags = () =>
+    [...openTags]
+      .reverse()
+      .map(({ name }) => `</${name}>`)
+      .join('');
+  const reopenedTags = () => openTags.map(({ html }) => html).join('');
+  const flush = () => {
+    if (!hasContent) return false;
+    chunks.push(`${current}${closingTags()}`);
+    current = reopenedTags();
+    hasContent = false;
+    return true;
+  };
+
+  for (const token of tokens) {
+    const closingMatch = token.match(/^<\/([a-z\d]+)/iu);
+    if (closingMatch) {
+      current += token;
+      const index = openTags.findLastIndex(
+        ({ name }) => name === closingMatch[1]?.toLowerCase(),
+      );
+      if (index !== -1) openTags.splice(index, 1);
+      continue;
+    }
+
+    const openingMatch = token.match(/^<([a-z\d]+)/iu);
+    const isSelfClosing = /^<br\b|\/>$/iu.test(token);
+    if (openingMatch && !isSelfClosing) {
+      const tag = { name: openingMatch[1].toLowerCase(), html: token };
+      const required = `${current}${token}</${tag.name}>${closingTags()}`;
+      if (required.length > limit && !flush()) return undefined;
+      if (`${current}${token}</${tag.name}>${closingTags()}`.length > limit) {
+        return undefined;
+      }
+      current += token;
+      openTags.push(tag);
+      continue;
+    }
+
+    if (`${current}${token}${closingTags()}`.length > limit && !flush()) {
+      return undefined;
+    }
+    if (`${current}${token}${closingTags()}`.length > limit) return undefined;
+    current += token;
+    hasContent = true;
+  }
+
+  if (hasContent) chunks.push(`${current}${closingTags()}`);
+  return chunks;
 }
 
 function splitAttributedTelegramText(

@@ -519,7 +519,7 @@ describe('TelegramChannel', () => {
     }
   });
 
-  it('falls back to bounded labeled plain text for one oversized HTML block', async () => {
+  it('keeps a near-limit labeled response as bounded HTML', async () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);
     const text = 'x'.repeat(4090);
@@ -537,11 +537,11 @@ describe('TelegramChannel', () => {
     for (const [, chunk, options] of calls) {
       expect(chunk).toMatch(/^\[review\] /u);
       expect(chunk.length).toBeLessThanOrEqual(4096);
-      expect(options).toBeUndefined();
+      expect(options).toEqual({ parse_mode: 'HTML' });
     }
   });
 
-  it('falls back without looping for a code block with one oversized line', async () => {
+  it('keeps a labeled code block with one oversized line as bounded HTML', async () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);
     const text = `\`\`\`text\n${'x'.repeat(5000)}\n\`\`\``;
@@ -552,14 +552,60 @@ describe('TelegramChannel', () => {
     expect(calls.length).toBeGreaterThan(1);
     expect(
       calls
-        .map((call) => call[1])
+        .map((call) => call[1].replace(/^\[review\] /u, ''))
         .join('')
-        .replaceAll('[review] ', ''),
-    ).toBe(text);
+        .replace(/<[^>]+>/gu, ''),
+    ).toBe(`${'x'.repeat(5000)}\n`);
     for (const [, chunk, options] of calls) {
       expect(chunk).toMatch(/^\[review\] /u);
       expect(chunk.length).toBeLessThanOrEqual(4096);
-      expect(options).toBeUndefined();
+      expect(options).toEqual({ parse_mode: 'HTML' });
+    }
+  });
+
+  it('preserves safe HTML when a later labeled chunk needs splitting', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const text = `**bold first**\n\n${'x'.repeat(4090)}`;
+
+    await channel.sendTestResponse('2', text, 'session-1', '[review]');
+
+    const calls = bot.api.sendMessage.mock.calls;
+    expect(calls[0]).toEqual([
+      '2',
+      '[review] <b>bold first</b>\n\n',
+      { parse_mode: 'HTML' },
+    ]);
+    for (const [, chunk, options] of calls) {
+      expect(chunk).toMatch(/^\[review\] /u);
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+      expect(options).toEqual({ parse_mode: 'HTML' });
+    }
+  });
+
+  it('preserves unlabeled HTML when a later chunk is oversized', async () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    const text = `**bold first**\n\n${'x'.repeat(5000)}`;
+
+    await channel.sendTestResponse('2', text, 'session-1');
+
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      '2',
+      '<b>bold first</b>\n\n',
+      { parse_mode: 'HTML' },
+    );
+    const calls = bot.api.sendMessage.mock.calls;
+    expect(
+      calls
+        .map((call) => call[1])
+        .join('')
+        .replace(/<[^>]+>/gu, ''),
+    ).toBe(`bold first\n\n${'x'.repeat(5000)}`);
+    for (const [, chunk, options] of calls) {
+      expect(chunk.length).toBeLessThanOrEqual(4096);
+      expect(options).toEqual({ parse_mode: 'HTML' });
     }
   });
 
