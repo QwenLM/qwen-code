@@ -11113,9 +11113,11 @@ describe('BaseLlmClient Lifecycle', () => {
     await config.refreshAuth(AuthType.USE_GEMINI);
 
     const llmService = config.getBaseLlmClient();
+    const activeGenerator = config.getContentGenerator();
     config.reloadModelProvidersConfig({});
 
     expect(llmService.clearPerModelGeneratorCache).toHaveBeenCalledOnce();
+    expect(config.getContentGenerator()).toBe(activeGenerator);
   });
 });
 
