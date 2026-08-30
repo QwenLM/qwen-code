@@ -117,12 +117,14 @@ describe('serve-ab pre-checkout workspace wipe', () => {
     const loosened = wipe.run
       .split('\n')
       .filter((line) => line.includes('|| true'));
-    expect(loosened).toHaveLength(5);
+    expect(loosened).toHaveLength(7);
     expect(loosened[0]).toContain('--git-path config.worktree');
     expect(loosened[1]).toContain('--unset-all extensions.worktreeConfig');
     expect(loosened[2]).toContain('config --local --name-only --list');
     expect(loosened[3]).toContain('grep -c .');
     expect(loosened[4]).toContain('config --local --unset-all "$key"');
+    expect(loosened[5]).toContain('config --local --list');
+    expect(loosened[6]).toContain('config --local --unset-all "${line%%=*}"');
   });
 
   it('carries the symlink heal, ordered and bounded (#9480)', () => {
@@ -1013,46 +1015,72 @@ describe('serve-ab pre-checkout workspace wipe', () => {
     'removes a bulk-planted kept config wholesale instead of looping per key',
     () => {
       // The per-key unset loop respawns git once per key and every spawn
-      // re-parses AND re-writes the whole planted config — a bulk plant
-      // grows the scrub superlinearly into the job timeout, and a killed
-      // scrub clears almost nothing, so every later job times out too.
-      // Past the bound the gitdir is removed wholesale and the next job
+      // re-parses AND re-writes the whole planted config — the scrub cost
+      // is keys TIMES bytes, a bulk plant grows it superlinearly into the
+      // job timeout, and a killed scrub clears almost nothing, so every
+      // later job times out too. Past EITHER bound — key count or config
+      // size — the gitdir is removed wholesale and the next job
       // re-fetches.
-      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-bulkcfg-'));
-      const ws = join(parent, 'repo');
-      execFileSync('git', ['init', '--quiet', ws]);
-      const junk = Array.from(
-        { length: 3000 },
-        (_, i) => `\tjunkkey${i} = x`,
-      ).join('\n');
-      writeFileSync(
-        join(ws, '.git', 'config'),
-        readFileSync(join(ws, '.git', 'config'), 'utf8') + `[junk]\n${junk}\n`,
-      );
-      try {
-        const started = Date.now();
-        const res = spawnSync(
-          'bash',
-          ['-e', '-o', 'pipefail', '-c', wipe.run],
-          {
-            encoding: 'utf8',
-            timeout: 30000,
-            env: {
-              ...process.env,
-              GITHUB_WORKSPACE: ws,
-              RUNNER_WORKSPACE: parent,
+      for (const arm of ['bulk-keys', 'large-values']) {
+        const parent = mkdtempSync(
+          join(tmpdir(), `serve-ab-wipe-bulkcfg-${arm}-`),
+        );
+        const ws = join(parent, 'repo');
+        execFileSync('git', ['init', '--quiet', ws]);
+        if (arm === 'bulk-keys') {
+          const junk = Array.from(
+            { length: 3000 },
+            (_, i) => `\tjunkkey${i} = x`,
+          ).join('\n');
+          writeFileSync(
+            join(ws, '.git', 'config'),
+            readFileSync(join(ws, '.git', 'config'), 'utf8') +
+              `[junk]\n${junk}\n`,
+          );
+        } else {
+          // Below the 1000-key bound, but every unset still re-writes the
+          // whole multi-MB config — the size dimension the count bound
+          // cannot see. Without the size guard the loop runs for tens of
+          // seconds instead of the wholesale rm.
+          const value = 'x'.repeat(300 * 1024);
+          const junk = Array.from(
+            { length: 20 },
+            (_, i) => `\tjunkkey${i} = ${value}`,
+          ).join('\n');
+          writeFileSync(
+            join(ws, '.git', 'config'),
+            readFileSync(join(ws, '.git', 'config'), 'utf8') +
+              `[junk]\n${junk}\n`,
+          );
+        }
+        try {
+          const started = Date.now();
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', wipe.run],
+            {
+              encoding: 'utf8',
+              timeout: 30000,
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: ws,
+                RUNNER_WORKSPACE: parent,
+              },
             },
-          },
-        );
-        const elapsed = Date.now() - started;
-        expect(res.status).toBe(0);
-        expect(res.stdout + res.stderr).toContain(
-          'non-allowlisted config keys',
-        );
-        expect(existsSync(join(ws, '.git'))).toBe(false);
-        expect(elapsed).toBeLessThan(20000);
-      } finally {
-        rmSync(parent, { recursive: true, force: true });
+          );
+          const elapsed = Date.now() - started;
+          expect(
+            res.status,
+            `wipe failed (${arm}): ${res.stdout}${res.stderr}`,
+          ).toBe(0);
+          expect(res.stdout + res.stderr).toContain(
+            'non-allowlisted config keys',
+          );
+          expect(existsSync(join(ws, '.git')), arm).toBe(false);
+          expect(elapsed, arm).toBeLessThan(20000);
+        } finally {
+          rmSync(parent, { recursive: true, force: true });
+        }
       }
     },
   );

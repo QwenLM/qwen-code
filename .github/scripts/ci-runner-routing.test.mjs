@@ -734,7 +734,7 @@ describe('serve-ab.yml runner routing', () => {
     );
     assert.match(
       steps[ownershipIndex].run,
-      /chown -R .* "\$GITHUB_WORKSPACE"/,
+      /chown -R .* "\$WS_HEAL"/,
       'ownership-restore must actually chown the workspace',
     );
     assert.ok(
@@ -798,7 +798,7 @@ describe('serve-ab.yml runner routing', () => {
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('#'));
     assert.equal(executed[0], 'set -uo pipefail');
-    const tail = executed.slice(-35);
+    const tail = executed.slice(-63);
     assert.equal(
       tail[0],
       'find "$WS" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
@@ -811,8 +811,8 @@ describe('serve-ab.yml runner routing', () => {
     );
     assert.equal(
       tail[2],
-      'planted="$(find "$WS/.git" -type l | wc -l | tr -d \' \')"',
-      'count the planted symlinks before naming anything — the names are bytes a previous job chose',
+      'planted="$(find "$WS/.git" ! -type f ! -type d | wc -l | tr -d \' \')"',
+      'count every planted NON-REGULAR entry before naming anything — the names are bytes a previous job chose',
     );
     assert.equal(
       tail[3],
@@ -821,13 +821,13 @@ describe('serve-ab.yml runner routing', () => {
     );
     assert.equal(
       tail[4],
-      'echo "::warning::removing ${planted} planted symlink(s) under ${WS}/.git"',
+      'echo "::warning::removing ${planted} planted non-regular entries under ${WS}/.git"',
       'counted, not named: a newline in a planted name would forge a workflow annotation once printed',
     );
     assert.equal(
       tail[5],
-      'find "$WS/.git" -type l -delete',
-      'every symlink under the kept .git redirects a read or a write through an attacker-chosen target — sweep the class, link only, never following',
+      'find "$WS/.git" ! -type f ! -type d -delete',
+      'every non-regular entry goes BEFORE any git call: a symlink redirects a read or a write through an attacker-chosen target, and a FIFO or socket at a path git opens blocks the first git call in open() forever — sweep the class, entry only, never following',
     );
     assert.equal(
       tail[6],
@@ -861,96 +861,212 @@ describe('serve-ab.yml runner routing', () => {
     );
     assert.equal(
       tail[12],
+      'rm -rf "$WS/.git/index"',
+      'the index is a workspace-scoped cache a killed job can leave garbage — the next checkout dies on it and every later one dies identically; the next checkout rebuilds it',
+    );
+    assert.equal(
+      tail[13],
+      'if grep -qis \'^[[:space:]]*\\[include\' "$WS/.git/config" "$WS/.git/config.worktree"; then',
+      'the one shape that lets config parsing open a file OUTSIDE the gitdir — an include section — is judged BEFORE any git call: a planted target there blocks or redirects every later git call, and no per-command timeout would un-wedge a kill',
+    );
+    assert.equal(
+      tail[14],
+      'echo "::warning::removing kept .git whose config carries an include section: every later git call blocks or reads through the planted target: ${WS}/.git"',
+      'the include refusal reports why the reuse is being paid back',
+    );
+    assert.equal(
+      tail[15],
+      'rm -rf "$WS/.git"',
+      'fail closed on an include plant: the gitdir is unprovable, the next job re-fetches',
+    );
+    assert.equal(tail[16], 'fi', 'close the include precheck');
+    assert.equal(
+      tail[17],
+      'if [ -d "$WS/.git" ]; then',
+      'the size bound judges a gitdir the include precheck did not already remove',
+    );
+    assert.equal(
+      tail[18],
+      'gitdir_kb="$(du -sk --apparent-size -- "$WS/.git" | cut -f1)"',
+      'junk planted inside the kept gitdir accretes without bound across jobs — one du walk, O(1) git spawns, apparent size because the accretion is measured in bytes stored',
+    );
+    assert.equal(
+      tail[19],
+      'if [ "${gitdir_kb}" -gt 5242880 ]; then',
+      "the bound sits far above a healthy ~900 MB history plus a repack's transient second pack",
+    );
+    assert.equal(
+      tail[20],
+      'echo "::warning::removing kept .git whose apparent size (${gitdir_kb} KB) exceeds the reuse bound: planted junk under it accretes without bound, re-fetching instead: ${WS}/.git"',
+      'the accretion warning reports the measured size and why the reuse is being paid back',
+    );
+    assert.equal(
+      tail[21],
+      'rm -rf "$WS/.git"',
+      'fail open past the bound — the identical shape every other validation failure uses — instead of carrying the junk into every later job',
+    );
+    assert.equal(tail[22], 'fi', 'close the size bound');
+    assert.equal(
+      tail[23],
+      'fi',
+      'keep the size bound inside its own kept-.git guard',
+    );
+    assert.equal(
+      tail[24],
+      'if [ -f "$WS/.git/shallow" ] && grep -qvE \'^[0-9a-f]{40}$\' "$WS/.git/shallow"; then',
+      'a corrupt shallow file dies the next fetch on every later job — judge the content: git writes one 40-hex sha per line',
+    );
+    assert.equal(
+      tail[25],
+      'echo "::warning::removing corrupt shallow file: ${WS}/.git/shallow"',
+      'the shallow warning names the file being removed',
+    );
+    assert.equal(
+      tail[26],
+      'rm -f "$WS/.git/shallow"',
+      'lose the FILE only — the next fetch re-establishes the boundary — never the gitdir the shallow record exists to serve',
+    );
+    assert.equal(tail[27], 'fi', 'close the shallow judgment');
+    assert.equal(
+      tail[28],
       'rm -rf "$(git --git-dir="$WS/.git" rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true',
       "extensions.worktreeConfig activates .git/config.worktree, a second local file that git config --local neither lists nor unsets — delete it like qwen-triage.yml's hardened config-sanitize",
     );
     assert.equal(
-      tail[13],
+      tail[29],
       'git --git-dir="$WS/.git" config --local --unset-all extensions.worktreeConfig 2>/dev/null || true',
       'drop the extension that re-activates the split config file',
     );
     assert.equal(
-      tail[14],
-      'scrub_keys="$(git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\\..+\\.(url|fetch|pushurl)|branch\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } || true)"',
-      "enumerate the scrub targets ONCE — the config is planted bytes and every git spawn re-parses it, so the per-key loop may only run over a bounded count — the allowlist keeps NO extensions.* key, remote narrowed to url/fetch/pushurl, core.worktree dropped — anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
+      tail[30],
+      'scrub_keys="$(git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null | { grep -ivE \'^(core\\.(repositoryformatversion|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\\..+\\.(url|fetch|pushurl)|branch\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } || true)"',
+      "enumerate the scrub targets ONCE — the config is planted bytes and every git spawn re-parses it, so the per-key loop may only run over a bounded count — the allowlist keeps NO extensions.* key, drops core.bare (a planted bare=true dies every later worktree call; unset, it is inferred false from the layout) and core.worktree, and narrows remote to url/fetch/pushurl — anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
     );
     assert.equal(
-      tail[15],
+      tail[31],
       'scrub_count="$(printf \'%s\\n\' "${scrub_keys}" | grep -c . || true)"',
       'count the targets the single enumeration produced',
     );
     assert.equal(
-      tail[16],
-      'if [ "${scrub_count}" -gt 1000 ]; then',
-      'a healthy actions/checkout gitdir holds a handful of local keys — a bulk plant must not reach the per-key loop',
+      tail[32],
+      'config_bytes=0',
+      'default the config size to zero for a gitdir whose config the sweep already removed',
     );
     assert.equal(
-      tail[17],
-      'echo "::warning::removing kept .git with ${scrub_count} non-allowlisted config keys: the per-key scrub cost is unbounded, re-fetching instead: ${WS}/.git"',
-      'the bound reports why the reuse is being paid back',
+      tail[33],
+      'if [ -f "$WS/.git/config" ]; then',
+      "measure the config's byte size only when the file exists",
     );
     assert.equal(
-      tail[18],
+      tail[34],
+      'config_bytes="$(wc -c < "$WS/.git/config" | tr -d \' \')"',
+      'wc -c output carries padding on some hosts; the arithmetic test needs a bare number',
+    );
+    assert.equal(tail[35], 'fi', 'close the config-size measure');
+    assert.equal(
+      tail[36],
+      'if [ "${scrub_count}" -gt 1000 ] || [ "${config_bytes}" -gt 1048576 ]; then',
+      'the scrub cost is keys TIMES bytes — every unset respawns git and re-writes the whole config — so a bulk plant, by key count OR config size, must not reach the per-key loop',
+    );
+    assert.equal(
+      tail[37],
+      'echo "::warning::removing kept .git with ${scrub_count} non-allowlisted config keys and a ${config_bytes}-byte config: the per-key scrub cost is unbounded, re-fetching instead: ${WS}/.git"',
+      'the bound reports both measured dimensions and why the reuse is being paid back',
+    );
+    assert.equal(
+      tail[38],
       'rm -rf "$WS/.git"',
       'fail open past the bound — the identical shape the unenumerable-refs arm uses — instead of looping into the job timeout',
     );
     assert.equal(
-      tail[19],
+      tail[39],
       'elif [ "${scrub_count}" != "0" ]; then',
-      'a bounded count keeps the per-key unset',
+      'a bounded plant keeps the per-key unset',
     );
     assert.equal(
-      tail[20],
+      tail[40],
       'printf \'%s\\n\' "${scrub_keys}" | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done',
-      'the kept .git config must be scrubbed to the allowlist — bounded by the count above',
+      'the kept .git config must be scrubbed to the allowlist — bounded by the count and size above',
     );
-    assert.equal(tail[21], 'fi', 'close the scrub bound');
+    assert.equal(tail[41], 'fi', 'close the scrub bound');
     assert.equal(
-      tail[22],
+      tail[42],
+      'if [ -d "$WS/.git" ]; then',
+      'the kept URL keys never reach the scrub loop, so they are checked for the ext:: shape that execs the attacker command on the next fetch — guarded on a gitdir the bounds above did not already remove',
+    );
+    assert.equal(
+      tail[43],
+      'exec_urls="$(git --git-dir="$WS/.git" config --local --list 2>/dev/null | { grep -iE \'^(remote\\.[^.]+\\.(url|pushurl)|submodule\\.[^.]+\\.url)=ext::\' || true; } || true)"',
+      'one enumeration, O(1) spawns, lists every url/pushurl value the allowlist kept',
+    );
+    assert.equal(
+      tail[44],
+      'printf \'%s\\n\' "${exec_urls}" | while IFS= read -r line; do',
+      'walk the ext:: hits line by line',
+    );
+    assert.equal(
+      tail[45],
+      'if [ -n "${line}" ]; then',
+      'an empty enumeration yields one empty line — the loop must skip it without failing the pipe',
+    );
+    assert.equal(
+      tail[46],
+      'git --git-dir="$WS/.git" config --local --unset-all "${line%%=*}" 2>/dev/null || true',
+      "unset-all removes every value of the key — actions/checkout re-establishes origin's url on the next checkout",
+    );
+    assert.equal(tail[47], 'fi', 'keep the empty-line skip an if-block');
+    assert.equal(tail[48], 'done', 'close the ext:: walk');
+    assert.equal(
+      tail[49],
+      'fi',
+      'keep the ext:: check inside its own kept-.git guard',
+    );
+    assert.equal(
+      tail[50],
       'if [ -d "$WS/.git" ]; then',
       'the replace strip and its fail-open guard on a real kept repo: a healed-empty workspace has no refs to strip and must not fail the job here',
     );
     assert.equal(
-      tail[23],
+      tail[51],
       'if ! replace_refs="$(git --git-dir="$WS/.git" for-each-ref --format=\'%(refname)\' refs/replace 2>/dev/null)"; then',
       'enumerate the replace refs; an unenumerable gitdir cannot be proven clean',
     );
     assert.equal(
-      tail[24],
+      tail[52],
       'echo "::warning::removing kept .git whose refs cannot be enumerated: ${WS}/.git"',
       'the fail-open reports why the reuse is being paid back',
     );
     assert.equal(
-      tail[25],
+      tail[53],
       'rm -rf "$WS/.git"',
       'fail open: remove the unprovable gitdir instead of carrying it — the next job re-fetches',
     );
-    assert.equal(tail[26], 'else', 'an enumerable gitdir keeps the strip');
+    assert.equal(tail[54], 'else', 'an enumerable gitdir keeps the strip');
     assert.equal(
-      tail[27],
+      tail[55],
       'printf \'%s\\n\' "${replace_refs}" | while IFS= read -r ref; do',
       "a planted refs/replace entry silently substitutes file content in the next job's checkout (actions/checkout passes no --no-replace-objects) — delete every one through git so packed entries drop too",
     );
     assert.equal(
-      tail[28],
+      tail[56],
       'if [ -n "${ref}" ]; then',
       'an empty enumeration yields one empty line — the loop must skip it without failing the pipe',
     );
     assert.equal(
-      tail[29],
+      tail[57],
       'git --git-dir="$WS/.git" update-ref -d "${ref}"',
       'delete each planted replace ref',
     );
-    assert.equal(tail[30], 'fi', 'keep the empty-line skip an if-block');
-    assert.equal(tail[31], 'done', 'close the strip loop');
-    assert.equal(tail[32], 'fi', 'close the fail-open if/else');
+    assert.equal(tail[58], 'fi', 'keep the empty-line skip an if-block');
+    assert.equal(tail[59], 'done', 'close the strip loop');
+    assert.equal(tail[60], 'fi', 'close the fail-open if/else');
     assert.equal(
-      tail[33],
+      tail[61],
       'fi',
       'the strip and fail-open stay inside the kept-.git guard',
     );
     assert.equal(
-      tail[34],
+      tail[62],
       'rm -rf "$WS/.git/refs/replace"',
       'and remove the namespace itself so nothing under it survives',
     );
@@ -958,61 +1074,113 @@ describe('serve-ab.yml runner routing', () => {
 
   it('leaves a symlinked workspace target untouched by the serve-ab ownership heal', () => {
     // Port of the visuals witness: this step runs the same recursive
-    // chown/chmod; without the real-directory gate chmod -R dereferences
-    // a planted workspace symlink and flips modes out of bounds — and
-    // this step runs BEFORE the wipe heal that unlinks the plant.
+    // chown/chmod; without the canonical-directory gate chmod -R
+    // dereferences a planted operand and flips modes out of bounds — and
+    // this step runs BEFORE the wipe heal that unlinks the plant. Three
+    // entrances: the link as the last component, the same plant hidden by
+    // one trailing slash (`[ -d path/ ]`/`[ ! -L path/ ]` resolve THROUGH
+    // the link when the slash is there — the realpath gate closes it,
+    // realpath never emits a trailing slash), and a link on an INTERMEDIATE
+    // component the last-component tests cannot see.
     const heal = serveAbDoc.jobs.ab.steps.find(
       (s) => s.name === 'Restore workspace ownership',
     );
     const bashPath = hostToolPath('bash');
-    const root = mkdtempSync(join(tmpdir(), 'serve-ab-ownership-link-'));
-    const outside = join(root, 'outside');
-    try {
-      const home = join(root, 'home');
-      mkdirSync(home);
-      const runnerTemp = join(root, 'runner-temp');
-      mkdirSync(runnerTemp);
-      mkdirSync(outside);
-      mkdirSync(join(outside, 'sub'));
-      writeFileSync(join(outside, 'canary'), 'x\n');
-      chmodSync(join(outside, 'canary'), 0o000);
-      writeFileSync(join(outside, 'sub', 'deep'), 'x\n');
-      chmodSync(join(outside, 'sub', 'deep'), 0o000);
-      const rws = join(root, 'rws');
-      mkdirSync(rws);
-      const ws = join(rws, 'qwen-code');
-      symlinkSync(outside, ws);
-      const envFile = join(root, 'github_env');
-      writeFileSync(envFile, '');
-      const res = spawnSync(
-        bashPath,
-        ['--noprofile', '--norc', '-eo', 'pipefail', '-c', heal.run],
-        {
-          encoding: 'utf8',
-          env: {
-            PATH: process.env.PATH,
-            HOME: home,
-            RUNNER_TEMP: runnerTemp,
-            GITHUB_WORKSPACE: ws,
-            GITHUB_ENV: envFile,
+    for (const arm of [
+      'last-component link',
+      'trailing slash',
+      'intermediate link',
+    ]) {
+      const root = mkdtempSync(join(tmpdir(), 'serve-ab-ownership-link-'));
+      const outside = join(root, 'outside');
+      try {
+        const home = join(root, 'home');
+        mkdirSync(home);
+        const runnerTemp = join(root, 'runner-temp');
+        mkdirSync(runnerTemp);
+        mkdirSync(outside);
+        mkdirSync(join(outside, 'sub'));
+        writeFileSync(join(outside, 'canary'), 'x\n');
+        chmodSync(join(outside, 'canary'), 0o000);
+        writeFileSync(join(outside, 'sub', 'deep'), 'x\n');
+        chmodSync(join(outside, 'sub', 'deep'), 0o000);
+        let gw;
+        if (arm === 'intermediate link') {
+          // The plant sits on the runner workspace itself — an operand
+          // component no last-component test can see; the recursion runs
+          // through it into the attacker-named tree.
+          mkdirSync(join(outside, 'qwen-code'));
+          writeFileSync(join(outside, 'qwen-code', 'canary'), 'x\n');
+          chmodSync(join(outside, 'qwen-code', 'canary'), 0o000);
+          symlinkSync(outside, join(root, 'rws-link'));
+          gw = join(root, 'rws-link', 'qwen-code');
+        } else {
+          const rws = join(root, 'rws');
+          mkdirSync(rws);
+          const ws = join(rws, 'qwen-code');
+          symlinkSync(outside, ws);
+          gw = arm === 'trailing slash' ? `${ws}/` : ws;
+        }
+        const envFile = join(root, 'github_env');
+        writeFileSync(envFile, '');
+        const res = spawnSync(
+          bashPath,
+          ['--noprofile', '--norc', '-eo', 'pipefail', '-c', heal.run],
+          {
+            encoding: 'utf8',
+            env: {
+              PATH: process.env.PATH,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: gw,
+              GITHUB_ENV: envFile,
+            },
           },
-        },
-      );
-      assert.equal(
-        res.status,
-        0,
-        `the heal must skip a symlinked operand: ${res.stdout}${res.stderr}`,
-      );
-      assert.ok(
-        lstatSync(ws).isSymbolicLink(),
-        'the plant must stay for the wipe heal to own',
-      );
-      assert.equal(statSync(join(outside, 'canary')).mode & 0o777, 0);
-      assert.equal(statSync(join(outside, 'sub', 'deep')).mode & 0o777, 0);
-    } finally {
-      chmodSync(join(outside, 'canary'), 0o644);
-      chmodSync(join(outside, 'sub', 'deep'), 0o644);
-      rmSync(root, { recursive: true, force: true });
+        );
+        assert.equal(
+          res.status,
+          0,
+          `the heal must skip a planted operand (${arm}): ${res.stdout}${res.stderr}`,
+        );
+        if (arm === 'intermediate link') {
+          assert.ok(
+            lstatSync(join(root, 'rws-link')).isSymbolicLink(),
+            'the plant must stay for the wipe heal to own',
+          );
+          assert.equal(
+            statSync(join(outside, 'qwen-code', 'canary')).mode & 0o777,
+            0,
+            `the recursion escaped through the intermediate link (${arm})`,
+          );
+        } else {
+          const ws = arm === 'trailing slash' ? gw.slice(0, -1) : gw;
+          assert.ok(
+            lstatSync(ws).isSymbolicLink(),
+            'the plant must stay for the wipe heal to own',
+          );
+          assert.equal(
+            statSync(join(outside, 'canary')).mode & 0o777,
+            0,
+            `the recursion escaped through the planted operand (${arm})`,
+          );
+          assert.equal(
+            statSync(join(outside, 'sub', 'deep')).mode & 0o777,
+            0,
+            `the recursion escaped through the planted operand (${arm})`,
+          );
+        }
+      } finally {
+        for (const p of [
+          join(outside, 'canary'),
+          join(outside, 'sub', 'deep'),
+          join(outside, 'qwen-code', 'canary'),
+        ]) {
+          if (existsSync(p)) {
+            chmodSync(p, 0o644);
+          }
+        }
+        rmSync(root, { recursive: true, force: true });
+      }
     }
   });
 });
@@ -1238,94 +1406,151 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     assert.ok(heal !== -1, 'the ownership heal must exist');
     assert.equal(steps[heal].if, "${{ runner.environment == 'self-hosted' }}");
-    assert.match(steps[heal].run, /chown -R .* "\$GITHUB_WORKSPACE"/);
-    assert.match(steps[heal].run, /chmod -R u\+rwX "\$GITHUB_WORKSPACE"/);
+    assert.match(steps[heal].run, /chown -R .* "\$WS_HEAL"/);
+    assert.match(steps[heal].run, /chmod -R u\+rwX "\$WS_HEAL"/);
+    assert.match(
+      steps[heal].run,
+      /realpath -m -- "\$WS_HEAL"/,
+      'the gate must require the WHOLE operand path to be link-free — realpath closes BOTH bypasses at once: it resolves a planted intermediate component to its target and never emits a trailing slash, so a last-component spelling with one cannot pass the equality test',
+    );
     assert.ok(heal < checkout, 'the heal must precede the checkout');
   });
 
   it('leaves a symlinked workspace target untouched by the ownership heal', () => {
     // GNU chmod has no -P: with -R it dereferences a symlink OPERAND and
-    // recurses into the target. The heal gates the recursion on a real
-    // directory and lets the wipe own the planted case. The same step
+    // recurses into the target. The heal gates the recursion on a real,
+    // CANONICAL directory and lets the wipe own the planted case — three
+    // entrances: the link as the last component, the same plant hidden by
+    // one trailing slash (`[ -d path/ ]`/`[ ! -L path/ ]` resolve THROUGH
+    // the link when the slash is there — the realpath gate closes it,
+    // realpath never emits a trailing slash), and a link on an INTERMEDIATE
+    // component the last-component tests cannot see. The same step
     // publishes the GIT_CONFIG_GLOBAL/SYSTEM neutralization the
     // neutralization witness below consumes the way Actions would.
     const heal = visualsCaptureJob.steps.find(
       (s) => s.name === 'Restore workspace ownership',
     );
     const bashPath = hostToolPath('bash');
-    const root = mkdtempSync(join(tmpdir(), 'visuals-ownership-link-'));
-    const outside = join(root, 'outside');
-    try {
-      const home = join(root, 'home');
-      mkdirSync(home);
-      const runnerTemp = join(root, 'runner-temp');
-      mkdirSync(runnerTemp);
-      mkdirSync(outside);
-      mkdirSync(join(outside, 'sub'));
-      writeFileSync(join(outside, 'canary'), 'x\n');
-      chmodSync(join(outside, 'canary'), 0o000);
-      writeFileSync(join(outside, 'sub', 'deep'), 'x\n');
-      chmodSync(join(outside, 'sub', 'deep'), 0o000);
-      const rws = join(root, 'rws');
-      mkdirSync(rws);
-      const ws = join(rws, 'qwen-code');
-      symlinkSync(outside, ws);
-      const envFile = join(root, 'github_env');
-      writeFileSync(envFile, '');
-      const res = spawnSync(
-        bashPath,
-        ['--noprofile', '--norc', '-eo', 'pipefail', '-c', heal.run],
-        {
-          encoding: 'utf8',
-          env: {
-            PATH: process.env.PATH,
-            HOME: home,
-            RUNNER_TEMP: runnerTemp,
-            GITHUB_WORKSPACE: ws,
-            GITHUB_ENV: envFile,
+    for (const arm of [
+      'last-component link',
+      'trailing slash',
+      'intermediate link',
+    ]) {
+      const root = mkdtempSync(join(tmpdir(), 'visuals-ownership-link-'));
+      const outside = join(root, 'outside');
+      try {
+        const home = join(root, 'home');
+        mkdirSync(home);
+        const runnerTemp = join(root, 'runner-temp');
+        mkdirSync(runnerTemp);
+        mkdirSync(outside);
+        mkdirSync(join(outside, 'sub'));
+        writeFileSync(join(outside, 'canary'), 'x\n');
+        chmodSync(join(outside, 'canary'), 0o000);
+        writeFileSync(join(outside, 'sub', 'deep'), 'x\n');
+        chmodSync(join(outside, 'sub', 'deep'), 0o000);
+        let gw;
+        if (arm === 'intermediate link') {
+          // The plant sits on the runner workspace itself — an operand
+          // component no last-component test can see; the recursion runs
+          // through it into the attacker-named tree.
+          mkdirSync(join(outside, 'qwen-code'));
+          writeFileSync(join(outside, 'qwen-code', 'canary'), 'x\n');
+          chmodSync(join(outside, 'qwen-code', 'canary'), 0o000);
+          symlinkSync(outside, join(root, 'rws-link'));
+          gw = join(root, 'rws-link', 'qwen-code');
+        } else {
+          const rws = join(root, 'rws');
+          mkdirSync(rws);
+          const ws = join(rws, 'qwen-code');
+          symlinkSync(outside, ws);
+          gw = arm === 'trailing slash' ? `${ws}/` : ws;
+        }
+        const envFile = join(root, 'github_env');
+        writeFileSync(envFile, '');
+        const res = spawnSync(
+          bashPath,
+          ['--noprofile', '--norc', '-eo', 'pipefail', '-c', heal.run],
+          {
+            encoding: 'utf8',
+            env: {
+              PATH: process.env.PATH,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: gw,
+              GITHUB_ENV: envFile,
+            },
           },
-        },
-      );
-      assert.equal(
-        res.status,
-        0,
-        `the heal must skip a symlinked operand: ${res.stdout}${res.stderr}`,
-      );
-      assert.ok(
-        lstatSync(ws).isSymbolicLink(),
-        'the plant must stay for the wipe heal to own',
-      );
-      assert.equal(statSync(join(outside, 'canary')).mode & 0o777, 0);
-      assert.equal(statSync(join(outside, 'sub', 'deep')).mode & 0o777, 0);
-      // The GIT_CONFIG bypasses must reach every later step of the job —
-      // the global one as a fresh WRITABLE file (actions/checkout's
-      // safe.directory registration dies on /dev/null), the system one as
-      // the read-only null device.
-      const envText = readFileSync(envFile, 'utf8');
-      assert.match(envText, /^GIT_CONFIG_GLOBAL=/m);
-      const globalFile = envText
-        .split('\n')
-        .find((l) => l.startsWith('GIT_CONFIG_GLOBAL='))
-        .slice('GIT_CONFIG_GLOBAL='.length);
-      assert.match(globalFile, /pool-gitconfig\./);
-      assert.ok(
-        !globalFile.startsWith(`${home}/`),
-        'the publication must never be a persistent ${HOME} path',
-      );
-      assert.ok(
-        statSync(globalFile).isFile(),
-        'the published gitconfig must exist',
-      );
-      assert.notEqual(
-        statSync(globalFile).mode & 0o200,
-        0,
-        'and be writable — checkout registers safe.directory in it',
-      );
-      assert.match(envText, /^GIT_CONFIG_SYSTEM=\/dev\/null$/m);
-    } finally {
-      chmodSync(join(outside, 'canary'), 0o644);
-      chmodSync(join(outside, 'sub', 'deep'), 0o644);
-      rmSync(root, { recursive: true, force: true });
+        );
+        assert.equal(
+          res.status,
+          0,
+          `the heal must skip a planted operand (${arm}): ${res.stdout}${res.stderr}`,
+        );
+        if (arm === 'intermediate link') {
+          assert.ok(
+            lstatSync(join(root, 'rws-link')).isSymbolicLink(),
+            'the plant must stay for the wipe heal to own',
+          );
+          assert.equal(
+            statSync(join(outside, 'qwen-code', 'canary')).mode & 0o777,
+            0,
+            `the recursion escaped through the intermediate link (${arm})`,
+          );
+        } else {
+          const ws = arm === 'trailing slash' ? gw.slice(0, -1) : gw;
+          assert.ok(
+            lstatSync(ws).isSymbolicLink(),
+            'the plant must stay for the wipe heal to own',
+          );
+          assert.equal(
+            statSync(join(outside, 'canary')).mode & 0o777,
+            0,
+            `the recursion escaped through the planted operand (${arm})`,
+          );
+          assert.equal(
+            statSync(join(outside, 'sub', 'deep')).mode & 0o777,
+            0,
+            `the recursion escaped through the planted operand (${arm})`,
+          );
+        }
+        // The GIT_CONFIG bypasses must reach every later step of the job —
+        // the global one as a fresh WRITABLE file (actions/checkout's
+        // safe.directory registration dies on /dev/null), the system one as
+        // the read-only null device — regardless of the planted operand.
+        const envText = readFileSync(envFile, 'utf8');
+        assert.match(envText, /^GIT_CONFIG_GLOBAL=/m);
+        const globalFile = envText
+          .split('\n')
+          .find((l) => l.startsWith('GIT_CONFIG_GLOBAL='))
+          .slice('GIT_CONFIG_GLOBAL='.length);
+        assert.match(globalFile, /pool-gitconfig\./);
+        assert.ok(
+          !globalFile.startsWith(`${home}/`),
+          'the publication must never be a persistent ${HOME} path',
+        );
+        assert.ok(
+          statSync(globalFile).isFile(),
+          'the published gitconfig must exist',
+        );
+        assert.notEqual(
+          statSync(globalFile).mode & 0o200,
+          0,
+          'and be writable — checkout registers safe.directory in it',
+        );
+        assert.match(envText, /^GIT_CONFIG_SYSTEM=\/dev\/null$/m);
+      } finally {
+        for (const p of [
+          join(outside, 'canary'),
+          join(outside, 'sub', 'deep'),
+          join(outside, 'qwen-code', 'canary'),
+        ]) {
+          if (existsSync(p)) {
+            chmodSync(p, 0o644);
+          }
+        }
+        rmSync(root, { recursive: true, force: true });
+      }
     }
   });
 
@@ -1390,7 +1615,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     assert.match(
       steps[ownershipIndex].run,
-      /chown -R .* "\$GITHUB_WORKSPACE"/,
+      /chown -R .* "\$WS_HEAL"/,
       'ownership-restore must actually chown the workspace',
     );
     assert.ok(
@@ -1453,7 +1678,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('#'));
     assert.equal(executed[0], 'set -uo pipefail');
-    const tail = executed.slice(-35);
+    const tail = executed.slice(-63);
     assert.equal(
       tail[0],
       'find "$WS" -mindepth 1 -maxdepth 1 ! \\( -name \'.git\' -type d \\) -exec rm -rf {} +',
@@ -1466,8 +1691,8 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     assert.equal(
       tail[2],
-      'planted="$(find "$WS/.git" -type l | wc -l | tr -d \' \')"',
-      'count the planted symlinks before naming anything — the names are bytes a previous job chose',
+      'planted="$(find "$WS/.git" ! -type f ! -type d | wc -l | tr -d \' \')"',
+      'count every planted NON-REGULAR entry before naming anything — the names are bytes a previous job chose',
     );
     assert.equal(
       tail[3],
@@ -1476,13 +1701,13 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     assert.equal(
       tail[4],
-      'echo "::warning::removing ${planted} planted symlink(s) under ${WS}/.git"',
+      'echo "::warning::removing ${planted} planted non-regular entries under ${WS}/.git"',
       'counted, not named: a newline in a planted name would forge a workflow annotation once printed',
     );
     assert.equal(
       tail[5],
-      'find "$WS/.git" -type l -delete',
-      'every symlink under the kept .git redirects a read or a write through an attacker-chosen target — sweep the class, link only, never following',
+      'find "$WS/.git" ! -type f ! -type d -delete',
+      'every non-regular entry goes BEFORE any git call: a symlink redirects a read or a write through an attacker-chosen target, and a FIFO or socket at a path git opens blocks the first git call in open() forever — sweep the class, entry only, never following',
     );
     assert.equal(
       tail[6],
@@ -1516,96 +1741,212 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     assert.equal(
       tail[12],
+      'rm -rf "$WS/.git/index"',
+      'the index is a workspace-scoped cache a killed job can leave garbage — the next checkout dies on it and every later one dies identically; the next checkout rebuilds it',
+    );
+    assert.equal(
+      tail[13],
+      'if grep -qis \'^[[:space:]]*\\[include\' "$WS/.git/config" "$WS/.git/config.worktree"; then',
+      'the one shape that lets config parsing open a file OUTSIDE the gitdir — an include section — is judged BEFORE any git call: a planted target there blocks or redirects every later git call, and no per-command timeout would un-wedge a kill',
+    );
+    assert.equal(
+      tail[14],
+      'echo "::warning::removing kept .git whose config carries an include section: every later git call blocks or reads through the planted target: ${WS}/.git"',
+      'the include refusal reports why the reuse is being paid back',
+    );
+    assert.equal(
+      tail[15],
+      'rm -rf "$WS/.git"',
+      'fail closed on an include plant: the gitdir is unprovable, the next job re-fetches',
+    );
+    assert.equal(tail[16], 'fi', 'close the include precheck');
+    assert.equal(
+      tail[17],
+      'if [ -d "$WS/.git" ]; then',
+      'the size bound judges a gitdir the include precheck did not already remove',
+    );
+    assert.equal(
+      tail[18],
+      'gitdir_kb="$(du -sk --apparent-size -- "$WS/.git" | cut -f1)"',
+      'junk planted inside the kept gitdir accretes without bound across jobs — one du walk, O(1) git spawns, apparent size because the accretion is measured in bytes stored',
+    );
+    assert.equal(
+      tail[19],
+      'if [ "${gitdir_kb}" -gt 5242880 ]; then',
+      "the bound sits far above a healthy ~900 MB history plus a repack's transient second pack",
+    );
+    assert.equal(
+      tail[20],
+      'echo "::warning::removing kept .git whose apparent size (${gitdir_kb} KB) exceeds the reuse bound: planted junk under it accretes without bound, re-fetching instead: ${WS}/.git"',
+      'the accretion warning reports the measured size and why the reuse is being paid back',
+    );
+    assert.equal(
+      tail[21],
+      'rm -rf "$WS/.git"',
+      'fail open past the bound — the identical shape every other validation failure uses — instead of carrying the junk into every later job',
+    );
+    assert.equal(tail[22], 'fi', 'close the size bound');
+    assert.equal(
+      tail[23],
+      'fi',
+      'keep the size bound inside its own kept-.git guard',
+    );
+    assert.equal(
+      tail[24],
+      'if [ -f "$WS/.git/shallow" ] && grep -qvE \'^[0-9a-f]{40}$\' "$WS/.git/shallow"; then',
+      'a corrupt shallow file dies the next fetch on every later job — judge the content: git writes one 40-hex sha per line',
+    );
+    assert.equal(
+      tail[25],
+      'echo "::warning::removing corrupt shallow file: ${WS}/.git/shallow"',
+      'the shallow warning names the file being removed',
+    );
+    assert.equal(
+      tail[26],
+      'rm -f "$WS/.git/shallow"',
+      'lose the FILE only — the next fetch re-establishes the boundary — never the gitdir the shallow record exists to serve',
+    );
+    assert.equal(tail[27], 'fi', 'close the shallow judgment');
+    assert.equal(
+      tail[28],
       'rm -rf "$(git --git-dir="$WS/.git" rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true',
       "extensions.worktreeConfig activates .git/config.worktree, a second local file that git config --local neither lists nor unsets — delete it like qwen-triage.yml's hardened config-sanitize",
     );
     assert.equal(
-      tail[13],
+      tail[29],
       'git --git-dir="$WS/.git" config --local --unset-all extensions.worktreeConfig 2>/dev/null || true',
       'drop the extension that re-activates the split config file',
     );
     assert.equal(
-      tail[14],
-      'scrub_keys="$(git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\\..+\\.(url|fetch|pushurl)|branch\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } || true)"',
-      "enumerate the scrub targets ONCE — the config is planted bytes and every git spawn re-parses it, so the per-key loop may only run over a bounded count — the allowlist keeps NO extensions.* key, remote narrowed to url/fetch/pushurl, core.worktree dropped — anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
+      tail[30],
+      'scrub_keys="$(git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null | { grep -ivE \'^(core\\.(repositoryformatversion|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\\..+\\.(url|fetch|pushurl)|branch\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } || true)"',
+      "enumerate the scrub targets ONCE — the config is planted bytes and every git spawn re-parses it, so the per-key loop may only run over a bounded count — the allowlist keeps NO extensions.* key, drops core.bare (a planted bare=true dies every later worktree call; unset, it is inferred false from the layout) and core.worktree, and narrows remote to url/fetch/pushurl — anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
     );
     assert.equal(
-      tail[15],
+      tail[31],
       'scrub_count="$(printf \'%s\\n\' "${scrub_keys}" | grep -c . || true)"',
       'count the targets the single enumeration produced',
     );
     assert.equal(
-      tail[16],
-      'if [ "${scrub_count}" -gt 1000 ]; then',
-      'a healthy actions/checkout gitdir holds a handful of local keys — a bulk plant must not reach the per-key loop',
+      tail[32],
+      'config_bytes=0',
+      'default the config size to zero for a gitdir whose config the sweep already removed',
     );
     assert.equal(
-      tail[17],
-      'echo "::warning::removing kept .git with ${scrub_count} non-allowlisted config keys: the per-key scrub cost is unbounded, re-fetching instead: ${WS}/.git"',
-      'the bound reports why the reuse is being paid back',
+      tail[33],
+      'if [ -f "$WS/.git/config" ]; then',
+      "measure the config's byte size only when the file exists",
     );
     assert.equal(
-      tail[18],
+      tail[34],
+      'config_bytes="$(wc -c < "$WS/.git/config" | tr -d \' \')"',
+      'wc -c output carries padding on some hosts; the arithmetic test needs a bare number',
+    );
+    assert.equal(tail[35], 'fi', 'close the config-size measure');
+    assert.equal(
+      tail[36],
+      'if [ "${scrub_count}" -gt 1000 ] || [ "${config_bytes}" -gt 1048576 ]; then',
+      'the scrub cost is keys TIMES bytes — every unset respawns git and re-writes the whole config — so a bulk plant, by key count OR config size, must not reach the per-key loop',
+    );
+    assert.equal(
+      tail[37],
+      'echo "::warning::removing kept .git with ${scrub_count} non-allowlisted config keys and a ${config_bytes}-byte config: the per-key scrub cost is unbounded, re-fetching instead: ${WS}/.git"',
+      'the bound reports both measured dimensions and why the reuse is being paid back',
+    );
+    assert.equal(
+      tail[38],
       'rm -rf "$WS/.git"',
       'fail open past the bound — the identical shape the unenumerable-refs arm uses — instead of looping into the job timeout',
     );
     assert.equal(
-      tail[19],
+      tail[39],
       'elif [ "${scrub_count}" != "0" ]; then',
-      'a bounded count keeps the per-key unset',
+      'a bounded plant keeps the per-key unset',
     );
     assert.equal(
-      tail[20],
+      tail[40],
       'printf \'%s\\n\' "${scrub_keys}" | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done',
-      'the kept .git config must be scrubbed to the allowlist — bounded by the count above',
+      'the kept .git config must be scrubbed to the allowlist — bounded by the count and size above',
     );
-    assert.equal(tail[21], 'fi', 'close the scrub bound');
+    assert.equal(tail[41], 'fi', 'close the scrub bound');
     assert.equal(
-      tail[22],
+      tail[42],
+      'if [ -d "$WS/.git" ]; then',
+      'the kept URL keys never reach the scrub loop, so they are checked for the ext:: shape that execs the attacker command on the next fetch — guarded on a gitdir the bounds above did not already remove',
+    );
+    assert.equal(
+      tail[43],
+      'exec_urls="$(git --git-dir="$WS/.git" config --local --list 2>/dev/null | { grep -iE \'^(remote\\.[^.]+\\.(url|pushurl)|submodule\\.[^.]+\\.url)=ext::\' || true; } || true)"',
+      'one enumeration, O(1) spawns, lists every url/pushurl value the allowlist kept',
+    );
+    assert.equal(
+      tail[44],
+      'printf \'%s\\n\' "${exec_urls}" | while IFS= read -r line; do',
+      'walk the ext:: hits line by line',
+    );
+    assert.equal(
+      tail[45],
+      'if [ -n "${line}" ]; then',
+      'an empty enumeration yields one empty line — the loop must skip it without failing the pipe',
+    );
+    assert.equal(
+      tail[46],
+      'git --git-dir="$WS/.git" config --local --unset-all "${line%%=*}" 2>/dev/null || true',
+      "unset-all removes every value of the key — actions/checkout re-establishes origin's url on the next checkout",
+    );
+    assert.equal(tail[47], 'fi', 'keep the empty-line skip an if-block');
+    assert.equal(tail[48], 'done', 'close the ext:: walk');
+    assert.equal(
+      tail[49],
+      'fi',
+      'keep the ext:: check inside its own kept-.git guard',
+    );
+    assert.equal(
+      tail[50],
       'if [ -d "$WS/.git" ]; then',
       'the replace strip and its fail-open guard on a real kept repo: a healed-empty workspace has no refs to strip and must not fail the job here',
     );
     assert.equal(
-      tail[23],
+      tail[51],
       'if ! replace_refs="$(git --git-dir="$WS/.git" for-each-ref --format=\'%(refname)\' refs/replace 2>/dev/null)"; then',
       'enumerate the replace refs; an unenumerable gitdir cannot be proven clean',
     );
     assert.equal(
-      tail[24],
+      tail[52],
       'echo "::warning::removing kept .git whose refs cannot be enumerated: ${WS}/.git"',
       'the fail-open reports why the reuse is being paid back',
     );
     assert.equal(
-      tail[25],
+      tail[53],
       'rm -rf "$WS/.git"',
       'fail open: remove the unprovable gitdir instead of carrying it — the next job re-fetches',
     );
-    assert.equal(tail[26], 'else', 'an enumerable gitdir keeps the strip');
+    assert.equal(tail[54], 'else', 'an enumerable gitdir keeps the strip');
     assert.equal(
-      tail[27],
+      tail[55],
       'printf \'%s\\n\' "${replace_refs}" | while IFS= read -r ref; do',
       "a planted refs/replace entry silently substitutes file content in the next job's checkout (actions/checkout passes no --no-replace-objects) — delete every one through git so packed entries drop too",
     );
     assert.equal(
-      tail[28],
+      tail[56],
       'if [ -n "${ref}" ]; then',
       'an empty enumeration yields one empty line — the loop must skip it without failing the pipe',
     );
     assert.equal(
-      tail[29],
+      tail[57],
       'git --git-dir="$WS/.git" update-ref -d "${ref}"',
       'delete each planted replace ref',
     );
-    assert.equal(tail[30], 'fi', 'keep the empty-line skip an if-block');
-    assert.equal(tail[31], 'done', 'close the strip loop');
-    assert.equal(tail[32], 'fi', 'close the fail-open if/else');
+    assert.equal(tail[58], 'fi', 'keep the empty-line skip an if-block');
+    assert.equal(tail[59], 'done', 'close the strip loop');
+    assert.equal(tail[60], 'fi', 'close the fail-open if/else');
     assert.equal(
-      tail[33],
+      tail[61],
       'fi',
       'the strip and fail-open stay inside the kept-.git guard',
     );
     assert.equal(
-      tail[34],
+      tail[62],
       'rm -rf "$WS/.git/refs/replace"',
       'and remove the namespace itself so nothing under it survives',
     );
@@ -1787,7 +2128,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
         );
         assert.match(
           res.stdout,
-          /removing 1 planted symlink\(s\) under .*\.git/,
+          /removing 1 planted non-regular entries under .*\.git/,
           `the sweep must report the planted link before it is gone (${arm})`,
         );
         assert.ok(
@@ -2240,7 +2581,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       assert.equal(res.status, 0, `wipe failed: ${res.stdout}${res.stderr}`);
       assert.match(
         res.stdout,
-        /removing 1 planted symlink\(s\) under .*\.git/,
+        /removing 1 planted non-regular entries under .*\.git/,
         'the sweep must report what it cleared',
       );
       const objects = join(ws, '.git', 'objects');
@@ -2481,6 +2822,385 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     }
   });
 
+  it('sweeps a FIFO planted where the scrub opens before any git call', () => {
+    // A pool job that ran contributor code leaves a mkfifo at a path the
+    // scrub's git calls open — config, packed-refs — needing no privilege.
+    // open() on a FIFO with no writer blocks forever, and the step has no
+    // per-command timeout, so without the widened sweep the job hangs into
+    // timeout-minutes with the plant alive and every later job on the
+    // runner wedges identically — the permanent-DoS shape the wipe exists
+    // to close. The sweep removes every non-regular entry BEFORE any git
+    // call; runWipeStep's spawn timeout turns an unfixed hang red here
+    // instead of holding the suite.
+    for (const arm of ['config', 'packed-refs']) {
+      const root = mkdtempSync(join(tmpdir(), `visuals-wipe-fifo-${arm}-`));
+      try {
+        const home = join(root, 'home');
+        mkdirSync(home);
+        const rws = join(root, 'rws');
+        const ws = join(rws, 'qwen-code');
+        initProbeRepo(home, ws);
+        const target = join(ws, '.git', arm);
+        rmSync(target, { force: true });
+        spawnSync('mkfifo', [target]);
+        const res = runWipeStep(wipeStep.run, { home, ws, rws });
+        assert.equal(
+          res.status,
+          0,
+          `the wipe must complete with a FIFO at ${arm} (a hang means the sweep regressed): ${res.stdout}${res.stderr}`,
+        );
+        assert.match(
+          res.stdout,
+          /removing 1 planted non-regular entries under .*\.git/,
+          `the sweep must report the planted FIFO before it is gone (${arm})`,
+        );
+        assert.ok(!existsSync(target), `the FIFO must be swept (${arm})`);
+        // The kept repo stays usable: the next checkout completes.
+        const checkout = spawnSync(
+          realGit,
+          [
+            '--git-dir',
+            join(ws, '.git'),
+            '--work-tree',
+            ws,
+            'checkout',
+            '-q',
+            '-f',
+            'HEAD',
+          ],
+          { cwd: root, encoding: 'utf8', env: wipeGitEnv(home) },
+        );
+        assert.equal(
+          checkout.status,
+          0,
+          `the next checkout must complete (${arm}): ${checkout.stderr}`,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('fails open on a config whose include section reaches outside the gitdir', () => {
+    // An include section is the one shape that lets config parsing open a
+    // file OUTSIDE the swept gitdir: a planted target there blocks every
+    // later git call in open() (FIFO arm) or redirects its reads (regular
+    // arm), and the fail-open arms sit AFTER the hang — no per-command
+    // timeout would un-wedge the kill. Judge the section BEFORE any git
+    // call and pay the reuse back: the gitdir goes, the next job
+    // re-fetches.
+    for (const arm of ['fifo', 'regular-file']) {
+      const root = mkdtempSync(join(tmpdir(), `visuals-wipe-include-${arm}-`));
+      try {
+        const home = join(root, 'home');
+        mkdirSync(home);
+        const rws = join(root, 'rws');
+        const ws = join(rws, 'qwen-code');
+        initProbeRepo(home, ws);
+        const outsideTarget = join(root, 'include-target');
+        if (arm === 'fifo') {
+          spawnSync('mkfifo', [outsideTarget]);
+        } else {
+          writeFileSync(outsideTarget, '[core]\n\thooksPath = /evil\n');
+        }
+        writeFileSync(
+          join(ws, '.git', 'config'),
+          readFileSync(join(ws, '.git', 'config'), 'utf8') +
+            `[include]\n\tpath = ${outsideTarget}\n`,
+        );
+        const res = runWipeStep(wipeStep.run, { home, ws, rws });
+        assert.equal(
+          res.status,
+          0,
+          `the wipe must survive an include plant (${arm}): ${res.stdout}${res.stderr}`,
+        );
+        assert.match(
+          res.stdout,
+          /config carries an include section/,
+          `the fail-open must say why the reuse is being paid back (${arm})`,
+        );
+        assert.ok(
+          !existsSync(join(ws, '.git')),
+          `the unprovable gitdir must be removed (${arm})`,
+        );
+        assert.ok(
+          existsSync(outsideTarget),
+          `the target outside the gitdir must be untouched (${arm})`,
+        );
+        // The next job starts clean: a second simulated job completes.
+        const res2 = runWipeStep(wipeStep.run, { home, ws, rws });
+        assert.equal(
+          res2.status,
+          0,
+          `the next job must not die on the removed gitdir (${arm}): ${res2.stdout}${res2.stderr}`,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('removes a garbage index a killed job left in the kept gitdir', () => {
+    // The index is workspace-scoped state a job killed mid-write leaves
+    // garbage — the next checkout dies on it, and then every later job
+    // dies identically, because nothing in the wipe ever removed it. The
+    // next checkout rebuilds the index, so the wipe drops it wholesale.
+    const root = mkdtempSync(join(tmpdir(), 'visuals-wipe-index-'));
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      const rws = join(root, 'rws');
+      const ws = join(rws, 'qwen-code');
+      initProbeRepo(home, ws);
+      writeFileSync(join(ws, '.git', 'index'), 'not an index');
+      const res = runWipeStep(wipeStep.run, { home, ws, rws });
+      assert.equal(res.status, 0, `wipe failed: ${res.stdout}${res.stderr}`);
+      assert.ok(
+        !existsSync(join(ws, '.git', 'index')),
+        'the garbage index must be removed',
+      );
+      const checkout = spawnSync(
+        realGit,
+        [
+          '--git-dir',
+          join(ws, '.git'),
+          '--work-tree',
+          ws,
+          'checkout',
+          '-q',
+          '-f',
+          'HEAD',
+        ],
+        { cwd: root, encoding: 'utf8', env: wipeGitEnv(home) },
+      );
+      assert.equal(
+        checkout.status,
+        0,
+        `the next checkout must rebuild the index: ${checkout.stderr}`,
+      );
+      assert.ok(
+        existsSync(join(ws, '.git', 'index')),
+        'the checkout rebuilds what the wipe dropped',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('scrubs a planted core.bare and every value of a multi-valued plant', () => {
+    // core.bare used to sit on the allowlist: a planted bare=true makes
+    // every later worktree git call die "this operation must be run in
+    // a work tree" until manual cleanup — unset, it is inferred false from
+    // the gitdir-in-.git layout, so the allowlist drops it. A multi-valued
+    // plant must lose EVERY value: unset-all does, a plain unset leaves
+    // the second one alive.
+    const root = mkdtempSync(join(tmpdir(), 'visuals-wipe-bare-'));
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      const rws = join(root, 'rws');
+      const ws = join(rws, 'qwen-code');
+      initProbeRepo(home, ws);
+      gitProbe(home, ['config', '--local', 'core.bare', 'true'], ws);
+      gitProbe(home, ['config', '--local', '--add', 'alias.evil', '!x1'], ws);
+      gitProbe(home, ['config', '--local', '--add', 'alias.evil', '!x2'], ws);
+      const res = runWipeStep(wipeStep.run, { home, ws, rws });
+      assert.equal(res.status, 0, `wipe failed: ${res.stdout}${res.stderr}`);
+      const local = gitProbe(
+        home,
+        [
+          '--git-dir',
+          join(ws, '.git'),
+          'config',
+          '--local',
+          '--name-only',
+          '--list',
+        ],
+        ws,
+      ).split('\n');
+      assert.ok(
+        !local.includes('core.bare'),
+        'a planted core.bare must not survive on the allowlist',
+      );
+      assert.ok(
+        !local.includes('alias.evil'),
+        'every value of a multi-valued plant must go',
+      );
+      const checkout = spawnSync(
+        realGit,
+        [
+          '--git-dir',
+          join(ws, '.git'),
+          '--work-tree',
+          ws,
+          'checkout',
+          '-q',
+          '-f',
+          'HEAD',
+        ],
+        { cwd: root, encoding: 'utf8', env: wipeGitEnv(home) },
+      );
+      assert.equal(
+        checkout.status,
+        0,
+        `a scrubbed core.bare must be inferred false: ${checkout.stderr}`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('unsets ext:: urls the allowlist keeps and keeps the urls it serves', () => {
+    // The allowlist keeps remote/submodule url keys for the next checkout
+    // to reuse, so they never reach the scrub loop — and an ext:: url
+    // among them execs the attacker command on the next fetch. Unset
+    // exactly that shape (actions/checkout re-establishes origin's url),
+    // and keep the ordinary urls the reuse depends on.
+    const root = mkdtempSync(join(tmpdir(), 'visuals-wipe-exturl-'));
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      const rws = join(root, 'rws');
+      const ws = join(rws, 'qwen-code');
+      initProbeRepo(home, ws);
+      gitProbe(
+        home,
+        ['config', '--local', 'remote.origin.url', 'ext::sh -c evil%'],
+        ws,
+      );
+      gitProbe(
+        home,
+        ['config', '--local', 'remote.origin.pushurl', 'ext::evil'],
+        ws,
+      );
+      gitProbe(
+        home,
+        ['config', '--local', 'submodule.sub.url', 'ext::evil'],
+        ws,
+      );
+      gitProbe(
+        home,
+        [
+          'config',
+          '--local',
+          'remote.mirror.url',
+          'https://example.com/mirror.git',
+        ],
+        ws,
+      );
+      const res = runWipeStep(wipeStep.run, { home, ws, rws });
+      assert.equal(res.status, 0, `wipe failed: ${res.stdout}${res.stderr}`);
+      const local = spawnSync(
+        realGit,
+        ['--git-dir', join(ws, '.git'), 'config', '--local', '--list'],
+        { encoding: 'utf8', env: wipeGitEnv(home) },
+      );
+      assert.ok(
+        !/^(remote\.origin\.(url|pushurl)|submodule\.sub\.url)=/m.test(
+          local.stdout,
+        ),
+        'every ext:: url must be unset',
+      );
+      assert.match(
+        local.stdout,
+        /^remote\.mirror\.url=https:/m,
+        'the ordinary url the next checkout reuses must survive',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('judges the shallow file content instead of carrying a corrupt plant', () => {
+    // The shallow file stays KEPT — the depth-1 checkouts legitimately
+    // record the boundary, and deleting a HEALTHY one corrupts the reuse —
+    // but a corrupt plant dies the next fetch with "shallow file is
+    // corrupt" on every later job. Lose the file only, never the gitdir;
+    // the next fetch re-establishes the boundary.
+    for (const arm of ['corrupt', 'valid']) {
+      const root = mkdtempSync(join(tmpdir(), `visuals-wipe-shallow-${arm}-`));
+      try {
+        const home = join(root, 'home');
+        mkdirSync(home);
+        const rws = join(root, 'rws');
+        const ws = join(rws, 'qwen-code');
+        initProbeRepo(home, ws);
+        writeFileSync(
+          join(ws, '.git', 'shallow'),
+          arm === 'valid' ? `${'a'.repeat(40)}\n` : 'not a sha\n',
+        );
+        const res = runWipeStep(wipeStep.run, { home, ws, rws });
+        assert.equal(
+          res.status,
+          0,
+          `wipe failed (${arm}): ${res.stdout}${res.stderr}`,
+        );
+        if (arm === 'valid') {
+          assert.ok(
+            existsSync(join(ws, '.git', 'shallow')),
+            'a valid shallow record must survive',
+          );
+        } else {
+          assert.match(
+            res.stdout,
+            /removing corrupt shallow file/,
+            'the corrupt file must be reported',
+          );
+          assert.ok(
+            !existsSync(join(ws, '.git', 'shallow')),
+            'the corrupt file must be removed',
+          );
+          assert.ok(
+            existsSync(join(ws, '.git', 'HEAD')),
+            'the gitdir itself must survive a corrupt shallow',
+          );
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('removes a kept .git whose junk accretion exceeds the size bound', () => {
+    // Junk a previous job plants INSIDE the kept gitdir accretes without
+    // bound across jobs — the top-level wipe never sees it. Past the bound
+    // the reuse is paid back and the next job re-fetches. The fixture
+    // plants a sparse file so the apparent-size bound trips without
+    // writing gigabytes.
+    const root = mkdtempSync(join(tmpdir(), 'visuals-wipe-accretion-'));
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      const rws = join(root, 'rws');
+      const ws = join(rws, 'qwen-code');
+      initProbeRepo(home, ws);
+      spawnSync('truncate', [
+        '-s',
+        '5500M',
+        join(ws, '.git', 'junk-accretion'),
+      ]);
+      const res = runWipeStep(wipeStep.run, { home, ws, rws });
+      assert.equal(res.status, 0, `wipe failed: ${res.stdout}${res.stderr}`);
+      assert.match(
+        res.stdout,
+        /apparent size .* exceeds the reuse bound/,
+        'the bound must say why the reuse is being paid back',
+      );
+      assert.ok(
+        !existsSync(join(ws, '.git')),
+        'the over-bound gitdir must be removed',
+      );
+      const res2 = runWipeStep(wipeStep.run, { home, ws, rws });
+      assert.equal(
+        res2.status,
+        0,
+        `the next job must not die on the removed gitdir: ${res2.stdout}${res2.stderr}`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('neutralizes the runner global git config before the wipe and the checkout', () => {
     // $HOME persists across jobs on the pool and actions/checkout COPIES
     // ~/.gitconfig into its temp HOME rather than isolating from it: a
@@ -2572,6 +3292,116 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       assert.ok(
         !existsSync(marker),
         'the planted global hooksPath must not fire in the wipe or the checkout',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('neutralizes a planted npm userconfig before the install', () => {
+    // $HOME persists across jobs on the pool and nothing on this lane pins
+    // NPM_CONFIG_USERCONFIG: a previous job planting script-shell in
+    // ~/.npmrc makes every lifecycle script of THIS job's npm ci run
+    // through an attacker binary — the exact cross-job code-execution
+    // class the git publication beside it closes. The ownership step
+    // publishes a fresh writable userconfig under ${RUNNER_TEMP}; this
+    // witness proves the plant fires without the publication (so the
+    // vector is live on this host) and stays silent with it.
+    const heal = visualsCaptureJob.steps.find(
+      (s) => s.name === 'Restore workspace ownership',
+    );
+    const bashPath = hostToolPath('bash');
+    const root = mkdtempSync(join(tmpdir(), 'visuals-npmrc-'));
+    try {
+      const home = join(root, 'home');
+      mkdirSync(home);
+      const runnerTemp = join(root, 'runner-temp');
+      mkdirSync(runnerTemp);
+      const evil = join(root, 'evil-shell.sh');
+      const marker = join(root, 'attacker-exec');
+      writeFileSync(evil, `#!/bin/sh\ntouch '${marker}'\nexit 0\n`);
+      chmodSync(evil, 0o755);
+      writeFileSync(join(home, '.npmrc'), `script-shell=${evil}\n`);
+      const pkg = join(root, 'pkg');
+      mkdirSync(pkg);
+      writeFileSync(
+        join(pkg, 'package.json'),
+        '{"name":"probe","version":"1.0.0","scripts":{"probe":"exit 0"}}\n',
+      );
+      const ws = join(root, 'rws', 'qwen-code');
+      mkdirSync(ws, { recursive: true });
+      // Job step 1: the ownership heal publishes the neutralization.
+      const envFile = join(root, 'github_env');
+      writeFileSync(envFile, '');
+      const healRes = spawnSync(
+        bashPath,
+        ['--noprofile', '--norc', '-eo', 'pipefail', '-c', heal.run],
+        {
+          encoding: 'utf8',
+          env: {
+            PATH: process.env.PATH,
+            HOME: home,
+            RUNNER_TEMP: runnerTemp,
+            GITHUB_WORKSPACE: ws,
+            GITHUB_ENV: envFile,
+          },
+        },
+      );
+      assert.equal(healRes.status, 0, `heal failed: ${healRes.stderr}`);
+      const envText = readFileSync(envFile, 'utf8');
+      assert.match(envText, /^NPM_CONFIG_USERCONFIG=/m);
+      const userconfig = envText
+        .split('\n')
+        .find((l) => l.startsWith('NPM_CONFIG_USERCONFIG='))
+        .slice('NPM_CONFIG_USERCONFIG='.length);
+      assert.match(userconfig, /pool-npmrc\./);
+      assert.ok(
+        !userconfig.startsWith(`${home}/`),
+        'the publication must never be a persistent ${HOME} path',
+      );
+      assert.ok(
+        statSync(userconfig).isFile(),
+        'the published userconfig must exist',
+      );
+      assert.notEqual(
+        statSync(userconfig).mode & 0o200,
+        0,
+        'and be writable — the rate-limit step writes it with npm config set',
+      );
+      // Control: without the publication the planted shell executes.
+      const control = spawnSync('npm', ['run', 'probe'], {
+        cwd: pkg,
+        encoding: 'utf8',
+        env: { PATH: process.env.PATH, HOME: home },
+      });
+      assert.equal(
+        control.status,
+        0,
+        `the control npm run must complete: ${control.stdout}${control.stderr}`,
+      );
+      assert.ok(
+        existsSync(marker),
+        'the planted script-shell must fire without the neutralization — the vector must be live for this witness to say anything',
+      );
+      rmSync(marker);
+      // Job shape: the install runs with the publication in its env.
+      const res = spawnSync('npm', ['run', 'probe'], {
+        cwd: pkg,
+        encoding: 'utf8',
+        env: {
+          PATH: process.env.PATH,
+          HOME: home,
+          NPM_CONFIG_USERCONFIG: userconfig,
+        },
+      });
+      assert.equal(
+        res.status,
+        0,
+        `npm run under the published userconfig failed: ${res.stdout}${res.stderr}`,
+      );
+      assert.ok(
+        !existsSync(marker),
+        'the planted script-shell must not fire once the userconfig is neutralized',
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -2683,6 +3513,16 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     assert.match(
       steps[cache].run,
+      /for CACHE_COMP in _cacache _logs/,
+      "the npm-managed entries BELOW the leaf must be judged too — npm's actual write root is _cacache, and a plant there survives every component check while NPM_CONFIG_CACHE is exported through it",
+    );
+    assert.match(
+      steps[cache].run,
+      /could not be healed; using the default cache/,
+      'an unhealable entry below the leaf degrades to the default cache instead of exporting the plant — the cache is an optimization, so fail open',
+    );
+    assert.match(
+      steps[cache].run,
       /if mkdir -p "\$\{cache_dir\}" && probe_file="\$\(mktemp -- "\$\{cache_dir\}\//,
       'the NPM_CONFIG_CACHE export must ride on a successful mkdir AND a real write probe inside the tree — the cache is an optimization, so an unusable tree degrades to the default cache',
     );
@@ -2705,9 +3545,12 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     // Plant shapes a previous pool job can leave: leaf file/symlink, a
     // parent that is a file, a symlink on the INTERMEDIATE component, an
     // unremovable leaf under a 555 parent (the rm must be tolerated — the
-    // contract is fail open), a mode-000 leaf dir, and a hostile-permission
-    // subtree below a healthy leaf. Only unhealable shapes skip the export;
-    // every one leaves the step at exit 0.
+    // contract is fail open), a mode-000 leaf dir, a hostile-permission
+    // subtree below a healthy leaf, and plants on the npm-managed entries
+    // BELOW the leaf (_cacache, npm's actual write root): fifo/file/symlink
+    // healed away, and one unhealable entry that must hold the degrade.
+    // Only unhealable shapes skip the export; every one leaves the step at
+    // exit 0.
     for (const plant of [
       'file',
       'symlink',
@@ -2717,6 +3560,10 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       'unremovable-symlink',
       'mode-000-leaf',
       'hostile-subtree',
+      'cacache-fifo',
+      'cacache-file',
+      'cacache-symlink',
+      'unremovable-cacache',
     ]) {
       const root = mkdtempSync(join(tmpdir(), `visuals-npmcache-${plant}-`));
       const home = join(root, 'home');
@@ -2748,6 +3595,22 @@ describe('web-shell-visuals.yml capture runner routing', () => {
         } else if (plant === 'mode-000-leaf') {
           mkdirSync(cacheDir, { recursive: true });
           chmodSync(cacheDir, 0o000);
+        } else if (plant === 'cacache-fifo') {
+          mkdirSync(cacheDir, { recursive: true });
+          spawnSync('mkfifo', [join(cacheDir, '_cacache')]);
+        } else if (plant === 'cacache-file') {
+          mkdirSync(cacheDir, { recursive: true });
+          writeFileSync(join(cacheDir, '_cacache'), 'plant');
+        } else if (plant === 'cacache-symlink') {
+          mkdirSync(cacheDir, { recursive: true });
+          mkdirSync(outside);
+          writeFileSync(join(outside, 'victim.txt'), 'x\n');
+          chmodSync(join(outside, 'victim.txt'), 0o000);
+          symlinkSync(outside, join(cacheDir, '_cacache'));
+        } else if (plant === 'unremovable-cacache') {
+          mkdirSync(cacheDir, { recursive: true });
+          writeFileSync(join(cacheDir, '_cacache'), 'plant');
+          chmodSync(cacheDir, 0o555);
         } else {
           mkdirSync(join(cacheDir, '_cacache'), { recursive: true });
           writeFileSync(join(cacheDir, '_cacache', 'index-v5'), 'x');
@@ -2755,12 +3618,36 @@ describe('web-shell-visuals.yml capture runner routing', () => {
         }
         const envFile = join(root, 'github_env');
         writeFileSync(envFile, '');
+        // The arms asserting a plant SURVIVES spawn the step with a
+        // stub-only PATH that has no sudo: the heal falls back to
+        // `sudo -n rm`, which UNLINKS a protected plant on every host
+        // whose sudo permits rm — both lanes that run this suite — so a
+        // survival assertion under the full PATH tests the host, not the
+        // step. bash is spawned by absolute path, so the restricted PATH
+        // only hides sudo; removing the restriction turns these arms red
+        // again on a sudo-capable host.
+        const survivalArm =
+          plant === 'unremovable-symlink' || plant === 'unremovable-cacache';
+        let stepPath = process.env.PATH;
+        if (survivalArm) {
+          const binDir = join(root, 'restricted-bin');
+          mkdirSync(binDir);
+          for (const tool of ['rm', 'mkdir', 'mktemp', 'chmod']) {
+            const toolPath = hostToolPath(tool);
+            assert.ok(
+              toolPath,
+              `${tool} must be resolvable to run the cache step`,
+            );
+            symlinkSync(toolPath, join(binDir, tool));
+          }
+          stepPath = binDir;
+        }
         const res = spawnSync(
           bashPath,
           ['--noprofile', '--norc', '-eo', 'pipefail', '-c', cacheStep.run],
           {
             encoding: 'utf8',
-            env: { PATH: process.env.PATH, HOME: home, GITHUB_ENV: envFile },
+            env: { PATH: stepPath, HOME: home, GITHUB_ENV: envFile },
           },
         );
         const envText = readFileSync(envFile, 'utf8');
@@ -2772,7 +3659,8 @@ describe('web-shell-visuals.yml capture runner routing', () => {
         if (
           plant === 'parent-file' ||
           plant === 'unremovable-leaf' ||
-          plant === 'unremovable-symlink'
+          plant === 'unremovable-symlink' ||
+          plant === 'unremovable-cacache'
         ) {
           assert.ok(
             !envText.includes('NPM_CONFIG_CACHE'),
@@ -2787,6 +3675,12 @@ describe('web-shell-visuals.yml capture runner routing', () => {
               statSync(join(outside, 'victim.txt')).mode & 0o777,
               0,
               'chmod must not reach through the surviving link',
+            );
+          }
+          if (plant === 'unremovable-cacache') {
+            assert.ok(
+              lstatSync(join(cacheDir, '_cacache')).isFile(),
+              'the unhealable entry below the leaf must survive and hold the degrade',
             );
           }
         } else {
@@ -2805,6 +3699,21 @@ describe('web-shell-visuals.yml capture runner routing', () => {
               readdirSync(outside),
               [],
               'nothing may be written through the intermediate plant',
+            );
+          } else if (plant === 'cacache-symlink') {
+            assert.ok(
+              !existsSync(join(cacheDir, '_cacache')),
+              `the planted entry below the leaf must be healed away (${plant})`,
+            );
+            assert.equal(
+              statSync(join(outside, 'victim.txt')).mode & 0o777,
+              0,
+              'nothing may be mode-flipped through the entry plant',
+            );
+          } else if (plant === 'cacache-fifo' || plant === 'cacache-file') {
+            assert.ok(
+              !existsSync(join(cacheDir, '_cacache')),
+              `the planted entry below the leaf must be healed away (${plant})`,
             );
           } else if (plant !== 'mode-000-leaf' && plant !== 'hostile-subtree') {
             assert.ok(

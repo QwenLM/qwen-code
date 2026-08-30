@@ -101,19 +101,29 @@ jobs:
           echo "GIT_CONFIG_SYSTEM=/dev/null" >> "${GITHUB_ENV}"
           RUNNER_UID="$(id -u)"
           RUNNER_GID="$(id -g)"
-          # Gate the recursion on a real directory: GNU chmod has no -P
-          # and with -R dereferences a symlink OPERAND, so a workspace a
-          # previous job replaced with a symlink — the plant class the
-          # wipe below heals — would be chmodded recursively through the
-          # link, out of bounds, and this step runs BEFORE the heal that
-          # unlinks the plant. The heal's fresh directory needs no
-          # ownership repair. chown -R defaults to -P and stays behind
-          # the same gate for the one shape both share.
-          if [ -d "$GITHUB_WORKSPACE" ] && [ ! -L "$GITHUB_WORKSPACE" ]; then
+          # Gate the recursion on a real, CANONICAL directory: GNU chmod has
+          # no -P and with -R dereferences a symlink OPERAND, so a workspace
+          # a previous job replaced with a symlink — the plant class the wipe
+          # below heals — would be chmodded recursively through the link,
+          # out of bounds, and this step runs BEFORE the heal that unlinks
+          # the plant. A last-component test alone leaks two entrances: a
+          # trailing slash makes `[ -d path/ ]`/`[ ! -L path/ ]` resolve
+          # THROUGH a last-component link (`-L link/` is false), and a link
+          # on an INTERMEDIATE component (e.g. the runner workspace itself)
+          # passes both tests on the real last component while the recursion
+          # still runs through the link. Requiring the whole operand to be
+          # link-free — realpath equal to itself — closes both: realpath
+          # resolves a planted component to its target and never emits a
+          # trailing slash. Skipping any planted spelling is safe: the
+          # heal's fresh directory needs no ownership repair. chown -R
+          # defaults to -P and stays behind the same gate for the one shape
+          # both share.
+          WS_HEAL="${GITHUB_WORKSPACE}"
+          if [ -d "$WS_HEAL" ] && [ ! -L "$WS_HEAL" ] && [ "$(realpath -m -- "$WS_HEAL" 2>/dev/null)" = "$WS_HEAL" ]; then
             if [ "$RUNNER_UID" != "0" ]; then
-              chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+              chown -R "$RUNNER_UID:$RUNNER_GID" "$WS_HEAL" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$WS_HEAL" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
             fi
-            chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+            chmod -R u+rwX "$WS_HEAL" 2>/dev/null || sudo -n chmod -R u+rwX "$WS_HEAL" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
           fi
 
       - name: 'Wipe stale workspace except the shared .git before checkout'
@@ -383,77 +393,123 @@ jobs:
           # run attacker code (a same-repo PR or write-access fork author —
           # the exact lanes this workflow routes onto the pool — or a
           # compromised dependency) and a per-entrance defang leaves the next
-          # audit a new entrance: every symlink under it goes — each one
-          # redirects a read or a write (objects, refs, config) through an
-          # attacker-chosen target — then every *.lock of any shape (a plant
-          # jams the defangs below or the next checkout), then
-          # objects/info/alternates (a poisoned object store the next
-          # checkout materializes), then the exec vectors commondir, hooks
-          # and info/attributes. The config scrub's allowlist is narrower
-          # than qwen-triage.yml's config-sanitize — remote narrowed to
-          # url/fetch/pushurl (any other remote key is a knob, e.g. vcs
+          # audit a new entrance. Every validation below fails the SAME way:
+          # the gitdir is removed and the next job re-fetches (the next
+          # checkout would fail on it anyway), while a healed-empty workspace
+          # has no repo and must not fail here. The layers, in order: every
+          # non-regular entry goes BEFORE any git call — a symlink redirects
+          # a read or a write (objects, refs, config) through an
+          # attacker-chosen target, and a FIFO or socket at a path git opens
+          # (config, packed-refs) blocks the first git call in open()
+          # forever — no per-command timeout here, so the job would hang into
+          # timeout-minutes with the plant alive for every later job; then
+          # every *.lock of any shape (a plant jams the defangs below or the
+          # next checkout); then objects/info/alternates (a poisoned object
+          # store the next checkout materializes); then the exec vectors
+          # commondir, hooks and info/attributes; then the index — a
+          # workspace-scoped cache a killed job can leave garbage, dying the
+          # next checkout and every later one, and the next checkout rebuilds
+          # it; then the config's include sections — the one shape that lets
+          # config parsing open a file OUTSIDE the gitdir, where a planted
+          # target blocks or redirects every later git call; then the
+          # gitdir's apparent size, because junk planted inside the kept
+          # gitdir accretes without bound across jobs; then the shallow
+          # file's content — a corrupt plant dies the next fetch on every
+          # later job, so lose the FILE only (the next fetch re-establishes
+          # the boundary), never the gitdir. The config scrub's allowlist is
+          # narrower than qwen-triage.yml's config-sanitize — remote narrowed
+          # to url/fetch/pushurl (any other remote key is a knob, e.g. vcs
           # makes the next fetch exec git-remote-<vcs>), core.worktree
           # dropped (redirects the next checkout's writes and cleans outside
-          # the workspace) — and keeps NO extensions.* key: git's exec knobs
-          # are an open-ended class, and a planted extension makes every
-          # later git call exit 128 while the scrub's own enumeration dies
-          # on it. So a gitdir whose refs cannot even be enumerated is NOT
-          # carried: the fail-open below removes it and the next job
-          # re-fetches (the next checkout would fail on it anyway), while a
-          # healed-empty workspace has no repo and must not fail here.
-          # refs/replace is stripped after the scrub: a planted replace ref
-          # silently substitutes file content in the NEXT job's checkout
-          # (actions/checkout passes no --no-replace-objects). .git/shallow
-          # is deliberately KEPT: these checkouts fetch with depth 1, so the
-          # file legitimately records the shallow boundary — deleting it
-          # corrupts the very reuse the kept .git exists for — and a plant
-          # can only narrow the object graph (a loud fetch failure), never
-          # exec or substitute content. The find and the defang rm stay bare
-          # on purpose: under the job's `bash -eo pipefail` a wipe that
-          # cannot clear the workspace fails the job here instead of building
-          # both checkouts on top of the leftovers. Only the config scrub is
-          # best-effort, mirroring qwen-triage.yml's config-sanitize.
-          # Worktree-scoped config first, the same defang pair as
-          # qwen-triage's hardened config-sanitize: extensions.worktreeConfig
-          # activates .git/config.worktree, a second local file that
-          # `git config --local` neither lists nor unsets and that CAN carry
-          # exec vectors like core.hooksPath — delete the file and drop the
-          # extension, closing a bypass the allowlist sweep cannot see. Every
-          # git call is anchored to $WS/.git instead of discovering the repo
-          # from the CWD: after the heal above unlinks a symlinked workspace
-          # root, the step's CWD still is the link's target, and CWD
-          # discovery would scrub a repo outside the workspace.
+          # the workspace), core.bare dropped (a planted bare=true dies every
+          # later worktree call; unset, it is inferred false from the
+          # gitdir-in-.git layout) — and keeps NO extensions.* key: git's
+          # exec knobs are an open-ended class, and a planted extension makes
+          # every later git call exit 128 while the scrub's own enumeration
+          # dies on it. The scrub cost is keys TIMES bytes — every unset
+          # respawns git and every spawn re-parses AND re-writes the whole
+          # planted config — so a bulk plant, by key count OR config size,
+          # goes the way of the unenumerable-refs arm instead of looping into
+          # the job timeout; a killed scrub clears almost nothing, which is
+          # the permanent wedge the bound exists to prevent. The allowlist's
+          # kept URL keys never reach the scrub loop, so they are checked for
+          # the ext:: shape that execs the attacker command on the next
+          # fetch, and refs/replace is stripped after the scrub: a planted
+          # replace ref silently substitutes file content in the NEXT job's
+          # checkout (actions/checkout passes no --no-replace-objects).
+          # .git/shallow is deliberately KEPT on a healthy gitdir: these
+          # checkouts fetch with depth 1, so the file legitimately records
+          # the shallow boundary, and deleting it corrupts the very reuse the
+          # kept .git exists for — a plant can only narrow the object graph
+          # (a loud fetch failure), never exec or substitute content. The
+          # find and the defang rm stay bare on purpose: under the job's
+          # `bash -eo pipefail` a wipe that cannot clear the workspace fails
+          # the job here instead of building both checkouts on top of the
+          # leftovers. Only the config scrub is best-effort, mirroring
+          # qwen-triage.yml's config-sanitize. Worktree-scoped config first,
+          # the same defang pair as qwen-triage's hardened config-sanitize:
+          # extensions.worktreeConfig activates .git/config.worktree, a
+          # second local file that `git config --local` neither lists nor
+          # unsets and that CAN carry exec vectors like core.hooksPath —
+          # delete the file and drop the extension, closing a bypass the
+          # allowlist sweep cannot see. Every git call is anchored to
+          # $WS/.git instead of discovering the repo from the CWD: after the
+          # heal above unlinks a symlinked workspace root, the step's CWD
+          # still is the link's target, and CWD discovery would scrub a repo
+          # outside the workspace.
           find "$WS" -mindepth 1 -maxdepth 1 ! \( -name '.git' -type d \) -exec rm -rf {} +
           if [ -d "$WS/.git" ]; then
-            planted="$(find "$WS/.git" -type l | wc -l | tr -d ' ')"
+            planted="$(find "$WS/.git" ! -type f ! -type d | wc -l | tr -d ' ')"
             if [ "${planted}" != "0" ]; then
               # Counted, not named: the names are bytes a previous job
               # chose, and a newline in one would forge a workflow
               # annotation once printed.
-              echo "::warning::removing ${planted} planted symlink(s) under ${WS}/.git"
-              find "$WS/.git" -type l -delete
+              echo "::warning::removing ${planted} planted non-regular entries under ${WS}/.git"
+              # find does not follow the entries it deletes.
+              find "$WS/.git" ! -type f ! -type d -delete
             fi
             find "$WS/.git" -name '*.lock' -prune -exec rm -rf {} +
             rm -rf "$WS/.git/objects/info/alternates"
           fi
           rm -rf "$WS/.git/commondir"
           rm -rf "$WS/.git/hooks" "$WS/.git/info/attributes"
+          rm -rf "$WS/.git/index"
+          if grep -qis '^[[:space:]]*\[include' "$WS/.git/config" "$WS/.git/config.worktree"; then
+            echo "::warning::removing kept .git whose config carries an include section: every later git call blocks or reads through the planted target: ${WS}/.git"
+            rm -rf "$WS/.git"
+          fi
+          if [ -d "$WS/.git" ]; then
+            gitdir_kb="$(du -sk --apparent-size -- "$WS/.git" | cut -f1)"
+            if [ "${gitdir_kb}" -gt 5242880 ]; then
+              echo "::warning::removing kept .git whose apparent size (${gitdir_kb} KB) exceeds the reuse bound: planted junk under it accretes without bound, re-fetching instead: ${WS}/.git"
+              rm -rf "$WS/.git"
+            fi
+          fi
+          if [ -f "$WS/.git/shallow" ] && grep -qvE '^[0-9a-f]{40}$' "$WS/.git/shallow"; then
+            echo "::warning::removing corrupt shallow file: ${WS}/.git/shallow"
+            rm -f "$WS/.git/shallow"
+          fi
           rm -rf "$(git --git-dir="$WS/.git" rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
           git --git-dir="$WS/.git" config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
-          scrub_keys="$(git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\..+\.(url|fetch|pushurl)|branch\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } || true)"
+          scrub_keys="$(git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null | { grep -ivE '^(core\.(repositoryformatversion|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|hidedotfiles|protecthfs|protectntfs)|remote\..+\.(url|fetch|pushurl)|branch\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } || true)"
           scrub_count="$(printf '%s\n' "${scrub_keys}" | grep -c . || true)"
-          # A healthy actions/checkout gitdir holds a handful of local keys.
-          # The unset loop respawns git once per key and every spawn
-          # re-parses AND re-writes the whole planted config, so a bulk
-          # plant grows the scrub superlinearly into the job timeout — a
-          # permanent wedge, because a killed scrub clears almost nothing.
-          # Bound it: past the bound the gitdir goes the way of the
-          # unenumerable-refs arm and the next job re-fetches.
-          if [ "${scrub_count}" -gt 1000 ]; then
-            echo "::warning::removing kept .git with ${scrub_count} non-allowlisted config keys: the per-key scrub cost is unbounded, re-fetching instead: ${WS}/.git"
+          config_bytes=0
+          if [ -f "$WS/.git/config" ]; then
+            config_bytes="$(wc -c < "$WS/.git/config" | tr -d ' ')"
+          fi
+          if [ "${scrub_count}" -gt 1000 ] || [ "${config_bytes}" -gt 1048576 ]; then
+            echo "::warning::removing kept .git with ${scrub_count} non-allowlisted config keys and a ${config_bytes}-byte config: the per-key scrub cost is unbounded, re-fetching instead: ${WS}/.git"
             rm -rf "$WS/.git"
           elif [ "${scrub_count}" != "0" ]; then
             printf '%s\n' "${scrub_keys}" | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done
+          fi
+          if [ -d "$WS/.git" ]; then
+            exec_urls="$(git --git-dir="$WS/.git" config --local --list 2>/dev/null | { grep -iE '^(remote\.[^.]+\.(url|pushurl)|submodule\.[^.]+\.url)=ext::' || true; } || true)"
+            printf '%s\n' "${exec_urls}" | while IFS= read -r line; do
+              if [ -n "${line}" ]; then
+                git --git-dir="$WS/.git" config --local --unset-all "${line%%=*}" 2>/dev/null || true
+              fi
+            done
           fi
           if [ -d "$WS/.git" ]; then
             if ! replace_refs="$(git --git-dir="$WS/.git" for-each-ref --format='%(refname)' refs/replace 2>/dev/null)"; then
