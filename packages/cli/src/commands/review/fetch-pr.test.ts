@@ -7,7 +7,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import type { Argv, CommandModule } from 'yargs';
-import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
   fetchPrCommand,
   countDiffChangedLines,
@@ -238,6 +239,15 @@ const producerMocks = vi.hoisted(() => ({
   readFileSync: vi.fn((_path?: unknown): string => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
+  // Same fail-closed default as readFileSync: the widening's reader gates
+  // on lstat BEFORE it reads, and a path nothing serves does not exist.
+  lstatSync: vi.fn((_path?: unknown): { isFile: () => boolean } => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
+  // Identity by default: this fixture's filesystem holds no symlinks, so a
+  // path's real location IS its lexical one and the widening reader's
+  // containment passes. A test that wants an ESCAPE steers it per path.
+  realpathSync: vi.fn((path?: unknown): string => String(path)),
   gh: vi.fn(),
   git: vi.fn(),
   execFileSync: vi.fn(),
@@ -276,11 +286,15 @@ vi.mock('node:fs', async (importOriginal) => {
     default: {
       ...actual,
       mkdirSync: producerMocks.mkdirSync,
+      lstatSync: producerMocks.lstatSync,
+      realpathSync: producerMocks.realpathSync,
       readFileSync: producerMocks.readFileSync,
       writeFileSync: producerMocks.writeFileSync,
       statSync: statSyncThroughMock,
     },
     mkdirSync: producerMocks.mkdirSync,
+    lstatSync: producerMocks.lstatSync,
+    realpathSync: producerMocks.realpathSync,
     readFileSync: producerMocks.readFileSync,
     writeFileSync: producerMocks.writeFileSync,
     statSync: statSyncThroughMock,
@@ -403,6 +417,9 @@ describe('fetch-pr report assembly', () => {
     // merge base → no diff) here so every test starts from a known state
     // regardless of order.
     producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.lstatSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     producerMocks.refExists.mockReturnValue(false);
@@ -1204,6 +1221,25 @@ describe('fetch-pr report assembly', () => {
     '',
   ].join('\n');
 
+  /**
+   * The scope the default fixture yields: `a.ts` moved since the anchor, and
+   * `b.ts` is a clean source file the widening weighed and passed over — it
+   * imports nothing that changed.
+   */
+  const SCOPE_A = {
+    anchor: ANCHOR,
+    deltaFiles: ['a.ts'],
+    interaction: [],
+    contextFileCount: 1,
+  };
+  /** Anchor at the merge base: the delta is the full range, so both moved. */
+  const SCOPE_AB = {
+    anchor: BASE,
+    deltaFiles: ['a.ts', 'b.ts'],
+    interaction: [],
+    contextFileCount: 0,
+  };
+
   /** Serve the delta for `ANCHOR..head` and the full range for `BASE..head`. */
   function servesBothRanges(full = FULL_DIFF, delta = DELTA_DIFF) {
     producerMocks.gitRaw.mockImplementation((...args: string[]) =>
@@ -1225,6 +1261,152 @@ describe('fetch-pr report assembly', () => {
           : null,
     );
   }
+
+  /**
+   * The ORPHANED-anchor shape, the complement of `anchorIsValid`: the
+   * anchor EXISTS and resolves to a commit, but every ancestry question
+   * answers null (exit 1) — a rebased-away GitHub anchor, or an Aone head
+   * orphaned by the AGit-Flow amend. One shape, so the tests that refuse
+   * it on GitHub and the tests that scope it on Aone cannot drift apart.
+   */
+  function serveOrphanShape(): void {
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'cat-file' ? '' : args[0] === 'rev-parse' ? ANCHOR : null,
+    );
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+  }
+
+  it('pulls a still-clean importer of a changed file back into the scope', async () => {
+    // The narrowing is sound in one direction only. `b.ts` has not changed
+    // since the anchor, so the delta capture cannot show it and the narrowed
+    // scope drops its section — but the round before cleared it against
+    // `a.ts`'s OLD shape, and (b.ts@head × a.ts@head) is a pairing no round
+    // has seen. Left out, that seam retires the moment the ledger certifies
+    // this head as the next anchor.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return "import './a.js';\n";
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      diffBase: BASE,
+      scope: {
+        anchor: ANCHOR,
+        deltaFiles: ['a.ts'],
+        interaction: [{ path: 'b.ts', importsChanged: ['a.ts'] }],
+        contextFileCount: 0,
+      },
+    });
+    // …and the widened file is PUBLISHED, carrying its own full-range hunks:
+    // the plan naming it is worth nothing if no chunk holds its diff.
+    expect(writtenDiff()).toContain('b/a.ts');
+    expect(writtenDiff()).toContain('b/b.ts');
+  });
+
+  it('drops a widening candidate whose real path leaves the worktree', async () => {
+    // Wiring, not the rule itself — `worktree-reader.test.ts` proves the rule
+    // against a real filesystem, where the kernel does the resolving. What
+    // this pins is that `fetch-pr` reaches the worktree THROUGH the contained
+    // reader: `lstat` spares only the final component, so an intermediate
+    // symlink the PR planted keeps the path lexically inside while its real
+    // location is outside, and what the reader returns is content-derived and
+    // lands in `scope.interaction` in the published report.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => true };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    // `b.ts` is reached through a symlinked ancestor: lexically inside,
+    // really outside.
+    producerMocks.realpathSync.mockImplementation((path?: unknown) =>
+      String(path).endsWith('b.ts') ? '/elsewhere/victim.ts' : String(path),
+    );
+    // The edge EXISTS in the content this serves — only containment stops it.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return "import './a.js';\n";
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    const scope = (report.incremental as { scope: Record<string, unknown> })
+      .scope;
+    expect(scope['interaction']).toEqual([]);
+    expect(writtenDiff()).not.toContain('b/b.ts');
+  });
+
+  it('treats an irregular worktree file as unreadable, never reading it', async () => {
+    // The widening's reader is handed paths the PR itself names, so a planted
+    // symlink or fifo reaches it. Opening a fifo blocks the synchronous read
+    // forever, and a device like /dev/zero grows the buffer until SIGKILL —
+    // neither throws, so the catch that frees the worktree lease never runs
+    // and every later review of the PR hangs identically. The reader lstats
+    // first: anything not a regular file is unreadable, contributes no edge,
+    // and the round keeps the unwidened floor.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return { isFile: () => false };
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    // The edge b.ts -> a.ts EXISTS in the content this serves — a reader
+    // that skipped the lstat gate would find it and publish the section.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (String(path).endsWith('b.ts')) return "import './a.js';\n";
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const report = await reportFor({ since: ANCHOR });
+
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      diffBase: BASE,
+      scope: {
+        anchor: ANCHOR,
+        deltaFiles: ['a.ts'],
+        interaction: [],
+        contextFileCount: 1,
+      },
+    });
+    expect(writtenDiff()).toContain('b/a.ts');
+    expect(writtenDiff()).not.toContain('b/b.ts');
+    // The gate refused b.ts BEFORE any read: no readFileSync call asked for
+    // it. A gateless mutant reads the served edge and the two assertions
+    // above flip.
+    expect(
+      producerMocks.readFileSync.mock.calls.some((c) =>
+        String(c[0]).endsWith('b.ts'),
+      ),
+    ).toBe(false);
+  });
 
   it('scopes the plan to a valid anchor and suppresses the full-range flags', async () => {
     anchorIsValid();
@@ -1254,6 +1436,7 @@ describe('fetch-pr report assembly', () => {
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: true,
+      scope: SCOPE_A,
       diffBase: BASE,
     });
     expect(report.diffPath).not.toBeNull();
@@ -1266,6 +1449,10 @@ describe('fetch-pr report assembly', () => {
     // …and the PLAN is the delta's, not the full range's: a re-plan over
     // fullText would pair a 200-line plan with an 8-line published diff.
     expect(report.diffLines).toBe(NARROWED.trimEnd().split('\n').length);
+    const narrowedSrcDiffLines = buildDiffPlan(NARROWED).srcDiffLines;
+    const fullSrcDiffLines = buildDiffPlan(FULL_DIFF).srcDiffLines;
+    expect(fullSrcDiffLines).toBeGreaterThan(narrowedSrcDiffLines);
+    expect(report.fullSrcDiffLines).toBe(fullSrcDiffLines);
     expect(report.emptyDiff).toBeUndefined();
     expect(report.collapsedFromUpstream).toBeUndefined();
     // The probe wiring, pinned by invocation shape: a transposed
@@ -1343,6 +1530,7 @@ describe('fetch-pr report assembly', () => {
     expect((await reportFor({ since: ANCHOR })).incremental).toEqual({
       since: ANCHOR,
       effective: true,
+      scope: SCOPE_A,
       diffBase: BASE,
     });
   });
@@ -1370,6 +1558,7 @@ describe('fetch-pr report assembly', () => {
     expect(report.incremental).toEqual({
       since: 'abc1234',
       effective: true,
+      scope: SCOPE_A,
       diffBase: BASE,
     });
     // The probes ran against the LAST value, not the first or the join.
@@ -1438,6 +1627,7 @@ describe('fetch-pr report assembly', () => {
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: true,
+      scope: SCOPE_A,
       diffBase: BASE,
     });
     // The round reviews the PR's own diff — and the FILE agents read must
@@ -1749,6 +1939,7 @@ describe('fetch-pr report assembly', () => {
     expect(report.incremental).toEqual({
       since: BASE,
       effective: true,
+      scope: SCOPE_AB,
       diffBase: BASE,
     });
     // Exactly one capture: the delta arm read no second range.
@@ -1909,6 +2100,7 @@ describe('fetch-pr report assembly', () => {
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: true,
+      scope: SCOPE_A,
       diffBase: BASE,
     });
     // The REAL brief builder, over the REAL report the handler just wrote.
@@ -1956,6 +2148,7 @@ describe('fetch-pr report assembly', () => {
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: true,
+      scope: SCOPE_A,
       diffBase: BASE,
     });
     expect(writtenDiff()).toBe(NARROWED);
@@ -2011,15 +2204,7 @@ describe('fetch-pr report assembly', () => {
     // The `effective` clause in the partition guard: without it a round
     // whose anchor was refused for a deterministic reason gets relabelled
     // `partition-failed`, which invites re-running a dead anchor.
-    producerMocks.gitOpt.mockImplementation(
-      (...args: string[]) =>
-        args[0] === 'cat-file' ? '' : args[0] === 'rev-parse' ? ANCHOR : null, // not an ancestor
-    );
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: BASE,
-      baseFetchFailed: false,
-    });
-    servesBothRanges();
+    serveOrphanShape(); // not an ancestor
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
       if (typeof text === 'string' && text.trim() !== '') {
         throw new Error('chunks do not tile the diff');
@@ -2104,14 +2289,8 @@ describe('fetch-pr report assembly', () => {
   });
 
   it('refuses a rebased-away anchor end to end, on a full-range plan', async () => {
-    producerMocks.gitOpt.mockImplementation(
-      (...args: string[]) =>
-        args[0] === 'cat-file' ? '' : args[0] === 'rev-parse' ? ANCHOR : null, // every merge-base probe fails → not an ancestor
-    );
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: BASE,
-      baseFetchFailed: false,
-    });
+    // Every merge-base probe fails → not an ancestor.
+    serveOrphanShape();
     producerMocks.gitRaw.mockImplementation((...args: string[]) =>
       args.includes(`${BASE}..f00df00df00d`)
         ? Buffer.from(DELTA_DIFF)
@@ -2284,15 +2463,8 @@ describe('fetch-pr report assembly', () => {
     // reason announced "no diff could be captured" moments after the capture
     // succeeded and the partitioner warned, sending whoever diagnoses the
     // round at git and the network instead of at the partitioner.
-    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
-      // `merge-base` answers null → exit 1 → the predicate's NO.
-      args[0] === 'cat-file' ? '' : args[0] === 'rev-parse' ? ANCHOR : null,
-    );
-    producerMocks.resolveMergeBase.mockReturnValue({
-      sha: BASE,
-      baseFetchFailed: false,
-    });
-    servesBothRanges();
+    // `merge-base` answers null → exit 1 → the predicate's NO.
+    serveOrphanShape();
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
       if (typeof text === 'string' && text.trim() !== '') {
         throw new Error('chunks do not tile the diff');
@@ -2525,6 +2697,91 @@ describe('fetch-pr report assembly', () => {
       seedReport('turbo');
       const report = await reportFor({});
       expect(report.effort).toBeUndefined();
+    });
+  });
+
+  describe('the Aone incremental rule (AGit-Flow, D7, #9618)', () => {
+    // An AGit-Flow update AMENDS the single CR commit in place: the new
+    // head has the cached head's parent, never the cached head itself, so
+    // the head test answers "no" for the cached anchor on EVERY update —
+    // and the clamp too once the update also rebased onto newer master.
+    // The Aone rule must not ask either — after the fetch both heads are
+    // local, and `anchor..head` is the update's delta. Driven through the
+    // real handler with the Aone reader: an explicit Aone `--host` selects
+    // it, a mocked `a1` serves auth + MR view, and the git probes answer
+    // the orphan shape (existence yes, ancestry exit 1).
+
+    function serveAone(): void {
+      producerMocks.execFileSync.mockImplementation(
+        (cmd: string, args: string[]) => {
+          if (cmd !== 'a1') return '';
+          if (args[0] === 'repo' && args[1] === 'mr' && args[2] === 'view') {
+            return JSON.stringify({
+              mergeRequest: {
+                sourceBranch: 'f00df00df00d',
+                targetBranch: 'main',
+                detailUrl:
+                  'https://code.alibaba-inc.com/acme/widgets/codereview/42',
+                description: '',
+              },
+            });
+          }
+          return ''; // `auth whoami`
+        },
+      );
+      serveOrphanShape();
+    }
+
+    it('scopes an amend-orphaned anchor instead of refusing it', async () => {
+      serveAone();
+      const report = await reportFor({
+        since: ANCHOR,
+        host: 'gitlab.alibaba-inc.com',
+      });
+      expect(report.incremental).toEqual({
+        since: ANCHOR,
+        effective: true,
+        scope: SCOPE_A,
+        diffBase: BASE,
+      });
+      expect(report.diffPath).not.toBeNull();
+      // The published scope is the PR's own diff narrowed to the amend's
+      // delta — the untouched file is dropped, exactly as the GitHub
+      // incremental path narrows.
+      expect(writtenDiff()).toBe(NARROWED);
+      // ...and the diff came from the Aone ref namespace, not GitHub's.
+      expect(producerMocks.git.mock.calls).toContainEqual([
+        'fetch',
+        'origin',
+        'refs/merge-requests/42/head:qwen-review/pr-42',
+      ]);
+    });
+
+    it('never asks an ancestry question on the Aone platform', async () => {
+      serveAone();
+      await reportFor({ since: ANCHOR, host: 'gitlab.alibaba-inc.com' });
+      const ancestryCalls = producerMocks.gitOpt.mock.calls.filter(
+        (args) => args[0] === 'merge-base' && args[1] === '--is-ancestor',
+      );
+      // Neither the head test nor the clamp — a mutant re-asking either
+      // would refuse this anchor (every answer is "no") but could survive
+      // an outcome-only assertion, so pin the silence itself.
+      expect(ancestryCalls).toEqual([]);
+    });
+
+    it('keeps the ancestry tests on GitHub — an orphaned anchor there is a force-push', async () => {
+      // Same orphan shape, GitHub platform (no Aone host): the refusal
+      // stands, because on a push-based platform an anchor the head does
+      // not descend from is rewritten history, not an amend.
+      serveOrphanShape();
+      const report = await reportFor({ since: ANCHOR });
+      expect(report.incremental).toEqual({
+        since: ANCHOR,
+        effective: false,
+        reason: 'not-an-ancestor',
+      });
+      // The full range is the fallback.
+      expect(writtenDiff()).toBe(FULL_DIFF);
     });
   });
 });
@@ -2858,6 +3115,112 @@ describe('resolveIncrementalAnchor', () => {
       since: ANCHOR,
       effective: false,
       reason: 'unknown-commit',
+    });
+    expect(r.diffBase).toBeNull();
+  });
+
+  // ---- The AGit-Flow rule (design D7, #9618) ----------------------------
+  // Under AGit-Flow an update AMENDS the single CR commit in place, so the
+  // amended head has the cached head's parent, never the cached head itself
+  // — the anchor-behind-head test refuses EVERY update's anchor (the clamp
+  // fires only when the update also rebased). The Aone rule rules without
+  // ancestry: after the fetch both heads are local, and their diff is the
+  // update's delta.
+
+  it('noAncestry scopes an orphaned anchor the ancestry test refuses', () => {
+    // isAncestor answers "no" for everything — the exact amend shape. The
+    // constant-false probe also kills the mutant that keeps asking: were
+    // the test still consulted, its answer would refuse this anchor.
+    const r = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({ isAncestor: () => false }),
+      null,
+      { noAncestry: true },
+    );
+    expect(r.incremental).toEqual({ since: ANCHOR, effective: true });
+    expect(r.diffBase).toBe(ANCHOR);
+  });
+
+  it('noAncestry asks NEITHER ancestry question — not the head test, not the clamp', () => {
+    // A constant-false isAncestor passes with a dropped guard on either
+    // check, so pin the ruling to silence: the merge base is present and
+    // "older" than nothing an amend can reach — the clamp's exact trigger
+    // after a rebase onto newer master.
+    const asked: Array<[string, string]> = [];
+    const r = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({
+        isAncestor: (a, b) => {
+          asked.push([a, b]);
+          return false;
+        },
+      }),
+      { sha: 'c'.repeat(40), fetchFailed: false },
+      { noAncestry: true },
+    );
+    expect(r.incremental).toEqual({ since: ANCHOR, effective: true });
+    expect(r.diffBase).toBe(ANCHOR);
+    expect(asked).toEqual([]);
+  });
+
+  it('noAncestry keeps the existence refusals — a fresh clone cannot diff the orphan', () => {
+    // The ancestry skip is about LINEAGE, not presence: an anchor the
+    // object store does not hold (the round-1 fetch happened elsewhere)
+    // has no delta to capture, and says so with the deterministic reason.
+    const absent = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({ commitExists: () => false, isAncestor: () => false }),
+      null,
+      { noAncestry: true },
+    );
+    expect(absent.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'unknown-commit',
+    });
+    expect(absent.diffBase).toBeNull();
+    const unresolvable = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({ resolveCommit: () => null, isAncestor: () => false }),
+      null,
+      { noAncestry: true },
+    );
+    expect(unresolvable.incremental.reason).toBe('unknown-commit');
+  });
+
+  it('noAncestry rules upToDate when the anchor IS the head', () => {
+    // A re-run with no amend in between: the identity comparison is not an
+    // ancestry test, so it rules exactly as on GitHub.
+    const r = resolveIncrementalAnchor(HEAD, HEAD, probe(), null, {
+      noAncestry: true,
+    });
+    expect(r.incremental).toEqual({
+      since: HEAD,
+      effective: true,
+      upToDate: true,
+    });
+    expect(r.diffBase).toBeNull();
+  });
+
+  it('noAncestry still refuses a possibly-stale base — base-untrusted is not an ancestry test', () => {
+    // The published scope is assembled from the base-derived full capture;
+    // a base the run flagged possibly-stale is a capture no sibling guard
+    // rules on, ancestry skip or not.
+    const r = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({ isAncestor: () => false }),
+      { sha: 'c'.repeat(40), fetchFailed: true },
+      { noAncestry: true },
+    );
+    expect(r.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'base-untrusted',
     });
     expect(r.diffBase).toBeNull();
   });
@@ -3821,7 +4184,11 @@ describe('fetch-pr --resume', () => {
 });
 
 describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
-  const OUT = '/tmp/fetch-report.json';
+  // The deadline helpers derive the record dir through resolve(OUT), so OUT
+  // must be a native absolute path: a POSIX literal gains a drive letter and
+  // backslashes on Windows, the disk-routing mock below stops matching, and
+  // /tmp also maps to an unwritable drive root there.
+  const OUT = join(tmpdir(), 'fetch-report.json');
   const DIFF_BYTES = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
 
   function prevReport(over: Record<string, unknown> = {}): string {
@@ -4112,7 +4479,7 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       actualDeadline.writeRoundCapStop(OUT, 2, 2, now + 2000);
 
       await run();
-      const stampsFile = `${recordDir}/budget-rounds.json`;
+      const stampsFile = join(recordDir, 'budget-rounds.json');
       // Resume 1 kept the stop — and the stamps that price its rounds.
       expect(actualDeadline.readBudgetStop(OUT)).not.toBeNull();
       expect(realFs.existsSync(stampsFile)).toBe(true);

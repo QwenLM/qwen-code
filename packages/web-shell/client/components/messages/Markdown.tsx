@@ -21,6 +21,7 @@ import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
 import {
   getCachedHtml,
   getCodeHighlighter,
@@ -963,8 +964,13 @@ export const Markdown = memo(function Markdown({
   // Memoize plugins so their array references remain stable.
   const remarkPlugins = useMemo(() => {
     return sourceMarkdown?.remarkPlugins
-      ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
-      : [remarkGfm, remarkMath];
+      ? [
+          remarkGfm,
+          remarkMath,
+          remarkCjkFriendly,
+          ...sourceMarkdown.remarkPlugins,
+        ]
+      : [remarkGfm, remarkMath, remarkCjkFriendly];
   }, [sourceMarkdown?.remarkPlugins]);
 
   const rehypePlugins = useMemo(() => {

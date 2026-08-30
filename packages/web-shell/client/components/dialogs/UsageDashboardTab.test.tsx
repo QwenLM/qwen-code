@@ -24,7 +24,7 @@ let mockState: HookState = {
 // selected range flows through (which is what drives the refetch).
 let lastUsageOpts: { range?: string } | undefined;
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useUsageDashboard: (opts: { range?: string } = {}) => {
     lastUsageOpts = opts;
     return mockState;

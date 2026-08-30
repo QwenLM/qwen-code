@@ -7,12 +7,24 @@
 import { describe, it, expect } from 'vitest';
 import {
   diagnoseConvergence,
+  isFreshDraft,
+  recommendationsFor,
   renderConvergenceDiagnosis,
+  renderMechanismHealth,
   MAX_RENDERED_CLUSTERS,
+  convergenceAssessment,
+  convergenceAdvisory,
+  LAND_WITH_RESIDUAL_RISK,
   type ConvergenceDiagnosis,
   type DraftedFinding,
+  type ConvergenceFacts,
 } from './convergence.js';
-import { LEDGER_MAX_ROUND, type LedgerFinding } from './ledger.js';
+import {
+  LEDGER_MAX_FILE,
+  LEDGER_MAX_ROUND,
+  LEDGER_MAX_TITLE,
+  type LedgerFinding,
+} from './ledger.js';
 
 const f = (id: string, file: string): LedgerFinding => ({
   id,
@@ -647,6 +659,635 @@ describe('diagnoseConvergence — the trigger table', () => {
   });
 });
 
+// The successor chain (#9905): the sharper form of recurrence — not "the
+// file sees findings again" but "each of the last two rounds CLOSED a
+// Critical here and this round posts another". The truth table pins both
+// the #9659 rebound shape that must fire and every near-miss that must
+// stay silent.
+describe('diagnoseConvergence — the successor chain (#9905)', () => {
+  /** A Critical the ledger carries. */
+  const c = (id: string, file: string): LedgerFinding => ({
+    id,
+    sev: 'C',
+    file,
+    title: 't',
+  });
+  const closedAt = (r: number, id: string, file: string) => ({
+    r,
+    id,
+    f: file,
+  });
+
+  it('fires on the #9659 rebound shape — closed in each of the last two rounds, fresh Critical now', () => {
+    // Round 11 of the measured chain: R9-1 closed at r=10, R10-2 closes
+    // now (r=11), and the round posts a fresh R11-4 on the same file.
+    const r = diagnoseConvergence({
+      round: 11,
+      posted: 1,
+      prev: {
+        findings: [c('R10-2', 'src/mechanism.ts')],
+        closed: [closedAt(10, 'R9-1', 'src/mechanism.ts')],
+      },
+      drafts: [],
+      closuresThisRound: [closedAt(11, 'R10-2', 'src/mechanism.ts')],
+      thisRoundFindings: [
+        { ...c('R11-4', 'src/mechanism.ts'), title: 'gen 3' },
+      ],
+    })!;
+    expect(r.successorChains).toEqual([
+      {
+        file: 'src/mechanism.ts',
+        generations: [['R9-1'], ['R10-2']],
+        newIds: ['R11-4'],
+      },
+    ]);
+    expect(recommendationsFor(r).map((x) => x.code)).toContain(
+      'successor-chain',
+    );
+    expect(
+      recommendationsFor(r).find((x) => x.code === 'successor-chain')?.basis,
+    ).toContain('R9-1 → R10-2 → R11-4');
+  });
+
+  it('renders the note naming the subsystem, the chain, and the advice', () => {
+    const r = diagnoseConvergence({
+      round: 11,
+      posted: 1,
+      prev: {
+        findings: [c('R10-2', 'src/mechanism.ts')],
+        closed: [closedAt(10, 'R9-1', 'src/mechanism.ts')],
+      },
+      drafts: [],
+      closuresThisRound: [closedAt(11, 'R10-2', 'src/mechanism.ts')],
+      thisRoundFindings: [
+        { ...c('R11-4', 'src/mechanism.ts'), title: 'gen 3' },
+      ],
+    })!;
+    const text = renderConvergenceDiagnosis(r);
+    expect(text.en).toContain('⚠️ Divergence:');
+    expect(text.en).toContain('`src/mechanism.ts`');
+    expect(text.en).toContain('`R9-1 → R10-2 → R11-4`');
+    expect(text.en).toContain("raising the pattern with the mechanism's owner");
+    expect(text.zh).toContain('⚠️ 发散：');
+    expect(text.zh).toContain('提给该机制的负责人');
+    // The sentences state what was MEASURED — one closure generation in the
+    // PREVIOUS round and one THIS round (r === round - 1 and r === round),
+    // never "exactly one per round" and never the two rounds before this
+    // one. A generation can close several Criticals (the chain beside the
+    // sentence renders them), and dating the closures to rounds 9-10 beside
+    // a chain whose R10-2 was BORN in round 10 refutes itself.
+    expect(text.en).toContain(
+      'closed Critical(s) in the previous round and again this round',
+    );
+    expect(text.en).not.toContain('in each of the last two rounds');
+    expect(text.zh).toContain('在上一轮和本轮各关闭了至少一个 Critical');
+    expect(text.zh).not.toContain('过去两轮');
+    const basis = recommendationsFor(r).find(
+      (x) => x.code === 'successor-chain',
+    )?.basis;
+    expect(basis).toContain(
+      'closed Critical(s) in the previous round and again this round',
+    );
+    expect(basis).not.toContain('in each of the last two rounds');
+  });
+
+  it('stays silent with only ONE round of closures on the file', () => {
+    // The first successor generation: R1-1 closes now, R2-1 lands —
+    // locally normal, and the sentinel says nothing until it repeats.
+    expect(
+      diagnoseConvergence({
+        round: 2,
+        posted: 1,
+        prev: { findings: [c('R1-1', 'src/a.ts')] },
+        drafts: [],
+        closuresThisRound: [closedAt(2, 'R1-1', 'src/a.ts')],
+        thisRoundFindings: [{ ...c('R2-1', 'src/a.ts'), title: 'gen 2' }],
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent when the closures are on a DIFFERENT file', () => {
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [c('R2-1', 'src/a.ts')],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [{ ...c('R3-1', 'src/b.ts'), title: 'new claim' }],
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent when the previous generation is offered a STALE closure', () => {
+    // Side-file admission accepts any closure with `1 ≤ r ≤ markerRound`,
+    // so a hand-edited or planted file — the route `compose-review.ts`
+    // itself names — can carry one from an EARLIER round. It must not
+    // stand in for the missing previous generation, or the note fires on
+    // one real closure plus a stale one.
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [c('R2-1', 'src/a.ts')],
+          closed: [closedAt(1, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [{ ...c('R3-1', 'src/a.ts'), title: 'gen 2' }],
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent when the current generation is offered a STALE closure', () => {
+    // The mirror: a previous-round `r` inside THIS round's minted set does
+    // not supply the current generation either.
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [c('R2-1', 'src/a.ts')],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(2, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [{ ...c('R3-1', 'src/a.ts'), title: 'gen 2' }],
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent when the same-file finding is CARRIED, not new', () => {
+    // A still-standing Critical keeps its original id; the chain needs a
+    // FRESH one — otherwise the note would fire every round over a file
+    // whose Critical nobody ever fixes.
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [c('R2-1', 'src/a.ts')],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [{ ...c('R1-9', 'src/a.ts'), title: 'new claim' }],
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent on the stand-ins — they name no subsystem', () => {
+    for (const pseudo of ['(body)', '(unknown)']) {
+      expect(
+        diagnoseConvergence({
+          round: 3,
+          posted: 1,
+          prev: {
+            findings: [c('R2-1', pseudo)],
+            closed: [closedAt(2, 'R1-1', pseudo)],
+          },
+          drafts: [],
+          closuresThisRound: [closedAt(3, 'R2-1', pseudo)],
+          thisRoundFindings: [c('R3-1', pseudo)],
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it('stays silent on a REAL file spelled like a stand-in — its closures are undisambiguatable', () => {
+    // The fresh side respects `k` — a real path spelled like a stand-in
+    // still counts. But `LedgerClosure` carries no `k`: a closure stamped
+    // `(body)` is a body-only closure OR a closure on that real file, and
+    // nothing parts the two. Joining them to the real file's chain would
+    // post a lineage over a mechanism the closures never anchored on, so
+    // stand-in-named closures never join — silence, never a guess.
+    const real: LedgerFinding = { ...c('R3-1', '(body)'), k: 1 };
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [c('R2-1', '(body)')],
+          closed: [closedAt(2, 'R1-1', '(body)')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', '(body)')],
+        thisRoundFindings: [{ ...real, title: 'gen 3' }],
+      }),
+    ).toBeNull();
+  });
+
+  it('reaches across the file cap — closures are capped, the fresh side is not', () => {
+    // Every closure route caps `f` at LEDGER_MAX_FILE while the fresh side
+    // keys on the RAW built path, so an exact join is permanently silent on
+    // a path past the cap — disarming the advisory for exactly the deep
+    // subsystems it exists for, while the recurrence cluster one function
+    // up still fires via its prefix fallback. The join mirrors `priorFor`.
+    const longPath = `src/${'deep/'.repeat(60)}mechanism.ts`;
+    expect(longPath.length).toBeGreaterThan(LEDGER_MAX_FILE);
+    const capped = longPath.slice(0, LEDGER_MAX_FILE);
+    const r = diagnoseConvergence({
+      round: 3,
+      posted: 1,
+      prev: {
+        findings: [{ ...c('R2-1', longPath), file: capped }],
+        closed: [closedAt(2, 'R1-1', capped)],
+      },
+      drafts: [],
+      closuresThisRound: [closedAt(3, 'R2-1', capped)],
+      thisRoundFindings: [{ ...c('R3-1', longPath), title: 'gen 3' }],
+    })!;
+    expect(r.successorChains).toEqual([
+      {
+        file: longPath,
+        generations: [['R1-1'], ['R2-1']],
+        newIds: ['R3-1'],
+      },
+    ]);
+  });
+
+  it('stays silent when the fresh id is a re-mint of a claim still standing', () => {
+    // The fresh side's mirror of the mint's claim-identity join: a re-post
+    // whose readback lost the carried id gets a FRESH `R<round>-<n>` stamp
+    // in the build, so id alone counts a still-standing claim as the chain's
+    // new generation — narrating divergence over a claim that never left
+    // the work list, in a body whose own marker says it still stands.
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [
+            c('R2-1', 'src/a.ts'),
+            { ...c('R1-9', 'src/a.ts'), title: 'the standing claim' },
+          ],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [
+          { ...c('R3-1', 'src/a.ts'), title: 'the standing claim' },
+        ],
+      }),
+    ).toBeNull();
+
+    // The same defense at the cap stage: the previous side's titles were
+    // sliced to LEDGER_MAX_TITLE at write time, so the fresh side must
+    // project from the SAME capped form — the uncapped projection of a
+    // long claim never meets the capped previous one, and the re-mint
+    // counts as a new generation.
+    const longClaim = `the standing claim ${'x'.repeat(70)}`;
+    expect(longClaim.length).toBeGreaterThan(LEDGER_MAX_TITLE);
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [
+            c('R2-1', 'src/a.ts'),
+            {
+              ...c('R1-9', 'src/a.ts'),
+              title: longClaim.slice(0, LEDGER_MAX_TITLE),
+            },
+          ],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [{ ...c('R3-1', 'src/a.ts'), title: longClaim }],
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent when the fresh finding is a Suggestion', () => {
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [c('R2-1', 'src/a.ts')],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [{ ...f('R3-1', 'src/a.ts'), title: 'new claim' }],
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent on a truncated previous list — no closures were minted', () => {
+    // The mint rule's downstream face: with a partial work list the caller
+    // mints nothing, and the carried history alone can never complete a
+    // chain (the check needs BOTH generations).
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+          truncated: true,
+        },
+        drafts: [],
+        closuresThisRound: [],
+        thisRoundFindings: [c('R3-1', 'src/a.ts')],
+      }),
+    ).toBeNull();
+  });
+
+  it('names every fresh Critical of the diverging file in one chain', () => {
+    const r = diagnoseConvergence({
+      round: 3,
+      posted: 2,
+      prev: {
+        findings: [c('R2-1', 'src/a.ts')],
+        closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+      },
+      drafts: [],
+      closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+      thisRoundFindings: [
+        { ...c('R3-1', 'src/a.ts'), title: 'claim one' },
+        { ...c('R3-2', 'src/a.ts'), title: 'claim two' },
+      ],
+    })!;
+    expect(r.successorChains).toHaveLength(1);
+    expect(r.successorChains[0]!.newIds).toEqual(['R3-1', 'R3-2']);
+    expect(
+      recommendationsFor(r).find((x) => x.code === 'successor-chain')?.basis,
+    ).toContain('R1-1 → R2-1 → R3-1/R3-2');
+  });
+
+  it('caps each rendered generation at six ids, naming the overflow', () => {
+    // `MAX_CHAIN_IDS_PER_GENERATION` binds the paragraph and the basis
+    // through the one renderer; no fixture before this one built a
+    // generation wider than two ids, so deleting the slice and its `… (+N)`
+    // suffix shipped green.
+    const r = diagnoseConvergence({
+      round: 3,
+      posted: 1,
+      prev: {
+        findings: [],
+        closed: Array.from({ length: 7 }, (_, i) =>
+          closedAt(2, `R1-${i + 1}`, 'src/a.ts'),
+        ),
+      },
+      drafts: [],
+      closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+      thisRoundFindings: [{ ...c('R3-1', 'src/a.ts'), title: 'new claim' }],
+    })!;
+    expect(
+      recommendationsFor(r).find((x) => x.code === 'successor-chain')?.basis,
+    ).toContain('R1-1/R1-2/R1-3/R1-4/R1-5/R1-6 … (+1) → R2-1 → R3-1');
+  });
+
+  it('orders chains by measured work, never by ledger-insertion order', () => {
+    // Four diverging files; the LAST-inserted one carries the most fresh
+    // Criticals. Both consumers slice the list at MAX_RENDERED_CLUSTERS, so
+    // an unsorted list lets the map's insertion order — the order the files
+    // first appeared in the build — choose which subsystems the note names.
+    const files = ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'];
+    const r = diagnoseConvergence({
+      round: 3,
+      posted: 6,
+      prev: {
+        findings: [],
+        closed: files.map((f, i) => closedAt(2, `R1-${i + 1}`, f)),
+      },
+      drafts: [],
+      closuresThisRound: files.map((f, i) => closedAt(3, `R2-${i + 1}`, f)),
+      thisRoundFindings: [
+        c('R3-1', 'src/a.ts'),
+        c('R3-2', 'src/b.ts'),
+        c('R3-3', 'src/c.ts'),
+        c('R3-4', 'src/d.ts'),
+        c('R3-5', 'src/d.ts'),
+        c('R3-6', 'src/d.ts'),
+      ],
+    })!;
+    expect(r.successorChains.map((x) => x.file)).toEqual([
+      'src/d.ts',
+      'src/a.ts',
+      'src/b.ts',
+      'src/c.ts',
+    ]);
+    // The render and the basis read the same sorted list: the
+    // multi-Critical subsystem is named first, one single-Critical file
+    // lands in the tail.
+    const text = renderConvergenceDiagnosis(r);
+    expect(text.en).toContain('`src/a.ts`');
+    expect(text.en.indexOf('`src/d.ts`')).toBeLessThan(
+      text.en.indexOf('`src/a.ts`'),
+    );
+    expect(text.en).toContain('and 1 more');
+    expect(text.en).not.toContain('`src/c.ts`');
+    expect(text.zh).toContain('`src/d.ts`');
+    expect(text.zh).toContain('；另有 1 个');
+    expect(text.zh).not.toContain('`src/c.ts`');
+    const basis = recommendationsFor(r).find(
+      (x) => x.code === 'successor-chain',
+    )?.basis;
+    expect(basis).toContain('src/d.ts');
+    // Both consumers slice at MAX_RENDERED_CLUSTERS: with four chains the
+    // basis names the rendered three and elides the rest — the suffix is
+    // the only witness that the recommendations half applies the cap.
+    expect(basis).toContain(', …');
+    expect(basis).not.toContain('src/c.ts');
+  });
+});
+
+describe('recommendationsFor — measurement to advice, no constants', () => {
+  const base: ConvergenceDiagnosis = {
+    round: 6,
+    posted: 4,
+    fresh: 2,
+    prevPosted: 4,
+    prevFresh: 2,
+    clusters: [{ file: 'src/a.ts', priorRounds: [3, 5], thisRound: 2 }],
+    successorChains: [],
+    volumeNotShrinking: true,
+    truncatedEvidence: false,
+    foreignEvidence: false,
+    mergedEvidence: false,
+  };
+
+  it('matches each code to the fact it names, and names it', () => {
+    const r = recommendationsFor(base);
+    expect(r.map((x) => x.code)).toEqual([
+      'root-cause-triage',
+      'batch-fixes',
+      'stem-surface',
+    ]);
+    // Every basis is a deterministic fact, not a judgement.
+    expect(r[0].basis).toContain('src/a.ts');
+    expect(r[1].basis).toContain('round 6 produced 2 first-time finding(s)');
+    expect(r[2].basis).toContain('did not resolve to critical');
+  });
+
+  it('offers the floor rung only where a rung is left to take', () => {
+    const atFloor = recommendationsFor({
+      ...base,
+      criticalFloorKind: 'explicit',
+    });
+    expect(atFloor.map((x) => x.code)).not.toContain('stem-surface');
+    expect(atFloor.map((x) => x.code)).toContain('batch-fixes');
+  });
+
+  it('matches land-and-defer only on a round with no open blocker', () => {
+    expect(
+      recommendationsFor({ ...base, openCriticals: 0 }).map((x) => x.code),
+    ).toContain('land-and-defer');
+    expect(
+      recommendationsFor({ ...base, openCriticals: 2 }).map((x) => x.code),
+    ).not.toContain('land-and-defer');
+    // Absent is not zero: an unrecorded count is not a count of none.
+    expect(recommendationsFor(base).map((x) => x.code)).not.toContain(
+      'land-and-defer',
+    );
+  });
+
+  it('matches nothing a signal did not fire', () => {
+    const volumeOnly = recommendationsFor({
+      ...base,
+      clusters: [],
+    });
+    expect(volumeOnly.map((x) => x.code)).not.toContain('root-cause-triage');
+    const clusterOnly = recommendationsFor({
+      ...base,
+      volumeNotShrinking: false,
+    });
+    expect(clusterOnly.map((x) => x.code)).toEqual(['root-cause-triage']);
+  });
+
+  it('is what the paragraph renders, not a second list beside it', () => {
+    // Derived rather than stored, so the codes a caller wires and the prose
+    // a human reads cannot describe different rounds.
+    const withLand = { ...base, openCriticals: 0 };
+    const prose = renderConvergenceDiagnosis(withLand);
+    expect(prose.en).toContain('shared root cause');
+    expect(prose.en).toContain('Batching the remaining fixes');
+    expect(prose.en).toContain('--severity-floor critical');
+    expect(prose.en).toContain('No Critical finding is open on this round');
+    expect(prose.zh).toContain('本轮没有未决的 Critical');
+    // ...and the negative side: an open blocker means the ending is not
+    // available, so the sentence must not render.
+    const withBlocker = renderConvergenceDiagnosis({
+      ...base,
+      openCriticals: 2,
+    });
+    expect(withBlocker.en).not.toContain('No Critical finding is open');
+    expect(withBlocker.zh).not.toContain('本轮没有未决的 Critical');
+    // ...and the narrowed floor case drops exactly the rung it dropped.
+    const atFloor = renderConvergenceDiagnosis({
+      ...base,
+      clusters: [],
+      criticalFloorKind: 'explicit',
+    });
+    expect(atFloor.en).not.toContain('dropping this PR');
+  });
+});
+
+describe('renderMechanismHealth — is the machinery working', () => {
+  it('says nothing when nothing is wrong with it', () => {
+    expect(
+      renderMechanismHealth({
+        postureNotEngaging: false,
+        anchorChainBroken: false,
+      }),
+    ).toBeNull();
+  });
+
+  it('states a posture that is engaged in name and not in effect', () => {
+    const r = renderMechanismHealth({
+      postureNotEngaging: true,
+      anchorChainBroken: false,
+    })!;
+    expect(r.en).toContain('engaged in name and not in effect');
+    expect(r.zh).toContain('名义上生效、实际未生效');
+    // Stated, never prescribed.
+    expect(r.en).toContain('Stated, not acted on');
+    expect(r.en).not.toMatch(/should |must |re-anchor/i);
+  });
+
+  it('states an anchor chain that has stopped', () => {
+    const r = renderMechanismHealth({
+      postureNotEngaging: false,
+      anchorChainBroken: true,
+    })!;
+    expect(r.en).toContain('re-reads the whole diff');
+    expect(r.zh).toContain('重读整个 diff');
+    // The clause splits the shapes that fire it: a recovered round with no
+    // anchor at all, one whose side file holds a GRAFTED anchor the running
+    // identity cannot use, and one whose graft the running round's fetch
+    // refused or resolved to the head. The split is load-bearing: before it,
+    // the wording said the recovered round "had none either" — false beside
+    // a side file that visibly holds the sha, and pointing away from the
+    // actual cause (identity mismatch, or a deterministic refusal the graft
+    // re-derives every round).
+    expect(r.en).toContain(
+      'none at all, one with no certifier, one certified by an identity other than',
+    );
+    expect(r.en).toContain(
+      "or one this round's fetch refused or resolved to the head",
+    );
+    expect(r.en).not.toContain('had none either');
+    expect(r.zh).toContain(
+      '要么完全没有、要么没有认证者、要么由本轮运行身份之外的身份认证、要么被本轮的获取拒绝或解析为头提交',
+    );
+    // The termination condition is "an anchor again", not "a clean close":
+    // the marker also withholds on a missing fetched sha and on a model
+    // identity drift, both of which a cleanly-closed round can carry.
+    expect(r.en).toContain("until a round's marker carries an anchor again");
+    // Broad on purpose: the superseded wording drifted into two comments
+    // as "until one closes cleanly", which an exact-string pin missed.
+    expect(r.en).not.toMatch(/until (a round|one) closes cleanly/);
+    expect(r.zh).toContain('直到某一轮的标记重新带上锚点');
+    // The onset is hedged: a fail-closed round that leaves a COMPLETE work
+    // list beside a strictly-earlier anchored own marker is grafted onto
+    // one round later, so "the next review re-reads the whole diff" is
+    // false there and the wording says so. The hedge carries the SAME
+    // usability qualifier as the termination clause: a graft that landed
+    // but the running round cannot use (certifier mismatch, fetch refusal,
+    // resolved to the head) does NOT spare the re-read, and an onset
+    // promising otherwise contradicts the disclosure on exactly that
+    // shape — the one 'discloses a grafted anchor the running model
+    // cannot use' pins with 're-reads the whole diff' still in the body.
+    expect(r.en).toContain(
+      'unless recovery grafts an earlier own anchor that the round running it can use onto the complete work list this round leaves behind',
+    );
+    expect(r.zh).toContain(
+      '除非恢复流程把本轮能使用的更早自有锚点嫁接到本轮留下的完整工作清单上',
+    );
+    // The termination list names BOTH exits: a round whose own marker
+    // carries an anchor again, and a USABLE graft — a grafted anchor whose
+    // certifier mismatches the round running it (or whose fetch refuses it)
+    // re-fires every round without ending the streak, so the exit is a
+    // graft the running round can use, not any graft. Before the clause,
+    // the disclosure predicted an endless re-read on exactly the large-PR
+    // shapes the graft exists for.
+    expect(r.en).toContain(
+      'or a graft lands that the round running it can use',
+    );
+    expect(r.zh).toContain('或落地的嫁接能被运行该轮的评审使用');
+    // The design once prescribed a re-anchor round here; the measurements
+    // did not bear out its premise, so the shape is disclosed and nothing
+    // is recommended.
+    expect(r.en).not.toContain('raise');
+  });
+
+  it('states both when both hold', () => {
+    const r = renderMechanismHealth({
+      postureNotEngaging: true,
+      anchorChainBroken: true,
+    })!;
+    expect(r.en).toContain('engaged in name');
+    expect(r.en).toContain('re-reads the whole diff');
+  });
+});
+
 describe('renderConvergenceDiagnosis — what the author reads', () => {
   const base: ConvergenceDiagnosis = {
     round: 6,
@@ -655,6 +1296,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     prevPosted: 4,
     prevFresh: 2,
     clusters: [{ file: 'src/a.ts', priorRounds: [3, 5], thisRound: 2 }],
+    successorChains: [],
     volumeNotShrinking: true,
     truncatedEvidence: false,
     foreignEvidence: false,
@@ -667,7 +1309,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       'round 6 posted 4 inline comment(s), 2 of them reported for the first time',
     );
     expect(r.en).toContain('the previous round posted 4');
-    expect(r.en).toContain('`src/a.ts` (findings in rounds 3, 5, 2 more now)');
+    expect(r.en).toContain('`src/a.ts` (findings in rounds 3, 5; 2 more now)');
     expect(r.zh).toContain('第 6 轮发布了 4 条行内评论，其中 2 条是首次提出');
     expect(r.zh).toContain('第 3、5 轮已出过发现，本轮又有 2 条');
   });
@@ -680,8 +1322,8 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       ...base,
       clusters: [{ file: 'src/a.ts', priorRounds: [4], thisRound: 1 }],
     });
-    expect(one.en).toContain('`src/a.ts` (findings in round 4, 1 more now)');
-    expect(one.en).not.toContain('in rounds 4,');
+    expect(one.en).toContain('`src/a.ts` (findings in round 4; 1 more now)');
+    expect(one.en).not.toContain('in rounds 4;');
   });
 
   it('says the observation withheld nothing — scoped to the observation', () => {
@@ -708,6 +1350,24 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.zh).toContain('根因');
     expect(r.zh).toContain('拆成单独的 PR');
     expect(r.zh).not.toMatch(/重构|重写|重新设计/);
+    // The chain advice renders into the SAME paragraph and binds by the
+    // SAME contract — a chainless fixture left this branch blind to it.
+    const chained = renderConvergenceDiagnosis({
+      ...base,
+      successorChains: [
+        {
+          file: 'src/mechanism.ts',
+          generations: [['R5-1'], ['R6-1']],
+          newIds: ['R6-2'],
+        },
+      ],
+    });
+    expect(chained.en).toContain('⚠️ Divergence:');
+    expect(chained.en).not.toMatch(
+      /refactor|rewrite|extract .* class|redesign/i,
+    );
+    expect(chained.zh).toContain('⚠️ 发散：');
+    expect(chained.zh).not.toMatch(/重构|重写|重新设计/);
   });
 
   it('falls back to the volume reading when nothing recurs', () => {
@@ -808,6 +1468,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       posted: 3,
       fresh: 3,
       clusters: [],
+      successorChains: [],
       volumeNotShrinking: false,
       truncatedEvidence: true,
       foreignEvidence: true,
@@ -821,6 +1482,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       posted: 3,
       fresh: 3,
       clusters: [],
+      successorChains: [],
       volumeNotShrinking: false,
       truncatedEvidence: false,
       foreignEvidence: true,
@@ -842,6 +1504,24 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.en).toContain('already resolve to a critical posting floor');
     expect(r.en).not.toContain('--severity-floor critical');
     expect(r.zh).toContain('已解析为 critical 发布下限');
+  });
+
+  it('names a signal-engaged floor with the reason it engaged early', () => {
+    // The trigger engages ahead of the round-6 schedule (#9903); an
+    // "already at the floor" sentence that does not say WHY reads as an
+    // unexplained posture change — the exact defect this wording exists
+    // for. It must also hold back the floor rung, exactly as the
+    // round-6 kind does: recommending a posture the round is already
+    // running under.
+    const r = renderConvergenceDiagnosis({
+      ...base,
+      clusters: [],
+      criticalFloorKind: 'auto-signaled',
+    });
+    expect(r.en).toContain('already engage the critical posting floor');
+    expect(r.en).toContain('resolved early');
+    expect(r.en).not.toContain('--severity-floor critical');
+    expect(r.zh).toContain('提前生效');
   });
 
   it('reports both readings when both signals fired', () => {
@@ -903,6 +1583,45 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.zh).toContain('上述轮次与其计数');
   });
 
+  it('qualifies the closure lineage a foreign marker supplies to the chain', () => {
+    // The chain's previous generation is read off `prev.closed` — entries
+    // recovered from the SAME marker the rounds and counts caveat already
+    // qualifies. A round-2 shape fires the chain while the cluster signal
+    // is still gated to round 3 and no previous volume was recorded, so
+    // without a closures leg the disclosure misses exactly the ids a
+    // planted or merged-foreign list chose.
+    const chained: ConvergenceDiagnosis = {
+      round: 2,
+      posted: 1,
+      fresh: 1,
+      clusters: [],
+      successorChains: [
+        {
+          file: 'src/a.ts',
+          generations: [['R0-1'], ['R1-1']],
+          newIds: ['R2-1'],
+        },
+      ],
+      volumeNotShrinking: false,
+      truncatedEvidence: false,
+      foreignEvidence: true,
+      mergedEvidence: false,
+    };
+    const r = renderConvergenceDiagnosis(chained);
+    expect(r.en).toContain('the closure lineage named above');
+    expect(r.en).toContain("may not be this account's own");
+    expect(r.zh).toContain('上述闭包血缘');
+    // The merged list protects this account's own entries under their own
+    // ids, so the caveat says "some of", exactly as for rounds and counts.
+    const merged = renderConvergenceDiagnosis({
+      ...chained,
+      mergedEvidence: true,
+    });
+    expect(merged.en).toContain(
+      'some of the closure lineage named above may not be',
+    );
+  });
+
   it('summarises the tail instead of listing every cluster', () => {
     const many = Array.from({ length: MAX_RENDERED_CLUSTERS + 2 }, (_, i) => ({
       file: `f${i}.ts`,
@@ -921,6 +1640,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       posted: 3,
       fresh: 3,
       clusters: base.clusters,
+      successorChains: [],
       volumeNotShrinking: false,
       truncatedEvidence: false,
       foreignEvidence: false,
@@ -929,5 +1649,324 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.en).toContain('round 4 posted 3 inline comment(s)');
     expect(r.en).not.toContain('the previous round posted');
     expect(r.zh).not.toContain('上一轮发布了');
+  });
+});
+
+describe('isFreshDraft — a carried id no longer answers on its own', () => {
+  // Issue #9674. Two different things reach this function under a previous
+  // round's id: a claim re-asserted (`still stands`) and a NEW defect wearing
+  // the id of the entry whose fix produced it (`fix-induced`). Only the first
+  // is a re-post.
+  const carried = new Set(['R2-1']);
+
+  it('reads a plain carried id as a re-post, as it always did', () => {
+    expect(isFreshDraft({ file: 'a.ts', carriedId: 'R2-1' }, 4, carried)).toBe(
+      false,
+    );
+  });
+
+  it('reads a fix-induced carried id as first-time work', () => {
+    expect(
+      isFreshDraft(
+        { file: 'a.ts', carriedId: 'R2-1', fixInduced: true },
+        4,
+        carried,
+      ),
+    ).toBe(true);
+  });
+
+  it('leaves a finding with no id fresh either way', () => {
+    // The marking adds nothing where the id is absent — that comment is
+    // already first-time by the id alone — and must not subtract either.
+    expect(isFreshDraft({ file: 'a.ts' }, 4, carried)).toBe(true);
+    expect(isFreshDraft({ file: 'a.ts', fixInduced: true }, 4, carried)).toBe(
+      true,
+    );
+  });
+
+  it('holds at the round cap, where a plain re-post still reads carried', () => {
+    // The cap arm returns false for a carried id minted at or past the cap.
+    // The marking has to reach its answer BEFORE that arm, or the one place
+    // the counter stops advancing is the one place a fix-induced re-report
+    // silently stops counting.
+    expect(
+      isFreshDraft(
+        { file: 'a.ts', carriedId: `R${LEDGER_MAX_ROUND}-1` },
+        LEDGER_MAX_ROUND,
+        new Set([`R${LEDGER_MAX_ROUND}-1`]),
+      ),
+    ).toBe(false);
+    expect(
+      isFreshDraft(
+        { file: 'a.ts', carriedId: `R${LEDGER_MAX_ROUND}-1`, fixInduced: true },
+        LEDGER_MAX_ROUND,
+        new Set([`R${LEDGER_MAX_ROUND}-1`]),
+      ),
+    ).toBe(true);
+  });
+});
+
+// The persistently-critical signal is advisory telemetry: every input
+// degrades OPEN, so the tests pin both the firing conjunction and each
+// degraded arm individually — a false fire would tell an operator to land a
+// loop that is still converging, and a missed fire is the silent status quo
+// this module exists to end.
+
+const FIRE: ConvergenceFacts = {
+  prevHadCritical: true,
+  thisCriticals: 2,
+  fresh: 3,
+  prevFresh: 3,
+  floorEngaged: true,
+  prevFloor: 'c',
+  // The predecessor's work-list was Critical-only, which is what an engaged
+  // floor leaves behind — the stamp above cannot say so on its own.
+  prevPostedSuggestion: false,
+  // Equal to `thisCriticals`, so the backlog veto abstains and every other
+  // arm below is pinned on its own. A firing default whose backlog was
+  // already shrinking would make each `toBeNull()` below pass for the
+  // wrong reason.
+  prevCriticals: 2,
+  // A WHOLE predecessor list, so the two absence-derived readings above are
+  // evidence and the advisory publishes them unqualified.
+  prevTruncated: false,
+};
+
+describe('convergenceAssessment', () => {
+  it('fires on the full conjunction — persistent Criticals, fresh rate not falling', () => {
+    const a = convergenceAssessment(FIRE);
+    expect(a).not.toBeNull();
+    expect(a?.shape).toBe('persistently-critical');
+    expect(a?.recommendation).toBe(LAND_WITH_RESIDUAL_RISK);
+    expect(a?.criticals).toBe(2);
+    expect(a?.fresh).toBe(3);
+    expect(a?.prevFresh).toBe(3);
+  });
+
+  it('fires when the fresh rate is RISING — rising is not falling either', () => {
+    expect(
+      convergenceAssessment({ ...FIRE, fresh: 5, prevFresh: 3 }),
+    ).not.toBeNull();
+  });
+
+  it('suppresses when the previous round was NOT recovered — undefined is not false', () => {
+    // A second round introducing its first Critical must not read as
+    // "persistent": there is no prior work-list to have carried one.
+    expect(
+      convergenceAssessment({ ...FIRE, prevHadCritical: undefined }),
+    ).toBeNull();
+  });
+
+  it('suppresses when the previous work-list had no Critical', () => {
+    // Criticals appeared only THIS round — being worked for the first time,
+    // not persisted.
+    expect(
+      convergenceAssessment({ ...FIRE, prevHadCritical: false }),
+    ).toBeNull();
+  });
+
+  it('suppresses when this round posts no Critical', () => {
+    expect(convergenceAssessment({ ...FIRE, thisCriticals: 0 })).toBeNull();
+  });
+
+  it('suppresses when the severity floor is NOT engaged — its futility claim would be unprovable', () => {
+    // The advisory asserts the floor "will not converge" the loop; before
+    // the floor has run, the loop may still converge once it does, and a
+    // guess is the false fire this module must never ship.
+    expect(convergenceAssessment({ ...FIRE, floorEngaged: false })).toBeNull();
+  });
+
+  it('suppresses when floor engagement is UNKNOWN — absence degrades open', () => {
+    expect(
+      convergenceAssessment({ ...FIRE, floorEngaged: undefined }),
+    ).toBeNull();
+  });
+
+  it('suppresses when either fresh count is missing — a gap says nothing', () => {
+    // Reachable without tampering: a marker written before the fresh count
+    // shipped records only the total, and there is no honest way to read a
+    // trend off one end of a window.
+    expect(convergenceAssessment({ ...FIRE, fresh: undefined })).toBeNull();
+    expect(convergenceAssessment({ ...FIRE, prevFresh: undefined })).toBeNull();
+  });
+
+  it('suppresses when the fresh rate is FALLING — a converging loop', () => {
+    // Criticals present but the new ones drying up: the loop is settling.
+    // Measured on posting TOTALS this arm was unreachable — Step 6 re-posts
+    // every standing Critical, so the total only ever rises and a loop
+    // whose fresh findings fell 5 -> 4 still posted more comments than the
+    // round before, firing `land-with-residual-risk` over a converging
+    // loop.
+    expect(
+      convergenceAssessment({ ...FIRE, fresh: 1, prevFresh: 3 }),
+    ).toBeNull();
+  });
+
+  it('suppresses when the standing backlog is SHRINKING — the fresh window is blind to it', () => {
+    // The blind spot the fresh window alone leaves: a reviewer finding
+    // nothing new for two rounds while the author clears blockers sits at
+    // fresh 0 against fresh 0, which "not falling" reads as stuck. Only the
+    // Critical count coming down says the loop is moving.
+    expect(
+      convergenceAssessment({
+        ...FIRE,
+        fresh: 0,
+        prevFresh: 0,
+        thisCriticals: 3,
+        prevCriticals: 5,
+      }),
+    ).toBeNull();
+  });
+
+  it('abstains on the backlog when the previous count is unknown', () => {
+    // A veto on positive evidence only. The work-list the count comes off
+    // is the one the marker's byte budget may have shortened, and an
+    // undercount can only hide shrinkage — never invent it — so an unknown
+    // predecessor must not silence a loop that is genuinely stuck.
+    expect(
+      convergenceAssessment({ ...FIRE, prevCriticals: undefined }),
+    ).not.toBeNull();
+  });
+
+  it('fires at zero fresh on both rounds — the purest form of the shape', () => {
+    // Criticals standing round after round with nothing new found is not a
+    // quiet loop, it is the shape itself, so this must fire — which is why
+    // this signal does NOT carry the sibling diagnosis's `prev.fresh > 0`
+    // requirement. That module is about a loop GENERATING work; this one is
+    // about work that never clears. The backlog holding steady (not
+    // shrinking) is what separates it from a backlog being worked down.
+    expect(
+      convergenceAssessment({
+        prevHadCritical: true,
+        thisCriticals: 3,
+        fresh: 0,
+        prevFresh: 0,
+        floorEngaged: true,
+        prevFloor: 'c',
+        prevPostedSuggestion: false,
+        prevCriticals: 3,
+        prevTruncated: false,
+      }),
+    ).not.toBeNull();
+  });
+});
+
+it('suppresses when the previous round posted under a DIFFERENT floor', () => {
+  // The round the floor engages on compares a Critical-only window
+  // against a predecessor that was still posting Suggestions. That
+  // movement is the posture, not the loop — and "the severity floor will
+  // not converge it" is not a claim one round of the floor can support.
+  expect(convergenceAssessment({ ...FIRE, prevFloor: 'o' })).toBeNull();
+});
+
+it('suppresses when the predecessor still posted a Suggestion — the stamp lied', () => {
+  // The recorded floor is the REPORTING reading, which folds an absent
+  // `severityFloor` into `auto` and stamps `c` on any round >= 6 — even one
+  // the strict enforcement backstop never touched, where Suggestions posted
+  // normally. Paired against this round's enforcement reading, that stamp
+  // let an un-enforced predecessor pass as an engaged one and the advisory
+  // published "the severity floor will not converge it" against a window
+  // whose far end still included Suggestions. A Suggestion in the
+  // work-list is the fact the stamp cannot carry: enforcement moves drafted
+  // Suggestions out of the posting set before the marker is built, so an
+  // engaged round's list is Critical-only.
+  expect(
+    convergenceAssessment({ ...FIRE, prevPostedSuggestion: true }),
+  ).toBeNull();
+});
+
+it('still evaluates when the predecessor work-list is unreadable', () => {
+  // Unknown abstains, like every other fact read off that list — a marker
+  // this round could not recover says nothing about what the floor did.
+  expect(
+    convergenceAssessment({ ...FIRE, prevPostedSuggestion: undefined }),
+  ).not.toBeNull();
+});
+
+it('still evaluates when the previous floor was never recorded', () => {
+  // Read like the sibling diagnosis in this module: a floor that was not
+  // recorded is not a floor that DIFFERS. A marker written before the
+  // field existed must evaluate exactly as it did before this conjunct,
+  // or the advisory goes silent on every loop carrying an older marker.
+  expect(
+    convergenceAssessment({ ...FIRE, prevFloor: undefined }),
+  ).not.toBeNull();
+});
+
+it('fires on a truncated predecessor, and says the reading came off one', () => {
+  // The gate is deliberately NOT restored: a whole-list requirement would
+  // silence the advisory on exactly the deep-work-list rounds it exists for,
+  // which are the rounds the marker's byte budget shortens. What a shortened
+  // list changes is what may be CLAIMED — "no Suggestion, so the floor was
+  // enforcing" and "the backlog is not shrinking" are both read off absence,
+  // and absence in a shortened list is not evidence.
+  const a = convergenceAssessment({ ...FIRE, prevTruncated: true });
+  expect(a).not.toBeNull();
+  expect(a?.prevTruncated).toBe(true);
+  const { en, zh } = convergenceAdvisory(a!);
+  expect(en).toContain('truncated to fit the marker');
+  expect(en).toContain('read off a list known to be incomplete');
+  expect(zh).toContain('为适配 marker 被截断');
+  // And a WHOLE list publishes the readings unqualified.
+  const whole = convergenceAdvisory(convergenceAssessment(FIRE)!);
+  expect(whole.en).not.toContain('truncated to fit the marker');
+  expect(whole.zh).not.toContain('为适配 marker 被截断');
+});
+
+describe('convergenceAdvisory', () => {
+  it('renders a RISING window in the right direction, in both languages', () => {
+    // Every equal-count fixture reads the same number twice, so swapping
+    // the two interpolations keeps them all green while inverting the trend
+    // a maintainer reads when making the land decision. A rising window
+    // (fresh 5, previous 3) fires and must read this-round-first.
+    const a = convergenceAssessment({ ...FIRE, fresh: 5, prevFresh: 3 });
+    expect(a).not.toBeNull();
+    const { en, zh } = convergenceAdvisory(a!);
+    expect(en).toContain('this round 5, previous 3');
+    expect(zh).toContain('本轮 5');
+    expect(zh).toContain('上一轮 3');
+  });
+
+  it('names the recommendation code and disclaims itself, in both languages', () => {
+    const a = convergenceAssessment(FIRE);
+    expect(a).not.toBeNull();
+    const { en, zh } = convergenceAdvisory(a!);
+    for (const text of [en, zh]) {
+      expect(text).toContain(LAND_WITH_RESIDUAL_RISK);
+      expect(text).toContain('persistently');
+    }
+    // Advisory-only contract: it must say it blocks nothing.
+    expect(en).toContain('does not block');
+    expect(zh).toContain('不阻断');
+    // The scaffold names the three maintainer dimensions — in BOTH
+    // languages. Pinned only in English, a zh scaffold that lost a column
+    // shipped green, and the Chinese reader is the one who cannot fall back
+    // to the other half of the paragraph.
+    expect(en).toContain('attack surface');
+    expect(en).toContain('attacker-dependency');
+    expect(en).toContain('blast radius');
+    expect(zh).toContain('攻击面');
+    expect(zh).toContain('攻击者依赖性');
+    expect(zh).toContain('影响范围');
+    // The claim the recommendation rests on, positively, in both.
+    expect(en).toContain('The severity floor will not converge it');
+    expect(zh).toContain('severity floor 无法使其收敛');
+    // Bounded by construction: the facts ride as numbers, never model
+    // prose — and the zh Critical COUNT is its own interpolation slot, not
+    // a repeat of the volume beside it. `FIRE` is deliberately asymmetric
+    // (2 Criticals, volume 3/3) so a template reading the wrong slot shows.
+    expect(en).toContain('2 Critical(s)');
+    expect(en).toContain('this round 3, previous 3');
+    expect(zh).toContain('本轮 2 条 Critical');
+    expect(zh).toContain('本轮 3，上一轮 3');
+    // The numbers are FIRST-TIME findings, and the sentence must say so —
+    // reported as "the posting volume" they described a total the signal
+    // does not measure, which is the false record this pipeline refuses.
+    expect(en).toContain('the rate of first-time findings is not falling');
+    expect(en).toContain('the standing Critical backlog is not shrinking');
+    expect(en).not.toContain('posting volume');
+    expect(zh).toContain('首次发现的速率没有下降');
+    expect(zh).toContain('未决 Critical 积压没有减少');
+    expect(zh).not.toContain('发布音量');
   });
 });

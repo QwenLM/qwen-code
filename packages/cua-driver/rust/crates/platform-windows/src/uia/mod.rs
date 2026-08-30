@@ -10,6 +10,7 @@
 //!  take >4s when reading each property individually).
 
 use windows::core::{Interface, BSTR};
+use windows::Win32::Foundation::S_OK;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
@@ -28,6 +29,7 @@ use windows::Win32::UI::Accessibility::{
 
 pub mod cache;
 pub mod fg_bypass;
+pub mod revision;
 pub mod scroll;
 pub mod windows_enum;
 pub use cache::ElementCache;
@@ -60,6 +62,9 @@ pub struct UiaNode {
     pub automation_id: Option<String>,
     pub help_text: Option<String>,
     pub actions: Vec<String>,
+    /// UIA RuntimeId candidate. It becomes stable only after the revision
+    /// manager confirms continuity with `IUIAutomation::CompareElements`.
+    pub runtime_id: Option<Vec<i32>>,
     /// Enabled state reported by UIA. `None` is reserved for fallback
     /// backends that cannot establish it.
     pub enabled: Option<bool>,
@@ -93,9 +98,48 @@ pub struct UiaNode {
     pub in_web_content: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiaBackend {
+    Uia,
+    Msaa,
+}
+
 pub struct UiaTreeResult {
     pub tree_markdown: String,
     pub nodes: Vec<UiaNode>,
+    pub backend: UiaBackend,
+    pub complete: bool,
+    pub truncated: bool,
+    pub incomplete_notes: Vec<String>,
+}
+
+#[derive(Default)]
+struct WalkStatus {
+    complete: bool,
+    truncated: bool,
+    incomplete_notes: Vec<String>,
+}
+
+impl WalkStatus {
+    fn complete() -> Self {
+        Self {
+            complete: true,
+            ..Self::default()
+        }
+    }
+
+    fn incomplete(&mut self, note: impl Into<String>) {
+        self.complete = false;
+        let note = note.into();
+        if !self.incomplete_notes.contains(&note) {
+            self.incomplete_notes.push(note);
+        }
+    }
+
+    fn truncate(&mut self, note: &'static str) {
+        self.truncated = true;
+        self.incomplete(note);
+    }
 }
 
 /// Walk the UIA tree for the window with the given HWND.
@@ -239,7 +283,17 @@ pub fn walk_tree_bounded(
     max_elements: usize,
     max_depth: usize,
 ) -> UiaTreeResult {
-    unsafe { walk_tree_unsafe(hwnd, query, max_elements, max_depth) }
+    walk_tree_bounded_with_runtime_ids(hwnd, query, max_elements, max_depth, false)
+}
+
+pub fn walk_tree_bounded_with_runtime_ids(
+    hwnd: u64,
+    query: Option<&str>,
+    max_elements: usize,
+    max_depth: usize,
+    collect_runtime_ids: bool,
+) -> UiaTreeResult {
+    unsafe { walk_tree_unsafe(hwnd, query, max_elements, max_depth, collect_runtime_ids) }
 }
 
 unsafe fn walk_tree_unsafe(
@@ -247,6 +301,7 @@ unsafe fn walk_tree_unsafe(
     query: Option<&str>,
     max_elements: usize,
     max_depth: usize,
+    collect_runtime_ids: bool,
 ) -> UiaTreeResult {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
@@ -257,6 +312,10 @@ unsafe fn walk_tree_unsafe(
                 return UiaTreeResult {
                     tree_markdown: format!("UIA init failed: {e}"),
                     nodes: Vec::new(),
+                    backend: UiaBackend::Uia,
+                    complete: false,
+                    truncated: false,
+                    incomplete_notes: vec!["uia_initialization_failed".into()],
                 }
             }
         };
@@ -268,6 +327,10 @@ unsafe fn walk_tree_unsafe(
             return UiaTreeResult {
                 tree_markdown: format!("CreateCacheRequest failed: {e}"),
                 nodes: Vec::new(),
+                backend: UiaBackend::Uia,
+                complete: false,
+                truncated: false,
+                incomplete_notes: vec!["uia_cache_request_failed".into()],
             }
         }
     };
@@ -352,6 +415,10 @@ unsafe fn walk_tree_unsafe(
             return UiaTreeResult {
                 tree_markdown: format!("ElementFromHandle failed: {e}"),
                 nodes: Vec::new(),
+                backend: UiaBackend::Uia,
+                complete: false,
+                truncated: false,
+                incomplete_notes: vec!["uia_target_resolution_failed".into()],
             }
         }
     };
@@ -376,6 +443,10 @@ unsafe fn walk_tree_unsafe(
                                 "BuildUpdatedCache failed after {attempt} attempts: {e}"
                             ),
                             nodes: Vec::new(),
+                            backend: UiaBackend::Uia,
+                            complete: false,
+                            truncated: false,
+                            incomplete_notes: vec!["uia_provider_invalidated".into()],
                         };
                     }
                     std::thread::sleep(std::time::Duration::from_millis(40));
@@ -388,18 +459,21 @@ unsafe fn walk_tree_unsafe(
     let mut lines: Vec<(usize, String)> = Vec::new();
     let mut counter = 0usize;
     let mut total = 0usize;
+    let mut status = WalkStatus::complete();
 
     walk_cached_bounded(
         &root_elem,
         0,
         None,
         false,
+        collect_runtime_ids,
         &mut nodes,
         &mut lines,
         &mut counter,
         &mut total,
         max_elements,
         max_depth,
+        &mut status,
     );
 
     // Fallback for CoreWindow-class apps (Calculator, Settings, older UWPs).
@@ -451,6 +525,7 @@ unsafe fn walk_tree_unsafe(
                 let mut fallback_lines: Vec<(usize, String)> = Vec::new();
                 let mut fallback_counter = 0usize;
                 let mut fallback_total = 0usize;
+                let mut fallback_status = WalkStatus::complete();
 
                 tracing::debug!(
                     target: "uia",
@@ -461,17 +536,20 @@ unsafe fn walk_tree_unsafe(
                     &automation,
                     &cache_req,
                     target_pid,
+                    collect_runtime_ids,
                     &mut fallback_nodes,
                     &mut fallback_lines,
                     &mut fallback_counter,
                     &mut fallback_total,
                     max_elements,
                     max_depth,
+                    &mut fallback_status,
                 );
 
                 if fallback_nodes.iter().any(|n| n.element_index.is_some()) {
                     nodes = fallback_nodes;
                     lines = fallback_lines;
+                    status = fallback_status;
                     // counter/total aren't read after this point — they're
                     // only used by walk_cached's &mut params for element
                     // indexing inside that call.
@@ -503,6 +581,10 @@ unsafe fn walk_tree_unsafe(
             return UiaTreeResult {
                 tree_markdown: stub,
                 nodes: Vec::new(),
+                backend: UiaBackend::Uia,
+                complete: false,
+                truncated: false,
+                incomplete_notes: vec!["uia_sal_primary_tree_empty".into()],
             };
         }
     }
@@ -517,6 +599,10 @@ unsafe fn walk_tree_unsafe(
     UiaTreeResult {
         tree_markdown,
         nodes,
+        backend: UiaBackend::Uia,
+        complete: status.complete,
+        truncated: status.truncated,
+        incomplete_notes: status.incomplete_notes,
     }
 }
 
@@ -547,17 +633,20 @@ unsafe fn walk_root_by_pid(
     automation: &IUIAutomation,
     cache_req: &IUIAutomationCacheRequest,
     target_pid: u32,
+    collect_runtime_ids: bool,
     nodes: &mut Vec<UiaNode>,
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
     total: &mut usize,
     max_elements: usize,
     max_depth: usize,
+    status: &mut WalkStatus,
 ) {
     let root = match automation.GetRootElement() {
         Ok(r) => r,
         Err(e) => {
             tracing::debug!(target: "uia", "GetRootElement failed: {e}");
+            status.incomplete("uia_root_resolution_failed");
             return;
         }
     };
@@ -565,6 +654,7 @@ unsafe fn walk_root_by_pid(
         Ok(c) => c,
         Err(e) => {
             tracing::debug!(target: "uia", "CreateTrueCondition failed: {e}");
+            status.incomplete("uia_root_condition_failed");
             return;
         }
     };
@@ -572,14 +662,25 @@ unsafe fn walk_root_by_pid(
         Ok(a) => a,
         Err(e) => {
             tracing::debug!(target: "uia", "root.FindAll(Children) failed: {e}");
+            status.incomplete("uia_root_children_failed");
             return;
         }
     };
-    let count = kids.Length().unwrap_or(0);
+    let count = match kids.Length() {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::debug!(target: "uia", "root children length failed: {error}");
+            status.incomplete("uia_root_children_length_failed");
+            return;
+        }
+    };
     for i in 0..count {
         let elem = match kids.GetElement(i) {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(_) => {
+                status.incomplete("uia_root_child_read_failed");
+                continue;
+            }
         };
         // Read ProcessId without a cache — root.FindAll didn't use one.
         // VARIANT for VT_I4 (UIA's ProcessId type) puts the int at
@@ -595,7 +696,10 @@ unsafe fn walk_root_by_pid(
                 }
                 raw.Anonymous.Anonymous.Anonymous.lVal as u32
             }
-            Err(_) => continue,
+            Err(_) => {
+                status.incomplete("uia_root_process_id_failed");
+                continue;
+            }
         };
         if pid != target_pid {
             continue;
@@ -607,6 +711,7 @@ unsafe fn walk_root_by_pid(
             Ok(e) => e,
             Err(e) => {
                 tracing::debug!(target: "uia", "BuildUpdatedCache on pid={target_pid} match failed: {e}");
+                status.incomplete("uia_root_cache_refresh_failed");
                 continue;
             }
         };
@@ -615,12 +720,14 @@ unsafe fn walk_root_by_pid(
             0,
             None,
             false,
+            collect_runtime_ids,
             nodes,
             lines,
             counter,
             total,
             max_elements,
             max_depth,
+            status,
         );
     }
 }
@@ -634,10 +741,12 @@ unsafe fn walk_cached(
     counter: &mut usize,
     total: &mut usize,
 ) {
+    let mut status = WalkStatus::complete();
     walk_cached_bounded(
         element,
         depth,
         None,
+        false,
         false,
         nodes,
         lines,
@@ -645,6 +754,7 @@ unsafe fn walk_cached(
         total,
         MAX_TOTAL_ELEMENTS,
         MAX_DEPTH,
+        &mut status,
     );
 }
 
@@ -654,14 +764,21 @@ unsafe fn walk_cached_bounded(
     depth: usize,
     parent_index: Option<usize>,
     in_web_content: bool,
+    collect_runtime_ids: bool,
     nodes: &mut Vec<UiaNode>,
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
     total: &mut usize,
     max_elements: usize,
     max_depth: usize,
+    status: &mut WalkStatus,
 ) {
-    if depth > max_depth || *total >= max_elements {
+    if depth > max_depth {
+        status.truncate("uia_max_depth_reached");
+        return;
+    }
+    if *total >= max_elements {
+        status.truncate("uia_max_elements_reached");
         return;
     }
     *total += 1;
@@ -706,6 +823,11 @@ unsafe fn walk_cached_bounded(
                 automation_id: automation_id.clone(),
                 help_text: help_text.clone(),
                 actions: actions.clone(),
+                runtime_id: if collect_runtime_ids {
+                    read_runtime_id(element)
+                } else {
+                    None
+                },
                 enabled,
                 selected,
                 element_ptr: ptr,
@@ -726,6 +848,11 @@ unsafe fn walk_cached_bounded(
                 automation_id: automation_id.clone(),
                 help_text: help_text.clone(),
                 actions: vec![],
+                runtime_id: if collect_runtime_ids {
+                    read_runtime_id(element)
+                } else {
+                    None
+                },
                 enabled,
                 selected,
                 element_ptr: ptr,
@@ -744,24 +871,59 @@ unsafe fn walk_cached_bounded(
     }
 
     // Recurse using cached children (no additional RPC).
-    if let Ok(children) = element.GetCachedChildren() {
-        let len = children.Length().unwrap_or(0);
-        for i in 0..len {
-            if let Ok(child) = children.GetElement(i) {
-                walk_cached_bounded(
-                    &child,
-                    depth + 1,
-                    emitted_parent,
-                    in_web_content || control_type.eq_ignore_ascii_case("Document"),
-                    nodes,
-                    lines,
-                    counter,
-                    total,
-                    max_elements,
-                    max_depth,
-                );
+    match element.GetCachedChildren() {
+        Ok(children) => {
+            let len = match children.Length() {
+                Ok(len) => len,
+                Err(_) => {
+                    status.incomplete("uia_children_length_failed");
+                    return;
+                }
+            };
+            for i in 0..len {
+                match children.GetElement(i) {
+                    Ok(child) => walk_cached_bounded(
+                        &child,
+                        depth + 1,
+                        emitted_parent,
+                        in_web_content || control_type.eq_ignore_ascii_case("Document"),
+                        collect_runtime_ids,
+                        nodes,
+                        lines,
+                        counter,
+                        total,
+                        max_elements,
+                        max_depth,
+                        status,
+                    ),
+                    Err(_) => status.incomplete("uia_child_read_failed"),
+                }
             }
         }
+        // UIA documents a null child-array pointer as the successful result
+        // for a cached leaf. windows-rs projects that S_OK + null interface as
+        // Error::empty() (whose code remains S_OK), so it means "no children"
+        // here rather than a partial capture. Preserve every failing HRESULT
+        // as an incomplete walk.
+        Err(error) if is_empty_cached_leaf(&error) => {}
+        Err(_) => status.incomplete("uia_children_read_failed"),
+    }
+}
+
+fn is_empty_cached_leaf(error: &windows::core::Error) -> bool {
+    error.code() == S_OK
+}
+
+#[cfg(test)]
+mod cached_children_tests {
+    use super::*;
+
+    #[test]
+    fn null_cached_children_are_an_empty_leaf() {
+        assert!(is_empty_cached_leaf(&windows::core::Error::empty()));
+        assert!(!is_empty_cached_leaf(&windows::core::Error::from_hresult(
+            windows::core::HRESULT(0x80004005_u32 as i32),
+        )));
     }
 }
 
@@ -919,6 +1081,44 @@ fn read_cached_selected(element: &IUIAutomationElement) -> Option<bool> {
     None
 }
 
+fn read_runtime_id(element: &IUIAutomationElement) -> Option<Vec<i32>> {
+    unsafe {
+        use windows::Win32::System::Ole::{
+            SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound,
+            SafeArrayGetUBound,
+        };
+
+        let array = element.GetRuntimeId().ok()?;
+        if array.is_null() {
+            return None;
+        }
+        let result = (|| {
+            if SafeArrayGetDim(array) != 1 {
+                return None;
+            }
+            let lower = SafeArrayGetLBound(array, 1).ok()?;
+            let upper = SafeArrayGetUBound(array, 1).ok()?;
+            if upper < lower {
+                return None;
+            }
+            let mut values = Vec::with_capacity((upper - lower + 1) as usize);
+            for index in lower..=upper {
+                let mut value = 0i32;
+                SafeArrayGetElement(
+                    array,
+                    &index,
+                    &mut value as *mut i32 as *mut core::ffi::c_void,
+                )
+                .ok()?;
+                values.push(value);
+            }
+            (!values.is_empty()).then_some(values)
+        })();
+        let _ = SafeArrayDestroy(array);
+        result
+    }
+}
+
 fn control_type_name(id: i32) -> String {
     match id {
         50000 => "Button",
@@ -1000,6 +1200,59 @@ pub(crate) fn format_node_line(node: &UiaNode) -> String {
         }
     }
     s
+}
+
+pub(crate) fn format_revision_body(node: &UiaNode) -> String {
+    let label = node
+        .name
+        .as_deref()
+        .or(node.value.as_deref())
+        .or(node.automation_id.as_deref())
+        .or(node.help_text.as_deref())
+        .unwrap_or_default();
+    let mut fields = vec![
+        format!("<{}>", node.control_type),
+        serde_json::to_string(label).expect("string labels serialize"),
+    ];
+    if let Some(value) = node.value.as_deref().filter(|value| !value.is_empty()) {
+        fields.push(format!(
+            "value={}",
+            serde_json::to_string(value).expect("string values serialize")
+        ));
+    }
+    if let Some(automation_id) = node
+        .automation_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        fields.push(format!(
+            "automation_id={}",
+            serde_json::to_string(automation_id).expect("string ids serialize")
+        ));
+    }
+    if let Some(enabled) = node.enabled {
+        fields.push(format!("enabled={enabled}"));
+    }
+    if let Some(selected) = node.selected {
+        fields.push(format!("selected={selected}"));
+    }
+    if !node.actions.is_empty() {
+        fields.push(format!(
+            "actions={}",
+            serde_json::to_string(&node.actions).expect("string actions serialize")
+        ));
+    }
+    if let Some((left, top, right, bottom)) = node.rect {
+        fields.push(format!(
+            "frame={left},{top},{},{}",
+            (right - left).max(0),
+            (bottom - top).max(0)
+        ));
+    }
+    if node.in_web_content {
+        fields.push("in_web_content=true".into());
+    }
+    fields.join(" ")
 }
 
 fn render_lines(lines: &[(usize, String)]) -> String {

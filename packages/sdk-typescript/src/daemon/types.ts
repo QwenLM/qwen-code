@@ -13,6 +13,11 @@
  * signals breaking wire changes (per the design doc).
  */
 
+import {
+  PERMISSION_MODES,
+  type PermissionMode,
+} from '../types/permission-mode.js';
+
 export type DaemonMode = 'http-bridge' | 'native';
 
 /** Goal v2 wire types, duplicated here to keep the SDK independent of Core. */
@@ -32,9 +37,15 @@ export interface TranscriptCursor {
 /**
  * Why the runtime stopped a Goal at one of its enumerated bounds. Set alongside
  * `lastReason` — that stays the human-readable half, this is the half a client
- * may key behavior off (an evidence-limited Goal cannot be resumed).
+ * may key behavior off. Resuming an evidence-limited Goal restarts its evidence
+ * window: the objective and revision carry over, but evidence recorded before
+ * the resume is no longer citable. `token_budget` marks a spent autonomous-spend
+ * authorization that a resume re-arms.
  */
-export type GoalLimitKind = 'evidence_catalog' | 'checkpoint_request';
+export type GoalLimitKind =
+  | 'evidence_catalog'
+  | 'checkpoint_request'
+  | 'token_budget';
 
 export interface GoalRecord {
   goalId: string;
@@ -292,6 +303,8 @@ export interface DaemonGitBranchInfo {
   name: string;
   isHead: boolean;
   upstream?: string;
+  /** The configured upstream ref no longer exists (git's `[gone]` state). */
+  upstreamGone?: boolean;
   ahead: number;
   behind: number;
   /** Unix epoch seconds of the branch tip commit. */
@@ -1024,6 +1037,14 @@ export interface DaemonBranchInfo {
   baseBranch: string;
 }
 
+/** GitHub pull request bound to a session (e.g. created from the Web Shell Git dialog). */
+export interface DaemonSessionPrInfo {
+  number: number;
+  url: string;
+  /** Snapshot of the PR's state at last bind/refresh; optional. */
+  state?: 'open' | 'merged' | 'closed';
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;
@@ -1267,6 +1288,8 @@ export interface DaemonSessionSummary {
   worktree?: DaemonWorktreeInfo;
   /** Present when the session was created with a new branch. */
   branch?: DaemonBranchInfo;
+  /** Present when GitHub PRs have been bound to the session (last = latest). */
+  prs?: DaemonSessionPrInfo[];
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -1442,6 +1465,7 @@ export interface DaemonWorkspaceSessionInfo {
 export interface DaemonArchiveSessionsResult {
   archived: string[];
   alreadyArchived: string[];
+  resolvedConflicts?: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: string }>;
 }
@@ -1449,6 +1473,7 @@ export interface DaemonArchiveSessionsResult {
 export interface DaemonUnarchiveSessionsResult {
   unarchived: string[];
   alreadyActive: string[];
+  resolvedConflicts?: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: string }>;
 }
@@ -1456,6 +1481,7 @@ export interface DaemonUnarchiveSessionsResult {
 /** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
 export interface SessionMetadataResult {
   displayName?: string;
+  prs?: DaemonSessionPrInfo[];
 }
 
 type OpenStringUnion<T extends string> = T | (string & {});
@@ -1470,6 +1496,7 @@ export type KnownDaemonSessionArtifactKind =
   | 'audio'
   | 'pdf'
   | 'notebook'
+  | 'document'
   | 'other';
 
 export type DaemonSessionArtifactKind =
@@ -1858,7 +1885,10 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   installedPath?: string;
   argumentHint?: string;
   model?: string;
+  /** Canonical name of the extension that provides this skill. */
   extensionName?: string;
+  /** Localized presentation name; never use as an extension identity. */
+  extensionDisplayName?: string;
 }
 
 export interface DaemonWorkspaceSkillsStatus {
@@ -1904,6 +1934,7 @@ export interface DaemonWorkspaceProviderModel {
   envKey?: string;
   isCurrent: boolean;
   isRuntime: boolean;
+  configOptions?: unknown[];
 }
 
 export interface DaemonWorkspaceProviderStatus extends DaemonStatusCell {
@@ -1989,6 +2020,7 @@ export interface DaemonWriteMemoryResult {
 }
 
 export type DaemonWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
+export type DaemonWorkspaceMemoryRememberTargetScope = 'project' | 'user';
 
 export type DaemonWorkspaceMemoryTaskStatus =
   | 'queued'
@@ -2015,6 +2047,7 @@ export interface DaemonWorkspaceMemoryRememberTask {
   taskId: string;
   status: DaemonWorkspaceMemoryTaskStatus;
   contextMode: DaemonWorkspaceMemoryRememberContextMode;
+  scope?: DaemonWorkspaceMemoryRememberTargetScope;
   createdAt: string;
   updatedAt: string;
   result?: DaemonWorkspaceMemoryRememberResult;
@@ -2027,6 +2060,7 @@ export interface DaemonWorkspaceMemoryRememberTask {
 
 export interface DaemonWorkspaceMemoryRememberOptions {
   contextMode?: DaemonWorkspaceMemoryRememberContextMode;
+  scope?: DaemonWorkspaceMemoryRememberTargetScope;
   clientId?: string;
 }
 
@@ -2046,6 +2080,7 @@ export interface DaemonWorkspaceMemoryForgetResult {
 export interface DaemonWorkspaceMemoryForgetTask {
   taskId: string;
   status: DaemonWorkspaceMemoryTaskStatus;
+  scope?: DaemonWorkspaceMemoryRememberTargetScope;
   createdAt: string;
   updatedAt: string;
   result?: DaemonWorkspaceMemoryForgetResult;
@@ -2057,6 +2092,7 @@ export interface DaemonWorkspaceMemoryForgetTask {
 }
 
 export interface DaemonWorkspaceMemoryForgetOptions {
+  scope?: DaemonWorkspaceMemoryRememberTargetScope;
   clientId?: string;
 }
 
@@ -2613,9 +2649,12 @@ export interface DaemonSessionStatsModelMetrics {
   };
   tokens: {
     prompt: number;
+    /** Provider-reported candidate tokens; may already include reasoning. */
     candidates: number;
+    /** Prompt plus all generated output, with reasoning counted once. */
     total: number;
     cached: number;
+    /** Reasoning tokens, shown as a subset of generated output. */
     thoughts: number;
   };
 }
@@ -2639,6 +2678,17 @@ export interface DaemonSessionStatsSkillByName {
   fail: number;
 }
 
+/** One subagent invocation's token consumption, with readable labels. */
+export interface DaemonSessionStatsSource {
+  /** Unique invocation id of the subagent. */
+  id: string;
+  /** Agent type name (e.g. "general-purpose"). */
+  type: string;
+  /** Business/task name for this invocation. */
+  name: string;
+  tokens: DaemonSessionStatsModelMetrics['tokens'];
+}
+
 /** Returned from `GET /session/:id/stats`. */
 export interface DaemonSessionStatsStatus {
   v: 1;
@@ -2648,6 +2698,11 @@ export interface DaemonSessionStatsStatus {
   durationMs: number;
   promptCount: number;
   models: Record<string, DaemonSessionStatsModelMetrics>;
+  /**
+   * Per-subagent-invocation token totals, sorted by total tokens desc.
+   * `main` conversation calls are excluded — they are the aggregate remainder.
+   */
+  sources?: DaemonSessionStatsSource[];
   tools: {
     totalCalls: number;
     totalSuccess: number;
@@ -2771,14 +2826,8 @@ export interface SetSessionLanguageResult {
  * Order matters for diagnostic UIs that render the modes in the
  * advertised sequence.
  */
-export const DAEMON_APPROVAL_MODES = [
-  'plan',
-  'default',
-  'auto-edit',
-  'auto',
-  'yolo',
-] as const;
-export type DaemonApprovalMode = (typeof DAEMON_APPROVAL_MODES)[number];
+export const DAEMON_APPROVAL_MODES = PERMISSION_MODES;
+export type DaemonApprovalMode = PermissionMode;
 
 /**
  * Result body of `POST /session/:id/approval-mode`. `previous` and
@@ -2833,6 +2882,7 @@ export interface DaemonSkillToggleResult {
   sessionsFailed: number;
 }
 
+/** Per-target error codes returned by older daemon versions. */
 export type DaemonSkillBatchToggleErrorCode =
   | 'skill_not_found'
   | 'skill_not_toggleable'
@@ -3743,6 +3793,7 @@ export interface MCPServerConfigShape {
   readonly tcp?: string;
   readonly timeout?: number;
   readonly discoveryTimeoutMs?: number;
+  readonly versionNegotiation?: 'auto' | 'legacy';
   readonly trust?: boolean;
   readonly description?: string;
   readonly oauth?: Record<string, unknown>;
@@ -4288,6 +4339,7 @@ export interface DaemonWorkspaceExtensionsStatus {
 }
 
 export interface ExtensionInstallRequest {
+  /** Git, GitHub, npm, or an absolute path on the daemon host. */
   source: string;
   credentialPersistence?: 'stored' | 'one_time';
   ref?: string;

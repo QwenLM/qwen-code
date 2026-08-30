@@ -33,7 +33,6 @@ const {
   renameSessionCatalog,
   patchSessionCatalog,
   removeSessionCatalog,
-  applySessionPinCatalog,
   addSessionCatalog,
   refreshSessionCatalogQueries,
   useSessionCatalogPollingSpy,
@@ -108,7 +107,6 @@ const {
   const renameSessionCatalog = vi.fn();
   const patchSessionCatalog = vi.fn();
   const removeSessionCatalog = vi.fn();
-  const applySessionPinCatalog = vi.fn();
   const addSessionCatalog = vi.fn();
   const refreshSessionCatalogQueries = vi.fn();
   const useSessionCatalogPollingSpy = vi.fn();
@@ -176,14 +174,13 @@ const {
     renameSessionCatalog,
     patchSessionCatalog,
     removeSessionCatalog,
-    applySessionPinCatalog,
     addSessionCatalog,
     refreshSessionCatalogQueries,
     useSessionCatalogPollingSpy,
   };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => connection,
   useActions: () => sessionActions,
   useWorkspace: () => workspace,
@@ -245,12 +242,6 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
       removeSession: (workspaceCwd: string, sessionId: string) => {
         removeSessionCatalog(workspaceCwd, sessionId);
       },
-      applySessionPin: (
-        workspaceCwd: string,
-        session: DaemonSessionSummary,
-      ) => {
-        applySessionPinCatalog(workspaceCwd, session);
-      },
       addSession: (
         workspaceCwd: string,
         session: DaemonSessionSummary,
@@ -266,6 +257,9 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
         renameSessionCatalog(workspaceCwd, sessionId, displayName);
         for (const listener of catalogListeners) listener(workspaceCwd);
       },
+      // These tests render pages straight from listWorkspaceSessions, so the
+      // store-owned pin toggle has no loaded catalog pages to patch.
+      toggleSessionPinned: vi.fn(),
     }),
     useSessionCatalogPolling: useSessionCatalogPollingSpy,
     useSessionCatalogQuery: (
@@ -435,6 +429,7 @@ function renderSidebar(
     lockedWorkspace?: {
       render?: (workspace: DaemonWorkspaceCapability) => ReactNode;
     };
+    showSessionSourceSwitch?: boolean;
     sessionActions?: {
       items?: readonly (
         | 'pin'
@@ -445,13 +440,7 @@ function renderSidebar(
         | 'export'
         | 'delete'
       )[];
-      inlineItems?: readonly (
-        | 'pin'
-        | 'archive'
-        | 'rename'
-        | 'export'
-        | 'delete'
-      )[];
+      inlineItems?: readonly ('pin' | 'rename' | 'export' | 'delete')[];
     };
   } = {},
 ) {
@@ -476,6 +465,7 @@ function renderSidebar(
           workspaces={overrides.workspaces}
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
           lockedWorkspace={overrides.lockedWorkspace}
+          showSessionSourceSwitch={overrides.showSessionSourceSwitch}
           sessionActions={overrides.sessionActions}
         />
       </I18nProvider>,
@@ -677,6 +667,17 @@ async function selectSessionMenuItem(
   label: string,
   itemLabel: string,
 ): Promise<void> {
+  const item = await openSessionMenuItem(label, itemLabel);
+  await act(async () => {
+    click(item);
+    await Promise.resolve();
+  });
+}
+
+async function openSessionMenuItem(
+  label: string,
+  itemLabel: string,
+): Promise<HTMLElement> {
   const trigger = sessionAction(label);
   expect(trigger).toBeDefined();
   await act(async () => {
@@ -687,10 +688,7 @@ async function selectSessionMenuItem(
     document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
   ).find((candidate) => candidate.textContent?.includes(itemLabel));
   expect(item).toBeDefined();
-  await act(async () => {
-    click(item!);
-    await Promise.resolve();
-  });
+  return item!;
 }
 
 async function openSessionMenuItems(label: string): Promise<string[]> {
@@ -831,7 +829,6 @@ beforeEach(() => {
   renameSessionCatalog.mockReset();
   patchSessionCatalog.mockReset();
   removeSessionCatalog.mockReset();
-  applySessionPinCatalog.mockReset();
   addSessionCatalog.mockReset();
   refreshSessionCatalogQueries.mockReset();
   useSessionCatalogPollingSpy.mockReset();
@@ -1083,14 +1080,16 @@ describe('WebShellSidebar workspace removal', () => {
     });
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
 
-    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await act(async () => {
       await Promise.resolve();
     });
     await ensureWorkspaceExpanded('other');
 
     expect(inlineSessionAction('Current secondary', 'Pin')).toBeDefined();
-    expect(archiveButtonFor('Other secondary')).toBeDefined();
     expect(sessionAction('Current secondary')).toBeDefined();
     expect(sessionAction('Other secondary')).toBeDefined();
 
@@ -1112,8 +1111,8 @@ describe('WebShellSidebar workspace removal', () => {
     });
     expect(primaryExport).not.toHaveBeenCalled();
 
+    await selectSessionMenuItem('Other secondary', 'Archive');
     await act(async () => {
-      click(archiveButtonFor('Other secondary')!);
       await secondaryArchive.mock.results.at(-1)?.value;
     });
     expect(secondaryArchive).toHaveBeenCalledWith(['other-secondary']);
@@ -1157,7 +1156,7 @@ describe('WebShellSidebar workspace removal', () => {
       lockedWorkspaceCwd: '/tmp/other',
       sessionActions: {
         items: ['rename', 'delete', 'archive'],
-        inlineItems: ['rename', 'delete', 'archive'],
+        inlineItems: ['rename', 'delete'],
       },
     });
     await expandWorkspace('other');
@@ -1165,9 +1164,11 @@ describe('WebShellSidebar workspace removal', () => {
     expect(inlineSessionAction('Locked current', 'Delete')?.disabled).toBe(
       true,
     );
-    expect(inlineSessionAction('Locked current', 'Archive')?.disabled).toBe(
-      true,
-    );
+    expect(
+      (await openSessionMenuItem('Locked current', 'Archive')).getAttribute(
+        'aria-disabled',
+      ),
+    ).toBe('true');
     expect(inlineSessionAction('Locked other', 'Rename')?.disabled).toBe(false);
     expect(inlineSessionAction('Locked current', 'Rename')?.disabled).toBe(
       false,
@@ -1496,10 +1497,9 @@ describe('WebShellSidebar workspace removal', () => {
     expect(secondaryOrganization).toHaveBeenCalledWith('locked-pinned', {
       isPinned: false,
     });
-    // Unpin reconciles through a targeted invalidation of the active lists
-    // instead of the workspace-wide refresh.
-    expect(invalidateSessionCatalog).toHaveBeenLastCalledWith('/tmp/other');
-    expect(refreshWorkspaceSessionCatalog).not.toHaveBeenCalled();
+    expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
+      '/tmp/other',
+    );
     expect(primaryDelete).not.toHaveBeenCalled();
     expect(primaryArchive).not.toHaveBeenCalled();
     expect(primaryOrganization).not.toHaveBeenCalled();
@@ -1543,7 +1543,7 @@ describe('WebShellSidebar workspace removal', () => {
       lockedWorkspaceCwd: '/tmp/other',
       sessionActions: {
         items: ['pin', 'group', 'archive', 'delete', 'export', 'details'],
-        inlineItems: ['pin', 'archive', 'delete'],
+        inlineItems: ['pin', 'delete'],
       },
     });
     await expandWorkspace('other');
@@ -1603,6 +1603,21 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     expect(onNewSession).toHaveBeenCalledWith('/tmp/other');
+  });
+
+  it('shows a native tooltip for the workspace create-group action', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
+    await expandWorkspace('other');
+
+    const createGroupButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Create group"]',
+    );
+    expect(createGroupButton).not.toBeNull();
+    expect(createGroupButton?.getAttribute('title')).toBe('Create group');
   });
 
   it('applies items and inlineItems consistently to locked normal, pinned, and archived rows', async () => {
@@ -2171,14 +2186,18 @@ describe('WebShellSidebar workspace removal', () => {
           'export',
           'delete',
         ],
-        inlineItems: ['rename', 'pin', 'archive', 'export', 'delete'],
+        inlineItems: ['rename', 'pin', 'export', 'delete'],
       },
     });
     await expandWorkspace('project');
 
     expect(inlineSessionAction('Legacy primary', 'Rename')).toBeUndefined();
     expect(inlineSessionAction('Legacy primary', 'Pin')).toBeDefined();
-    expect(archiveButtonFor('Legacy primary')?.disabled).toBe(false);
+    expect(
+      (await openSessionMenuItem('Legacy primary', 'Archive')).hasAttribute(
+        'data-disabled',
+      ),
+    ).toBe(false);
     expect(
       inlineSessionAction('Legacy primary', 'Export conversation record'),
     ).toBeDefined();
@@ -2190,7 +2209,7 @@ describe('WebShellSidebar workspace removal', () => {
       inlineSessionAction('Legacy primary', 'Pin')
         ?.closest<HTMLElement>('[class*="sessionMetaSlot"]')
         ?.style.getPropertyValue('--session-actions-width'),
-    ).toBe('130px');
+    ).toBe('104px');
   });
 
   it('fails closed for an explicit primary cwd that disappears from the catalog', async () => {
@@ -2219,7 +2238,7 @@ describe('WebShellSidebar workspace removal', () => {
 
     const mutationActions = {
       items: ['rename', 'pin', 'group', 'archive', 'export', 'delete'] as const,
-      inlineItems: ['rename', 'pin', 'archive', 'export', 'delete'] as const,
+      inlineItems: ['rename', 'pin', 'export', 'delete'] as const,
     };
     renderSidebar({ sessionActions: mutationActions });
     await expandWorkspace('project');
@@ -2283,25 +2302,32 @@ describe('WebShellSidebar workspace removal', () => {
     renderSidebar({
       sessionActions: {
         items: ['rename', 'archive', 'delete'],
-        inlineItems: ['rename', 'archive', 'delete'],
+        inlineItems: ['rename', 'delete'],
       },
     });
     await expandWorkspace('project');
     await expandWorkspace('other');
 
     const rename = inlineSessionAction('Current no-cwd primary', 'Rename');
-    const archive = archiveButtonFor('Current no-cwd primary');
     const remove = inlineSessionAction('Current no-cwd primary', 'Delete');
     expect(rename?.disabled).toBe(false);
-    expect(archive?.disabled).toBe(true);
     expect(remove?.disabled).toBe(true);
-    expect(archiveButtonFor('Equal-id secondary')?.disabled).toBe(false);
+    const archive = await openSessionMenuItem(
+      'Current no-cwd primary',
+      'Archive',
+    );
+    expect(archive.getAttribute('aria-disabled')).toBe('true');
 
     await act(async () => {
-      click(archive!);
+      click(archive);
       click(remove!);
       await Promise.resolve();
     });
+    expect(
+      (await openSessionMenuItem('Equal-id secondary', 'Archive')).hasAttribute(
+        'data-disabled',
+      ),
+    ).toBe(false);
 
     expect(document.body.textContent).not.toContain('Delete Session');
     expect(active.archiveSession).not.toHaveBeenCalled();
@@ -2771,7 +2797,9 @@ describe('WebShellSidebar workspace removal', () => {
       exportArchivedSession,
     }));
 
-    renderSidebar();
+    renderSidebar({
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await expandWorkspace('other');
     await expandArchived();
     await act(async () => {
@@ -2779,14 +2807,14 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
 
-    expect(archiveButtonFor('Unlocked normal')?.disabled).toBe(false);
     expect(inlineSessionAction('Unlocked normal', 'Pin')).toBeDefined();
     expect(inlineSessionAction('Unlocked normal', 'Delete')).toBeUndefined();
     const activeItems = await openSessionMenuItems('Unlocked normal');
     expect(activeItems).toEqual(expect.arrayContaining(['Rename', 'Delete']));
 
-    expect(archiveButtonFor('Unlocked pinned')?.disabled).toBe(false);
+    expect(activeItems).toContain('Archive');
     expect(inlineSessionAction('Unlocked pinned', 'Unpin')).toBeDefined();
+    expect(await openSessionMenuItems('Unlocked pinned')).toContain('Archive');
 
     const archivedItems = await openSessionMenuItems('Unlocked archived');
     expect(archivedItems).toEqual([
@@ -3182,12 +3210,13 @@ describe('WebShellSidebar non-primary archive', () => {
       ],
     });
 
-    renderSidebar({ onError });
+    renderSidebar({
+      onError,
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await expandWorkspace('other');
-    const archiveButton = archiveButtonFor('Secondary error');
-    expect(archiveButton).toBeDefined();
+    await selectSessionMenuItem('Secondary error', 'Archive');
     await act(async () => {
-      click(archiveButton!);
       await archiveSessionsData.mock.results.at(-1)?.value;
       await Promise.resolve();
     });
@@ -3228,17 +3257,52 @@ describe('WebShellSidebar non-primary archive', () => {
         : [],
     );
 
-    renderSidebar();
+    renderSidebar({
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await ensureWorkspaceExpanded('project');
     await expandWorkspace('other');
-    expect(archiveButtonFor('Primary active')).toBeDefined();
-    expect(archiveButtonFor('Secondary active')).toBeUndefined();
+    expect(await openSessionMenuItems('Primary active')).toContain('Archive');
+    expect(sessionAction('Secondary active')).toBeUndefined();
     await expandArchived();
     expect(
       listWorkspaceSessions.mock.calls.some(
         ([, options]) => options?.archiveState === 'archived',
       ),
     ).toBe(false);
+  });
+
+  it('disables the archive menu item while a session has a running turn', async () => {
+    active.sessions.push({
+      sessionId: 'primary-running',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Primary running',
+      hasActivePrompt: true,
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const trigger = sessionAction('Primary running');
+    expect(trigger).toBeDefined();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+    const archiveItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Archive');
+    expect(archiveItem).toBeDefined();
+    expect(archiveItem?.getAttribute('data-disabled')).not.toBeNull();
+    expect(archiveItem?.title).toBe(
+      'A running session cannot be archived; archiving would end its turn',
+    );
+
+    await act(async () => {
+      click(archiveItem!);
+      await Promise.resolve();
+    });
+    expect(active.archiveSession).not.toHaveBeenCalled();
   });
 
   it('hides archive UI when session_archive is absent', async () => {
@@ -3260,7 +3324,9 @@ describe('WebShellSidebar non-primary archive', () => {
 
     renderSidebar();
     await expandWorkspace('other');
-    expect(archiveButtonFor('Secondary active')).toBeUndefined();
+    expect(await openSessionMenuItems('Secondary active')).not.toContain(
+      'Archive',
+    );
     expect(container.textContent).not.toContain('Archived');
   });
 
@@ -3325,7 +3391,7 @@ describe('WebShellSidebar non-primary archive', () => {
           'export',
           'delete',
         ],
-        inlineItems: ['rename', 'pin', 'archive', 'export', 'delete'],
+        inlineItems: ['rename', 'pin', 'export', 'delete'],
       },
     });
 
@@ -3439,17 +3505,19 @@ describe('WebShellSidebar non-primary archive', () => {
       errors: [],
     });
 
-    renderSidebar({ onError });
+    renderSidebar({
+      onError,
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await ensureWorkspaceExpanded('project');
     await expandWorkspace('other');
-    const primaryArchiveButton = archiveButtonFor('Legacy primary shared');
-    const archiveButton = archiveButtonFor('Secondary shared');
-    expect(primaryArchiveButton).toBeDefined();
-    expect(primaryArchiveButton?.disabled).toBe(true);
-    expect(archiveButton).toBeDefined();
-    expect(archiveButton?.disabled).toBe(false);
+    expect(
+      (
+        await openSessionMenuItem('Legacy primary shared', 'Archive')
+      ).getAttribute('aria-disabled'),
+    ).toBe('true');
+    await selectSessionMenuItem('Secondary shared', 'Archive');
     await act(async () => {
-      click(archiveButton!);
       await archiveSessionsData.mock.results.at(-1)?.value;
       await Promise.resolve();
     });
@@ -3489,19 +3557,23 @@ describe('WebShellSidebar non-primary archive', () => {
         : [],
     );
 
-    renderSidebar();
+    renderSidebar({
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await ensureWorkspaceExpanded('project');
     await expandWorkspace('other');
-    const secondaryArchive = archiveButtonFor('Secondary pending');
-    expect(secondaryArchive).toBeDefined();
+    await selectSessionMenuItem('Secondary pending', 'Archive');
 
-    await act(async () => {
-      click(secondaryArchive!);
-      await Promise.resolve();
-    });
-
-    expect(archiveButtonFor('Secondary pending')?.disabled).toBe(true);
-    expect(archiveButtonFor('Primary pending')?.disabled).toBe(false);
+    expect(
+      (await openSessionMenuItem('Secondary pending', 'Archive')).getAttribute(
+        'aria-disabled',
+      ),
+    ).toBe('true');
+    expect(
+      (await openSessionMenuItem('Primary pending', 'Archive')).hasAttribute(
+        'data-disabled',
+      ),
+    ).toBe(false);
 
     await act(async () => {
       finishArchive({
@@ -3545,6 +3617,136 @@ describe('WebShellSidebar primary workspace header', () => {
 });
 
 describe('WebShellSidebar session source switch', () => {
+  it('can hide the switch while keeping every catalog scoped to tasks', async () => {
+    renderSidebar({ showSessionSourceSwitch: false });
+
+    expect(container.querySelector('[aria-label="Session source"]')).toBeNull();
+    expect(
+      useSessions.mock.calls.every(
+        ([options]) => options?.sourceType === 'default',
+      ),
+    ).toBe(true);
+
+    await expandWorkspace('other');
+    expect(listWorkspaceSessions).toHaveBeenCalled();
+    expect(
+      listWorkspaceSessions.mock.calls.every(
+        ([options]) => options?.sourceType === 'default',
+      ),
+    ).toBe(true);
+  });
+
+  it('returns to task sessions when the switch is hidden at runtime', async () => {
+    const taskSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    const channelSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'channel-session',
+        displayName: 'Channel session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+      },
+    ];
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') return archived;
+        return options?.sourceType === 'channel'
+          ? { ...active, sessions: channelSessions }
+          : { ...active, sessions: taskSessions };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await switchSessionSource('Channels');
+    expect(container.textContent).toContain('Channel session');
+
+    renderSidebar({ showSessionSourceSwitch: false });
+
+    expect(container.querySelector('[aria-label="Session source"]')).toBeNull();
+    expect(container.textContent).toContain('Task session');
+    expect(container.textContent).not.toContain('Channel session');
+    expect(
+      useSessions.mock.calls.findLast(
+        ([options]) =>
+          options?.archiveState === 'active' && options.group !== 'pinned',
+      )?.[0]?.sourceType,
+    ).toBe('default');
+
+    renderSidebar();
+    const tasksTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.trim() === 'Tasks');
+    expect(tasksTab?.getAttribute('data-state')).toBe('active');
+  });
+
+  it('preserves channel completion state when hidden at runtime', async () => {
+    const channelSession: DaemonSessionSummary = {
+      sessionId: 'channel-session',
+      displayName: 'Channel session',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'channel',
+      hasActivePrompt: true,
+    };
+    const taskSession: DaemonSessionSummary = {
+      sessionId: 'task-session',
+      displayName: 'Task session',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+    };
+    let channelResult = {
+      ...active,
+      sessions: [channelSession],
+      loading: false,
+    };
+    const taskResult = {
+      ...active,
+      sessions: [taskSession],
+      loading: false,
+    };
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') return archived;
+        return options?.sourceType === 'channel' ? channelResult : taskResult;
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await switchSessionSource('Channels');
+    channelResult = { ...channelResult, loading: true };
+    renderSidebar();
+    channelResult = { ...channelResult, loading: false };
+    renderSidebar();
+    channelResult = { ...channelResult, loading: true };
+    renderSidebar();
+    channelResult = {
+      ...channelResult,
+      sessions: [{ ...channelSession, hasActivePrompt: false }],
+      loading: false,
+    };
+    renderSidebar();
+
+    const findChannelStatusDot = () =>
+      Array.from(container.querySelectorAll<HTMLElement>('[role="button"]'))
+        .find((candidate) => candidate.textContent?.includes('Channel session'))
+        ?.querySelector('[class*="sessionStatusDot"]');
+    expect(findChannelStatusDot()).not.toBeNull();
+
+    renderSidebar({ showSessionSourceSwitch: false });
+    expect(container.textContent).toContain('Task session');
+    renderSidebar();
+    await switchSessionSource('Channels');
+
+    expect(findChannelStatusDot()).not.toBeNull();
+  });
+
   it('never renders primary sessions from the inactive source', async () => {
     active.sessions.push(
       {
@@ -3570,6 +3772,51 @@ describe('WebShellSidebar session source switch', () => {
 
     expect(container.textContent).not.toContain('Task session');
     expect(container.textContent).toContain('Channel session');
+  });
+
+  it('renders scheduled-task runs with a flat source icon', async () => {
+    const scheduledRun: DaemonSessionSummary = {
+      sessionId: 'scheduled-run',
+      displayName: 'Hourly review',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    };
+    active.sessions.push(scheduledRun);
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const title = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    ).find((candidate) => candidate.textContent === 'Hourly review');
+    const row = title?.closest('[role="button"]');
+    expect(row).toBeTruthy();
+    const sourceIcon = row?.querySelector(
+      '[data-web-shell-scheduled-task-session]',
+    );
+    expect(sourceIcon).toBeTruthy();
+    expect(sourceIcon?.getAttribute('title')).toBe('Scheduled Tasks');
+    expect(row?.textContent).not.toContain('🧵');
+    expect(row?.textContent).not.toContain('⏰');
+
+    active.sessions = [{ ...scheduledRun, hasActivePrompt: true }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    active.sessions = [{ ...scheduledRun, hasActivePrompt: false }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+
+    const completedRow = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    )
+      .find((candidate) => candidate.textContent === 'Hourly review')
+      ?.closest('[role="button"]');
+    expect(
+      completedRow?.querySelector('[data-web-shell-scheduled-task-session]'),
+    ).toBeTruthy();
+    expect(
+      completedRow?.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeTruthy();
   });
 
   it('preserves channel completion state while the tasks source is active', async () => {
@@ -4909,19 +5156,20 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
     ).filter((item) => item.textContent?.includes('Archive')).length;
   }
 
-  it('keeps one inline archive action when ownership changes', async () => {
+  it('keeps one archive menu item when ownership changes', async () => {
     enableOrganization();
     useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
 
     renderSidebar();
     await settle();
     expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
-    expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(1);
+    expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(0);
     expect(
       sessionRow('Pinned secondary').querySelectorAll(
         '[class*="sessionActions"]',
       ),
     ).toHaveLength(1);
+    expect(await countArchiveMenuItemsInRow('Pinned secondary')).toBe(1);
   });
 
   it('keeps archive when the read-only cluster is the sole owner', async () => {
@@ -4937,24 +5185,23 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
         : [],
     );
     renderSidebar({
-      sessionActions: { items: ['archive'], inlineItems: ['archive'] },
+      sessionActions: { items: ['archive'] },
     });
     await expandWorkspace('other');
-    expect(archiveButtonsInRow('Secondary only')).toHaveLength(1);
+    expect(archiveButtonsInRow('Secondary only')).toHaveLength(0);
     expect(
       sessionRow('Secondary only').querySelectorAll(
         '[class*="sessionActions"]',
       ),
     ).toHaveLength(1);
+    expect(await countArchiveMenuItemsInRow('Secondary only')).toBe(1);
   });
 
-  it('keeps exactly one archive menu item when archive is dropdown-only', async () => {
+  it('keeps exactly one archive menu item by default', async () => {
     enableOrganization();
     useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
 
-    renderSidebar({
-      sessionActions: { inlineItems: ['pin'] },
-    });
+    renderSidebar();
     await settle();
 
     expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(0);
@@ -4987,88 +5234,6 @@ describe('WebShellSidebar session organization write-through', () => {
     });
   }
 
-  it('writes a confirmed pin through the catalog and refreshes active lists', async () => {
-    const onError = vi.fn();
-    enableOrganization();
-    active.sessions.push({
-      sessionId: 'primary-pin',
-      workspaceCwd: '/tmp/project',
-      displayName: 'Primary pin',
-    });
-    updateSessionOrganization.mockResolvedValue({
-      sessionId: 'primary-pin',
-      groupId: null,
-      isPinned: true,
-      pinnedAt: '2026-01-02T03:04:05.000Z',
-      updatedAt: '2026-01-02T03:04:05.000Z',
-    });
-
-    renderSidebar({ onError });
-    await settle();
-
-    const pin = inlineSessionAction('Primary pin', 'Pin');
-    expect(pin).toBeDefined();
-    await act(async () => {
-      click(pin!);
-      await updateSessionOrganization.mock.results.at(-1)?.value;
-      await Promise.resolve();
-    });
-
-    expect(updateSessionOrganization).toHaveBeenCalledWith('primary-pin', {
-      isPinned: true,
-    });
-    expect(applySessionPinCatalog).toHaveBeenCalledWith('/tmp/project', {
-      sessionId: 'primary-pin',
-      workspaceCwd: '/tmp/project',
-      displayName: 'Primary pin',
-      isPinned: true,
-      pinnedAt: '2026-01-02T03:04:05.000Z',
-    });
-    expect(invalidateSessionCatalog).toHaveBeenCalledWith('/tmp/project');
-    expect(onError).not.toHaveBeenCalled();
-  });
-
-  it('unpins without writing a stale pinnedAt', async () => {
-    const onError = vi.fn();
-    enableOrganization();
-    active.sessions.push({
-      sessionId: 'primary-unpin',
-      workspaceCwd: '/tmp/project',
-      displayName: 'Primary unpin',
-      isPinned: true,
-      pinnedAt: '2026-01-01T00:00:00.000Z',
-    });
-    updateSessionOrganization.mockResolvedValue({
-      sessionId: 'primary-unpin',
-      groupId: null,
-      isPinned: false,
-      updatedAt: '2026-01-02T03:04:05.000Z',
-    });
-
-    renderSidebar({ onError });
-    await settle();
-
-    const unpin = inlineSessionAction('Primary unpin', 'Unpin');
-    expect(unpin).toBeDefined();
-    await act(async () => {
-      click(unpin!);
-      await updateSessionOrganization.mock.results.at(-1)?.value;
-      await Promise.resolve();
-    });
-
-    expect(updateSessionOrganization).toHaveBeenCalledWith('primary-unpin', {
-      isPinned: false,
-    });
-    expect(applySessionPinCatalog).toHaveBeenCalledWith('/tmp/project', {
-      sessionId: 'primary-unpin',
-      workspaceCwd: '/tmp/project',
-      displayName: 'Primary unpin',
-      pinnedAt: '2026-01-01T00:00:00.000Z',
-      isPinned: false,
-    });
-    expect(onError).not.toHaveBeenCalled();
-  });
-
   it('drops a primary row as soon as its archive RPC lands', async () => {
     const onError = vi.fn();
     enableOrganization();
@@ -5082,10 +5247,9 @@ describe('WebShellSidebar session organization write-through', () => {
     renderSidebar({ onError });
     await settle();
 
-    const archive = archiveButtonFor('Primary archive');
-    expect(archive).toBeDefined();
+    const archive = await openSessionMenuItem('Primary archive', 'Archive');
     await act(async () => {
-      click(archive!);
+      click(archive);
       await active.archiveSession.mock.results.at(-1)?.value;
       await Promise.resolve();
     });
@@ -5157,10 +5321,9 @@ describe('WebShellSidebar session organization write-through', () => {
     renderSidebar({ onError });
     await settle();
 
-    const archive = archiveButtonFor('Primary gone');
-    expect(archive).toBeDefined();
+    const archive = await openSessionMenuItem('Primary gone', 'Archive');
     await act(async () => {
-      click(archive!);
+      click(archive);
       await active.archiveSession.mock.results.at(-1)?.value;
       await Promise.resolve();
     });
@@ -5226,10 +5389,9 @@ describe('WebShellSidebar session organization write-through', () => {
     renderSidebar({ onError });
     await expandWorkspace('other');
 
-    const archive = archiveButtonFor('Secondary gone');
-    expect(archive).toBeDefined();
+    const archive = await openSessionMenuItem('Secondary gone', 'Archive');
     await act(async () => {
-      click(archive!);
+      click(archive);
       await archiveSessionsData.mock.results.at(-1)?.value;
       await Promise.resolve();
     });

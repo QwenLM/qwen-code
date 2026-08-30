@@ -45,7 +45,7 @@ test('creates a Goal directly from a new task before any chat', async ({
     .toBe(0);
 });
 
-test('runs the canonical Goal and explicit queue interaction chain @smoke', async ({
+test('runs the canonical Goal and active-turn queue interaction chain @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
@@ -90,32 +90,27 @@ test('runs the canonical Goal and explicit queue interaction chain @smoke', asyn
   await strip.getByRole('button', { name: 'Resume goal' }).click();
   await expect(strip).toContainText('In progress');
 
-  await submitComposer(page, 'stay queued until I choose');
-  const queue = page.locator('[data-web-shell-queued-prompts]');
-  await expect(queue).toContainText('stay queued until I choose');
-  expect(daemon.promptRequests()).toHaveLength(0);
-  expect(midTurnRequests(daemon)).toHaveLength(0);
-  const [queueWidth, goalWidth] = await Promise.all([
-    queue.evaluate((element) => element.getBoundingClientRect().width),
-    strip.evaluate((element) => element.getBoundingClientRect().width),
-  ]);
-  expect(Math.abs(queueWidth - goalWidth)).toBeLessThan(1);
-  await capture(page, testInfo, '02-goal-with-local-queue.png');
-
   await daemon.sendEvent(
     assistantTextEvent('Goal turn running', {
       id: 2,
       sessionId: scenario.sessionId,
     }),
   );
-  await queue.getByRole('button', { name: 'Insert' }).click();
+  await submitComposer(page, 'stay queued until I choose');
+  const queue = page.locator('[data-web-shell-queued-prompts]');
+  await expect(queue).toContainText('stay queued until I choose');
+  expect(daemon.promptRequests()).toHaveLength(0);
   await expect.poll(() => midTurnRequests(daemon).length).toBe(1);
   expect(midTurnRequests(daemon)[0]?.body).toMatchObject({
     message: 'stay queued until I choose',
   });
+  const [queueWidth, goalWidth] = await Promise.all([
+    queue.evaluate((element) => element.getBoundingClientRect().width),
+    strip.evaluate((element) => element.getBoundingClientRect().width),
+  ]);
+  expect(Math.abs(queueWidth - goalWidth)).toBeLessThan(1);
   await expect(queue).toContainText('Queued...');
-  expect(daemon.promptRequests()).toHaveLength(0);
-  await capture(page, testInfo, '03-explicitly-inserted.png');
+  await capture(page, testInfo, '02-inserted-during-active-turn.png');
   await daemon.sendEvent(
     turnCompleteEvent('goal-turn-1', {
       id: 3,
@@ -123,11 +118,10 @@ test('runs the canonical Goal and explicit queue interaction chain @smoke', asyn
     }),
   );
 
-  await submitComposer(page, 'run only after the goal pauses');
-  await expect(queue).toContainText('run only after the goal pauses');
-  expect(daemon.promptRequests()).toHaveLength(0);
-  await strip.getByRole('button', { name: 'Pause goal' }).click();
+  await submitComposer(page, 'run while the goal stays active');
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expect(midTurnRequests(daemon)).toHaveLength(1);
+  await expect(queue).not.toContainText('run while the goal stays active');
 
   let confirmationOpened = false;
   page.on('dialog', async (dialog) => {
@@ -140,7 +134,7 @@ test('runs the canonical Goal and explicit queue interaction chain @smoke', asyn
   expect(goalControlRequests(daemon).at(-1)?.body).toMatchObject({
     action: 'clear',
   });
-  await capture(page, testInfo, '04-goal-cleared.png');
+  await capture(page, testInfo, '03-goal-cleared.png');
 });
 
 async function installScenario(

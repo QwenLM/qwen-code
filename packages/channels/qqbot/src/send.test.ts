@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type {
   ChannelAgentBridge,
   ChannelTaskLifecycleEvent,
+  Envelope,
 } from '@qwen-code/channel-base';
 import { isValidChatId, DeliveryError } from './QQChannel.js';
 
@@ -12,6 +13,7 @@ const {
   mockFetchGatewayUrl,
   MockWebSocket,
   mockWebSockets,
+  mockBaseHandleInbound,
 } = vi.hoisted(() => {
   const mockWebSockets: unknown[] = [];
 
@@ -47,6 +49,7 @@ const {
     mockSendQQMessage: vi.fn(),
     mockFetchAccessToken: vi.fn(),
     mockFetchGatewayUrl: vi.fn(),
+    mockBaseHandleInbound: vi.fn(() => Promise.resolve()),
     MockWebSocket,
     mockWebSockets,
   };
@@ -105,8 +108,11 @@ vi.mock('@qwen-code/channel-base', async () => {
         this.router = (options?.['router'] as Record<string, unknown>) ?? {};
         this.baseOptions = options ?? ({} as Record<string, unknown>);
       }
-      protected handleInbound(_env: unknown): Promise<void> {
-        return Promise.resolve();
+      protected handleInbound(env: unknown): Promise<void> {
+        return mockBaseHandleInbound(env) as Promise<void>;
+      }
+      protected getResponseMessageId(_sessionId: string): string | undefined {
+        return undefined;
       }
       protected onTaskLifecycle(_event: unknown): void {}
     },
@@ -139,6 +145,14 @@ function mockResponse(
   body = '',
 ): { ok: boolean; status: number; text: () => Promise<string> } {
   return { ok, status, text: async () => body };
+}
+
+function deferredPromise() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 describe('isValidChatId', () => {
@@ -839,6 +853,108 @@ describe('sendMessage', () => {
     saveSpy.mockRestore();
   });
 
+  it('does not borrow the latest reply context for a background response', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-latest' });
+    const channel = ch as unknown as {
+      sendResponseMessage: (
+        chatId: string,
+        text: string,
+        sessionId: string,
+      ) => Promise<void>;
+    };
+
+    await channel.sendResponseMessage(
+      'test-chat-id',
+      'background',
+      'session-background',
+    );
+
+    expect(mockSendQQMessage.mock.calls[0][3]).toEqual({
+      msg_type: 2,
+      markdown: { content: 'background' },
+    });
+  });
+
+  it('keeps overlapping inbound replies bound to their own messages', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const channel = ch as unknown as {
+      setReplyMsgId: (chatId: string, messageId: string) => void;
+    };
+    channel.setReplyMsgId('test-chat-id', 'msg-a');
+    channel.setReplyMsgId('test-chat-id', 'msg-b');
+    const first = deferredPromise();
+    const second = deferredPromise();
+    mockBaseHandleInbound
+      .mockImplementationOnce(async (inbound: Envelope) => {
+        await first.promise;
+        await ch.sendMessage(inbound.chatId, 'reply-a');
+      })
+      .mockImplementationOnce(async (inbound: Envelope) => {
+        await second.promise;
+        await ch.sendMessage(inbound.chatId, 'reply-b');
+      });
+    const base = {
+      channelName: 'test-bot',
+      senderId: 'sender',
+      senderName: 'sender',
+      chatId: 'test-chat-id',
+      text: 'prompt',
+      isGroup: false,
+      isMentioned: false,
+      isReplyToBot: false,
+    };
+
+    const pendingA = ch.handleInbound({ ...base, messageId: 'msg-a' });
+    const pendingB = ch.handleInbound({ ...base, messageId: 'msg-b' });
+    second.resolve();
+    await pendingB;
+    first.resolve();
+    await pendingA;
+
+    expect(mockSendQQMessage.mock.calls[0][3]).toMatchObject({
+      msg_id: 'msg-b',
+      msg_seq: 1,
+    });
+    expect(mockSendQQMessage.mock.calls[1][3]).toMatchObject({
+      msg_id: 'msg-a',
+      msg_seq: 1,
+    });
+  });
+
+  it('does not replace an expired session reply with a newer chat reply', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-newer' });
+    const channel = ch as unknown as {
+      getResponseMessageId: (sessionId: string) => string | undefined;
+      replyContextByMessageId: Map<
+        string,
+        { chatId: string; msgId: string; timestamp: number }
+      >;
+      sendResponseMessage: (
+        chatId: string,
+        text: string,
+        sessionId: string,
+      ) => Promise<void>;
+    };
+    channel.getResponseMessageId = () => 'msg-expired';
+    channel.replyContextByMessageId.set('msg-expired', {
+      chatId: 'test-chat-id',
+      msgId: 'msg-expired',
+      timestamp: Date.now() - 300_001,
+    });
+
+    await channel.sendResponseMessage(
+      'test-chat-id',
+      'late response',
+      'session-old',
+    );
+
+    expect(mockSendQQMessage.mock.calls[0][3]).toEqual({
+      msg_type: 2,
+      markdown: { content: 'late response' },
+    });
+    expect(channel.replyContextByMessageId.has('msg-expired')).toBe(false);
+  });
+
   it('sends single request even for long text (no splitting)', async () => {
     const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-789' });
     const text = 'a'.repeat(4500);
@@ -1160,7 +1276,7 @@ describe('setReplyMsgId', () => {
     return ch;
   }
 
-  it('cleans up old msgSeqMap entry when setting new replyMsgId for same chatId', () => {
+  it('retains the previous message sequence until its reply context expires', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
 
@@ -1182,9 +1298,14 @@ describe('setReplyMsgId', () => {
       'new-msg-id',
     );
 
-    expect(msgSeqMap.has('old-msg-id')).toBe(false);
+    expect(msgSeqMap.get('old-msg-id')).toBe(5);
     expect(msgSeqMap.get('other-msg-id')).toBe(10);
     expect(replyMsgId.get('test-chat-id')!.msgId).toBe('new-msg-id');
+    const replyContexts = chp['replyContextByMessageId'] as Map<
+      string,
+      { chatId: string; msgId: string; timestamp: number }
+    >;
+    expect(replyContexts.get('new-msg-id')?.chatId).toBe('test-chat-id');
   });
 
   it('does nothing when chatId has no prior replyMsgId', () => {
@@ -1556,6 +1677,10 @@ describe('restoreQQState validation filters', () => {
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readFileSync).mockReturnValue(
       JSON.stringify({
+        replyMsgId: [
+          ['chat-a', 'a'],
+          ['chat-b', 'b'],
+        ],
         msgSeqMap: [
           ['a', 0],
           ['b', 42],
@@ -1590,7 +1715,7 @@ describe('restoreQQState validation filters', () => {
     // Use raw JSON string: JSON.stringify(Infinity) → "null", which
     // bypasses Number.isSafeInteger (caught by typeof check instead).
     vi.mocked(readFileSync).mockReturnValue(
-      '{"msgSeqMap":[["a",1.5],["b",9007199254740992],["c",1e999],["d",-1e999],["e",42],["f",0]]}',
+      '{"replyMsgId":[["chat-e","e"],["chat-f","f"]],"msgSeqMap":[["a",1.5],["b",9007199254740992],["c",1e999],["d",-1e999],["e",42],["f",0]]}',
     );
 
     const ch = makeChannel();
@@ -1849,6 +1974,36 @@ describe('replyMsgId cleanup timer', () => {
     expect(saveSpy).toHaveBeenCalledTimes(1);
 
     saveSpy.mockRestore();
+    ch.disconnect();
+  });
+
+  it('reclaims an older same-chat context without deleting the latest one', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const setReplyMsgId = chp['setReplyMsgId'] as (
+      chatId: string,
+      msgId: string,
+    ) => void;
+    setReplyMsgId.call(ch, 'shared-chat', 'msg-old');
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-old', 3);
+
+    vi.advanceTimersByTime(60_000);
+    setReplyMsgId.call(ch, 'shared-chat', 'msg-latest');
+    msgSeqMap.set('msg-latest', 1);
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(300_000);
+
+    const replyContexts = chp['replyContextByMessageId'] as Map<
+      string,
+      unknown
+    >;
+    expect(replyContexts.has('msg-old')).toBe(false);
+    expect(msgSeqMap.has('msg-old')).toBe(false);
+    expect(replyContexts.has('msg-latest')).toBe(true);
+    expect(msgSeqMap.get('msg-latest')).toBe(1);
     ch.disconnect();
   });
 

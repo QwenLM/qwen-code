@@ -542,61 +542,6 @@ describe('SessionCatalogStore', () => {
     ).toEqual(['archived-only']);
   });
 
-  it('applies a confirmed pin across list and pinned pages', async () => {
-    const listQuery: SessionCatalogQuery = {
-      routeKind: 'legacy',
-      workspaceCwd: '/w',
-      options: { archiveState: 'active', view: 'organized', group: 'all' },
-    };
-    const pinnedQuery: SessionCatalogQuery = {
-      routeKind: 'legacy',
-      workspaceCwd: '/w',
-      options: { archiveState: 'active', view: 'organized', group: 'pinned' },
-    };
-    legacy.mockImplementation(
-      async (
-        _cwd: string,
-        options: { group?: string } | undefined,
-      ): Promise<DaemonSessionListPage> => ({
-        sessions:
-          options?.group === 'pinned'
-            ? []
-            : [{ sessionId: 'pin-me', workspaceCwd: '/w' }],
-        nextCursor: undefined,
-      }),
-    );
-    await store.loadOnce(listQuery, { fresh: true });
-    await store.loadOnce(pinnedQuery, { fresh: true });
-
-    store.applySessionPin('/w', {
-      sessionId: 'pin-me',
-      workspaceCwd: '/w',
-      isPinned: true,
-      pinnedAt: '2026-01-02T03:04:05.000Z',
-    });
-
-    expect(store.getSnapshot(listQuery).page?.sessions[0]).toMatchObject({
-      isPinned: true,
-      pinnedAt: '2026-01-02T03:04:05.000Z',
-    });
-    expect(
-      store
-        .getSnapshot(pinnedQuery)
-        .page?.sessions.map((session) => session.sessionId),
-    ).toEqual(['pin-me']);
-
-    store.applySessionPin('/w', {
-      sessionId: 'pin-me',
-      workspaceCwd: '/w',
-      isPinned: false,
-    });
-
-    expect(store.getSnapshot(listQuery).page?.sessions[0]?.isPinned).toBe(
-      false,
-    );
-    expect(store.getSnapshot(pinnedQuery).page?.sessions).toEqual([]);
-  });
-
   it('seeds a session into destination pages without touching pinned pages', async () => {
     const listQuery: SessionCatalogQuery = {
       routeKind: 'legacy',
@@ -790,6 +735,190 @@ describe('SessionCatalogStore', () => {
 
     unsubscribeActive();
     unsubscribeArchived();
+  });
+
+  describe('applySessionPinToggle', () => {
+    const pinnedView = (workspaceCwd: string): SessionCatalogQuery => ({
+      routeKind: 'legacy',
+      workspaceCwd,
+      options: {
+        pageSize: 1000,
+        archiveState: 'active',
+        view: 'organized',
+        group: 'pinned',
+      },
+    });
+
+    it('pins across loaded pages and leaves unloaded or foreign pages alone', async () => {
+      const row = { sessionId: 'plain', workspaceCwd: '/work' };
+      const existingPin = {
+        sessionId: 'other',
+        workspaceCwd: '/work',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      };
+      legacy.mockImplementation(async (cwd: string) => ({
+        sessions:
+          cwd === '/work'
+            ? [row]
+            : [{ sessionId: 'foreign', workspaceCwd: cwd }],
+      }));
+      await store.loadOnce(query('/work'), { fresh: true });
+      await store.loadOnce(query('/other'), { fresh: true });
+      // The pinned-view page stays unloaded for /work: no entry may be
+      // invented for it.
+      await store.loadOnce(pinnedView('/other'), { fresh: true });
+      legacy.mockImplementation(async () => ({ sessions: [existingPin] }));
+
+      store.applySessionPinToggle(
+        '/work',
+        { ...row },
+        {
+          pinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      );
+
+      expect(store.getSnapshot(query('/work')).page?.sessions[0]).toMatchObject(
+        {
+          isPinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      );
+      expect(
+        store.getSnapshot(query('/other')).page?.sessions[0],
+      ).toMatchObject({ sessionId: 'foreign' });
+      expect(store.getSnapshot(pinnedView('/work')).page).toBeUndefined();
+    });
+
+    it('inserts the row into a loaded pinned-view page and patches it in place when already present', async () => {
+      const row = { sessionId: 'plain', workspaceCwd: '/work' };
+      const existingPin = {
+        sessionId: 'other',
+        workspaceCwd: '/work',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      };
+      legacy.mockImplementation(
+        async (_cwd: string, options: { group?: string }) =>
+          options?.group === 'pinned'
+            ? { sessions: [existingPin] }
+            : { sessions: [row] },
+      );
+      await store.loadOnce(query('/work'), { fresh: true });
+      await store.loadOnce(pinnedView('/work'), { fresh: true });
+
+      store.applySessionPinToggle(
+        '/work',
+        { ...row },
+        {
+          pinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      );
+
+      expect(store.getSnapshot(pinnedView('/work')).page?.sessions).toEqual([
+        existingPin,
+        {
+          ...row,
+          isPinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      ]);
+
+      // Re-pin patches the existing row instead of duplicating it.
+      store.applySessionPinToggle(
+        '/work',
+        { ...row },
+        {
+          pinned: true,
+          pinnedAt: '2026-03-03T00:00:00.000Z',
+        },
+      );
+      expect(
+        store.getSnapshot(pinnedView('/work')).page?.sessions,
+      ).toHaveLength(2);
+    });
+
+    it('unpins by removing the row from the pinned page and clearing pinnedAt elsewhere', async () => {
+      const row = {
+        sessionId: 'plain',
+        workspaceCwd: '/work',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      };
+      legacy.mockImplementation(
+        async (_cwd: string, options: { group?: string }) =>
+          options?.group === 'pinned'
+            ? { sessions: [row] }
+            : { sessions: [row] },
+      );
+      await store.loadOnce(query('/work'), { fresh: true });
+      await store.loadOnce(pinnedView('/work'), { fresh: true });
+
+      store.applySessionPinToggle('/work', { ...row }, { pinned: false });
+
+      expect(store.getSnapshot(pinnedView('/work')).page?.sessions).toEqual([]);
+      const patched = store.getSnapshot(query('/work')).page?.sessions[0];
+      expect(patched?.isPinned).toBe(false);
+      expect(patched?.pinnedAt).toBeUndefined();
+    });
+
+    it('survives unrelated patchSession churn after the toggle (R5-1)', async () => {
+      const row = { sessionId: 'plain', workspaceCwd: '/work' };
+      const sibling = {
+        sessionId: 'sibling',
+        workspaceCwd: '/work',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      };
+      legacy.mockImplementation(
+        async (_cwd: string, options: { group?: string }) =>
+          options?.group === 'pinned'
+            ? { sessions: [sibling] }
+            : { sessions: [row, sibling] },
+      );
+      await store.loadOnce(query('/work'), { fresh: true });
+      await store.loadOnce(pinnedView('/work'), { fresh: true });
+
+      store.applySessionPinToggle(
+        '/work',
+        { ...row },
+        {
+          pinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      );
+      // Churn that never touches pin state: a rename of another session and
+      // a live-state tick both mint fresh page references.
+      store.patchSession('/work', 'sibling', { displayName: 'Renamed' });
+      store.applyLiveState('/work', [
+        {
+          sessionId: 'sibling',
+          clientCount: 1,
+          hasActivePrompt: true,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+          updatedAt: '2026-02-03T00:00:00.000Z',
+        },
+      ]);
+
+      expect(
+        store
+          .getSnapshot(pinnedView('/work'))
+          .page?.sessions.map((session) => session.sessionId),
+      ).toEqual(['sibling', 'plain']);
+      // The all-sessions page keeps activity order; the toggled row must
+      // still carry the pin state after the churn.
+      expect(
+        store
+          .getSnapshot(query('/work'))
+          .page?.sessions.find((session) => session.sessionId === 'plain'),
+      ).toMatchObject({
+        isPinned: true,
+        pinnedAt: '2026-02-02T00:00:00.000Z',
+      });
+    });
   });
 
   it('overlays live state and clears volatile fields for persisted-only sessions', async () => {
@@ -1899,6 +2028,84 @@ describe('SessionCatalogStore', () => {
     const unsubscribe = store.subscribe(target, vi.fn());
 
     expect(legacy).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+});
+
+describe('SessionCatalogStore live-session snapshots (#9487)', () => {
+  let store: SessionCatalogStore;
+
+  function live(sessionId: string, hasActivePrompt: boolean) {
+    return {
+      sessionId,
+      clientCount: 1,
+      hasActivePrompt,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+    };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    const client = {
+      listWorkspaceSessionsPage: vi.fn(),
+      workspaceByCwd: vi.fn(() => ({
+        listWorkspaceSessionsPage: vi.fn(),
+      })),
+    } as unknown as DaemonClient;
+    store = new SessionCatalogStore(client);
+  });
+
+  afterEach(() => {
+    store.dispose();
+    vi.useRealTimers();
+  });
+
+  it('answers per-session lookups independently of any loaded page', () => {
+    expect(store.hasLiveSessions('/work')).toBe(false);
+    expect(store.getLiveSession('/work', 'off-page')).toBeUndefined();
+
+    // One live-state response is enough: no catalog page was ever loaded,
+    // yet a session that no page contains resolves from the snapshot.
+    store.applyLiveState('/work', [live('off-page', true)]);
+
+    expect(store.hasLiveSessions('/work')).toBe(true);
+    expect(store.getLiveSession('/work', 'off-page')?.hasActivePrompt).toBe(
+      true,
+    );
+    expect(store.getLiveSession('/work', 'unknown')).toBeUndefined();
+  });
+
+  it('notifies live-session subscribers only when volatile state changes', () => {
+    const listener = vi.fn();
+    const unsubscribe = store.subscribeLiveSessions('/work', listener);
+
+    store.applyLiveState('/work', [live('s1', true)]);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    // The 2s poll cadence keeps re-applying identical state: no churn.
+    store.applyLiveState('/work', [live('s1', true)]);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    store.applyLiveState('/work', [live('s1', false)]);
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    unsubscribe();
+    store.applyLiveState('/work', [live('s1', true)]);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops the snapshot when the last live-state retainer releases', () => {
+    const release = store.retainWorkspaceLiveState('/work');
+    store.applyLiveState('/work', [live('s1', true)]);
+    const listener = vi.fn();
+    const unsubscribe = store.subscribeLiveSessions('/work', listener);
+
+    release();
+
+    expect(store.hasLiveSessions('/work')).toBe(false);
+    expect(store.getLiveSession('/work', 's1')).toBeUndefined();
+    expect(listener).toHaveBeenCalledTimes(1);
     unsubscribe();
   });
 });

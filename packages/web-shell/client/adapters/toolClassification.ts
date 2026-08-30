@@ -32,17 +32,20 @@ export function isSubAgentToolCall(tool: ACPToolCall): boolean {
 }
 
 // NOTE: This background-classification heuristic (top-level `agent` call, no
-// explicit `run_in_background`, no `working_dir`, no named teammate) mirrors two
-// other implementations that must stay in sync:
-//   - core dispatch (source of truth): packages/core/src/tools/agent/agent.ts
-//     (`backgroundRequested`/`shouldRunInBackground` in AgentTool.execute)
-//   - desktop UI: packages/desktop/packages/shared/src/agent/tool-matching.ts
-//     (`detectBackgroundEvents`)
-// If the routing rule changes in core, update all three. Divergences already
-// exist (e.g. `subagentConfig.background` is invisible here; the desktop copy
-// lacks the `rawOutput.status === 'background'` fallback below).
+// explicit `run_in_background`, no `working_dir`, no named teammate) is the
+// frozen compatibility path for frames lacking `executionMode` (older daemon
+// frames, recordings made before the projection, and current-core
+// blocked-spawn result frames). It must NOT be updated when the routing rule
+// changes in core — the live rule lives in packages/core/src/tools/agent/
+// agent.ts (`backgroundRequested`/`shouldRunInBackground`), and the desktop
+// adapter that used to mirror it has been forked out of this repo. A
+// divergence already exists: `subagentConfig.background` is invisible here.
 export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
   if (!isSubAgentToolCall(tool)) return false;
+  if (tool.executionMode) return tool.executionMode === 'background';
+
+  // Older daemon frames and recorded sessions do not include executionMode.
+  // Preserve their existing argument/status inference as a compatibility path.
   const rawOutput = getRecord(tool.rawOutput);
   const name = tool.toolName.toLowerCase();
   const args = tool.args;
@@ -67,4 +70,25 @@ export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
     explicitlyBackground ||
     defaultsToBackground
   );
+}
+
+const BACKGROUND_SHELL_NAMES = new Set([
+  'shell',
+  'bash',
+  'run_shell_command',
+  'exec',
+]);
+const BACKGROUND_SHELL_ID_PATTERN =
+  /^(?:Background shell|Promoted to background:)\s+(bg_[\w-]+)/i;
+
+export function backgroundShellTaskId(tool: ACPToolCall): string | undefined {
+  if (
+    tool.status === 'failed' ||
+    !BACKGROUND_SHELL_NAMES.has(tool.toolName.toLowerCase())
+  ) {
+    return undefined;
+  }
+  return typeof tool.rawOutput === 'string'
+    ? BACKGROUND_SHELL_ID_PATTERN.exec(tool.rawOutput)?.[1]
+    : undefined;
 }

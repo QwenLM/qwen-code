@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-plugin-example",
-  "version": "0.21.14",
+  "version": "0.22.3",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -21,6 +21,7 @@
   },
   "scripts": {
     "build": "tsc --build",
+    "test": "vitest run",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

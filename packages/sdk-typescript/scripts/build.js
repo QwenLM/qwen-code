@@ -93,13 +93,31 @@ const rootDir = join(__dirname, '..');
 // Bumped from 195KB to 196KB for transient-vs-gone media hydration errors and
 // the reference-only replay placeholder.
 // Bumped from 196KB to 197KB for the workspace session live-state daemon
-// surface (catalog version + live snapshot accessors) and immutable,
-// identity-stable transcript block indexes used by browser renderers.
+// surface (catalog version + live snapshot accessors), immutable,
+// identity-stable transcript block indexes used by browser renderers, and the
+// daemon transcript-retention work (replay-snapshot release + capped debug
+// payloads, #9303) landing on top of the session media references bundle.
 // Bumped from 197KB to 198KB for the unrecognized-diagnostic sidechannel
 // (`unrecognizedDiagnostics` routing + selector, #8823).
 // Bumped from 198KB to 199KB for persistent session attachment read/remove and
 // binary resource hydration.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 199 * 1024;
+// Bumped from 199KB to 200KB for the session PR binding (`DaemonSessionPrInfo`
+// + validators).
+// Bumped from 199KB to 200KB for the retention byte budget (block byte
+// estimation + budget-aware trimming) and backing-store-detached string caps
+// (#9303 review round 3).
+// Bumped from 200KB to 206KB for the pagination/eviction reconciliation and the
+// #8823 × #9303 merge (#9303 review rounds 9-12): eviction-direction signal,
+// rewind truncation callback, trimmed tool/permission sentinel helpers,
+// record-boundary eviction snap, and the floor back-off — each bump budgeted
+// its own delta in isolation, and the combined feature sets land here. The
+// attachment read/remove + binary hydration feature that separately bumped
+// main to 199KB merges within this headroom, so no further bump is needed.
+// Bumped from 206KB to 208KB for transcript block change summaries used to
+// avoid complete Web Shell projection on every streamed text update.
+// Bumped from 208KB to 215KB for the complete standalone-session lifecycle,
+// response validation, and outcome-unknown recovery surface.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 215 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

@@ -9,14 +9,7 @@ import { type DOMElement } from 'ink';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useMouseEvents } from '../../hooks/useMouseEvents.js';
 import { type MouseEvent } from '../../utils/mouse.js';
-import {
-  measureElementPosition,
-  layoutRowForEvent,
-} from '../../utils/measure-element-position.js';
-import {
-  findItemAtLayoutRow,
-  type VisibleItemRect,
-} from '../../utils/list-mouse.js';
+import { findElementAtMouseEvent } from '../../utils/mouse-hit.js';
 
 export interface RowMouseControllerProps {
   /** Outer list container node — bounds interactions horizontally. */
@@ -68,40 +61,15 @@ export function RowMouseController({
   const { rows: terminalHeight } = useTerminalSize();
 
   const resolveIndex = useCallback(
-    (event: MouseEvent): number | null => {
-      const container = containerRef.current;
-      if (!container) return null;
-
-      // Ignore interactions outside the list's columns so a click elsewhere on
-      // the same terminal row doesn't hijack a selection.
-      const containerRect = measureElementPosition(container);
-      const col0 = event.col - 1;
-      if (
-        containerRect.width > 0 &&
-        (col0 < containerRect.x ||
-          col0 >= containerRect.x + containerRect.width)
-      ) {
-        return null;
-      }
-
-      const layoutRow = layoutRowForEvent(container, event.row, terminalHeight);
-
-      const rects: VisibleItemRect[] = [];
-      const nodes = itemRefs.current;
-      for (let visiblePos = 0; visiblePos < nodes.length; visiblePos++) {
-        const node = nodes[visiblePos];
-        if (!node) continue;
-        const rect = measureElementPosition(node);
-        if (rect.height <= 0) continue;
-        rects.push({
-          index: scrollOffset + visiblePos,
-          top: rect.y,
-          height: rect.height,
-        });
-      }
-
-      return findItemAtLayoutRow(rects, layoutRow);
-    },
+    (event: MouseEvent): number | null =>
+      findElementAtMouseEvent(
+        containerRef.current,
+        itemRefs.current,
+        event,
+        terminalHeight,
+        'row',
+        scrollOffset,
+      ),
     [containerRef, itemRefs, scrollOffset, terminalHeight],
   );
 
