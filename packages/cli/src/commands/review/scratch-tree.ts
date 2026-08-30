@@ -176,6 +176,32 @@ function git(cwd: string, ...args: string[]): void {
   gitOut(cwd, ...args);
 }
 
+function filterRefusal(
+  filters: ReturnType<typeof localFilterCommands>,
+): string | null {
+  if (filters.unreadable) {
+    return (
+      `the repository's local config file ${inertPath(filters.unreadable)} ` +
+      'could not be read to the end, so this command cannot tell whether it ' +
+      'defines a content filter the checkouts below would EXECUTE. A screen ' +
+      'that did not finish is not a clean result — fix or remove that file.'
+    );
+  }
+  if (filters.keys.length > 0) {
+    return (
+      `the repository's local config defines content filter(s) ${filters.keys
+        .map(inertPath)
+        .join(', ')} — ` +
+      'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +
+      'filters are config-driven), and two plain writes into the common dir are ' +
+      'enough to plant both the filter and the attributes that select it. Remove ' +
+      'the filter config — or the attributes file that uses it — if it is not ' +
+      'yours; until then no scratch tree is safe to create or reset.'
+    );
+  }
+  return null;
+}
+
 /**
  * Put an existing scratch tree back at `headSha`, or say why it could not be.
  *
@@ -189,11 +215,15 @@ function git(cwd: string, ...args: string[]): void {
  * dependency farm lives in that ignored state, so the caller re-links it
  * afterwards; sparing it to save the second would sell the guarantee.
  */
+type ScratchResetResult =
+  | { reset: true }
+  | { reset: false; filterRefusal?: string };
+
 function resetScratchTree(
   tree: string,
   headSha: string,
   worktree: string,
-): boolean {
+): ScratchResetResult {
   // The gate that makes the rest of this function safe to run. A LINKED
   // worktree has a `.git` file pointing at the common dir; a bare directory
   // left by a crashed `worktree add` (or by a cleanup whose `rmSync` failed)
@@ -204,13 +234,13 @@ function resetScratchTree(
   // sha that makes this function report success (measured on a real repo). The
   // caller's discard-and-rebuild path handles the bare directory correctly;
   // this one must never touch it.
-  if (!existsSync(join(tree, '.git'))) return false;
+  if (!existsSync(join(tree, '.git'))) return { reset: false };
   // And the tree must BE the tree: a symlink at the scratch path, or a `.git`
   // naming another repository, would aim everything below at whatever it
   // resolves to. Discard-and-rebuild is the correct answer to all of it —
   // `discardWorktree`'s `rmSync` unlinks a symlink rather than following it.
   try {
-    if (!lstatSync(tree).isDirectory()) return false;
+    if (!lstatSync(tree).isDirectory()) return { reset: false };
     // A genuine linked worktree carries its `.git` as a FILE naming its admin
     // entry, and its gitdir is `<common>/worktrees/<name>`. A tree claiming
     // to be the MAIN checkout — gitdir === commondir, reached by a `.git`
@@ -223,7 +253,7 @@ function resetScratchTree(
       realpathSync(gitOut(tree, 'rev-parse', '--show-toplevel')) !==
       realpathSync(tree)
     ) {
-      return false;
+      return { reset: false };
     }
     // And it must be a worktree of THIS repository. `--show-toplevel` prints
     // the directory the `.git` file sits in, whatever that file points at, so a
@@ -234,7 +264,7 @@ function resetScratchTree(
       realpathSync(
         gitOut(dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'),
       );
-    if (commonOf(tree) !== commonOf(worktree)) return false;
+    if (commonOf(tree) !== commonOf(worktree)) return { reset: false };
     // EVERY ancestor, not just the parent. The first cut lstat'd `dirname(tree)`
     // on the stated premise that `.qwen/tmp` is the one component above the leaf
     // anything here can replace — which is false one hop higher: a link at
@@ -248,12 +278,12 @@ function resetScratchTree(
     if (
       redirectedAncestor(dirname(resolve(tree)), dirname(commonOf(worktree)))
     ) {
-      return false;
+      return { reset: false };
     }
     const gitdir = realpathSync(
       gitOut(tree, 'rev-parse', '--path-format=absolute', '--git-dir'),
     );
-    if (gitdir === commonOf(worktree)) return false;
+    if (gitdir === commonOf(worktree)) return { reset: false };
     // The admin entry must point back at THIS tree. A planted gitfile naming
     // a SIBLING worktree's admin entry passes every check above — directory,
     // gitfile, toplevel resolving to itself, common dirs comparing equal,
@@ -266,19 +296,27 @@ function resetScratchTree(
     if (
       realpathSync(dirname(resolve(gitdir, backpointer))) !== realpathSync(tree)
     ) {
-      return false;
+      return { reset: false };
     }
   } catch {
-    return false;
+    return { reset: false };
   }
   try {
+    // Evaluate includes only after proving this path is this repository's
+    // linked worktree, and in that worktree's own gitdir context. In
+    // particular, `includeIf.gitdir:` may match this admin entry while it does
+    // not match the review worktree. The screen still precedes checkout, so a
+    // smudge command selected by the resulting graph cannot run first.
+    const refusal = filterRefusal(localFilterCommands(tree));
+    if (refusal !== null) return { reset: false, filterRefusal: refusal };
+
     // Re-read the leaf immediately before the mutation. The gate above is a
     // handful of spawns long, and what it authorises is a `checkout --force`
     // and a `clean -ffdx`: a link swapped in during that window aims both at
     // whatever it names. The window cannot be closed from here — this narrows
     // it to one syscall, which is the same trade the hunk probe's pre-write
     // re-check makes.
-    if (lstatSync(tree).isSymbolicLink()) return false;
+    if (lstatSync(tree).isSymbolicLink()) return { reset: false };
     git(tree, 'checkout', '--force', '--detach', headSha);
     // `-ff` because a single `-f` refuses to delete a nested git repository, so
     // a probe that cloned or `git init`-ed a fixture would survive a reset the
@@ -297,7 +335,7 @@ function resetScratchTree(
     const hidden = gitOut(tree, 'ls-files', '-v')
       .split('\n')
       .some((line) => /^[a-zS]/.test(line));
-    if (hidden) return false;
+    if (hidden) return { reset: false };
     // Nor does any of it reach INSIDE a submodule: `checkout --force` without
     // `--recurse-submodules` leaves its working tree alone, `clean` never
     // touches a tracked gitlink, and `rev-parse HEAD` is the superproject's. A
@@ -313,12 +351,12 @@ function resetScratchTree(
     const hasSubmodules = gitOut(tree, 'ls-files', '-s')
       .split('\n')
       .some((line) => line.startsWith('160000'));
-    if (hasSubmodules) return false;
-    return gitOut(tree, 'rev-parse', 'HEAD') === headSha;
+    if (hasSubmodules) return { reset: false };
+    return { reset: gitOut(tree, 'rev-parse', 'HEAD') === headSha };
   } catch {
     // A tree too broken to reset is not a tree to probe in. The caller
     // discards and rebuilds it rather than handing back a half-known state.
-    return false;
+    return { reset: false };
   }
 }
 
@@ -421,29 +459,7 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     }
   }
 
-  // BEFORE any checkout runs — the reuse path's reset and the rebuild path's
-  // `worktree add` both execute configured content filters.
-  const filters = localFilterCommands(worktree);
-  if (filters.unreadable) {
-    return unavailable(
-      `the repository's local config file ${inertPath(filters.unreadable)} ` +
-        'could not be read to the end, so this command cannot tell whether it ' +
-        'defines a content filter the checkouts below would EXECUTE. A screen ' +
-        'that did not finish is not a clean result — fix or remove that file.',
-    );
-  }
-  if (filters.keys.length > 0) {
-    return unavailable(
-      `the repository's local config defines content filter(s) ${filters.keys
-        .map(inertPath)
-        .join(', ')} — ` +
-        'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +
-        'filters are config-driven), and two plain writes into the common dir are ' +
-        'enough to plant both the filter and the attributes that select it. Remove ' +
-        'the filter config — or the attributes file that uses it — if it is not ' +
-        'yours; until then no scratch tree is safe to create or reset.',
-    );
-  }
+  const tree = scratchWorktreePath(worktree, label);
 
   // Read BEFORE the tree is created, so it describes the shared tree as this
   // call found it and can never be confused with anything this call did. The
@@ -482,8 +498,21 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
         'instead of clearing one).'
       : '';
 
-  const tree = scratchWorktreePath(worktree, label);
-  if (existsSync(tree) && resetScratchTree(tree, headSha, worktree)) {
+  const reset = existsSync(tree)
+    ? resetScratchTree(tree, headSha, worktree)
+    : { reset: false as const };
+  if (!reset.reset && reset.filterRefusal !== undefined) {
+    return {
+      available: false,
+      reused: false,
+      dependencies: null,
+      sharedTreeResidue,
+      sharedTreeResidueTotal: residue.total,
+      sharedTreeUnmeasured: residue.unmeasured,
+      note: reset.filterRefusal + residueNote,
+    };
+  }
+  if (reset.reset) {
     // The reset clears the ignored state too, so the farm went with it: this
     // re-links it. `rebuild` rather than trusting a marker, because
     // `node_modules` is where a probe is told it may install, and anything a
@@ -522,7 +551,40 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     // Clears both a leftover from a crashed run and a tree the reset above
     // could not rescue; either would fail `add` with `already exists`.
     sweep = discardWorktree(worktree, tree);
-    git(worktree, 'worktree', 'add', '--detach', tree, headSha);
+    // `--no-checkout` creates the real scratch admin entry without
+    // materialising a tracked file, so no smudge filter runs yet. That gives
+    // the screen below the exact gitdir context the subsequent checkout uses,
+    // including `includeIf.gitdir:` conditions that cannot match before the
+    // entry exists.
+    git(
+      worktree,
+      'worktree',
+      'add',
+      '--no-checkout',
+      '--detach',
+      tree,
+      headSha,
+    );
+    const refusal = filterRefusal(localFilterCommands(tree));
+    if (refusal !== null) {
+      sweep = discardWorktree(worktree, tree);
+      return {
+        available: false,
+        reused: false,
+        dependencies: null,
+        sharedTreeResidue,
+        sharedTreeResidueTotal: residue.total,
+        sharedTreeUnmeasured: residue.unmeasured,
+        note:
+          `${refusal} The no-checkout scratch registration was removed before ` +
+          'any tracked file was materialised.' +
+          residueNote,
+      };
+    }
+    git(tree, 'checkout', '--force', '--detach', headSha);
+    if (gitOut(tree, 'rev-parse', 'HEAD') !== headSha) {
+      throw new Error(`scratch checkout did not reach ${headSha}`);
+    }
   } catch (e) {
     // Not `unavailable()`: the residue was already measured, and a report whose
     // note names contaminated paths while its `sharedTreeResidue` field says

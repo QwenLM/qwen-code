@@ -618,6 +618,14 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       execFileSync('git', ['config', '--unset', 'filter.evil.smudge'], {
         cwd: dir,
       });
+      // Reach that global file through a repo-local include too. Following
+      // includes is necessary to catch a local included filter, but judging
+      // the include directive itself would refuse this legitimate origin.
+      execFileSync(
+        'git',
+        ['config', 'include.path', join(isolation.home, '.gitconfig')],
+        { cwd: dir },
+      );
       execFileSync(
         'git',
         ['config', '--global', 'filter.lfs.clean', 'git-lfs clean -- %f'],
@@ -642,6 +650,114 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       expect(afterDetail).not.toContain('content filter');
       // The local `evil` filter is gone, so nothing selected by the committed
       // attributes line remains to execute either.
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(canaryDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a repo-local content filter hidden behind include.path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-filter-include-'));
+    const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-canary-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=included\n');
+      asCheckout(dir);
+      const canary = join(canaryDir, 'PWNED-included-smudge');
+      const included = join(dir, '.git', 'review-filter.inc');
+      writeFileSync(
+        included,
+        `[filter "included"]\n\tsmudge = touch ${canary}\n`,
+      );
+      execFileSync('git', ['config', 'include.path', included], { cwd: dir });
+      writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.included.smudge');
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(canaryDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a repo-local filter reached through matching includeIf', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-filter-includeif-'));
+    const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-canary-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=conditional\n');
+      asCheckout(dir);
+      const gitDir = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-dir'],
+        { cwd: dir, encoding: 'utf8' },
+      ).trim();
+      const canary = join(canaryDir, 'PWNED-conditional-smudge');
+      const included = join(gitDir, 'review-filter-conditional.inc');
+      writeFileSync(
+        included,
+        `[filter "conditional"]\n\tsmudge = touch ${canary}\n`,
+      );
+      execFileSync(
+        'git',
+        ['config', `includeIf.gitdir:${gitDir}.path`, included],
+        { cwd: dir },
+      );
+      writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.conditional.smudge');
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(canaryDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an included filter whose origin is outside the gitdir', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-filter-external-'));
+    const canaryDir = mkdtempSync(join(tmpdir(), 'qwen-canary-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, '.gitattributes'), '*.ts filter=external\n');
+      asCheckout(dir);
+      const canary = join(canaryDir, 'PWNED-external-smudge');
+      const included = join(dir, 'review-filter-external.inc');
+      writeFileSync(
+        included,
+        `[filter "external"]\n\tsmudge = touch ${canary}\n`,
+      );
+      execFileSync('git', ['config', 'include.path', included], { cwd: dir });
+      writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.external.smudge');
       expect(existsSync(canary)).toBe(false);
     } finally {
       isolation.dispose();
