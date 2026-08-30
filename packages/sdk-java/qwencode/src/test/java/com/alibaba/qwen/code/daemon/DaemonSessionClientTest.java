@@ -2981,6 +2981,7 @@ class DaemonSessionClientTest {
             String epoch) throws IOException {
         byte[] bytes = ("retry: 0\n\n" + events).getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+        exchange.getResponseHeaders().set("Connection", "close");
         if (epoch != null) {
             exchange.getResponseHeaders().set("X-Qwen-Event-Epoch", epoch);
         }
