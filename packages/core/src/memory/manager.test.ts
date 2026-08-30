@@ -8,7 +8,11 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { globalMemoryManager, MemoryManager } from './manager.js';
+import {
+  globalMemoryManager,
+  MemoryManager,
+  type MemoryTaskRecord,
+} from './manager.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
   getAutoMemoryMetadataPath,
@@ -187,6 +191,39 @@ describe('MemoryManager', () => {
         migrationTasks: expect.arrayContaining([
           expect.objectContaining({ id: project.taskId, status: 'completed' }),
           expect.objectContaining({ id: user.taskId, status: 'completed' }),
+        ]),
+      });
+    });
+
+    it('reports a running migration outside the display task limit', async () => {
+      const manager = new MemoryManager();
+      const records: MemoryTaskRecord[] = Array.from(
+        { length: 9 },
+        (_, index) => ({
+          id: `completed-${index}`,
+          taskType: 'migration',
+          projectRoot,
+          status: 'completed',
+          createdAt: `2026-01-01T00:00:${index.toString().padStart(2, '0')}.000Z`,
+          updatedAt: `2026-01-01T00:00:${index.toString().padStart(2, '0')}.000Z`,
+        }),
+      );
+      records.push({
+        id: 'older-running',
+        taskType: 'migration',
+        projectRoot,
+        status: 'running',
+        createdAt: '2025-01-01T00:00:00.000Z',
+        updatedAt: '2025-01-01T00:00:00.000Z',
+      });
+      vi.spyOn(manager, 'listTasksByType').mockImplementation((taskType) =>
+        taskType === 'migration' ? records : [],
+      );
+
+      await expect(manager.getStatus(projectRoot)).resolves.toMatchObject({
+        migrationRunning: true,
+        migrationTasks: expect.not.arrayContaining([
+          expect.objectContaining({ id: 'older-running' }),
         ]),
       });
     });

@@ -82,9 +82,11 @@ export async function getManagedAutoMemoryStatus(
   const extractTaskType = 'extract' as const;
   const dreamTaskType = 'dream' as const;
   const migrationTaskType = 'migration' as const;
-  const migrationTasks = manager
-    .listTasksByType(migrationTaskType, projectRoot)
-    .slice(0, 8);
+  const allMigrationTasks = manager.listTasksByType(
+    migrationTaskType,
+    projectRoot,
+  );
+  const migrationTasks = allMigrationTasks.slice(0, 8);
 
   return {
     root,
@@ -95,7 +97,9 @@ export async function getManagedAutoMemoryStatus(
     extractionRunning: manager
       .listTasksByType(extractTaskType, projectRoot)
       .some((t) => t.status === 'running'),
-    migrationRunning: migrationTasks.some((task) => task.status === 'running'),
+    migrationRunning: allMigrationTasks.some(
+      (task) => task.status === 'running',
+    ),
     topics,
     extractionTasks: manager
       .listTasksByType(extractTaskType, projectRoot)

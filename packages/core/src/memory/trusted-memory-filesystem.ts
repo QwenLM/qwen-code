@@ -39,14 +39,38 @@ export async function resolveTrustedMemoryRoot(
   if (!isWithin(path.resolve(trustedAnchor), path.resolve(root))) {
     throw new Error(`Memory root is outside its trusted anchor: ${root}`);
   }
-  const expected = path.join(await fs.realpath(trustedAnchor), relative);
+  const resolvedAnchor = await fs.realpath(trustedAnchor);
+  const expected = path.join(resolvedAnchor, relative);
   const resolved = await fs.realpath(root);
-  if (comparable(resolved) !== comparable(expected)) {
+  const resolvedAliasRoot = await resolveSharedProjectAliasRoot(
+    resolvedAnchor,
+    relative,
+  );
+  if (comparable(resolved) !== comparable(resolvedAliasRoot ?? expected)) {
     throw new Error(
       `Memory root resolves outside its trusted boundary: ${root}`,
     );
   }
   return resolved;
+}
+
+async function resolveSharedProjectAliasRoot(
+  resolvedAnchor: string,
+  relative: string,
+): Promise<string | undefined> {
+  const parts = relative.split(path.sep);
+  if (parts.length !== 3 || parts[0] !== 'projects') return undefined;
+
+  const projectAlias = path.join(resolvedAnchor, parts[0], parts[1]);
+  const stats = await fs.lstat(projectAlias).catch(() => undefined);
+  if (!stats?.isSymbolicLink()) return undefined;
+
+  const projectsRoot = await fs.realpath(path.join(resolvedAnchor, 'projects'));
+  const resolvedProject = await fs.realpath(projectAlias);
+  if (comparable(path.dirname(resolvedProject)) !== comparable(projectsRoot)) {
+    return undefined;
+  }
+  return path.join(resolvedProject, parts[2]);
 }
 
 export interface TrustedMemoryFile {
