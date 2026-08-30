@@ -289,7 +289,7 @@ describe('BackgroundShellRegistry', () => {
     });
 
     it('setNotificationCallback(undefined) clears the callback', () => {
-      // useGeminiStream's cleanup relies on this contract to avoid
+      // useLlmStream's cleanup relies on this contract to avoid
       // leaked callbacks firing into torn-down React state on unmount.
       // If a future refactor breaks the clearing path, stale callbacks
       // would fire silently — no test would catch it without this guard.

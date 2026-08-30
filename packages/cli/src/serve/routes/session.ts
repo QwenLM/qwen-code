@@ -595,6 +595,42 @@ function parseOptionalApprovalMode(
   return rawApprovalMode as ApprovalMode;
 }
 
+function parseRequestedSessionSource(
+  body: Record<string, unknown>,
+  res: Response,
+): { sourceType?: string; sourceId?: string } | null {
+  if (
+    isReservedStandaloneSessionSource({
+      sourceType:
+        typeof body['sourceType'] === 'string' ? body['sourceType'] : undefined,
+    })
+  ) {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned standalone sessions.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
+  const source = parseSessionSource(body['sourceType'], body['sourceId']);
+  if ('error' in source) {
+    res.status(400).json({
+      error: source.error,
+      code: 'invalid_session_source',
+    });
+    return null;
+  }
+  if (isReservedLiveSessionSource(source)) {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned Live Voice sessions.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
+  return source;
+}
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
@@ -2355,12 +2391,16 @@ export function registerSessionRoutes(
   const parseSessionPrBody = (
     req: Request,
     res: Response,
-  ): { number: number; url: string } | null | undefined => {
+  ):
+    | { number: number; url: string; state?: 'open' | 'merged' | 'closed' }
+    | null
+    | undefined => {
     const raw: unknown = safeBody(req)['pr'];
     if (raw === undefined) return undefined;
     const candidate = raw as Record<string, unknown> | null;
     const number = candidate?.['number'];
     const url = candidate?.['url'];
+    const state = candidate?.['state'];
     if (
       candidate === null ||
       typeof candidate !== 'object' ||
@@ -2372,16 +2412,20 @@ export function registerSessionRoutes(
       !/^https?:\/\//i.test(url) ||
       // The url lands in the bridge's stderr audit line — control
       // characters would let a caller forge log lines.
-      hasControlCharacter(url)
+      hasControlCharacter(url) ||
+      (state !== undefined &&
+        state !== 'open' &&
+        state !== 'merged' &&
+        state !== 'closed')
     ) {
       res.status(400).json({
-        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters`,
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` of \`open\`, \`merged\`, or \`closed\``,
         code: 'invalid_metadata',
         field: 'pr',
       });
       return null;
     }
-    return { number, url };
+    return { number, url, ...(state ? { state } : {}) };
   };
 
   const serializeSessionErrors = (
@@ -2661,37 +2705,8 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
-    if (
-      isReservedStandaloneSessionSource({
-        sourceType:
-          typeof body['sourceType'] === 'string'
-            ? body['sourceType']
-            : undefined,
-      })
-    ) {
-      res.status(400).json({
-        error:
-          'The requested session source is reserved for daemon-owned standalone sessions.',
-        code: 'reserved_session_source',
-      });
-      return;
-    }
-    const source = parseSessionSource(body['sourceType'], body['sourceId']);
-    if ('error' in source) {
-      res.status(400).json({
-        error: source.error,
-        code: 'invalid_session_source',
-      });
-      return;
-    }
-    if (isReservedLiveSessionSource(source)) {
-      res.status(400).json({
-        error:
-          'The requested session source is reserved for daemon-owned Live Voice sessions.',
-        code: 'reserved_session_source',
-      });
-      return;
-    }
+    const source = parseRequestedSessionSource(body, res);
+    if (source === null) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
 
@@ -3423,6 +3438,8 @@ export function registerSessionRoutes(
       if (historyPageSize === null) return;
       const liveReplayMode = parseLiveReplayMode(body ?? {}, res);
       if (liveReplayMode === null) return;
+      const restoreSource = parseRequestedSessionSource(body, res);
+      if (restoreSource === null) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       if (
@@ -3602,6 +3619,15 @@ export function registerSessionRoutes(
               isReservedStandaloneSessionSource(metadata)
                 ? metadataWithoutSource
                 : metadata;
+            const hasPersistedSource =
+              'sourceType' in restoreMetadata &&
+              restoreMetadata.sourceType !== undefined;
+            const restoreRequestMetadata = {
+              ...restoreMetadata,
+              ...(hasPersistedSource || isInternalWorkspaceRuntime(runtime)
+                ? {}
+                : restoreSource),
+            };
             assertRuntimeGenerationOpen?.();
             if (isInternalWorkspaceRuntime(runtime)) {
               sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
@@ -3639,14 +3665,14 @@ export function registerSessionRoutes(
                     ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...restoreMetadata,
+                    ...restoreRequestMetadata,
                   })
                 : await runtime.bridge.resumeSession({
                     sessionId,
                     workspaceCwd,
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...restoreMetadata,
+                    ...restoreRequestMetadata,
                   });
             // Every path that can register a Live entry relocates it before a
             // prompt can start. Re-queuing cd for an active entry would block
@@ -5780,7 +5806,11 @@ export function registerSessionRoutes(
                 service.getPrSessionPathForArchiveState(sessionId, 'active'),
                 pr,
               )
-            ).map(({ number, url }) => ({ number, url }));
+            ).map(({ number, url, state }) => ({
+              number,
+              url,
+              ...(state ? { state } : {}),
+            }));
             effective = { ...effective, prs: persistedPrs };
           }
         } finally {
@@ -5892,7 +5922,11 @@ export function registerSessionRoutes(
           await runWithWorkspaceRuntimeStorage(runtime, async () => {
             let effective: {
               displayName?: string;
-              prs?: Array<{ number: number; url: string }>;
+              prs?: Array<{
+                number: number;
+                url: string;
+                state?: 'open' | 'merged' | 'closed';
+              }>;
             };
             const service = createWorkspaceRuntimeSessionService(runtime);
             try {
@@ -5939,7 +5973,11 @@ export function registerSessionRoutes(
                     ),
                     pr,
                   )
-                ).map(({ number, url }) => ({ number, url }));
+                ).map(({ number, url, state }) => ({
+                  number,
+                  url,
+                  ...(state ? { state } : {}),
+                }));
                 assertRuntimeGenerationOpen?.();
                 effective = { ...effective, prs: persistedPrs };
               }
@@ -5965,9 +6003,10 @@ export function registerSessionRoutes(
                   pr,
                 );
                 assertRuntimeGenerationOpen?.();
-                effective.prs = persisted.map(({ number, url }) => ({
+                effective.prs = persisted.map(({ number, url, state }) => ({
                   number,
                   url,
+                  ...(state ? { state } : {}),
                 }));
               }
               if (displayName !== undefined) {
@@ -6513,12 +6552,14 @@ export function registerSessionRoutes(
                     },
                   ),
                 )
-              : Promise.resolve(
-                  listLiveWorkspaceSessionsForResponse(
-                    runtime.bridge,
-                    key,
-                    options,
-                  ),
+              : listLiveWorkspaceSessionsForResponse(
+                  runtime.bridge,
+                  key,
+                  options,
+                  {
+                    runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                    signal: controller.signal,
+                  },
                 );
           const result =
             liveRuntime && deps.conversationRuntimeActivity

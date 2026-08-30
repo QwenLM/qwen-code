@@ -18,7 +18,12 @@ import {
   sanitizeSenderName,
   truncateUtf16Units,
 } from '@qwen-code/channel-base';
-import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
+import {
+  DINGTALK_CHUNK_LIMIT,
+  escapeDingTalkMarkdown,
+  normalizeDingTalkMarkdown,
+  extractTitle,
+} from './markdown.js';
 import { downloadMedia } from './media.js';
 import {
   DingTalkMediaUploadError,
@@ -27,6 +32,11 @@ import {
   replaceImageMarkers,
   uploadDingTalkImage,
 } from './outbound-image.js';
+import {
+  OutboundFileProjector,
+  projectFileText,
+  withFileUnavailableNotice,
+} from './outbound-file.js';
 import {
   DingtalkConnectionManager,
   type DingtalkManagedSocket,
@@ -584,6 +594,7 @@ const DIRECT_MSG_API =
 const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+const REPLY_FETCH_TIMEOUT_MS = 15_000;
 // Extensions for generated media store names, keyed by the download's mime
 // type. The agent reads stored media via `read_file`, whose type detection is
 // extension-first: an extensionless name falls through to the binary content
@@ -701,6 +712,24 @@ export class DingtalkChannel extends ChannelBase {
   private readonly inboundCardOwners = new Map<string, CardRunCorrelation>();
   private readonly cardRunBySession = new Map<string, string>();
   private readonly cardRuns = new Map<string, CardRunCorrelation>();
+  // Keyed by runId, not segmentId: a mid-turn segment reset (response
+  // boundary, input requested) mints a fresh segment UUID but the projection
+  // state must survive it, or a marker split across the reset leaks.
+  private readonly fileProjectors = new Map<
+    string,
+    { sessionId: string; projector: OutboundFileProjector }
+  >();
+  private readonly blockFileProjectors = new Map<
+    string,
+    { projector: OutboundFileProjector; reportedMarkers: number }
+  >();
+  // Sessions armed for block projection by onPromptStart and disarmed when
+  // the turn settles (or the session dies). A block send that finds NO
+  // projector state is only legitimate as a turn's FIRST block, which always
+  // lands while armed: late sends from an evicted (/clear) or dead session
+  // must be dropped, because recreating state would post the tail of a
+  // force-split [FILE: ...] marker verbatim.
+  private readonly blockProjectionArmed = new Set<string>();
 
   constructor(
     name: string,
@@ -770,7 +799,8 @@ export class DingtalkChannel extends ChannelBase {
         this.questionCardController = new QuestionCardController({
           client: this.interactiveCardClient,
           timeoutMs: this.interactiveCardConfig.questionCard.timeoutMs,
-          sendFallback: (chatId, text) => this.sendMessage(chatId, text),
+          sendFallback: (chatId, text, sourceLabel) =>
+            this.sendReply(chatId, text, undefined, sourceLabel),
           reserveRunProjection: (runId) =>
             this.interactionPresenter?.reserveProjection(runId),
           onError: (operation, error) => {
@@ -790,7 +820,9 @@ export class DingtalkChannel extends ChannelBase {
                   chatId: string,
                   text: string,
                   sessionId: string,
-                ) => this.sendFallbackReply(chatId, text, sessionId),
+                  sourceLabel?: string,
+                ) =>
+                  this.sendFallbackReply(chatId, text, sessionId, sourceLabel),
               }
             : {}),
         });
@@ -1045,9 +1077,35 @@ export class DingtalkChannel extends ChannelBase {
     return isGroup && !conversationId;
   }
 
-  private async prepareOutgoingText(text: string): Promise<string> {
-    const markers = findImageMarkers(text);
-    if (markers.length === 0) return text;
+  private projectOutgoingFileText(
+    text: string,
+    streamed?: OutboundFileProjector,
+  ): string {
+    const projection = projectFileText(text);
+    // Markers are counted when their opening bytes arrive, so the streamed
+    // count also fails closed when the final text no longer carries a marker
+    // the stream already delivered. Whole-turn hash comparison is NOT
+    // viable: the bridges return only post-last-boundary chunks as the final
+    // text, so any routine multi-tool turn would diverge by construction.
+    const streamedMarkers = streamed ? streamed.result('').markerCount : 0;
+    if (projection.markerCount === 0 && streamedMarkers === 0) {
+      return projection.text;
+    }
+    // Counts only — never paths — so a redaction event stays debuggable
+    // without leaking what was redacted.
+    process.stderr.write(
+      `[DingTalk:${this.name}] file markers redacted (final=${projection.markerCount}, streamed=${streamedMarkers})\n`,
+    );
+    return withFileUnavailableNotice(projection.text);
+  }
+
+  private async prepareOutgoingText(
+    text: string,
+    streamed?: OutboundFileProjector,
+  ): Promise<string> {
+    const fileSafeText = this.projectOutgoingFileText(text, streamed);
+    const markers = findImageMarkers(fileSafeText);
+    if (markers.length === 0) return fileSafeText;
 
     const replacements: string[] = [];
     for (const marker of markers) {
@@ -1095,13 +1153,14 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
 
-    return replaceImageMarkers(text, markers, replacements);
+    return replaceImageMarkers(fileSafeText, markers, replacements);
   }
 
   private async sendReply(
     chatId: string,
     text: string,
     atUserId?: string,
+    sourceLabel?: string,
   ): Promise<void> {
     // chatId is a conversationId — resolve to the latest sessionWebhook
     const webhook = this.webhooks.get(chatId);
@@ -1114,7 +1173,19 @@ export class DingtalkChannel extends ChannelBase {
 
     const outgoingText = await this.prepareOutgoingText(text);
     const mentionPrefix = atUserId ? `@${atUserId}\n\n` : '';
-    const chunks = normalizeDingTalkMarkdown(mentionPrefix + outgoingText);
+    const sourcePrefix =
+      sourceLabel && outgoingText.trim().length > 0
+        ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
+        : '';
+    const contentLimit =
+      DINGTALK_CHUNK_LIMIT - mentionPrefix.length - sourcePrefix.length;
+    if (contentLimit <= 0) {
+      throw new Error('DingTalk source label exceeds the message limit.');
+    }
+    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
+      (chunk, index) =>
+        `${index === 0 ? mentionPrefix : ''}${sourcePrefix}${chunk}`,
+    );
     const title = extractTitle(outgoingText);
 
     for (let i = 0; i < chunks.length; i++) {
@@ -1129,11 +1200,23 @@ export class DingtalkChannel extends ChannelBase {
         ...(isMention ? { at: { atUserIds: [atUserId] } } : {}),
       };
 
-      const resp = await fetch(webhook, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      let resp: Response;
+      try {
+        resp = await fetch(webhook, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(REPLY_FETCH_TIMEOUT_MS),
+        });
+      } catch (err) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] sendMessage failed: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            300,
+          )}\n`,
+        );
+        throw err;
+      }
 
       if (isMention && process.env['QWEN_CHANNEL_DEBUG_MENTIONS'] === '1') {
         const payload = (await resp
@@ -1165,6 +1248,15 @@ export class DingtalkChannel extends ChannelBase {
 
   async sendMessage(chatId: string, text: string): Promise<void> {
     await this.sendReply(chatId, text);
+  }
+
+  protected override async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    await this.sendReply(chatId, text, undefined, sourceLabel);
   }
 
   override supportsProactiveSend(): boolean {
@@ -1208,11 +1300,21 @@ export class DingtalkChannel extends ChannelBase {
   protected override async pushProactive(
     target: SessionTarget,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (!text.trim()) return;
 
     const outgoingText = await this.prepareOutgoingText(text);
-    const chunks = normalizeDingTalkMarkdown(outgoingText);
+    const sourcePrefix = sourceLabel
+      ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
+      : '';
+    const contentLimit = DINGTALK_CHUNK_LIMIT - sourcePrefix.length;
+    if (contentLimit <= 0) {
+      throw new Error('DingTalk source label exceeds the message limit.');
+    }
+    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
+      (chunk) => `${sourcePrefix}${chunk}`,
+    );
     const title = extractTitle(outgoingText);
 
     for (let i = 0; i < chunks.length; i++) {
@@ -1551,6 +1653,11 @@ export class DingtalkChannel extends ChannelBase {
 
   /** Recall reactions left behind when a session dies without terminal lifecycle events. */
   override onSessionDied(sessionId: string): void {
+    this.blockProjectionArmed.delete(sessionId);
+    this.blockFileProjectors.delete(sessionId);
+    for (const [runId, state] of this.fileProjectors) {
+      if (state.sessionId === sessionId) this.fileProjectors.delete(runId);
+    }
     const bufferedTargets = this.bufferedMentionTargetsBySession.get(sessionId);
     if (bufferedTargets) {
       this.bufferedMentionTargetsBySession.delete(sessionId);
@@ -1594,12 +1701,14 @@ export class DingtalkChannel extends ChannelBase {
       ) {
         this.cardRuns.set(event.runId, inboundOwner);
         this.cardRunBySession.set(event.sessionId, event.runId);
+        const sourceLabel = this.getResponseSourceLabel(event.sessionId);
         this.interactionPresenter?.registerRun(
           event.runId,
           event.owner.id,
           inboundOwner.target,
           event.sessionId,
           inboundOwner.sender,
+          ...(sourceLabel ? [sourceLabel] : []),
         );
         this.interactionPresenter?.startStatusCard(event.runId);
       }
@@ -1609,6 +1718,7 @@ export class DingtalkChannel extends ChannelBase {
       if (event.messageId) this.mentionTargets.delete(event.messageId);
       this.stopReaction(event.chatId, event.messageId, event.sessionId);
       if (event.runId) {
+        this.deleteFileProjectorsForRun(event.runId);
         if (event.type === 'failed') {
           this.interactionPresenter?.terminalizeRun(
             event.runId,
@@ -1679,6 +1789,7 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
+    this.blockProjectionArmed.add(sessionId);
     if (messageId) {
       this.bufferedMentionTargets.delete(messageId);
       this.untrackBufferedMentionTarget(sessionId, messageId);
@@ -1694,34 +1805,36 @@ export class DingtalkChannel extends ChannelBase {
   override async handleInbound(envelope: Envelope): Promise<void> {
     if (!(await this.preflightInbound(envelope))) return;
 
-    const messageId = envelope.messageId;
-    if (messageId && envelope.senderId) {
-      this.inboundCardOwners.delete(messageId);
-      this.inboundCardOwners.set(messageId, {
-        ownerId: envelope.senderId,
-        target: {
-          chatId: envelope.chatId,
-          isGroup: envelope.isGroup,
-        },
-        ...(this.atSender && envelope.isGroup
-          ? {
-              sender: {
-                senderName: envelope.senderName,
-              },
-            }
-          : {}),
-      });
-      if (this.inboundCardOwners.size > 1000) {
-        const oldest = this.inboundCardOwners.keys().next().value;
-        if (oldest !== undefined) this.inboundCardOwners.delete(oldest);
+    await this.processPreflightedInbound(envelope, async () => {
+      const messageId = envelope.messageId;
+      if (messageId && envelope.senderId) {
+        this.inboundCardOwners.delete(messageId);
+        this.inboundCardOwners.set(messageId, {
+          ownerId: envelope.senderId,
+          target: {
+            chatId: envelope.chatId,
+            isGroup: envelope.isGroup,
+          },
+          ...(this.atSender && envelope.isGroup
+            ? {
+                sender: {
+                  senderName: envelope.senderName,
+                },
+              }
+            : {}),
+        });
+        if (this.inboundCardOwners.size > 1000) {
+          const oldest = this.inboundCardOwners.keys().next().value;
+          if (oldest !== undefined) this.inboundCardOwners.delete(oldest);
+        }
       }
-    }
-    const atUserId = (envelope as MentionTargetEnvelope)[mentionTarget];
-    if (this.atSender && messageId && atUserId) {
-      this.mentionTargets.set(messageId, atUserId);
-    }
+      const atUserId = (envelope as MentionTargetEnvelope)[mentionTarget];
+      if (this.atSender && messageId && atUserId) {
+        this.mentionTargets.set(messageId, atUserId);
+      }
 
-    await this.processInbound(envelope);
+      await this.processInbound(envelope);
+    });
   }
 
   protected override async processInbound(envelope: Envelope): Promise<void> {
@@ -1751,33 +1864,129 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
+    this.settleBlockFileProjector(chatId, sessionId);
     this.sessionMentionTargets.delete(sessionId);
     this.stopReaction(chatId, messageId, sessionId);
+  }
+
+  /**
+   * Turn end is the only point where the block projector's held state can be
+   * settled: ChannelBase drains the turn's queued block sends before calling
+   * onPromptEnd, so everything already appended belongs to this turn. Flush
+   * the held candidate bytes (a trailing `[FILE:` prefix the stream never
+   * completed) before deleting the entry — a later delete-without-settle
+   * would silently drop them from the delivered answer. Also disarm the
+   * session: /clear eviction and session death settle WITHOUT draining the
+   * turn's send chain, and any block that lands afterwards must be dropped
+   * rather than recreating projector state.
+   */
+  private settleBlockFileProjector(chatId: string, sessionId: string): void {
+    this.blockProjectionArmed.delete(sessionId);
+    const state = this.blockFileProjectors.get(sessionId);
+    if (!state) return;
+    this.blockFileProjectors.delete(sessionId);
+    const tail = state.projector.complete();
+    if (!tail.trim()) return;
+    // Deliberately fire-and-forget: complete() can only return a strict
+    // prefix of '[FILE:' (at most 5 chars, no path bytes), so the worst case
+    // is a stray fragment landing out of order with the next turn — not a
+    // leak — and blocking settle on a delivery that may hang is worse.
+    void this.sendReply(
+      chatId,
+      tail,
+      undefined,
+      this.getResponseSourceLabel(sessionId),
+    ).catch((err) => {
+      process.stderr.write(
+        `[DingTalk:${this.name}] projector tail delivery failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    });
+  }
+
+  /**
+   * Out-of-turn one-shot sends (background responses) must not flow through
+   * the session's block-streaming projector: a second sender interleaving with
+   * mid-projection state can swallow the send or split a held marker.
+   */
+  protected override async deliverBackgroundReply(
+    chatId: string,
+    text: string,
+    sessionId: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    if (this.config.blockStreaming !== 'on') {
+      return super.deliverBackgroundReply(chatId, text, sessionId, sourceLabel);
+    }
+    await this.sendReply(chatId, text, undefined, sourceLabel);
   }
 
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    const atUserId = this.atSender
-      ? this.sessionMentionTargets.get(sessionId)
-      : undefined;
+    let outgoingText = text;
+    let consumesMention = true;
+    if (this.config.blockStreaming === 'on') {
+      const projected = this.projectBlockStreamChunk(text, sessionId);
+      if (!projected.text.trim()) return;
+      outgoingText = projected.text;
+      // A notice-only block must not consume the prompt's mention target:
+      // the @mention belongs to the block carrying the actual answer.
+      consumesMention = projected.hasContent;
+    }
+    const atUserId =
+      consumesMention && this.atSender
+        ? this.sessionMentionTargets.get(sessionId)
+        : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
-    await this.sendReply(chatId, text, atUserId);
+    await this.sendReply(
+      chatId,
+      outgoingText,
+      atUserId,
+      sourceLabel ?? this.getResponseSourceLabel(sessionId),
+    );
+  }
+
+  private projectBlockStreamChunk(
+    text: string,
+    sessionId: string,
+  ): { text: string; hasContent: boolean } {
+    let state = this.blockFileProjectors.get(sessionId);
+    if (!state) {
+      if (!this.blockProjectionArmed.has(sessionId)) {
+        return { text: '', hasContent: false };
+      }
+      state = { projector: new OutboundFileProjector(), reportedMarkers: 0 };
+      this.blockFileProjectors.set(sessionId, state);
+    }
+    const safe = state.projector.append(text);
+    const hasContent = safe.trim().length > 0;
+    const result = state.projector.result(safe);
+    let outgoingText = safe;
+    if (result.markerCount > state.reportedMarkers) {
+      outgoingText = withFileUnavailableNotice(safe);
+      state.reportedMarkers = result.markerCount;
+      process.stderr.write(
+        `[DingTalk:${this.name}] file markers redacted in block stream (session ${sessionId}, markers=${result.markerCount})\n`,
+      );
+    }
+    return { text: outgoingText, hasContent };
   }
 
   private async sendFallbackReply(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     // Mid-run fallbacks must not consume the prompt's mention target: the
     // final answer of the same run still needs it.
     const atUserId = this.atSender
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
-    await this.sendReply(chatId, text, atUserId);
+    await this.sendReply(chatId, text, atUserId, sourceLabel);
   }
 
   protected override async onResponseComplete(
@@ -1786,8 +1995,12 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
+    const streamed = segment
+      ? this.fileProjectors.get(segment.runId)?.projector
+      : undefined;
+    if (segment) this.fileProjectors.delete(segment.runId);
+    const outgoingText = await this.prepareOutgoingText(text, streamed);
     if (segment && this.interactionPresenter) {
-      const outgoingText = await this.prepareOutgoingText(text);
       if (
         await this.interactionPresenter.closeOutput(
           segment.segmentId,
@@ -1799,7 +2012,12 @@ export class DingtalkChannel extends ChannelBase {
         return;
       }
     }
-    await this.sendResponseMessage(chatId, text, sessionId);
+    await this.sendResponseMessage(
+      chatId,
+      outgoingText,
+      sessionId,
+      segment?.sourceLabel,
+    );
   }
 
   protected override onOutputSegmentEnd(
@@ -1808,6 +2026,13 @@ export class DingtalkChannel extends ChannelBase {
     segment: ChannelOutputSegmentContext,
     reason: ChannelOutputSegmentEndReason,
   ): void | Promise<void> {
+    if (
+      reason === 'completed' ||
+      reason === 'failed' ||
+      reason === 'cancelled'
+    ) {
+      this.fileProjectors.delete(segment.runId);
+    }
     if (!this.interactionPresenter) return;
     return this.interactionPresenter
       .closeOutput(segment.segmentId, '', reason, segment)
@@ -1820,7 +2045,21 @@ export class DingtalkChannel extends ChannelBase {
     _sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
-    if (segment) this.interactionPresenter?.appendOutput(segment, chunk);
+    if (!segment) return;
+    let state = this.fileProjectors.get(segment.runId);
+    if (!state) {
+      state = {
+        sessionId: segment.sessionId,
+        projector: new OutboundFileProjector(),
+      };
+      this.fileProjectors.set(segment.runId, state);
+    }
+    const safe = state.projector.append(chunk);
+    if (safe) this.interactionPresenter?.appendOutput(segment, safe);
+  }
+
+  private deleteFileProjectorsForRun(runId: string): void {
+    this.fileProjectors.delete(runId);
   }
 
   protected override async presentUserInputRequest(
@@ -2331,39 +2570,49 @@ export class DingtalkChannel extends ChannelBase {
         (envelope as MentionTargetEnvelope)[mentionTarget] = senderStaffId;
       }
 
-      const processMessage = async () => {
-        // Download media in callback order.
-        if (content.downloadCodes.length > 0 && content.mediaType) {
-          for (const downloadCode of content.downloadCodes) {
-            await this.attachMedia(
-              envelope,
-              downloadCode,
-              content.mediaType,
-              content.fileName,
-              content.placeholder,
-            );
-          }
-        }
-        if (quoted.media) {
-          await this.attachMedia(
-            envelope,
-            quoted.media.downloadCode,
-            quoted.media.mediaType,
-            quoted.media.fileName,
-          );
-        }
-        await this.handleInbound(envelope);
-      };
-
-      // Don't await — stream callback should return quickly
-      processMessage().catch((err) => {
+      const processMessage =
+        content.downloadCodes.length > 0 || quoted.media
+          ? this.prepareThenHandleInbound(envelope, async () => {
+              // Download media in callback order.
+              if (content.downloadCodes.length > 0 && content.mediaType) {
+                for (const downloadCode of content.downloadCodes) {
+                  await this.attachMedia(
+                    envelope,
+                    downloadCode,
+                    content.mediaType,
+                    content.fileName,
+                    content.placeholder,
+                  );
+                }
+              }
+              if (quoted.media) {
+                await this.attachMedia(
+                  envelope,
+                  quoted.media.downloadCode,
+                  quoted.media.mediaType,
+                  quoted.media.fileName,
+                );
+              }
+            })
+          : this.handleInbound(envelope);
+      processMessage.catch((err) => {
+        // Don't await — stream callback should return quickly
         process.stderr.write(
           `[DingTalk:${this.name}] Error handling message: ${err}\n`,
         );
-        this.sendMessage(
-          chatId,
-          'Sorry, something went wrong processing your message.',
-        ).catch(() => {});
+        const sourceLabel = this.getInboundErrorSourceLabel(envelope);
+        const delivery = sourceLabel
+          ? this.sendThreadMessage(
+              chatId,
+              envelope.threadId,
+              'Sorry, something went wrong processing your message.',
+              sourceLabel,
+            )
+          : this.sendMessage(
+              chatId,
+              'Sorry, something went wrong processing your message.',
+            );
+        delivery.catch(() => {});
       });
     } catch (err) {
       process.stderr.write(

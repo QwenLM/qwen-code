@@ -17,7 +17,8 @@
 // file path exists — stays with the caller.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   writeStdoutLine,
@@ -27,13 +28,15 @@ import { tokenizeArgs } from '../../utils/shell-args.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
 import { isAoneCanonicalHost } from './lib/remote-match.js';
+import { lastReviewEffortPath } from './lib/paths.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
 /**
  * The posting floor for findings on a PR review: `critical` posts only
  * Critical findings (otherwise-postable high-confidence Suggestions are
- * recorded and deferred; low-confidence and Nice-to-have stay terminal-only
+ * recorded and deferred — and so is a Critical classified fails-closed on
+ * new surface, #10291; low-confidence and Nice-to-have stay terminal-only
  * as ever), `suggestion` posts Criticals and Suggestions — today's behaviour. The floor governs what
  * the review PUBLISHES, never what it finds or verifies.
  */
@@ -84,6 +87,7 @@ export interface ParsedReviewArgs {
   effortSource:
     | 'explicit'
     | 'configured'
+    | 'last_used'
     | 'default'
     | 'forced-by-comment'
     | 'forced-by-fix';
@@ -354,31 +358,35 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   return { type: 'file', path: token };
 }
 
+interface ReviewArgsDefaults {
+  /**
+   * The standing default from `review.effort`, raw (`auto` already mapped
+   * to undefined by the caller), applied when neither an explicit nor a
+   * remembered effort is present. Validated case-insensitively exactly like
+   * an explicit flag — an invalid value warns and falls back instead of
+   * dropping silently. The `--comment`/`--fix` forcings still override it.
+   */
+  effort?: string;
+  /** The last valid effort explicitly typed for this project. */
+  lastUsedEffort?: ReviewEffort;
+  /**
+   * The standing `review.comment` setting: treat a PR review as if
+   * `--comment` was passed. The target binding is untouched — the run still
+   * authorises only the PR the arguments name.
+   */
+  comment?: boolean;
+  /**
+   * The standing `review.severityFloor` setting, raw (`auto` already mapped
+   * to undefined by the caller). Validated exactly like the flag — a typo
+   * warns and falls back to the round-adaptive default.
+   */
+  severityFloor?: string;
+}
+
 export function parseReviewArgs(
   raw: string,
-  defaults: {
-    /**
-     * The standing default from `review.effort`, raw (`auto` already mapped
-     * to undefined by the caller), applied when no `--effort` flag is
-     * present. Validated case-insensitively exactly like an explicit flag —
-     * an invalid value warns and falls back instead of dropping silently.
-     * An explicit flag still wins; the `--comment`/`--fix` forcings still
-     * override it.
-     */
-    effort?: string;
-    /**
-     * The standing `review.comment` setting: treat a PR review as if
-     * `--comment` was passed. The target binding is untouched — the run still
-     * authorises only the PR the arguments name.
-     */
-    comment?: boolean;
-    /**
-     * The standing `review.severityFloor` setting, raw (`auto` already mapped
-     * to undefined by the caller). Validated exactly like the flag — a typo
-     * warns and falls back to the round-adaptive default.
-     */
-    severityFloor?: string;
-  } = {},
+  defaults: ReviewArgsDefaults = {},
+  rememberExplicitEffort?: (effort: ReviewEffort) => void,
 ): ParsedReviewArgs {
   const tokens = tokenizeArgs(raw);
   const warnings: string[] = [];
@@ -896,6 +904,9 @@ export function parseReviewArgs(
   if (explicitEffort !== null) {
     effort = explicitEffort;
     effortSource = 'explicit';
+  } else if (defaults.lastUsedEffort !== undefined) {
+    effort = defaults.lastUsedEffort;
+    effortSource = 'last_used';
   } else if (configuredEffort !== undefined) {
     effort = configuredEffort;
     effortSource = 'configured';
@@ -932,6 +943,13 @@ export function parseReviewArgs(
     );
   }
 
+  if (effortSource === 'last_used') {
+    const example = effort === 'medium' ? 'high' : 'medium';
+    warnings.push(
+      `No effort level given — reusing ${effort}, the level you typed last time. Type a level like \`/review --effort ${example}\` to change it.`,
+    );
+  }
+
   // Now the resolution is final; compose the deferred effort warnings so
   // each states what is actually in effect.
   const resolution =
@@ -945,7 +963,9 @@ export function parseReviewArgs(
           ? '`--fix` forces at least medium effort'
           : effortSource === 'configured'
             ? 'using the configured review.effort'
-            : 'using the default effort';
+            : effortSource === 'last_used'
+              ? 'using the last explicitly typed effort'
+              : 'using the default effort';
   for (const issue of effortIssues) {
     switch (issue.kind) {
       case 'invalid-eq':
@@ -1063,6 +1083,10 @@ export function parseReviewArgs(
     }
   }
 
+  if (explicitEffort !== null) {
+    rememberExplicitEffort?.(explicitEffort);
+  }
+
   return {
     target,
     effort,
@@ -1114,6 +1138,71 @@ function reviewDefaultsFromSettings(): {
         ? undefined
         : review.severityFloor,
   };
+}
+
+function readLastReviewEffort(path: string): ReviewEffort | undefined {
+  let value: string;
+  try {
+    if (!existsSync(path)) return undefined;
+    value = readFileSync(path, 'utf8').trim();
+  } catch (error) {
+    writeStderrLineSafe(
+      `NOTE: the remembered review effort at ${path} could not be read (${
+        error instanceof Error ? error.message.split('\n')[0] : String(error)
+      }); resolving from review.effort and the target default instead. Type \`--effort <level>\` to record a new one.`,
+    );
+    return undefined;
+  }
+  const effort = asEffort(value);
+  if (effort === null) {
+    writeStderrLineSafe(
+      `NOTE: ${path} must contain low, medium, or high; got ${JSON.stringify(value)}. Ignoring it; resolving from review.effort and the target default instead. Type \`--effort <level>\` to record a new one.`,
+    );
+    return undefined;
+  }
+  return effort;
+}
+
+function writeLastReviewEffort(
+  path: string,
+  explicitEffort: ReviewEffort,
+  resolvedEffort: ReviewEffort,
+): void {
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    atomicWriteFileSync(path, `${explicitEffort}\n`, {
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
+  } catch (error) {
+    writeStderrLineSafe(
+      `NOTE: the explicit review effort ${explicitEffort} could not be remembered at ${path} (${
+        error instanceof Error ? error.message.split('\n')[0] : String(error)
+      }); this review still uses ${resolvedEffort}.`,
+    );
+  }
+}
+
+function parseReviewArgsWithMemory(
+  raw: string,
+  defaults: ReviewArgsDefaults,
+  effortPath: string,
+): ParsedReviewArgs {
+  let explicitEffort: ReviewEffort | undefined;
+  const initial = parseReviewArgs(raw, defaults, (effort) => {
+    explicitEffort = effort;
+  });
+
+  if (explicitEffort !== undefined) {
+    writeLastReviewEffort(effortPath, explicitEffort, initial.effort);
+    return initial;
+  }
+
+  const lastUsedEffort = readLastReviewEffort(effortPath);
+  return lastUsedEffort === undefined
+    ? initial
+    : parseReviewArgs(raw, { ...defaults, lastUsedEffort });
 }
 
 export const parseArgsCommand: CommandModule = {
@@ -1181,7 +1270,16 @@ export const parseArgsCommand: CommandModule = {
       writeStderrLineSafe(bundleNotice);
     }
 
-    const parsed = parseReviewArgs(rawStr, reviewDefaultsFromSettings());
+    const projectRoot = process.cwd();
+    const effortPath = lastReviewEffortPath(
+      projectRoot,
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    const parsed = parseReviewArgsWithMemory(
+      rawStr,
+      reviewDefaultsFromSettings(),
+      effortPath,
+    );
     const json = JSON.stringify(parsed, null, 2);
     if (out) {
       mkdirSync(dirname(out), { recursive: true });

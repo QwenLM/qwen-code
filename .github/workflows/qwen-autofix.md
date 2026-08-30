@@ -250,6 +250,12 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [146. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…](#af-146)
 - [147. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…](#af-147)
 - [148. route — Persistent pool, not hosted: a hosted backlog queued route past the cron period, and af-005's…](#af-148)
+- [149. review-address · Post autofix status comment — Round heartbeat: the announcement freezes at "working" for the whole round…](#af-149)
+- [150. review-address · Post autofix status comment — Deep-link "Watch live progress" to THIS matrix leg's live log, not just the run…](#af-150)
+- [151. run — Convergence-signal circuit breaker — the off-ramp the round and growth brakes cannot…](#af-151)
+- [152. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…](#af-152)
+- [153. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…](#af-153)
+- [154. review-address · Report dry-run / failure — Convergence-break report guard (#10122): the report step's stale-base retry is a sibling…](#af-154)
 
 ---
 
@@ -973,8 +979,12 @@ signal, NOT proof that main is healthy.
 
 MAIN_GREEN_CHECKS is sourced from the last-merged PR's PRE-MERGE
 check-runs, which ran against that PR merged with main-as-of-then —
-never the tree now on main (ci.yml has no push trigger, so main's
-squash commits carry no check-runs to read). main breaks here by
+never the tree now on main. (ci.yml's post-merge push lane DOES put
+check-runs on main's squash commits now, but that lane is lint, static
+analysis and unit tests only — the no-AK integration gate and every
+platform lane stay off the push trigger — so it is a strictly narrower
+signal than a PR's full matrix, and this deliberately stays on the
+pre-merge runs.) main breaks here by
 SEMANTIC CONFLICT: two PRs green apart but broken together. In exactly
 that state the last-merged PR is green, this signal reads green, and
 the update would merge a currently-broken main into a healthy PR. The
@@ -2806,7 +2816,7 @@ running) is not blocking (the next scan re-checks once it starts).
 The dispatch-pending marker is exempted by context: it is this
 loop's own StatusContext busy signal (no .workflowName/.name, so
 it passes the filters above) and its dedicated TTL check above is
-the authority on it — the 330-minute horizon here would keep a
+the authority on it — the 375-minute horizon here would keep a
 stranded marker blocking long past its TTL.
 ```
 
@@ -3767,4 +3777,426 @@ fills a per-run WORKDIR with API dumps that no VM teardown
 removes on the pool, so it gets a fixed autofix* per-run path
 (the age sweep can reclaim it after a hard kill), an EXIT
 trap, and an always() cleanup step mirroring issue-autofix.
+```
+
+<a id="af-149"></a>
+
+### 149. review-address · Post autofix status comment — Round heartbeat: the announcement freezes at "working" for the whole round…
+
+In `review-address` · `Post autofix status comment`.
+
+```text
+Round heartbeat: the announcement freezes at "working" for
+the whole round — up to the 130-minute agent step plus gate
+and repair — so on the PR page a healthy long round and a
+dead one look identical (observed on #9739: ~1.5h of
+silence). A detached loop started here re-PATCHes the SAME
+comment every 10 min with elapsed time and last agent
+activity (agent.log mtime — run-agent.mjs writes every
+stream event there; no parsing, and the thinking phase's
+10-minute stream-idle window shows as an honest "active N
+min ago"). EDITING one comment, not posting: a managed PR
+can run 100 rounds, and edits raise no issue_comment events
+(no workflow fan-out) and no notifications. The body renders
+through the heartbeat script's 'body' subcommand for the
+initial post AND every tick, so the two texts cannot drift.
+
+LIFETIME is bounded to the sandboxed agent phase: the
+verification gate kills the loop BEFORE it runs the
+branch's own build/tests ON THE HOST. The first design
+claimed "no fork code runs on the host beside this loop"
+for the whole round and review proved that false — the gate
+script says plainly that the branch's code runs there as
+the runner user. A PAT-holding host process concurrent with
+host-side branch code is a /proc/<pid>/environ read away
+from leaking the token (same UID; the pool's ptrace scope
+does NOT stand between — it gates ptrace attach, not this
+direct same-UID read; witnessed on the pool's host class:
+a non-descendant sibling extracted an environ canary with
+ptrace_scope=1), so the pulse covers the agent step — the
+longest, sandboxed phase — and dies before the gate. The
+comment holds its last tick through gate/repair; finalize
+flips the terminal text.
+
+KILL TARGETS travel through EXPRESSION CONTEXT: post_status
+records $! as heartbeat_pid, and the gate / finalize / the
+always() cleanup kill that value — delivered through each
+killer's step-level env: block (the STATUS_ID shape), so the
+runner sets it as data; an interpolation inside a run body
+would substitute a forged output BEFORE the shell parses, so
+it would execute as shell syntax in the consuming shell
+(R16-1). Never a pid read from a
+WORKDIR file: the agent's docker sandbox mounts the host
+/tmp on the same path and runs as this same user, so branch
+code the agent executes can plant any value in
+heartbeat.pid — an arbitrary same-UID kill in the hand of
+the next killer (this file class is known-hostile: the gate
+refuses to re-read its verdict from WORKDIR for the same
+reason). The on-disk pid file survives for diagnostics and
+the loop's OWN existence self-check only — tampering there
+can at worst end the pulse early or forge its "active"
+figure, never reach a kill or the token. The killers are
+INLINE bash in the yml: no PR-branch-controlled file is
+ever executed in a PAT-bearing or post-agent context, and
+the gate's own kill uses absolute-path/builtin command
+words per that step's shadowing doctrine.
+
+LIFECYCLE CONFIRMATION on every kill: the pid recorded at
+launch can be REUSED between the launch and a kill — the
+gate lands up to a whole agent phase after post_status
+recorded the id, and finalize and the always() cleanup run
+hours later still; by then the runner may have recycled
+the number. The blind form was probe-verified fatal:
+mapped to an unrelated detached session, the stale pid's
+kill block terminated it (pid, group AND session TERM).
+Every killer therefore confirms the pid's start time
+before signaling: post_status also records the loop's
+start time (heartbeat_start_ticks — field 22 of
+/proc/<pid>/stat, clock ticks since boot; index 19 after
+stripping through the LAST ')' of the parenthesized
+comm), and a killer signals only a pid whose stat still
+carries exactly that value. A reused pid necessarily
+carries a different start time and a dead pid carries no
+stat at all, so a failed check proves the loop is gone
+and killing nothing is right — the confirmation can only
+ever SUPPRESS a kill, never admit a wrong one (its
+residual is the narrow stat-read→signal window, the same
+residual the decimal check it replaces carried for its
+whole lifetime).
+
+PAT TRADE, chosen deliberately within that lifetime: the
+loop holds the bot PAT in env — a temporal overlap the
+"THIS step holds no PAT" rule (af-126) otherwise avoids.
+Accepted because within the agent phase the token never
+touches disk and the only host processes concurrent with
+the loop are trusted (run-agent.mjs, the bundled CLI) —
+plus two hardenings that keep the overlap honest. KILL:
+the overlap ends at the gate only if the kill covers the
+loop's whole SESSION — each tick's `timeout 60 gh` subtree
+runs in its OWN process group (coreutils timeout default)
+under the loop's setsid session, so a group/pid kill
+landing mid-tick leaves it alive holding the PAT for up to
+60s (witnessed on the pool's host class); all three
+killers therefore kill pid, group, AND session. PINS: the
+step's gh calls and every tick run under the af-112
+hermetic pins — pinned GH_HOST, dropped
+GH_TOKEN/GH_ENTERPRISE_TOKEN, and a fresh empty
+GH_CONFIG_DIR minted around EVERY call (the loop mints
+per tick, post_status mints per call inside its
+hermetic_gh wrapper, finalize mints adjacent to its
+single call) and removed right after. Without them the
+default ~/.config/gh on the shared attacker-writable
+HOME can carry http_unix_socket, and a planted same-UID
+listener then receives the tick's Authorization header
+WITH the PAT (witnessed with the pool's gh): exfil with
+no orphan, no /proc read and no kill miss, inside the
+legitimate overlap, where none of the trade arguments
+above reaches. The mint sits under the same-UID-writable
+RUNNER_TEMP, and a LONG-LIVED minted dir is itself
+plantable between calls — a config.yml with
+http_unix_socket written into it is read by the next
+call, witnessed with the pool's gh on the loop's 600s
+launch→first-call window (R11-1) — so the dir is minted
+milliseconds before each call and removed right after:
+the residual is a per-call mint→use race, not a
+persistent channel. RESOLUTION: the af-112
+pins close gh's CONFIG channel; the binary-resolution
+channel is closed separately. The PAT-bearing step and
+the loop both pin PATH from the stage-time TRUSTED_PATH
+capture BEFORE the first command word resolves (the R6-3
+doctrine): the job's own $GITHUB_PATH append keeps
+${RUNNER_TEMP}/qwen-bin ahead of /usr/bin, and a same-UID
+plant of gh/timeout/setsid/touch in any writable dir on
+the ambient PATH would otherwise be resolved with the PAT
+in env — witnessed: a planted setsid at launch and a
+planted gh mid-tick both received the token; the pinned
+forms never reached the plant. The loop validates the
+capture like any other launch input and fails fast
+without it; the killers in PAT-bearing steps take the
+same absolute-path/builtin command words as the gate's
+kill block. The alternative — heartbeat from the schedule
+scan or a watcher job — lands every ~40-70 min in this
+repo (af-027) and would re-derive comment id, run
+identity and liveness remotely: too slow and too much
+machinery for a pulse.
+
+ORPHAN DISCIPLINE on the persistent pool: the loop
+self-exits when the pid file no longer holds ITS OWN pid.
+This is an identity check, not an existence check — WORKDIR
+is PR-scoped, so after a crashed round's reset the next
+round recreates heartbeat.pid at the SAME path; existence
+alone would let the orphaned old loop pass and keep PATCHing
+its stale body onto the comment. Reclamation by rewrite is
+HOST-LOCAL: it fires only when the next same-PR round reuses
+the orphan's host. Cross-host — the fleet's general case,
+no per-PR runner affinity — nothing rewrites the file, the
+orphan keeps passing its own identity check, and it pulses
+its stale body onto the shared comment until the age cap
+(accepted residual risk, with its REAL profile: the orphan
+holds the bot PAT in /proc/<pid>/environ until the cap,
+and any same-UID process on that host — including another
+PR's round running its gate's host-side build/tests —
+reads it directly; the pool's ptrace scope does not gate
+this read, as witnessed above. The cap therefore sits just
+past the 330-minute job envelope — only a crash orphan
+ever reaches it, so the cap IS the bound on its token
+window. A cross-run kill keyed on a WORKDIR pid would
+reopen the untrusted-kill-target hole, so reclamation
+stays host-local). Reading the file to self-identify is
+safe (the loop never kills anything); the
+killers never read it, which is what keeps the
+untrusted-target hole closed — no cross-run kill. The other
+bounds: a heartbeat-stop marker, or the age cap just past
+the 330-minute job envelope; each tick's gh call is
+additionally wrapped in a 60s timeout so a black-holed
+connection cannot stall the loop past the cap. Killers that
+run in-round touch the stop marker BEFORE killing so a
+missed kill still ends the loop at its next self-check — a
+tick landing after the terminal text would overwrite it
+with a live-looking "working" line. The terminal text is
+additionally DRAINED, not slept past: the fixed 2s sleep
+proved wrong on probe — killing the client cannot cancel a
+PATCH the server already ACCEPTED (reproduced: WORKING
+accepted 1.67s in, TERMINAL submitted 3.80s in, the stale
+WORKING committed 6.67s in and flipped the comment back to
+live-looking). Each tick therefore stamps its start epoch
+into heartbeat-tick-inflight around its gh call and
+removes it after; finalize waits until the stamp is ABSENT
+or older than the 65s completion bound (the tick's 60s
+gh timeout plus margin) BEFORE its terminal PATCH — every
+request started before that bound has committed or died
+by the time the terminal text goes up. The stamp is a
+wait input, never a kill target: a planted fresh stamp
+costs at most the bound in finalize delay, a planted
+deletion reopens only the cosmetic overwrite (nothing
+rides the stamp but the comment text), and finalize's
+read is bounded like the loop's pid-file read so a
+planted FIFO cannot stall it.
+```
+
+<a id="af-150"></a>
+
+### 150. review-address · Post autofix status comment — Deep-link "Watch live progress" to THIS matrix leg's live log, not just the run…
+
+In `review-address` · `Post autofix status comment`.
+
+```text
+Deep-link "Watch live progress" to THIS matrix leg's live
+log, not just the run page: the run page lists every leg of
+the scan and the reader must find which one is theirs. The
+job id comes from the current run ATTEMPT's jobs listing
+matched on the name prefix "review-address (<pr>," — the
+matrix name format this job has always used — read through
+jq with --arg so the PR number enters as data, never string
+interpolation. BEST-EFFORT by construction: any lookup
+failure (API error, unexpected shape) leaves the run URL, so
+the link is never worse than before this existed. The
+finalize text keeps the run URL on purpose: once the round
+ends the run page is the right destination (all steps, all
+attempts), and one less thing to re-resolve on the
+crashed-agent paths where this step's outputs may be all
+that survived.
+```
+
+<a id="af-151"></a>
+
+### 151. run — Convergence-signal circuit breaker — the off-ramp the round and growth brakes cannot…
+
+In `run`.
+
+```text
+Convergence-signal circuit breaker — the off-ramp the round and growth
+brakes cannot provide (#10107). Every brake this loop had bounded its OWN
+telemetry: rounds (CRITICAL_ONLY_AFTER_ROUND, the caps), bytes (the growth
+budgets), failures (the consecutive-failure and timeout breakers). None of
+them could see the one diagnosis that matters on a non-converging pair:
+the REVIEW side has measured, since #9461/#9623, whether its own loop is
+settling — recurrence clusters, a first-time-finding rate that is not
+falling — and publishes the matched handling recommendations as a closed
+code set (`rec` in the posted ledger marker, RECOMMENDATION_CODES in
+packages/cli/src/commands/review/lib/convergence.ts). Measured on #9729:
+the observation named the failure mode in round 3 and repeated it through
+round 15, both sides' brakes engaged (critical floor from ~round 5; growth
+brake, Critical-only), and the loop still ran ~13 more rounds — ~50
+runner-hours, the PR growing +1.7k → +5.6k lines, round 15 still posting
+fresh Criticals in loop-written code. The brakes slow each side; neither
+can stop the pair, and the human who could is exactly the one takeover
+removed from the loop.
+
+The breaker consumes the codes instead of re-deriving the diagnosis: the
+review module's contract is that it measures and holds no threshold ("a
+caller wires actions to these codes without parsing prose"), so the
+threshold lives here — CONVERGENCE_BREAK_ROUNDS consecutive signal-bearing
+review rounds, with no trusted-human response in between, pause the loop.
+Three by default: the review engages its own critical posting floor after
+two flat rounds (#9938), so three signal rounds mean the posture rung has
+already been taken and the pair demonstrably did not respond to it.
+
+The action is a PARK in the growth-audit-conflict mold, not a terminal
+stop: one visible notice, then silence; a trusted-human response resumes
+the loop with a fresh N-round runway (the response steers the next rounds
+as ordinary feedback); /retry or re-engaging takeover resets via the
+window key like every other census. No NEEDS_HUMAN_LABEL — that label
+marks stops only a re-arm can lift, and a self-lifting park wearing it
+would leave the label lying the moment a maintainer's comment resumed
+the loop. Downshifting automatic re-review falls out for free: reviews
+are push-triggered, so a loop that stops pushing stops re-reviewing —
+on-demand review (a human push, /review) keeps working.
+
+'land-and-defer' and the persistently-critical exit advisory are
+deliberately NOT signal codes: both mean "this loop can end by merging",
+and pausing on them would park exactly the PR a human should merge. They
+stay visible in the review body; acting on them is a different feature.
+```
+
+<a id="af-152"></a>
+
+### 152. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…
+
+In `review-scan` · `Scan for PRs with new feedback`.
+
+```text
+Convergence-signal circuit breaker (#10107): the review side diagnoses a
+non-converging loop in machine-readable form — the `rec` codes in its
+posted ledger marker — and this gate is the consumer. See af-151 for the
+concept; this section carries the reading's mechanics.
+
+The streak is TRAILING and CONSECUTIVE: review-bot reviews after the
+boundary, last ledger marker per body (an edited body can hold more than
+one; the newest describes the round), one entry per ROUND keeping the
+newest (the review workflow dismisses its own superseded reviews but the
+dismissed body — and its marker — survives in the list, and a re-run of
+one round must not count twice), reduced in TIME order — jq's group_by
+re-sorts its input by the grouping key, so the dedup's output is re-sorted
+by submitted_at before the reduce: round-NUMBER order would miscount in
+the unsafe direction whenever a round lands out of order (a dismissed
+round's healthy re-run landing late reads as a signal tail), reset to
+zero by any marker round whose
+codes do not intersect CONVERGENCE_SIGNAL_CODES. A review without a
+parseable marker contributes nothing either way — fallback comments and
+dismissal stubs are not rounds — while a marker without `rec` is a round
+that measured no divergence (a healthy round, or one from a CLI predating
+the field) and resets: the fail-open direction, one delayed breaker, never
+a false park.
+
+The boundary is max(window key, newest trusted-human activity). The
+window-key half makes /retry and re-engagement reset the breaker exactly
+like every other census. The human-activity half is the resume signal the
+notice promises — a maintainer response moves the boundary past the streak:
+the loop wakes with a fresh CONVERGENCE_BREAK_ROUNDS of runway, and the
+response itself reaches the agent as ordinary feedback. The reviews arm
+counts every state that records a response — CHANGES_REQUESTED, COMMENTED,
+APPROVED, and DISMISSED: an approval resumes exactly like the notice
+promises ("a review or comment counts"), and a dismissed review keeps the
+boundary where the human put it, so a dismissal can never snap the
+boundary back to the window key and silently re-park under the stale
+pre-resume notice. The legs mirror
+the conflict park's wake legs (trusted-human reviews, inline comments,
+issue comments minus bot markers and @qwen-code commands) with one
+deliberate difference: NO failed-check leg. The conflict park wakes on
+outside CI going red because its parked item is a size judgment and a
+broken tree outranks it; this park's whole claim is that more automatic
+rounds are the problem, and a red check resuming the general loop would
+re-open it with zero human input. Trust: the streak reads only reviews
+the REVIEW_BOT account submitted — a review is not a forgeable surface
+the way an issue comment is — and the boundary can only be moved LATER by
+untrusted input, which is the safe direction (a later boundary shortens
+the streak and delays the park).
+
+The notice posts once per boundary, not once per window: a loop that
+resumed on a human response and re-tripped earned a fresh notice, and the
+earlier one is older than the activity that resumed it, so the dedup
+(AUTOFIX_BOT comments carrying the marker, newer than the boundary) reads
+exactly that. It deliberately does NOT begin "🤖 AutoFix stopped" — the
+fleet shepherd's REASON regex reads that prefix as a terminal stop, and
+this is a self-lifting park. The verdict is derived ABOVE the stale-base
+update, and the update's gate refuses a parked PR beside the conflict
+park: a base merge into a parked PR re-fires every synchronize-triggered
+workflow on the new head, and the base-merge round reviews an unchanged
+diff — its clean marker resets the streak, silently lifting the park
+with zero human activity (af-108's exact hazard, the one the conflict
+park's guard was added for). Both gates reuse the one derivation, so the
+two reads cannot drift; the park ACTION sits ABOVE the idle fast-path —
+a parked PR whose signal rounds all sit at or below the eval watermark IS
+the idle case, and the notice and fleet row the action writes are the
+park's only visible escalation, so below the fast-path they would never
+be reached — and still precedes target emission, so a parked PR spends
+no dispatch, no runner, and no round either way.
+The notice's release clause branches on the takeover label like the cap
+notices: `/takeover stop` is a logged no-op on a PR without the label,
+so there the notice offers takeover itself instead. Its codes clause
+claims exactly the union it prints — codes observed since the last
+maintainer response, or the window start if none — because CONV_SINCE
+advances to the newest trusted-human activity, not the window key.
+
+The RELEASE census is the park's own enumeration: a posted notice holds
+the park until the boundary itself moves (a trusted-human response or a
+re-arm). Any clean round resets the streak — including the review a
+maintainer push triggers via synchronize — but must not silently release
+the park: the dedup counts notices newer than the boundary, so a
+release-then-re-trip would re-park under the stale notice with no fresh
+one. If the signal resumes, the streak census re-parks loudly (the
+boundary moved, or the notice is still the newest word); the hold only
+keeps the quiet middle honest. The mirror and the report guard carry the
+same hold.
+```
+
+<a id="af-153"></a>
+
+### 153. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…
+
+In `review-address` · `Prepare branch and feedback`.
+
+```text
+Convergence-break mirror (#10107): the scan refuses to select while the
+breaker holds, but a target can be emitted moments before the tripping
+review lands — the review's own pull_request_review trigger routes a
+round for exactly the review that completes the streak — or forced past
+the scan by dispatch. The leg therefore re-derives the same reading over
+its own live fetch and idles via STALE, the same shape as the conflict
+park above it and the live-watermark revalidation before it: discard
+without action, marker, or comment. The notice stays the scan's job — a
+leg that posted it would race the scan's dedup, and the once-per-boundary
+guarantee is only checkable where the comment list and the decision live
+in one place; the next scheduled scan (10-minute cron) posts it, so the
+visible escalation lags the park by at most one scan interval.
+
+Keep the two readings in LOCKSTEP with the scan gate (boundary, streak,
+codes) — a divergence between them either burns agent rounds the scan
+already refused, or silently discards rounds the scan still allows. A
+test replays both against the same fixture. The mirror also carries the
+scan's park HOLD: a target dispatched before a clean round reset the
+streak must not land on a PR a posted notice still holds parked.
+```
+
+<a id="af-154"></a>
+
+### 154. review-address · Report dry-run / failure — Convergence-break report guard (#10122): the report step's stale-base retry is a sibling…
+
+In `review-address` · `Report dry-run / failure`.
+
+```text
+Convergence-break report guard (#10122): the report step's stale-base
+retry is a sibling wake leg the scan's CONV_PARKED cannot cover — that
+reading is scan-local, and this job's inputs froze at prepare time. The
+race: the scan emits a target while the streak is one short; the round
+passes prepare's mirror before the tripping review lands; the scan parks
+the PR on its next tick; the in-flight round then fails its verification
+gate — and this step, POST_HANDOFF on a frozen STALE=false, merges main
+into the parked PR. The merge re-fires every synchronize-triggered
+workflow; the base-merge round reviews an unchanged diff and posts a
+rec-less marker; the streak resets — the park lifts with zero human
+activity, the notice's "base conflicts stay unhandled while paused"
+promise broken, and no fresh notice because the boundary never moved.
+The race window is the full prepare-to-report span — tens of minutes
+against the 10-minute scan cadence — on exactly the PRs the breaker
+targets.
+
+The guard re-derives the breaker's reading over fresh fetches before the
+merge attempt — the rearm key, the boundary, and the streak programs are
+the scan gate's verbatim, and the park hold rides along, so the three
+sites stay in one lockstep pin — and skips update-branch while the
+reading holds, exactly like the conflict verdict's skip above it. A
+skipped retry reports the gate failure honestly instead; the park's own
+notice is still the scan's job.
 ```

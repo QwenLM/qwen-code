@@ -101,6 +101,12 @@ class TestChannel extends ChannelBase {
   async connect() {
     this.connected = true;
   }
+  handlePreparedInbound(
+    envelope: Envelope,
+    prepare: () => Promise<boolean | void>,
+  ): Promise<void> {
+    return this.prepareThenHandleInbound(envelope, prepare);
+  }
   async sendMessage(chatId: string, text: string) {
     if (this.sendMessageError) {
       throw this.sendMessageError;
@@ -151,11 +157,15 @@ class TestChannel extends ChannelBase {
   protected override async pushProactive(
     target: SessionTarget,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (this.proactiveError) {
       throw this.proactiveError;
     }
-    this.proactive.push({ chatId: target.chatId, text });
+    this.proactive.push({
+      chatId: target.chatId,
+      text: this.formatAttributedText(text, sourceLabel),
+    });
     this.proactiveTargets.push(target);
   }
 
@@ -183,6 +193,14 @@ class TestChannel extends ChannelBase {
 
   stateDirForTest(): string | undefined {
     return this.stateDir;
+  }
+
+  formatMarkdownForTest(text: string, sourceLabel?: string): string {
+    return this.formatMarkdownAttributedText(text, sourceLabel);
+  }
+
+  inboundErrorSourceLabelForTest(envelope: Envelope): string | undefined {
+    return this.getInboundErrorSourceLabel(envelope);
   }
 
   debugPayloadForTest(platform: string, payload: unknown): void {
@@ -265,7 +283,12 @@ class TestChannel extends ChannelBase {
       segment,
     });
     await this.responseCompleteGate;
-    await super.onResponseComplete(chatId, fullText, sessionId);
+    await super.onResponseComplete(
+      chatId,
+      fullText,
+      sessionId,
+      segment as ChannelOutputSegmentContext | undefined,
+    );
   }
 }
 
@@ -286,6 +309,30 @@ class ResponseTrackingChannel extends TestChannel {
   }
 }
 
+class SlowBlockSendChannel extends TestChannel {
+  sendCompletions = 0;
+  completionsAtPromptEnd: number[] = [];
+
+  protected override async sendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    this.sendCompletions++;
+    await super.sendResponseMessage(chatId, text, sessionId);
+  }
+
+  protected override onPromptEnd(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    this.completionsAtPromptEnd.push(this.sendCompletions);
+    super.onPromptEnd(chatId, sessionId, messageId);
+  }
+}
+
 class UnsafeProcessChannel extends TestChannel {
   processWithoutPreflight(envelope: Envelope): Promise<void> {
     return this.processInbound(envelope);
@@ -298,7 +345,7 @@ function createBridge(): ChannelAgentBridge {
   let channelLoopToolHandler: ChannelLoopToolHandler | undefined;
   const bridge = Object.assign(emitter, {
     newSession: vi.fn().mockImplementation(() => `s-${++sessionCounter}`),
-    loadSession: vi.fn(),
+    loadSession: vi.fn(async (sessionId: string) => sessionId),
     prompt: vi.fn().mockResolvedValue('agent response'),
     cancelSession: vi.fn().mockResolvedValue(undefined),
     discardSession: vi.fn().mockResolvedValue(undefined),
@@ -308,6 +355,7 @@ function createBridge(): ChannelAgentBridge {
     availableCommands: [],
     setBridge: vi.fn(),
     respondToPermission: vi.fn().mockResolvedValue(true),
+    listSessions: vi.fn(() => []),
     registerChannelLoopToolHandler: vi.fn((handler: ChannelLoopToolHandler) => {
       channelLoopToolHandler = handler;
     }),
@@ -430,6 +478,18 @@ describe('ChannelBase', () => {
     expect(
       createChannel({}, { stateDir: '/tmp/channel-state' }).stateDirForTest(),
     ).toBe('/tmp/channel-state');
+  });
+
+  it('fails closed when named sessions lack daemon state or user scope', () => {
+    expect(() => createChannel({ multiSession: true })).toThrow(
+      'only in daemon-managed mode',
+    );
+    expect(() =>
+      createChannel(
+        { multiSession: true, sessionScope: 'chat_thread' },
+        { stateDir: '/tmp/channel-state' },
+      ),
+    ).toThrow('requires sessionScope "user"');
   });
 
   describe('proactive delivery boundary', () => {
@@ -3423,6 +3483,1166 @@ describe('ChannelBase', () => {
   });
 
   describe('slash commands', () => {
+    it('keeps named task catalogs isolated by sender without exposing session IDs', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel(
+        { multiSession: true, groupPolicy: 'open' },
+        { stateDir },
+      );
+      try {
+        await ch.handleInbound(
+          envelope({
+            senderId: 'alice',
+            chatId: 'group-1',
+            isGroup: true,
+            isMentioned: true,
+            text: '/session new review',
+          }),
+        );
+        await ch.handleInbound(
+          envelope({
+            senderId: 'bob',
+            chatId: 'group-1',
+            isGroup: true,
+            isMentioned: true,
+            text: '/session new review',
+          }),
+        );
+
+        ch.sent = [];
+        await ch.handleInbound(
+          envelope({
+            senderId: 'alice',
+            chatId: 'group-1',
+            isGroup: true,
+            isMentioned: true,
+            text: '/sessions all',
+          }),
+        );
+        expect(ch.sent[0]!.text).toContain('* review (open, shared)');
+        expect(ch.sent[0]!.text).not.toContain('s-1');
+        expect(ch.sent[0]!.text).not.toContain('s-2');
+
+        await ch.handleInbound(
+          envelope({
+            senderId: 'alice',
+            chatId: 'group-1',
+            isGroup: true,
+            isMentioned: true,
+            text: 'review this change',
+          }),
+        );
+        expect(bridge.prompt).toHaveBeenLastCalledWith(
+          's-1',
+          expect.stringContaining('review this change'),
+          expect.anything(),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('labels direct and group results while preserving raw response contexts', async () => {
+      const directState = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const groupState = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      try {
+        const direct = createChannel(
+          { multiSession: true },
+          { stateDir: directState },
+        );
+        await direct.handleInbound(envelope({ text: '/session new review' }));
+        direct.sent = [];
+        await direct.handleInbound(envelope({ text: 'review it' }));
+
+        expect(direct.sent).toEqual([
+          { chatId: 'chat1', text: '[review] agent response' },
+        ]);
+        expect(direct.responseCompletions[0]).toMatchObject({
+          text: 'agent response',
+          segment: { sourceLabel: '[review]' },
+        });
+        expect(bridge.prompt).toHaveBeenLastCalledWith(
+          's-1',
+          expect.any(String),
+          expect.anything(),
+        );
+
+        const groupBridge = createBridge();
+        bridge = groupBridge;
+        const group = createChannel(
+          { multiSession: true, groupPolicy: 'open' },
+          { stateDir: groupState },
+        );
+        await group.handleInbound(
+          envelope({
+            senderId: 'alice',
+            senderName: 'Alice [lead]',
+            chatId: 'group-1',
+            isGroup: true,
+            isMentioned: true,
+            text: '/session new feature-a',
+          }),
+        );
+        group.sent = [];
+        await group.handleInbound(
+          envelope({
+            senderId: 'alice',
+            senderName: 'Alice [lead]',
+            chatId: 'group-1',
+            isGroup: true,
+            isMentioned: true,
+            text: 'build it',
+          }),
+        );
+
+        expect(group.sent).toEqual([
+          {
+            chatId: 'group-1',
+            text: '[Alice lead · feature-a] agent response',
+          },
+        ]);
+      } finally {
+        rmSync(directState, { recursive: true, force: true });
+        rmSync(groupState, { recursive: true, force: true });
+      }
+    });
+
+    it('preserves the named task label on a rejected inbound turn', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const error = new Error('agent unavailable');
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+          error,
+        );
+        const failedEnvelope = envelope({ text: 'review it' });
+
+        let rejected: unknown;
+        try {
+          await ch.handleInbound(failedEnvelope);
+        } catch (caught) {
+          rejected = caught;
+        }
+
+        expect(rejected).toBe(error);
+        expect(ch.inboundErrorSourceLabelForTest(failedEnvelope)).toBe(
+          '[review]',
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not rewrite a primitive rejection when retaining its task label', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+          'agent unavailable',
+        );
+        const failedEnvelope = envelope({ text: 'review it' });
+
+        const result = await Promise.allSettled([
+          ch.handleInbound(failedEnvelope),
+        ]);
+
+        expect(result[0]).toEqual({
+          status: 'rejected',
+          reason: 'agent unavailable',
+        });
+        expect(ch.inboundErrorSourceLabelForTest(failedEnvelope)).toBe(
+          '[review]',
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps concurrent task labels separate when the bridge reuses an error', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const sharedError = new Error('agent unavailable');
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({
+            senderId: 'alice',
+            chatId: 'chat-a',
+            text: '/session new review',
+          }),
+        );
+        await ch.handleInbound(
+          envelope({
+            senderId: 'bob',
+            chatId: 'chat-b',
+            text: '/session new dev',
+          }),
+        );
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
+          sharedError,
+        );
+        const reviewEnvelope = envelope({
+          senderId: 'alice',
+          chatId: 'chat-a',
+          text: 'review it',
+        });
+        const devEnvelope = envelope({
+          senderId: 'bob',
+          chatId: 'chat-b',
+          text: 'build it',
+        });
+
+        const results = await Promise.allSettled([
+          ch.handleInbound(reviewEnvelope),
+          ch.handleInbound(devEnvelope),
+        ]);
+
+        expect(results).toEqual([
+          { status: 'rejected', reason: sharedError },
+          { status: 'rejected', reason: sharedError },
+        ]);
+        expect(ch.inboundErrorSourceLabelForTest(reviewEnvelope)).toBe(
+          '[review]',
+        );
+        expect(ch.inboundErrorSourceLabelForTest(devEnvelope)).toBe('[dev]');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('labels direct shell results and named permission prompts by exact task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const shellCommand = vi.fn().mockResolvedValue({
+        exitCode: 0,
+        output: 'ok',
+        aborted: false,
+      });
+      (
+        bridge as unknown as {
+          shellCommand: typeof shellCommand;
+        }
+      ).shellCommand = shellCommand;
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        ch.sent = [];
+        await ch.handleInbound(envelope({ text: '!npm test' }));
+        expect(ch.sent[0]!.text).toBe('[review] $ npm test\n```\nok\n```');
+
+        ch.sent = [];
+        await ch.dispatchPermissionRequest({
+          requestId: 'req-123',
+          sessionId: 's-1',
+          request: {
+            toolCall: { title: 'Run tests' },
+            options: [
+              { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+              {
+                optionId: 'proceed_always_project',
+                kind: 'allow_always',
+                name: 'Always',
+              },
+              { optionId: 'deny', kind: 'reject_once', name: 'Deny' },
+            ],
+          },
+        });
+        expect(ch.sent[0]!.text).toBe(
+          '[review] Permission required to run a tool\nRequest: req-123\n\nCommand:\nRun tests\n\nReply with:\n/approve req-123          allow once\n/approve-always req-123   always allow for this project\n/deny req-123             deny',
+        );
+
+        ch.sent = [];
+        await ch.handleInbound(envelope({ text: '/approve req-123' }));
+        expect(ch.sent[0]!.text).toBe('[review] Permission approved.');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('cancels a named permission invalidated during presentation lookup', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const router = new SessionRouter(bridge, '/tmp', 'user', undefined, {
+        recoveryMode: 'lazy',
+      });
+      const ch = createChannel({ multiSession: true }, { stateDir, router });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        ch.sent = [];
+        const dispatch = ch.dispatchPermissionRequest({
+          requestId: 'req-invalidated',
+          sessionId: 's-1',
+          request: {
+            toolCall: { title: 'Run tests' },
+            options: [
+              { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+            ],
+          },
+        });
+        ch.onSessionDied('s-1');
+        await dispatch;
+
+        expect(bridge.respondToPermission).toHaveBeenCalledWith(
+          'req-invalidated',
+          { outcome: { outcome: 'cancelled' } },
+        );
+        expect(ch.sent).toEqual([]);
+        expect(
+          (
+            ch as unknown as {
+              pendingPermissions: Map<string, unknown>;
+            }
+          ).pendingPermissions,
+        ).toEqual(new Map());
+        expect(
+          (
+            ch as unknown as {
+              isNamedSessionBusy: (sessionId: string) => boolean;
+            }
+          ).isNamedSessionBusy('s-1'),
+        ).toBe(false);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('cancels a named permission when presentation persistence fails', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        ch.sent = [];
+        const namedSessions = (
+          ch as unknown as {
+            namedSessions: {
+              resolvePresentation: (sessionId: string) => Promise<unknown>;
+            };
+          }
+        ).namedSessions;
+        vi.spyOn(namedSessions, 'resolvePresentation').mockRejectedValueOnce(
+          new Error('registry unavailable'),
+        );
+
+        await expect(
+          ch.dispatchPermissionRequest({
+            requestId: 'req-persist-failed',
+            sessionId: 's-1',
+            request: {
+              toolCall: { title: 'Run tests' },
+              options: [
+                { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+              ],
+            },
+          }),
+        ).rejects.toThrow('registry unavailable');
+
+        expect(bridge.respondToPermission).toHaveBeenCalledWith(
+          'req-persist-failed',
+          { outcome: { outcome: 'cancelled' } },
+        );
+        expect(ch.sent).toEqual([]);
+        expect(
+          (
+            ch as unknown as {
+              pendingPermissions: Map<string, unknown>;
+            }
+          ).pendingPermissions,
+        ).toEqual(new Map());
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps the turn label stable when contact data changes before permission', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const currentLabel = { value: 'Alice' };
+      const observe = vi.fn().mockResolvedValue(undefined);
+      const list = () => ({
+        users: [],
+        groups: [
+          {
+            channelName: 'test-chan',
+            id: 'group-1',
+            label: 'Group 1',
+            lastObservedAt: '2026-08-29T00:00:00.000Z',
+            users: [
+              {
+                id: 'alice',
+                label: currentLabel.value,
+                lastObservedAt: '2026-08-29T00:00:00.000Z',
+              },
+            ],
+            topics: [],
+          },
+        ],
+      });
+      let finishPrompt: (value: string) => void = () => {};
+      const ch = createChannel(
+        { multiSession: true, groupPolicy: 'open' },
+        { stateDir, observedContacts: { observe, list } },
+      );
+      try {
+        await ch.handleInbound(
+          envelope({
+            senderId: 'alice',
+            senderName: '',
+            chatId: 'group-1',
+            isGroup: true,
+            isMentioned: true,
+            text: '/session new review',
+          }),
+        );
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+          () =>
+            new Promise<string>((resolve) => {
+              finishPrompt = resolve;
+            }),
+        );
+        ch.sent = [];
+        const turn = ch.handleInbound(
+          envelope({
+            senderId: 'alice',
+            senderName: '',
+            chatId: 'group-1',
+            isGroup: true,
+            isMentioned: true,
+            text: 'review it',
+          }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+        currentLabel.value = 'Renamed Alice';
+        await ch.dispatchPermissionRequest({
+          requestId: 'req-stable-label',
+          sessionId: 's-1',
+          request: {
+            toolCall: { title: 'Run tests' },
+            options: [
+              { optionId: 'once', kind: 'allow_once', name: 'Allow once' },
+            ],
+          },
+        });
+
+        expect(ch.sent[0]?.text).toContain(
+          '[Alice · review] Permission required to run a tool',
+        );
+        expect(ch.sent[0]?.text).not.toContain('Renamed Alice');
+        finishPrompt('done');
+        await turn;
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('labels named background delivery and suppresses whitespace-only bodies', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        ch.sent = [];
+        await ch.dispatchBackgroundResponse('s-1', 'background result');
+        await ch.dispatchBackgroundResponse('s-1', '   ');
+
+        expect(ch.sent).toEqual([
+          { chatId: 'chat1', text: '[review] background result' },
+        ]);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects named background delivery invalidated during presentation lookup', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const router = new SessionRouter(bridge, '/tmp', 'user', undefined, {
+        recoveryMode: 'lazy',
+      });
+      const ch = createChannel({ multiSession: true }, { stateDir, router });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        ch.sent = [];
+        const dispatch = ch.dispatchBackgroundResponse(
+          's-1',
+          'background result',
+        );
+        ch.onSessionDied('s-1');
+
+        await expect(dispatch).rejects.toThrow(
+          'Named background response ownership is unavailable.',
+        );
+        expect(ch.sent).toEqual([]);
+        expect(ch.proactive).toEqual([]);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps attributed Markdown bodies on a fresh line', () => {
+      const ch = createChannel();
+
+      expect(
+        ch.formatMarkdownForTest('```ts\nconst x = 1;\n```', '[review]'),
+      ).toBe('\\[review\\]\n```ts\nconst x = 1;\n```');
+    });
+
+    it('rejects switching while ChannelBase still owns an unfinished turn', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishPrompt!: (response: string) => void;
+      vi.mocked(bridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishPrompt = resolve;
+          }),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        const running = ch.handleInbound(envelope({ text: 'long task' }));
+        while (!finishPrompt) await Promise.resolve();
+
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+        expect(ch.sent.at(-1)!.text).toContain(
+          'still running or waiting for permission',
+        );
+        expect(bridge.newSession).toHaveBeenCalledTimes(1);
+
+        finishPrompt('done');
+        await running;
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reserves a named turn before an exact reload releases the owner lock', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const recoveredBridge = createBridge();
+      let finishLoad!: (sessionId: string) => void;
+      let finishPrompt!: (response: string) => void;
+      vi.mocked(recoveredBridge.loadSession).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishLoad = resolve;
+          }),
+      );
+      vi.mocked(recoveredBridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishPrompt = resolve;
+          }),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+        ch.setBridge(recoveredBridge);
+
+        const turn = ch.handleInbound(envelope({ text: 'continue feature' }));
+        await vi.waitFor(() =>
+          expect(recoveredBridge.loadSession).toHaveBeenCalledWith(
+            's-2',
+            '/tmp',
+            { sourceId: 'test-chan' },
+            expect.anything(),
+          ),
+        );
+        const switching = ch.handleInbound(
+          envelope({ text: '/session use review' }),
+        );
+
+        finishLoad('s-2');
+        await switching;
+        expect(ch.sent.at(-1)!.text).toContain(
+          'still running or waiting for permission',
+        );
+        await vi.waitFor(() =>
+          expect(recoveredBridge.prompt).toHaveBeenCalledTimes(1),
+        );
+        expect(recoveredBridge.prompt).toHaveBeenCalledWith(
+          's-2',
+          expect.stringContaining('continue feature'),
+          expect.anything(),
+        );
+
+        finishPrompt('done');
+        await turn;
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('re-reserves a retried envelope after an exact reload fails', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const recoveredBridge = createBridge();
+      let finishLoad!: (sessionId: string) => void;
+      let finishPrompt!: (response: string) => void;
+      vi.mocked(recoveredBridge.loadSession)
+        .mockRejectedValueOnce(new Error('load failed'))
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((resolve) => {
+              finishLoad = resolve;
+            }),
+        );
+      vi.mocked(recoveredBridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishPrompt = resolve;
+          }),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      const message = envelope({ text: 'retry feature' });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+        ch.setBridge(recoveredBridge);
+
+        await ch.handleInbound(message);
+        expect(ch.sent.at(-1)!.text).toContain('Could not load task');
+
+        const retried = ch.handleInbound(message);
+        await vi.waitFor(() =>
+          expect(recoveredBridge.loadSession).toHaveBeenCalledTimes(2),
+        );
+        const switching = ch.handleInbound(
+          envelope({ text: '/session use review' }),
+        );
+
+        finishLoad('s-2');
+        await switching;
+        expect(ch.sent.at(-1)!.text).toContain(
+          'still running or waiting for permission',
+        );
+        await vi.waitFor(() =>
+          expect(recoveredBridge.prompt).toHaveBeenCalledTimes(1),
+        );
+        expect(recoveredBridge.prompt).toHaveBeenCalledWith(
+          's-2',
+          expect.stringContaining('retry feature'),
+          expect.anything(),
+        );
+
+        finishPrompt('done');
+        await retried;
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reserves the selected task before asynchronous inbound preprocessing', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishObservation!: () => void;
+      const observation = new Promise<void>((resolve) => {
+        finishObservation = resolve;
+      });
+      const observe = vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(undefined)
+        .mockReturnValueOnce(observation)
+        .mockResolvedValue(undefined);
+      const ch = createChannel(
+        { multiSession: true },
+        { stateDir, observedContacts: { observe } },
+      );
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+
+        const turn = ch.handleInbound(envelope({ text: 'continue feature' }));
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(3));
+        await ch.handleInbound(envelope({ text: '/session use review' }));
+        expect(ch.sent.at(-1)!.text).toContain(
+          'still running or waiting for permission',
+        );
+
+        finishObservation();
+        await turn;
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          's-2',
+          expect.stringContaining('continue feature'),
+          expect.anything(),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reserves the selected task before adapter media preparation', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishPreparation!: () => void;
+      const preparation = new Promise<void>((resolve) => {
+        finishPreparation = resolve;
+      });
+      const prepare = vi.fn(() => preparation);
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+
+        const turn = ch.handlePreparedInbound(
+          envelope({ text: 'slow image' }),
+          prepare,
+        );
+        await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+        const switching = ch.handleInbound(
+          envelope({ text: '/session use review' }),
+        );
+
+        finishPreparation();
+        await switching;
+        expect(ch.sent.at(-1)!.text).toContain(
+          'still running or waiting for permission',
+        );
+
+        await turn;
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          's-2',
+          expect.stringContaining('slow image'),
+          expect.anything(),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps the selected task while preparation changes a command into an agent turn', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishPreparation!: () => void;
+      let finishPrompt!: (response: string) => void;
+      const preparation = new Promise<void>((resolve) => {
+        finishPreparation = resolve;
+      });
+      vi.mocked(bridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishPrompt = resolve;
+          }),
+      );
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      const message = envelope({ text: '/help' });
+      const prepare = vi.fn(async () => {
+        await preparation;
+        message.text = '[quoted context]\n/help';
+      });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+
+        const turn = ch.handlePreparedInbound(message, prepare);
+        await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+        const switching = ch.handleInbound(
+          envelope({ text: '/session use review' }),
+        );
+
+        finishPreparation();
+        await switching;
+        expect(ch.sent.at(-1)!.text).toContain(
+          'still running or waiting for permission',
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          's-2',
+          expect.stringContaining('[quoted context]\n/help'),
+          expect.anything(),
+        );
+
+        finishPrompt('done');
+        await turn;
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not create a default task when prepared text remains a local command', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handlePreparedInbound(
+          envelope({ text: '/help' }),
+          async () => undefined,
+        );
+
+        expect(bridge.newSession).not.toHaveBeenCalled();
+        expect(ch.sent.at(-1)!.text).toContain('Commands:');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      {
+        label: 'aborted',
+        prepare: async () => false,
+        error: undefined,
+      },
+      {
+        label: 'failed',
+        prepare: async () => {
+          throw new Error('download failed');
+        },
+        error: 'download failed',
+      },
+    ])(
+      'releases the named task when adapter preparation is $label',
+      async ({ prepare, error }) => {
+        const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+        const ch = createChannel({ multiSession: true }, { stateDir });
+        try {
+          await ch.handleInbound(envelope({ text: '/session new review' }));
+          await ch.handleInbound(envelope({ text: '/session new feature' }));
+
+          const prepared = ch.handlePreparedInbound(
+            envelope({ text: 'media message' }),
+            prepare,
+          );
+          if (error) {
+            await expect(prepared).rejects.toThrow(error);
+          } else {
+            await prepared;
+          }
+          expect(bridge.prompt).not.toHaveBeenCalled();
+
+          await ch.handleInbound(envelope({ text: '/session use review' }));
+          expect(ch.sent.at(-1)!.text).toContain('Selected task "review"');
+        } finally {
+          rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('creates and reserves the default task before preprocessing the first message', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishObservation!: () => void;
+      const observation = new Promise<void>((resolve) => {
+        finishObservation = resolve;
+      });
+      const observe = vi
+        .fn()
+        .mockReturnValueOnce(observation)
+        .mockResolvedValue(undefined);
+      const ch = createChannel(
+        { multiSession: true },
+        { stateDir, observedContacts: { observe } },
+      );
+      try {
+        const first = ch.handleInbound(envelope({ text: 'first task' }));
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(1));
+        expect(bridge.newSession).toHaveBeenCalledTimes(1);
+
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+        expect(ch.sent.at(-1)!.text).toContain(
+          'still running or waiting for permission',
+        );
+        expect(bridge.newSession).toHaveBeenCalledTimes(1);
+
+        finishObservation();
+        await first;
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          's-1',
+          expect.stringContaining('first task'),
+          expect.anything(),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not retarget a message received while no task was selected', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishObservation!: () => void;
+      const observation = new Promise<void>((resolve) => {
+        finishObservation = resolve;
+      });
+      const observe = vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(undefined)
+        .mockReturnValueOnce(observation)
+        .mockResolvedValue(undefined);
+      const ch = createChannel(
+        { multiSession: true },
+        { stateDir, observedContacts: { observe } },
+      );
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session close review' }));
+
+        const pending = ch.handleInbound(envelope({ text: 'review this' }));
+        await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(3));
+        await ch.handleInbound(envelope({ text: '/session use review' }));
+        expect(ch.sent.at(-1)!.text).toContain('Selected task "review"');
+
+        finishObservation();
+        await pending;
+        expect(bridge.prompt).not.toHaveBeenCalled();
+        expect(ch.sent.at(-1)!.text).toContain(
+          'No task was selected when this message was received',
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps a named task busy for the full shell command', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishShell!: (result: {
+        exitCode: number | null;
+        output: string;
+        aborted: boolean;
+      }) => void;
+      const shellCommand = vi.fn(
+        () =>
+          new Promise<{
+            exitCode: number | null;
+            output: string;
+            aborted: boolean;
+          }>((resolve) => {
+            finishShell = resolve;
+          }),
+      );
+      (
+        bridge as unknown as {
+          shellCommand: typeof shellCommand;
+        }
+      ).shellCommand = shellCommand;
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+
+        const running = ch.handleInbound(envelope({ text: '!npm test' }));
+        await vi.waitFor(() => expect(shellCommand).toHaveBeenCalledTimes(1));
+        await ch.handleInbound(envelope({ text: '/session use review' }));
+        expect(ch.sent.at(-1)!.text).toContain(
+          'still running or waiting for permission',
+        );
+        await ch.handleInbound(envelope({ text: '/session close feature' }));
+        expect(ch.sent.at(-1)!.text).toContain(
+          'still running or waiting for permission',
+        );
+
+        finishShell({ exitCode: 0, output: 'ok', aborted: false });
+        await running;
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects switching or closing while a named turn is queued in memory recall', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishRecall!: (entries: ChannelMemoryEntry[]) => void;
+      const recall = new Promise<ChannelMemoryEntry[]>((resolve) => {
+        finishRecall = resolve;
+      });
+      const channelMemory = createChannelMemory();
+      channelMemory.listChannelMemoryEntries.mockReturnValueOnce(recall);
+      const ch = createChannel(
+        { multiSession: true },
+        { stateDir, channelMemory },
+      );
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+
+        const queued = ch.handleInbound(envelope({ text: 'build it' }));
+        await vi.waitFor(() =>
+          expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(
+            1,
+          ),
+        );
+        expect(bridge.prompt).not.toHaveBeenCalled();
+
+        await ch.handleInbound(envelope({ text: '/session use review' }));
+        expect(ch.sent.at(-1)!.text).toContain(
+          'still running or waiting for permission',
+        );
+        await ch.handleInbound(envelope({ text: '/session close feature' }));
+        expect(ch.sent.at(-1)!.text).toContain(
+          'still running or waiting for permission',
+        );
+        expect(bridge.loadSession).not.toHaveBeenCalled();
+        expect(bridge.discardSession).not.toHaveBeenCalled();
+
+        finishRecall([]);
+        await queued;
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          's-2',
+          expect.stringContaining('build it'),
+          expect.anything(),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps a collected named turn bound and drops it after reset', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      let finishFirst!: (response: string) => void;
+      let finishClassification!: (result: {
+        intent: string;
+        confidence: number;
+      }) => void;
+      const classification = new Promise<{
+        intent: string;
+        confidence: number;
+      }>((resolve) => {
+        finishClassification = resolve;
+      });
+      const channelMemory = createChannelMemory();
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi
+          .fn()
+          .mockResolvedValueOnce({ intent: 'none', confidence: 0.9 })
+          .mockReturnValueOnce(classification),
+      };
+      vi.mocked(bridge.prompt).mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishFirst = resolve;
+          }),
+      );
+      const ch = createChannel(
+        { multiSession: true, dispatchMode: 'collect' },
+        { stateDir, channelMemory, memoryIntentClassifier },
+      );
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+
+        const first = ch.handleInbound(envelope({ text: 'build feature' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        await ch.handleInbound(envelope({ text: 'update feature' }));
+
+        finishFirst('done');
+        await first;
+        await vi.waitFor(() =>
+          expect(
+            memoryIntentClassifier.classifyChannelMemoryIntent,
+          ).toHaveBeenCalledTimes(2),
+        );
+
+        await ch.handleInbound(envelope({ text: '/session use review' }));
+        expect(ch.sent.at(-1)!.text).toContain(
+          'still running or waiting for permission',
+        );
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+        expect(ch.sent.at(-1)!.text).toContain('Task "feature" reset');
+        finishClassification({ intent: 'none', confidence: 0.9 });
+        await vi.waitFor(() =>
+          expect(
+            (ch as unknown as { queuedTurns: Map<string, number> }).queuedTurns
+              .size,
+          ).toBe(0),
+        );
+
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+        expect(bridge.prompt).toHaveBeenCalledWith(
+          's-2',
+          expect.stringContaining('build feature'),
+          expect.anything(),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('cancels the exact named owner when legacy route keys collide', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const finishPrompts = new Map<string, (response: string) => void>();
+      vi.mocked(bridge.prompt).mockImplementation(
+        (sessionId: string) =>
+          new Promise<string>((resolve) => {
+            finishPrompts.set(sessionId, resolve);
+          }),
+      );
+      vi.mocked(bridge.cancelSession).mockImplementation(async (sessionId) => {
+        finishPrompts.get(sessionId)?.('cancelled');
+      });
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      ch.enableCancelCommand();
+      const alice = { senderId: 'alice:x', chatId: 'group' };
+      const bob = { senderId: 'alice', chatId: 'x:group' };
+      try {
+        await ch.handleInbound(
+          envelope({ ...alice, text: '/session new review' }),
+        );
+        await ch.handleInbound(
+          envelope({ ...bob, text: '/session new review' }),
+        );
+        const alicePrompt = ch.handleInbound(
+          envelope({ ...alice, text: 'alice task' }),
+        );
+        const bobPrompt = ch.handleInbound(
+          envelope({ ...bob, text: 'bob task' }),
+        );
+        await vi.waitFor(() => expect(finishPrompts.size).toBe(2));
+
+        await ch.handleInbound(envelope({ ...alice, text: '/cancel' }));
+
+        expect(bridge.cancelSession).toHaveBeenCalledWith('s-1');
+        expect(bridge.cancelSession).not.toHaveBeenCalledWith('s-2');
+        finishPrompts.get('s-2')?.('done');
+        await Promise.all([alicePrompt, bobPrompt]);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('closes and reopens the exact named task and resets only the selected task', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        await ch.handleInbound(envelope({ text: '/session new feature' }));
+        await ch.handleInbound(envelope({ text: '/session close review' }));
+        expect(ch.sent.at(-1)!.text).toBe(
+          'Closed task "review". Selected "feature".',
+        );
+        await ch.handleInbound(envelope({ text: '/session use review' }));
+        expect(bridge.loadSession).toHaveBeenCalledWith(
+          's-1',
+          '/tmp',
+          { sourceId: 'test-chan' },
+          expect.anything(),
+        );
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+        expect(ch.sent.at(-1)!.text).toContain('Task "review" reset');
+        expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+
+        await ch.handleInbound(envelope({ text: '/session use feature' }));
+        await ch.handleInbound(envelope({ text: '/session use review' }));
+        await ch.handleInbound(envelope({ text: '/session current' }));
+        expect(ch.sent.at(-1)!.text).toContain('Current task: review');
+        expect(bridge.loadSession).toHaveBeenCalledTimes(1);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports the Part 2 cancellation boundary without promising /cancel on every adapter', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session cancel' }));
+
+        expect(ch.sent.at(-1)!.text).toBe(
+          'Named task cancellation is not available in Part 2 yet. Wait for the selected task to finish before switching; Telegram users can use /cancel.',
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('leaves /sessions available to the agent when named sessions are disabled', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(envelope({ text: '/sessions' }));
+
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        's-1',
+        expect.stringContaining('/sessions'),
+        expect.anything(),
+      );
+    });
+
     it('/help sends command list', async () => {
       const ch = createChannel();
       await ch.handleInbound(envelope({ text: '/help' }));
@@ -13525,6 +14745,34 @@ describe('ChannelBase', () => {
       expect(ch.responseDeliveries).toEqual([
         { chatId: 'chat1', text: 'reply', sessionId: 's-1' },
       ]);
+    });
+
+    it('settles turn cleanup only after queued block sends land', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'first paragraph body\n\n',
+          );
+          return Promise.reject(new Error('agent boom'));
+        },
+      );
+      const ch = new SlowBlockSendChannel(
+        'test-chan',
+        defaultConfig({
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 5, maxChars: 100 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        }),
+        bridge,
+      );
+
+      await expect(ch.handleInbound(envelope())).rejects.toThrow('agent boom');
+
+      // The failed turn's queued block send must have completed before
+      // onPromptEnd settled turn-scoped adapter state.
+      expect(ch.completionsAtPromptEnd).toEqual([1]);
     });
 
     it('uses block streamer when blockStreaming=on', async () => {
