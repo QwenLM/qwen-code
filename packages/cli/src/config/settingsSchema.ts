@@ -631,17 +631,6 @@ const SETTINGS_SCHEMA = {
           'or set a specific language.',
         showInDialog: true,
       },
-      dynamicCommandTranslation: {
-        type: 'boolean',
-        label: 'Language: Dynamic Command Translation',
-        category: 'General',
-        requiresRestart: false,
-        default: false,
-        description:
-          'Enable AI translation for dynamic slash command descriptions. ' +
-          'When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.',
-        showInDialog: true,
-      },
       terminalBell: {
         type: 'boolean',
         label: 'Terminal Bell Notification',
@@ -1751,7 +1740,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: undefined as number | undefined,
             description:
-              'Maximum inactivity between streamed chunks for OpenAI-compatible models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.',
+              'Maximum inactivity between streamed chunks for OpenAI-compatible and Anthropic models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.',
             minimum: 0,
             maximum: 2_147_483_647,
             parentKey: 'generationConfig',
@@ -2534,6 +2523,31 @@ const SETTINGS_SCHEMA = {
               'environments.',
             showInDialog: false,
           },
+          mcp: {
+            type: 'object',
+            label: 'Auto Mode MCP Tools',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description: 'AUTO classifier controls for third-party MCP tools.',
+            showInDialog: false,
+            properties: {
+              forwardArguments: {
+                type: 'boolean',
+                label: 'Forward MCP Arguments To Classifier',
+                category: 'Tools',
+                requiresRestart: true,
+                default: true,
+                description:
+                  'Forward MCP tool arguments (bounded and truncated) to the ' +
+                  'AUTO classifier so it can judge what the agent is about ' +
+                  'to send to the server. When false the classifier sees ' +
+                  'only the tool name, which usually results in a ' +
+                  'conservative block.',
+                showInDialog: false,
+              },
+            },
+          },
         },
       },
     },
@@ -3280,7 +3294,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on both opens this session to peer messages and makes it discoverable to others.',
+          'Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on opens this session to peer messages, makes it discoverable to others, and lets its model address them from send_message.',
         showInDialog: false,
       },
       crossSessionInbound: {

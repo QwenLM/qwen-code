@@ -30,6 +30,7 @@ vi.mock('node:fs', async (importOriginal) => {
       appendFile: vi.fn().mockResolvedValue(undefined),
       unlink: vi.fn().mockResolvedValue(undefined),
       symlink: vi.fn().mockResolvedValue(undefined),
+      readlink: vi.fn().mockResolvedValue(''),
       copyFile: vi.fn().mockResolvedValue(undefined),
     },
   };
@@ -57,6 +58,13 @@ describe('debugLogger', () => {
     await vi.runAllTimersAsync();
     resetDebugLoggingState();
     vi.clearAllMocks();
+    vi.mocked(fs.readlink).mockImplementation(async () => {
+      const target = vi.mocked(fs.symlink).mock.calls.at(-1)?.[0];
+      if (typeof target !== 'string') {
+        throw new Error('symlink target unavailable');
+      }
+      return target;
+    });
     vi.mocked(getTraceContext).mockReturnValue(null);
   });
 
@@ -459,12 +467,160 @@ describe('debugLogger', () => {
     it('does not fall back to copy when symlink fails', async () => {
       resetDebugLoggingState();
       vi.mocked(fs.symlink).mockRejectedValueOnce(new Error('EPERM'));
+      vi.mocked(fs.readlink).mockRejectedValueOnce(new Error('ENOENT'));
 
       setDebugLogSession(uuidSession);
 
       await vi.runAllTimersAsync();
 
       expect(fs.copyFile).not.toHaveBeenCalled();
+    });
+
+    it('retries the latest alias after a failed update', async () => {
+      resetDebugLoggingState();
+      vi.mocked(fs.symlink)
+        .mockRejectedValueOnce(new Error('EPERM'))
+        .mockResolvedValue(undefined);
+      vi.mocked(fs.readlink)
+        .mockRejectedValueOnce(new Error('ENOENT'))
+        .mockResolvedValue('92ec0176-d354-4147-848b-5cd2d80609c4.txt');
+
+      setDebugLogSession(uuidSession);
+      await vi.runAllTimersAsync();
+      expect(fs.symlink).toHaveBeenCalledOnce();
+
+      createDebugLogger().info('retry alias update');
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).toHaveBeenCalledTimes(2);
+      expect(fs.symlink).toHaveBeenLastCalledWith(
+        '92ec0176-d354-4147-848b-5cd2d80609c4.txt',
+        expectedLatestPath,
+      );
+
+      // A successful (re)try must leave the dedup marker in place: another
+      // write for the same session may not re-run the alias update.
+      createDebugLogger().info('same session again');
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).toHaveBeenCalledTimes(2);
+    });
+
+    it('resets the failure streak on a successful alias update', async () => {
+      resetDebugLoggingState();
+      const otherSession = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      vi.mocked(fs.symlink).mockResolvedValue(undefined);
+      vi.mocked(fs.readlink)
+        // A's first attempt fails, its retry verifies successfully.
+        .mockRejectedValueOnce(new Error('ENOENT'))
+        .mockResolvedValueOnce('92ec0176-d354-4147-848b-5cd2d80609c4.txt')
+        // B's first attempt "succeeds" at the fs level but points at the
+        // wrong target — the mismatch branch must count as a failure.
+        .mockResolvedValueOnce('92ec0176-d354-4147-848b-5cd2d80609c4.txt')
+        .mockRejectedValue(new Error('ENOENT'));
+
+      setDebugLogSession(uuidSession);
+      await vi.runAllTimersAsync();
+
+      const logger = createDebugLogger();
+      logger.info('A retries');
+      await vi.runAllTimersAsync();
+      expect(fs.symlink).toHaveBeenCalledTimes(2);
+
+      // A's success reset the streak, so B's two failures land at streak 1
+      // and 2 — below the cap — and B still gets a third attempt. Without
+      // the reset, A's initial failure would push B's second failure to the
+      // cap and the marker would go sticky one failure early.
+      sessionIdContext.run(otherSession, () => {
+        logger.info('B first failure');
+      });
+      await vi.runAllTimersAsync();
+      sessionIdContext.run(otherSession, () => {
+        logger.info('B second failure');
+      });
+      await vi.runAllTimersAsync();
+      sessionIdContext.run(otherSession, () => {
+        logger.info('B third attempt');
+      });
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).toHaveBeenCalledTimes(5);
+
+      // Restore the factory defaults for later tests.
+      vi.mocked(fs.symlink).mockResolvedValue(undefined);
+      vi.mocked(fs.readlink).mockResolvedValue('');
+    });
+
+    it('stops retrying the alias after consecutive persistent failures', async () => {
+      resetDebugLoggingState();
+      vi.mocked(fs.symlink).mockRejectedValue(new Error('EPERM'));
+      vi.mocked(fs.readlink).mockRejectedValue(new Error('ENOENT'));
+
+      setDebugLogSession(uuidSession);
+      await vi.runAllTimersAsync();
+
+      const logger = createDebugLogger();
+      for (let i = 0; i < 5; i += 1) {
+        logger.info(`doomed alias attempt ${i}`);
+        await vi.runAllTimersAsync();
+      }
+
+      // Attempts 1-3 retry; at the streak cap the marker stays sticky, so
+      // the remaining writes must not re-run the doomed unlink/symlink.
+      expect(fs.symlink).toHaveBeenCalledTimes(3);
+
+      // Restore the factory defaults for later tests.
+      vi.mocked(fs.symlink).mockResolvedValue(undefined);
+      vi.mocked(fs.readlink).mockResolvedValue('');
+    });
+
+    it('does not let a stale failed update clear a newer session marker', async () => {
+      resetDebugLoggingState();
+      vi.clearAllMocks();
+
+      const otherSession = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      const deferreds: Array<{
+        resolve: () => void;
+        reject: (err: Error) => void;
+      }> = [];
+      vi.mocked(fs.symlink).mockImplementation(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            deferreds.push({ resolve: () => resolve(), reject });
+          }),
+      );
+      vi.mocked(fs.unlink).mockResolvedValue(undefined);
+      vi.mocked(fs.readlink).mockResolvedValue(`${otherSession}.txt`);
+
+      const logger = createDebugLogger();
+      sessionIdContext.run('92ec0176-d354-4147-848b-5cd2d80609c4', () => {
+        logger.info('message from A');
+      });
+      sessionIdContext.run(otherSession, () => {
+        logger.info('message from B');
+      });
+      await vi.runAllTimersAsync();
+
+      // A's update fails only after B's was scheduled (B owns the marker).
+      deferreds[0]!.reject(new Error('EPERM'));
+      await vi.runAllTimersAsync();
+      deferreds[1]!.resolve();
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).toHaveBeenCalledTimes(2);
+
+      // B's marker must have survived A's stale failure: another write from
+      // B may not re-run the alias update.
+      sessionIdContext.run(otherSession, () => {
+        logger.info('B again');
+      });
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).toHaveBeenCalledTimes(2);
+
+      // Restore the factory defaults for later tests.
+      vi.mocked(fs.symlink).mockResolvedValue(undefined);
+      vi.mocked(fs.readlink).mockResolvedValue('');
     });
 
     it('does not create symlink when debug logging is disabled', async () => {

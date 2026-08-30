@@ -38,6 +38,7 @@ interface Harness {
 async function makeHarness(opts?: {
   trusted?: boolean;
   token?: string;
+  hostname?: string;
   generationGuard?: { assertOpen(): void };
   workspaceName?: string;
 }): Promise<Harness> {
@@ -58,7 +59,12 @@ async function makeHarness(opts?: {
     ...(opts?.generationGuard ? { generationGuard: opts.generationGuard } : {}),
   });
   const app = createServeApp(
-    { ...baseOpts, workspace, token: opts?.token },
+    {
+      ...baseOpts,
+      workspace,
+      token: opts?.token,
+      hostname: opts?.hostname ?? baseOpts.hostname,
+    },
     undefined,
     { fsFactory },
   );
@@ -160,15 +166,36 @@ describe('POST /file/write', () => {
   });
   afterEach(async () => teardown(h));
 
-  it('requires a token even on loopback no-token defaults', async () => {
+  it('writes through the trusted-loopback primary listener without a token', async () => {
     await teardown(h);
     h = await makeHarness();
     const res = await request(h.app)
       .post('/file/write')
       .set('Host', loopbackHost())
       .send({ path: 'a.txt', content: 'x', mode: 'create' });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      kind: 'file_write',
+      path: 'a.txt',
+      created: true,
+      hash: rawHash('x'),
+    });
+    expect(await fsp.readFile(path.join(h.workspace, 'a.txt'), 'utf8')).toBe(
+      'x',
+    );
+  });
+
+  it('denies a non-trusted tokenless embed before writing', async () => {
+    await teardown(h);
+    h = await makeHarness({ hostname: '192.0.2.1' });
+    const res = await request(h.app)
+      .post('/file/write')
+      .send({ path: 'denied.txt', content: 'x', mode: 'create' });
     expect(res.status).toBe(401);
     expect(res.body.code).toBe('token_required');
+    await expect(
+      fsp.stat(path.join(h.workspace, 'denied.txt')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('creates a text file with no-store headers', async () => {
@@ -804,7 +831,7 @@ describe('POST /file/upload', () => {
     expect(res.body.errorKind).toBe('untrusted_workspace');
   });
 
-  it('requires a token', async () => {
+  it('uploads through trusted loopback without a token', async () => {
     await teardown(h);
     h = await makeHarness();
     const res = await request(h.app)
@@ -813,7 +840,29 @@ describe('POST /file/upload', () => {
       .set('Content-Type', 'application/octet-stream')
       .query({ path: 'a.bin' })
       .send(Buffer.from('x'));
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      kind: 'file_upload',
+      path: 'a.bin',
+    });
+    expect(await fsp.readFile(path.join(h.workspace, 'a.bin'), 'utf8')).toBe(
+      'x',
+    );
+  });
+
+  it('denies a non-trusted tokenless embed before uploading', async () => {
+    await teardown(h);
+    h = await makeHarness({ hostname: '192.0.2.1' });
+    const res = await request(h.app)
+      .post('/file/upload')
+      .set('Content-Type', 'application/octet-stream')
+      .query({ path: 'denied.bin' })
+      .send(Buffer.from('x'));
     expect(res.status).toBe(401);
+    expect(res.body.code).toBe('token_required');
+    await expect(
+      fsp.stat(path.join(h.workspace, 'denied.bin')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('rejects "." and ".." basenames with parse_error', async () => {
