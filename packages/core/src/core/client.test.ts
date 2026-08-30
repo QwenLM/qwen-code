@@ -2530,6 +2530,66 @@ describe('Gemini Client (client.ts)', () => {
       });
     });
 
+    it('announces a mid-session eager-revealed MCP tool on disconnect and again on a flap (R1-28)', async () => {
+      // The eager-reveal seed alone only reaches announcedMcpToolNames via
+      // rememberAnnouncedDeferredTools, which runs exclusively in startChat.
+      // A server that registers AFTER the initial startChat is eagerly
+      // revealed by a mid-session setTools(); the reveal itself is the
+      // announcement, so its disconnect — before any new startChat — must
+      // still produce the removal reminder, and a reconnect/disconnect flap
+      // must announce it a second time (R1-28).
+      const reg = getRegistryMock();
+      const tool = {
+        name: 'mcp__late__do',
+        description: 'd',
+        serverName: 'late',
+      };
+      let registered = false;
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' || (n === tool.name && registered)
+          ? ({} as never)
+          : null,
+      );
+      reg.getDeferredToolSummary.mockImplementation(() =>
+        registered ? [tool] : [],
+      );
+      reg.isPermissionDeferred.mockReturnValue(false);
+
+      await client.startChat();
+      // Not registered yet: nothing revealed at the initial startChat.
+      expect(reg.revealDeferredTool).not.toHaveBeenCalledWith(tool.name);
+
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
+
+      // Mid-session registration: the incomplete bridge eagerly reveals it.
+      registered = true;
+      await client.setTools();
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith(tool.name);
+
+      // Disconnect before any new startChat: still announced.
+      registered = false;
+      await client.setTools();
+      await runTurn();
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [],
+        ['mcp__late__do'],
+      );
+
+      // Flap: reconnect re-reveals (re-announces), a second disconnect must
+      // announce the removal again instead of staying silent.
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
+      registered = true;
+      await client.setTools();
+      registered = false;
+      await client.setTools();
+      await runTurn();
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [],
+        ['mcp__late__do'],
+      );
+    });
+
     it('does not announce a still-registered tool as removed after history reveals it', async () => {
       const reg = getRegistryMock();
       const tool = {
@@ -2748,6 +2808,12 @@ describe('Gemini Client (client.ts)', () => {
       // Names the tool, so the report is actionable without a debug session.
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('write_file'),
+      );
+      // The remedy clause must enumerate every unregistration cause —
+      // including a tools.disabled entry — so an operator whose bridge half
+      // is disabled (not merely denied) gets an actionable fix (R1-15).
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('tools.disabled'),
       );
       warnSpy.mockRestore();
     });

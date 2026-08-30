@@ -1714,6 +1714,15 @@ export class LlmClient {
             // Keep the disconnect-announcement path seeded even though the
             // reminder list is undefined in this state (see the field).
             this.eagerlyRevealedMcpToolNames.add(t.name);
+            // Track the reveal as an announcement as well: the model now
+            // sees the tool, so a later disconnect must announce its
+            // removal. A mid-session setTools() reveal never passes through
+            // rememberAnnouncedDeferredTools (startChat-only), which is the
+            // sole path promoting the seed into announcedMcpToolNames —
+            // without this, a server that registers after the initial
+            // startChat disconnects silently and the model keeps calling a
+            // dead server's tools (R1-28).
+            this.announcedMcpToolNames.add(t.name);
           }
         }
         if (withheld.length > 0 && !this.warnedAboutUnreachableEagerTools) {
@@ -1731,7 +1740,7 @@ export class LlmClient {
               `ToolSearch + ToolCall bridge is incomplete (${missingHalves.join(' and ')} not registered), ` +
               `so nothing can load them on demand and they are unreachable until restart: ${withheld.join(', ')}. ` +
               `Enable tools.toolSearch.enabled (which registers both bridge tools) and drop any ` +
-              `tool_search/tool_call deny rule or --exclude-tools entry to keep them loadable, ` +
+              `tool_search/tool_call deny rule, --exclude-tools entry, or tools.disabled entry to keep them loadable, ` +
               `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,
           );
         }

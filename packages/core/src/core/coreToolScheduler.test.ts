@@ -1343,6 +1343,101 @@ describe('CoreToolScheduler', () => {
     }
   });
 
+  it('prunes the bridge-keyed retry counter across a successful bridged execution', async () => {
+    // R1-18: invalid envelopes record under the model-facing name
+    // (`tool_call:<msg>`), while a successfully resolved envelope renames the
+    // request to the resolved TARGET before the batch-start prune runs — so
+    // the prune is the only mechanism that clears a stale `tool_call:` count
+    // across a successful bridged execution. Interleave one: without the
+    // prune (e.g. a refactor keying presence by model-facing name), the count
+    // of 2 would survive the successful call and the next two identical
+    // failures would reach the threshold and inject RETRY LOOP DETECTED
+    // prematurely — while the direct-tool isolation test stays green, because
+    // there recording and prune names never diverge.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [{ text: 'issue created' }],
+      returnDisplay: 'issue created',
+    });
+    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
+    const deferred = new MockTool({
+      name: 'mcp__github__create_issue',
+      shouldDefer: true,
+      execute,
+    });
+    const { scheduler, ensureTool, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [bridge.name, bridge],
+          [deferred.name, deferred],
+        ]),
+        deferredHiddenNames: new Set([deferred.name]),
+      });
+
+    const scheduleInvalidEnvelope = async (callId: string) => {
+      onAllToolCallsComplete.mockClear();
+      await scheduler.schedule(
+        {
+          callId,
+          name: ToolNames.TOOL_CALL,
+          args: { name: ToolNames.TOOL_CALL, arguments: {} },
+          isClientInitiated: false,
+          prompt_id: 'prompt-bridge-prune',
+        },
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      return onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    };
+
+    const first = await scheduleInvalidEnvelope('bridge-prune-1');
+    const second = await scheduleInvalidEnvelope('bridge-prune-2');
+    for (const completed of [first, second]) {
+      expect(completed.status).toBe('error');
+      if (completed.status === 'error') {
+        expect(completed.response.error?.message).not.toContain(
+          'RETRY LOOP DETECTED',
+        );
+      }
+    }
+
+    // A bridge envelope that resolves and executes: its batch carries the
+    // resolved TARGET name, so the batch-start prune clears the `tool_call:`
+    // counters accumulated above.
+    onAllToolCallsComplete.mockClear();
+    ensureTool.mockClear();
+    await scheduler.schedule(
+      {
+        callId: 'bridge-prune-success',
+        name: ToolNames.TOOL_CALL,
+        args: { name: deferred.name, arguments: {} },
+        isClientInitiated: false,
+        prompt_id: 'prompt-bridge-prune',
+      },
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const succeeded = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
+    expect(succeeded.status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(1);
+
+    // Two more identical invalid envelopes: effectively first and second
+    // failures again — the fourth overall error must still lack the
+    // directive. Removing or name-inverting the prune turns this red.
+    const third = await scheduleInvalidEnvelope('bridge-prune-3');
+    const fourth = await scheduleInvalidEnvelope('bridge-prune-4');
+    for (const completed of [third, fourth]) {
+      expect(completed.status).toBe('error');
+      if (completed.status === 'error') {
+        expect(completed.response.errorType).toBe(
+          ToolErrorType.INVALID_TOOL_PARAMS,
+        );
+        expect(completed.response.error?.message).not.toContain(
+          'RETRY LOOP DETECTED',
+        );
+      }
+    }
+  });
+
   it('preserves the bridge response name when a deferred target times out', async () => {
     const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
     const deferred = new MockTool({
