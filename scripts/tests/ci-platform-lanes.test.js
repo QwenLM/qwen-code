@@ -45,7 +45,7 @@ it('keeps the shared Linux test lane above its observed contention budget', () =
 });
 
 it('keeps the no-AK gate above its observed dependency-install budget', () => {
-  expect(ci.jobs.integration_no_ak['timeout-minutes']).toBe(90);
+  expect(ci.jobs.integration_no_ak['timeout-minutes']).toBe(60);
 });
 
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
