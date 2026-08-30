@@ -9,6 +9,7 @@ import {
   SpanKind,
   SpanStatusCode,
   TraceFlags,
+  type Context,
   type HrTime,
   type SpanContext,
 } from '@opentelemetry/api';
@@ -22,14 +23,22 @@ import {
   resourceFromAttributes,
 } from '@opentelemetry/resources';
 
-import { EVENT_SUBAGENT_EXECUTION, SERVICE_NAME } from './constants.js';
+import {
+  EVENT_SUBAGENT_EXECUTION,
+  EVENT_TOOL_CALL,
+  SERVICE_NAME,
+} from './constants.js';
 import {
   deriveTraceId,
   randomHexString,
   randomSpanId,
 } from './trace-id-utils.js';
-import { getCurrentSessionId } from './session-context.js';
+import {
+  getCurrentSessionId,
+  getSessionIdFromContext,
+} from './session-context.js';
 import { isInNativeSubagentSpan } from './session-tracing.js';
+import { sessionIdContext } from '../utils/sessionIdContext.js';
 
 /**
  * LogRecord event names that have native span coverage when emitted
@@ -143,7 +152,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     this.flushTimer.unref();
   }
 
-  onEmit(logRecord: ReadableLogRecord): void {
+  onEmit(logRecord: ReadableLogRecord, emitContext?: Context): void {
     if (this.isShutdown) {
       return;
     }
@@ -204,12 +213,17 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     // Prefer a real active span context when OTel logs provide one, preserving
     // direct parentage. Otherwise derive traceId from session.id so all events
     // in one session appear under a single trace.  Fall back to
-    // getCurrentSessionId() when the log record has no session.id attribute
-    // (e.g. after a session change via /clear or /resume).
+    // the scoped session when the log record has no session.id attribute.
+    // The process-global value remains the last compatibility fallback.
     const parentSpanContext = getValidParentSpanContext(logRecord.spanContext);
-    // || (not ??) so empty-string session.id also falls through to the fallback
+    const explicitSessionId = logRecord.attributes?.['session.id'];
     const sessionId =
-      logRecord.attributes?.['session.id'] || getCurrentSessionId();
+      (typeof explicitSessionId === 'string' && explicitSessionId
+        ? explicitSessionId
+        : undefined) ??
+      (emitContext ? getSessionIdFromContext(emitContext) : undefined) ??
+      (sessionIdContext.getStore() || getCurrentSessionId());
+    if (sessionId) attributes['session.id'] = sessionId;
     let traceId: string;
     if (parentSpanContext) {
       traceId = parentSpanContext.traceId;
@@ -458,6 +472,14 @@ function deriveSpanStatus(attrs: Record<string, unknown> | undefined): {
   message?: string;
 } {
   if (!attrs) return { code: SpanStatusCode.OK };
+  // Only tool calls freeze a `cancelled` terminal that must stay UNSET; other
+  // events (e.g. auth) can be cancelled AND carry an error, which stays ERROR.
+  if (
+    attrs['event.name'] === EVENT_TOOL_CALL &&
+    attrs['status'] === 'cancelled'
+  ) {
+    return { code: SpanStatusCode.UNSET };
+  }
   if (
     !!attrs['error'] ||
     !!attrs['error.message'] ||

@@ -10,21 +10,23 @@ import type {
   ToolCallLocation,
   ToolKind,
 } from '@agentclientprotocol/sdk';
-import type {
-  TranscriptProjectionDiagnostic,
-  TranscriptRecordInput,
-  TranscriptReplayGapInput,
+// Use the Node-free transcriptRecords subpath so the browser replay bundle
+// does not pull in the full core package barrel.
+import {
+  projectUserTranscriptForDisplay,
+  type TranscriptProjectionDiagnostic,
+  type TranscriptRecordInput,
+  type TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
+  isGoalCheckpointBookkeepingRecord,
   parseGoalSnapshotV2,
+  parseGoalStateCause,
   parseGoalStateRecordPayloadV2,
   projectGoalStateToLegacy,
   type GoalSnapshotV2,
+  type GoalStateCause,
 } from '@qwen-code/qwen-code-core/goalWire';
-// Narrow path — the helper is Node-free. Importing the core package barrel
-// here would pull the whole Node-bound core graph into the browser
-// transcript bundle (sdk-typescript daemon/transcript).
-import { stripTrailingUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/userPromptSubmitContext';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -49,6 +51,12 @@ export interface PendingTranscriptToolCall {
   readonly toolName: string;
   readonly sourceRecordId: string;
   readonly sourceTimestamp?: string;
+  /**
+   * The transcript's own id when dedup renamed `callId` (`<id>:2`). Skip
+   * sets derived from chat history hold RAW ids, so finalize must match
+   * against both.
+   */
+  readonly rawCallId?: string;
 }
 
 export interface TranscriptReplayStateV1 {
@@ -56,6 +64,7 @@ export interface TranscriptReplayStateV1 {
   readonly pendingToolCalls: readonly PendingTranscriptToolCall[];
   readonly cumulativeUsage: TranscriptReplayUsageState;
   readonly goalState?: GoalSnapshotV2;
+  readonly goalCause?: GoalStateCause;
 }
 
 export interface TranscriptReplayToolMetadata {
@@ -80,6 +89,7 @@ export interface TranscriptReplayMachineOptions {
   readonly gaps?: readonly TranscriptReplayGapInput[];
   readonly presentation?: TranscriptReplayPresentationAdapter;
   readonly onDiagnostic?: (diagnostic: TranscriptProjectionDiagnostic) => void;
+  readonly skipFinalizeCallIds?: ReadonlySet<string>;
 }
 
 export interface TranscriptReplayMachine {
@@ -92,6 +102,7 @@ interface UpdateMetaOptions {
   readonly timestamp?: string | number;
   readonly sourceRecordIds?: readonly string[];
   readonly planToolCallId?: string;
+  readonly todoPlanId?: string;
   readonly extra?: Readonly<Record<string, unknown>>;
 }
 
@@ -125,6 +136,12 @@ export interface TranscriptTodoItem {
   readonly id?: string;
   readonly content: string;
   readonly status: 'pending' | 'in_progress' | 'completed';
+  readonly blockedBy?: readonly string[];
+}
+
+export interface TranscriptTodoPlan {
+  readonly planId?: string;
+  readonly todos: TranscriptTodoItem[];
 }
 
 export interface TranscriptUsageUpdateOptions extends UpdateMetaOptions {
@@ -145,6 +162,12 @@ const TRANSCRIPT_GOAL_STATUS_KINDS = new Set([
   'cleared',
   'failed',
   'aborted',
+  // A paused goal is not running, and dropping the card here is not neutral:
+  // the replay stream is what feeds the goal renderer, so the older `set` card
+  // stays newest and every surface keeps claiming autonomous work is under way.
+  // Kept in step with `GOAL_STATUS_KINDS`, which the daemon-side reader
+  // (`parseGoalStatusItem`) validates the same on-disk cards against.
+  'paused',
   'checking',
 ]);
 
@@ -159,6 +182,53 @@ interface TranscriptGoalStatus {
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function replaceTextPartsForDisplay(
+  parts: readonly unknown[] | undefined,
+  displayText: string,
+): readonly unknown[] {
+  const projected: unknown[] = [];
+  let replacedText = false;
+  for (const part of parts ?? []) {
+    if (isObjectRecord(part) && typeof part['text'] === 'string') {
+      if (!replacedText && displayText.length > 0) {
+        projected.push({ text: displayText });
+      }
+      replacedText = true;
+    } else {
+      projected.push(part);
+    }
+  }
+  if (!replacedText && displayText.length > 0) {
+    projected.push({ text: displayText });
+  }
+  return projected;
+}
+
+function stripGeneratedAttachmentTokens(
+  displayText: string,
+  payload: Record<string, unknown> | undefined,
+): string {
+  const references = payload?.['attachmentReferences'];
+  if (!Array.isArray(references)) return displayText;
+  const tokens = references.flatMap((reference) => {
+    if (
+      !isObjectRecord(reference) ||
+      reference['type'] !== 'resource' ||
+      typeof reference['attachmentId'] !== 'string'
+    ) {
+      return [];
+    }
+    return [`@attachment:///${encodeURIComponent(reference['attachmentId'])}`];
+  });
+  if (tokens.length === 0) return displayText;
+  const tokenText = tokens.join('\n');
+  if (displayText === tokenText) return '';
+  const suffix = `\n\n${tokenText}`;
+  return displayText.endsWith(suffix)
+    ? displayText.slice(0, -suffix.length)
+    : displayText;
 }
 
 export function toTranscriptEpochMs(
@@ -219,6 +289,31 @@ export function createTranscriptImageUpdate(
     content: { type: 'image', data: options.data, mimeType: options.mimeType },
     ...(meta ? { _meta: meta } : {}),
   } as SessionUpdate;
+}
+
+function createTranscriptAttachmentReferenceUpdate(
+  reference: Record<string, unknown>,
+  options: UpdateMetaOptions,
+): SessionUpdate | undefined {
+  if (
+    (reference['type'] !== 'image' && reference['type'] !== 'resource') ||
+    typeof reference['attachmentId'] !== 'string' ||
+    typeof reference['mimeType'] !== 'string' ||
+    typeof reference['size'] !== 'number'
+  ) {
+    return undefined;
+  }
+  const meta = buildUpdateMeta(options);
+  return {
+    sessionUpdate: 'user_message_chunk',
+    content: {
+      type: reference['type'],
+      attachmentId: reference['attachmentId'],
+      mimeType: reference['mimeType'],
+      size: reference['size'],
+    },
+    ...(meta ? { _meta: meta } : {}),
+  } as unknown as SessionUpdate;
 }
 
 export function createTranscriptUsageUpdate(
@@ -297,13 +392,23 @@ export function createTranscriptToolCallResultUpdate(
       },
     }),
   };
-  if (
-    options.resultDisplay !== undefined &&
-    !isTruncatedSessionDiffDisplay(options.resultDisplay)
-  ) {
-    update['rawOutput'] = options.resultDisplay;
-  }
+  const rawOutput = getReplayRawOutput(options.resultDisplay);
+  if (rawOutput !== undefined) update['rawOutput'] = rawOutput;
   return update as unknown as SessionUpdate;
+}
+
+function getReplayRawOutput(resultDisplay: unknown): unknown {
+  if (!isTruncatedSessionDiffDisplay(resultDisplay)) return resultDisplay;
+  if (
+    resultDisplay['fileDiffTruncated'] === true ||
+    typeof resultDisplay['fileDiff'] !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    fileName: resultDisplay['fileName'],
+    fileDiff: resultDisplay['fileDiff'],
+  };
 }
 
 export function createTranscriptPlanUpdate(
@@ -315,6 +420,9 @@ export function createTranscriptPlanUpdate(
     ...options,
     extra: {
       ...(cumulativeUsage ? { stats: { ...cumulativeUsage } } : {}),
+      ...(options.todoPlanId
+        ? { qwenTodoPlan: { id: options.todoPlanId } }
+        : {}),
       ...(options.extra ?? {}),
     },
   });
@@ -324,6 +432,16 @@ export function createTranscriptPlanUpdate(
       content: todo.content,
       priority: 'medium' as const,
       status: todo.status,
+      ...(todo.id || todo.blockedBy
+        ? {
+            _meta: {
+              qwenTodo: {
+                ...(todo.id ? { id: todo.id } : {}),
+                ...(todo.blockedBy ? { blockedBy: [...todo.blockedBy] } : {}),
+              },
+            },
+          }
+        : {}),
     })),
     ...(meta ? { _meta: meta } : {}),
   } as SessionUpdate;
@@ -333,10 +451,18 @@ export function extractTranscriptTodos(
   resultDisplay: unknown,
   args?: Readonly<Record<string, unknown>>,
 ): TranscriptTodoItem[] | null {
-  const fromDisplay = extractTodosFromDisplay(resultDisplay);
+  return extractTranscriptTodoPlan(resultDisplay, args)?.todos ?? null;
+}
+
+export function extractTranscriptTodoPlan(
+  resultDisplay: unknown,
+  args?: Readonly<Record<string, unknown>>,
+): TranscriptTodoPlan | null {
+  const fromDisplay = extractTodoPlanFromDisplay(resultDisplay);
   if (fromDisplay) return fromDisplay;
+  if (resultDisplay !== null && resultDisplay !== undefined) return null;
   return args && Array.isArray(args['todos'])
-    ? normalizeTodos(args['todos'])
+    ? { todos: normalizeTodos(args['todos']) }
     : null;
 }
 
@@ -361,6 +487,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   };
   private finalized = false;
   private goalState: GoalSnapshotV2 | undefined;
+  private goalCause: GoalStateCause | undefined;
 
   constructor(private readonly options: TranscriptReplayMachineOptions) {
     const initialState = parseInitialState(
@@ -369,6 +496,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     );
     this.usage = { ...initialState.cumulativeUsage };
     this.goalState = initialState.goalState;
+    this.goalCause = initialState.goalCause;
     for (const pending of initialState.pendingToolCalls) {
       this.pendingToolCalls.set(pending.callId, pending);
       this.usedToolCallIds.add(pending.callId);
@@ -396,6 +524,14 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     const meta = {
       timestamp: record.timestamp,
       sourceRecordIds: [record.uuid],
+      ...(record.subtype === 'realtime_message'
+        ? {
+            extra: {
+              source: 'realtime_voice',
+              qwenDiscreteMessage: true,
+            },
+          }
+        : {}),
     };
 
     const gap = this.gapByChild.get(record.uuid);
@@ -435,8 +571,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   *finalize(): Iterable<TranscriptReplayEmission> {
     if (this.finalized) return;
     this.finalized = true;
+    const skip = this.options.skipFinalizeCallIds;
     let ordinal = 0;
     for (const pending of [...this.pendingToolCalls.values()]) {
+      if (
+        skip &&
+        (skip.has(pending.callId) ||
+          (pending.rawCallId !== undefined && skip.has(pending.rawCallId)))
+      )
+        continue;
       this.pendingToolCalls.delete(pending.callId);
       this.report(
         'missing_tool_result',
@@ -469,6 +612,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       })),
       cumulativeUsage: { ...this.usage },
       ...(this.goalState ? { goalState: this.goalState } : {}),
+      ...(this.goalCause ? { goalCause: this.goalCause } : {}),
     };
   }
 
@@ -477,30 +621,50 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    const payload = isObjectRecord(record.systemPayload)
+      ? record.systemPayload
+      : undefined;
+    const replayMeta: UpdateMetaOptions =
+      record.subtype === 'mid_turn_user_message'
+        ? {
+            ...meta,
+            extra: {
+              ...meta.extra,
+              source: 'mid_turn_message_injected',
+              qwenDiscreteMessage: true,
+            },
+          }
+        : meta;
     if (
       record.subtype === 'goal_runtime' ||
       record.subtype === 'notification' ||
       record.subtype === 'cron' ||
       record.subtype === 'mid_turn_user_message'
     ) {
-      const payload = isObjectRecord(record.systemPayload)
-        ? record.systemPayload
-        : undefined;
       const displayText =
         payload && typeof payload['displayText'] === 'string'
-          ? payload['displayText']
+          ? stripGeneratedAttachmentTokens(payload['displayText'], payload)
           : undefined;
-      const backgroundTask =
-        payload && isObjectRecord(payload['backgroundTask'])
-          ? payload['backgroundTask']
-          : undefined;
+      if (record.subtype === 'mid_turn_user_message' && displayText === '') {
+        const media = [
+          ...this.projectUserAttachmentReferences(payload, emit, replayMeta),
+        ];
+        if (media.length > 0) {
+          yield* media;
+          return;
+        }
+      }
       if (displayText) {
         const isNotification = record.subtype === 'notification';
+        const backgroundTask =
+          payload && isObjectRecord(payload['backgroundTask'])
+            ? payload['backgroundTask']
+            : undefined;
         yield emit(
           createTranscriptMessageUpdate({
             role: 'user',
             text: displayText,
-            ...meta,
+            ...replayMeta,
             ...(isNotification
               ? {
                   extra: {
@@ -514,102 +678,53 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
                 : {}),
           }),
         );
+        yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
         return;
       }
       if (record.subtype !== 'mid_turn_user_message') return;
-    } else if (!record.subtype) {
-      // Plain user records — including UserPromptSubmit-augmented ones —
-      // prefer the recorded display projection, then strip a trailing
-      // whole-part tagged hook-context block. Matches resumeHistoryUtils.
-      // Always go through projectMessageParts so multimodal inlineData
-      // (images) survives even when displayText replaces the text parts.
-      const payload = isObjectRecord(record.systemPayload)
-        ? record.systemPayload
-        : undefined;
-      const displayText =
-        payload && typeof payload['displayText'] === 'string'
-          ? payload['displayText']
-          : undefined;
+    }
+
+    const projection = projectUserTranscriptForDisplay(record);
+    if (projection.displayText !== undefined) {
+      const displayText = stripGeneratedAttachmentTokens(
+        projection.displayText,
+        payload,
+      );
       yield* this.projectMessageParts(
-        displayText
-          ? this.withUserPromptDisplayText(record, displayText)
-          : this.withoutTrailingUserPromptSubmitContext(record),
+        record,
         'user',
         emit,
-        meta,
+        replayMeta,
+        undefined,
+        replaceTextPartsForDisplay(record.message?.parts, displayText),
       );
+      yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
       return;
     }
-    yield* this.projectMessageParts(record, 'user', emit, meta);
+
+    yield* this.projectMessageParts(
+      record,
+      'user',
+      emit,
+      replayMeta,
+      undefined,
+      projection.parts,
+    );
+    yield* this.projectUserAttachmentReferences(payload, emit, replayMeta);
   }
 
-  /**
-   * Drops a trailing message part that is entirely a tagged UserPromptSubmit
-   * context block. Injection always appends after the user's own part(s), so
-   * a sole matching part is treated as user-authored and kept.
-   */
-  private withoutTrailingUserPromptSubmitContext(
-    record: TranscriptRecordInput,
-  ): TranscriptRecordInput {
-    const parts = record.message?.parts;
-    if (!Array.isArray(parts)) {
-      return record;
+  private *projectUserAttachmentReferences(
+    payload: Record<string, unknown> | undefined,
+    emit: (update: SessionUpdate) => TranscriptReplayEmission,
+    meta: UpdateMetaOptions,
+  ): Iterable<TranscriptReplayEmission> {
+    const references = payload?.['attachmentReferences'];
+    if (!Array.isArray(references)) return;
+    for (const reference of references) {
+      if (!isObjectRecord(reference)) continue;
+      const update = createTranscriptAttachmentReferenceUpdate(reference, meta);
+      if (update) yield emit(update);
     }
-    const nextParts = stripTrailingUserPromptSubmitContextPart(parts);
-    if (nextParts === parts) {
-      return record;
-    }
-    return {
-      ...record,
-      message: {
-        ...record.message,
-        parts: [...nextParts],
-      },
-    };
-  }
-
-  /**
-   * Rebuilds a plain user record for display: strip trailing tagged hook
-   * context, then replace every text part with a single `displayText` part at
-   * the first text position so images keep their relative order.
-   */
-  private withUserPromptDisplayText(
-    record: TranscriptRecordInput,
-    displayText: string,
-  ): TranscriptRecordInput {
-    const stripped = this.withoutTrailingUserPromptSubmitContext(record);
-    const parts = stripped.message?.parts;
-    if (!Array.isArray(parts) || parts.length === 0) {
-      return {
-        ...stripped,
-        message: {
-          ...stripped.message,
-          parts: [{ text: displayText }],
-        },
-      };
-    }
-    let replaced = false;
-    const nextParts: unknown[] = [];
-    for (const part of parts) {
-      if (isObjectRecord(part) && typeof part['text'] === 'string') {
-        if (!replaced) {
-          nextParts.push({ text: displayText });
-          replaced = true;
-        }
-        continue;
-      }
-      nextParts.push(part);
-    }
-    if (!replaced) {
-      nextParts.push({ text: displayText });
-    }
-    return {
-      ...stripped,
-      message: {
-        ...stripped.message,
-        parts: nextParts,
-      },
-    };
   }
 
   private *projectAssistantRecord(
@@ -644,8 +759,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
     beforeToolCall?: () => SessionUpdate | undefined,
+    partsOverride?: readonly unknown[],
   ): Iterable<TranscriptReplayEmission> {
-    const parts = record.message?.parts;
+    const parts = partsOverride ?? record.message?.parts;
     if (!parts) return;
     for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
       const part = parts[partIndex];
@@ -738,6 +854,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
             toolName,
             sourceRecordId: record.uuid,
             ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
+            ...(explicitId !== undefined && explicitId !== callId
+              ? { rawCallId: explicitId }
+              : {}),
           });
         }
       }
@@ -777,12 +896,13 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
 
     const resultDisplay = result?.['resultDisplay'];
     if (toolName === 'todo_write') {
-      const todos = extractTranscriptTodos(resultDisplay);
-      if (todos) {
+      const plan = extractTranscriptTodoPlan(resultDisplay);
+      if (plan) {
         yield emit(
-          createTranscriptPlanUpdate(todos, this.usage, {
+          createTranscriptPlanUpdate(plan.todos, this.usage, {
             ...meta,
             planToolCallId: callId,
+            todoPlanId: plan.planId,
           }),
         );
       }
@@ -836,11 +956,36 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         );
         return;
       }
+      const bookkeepingOnly = isGoalCheckpointBookkeepingRecord({
+        cause: payload.cause,
+        previousCause: this.goalCause,
+        previous: this.goalState,
+        next: payload.snapshot,
+      });
       const projection = projectGoalStateToLegacy(
         payload,
         this.goalState?.goal ?? null,
       );
+      const goalControlCommand = projectGoalControlCommand(
+        payload.cause,
+        payload.snapshot,
+      );
       this.goalState = payload.snapshot;
+      this.goalCause = payload.cause;
+      if (bookkeepingOnly) return;
+      if (goalControlCommand) {
+        yield emit(
+          createTranscriptMessageUpdate({
+            role: 'user',
+            text: goalControlCommand,
+            ...meta,
+            extra: {
+              source: 'goal_control',
+              'qwen.session.recordId': record.uuid,
+            },
+          }),
+        );
+      }
       const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(
         createTranscriptMessageUpdate({
@@ -1020,6 +1165,40 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   }
 }
 
+function projectGoalControlCommand(
+  cause: GoalStateCause,
+  snapshot: GoalSnapshotV2,
+): string | undefined {
+  switch (cause) {
+    case 'create':
+    case 'replace':
+      return snapshot.goal ? `/goal ${snapshot.goal.objective}` : undefined;
+    case 'edit':
+      return snapshot.goal
+        ? `/goal edit ${snapshot.goal.objective}`
+        : undefined;
+    case 'pause':
+    case 'resume':
+    case 'clear':
+      return `/goal ${cause}`;
+    case 'turn_finished':
+    case 'checkpoint':
+    case 'verifier_accept':
+    case 'verifier_reject':
+    case 'complete':
+    case 'blocked':
+    case 'usage_limited':
+    case 'migrated':
+      return undefined;
+    default:
+      return assertNever(cause);
+  }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unsupported Goal state cause: ${String(value)}`);
+}
+
 function parseTranscriptGoalStatus(
   value: unknown,
 ): TranscriptGoalStatus | undefined {
@@ -1148,6 +1327,17 @@ function parseInitialState(
       affectsCompleteness: true,
     });
   }
+  const rawGoalCause = value['goalCause'];
+  const goalCause =
+    rawGoalCause === undefined ? undefined : parseGoalStateCause(rawGoalCause);
+  if (rawGoalCause !== undefined && !goalCause) {
+    onDiagnostic?.({
+      code: 'invalid_replay_state',
+      severity: 'warning',
+      message: 'Dropped a malformed Goal cause from replay state.',
+      affectsCompleteness: true,
+    });
+  }
   return {
     v: 1,
     pendingToolCalls,
@@ -1160,6 +1350,7 @@ function parseInitialState(
         }
       : emptyUsage(),
     ...(goalState ? { goalState } : {}),
+    ...(goalCause ? { goalCause } : {}),
   };
 }
 
@@ -1281,7 +1472,9 @@ function extractDiffContent(resultDisplay: unknown): ToolCallContent | null {
   };
 }
 
-function isTruncatedSessionDiffDisplay(value: unknown): boolean {
+function isTruncatedSessionDiffDisplay(
+  value: unknown,
+): value is Readonly<Record<string, unknown>> {
   return (
     isObjectRecord(value) &&
     value['truncatedForSession'] === true &&
@@ -1334,10 +1527,15 @@ function extractToolResultCallId(
   return undefined;
 }
 
-function extractTodosFromDisplay(value: unknown): TranscriptTodoItem[] | null {
+function extractTodoPlanFromDisplay(value: unknown): TranscriptTodoPlan | null {
   if (isObjectRecord(value) && value['type'] === 'todo_list') {
     return Array.isArray(value['todos'])
-      ? normalizeTodos(value['todos'])
+      ? {
+          ...(typeof value['planId'] === 'string'
+            ? { planId: value['planId'] }
+            : {}),
+          todos: normalizeTodos(value['todos']),
+        }
       : null;
   }
   if (typeof value !== 'string') return null;
@@ -1346,7 +1544,12 @@ function extractTodosFromDisplay(value: unknown): TranscriptTodoItem[] | null {
     return isObjectRecord(parsed) &&
       parsed['type'] === 'todo_list' &&
       Array.isArray(parsed['todos'])
-      ? normalizeTodos(parsed['todos'])
+      ? {
+          ...(typeof parsed['planId'] === 'string'
+            ? { planId: parsed['planId'] }
+            : {}),
+          todos: normalizeTodos(parsed['todos']),
+        }
       : null;
   } catch {
     return null;
@@ -1370,6 +1573,10 @@ function normalizeTodos(values: readonly unknown[]): TranscriptTodoItem[] {
         ...(typeof value['id'] === 'string' ? { id: value['id'] } : {}),
         content: value['content'],
         status,
+        ...(Array.isArray(value['blockedBy']) &&
+        value['blockedBy'].every((dependency) => typeof dependency === 'string')
+          ? { blockedBy: value['blockedBy'] as string[] }
+          : {}),
       },
     ];
   });

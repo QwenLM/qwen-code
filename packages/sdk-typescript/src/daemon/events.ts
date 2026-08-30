@@ -5,12 +5,17 @@
  */
 
 import type {
+  DaemonBranchPoint,
   DaemonEvent,
   DaemonErrorKind,
   DaemonMcpTransport,
   DaemonSessionArtifactChange,
+  DaemonSessionPrInfo,
+  DaemonSkillToggleMutation,
   PermissionOutcome,
+  PromptContentBlock,
 } from './types.js';
+import { isDaemonSessionPrInfo } from './session-pr.js';
 // Single source of truth: the daemon publisher owns the wire literal in
 // acp-bridge's dependency-free `daemonEventTypes` module. We re-export it so the
 // validator/reducer below, and the browser consumer via `@qwen-code/sdk/daemon`,
@@ -293,6 +298,7 @@ export interface DaemonSessionClosedData {
 export interface DaemonSessionMetadataUpdatedData {
   sessionId: string;
   displayName?: string;
+  prs?: DaemonSessionPrInfo[];
   [key: string]: unknown;
 }
 
@@ -305,33 +311,24 @@ export interface DaemonArtifactChangedData {
 /**
  * `mid_turn_message_injected` payload. Emitted when the daemon drains
  * browser-queued mid-turn messages into the running turn (web-shell mid-turn
- * drain). It is a transient dedupe signal, not a transcript item: consumers
- * move these messages out of their pending queue so they aren't resent as the
- * next turn. They are not rendered from this event — the message already reached
- * the model mid-turn, and the persisted transcript shows it on reload.
+ * drain). Consumers move these messages out of their pending queue so they
+ * aren't resent as the next turn; UI adapters may also render the attached
+ * text/media as the immediate mid-turn echo.
  */
 export interface DaemonMidTurnMessageInjectedData {
   sessionId: string;
   messages: string[];
+  messageIds?: string[];
   /**
-   * Trusted client id that queued these messages, so a consumer dedupes only its
-   * OWN pending queue — a peer attached to the same session must not drop a
-   * coincidentally-equal entry it didn't queue. Absent for anonymous pushes.
-   *
-   * CONTRACT: a consumer that dedupes on this event MUST compare this id against
-   * its own client id and skip frames originated by a different client. The
-   * daemon broadcasts the frame to every SSE subscriber on the session and does
-   * NOT route by originator, so a consumer that dedupes unconditionally will drop
-   * another client's coincidentally-equal pending message (double delivery).
-   *
-   * IMPORTANT — wire location: unlike the permission/settings events (which the
-   * session reducer's `mergeOriginator` step copies from the envelope INTO
-   * `data`), this event is NOT reduced, so the daemon leaves the id ONLY on the
-   * SSE envelope (`event.originatorClientId`) and never populates it here. A raw
-   * SDK consumer must read `event.originatorClientId`; `data.originatorClientId`
-   * is filled in only by a consumer that lifts it off the envelope itself (the
-   * web-shell's `parseSidechannelMidTurnInjected` does this). The field lives on
-   * this shape so that lifted representation is well-typed.
+   * Parallel array to `messages` — one entry per drained message. Each entry
+   * may carry image content blocks the daemon attached to the
+   * original queued payload, so the browser echo renderer can show them
+   * alongside the message text. Older daemons omit this field.
+   */
+  items?: Array<{ content?: PromptContentBlock[] }>;
+  /**
+   * Present only on events from older daemons. New daemons publish one
+   * session-wide batch and clients reconcile it by message id.
    */
   originatorClientId?: string;
   [key: string]: unknown;
@@ -424,9 +421,11 @@ export interface DaemonStateResyncRequiredData {
 
 export interface DaemonHistoryTruncatedData {
   reason: 'replay_window_exceeded';
+  scope?: 'live_journal' | (string & {});
   truncatedEvents: number;
   retainedEvents: number;
   maxBytes: number;
+  maxEvents?: number;
   truncatedTurns?: number;
   /**
    * Pagination anchor: the last `qwen.session.recordId` observed by the
@@ -676,6 +675,14 @@ export interface DaemonToolToggledData {
   [key: string]: unknown;
 }
 
+export interface DaemonSettingsChangedData {
+  key: string;
+  value?: unknown;
+  scope?: string;
+  mutation?: DaemonSkillToggleMutation;
+  [key: string]: unknown;
+}
+
 export interface DaemonTrustChangeRequestedData {
   workspaceCwd: string;
   desiredState: 'trusted' | 'untrusted';
@@ -827,6 +834,7 @@ export interface DaemonTurnCompleteData {
   sessionId: string;
   stopReason: string;
   promptId?: string;
+  branchPoint?: DaemonBranchPoint;
   [key: string]: unknown;
 }
 
@@ -835,6 +843,7 @@ export interface DaemonTurnErrorData {
   message: string;
   code?: string;
   errorKind?: DaemonErrorKind | (string & {});
+  loopType?: string;
   promptId?: string;
   [key: string]: unknown;
 }
@@ -1083,7 +1092,7 @@ export type DaemonToolToggledEvent = DaemonEventEnvelope<
 >;
 export type DaemonSettingsChangedEvent = DaemonEventEnvelope<
   'settings_changed',
-  Record<string, unknown>
+  DaemonSettingsChangedData
 >;
 export type DaemonTrustChangeRequestedEvent = DaemonEventEnvelope<
   'trust_change_requested',
@@ -1667,10 +1676,12 @@ export function asKnownDaemonEvent(
       return isArtifactChangedData(event.data)
         ? (event as DaemonArtifactChangedEvent)
         : undefined;
-    case MID_TURN_MESSAGE_INJECTED_EVENT:
-      return isMidTurnMessageInjectedData(event.data)
-        ? (event as DaemonMidTurnMessageInjectedEvent)
+    case MID_TURN_MESSAGE_INJECTED_EVENT: {
+      const data = asMidTurnMessageInjectedData(event.data);
+      return data
+        ? ({ ...event, data } as DaemonMidTurnMessageInjectedEvent)
         : undefined;
+    }
     case PENDING_PROMPT_ADDED_EVENT:
       return isPendingPromptAddedData(event.data)
         ? (event as DaemonPendingPromptAddedEvent)
@@ -1748,11 +1759,8 @@ export function asKnownDaemonEvent(
         ? (event as DaemonToolToggledEvent)
         : undefined;
     case 'settings_changed':
-      return event.data != null && typeof event.data === 'object'
-        ? (event as DaemonEventEnvelope<
-            'settings_changed',
-            Record<string, unknown>
-          >)
+      return isSettingsChangedData(event.data)
+        ? (event as DaemonSettingsChangedEvent)
         : undefined;
     case 'trust_change_requested':
       return isTrustChangeRequestedData(event.data)
@@ -2644,10 +2652,17 @@ function isSessionClosedData(value: unknown): value is DaemonSessionClosedData {
 function isSessionMetadataUpdatedData(
   value: unknown,
 ): value is DaemonSessionMetadataUpdatedData {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !isOptionalStringOrNull(value['displayName'])
+  ) {
+    return false;
+  }
+  const prs = value['prs'];
   return (
-    isRecord(value) &&
-    isNonEmptyString(value['sessionId']) &&
-    isOptionalStringOrNull(value['displayName'])
+    prs === undefined ||
+    (Array.isArray(prs) && prs.every(isDaemonSessionPrInfo))
   );
 }
 
@@ -2667,15 +2682,37 @@ function isArtifactChangedData(
   );
 }
 
-function isMidTurnMessageInjectedData(
+function asMidTurnMessageInjectedData(
   value: unknown,
-): value is DaemonMidTurnMessageInjectedData {
-  return (
-    isRecord(value) &&
-    isNonEmptyString(value['sessionId']) &&
-    Array.isArray(value['messages']) &&
-    value['messages'].every((message) => typeof message === 'string')
-  );
+): DaemonMidTurnMessageInjectedData | undefined {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !Array.isArray(value['messages']) ||
+    !value['messages'].every((message) => typeof message === 'string')
+  ) {
+    return undefined;
+  }
+  const messageIds = value['messageIds'];
+  // `messageIds` is an optional enrichment: a misaligned or malformed batch is
+  // dropped (mirroring `parseSidechannelMidTurnInjected`) rather than rejecting
+  // the whole event, so a buggy daemon can't silently lose the injection signal.
+  const alignedMessageIds =
+    Array.isArray(messageIds) &&
+    messageIds.length === value['messages'].length &&
+    messageIds.every(isNonEmptyString)
+      ? (messageIds as string[])
+      : undefined;
+  // Strip the raw `messageIds` before spreading so a malformed batch OMITS the
+  // key (matching `parseSidechannelMidTurnInjected`) instead of leaving a
+  // present `undefined` that breaks `'messageIds' in data` checks.
+  const { messageIds: _rawMessageIds, ...rest } =
+    value as DaemonMidTurnMessageInjectedData;
+  return {
+    ...rest,
+    messages: value['messages'] as string[],
+    ...(alignedMessageIds ? { messageIds: alignedMessageIds } : {}),
+  };
 }
 
 function isPendingPromptAddedData(
@@ -2750,10 +2787,14 @@ function isHistoryTruncatedData(
     return false;
   }
   const truncatedTurns = value['truncatedTurns'];
+  const scope = value['scope'];
+  const maxEvents = value['maxEvents'];
   return (
     isNonNegativeInteger(value['truncatedEvents']) &&
     isNonNegativeInteger(value['retainedEvents']) &&
     isNonNegativeInteger(value['maxBytes']) &&
+    (scope === undefined || isNonEmptyString(scope)) &&
+    (maxEvents === undefined || isNonNegativeInteger(maxEvents)) &&
     (truncatedTurns === undefined || isNonNegativeInteger(truncatedTurns))
   );
 }
@@ -2978,6 +3019,43 @@ function isToolToggledData(value: unknown): value is DaemonToolToggledData {
     isRecord(value) &&
     isNonEmptyString(value['toolName']) &&
     typeof value['enabled'] === 'boolean'
+  );
+}
+
+function isDaemonSkillToggleMutation(
+  value: unknown,
+): value is DaemonSkillToggleMutation {
+  if (!isRecord(value)) return false;
+  const activation = value['activation'];
+  const skills = value['skills'];
+  return (
+    isNonEmptyString(value['id']) &&
+    value['kind'] === 'skill_toggle' &&
+    Array.isArray(skills) &&
+    skills.length > 0 &&
+    skills.every(
+      (skill) =>
+        isRecord(skill) &&
+        isNonEmptyString(skill['name']) &&
+        typeof skill['enabled'] === 'boolean',
+    ) &&
+    (activation === 'applied' ||
+      activation === 'deferred' ||
+      activation === 'partial') &&
+    isFiniteNumber(value['sessionsRefreshed']) &&
+    isFiniteNumber(value['sessionsFailed'])
+  );
+}
+
+export function isSettingsChangedData(
+  value: unknown,
+): value is DaemonSettingsChangedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['key']) &&
+    (value['scope'] === undefined || typeof value['scope'] === 'string') &&
+    (value['mutation'] === undefined ||
+      isDaemonSkillToggleMutation(value['mutation']))
   );
 }
 

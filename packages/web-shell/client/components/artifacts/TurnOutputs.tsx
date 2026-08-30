@@ -1,7 +1,5 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
-import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
-import { useWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 import {
   DownloadIcon,
   FileAudioIcon,
@@ -28,6 +26,7 @@ import {
   stripWorkspacePath,
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
+import { useArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
 import styles from './TurnOutputs.module.css';
 
 export interface TurnOutputFileChange {
@@ -55,6 +54,7 @@ export interface TurnOutputScheduledTask {
   prompt: string;
   recurring: boolean;
   durable: boolean;
+  workspaceId?: string;
   display?: string;
 }
 
@@ -66,6 +66,15 @@ export const TURN_OUTPUT_KINDS: readonly TurnOutputKind[] = [
   'scheduled_task',
 ];
 
+export const TURN_OUTPUT_VISIBLE_LIMIT = 3;
+
+export function visibleTurnOutputs<T>(
+  items: readonly T[],
+  expanded: boolean,
+): readonly T[] {
+  return expanded ? items : items.slice(0, TURN_OUTPUT_VISIBLE_LIMIT);
+}
+
 export type TurnOutputOpenRequest = (
   | {
       id: 'review';
@@ -74,7 +83,26 @@ export type TurnOutputOpenRequest = (
       turnId: string;
       changes: readonly TurnOutputFileChange[];
       selectedPath?: string;
-      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+      workspaceId?: string;
+    }
+  | {
+      id: 'image';
+      kind: 'image';
+      title: string;
+      turnId: string;
+      src: string;
+      alt?: string;
+    }
+  | {
+      id: string;
+      kind: 'attachment';
+      title: string;
+      turnId: string;
+      mimeType?: string;
+      data?: Blob;
+      text?: string;
+      workspacePath?: string;
       workspaceCwd?: string;
     }
   | {
@@ -85,7 +113,8 @@ export type TurnOutputOpenRequest = (
       artifactId: string;
       managedId?: string;
       artifact: DaemonSessionArtifact;
-      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+      workspaceId?: string;
       previewContent?: string;
     }
   | {
@@ -94,7 +123,8 @@ export type TurnOutputOpenRequest = (
       title: string;
       turnId: string;
       task: TurnOutputScheduledTask;
-      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
+      workspaceId?: string;
     }
   | {
       id: string;
@@ -139,8 +169,10 @@ function TurnOutputsComponent({
   onError,
 }: TurnOutputsProps) {
   const { t } = useI18n();
-  const workspaceActions = useWorkspaceActions();
+  const workspaceTarget = useArtifactWorkspaceTarget(workspaceCwd);
+  const workspaceActions = workspaceTarget?.actions;
   const [showAllChanges, setShowAllChanges] = useState(false);
+  const [showAllArtifacts, setShowAllArtifacts] = useState(false);
   if (
     changes.length === 0 &&
     artifacts.length === 0 &&
@@ -148,8 +180,10 @@ function TurnOutputsComponent({
   ) {
     return null;
   }
-  const visibleChanges = showAllChanges ? changes : changes.slice(0, 3);
-  const remainingChanges = changes.length - 3;
+  const visibleChanges = visibleTurnOutputs(changes, showAllChanges);
+  const remainingChanges = changes.length - TURN_OUTPUT_VISIBLE_LIMIT;
+  const visibleArtifacts = visibleTurnOutputs(artifacts, showAllArtifacts);
+  const remainingArtifacts = artifacts.length - TURN_OUTPUT_VISIBLE_LIMIT;
   const totals = sumLineStats(changes);
   const openReview = (selectedPath?: string) => {
     if (onOpenRequest) {
@@ -160,6 +194,9 @@ function TurnOutputsComponent({
         turnId,
         changes,
         ...(workspaceCwd ? { workspaceCwd } : {}),
+        ...(workspaceTarget?.workspaceId
+          ? { workspaceId: workspaceTarget.workspaceId }
+          : {}),
         ...(selectedPath ? { selectedPath } : {}),
       });
       return;
@@ -181,6 +218,10 @@ function TurnOutputsComponent({
         artifactId: artifact.id,
         ...(artifact.managedId ? { managedId: artifact.managedId } : {}),
         artifact,
+        ...(workspaceCwd ? { workspaceCwd } : {}),
+        ...(workspaceTarget?.workspaceId
+          ? { workspaceId: workspaceTarget.workspaceId }
+          : {}),
         ...(previewContent !== undefined ? { previewContent } : {}),
       });
       return;
@@ -194,7 +235,13 @@ function TurnOutputsComponent({
         kind: 'scheduled_task',
         title: t('scheduledTasks.title'),
         turnId,
-        task,
+        task: workspaceTarget?.workspaceId
+          ? { ...task, workspaceId: workspaceTarget.workspaceId }
+          : task,
+        ...(workspaceCwd ? { workspaceCwd } : {}),
+        ...(workspaceTarget?.workspaceId
+          ? { workspaceId: workspaceTarget.workspaceId }
+          : {}),
       });
       return;
     }
@@ -316,14 +363,18 @@ function TurnOutputsComponent({
         </div>
       )}
 
-      {artifacts.map((artifact) => (
+      {visibleArtifacts.map((artifact) => (
         <ArtifactCard
           key={artifact.id}
           artifact={artifact}
-          onOpen={() => openArtifact(artifact)}
+          onOpen={
+            canOpenWorkspaceArtifact(artifact)
+              ? () => openArtifact(artifact)
+              : undefined
+          }
           onError={onError}
           onDownload={
-            canDownloadArtifact(artifact)
+            canDownloadArtifact(artifact) && workspaceActions
               ? (isCancelled) =>
                   downloadWorkspaceFile(
                     workspaceActions,
@@ -335,6 +386,22 @@ function TurnOutputsComponent({
           }
         />
       ))}
+      {remainingArtifacts > 0 && (
+        <button
+          type="button"
+          className={styles.showMoreButton}
+          onClick={() => setShowAllArtifacts((value) => !value)}
+        >
+          <span>
+            {showAllArtifacts
+              ? t('turnOutputs.collapseArtifacts')
+              : t('turnOutputs.showMoreArtifacts', {
+                  count: remainingArtifacts,
+                })}
+          </span>
+          <ChevronIcon open={showAllArtifacts} />
+        </button>
+      )}
 
       {scheduledTasks.map((task) => (
         <ScheduledTaskCard
@@ -355,7 +422,7 @@ function ArtifactCard({
   onError,
 }: {
   artifact: DaemonSessionArtifact;
-  onOpen: () => void;
+  onOpen?: () => void;
   onDownload?: (isCancelled: () => boolean) => Promise<void>;
   onError?: (error: unknown, fallback: string) => void;
 }) {
@@ -372,6 +439,7 @@ function ArtifactCard({
   }, []);
   const size = formatArtifactSize(artifact.sizeBytes);
   const FormatIcon = getArtifactFormatIcon(artifact.kind);
+  const blockedReason = getWorkspaceArtifactOpenBlockReason(artifact, t);
   const downloadName =
     (artifact.workspacePath &&
       normalizePath(artifact.workspacePath).split('/').at(-1)) ||
@@ -405,7 +473,9 @@ function ArtifactCard({
         <div className={styles.artifactInfo}>
           <div className={styles.title}>{artifact.title}</div>
           <div className={styles.artifactMeta}>
-            {[getArtifactTypeLabel(artifact), size].filter(Boolean).join(' · ')}
+            {[getArtifactTypeLabel(artifact), size, blockedReason]
+              .filter(Boolean)
+              .join(' · ')}
           </div>
         </div>
         <div className={styles.actions}>
@@ -425,7 +495,8 @@ function ArtifactCard({
             type="button"
             className={styles.reviewButton}
             onClick={onOpen}
-            title={artifact.title}
+            title={blockedReason ?? artifact.title}
+            disabled={!onOpen}
           >
             {t('common.open')}
           </button>
@@ -444,6 +515,7 @@ const ARTIFACT_FORMAT_ICONS: Readonly<Record<string, LucideIcon>> = {
   audio: FileAudioIcon,
   pdf: FileTextIcon,
   notebook: NotebookTabsIcon,
+  document: FileTextIcon,
 };
 
 export function getArtifactFormatIcon(kind: string): LucideIcon | undefined {
@@ -632,6 +704,27 @@ function canDownloadArtifact(
     artifact.status === 'available' &&
     Boolean(artifact.workspacePath)
   );
+}
+
+export function canOpenWorkspaceArtifact(
+  artifact: DaemonSessionArtifact,
+): boolean {
+  if (artifact.storage !== 'workspace') {
+    return true;
+  }
+  return artifact.status === 'available' || artifact.status === 'changed';
+}
+
+export function getWorkspaceArtifactOpenBlockReason(
+  artifact: DaemonSessionArtifact,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string | undefined {
+  if (canOpenWorkspaceArtifact(artifact)) {
+    return undefined;
+  }
+  return artifact.workspacePath
+    ? t('turnOutputs.artifactUnavailable', { path: artifact.workspacePath })
+    : t('turnOutputs.artifactMissing');
 }
 
 export function displayPath(path: string, workspaceCwd?: string) {

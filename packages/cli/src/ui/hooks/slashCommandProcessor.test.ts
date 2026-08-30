@@ -5,6 +5,7 @@
  */
 
 import { act, renderHook, waitFor } from '@testing-library/react';
+import process from 'node:process';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import {
   useSlashCommandProcessor,
@@ -26,7 +27,7 @@ import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import {
-  type GeminiClient,
+  type LlmClient,
   SlashCommandStatus,
   ToolConfirmationOutcome,
   makeFakeConfig,
@@ -135,6 +136,23 @@ function createTestCommand(
   };
 }
 
+function createTestCommandPath(path: string): SlashCommand {
+  const names = path.split(' ');
+  let command = createTestCommand({
+    name: names.at(-1) ?? path,
+    action: vi.fn(),
+  });
+
+  for (let index = names.length - 2; index >= 0; index--) {
+    command = createTestCommand({
+      name: names[index],
+      subCommands: [command],
+    });
+  }
+
+  return command;
+}
+
 describe('useSlashCommandProcessor', () => {
   const mockAddItem = vi.fn();
   const mockUpdateItem = vi.fn();
@@ -142,9 +160,12 @@ describe('useSlashCommandProcessor', () => {
   const mockLoadHistory = vi.fn();
   const mockOpenThemeDialog = vi.fn();
   const mockOpenAuthDialog = vi.fn();
+  const mockOpenSettingsDialog = vi.fn();
   const mockOpenMemoryDialog = vi.fn();
   const mockOpenModelDialog = vi.fn();
+  const mockOpenHelpDialog = vi.fn();
   const mockSetQuittingMessages = vi.fn();
+  const mockClearPendingState = vi.fn();
 
   const mockConfig = makeFakeConfig({});
   mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
@@ -159,13 +180,13 @@ describe('useSlashCommandProcessor', () => {
     openThemeDialog: mockOpenThemeDialog,
     openEditorDialog: vi.fn(),
     openMemoryDialog: mockOpenMemoryDialog,
-    openSettingsDialog: vi.fn(),
+    openSettingsDialog: mockOpenSettingsDialog,
     openStatusLineDialog: vi.fn(),
     openModelDialog: mockOpenModelDialog,
     openTrustDialog: vi.fn(),
     openPermissionsDialog: vi.fn(),
     openApprovalModeDialog: vi.fn(),
-    openHelpDialog: vi.fn(),
+    openHelpDialog: mockOpenHelpDialog,
     openResumeDialog: vi.fn(),
     handleResume: vi.fn(),
     handleBranch: vi.fn().mockResolvedValue(undefined),
@@ -181,6 +202,7 @@ describe('useSlashCommandProcessor', () => {
     openMcpDialog: vi.fn(),
     openHooksDialog: vi.fn(),
     openRewindSelector: vi.fn(),
+    clearPendingState: mockClearPendingState,
   });
 
   beforeEach(() => {
@@ -211,6 +233,7 @@ describe('useSlashCommandProcessor', () => {
     setIsProcessing = vi.fn(),
     settings: LoadedSettings = mockSettings,
     extensionRefreshState?: ExtensionRefreshState,
+    isIdleRef = { current: true },
   ) => {
     mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
     mockFileLoadCommands.mockResolvedValue(Object.freeze(fileCommands));
@@ -228,8 +251,8 @@ describe('useSlashCommandProcessor', () => {
         vi.fn(), // toggleVimEnabled
         false, // isProcessing
         setIsProcessing,
-        { current: true }, // isIdleRef
-        vi.fn(), // setGeminiMdFileCount
+        isIdleRef,
+        vi.fn(), // setMemoryFileCount
         createMockActions(),
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
@@ -454,6 +477,169 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
+    it('renders an idle Goal control response as a Goal state item', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'running' as const,
+        goal: {
+          goalId: 'goal-ui',
+          revision: 1,
+          objective: 'Ship the TUI',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-ui' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'set', objective: 'Ship the TUI' },
+          response: { snapshot },
+          cause: 'create',
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal Ship the TUI');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.GOAL_STATE,
+          snapshot,
+          cause: 'create',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('leaves a mid-turn Goal control response to the active stream', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: null,
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'clear' },
+          response: { snapshot },
+          cause: 'clear',
+        }),
+      });
+      const result = setupProcessorHook(
+        [command],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal clear');
+      });
+
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: MessageType.GOAL_STATE }),
+        expect.any(Number),
+      );
+    });
+
+    it('renders a mid-turn /goal status card since it emits no broadcast', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-status',
+          revision: 2,
+          objective: 'Ship the TUI',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-status' },
+          turnCount: 1,
+          activeTimeMs: 5,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'status' },
+          response: { snapshot },
+        }),
+      });
+      const result = setupProcessorHook(
+        [command],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.GOAL_STATE,
+          snapshot,
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('renders a mid-turn causeless /goal clear with no active goal', async () => {
+      const snapshot = {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: null,
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue({
+          type: 'goal_control',
+          operation: { kind: 'clear' },
+          response: { snapshot },
+        }),
+      });
+      const result = setupProcessorHook(
+        [command],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: false },
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/goal clear');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: MessageType.INFO, text: 'No Goal set.' },
+        expect.any(Number),
+      );
+    });
+
     it('should correctly find and execute a nested subcommand', async () => {
       const childAction = vi.fn();
       const parentCommand: SlashCommand = {
@@ -556,6 +742,367 @@ describe('useSlashCommandProcessor', () => {
   });
 
   describe('Action Result Handling', () => {
+    it.each([
+      ['/auth status', 'auth', ['connect', 'login'], 'auth'],
+      ['/connect', 'auth', ['connect', 'login'], 'auth'],
+      ['/settings', 'settings', undefined, 'settings'],
+    ] as const)(
+      'handles %s without adding the invocation to TUI history',
+      async (input, name, altNames, dialog) => {
+        const command = createTestCommand({
+          name,
+          altNames: altNames ? [...altNames] : undefined,
+          action: vi.fn().mockResolvedValue({ type: 'dialog', dialog }),
+        });
+        const result = setupProcessorHook([command]);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(1),
+        );
+
+        await act(async () => {
+          await result.current.handleSlashCommand(input);
+        });
+
+        expect(mockAddItem).not.toHaveBeenCalled();
+        expect(
+          name === 'auth' ? mockOpenAuthDialog : mockOpenSettingsDialog,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          mockConfig.getChatRecordingService()?.recordSlashCommand,
+        ).toHaveBeenCalledWith({
+          phase: 'invocation',
+          rawCommand: input,
+          sentToModel: false,
+          hiddenInvocation: true,
+        });
+      },
+    );
+
+    it.each(['/help', '/?'])(
+      'opens %s without adding the invocation to TUI history',
+      async (input) => {
+        const command = createTestCommand({
+          name: 'help',
+          altNames: ['?'],
+          action: vi.fn().mockResolvedValue({
+            type: 'dialog',
+            dialog: 'help',
+          }),
+        });
+        const result = setupProcessorHook([command]);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(1),
+        );
+
+        await act(async () => {
+          await result.current.handleSlashCommand(input);
+        });
+
+        expect(mockAddItem).not.toHaveBeenCalled();
+        expect(mockOpenHelpDialog).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(['/diff', '/editor', '/theme'])(
+      'hides the invocation for the %s panel',
+      async (input) => {
+        const command = createTestCommandPath(input.slice(1));
+        const result = setupProcessorHook([command]);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(1),
+        );
+
+        await act(async () => {
+          await result.current.handleSlashCommand(input);
+        });
+
+        expect(mockAddItem).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['/effort', '/model', '/stats', '/statusline'])(
+      'hides the invocation for the bare %s picker',
+      async (input) => {
+        const [name] = input.slice(1).split(' ');
+        const command = createTestCommand({ name, action: vi.fn() });
+        const result = setupProcessorHook([command]);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(1),
+        );
+
+        await act(async () => {
+          await result.current.handleSlashCommand(input);
+        });
+
+        expect(mockAddItem).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      '/model --fast',
+      '/model --voice --project',
+      '/model --vision --global',
+      '/model --compaction',
+      '/model --image',
+      '/stats 2026-01',
+    ])('hides the invocation for the picker-only form %s', async (input) => {
+      const [name] = input.slice(1).split(' ');
+      const command = createTestCommand({ name, action: vi.fn() });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand(input);
+      });
+
+      expect(mockAddItem).not.toHaveBeenCalled();
+      expect(
+        mockConfig.getChatRecordingService()?.recordSlashCommand,
+      ).toHaveBeenCalledWith({
+        phase: 'invocation',
+        rawCommand: input,
+        sentToModel: false,
+        hiddenInvocation: true,
+      });
+    });
+
+    it('reveals a picker-shaped invocation when argument validation fails', async () => {
+      const input = '/model --project --global';
+      const command = createTestCommand({
+        name: 'model',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'error',
+          content: 'Cannot use both --project and --global',
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand(input);
+      });
+
+      expect(mockAddItem).toHaveBeenNthCalledWith(
+        1,
+        { type: MessageType.USER, text: input, sentToModel: false },
+        expect.any(Number),
+      );
+      expect(
+        mockConfig.getChatRecordingService()?.recordSlashCommand,
+      ).toHaveBeenCalledWith({
+        phase: 'invocation',
+        rawCommand: input,
+        sentToModel: false,
+        hiddenInvocation: false,
+      });
+    });
+
+    it('keeps the invocation for /theme when NO_COLOR blocks the dialog', async () => {
+      process.env['NO_COLOR'] = '1';
+      try {
+        const command = createTestCommand({
+          name: 'theme',
+          action: vi.fn().mockResolvedValue({
+            type: 'message',
+            messageType: 'info',
+            content:
+              'Theme configuration unavailable due to NO_COLOR env variable.',
+          }),
+        });
+        const result = setupProcessorHook([command]);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(1),
+        );
+
+        await act(async () => {
+          await result.current.handleSlashCommand('/theme');
+        });
+
+        expect(mockAddItem).toHaveBeenCalledWith(
+          { type: MessageType.USER, text: '/theme', sentToModel: false },
+          expect.any(Number),
+        );
+        expect(
+          mockConfig.getChatRecordingService()?.recordSlashCommand,
+        ).toHaveBeenCalledWith({
+          phase: 'invocation',
+          rawCommand: '/theme',
+          sentToModel: false,
+          hiddenInvocation: false,
+        });
+      } finally {
+        delete process.env['NO_COLOR'];
+      }
+    });
+
+    it('records the rejection message in the result record for resume', async () => {
+      const input = '/model --project --global';
+      const command = createTestCommand({
+        name: 'model',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'error',
+          content: 'Cannot use both --project and --global',
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand(input);
+      });
+
+      expect(
+        mockConfig.getChatRecordingService()?.recordSlashCommand,
+      ).toHaveBeenCalledWith({
+        phase: 'result',
+        rawCommand: input,
+        outputHistoryItems: [
+          {
+            type: MessageType.ERROR,
+            text: 'Cannot use both --project and --global',
+          },
+        ],
+      });
+    });
+
+    it('hides the invocation for the /usage alias', async () => {
+      const command = createTestCommand({
+        name: 'stats',
+        altNames: ['usage'],
+        action: vi.fn(),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/usage');
+      });
+
+      expect(mockAddItem).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['/effort high', 'effort'],
+      ['/model qwen3-max', 'model'],
+      ['/statusline make it compact', 'statusline'],
+      ['/stats export', 'stats export'],
+    ])(
+      'keeps the invocation for the direct action %s',
+      async (input, canonicalPath) => {
+        const command = createTestCommandPath(canonicalPath);
+        const result = setupProcessorHook([command]);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(1),
+        );
+
+        await act(async () => {
+          await result.current.handleSlashCommand(input);
+        });
+
+        expect(mockAddItem).toHaveBeenCalledTimes(1);
+        expect(mockAddItem).toHaveBeenCalledWith(
+          { type: MessageType.USER, text: input, sentToModel: false },
+          expect.any(Number),
+        );
+      },
+    );
+
+    it.each(['/status paths', '/stats model'])(
+      'keeps the invocation for the %s subcommand',
+      async (input) => {
+        const command = createTestCommandPath(input.slice(1));
+        const result = setupProcessorHook([command]);
+        await waitFor(() =>
+          expect(result.current.slashCommands).toHaveLength(1),
+        );
+
+        await act(async () => {
+          await result.current.handleSlashCommand(input);
+        });
+
+        expect(mockAddItem).toHaveBeenCalledTimes(1);
+        expect(mockAddItem).toHaveBeenCalledWith(
+          { type: MessageType.USER, text: input, sentToModel: false },
+          expect.any(Number),
+        );
+        expect(
+          mockConfig.getChatRecordingService()?.recordSlashCommand,
+        ).toHaveBeenCalledWith({
+          phase: 'invocation',
+          rawCommand: input,
+          sentToModel: false,
+          hiddenInvocation: false,
+        });
+      },
+    );
+
+    it('shows status output without adding the invocation to TUI history', async () => {
+      const command = createTestCommand({
+        name: 'status',
+        altNames: ['about'],
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'info',
+          content: 'status output',
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/about');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledTimes(1);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: MessageType.INFO, text: 'status output' },
+        expect.any(Number),
+      );
+    });
+
+    it('keeps the invocation for a file command that overrides status', async () => {
+      const builtinStatus = createTestCommand({
+        name: 'status',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'info',
+          content: 'builtin status output',
+        }),
+      });
+      const command = createTestCommand(
+        {
+          name: 'status',
+          action: vi.fn().mockResolvedValue({
+            type: 'message',
+            messageType: 'info',
+            content: 'custom status output',
+          }),
+        },
+        CommandKind.FILE,
+      );
+      const result = setupProcessorHook([builtinStatus], [command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/status');
+      });
+
+      expect(command.action).toHaveBeenCalledTimes(1);
+      expect(builtinStatus.action).not.toHaveBeenCalled();
+      expect(mockAddItem).toHaveBeenNthCalledWith(
+        1,
+        { type: MessageType.USER, text: '/status', sentToModel: false },
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenNthCalledWith(
+        2,
+        { type: MessageType.INFO, text: 'custom status output' },
+        expect.any(Number),
+      );
+    });
+
     it('should handle "dialog: theme" action', async () => {
       const command = createTestCommand({
         name: 'themecmd',
@@ -640,6 +1187,25 @@ describe('useSlashCommandProcessor', () => {
 
       expect(mockOpenModelDialog).toHaveBeenCalledWith({
         imageModelMode: true,
+      });
+    });
+
+    it('should handle "dialog: compaction-model" action', async () => {
+      const command = createTestCommand({
+        name: 'compactionmodelcmd',
+        action: vi
+          .fn()
+          .mockResolvedValue({ type: 'dialog', dialog: 'compaction-model' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/compactionmodelcmd');
+      });
+
+      expect(mockOpenModelDialog).toHaveBeenCalledWith({
+        compactionModelMode: true,
       });
     });
 
@@ -840,8 +1406,8 @@ describe('useSlashCommandProcessor', () => {
     it('should handle "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
-      } as unknown as GeminiClient;
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
+      } as unknown as LlmClient;
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(mockClient);
 
       const command = createTestCommand({
         name: 'load',
@@ -868,8 +1434,8 @@ describe('useSlashCommandProcessor', () => {
     it('should preserve thoughts when handling "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
-      } as unknown as GeminiClient;
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
+      } as unknown as LlmClient;
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(mockClient);
 
       const historyWithThoughts = [
         {
@@ -962,6 +1528,70 @@ describe('useSlashCommandProcessor', () => {
         phase: 'invocation',
         rawCommand: '/filecmd',
         sentToModel: true,
+        hiddenInvocation: false,
+      });
+    });
+
+    it('classifies a hidden invocation as model-sent when it submits a prompt', async () => {
+      const command = createTestCommand({
+        name: 'status',
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'hidden but submitted' }],
+        }),
+      });
+
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand('/status');
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: [{ text: 'hidden but submitted' }],
+      });
+      expect(mockAddItem).not.toHaveBeenCalled();
+      expect(mockUpdateItem).not.toHaveBeenCalled();
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      expect(recorder.recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'invocation',
+        rawCommand: '/status',
+        sentToModel: true,
+        hiddenInvocation: true,
+      });
+    });
+
+    it('should preserve context-file refresh intent from submit_prompt actions', async () => {
+      const fileCommand = createTestCommand(
+        {
+          name: 'rememberfile',
+          description: 'A command that writes project context',
+          action: async () => ({
+            type: 'submit_prompt',
+            content: [{ text: 'Remember this fact.' }],
+            refreshContextFilesOnWrite: true,
+          }),
+        },
+        CommandKind.FILE,
+      );
+
+      const result = setupProcessorHook([], [fileCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand('/rememberfile');
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: [{ text: 'Remember this fact.' }],
+        refreshContextFilesOnWrite: true,
       });
     });
 
@@ -1442,6 +2072,7 @@ describe('useSlashCommandProcessor', () => {
         phase: 'invocation',
         rawCommand: '/shellcmd',
         sentToModel: true,
+        hiddenInvocation: false,
       });
     });
 
@@ -1494,6 +2125,7 @@ describe('useSlashCommandProcessor', () => {
         phase: 'invocation',
         rawCommand: '/actioncmd',
         sentToModel: true,
+        hiddenInvocation: false,
       });
     });
 
@@ -1720,7 +2352,7 @@ describe('useSlashCommandProcessor', () => {
           false, // isProcessing
           vi.fn(), // setIsProcessing
           { current: true }, // isIdleRef
-          vi.fn(), // setGeminiMdFileCount
+          vi.fn(), // setMemoryFileCount
           createMockActions(),
           new Map(), // extensionsUpdateState
           true, // isConfigInitialized
@@ -2451,6 +3083,18 @@ describe('useSlashCommandProcessor', () => {
   });
 
   describe('ui.clear and /btw dialog', () => {
+    it('should discard pending Gemini state when ui.clear is called', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => expect(result.current.commandContext).toBeDefined());
+
+      act(() => {
+        result.current.commandContext.ui.clear();
+      });
+
+      expect(mockClearPendingState).toHaveBeenCalledTimes(1);
+      expect(mockClearItems).toHaveBeenCalledTimes(1);
+    });
+
     it('should dismiss an active btw dialog when ui.clear is called', async () => {
       const result = setupProcessorHook();
       await waitFor(() => expect(result.current.commandContext).toBeDefined());
@@ -2527,6 +3171,51 @@ describe('useSlashCommandProcessor', () => {
       expect(recorder.recordSlashCommand).not.toHaveBeenCalled();
     });
 
+    it('does not record /advisor via the chat recorder', async () => {
+      const advisorCmd = createTestCommand({
+        name: 'advisor',
+        action: vi.fn().mockResolvedValue(undefined),
+      });
+      const result = setupProcessorHook([advisorCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      recorder.recordSlashCommand.mockClear();
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/advisor check my work');
+      });
+
+      expect(advisorCmd.action).toHaveBeenCalled();
+      expect(recorder.recordSlashCommand).not.toHaveBeenCalled();
+    });
+
+    it('records a user command shadowing the advisor name', async () => {
+      const shadowCmd = createTestCommand(
+        {
+          name: 'advisor',
+          action: vi.fn().mockResolvedValue(undefined),
+        },
+        CommandKind.FILE,
+      );
+      const result = setupProcessorHook([shadowCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      recorder.recordSlashCommand.mockClear();
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/advisor check my work');
+      });
+
+      expect(shadowCmd.action).toHaveBeenCalled();
+      expect(recorder.recordSlashCommand).toHaveBeenCalledTimes(2);
+    });
+
     it('still records unrelated commands via the chat recorder (control)', async () => {
       const testCmd = createTestCommand({
         name: 'regular',
@@ -2598,6 +3287,41 @@ describe('useSlashCommandProcessor', () => {
           { text: 'SKILL_BODY:e2e-testing:e2e workflow' },
           { text: 'implement X' },
         ]),
+      });
+    });
+
+    it('preserves context-file refresh intent from stacked skills', async () => {
+      const skillA: SlashCommand = createTestCommand(
+        {
+          name: 'remember-skill',
+          description: 'Skill that writes project context',
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'SKILL_BODY:remember-skill' }],
+            refreshContextFilesOnWrite: true,
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const skillB = createSkillCommand('e2e-testing', 'e2e workflow');
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/remember-skill /e2e-testing implement X',
+        );
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: expect.arrayContaining([
+          { text: 'SKILL_BODY:remember-skill' },
+          { text: 'SKILL_BODY:e2e-testing:e2e workflow' },
+          { text: 'implement X' },
+        ]),
+        refreshContextFilesOnWrite: true,
       });
     });
 

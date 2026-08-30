@@ -13,7 +13,7 @@ import {
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
-import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
+import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 vi.mock('./scan.js', async (importOriginal) => {
@@ -38,7 +38,7 @@ vi.mock('./paths.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../utils/forkedAgent.js', () => ({
+vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
   getCacheSafeParams: vi.fn(),
 }));
@@ -49,6 +49,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
     getApprovalMode: vi.fn(),
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
+    getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
   } as unknown as Config;
 
   beforeEach(() => {
@@ -93,13 +94,13 @@ describe('runAutoMemoryExtractionByAgent', () => {
       hasToolActivity: true,
       systemMessage: 'Managed auto-memory updated: user.md',
     });
+    expect(getCacheSafeParams).toHaveBeenCalledWith('session-1');
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         tools: [
           'read_file',
           'grep_search',
           'glob',
-          'list_directory',
           'run_shell_command',
           'write_file',
           'edit',
@@ -139,6 +140,38 @@ describe('runAutoMemoryExtractionByAgent', () => {
 
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ maxTimeMinutes: 0 }),
+    );
+  });
+
+  it('threads the configured memory agent turn limit into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    vi.mocked(mockConfig.getMemoryAgentMaxTurns).mockReturnValueOnce(25);
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 25 }),
+    );
+  });
+
+  it('passes the zero turn-limit sentinel through to the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    vi.mocked(mockConfig.getMemoryAgentMaxTurns).mockReturnValueOnce(0);
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
     );
   });
 
@@ -273,6 +306,22 @@ describe('runAutoMemoryExtractionByAgent', () => {
     expect(call?.taskPrompt).toContain(
       'do not intentionally remove their valid entries from `MEMORY.md`',
     );
+  });
+
+  it('does not advertise the opt-in list_directory tool to the extraction agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+    });
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    expect(call?.taskPrompt).toContain('Available tools in this run');
+    // list_directory is disabled by default, so the prompt must not steer this
+    // turn-budgeted background agent toward an unregistered tool.
+    expect(call?.taskPrompt).not.toContain('list_directory');
   });
 
   it('throws when getCacheSafeParams returns null', async () => {

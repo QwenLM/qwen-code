@@ -18,19 +18,21 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import type { PermissionManager } from '../permissions/permission-manager.js';
 import {
   AUTO_SKILL_DIR_PREFIX,
   buildTaskPrompt,
   createSkillScopedAgentConfig,
+  DEFAULT_AUTO_SKILL_MAX_TURNS,
   DEFAULT_AUTO_SKILL_TIMEOUT_MS,
   listExistingSkillDirNames,
   runSkillReviewByAgent,
   SKILL_REVIEW_SYSTEM_PROMPT,
 } from './skillReviewAgentPlanner.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 
-vi.mock('../utils/forkedAgent.js', () => ({
+vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
 
@@ -403,6 +405,12 @@ describe('buildTaskPrompt', () => {
     expect(prompt).toContain('alpha');
     expect(prompt).toContain('beta');
     expect(prompt).toMatch(/Active skill directory names/i);
+    // The inspection guidance must only reference tools in this run's filter
+    // (read_file/write_file/edit) — not `ls`/list_directory, which is opt-in.
+    expect(prompt).toContain(
+      'Use `read_file` to inspect the existing skill files listed above',
+    );
+    expect(prompt).not.toContain('Use `ls`');
   });
 
   it('lists archived directory names as reserved', async () => {
@@ -415,18 +423,21 @@ describe('buildTaskPrompt', () => {
     expect(await buildTaskPrompt(projectRoot)).toContain(directoryName);
   });
 
-  it('excludes archived directory names carrying control bytes from the prompt', async () => {
-    // Mirrors the curator's charset guard: a crafted archived directory name
-    // with ANSI/control bytes must not reach the task prompt verbatim.
-    const directoryName = 'auto-skill-evil\u001b[31m';
-    await fs.mkdir(
-      path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
-      { recursive: true },
-    );
+  it.skipIf(process.platform === 'win32')(
+    'excludes archived directory names carrying control bytes from the prompt',
+    async () => {
+      // Mirrors the curator's charset guard: a crafted archived directory name
+      // with ANSI/control bytes must not reach the task prompt verbatim.
+      const directoryName = 'auto-skill-evil\u001b[31m';
+      await fs.mkdir(
+        path.join(projectRoot, '.qwen', 'archived-skills', directoryName),
+        { recursive: true },
+      );
 
-    const prompt = await buildTaskPrompt(projectRoot);
-    expect(prompt).not.toContain('\u001b[31m');
-  });
+      const prompt = await buildTaskPrompt(projectRoot);
+      expect(prompt).not.toContain('\u001b[31m');
+    },
+  );
 
   it('falls back to a placeholder line when no skills exist yet', async () => {
     const prompt = await buildTaskPrompt(projectRoot);
@@ -468,15 +479,23 @@ describe('SKILL_REVIEW_SYSTEM_PROMPT', () => {
   });
 });
 
-describe('runSkillReviewByAgent timeout wiring', () => {
+describe('runSkillReviewByAgent limit wiring', () => {
   let tempDir: string;
   let projectRoot: string;
 
-  function makeConfig(timeoutMinutes: number | undefined): Config {
+  function makeConfig(
+    options: {
+      timeoutMinutes?: number;
+      maxTurns?: number;
+    } = {},
+  ): Config {
     return {
       getProjectRoot: () => projectRoot,
       getPermissionManager: () => undefined,
-      getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(timeoutMinutes),
+      getMemoryAgentTimeoutMinutes: vi
+        .fn()
+        .mockReturnValue(options.timeoutMinutes),
+      getMemoryAgentMaxTurns: vi.fn().mockReturnValue(options.maxTurns),
     } as unknown as Config;
   }
 
@@ -498,7 +517,7 @@ describe('runSkillReviewByAgent timeout wiring', () => {
 
   it('uses the configured memory agent timeout when no timeoutMs param is passed', async () => {
     await runSkillReviewByAgent({
-      config: makeConfig(30),
+      config: makeConfig({ timeoutMinutes: 30 }),
       projectRoot,
       history: [],
     });
@@ -508,9 +527,46 @@ describe('runSkillReviewByAgent timeout wiring', () => {
     );
   });
 
+  it('uses the configured memory agent turn limit when maxTurns is omitted', async () => {
+    await runSkillReviewByAgent({
+      config: makeConfig({ maxTurns: 25 }),
+      projectRoot,
+      history: [],
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 25 }),
+    );
+  });
+
+  it('passes the zero turn-limit sentinel through to the forked agent', async () => {
+    await runSkillReviewByAgent({
+      config: makeConfig({ maxTurns: 0 }),
+      projectRoot,
+      history: [],
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
+    );
+  });
+
+  it('lets an explicit maxTurns param override the configured value', async () => {
+    await runSkillReviewByAgent({
+      config: makeConfig({ maxTurns: 25 }),
+      projectRoot,
+      history: [],
+      maxTurns: 3,
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 3 }),
+    );
+  });
+
   it('lets an explicit timeoutMs param override the configured value', async () => {
     await runSkillReviewByAgent({
-      config: makeConfig(30),
+      config: makeConfig({ timeoutMinutes: 30 }),
       projectRoot,
       history: [],
       timeoutMs: 60_000,
@@ -523,15 +579,101 @@ describe('runSkillReviewByAgent timeout wiring', () => {
 
   it('falls back to the built-in default when neither is set', async () => {
     await runSkillReviewByAgent({
-      config: makeConfig(undefined),
+      config: makeConfig(),
       projectRoot,
       history: [],
     });
 
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
+        maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
         maxTimeMinutes: DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000,
       }),
     );
+  });
+
+  it('passes only always-registered tools to the forked agent', async () => {
+    // list_directory is disabled by default, so it must not be requested for
+    // this turn-budgeted background agent — the prompt steers to read_file.
+    await runSkillReviewByAgent({
+      config: makeConfig(),
+      projectRoot,
+      history: [],
+    });
+
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    expect(call?.tools).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.WRITE_FILE,
+      ToolNames.EDIT,
+    ]);
+  });
+});
+
+describe('skill-scoped shim registration-gate delegation (#10075)', () => {
+  function scopedPmWithBase(basePm: unknown): PermissionManager {
+    const scoped = createSkillScopedAgentConfig(
+      {
+        getProjectRoot: () => '/project',
+        getPermissionManager: () => basePm,
+      } as unknown as Config,
+      '/project',
+    );
+    const pm = scoped.getPermissionManager();
+    if (!pm) {
+      throw new Error(
+        'createSkillScopedAgentConfig must install a PermissionManager',
+      );
+    }
+    return pm;
+  }
+
+  it('isToolDisabledByCoreToolsAllowList delegates when present, defaults to false otherwise', () => {
+    const gate = vi.fn().mockReturnValue(true);
+    const withGate: Pick<
+      PermissionManager,
+      'isToolDisabledByCoreToolsAllowList'
+    > = {
+      isToolDisabledByCoreToolsAllowList: gate,
+    };
+    const delegated = scopedPmWithBase(withGate);
+    expect(delegated.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+      true,
+    );
+    expect(gate).toHaveBeenCalledWith(ToolNames.EDIT);
+
+    const noBase = scopedPmWithBase(undefined);
+    expect(noBase.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+      false,
+    );
+
+    // A base PM without the method (older shape) must not throw — the
+    // scheduler's own `typeof` guard relies on this returning false.
+    const legacyBase: Pick<PermissionManager, 'isToolEnabled'> = {
+      isToolEnabled: vi.fn().mockResolvedValue(true),
+    };
+    const legacy = scopedPmWithBase(legacyBase);
+    expect(legacy.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+      false,
+    );
+  });
+
+  it('getToolRegistrationStatus delegates when present, defaults to registered', async () => {
+    // Use a non-scoped tool: read_file/ls/edit/write_file short-circuit as
+    // scoped tools before the base delegation.
+    const status = vi.fn().mockResolvedValue('disabled');
+    const withStatus: Pick<PermissionManager, 'getToolRegistrationStatus'> = {
+      getToolRegistrationStatus: status,
+    };
+    const delegated = scopedPmWithBase(withStatus);
+    await expect(
+      delegated.getToolRegistrationStatus(ToolNames.WEB_FETCH),
+    ).resolves.toBe('disabled');
+    expect(status).toHaveBeenCalledWith(ToolNames.WEB_FETCH);
+
+    const noBase = scopedPmWithBase(undefined);
+    await expect(
+      noBase.getToolRegistrationStatus(ToolNames.WEB_FETCH),
+    ).resolves.toBe('registered');
   });
 });

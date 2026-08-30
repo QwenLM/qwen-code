@@ -20,7 +20,7 @@ const {
   symlinkSync,
   writeFileSync,
 } = await vi.importActual('node:fs');
-const { execFileSync } = await vi.importActual('node:child_process');
+const { execFileSync, spawnSync } = await vi.importActual('node:child_process');
 const crypto = await vi.importActual('node:crypto');
 const { tmpdir } = await vi.importActual('node:os');
 const path = await vi.importActual('node:path');
@@ -45,6 +45,20 @@ const releaseScriptUtilsUrl = pathToFileURL(
 // Windows batch behavior has separate Windows-only E2E coverage below.
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
 const itOnWindows = process.platform === 'win32' ? it : it.skip;
+// The POSIX fixture helpers shell out to the `zip` and `unzip` binaries.
+// Local minimal images may omit them, but CI must keep the archive-safety
+// cases active.
+const zipAvailable =
+  process.platform === 'win32' ||
+  (spawnSync('zip', ['--version']).error === undefined &&
+    spawnSync('unzip', ['-v']).error === undefined);
+if (process.env.CI && process.platform !== 'win32' && !zipAvailable) {
+  throw new Error(
+    '`zip`/`unzip` missing on a CI host; archive tests would skip.',
+  );
+}
+const itWithZip = zipAvailable ? it : it.skip;
+const itOnUnixWithZip = zipAvailable ? itOnUnix : it.skip;
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -265,6 +279,7 @@ describe('installation scripts', () => {
     const script = readScript(
       'scripts/installation/install-qwen-standalone.bat',
     );
+    const verifyChecksum = readBatchRoutine(script, 'VerifyChecksum');
 
     expect(script).toContain('--method METHOD');
     expect(script).toContain('--mirror MIRROR');
@@ -276,7 +291,7 @@ describe('installation scripts', () => {
     expect(script).toContain(
       'SHA256SUMS not found at !CHECKSUM_FILE!; cannot verify archive',
     );
-    expect(script).toContain('Get-FileHash -Algorithm SHA256');
+    expect(script).not.toContain('Get-FileHash');
     expect(script).toContain('tokens=1,2');
     expect(script).toContain('CHECKSUM_NAME');
     expect(script).toContain('if "!CHECKSUM_NAME!"=="!ARCHIVE_NAME!"');
@@ -299,6 +314,25 @@ describe('installation scripts', () => {
       'installer options contain unsafe command characters',
     );
     expect(script).not.toContain('-EncodedCommand');
+    expect(verifyChecksum).toContain('[IO.File]::OpenRead');
+    expect(verifyChecksum).toContain(
+      '[Security.Cryptography.SHA256]::Create()',
+    );
+    expect(verifyChecksum).toContain('.ComputeHash($stream)');
+    expect(verifyChecksum).toContain("-cnotmatch '\\A[0-9A-F]{64}\\z'");
+    expect(verifyChecksum).toContain('[Console]::Write($hash)');
+    expect(verifyChecksum).toContain('SHA-256 calculation failed: ');
+    expect(verifyChecksum).not.toMatch(/ReadAllBytes|ReadToEnd/);
+    expect(verifyChecksum).toContain(
+      'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command',
+    );
+    expect(verifyChecksum.indexOf('finally')).toBeGreaterThan(-1);
+    expect(verifyChecksum).toContain('$stream.Dispose()');
+    expect(verifyChecksum).toContain('$sha256.Dispose()');
+    expect(verifyChecksum.indexOf('$stream.Dispose()')).toBeLessThan(
+      verifyChecksum.indexOf('$sha256.Dispose()'),
+    );
+    expect(verifyChecksum).not.toContain('2^>nul');
     expect(script).toContain('QWEN_VALIDATE_OPTIONS_SCRIPT');
     expect(script).toContain('$unsafe = [char[]](10,13,33,34');
     expect(script).toContain(
@@ -442,23 +476,25 @@ describe('installation scripts', () => {
     }
   });
 
-  it('injects Windows processor overrides directly into cmd commands', () => {
+  it('injects Windows command overrides case-insensitively', () => {
     const prepared = prepareWindowsCommand(
       'call "C:\\tools\\install-qwen-standalone.bat"',
       {
         Path: 'C:\\fake-bin',
         PROCESSOR_ARCHITECTURE: 'AMD64',
         PROCESSOR_ARCHITEW6432: '',
+        PSModulePath: 'C:\\PowerShell\\7\\Modules',
       },
       {
         Path: 'C:\\Windows\\System32',
         processor_architecture: 'ARM64',
         PROCESSOR_ARCHITEW6432: 'ARM64',
+        psmodulepath: 'C:\\WindowsPowerShell\\Modules',
       },
     );
 
     expect(prepared.command).toBe(
-      'set "PROCESSOR_ARCHITECTURE=AMD64" && set "PROCESSOR_ARCHITEW6432=" && call "C:\\tools\\install-qwen-standalone.bat"',
+      'set "PROCESSOR_ARCHITECTURE=AMD64" && set "PROCESSOR_ARCHITEW6432=" && set "PSModulePath=C:\\PowerShell\\7\\Modules" && call "C:\\tools\\install-qwen-standalone.bat"',
     );
     expect(prepared.env).toEqual({ Path: 'C:\\fake-bin' });
   });
@@ -1679,7 +1715,7 @@ describe('standalone release packaging', () => {
     }
   });
 
-  it('requires the standalone cli-entry wrapper in dist', () => {
+  itWithZip('requires the standalone cli-entry wrapper in dist', () => {
     const createdDist = ensureMinimalDist({ includeCliEntry: false });
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
@@ -1709,104 +1745,117 @@ describe('standalone release packaging', () => {
     }
   });
 
-  it('packages a win-x64 standalone archive', () => {
-    const createdDist = ensureMinimalDist();
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+  itWithZip(
+    'packages a win-x64 standalone archive',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
-    try {
-      const outDir = path.join(tmpDir, 'out');
-      execFileSync(
-        'node',
-        [
-          'scripts/create-standalone-package.js',
-          '--target',
-          'win-x64',
-          '--node-archive',
-          createFakeWindowsNodeArchive(tmpDir),
-          '--out-dir',
-          outDir,
-          '--version',
-          '0.0.0-test',
-        ],
-        { stdio: 'pipe' },
-      );
+      try {
+        const outDir = path.join(tmpDir, 'out');
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            'win-x64',
+            '--node-archive',
+            createFakeWindowsNodeArchive(tmpDir),
+            '--out-dir',
+            outDir,
+            '--version',
+            '0.0.0-test',
+          ],
+          { stdio: 'pipe' },
+        );
 
-      const archive = path.join(outDir, 'qwen-code-win-x64.zip');
-      const extractDir = path.join(tmpDir, 'extract');
-      mkdirSync(extractDir, { recursive: true });
-      extractZipForTest(archive, extractDir);
+        const archive = path.join(outDir, 'qwen-code-win-x64.zip');
+        const extractDir = path.join(tmpDir, 'extract');
+        mkdirSync(extractDir, { recursive: true });
+        extractZipForTest(archive, extractDir);
 
-      expect(existsSync(path.join(extractDir, 'qwen-code'))).toBe(true);
-      expect(
-        existsSync(path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd')),
-      ).toBe(true);
-      expect(
-        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
-      ).toBe(true);
-      expect(
-        existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
-      ).toBe(true);
-      const shim = readScript(
-        path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd'),
-      );
-      expect(shim).toContain(
-        'set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"',
-      );
-      expect(shim).toContain(
-        '"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*',
-      );
-      expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(1);
-      expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
-        'qwen-code-win-x64.zip',
-      );
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-      restoreMinimalDist(createdDist);
-    }
-  }, 30_000);
+        expect(existsSync(path.join(extractDir, 'qwen-code'))).toBe(true);
+        expect(
+          existsSync(path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd')),
+        ).toBe(true);
+        expect(
+          existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+        ).toBe(true);
+        expect(
+          existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
+        ).toBe(true);
+        const shim = readScript(
+          path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd'),
+        );
+        expect(shim).toContain(
+          'set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"',
+        );
+        expect(shim).toContain(
+          '"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*',
+        );
+        expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(1);
+        expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
+          'qwen-code-win-x64.zip',
+        );
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        restoreMinimalDist(createdDist);
+      }
+    },
+    30_000,
+  );
 
-  it('skips npm-only artifacts staged in dist', () => {
-    const createdDist = ensureMinimalDist({
-      includeNpmPackageArtifacts: true,
-    });
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+  itWithZip(
+    'skips npm-only artifacts staged in dist',
+    () => {
+      const createdDist = ensureMinimalDist({
+        includeNpmPackageArtifacts: true,
+      });
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
-    try {
-      const outDir = path.join(tmpDir, 'out');
-      execFileSync(
-        'node',
-        [
-          'scripts/create-standalone-package.js',
-          '--target',
-          'win-x64',
-          '--node-archive',
-          createFakeWindowsNodeArchive(tmpDir),
-          '--out-dir',
-          outDir,
-          '--version',
-          '0.0.0-test',
-        ],
-        { stdio: 'pipe' },
-      );
+      try {
+        const outDir = path.join(tmpDir, 'out');
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            'win-x64',
+            '--node-archive',
+            createFakeWindowsNodeArchive(tmpDir),
+            '--out-dir',
+            outDir,
+            '--version',
+            '0.0.0-test',
+          ],
+          { stdio: 'pipe' },
+        );
 
-      const extractDir = path.join(tmpDir, 'extract');
-      mkdirSync(extractDir, { recursive: true });
-      extractZipForTest(path.join(outDir, 'qwen-code-win-x64.zip'), extractDir);
+        const extractDir = path.join(tmpDir, 'extract');
+        mkdirSync(extractDir, { recursive: true });
+        extractZipForTest(
+          path.join(outDir, 'qwen-code-win-x64.zip'),
+          extractDir,
+        );
 
-      expect(
-        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
-      ).toBe(true);
-      expect(
-        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'postinstall.js')),
-      ).toBe(false);
-      expect(
-        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'patches')),
-      ).toBe(false);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-      restoreMinimalDist(createdDist);
-    }
-  }, 30_000);
+        expect(
+          existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+        ).toBe(true);
+        expect(
+          existsSync(
+            path.join(extractDir, 'qwen-code', 'lib', 'postinstall.js'),
+          ),
+        ).toBe(false);
+        expect(
+          existsSync(path.join(extractDir, 'qwen-code', 'lib', 'patches')),
+        ).toBe(false);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        restoreMinimalDist(createdDist);
+      }
+    },
+    30_000,
+  );
 
   it('requires the native audio prebuild when release packaging opts in', () => {
     const createdDist = ensureMinimalDist();
@@ -2136,7 +2185,7 @@ describe('standalone release packaging', () => {
     }
   });
 
-  it('rejects unexpected dist assets', () => {
+  itWithZip('rejects unexpected dist assets', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
 
@@ -3563,7 +3612,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
     }
   });
 
-  itOnUnix(
+  itOnUnixWithZip(
     'rejects standalone archives containing path traversal entries',
     () => {
       const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
@@ -3864,9 +3913,9 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
   });
 });
 
-// Windows runners are slower at spawning cmd.exe + node.exe, so the
-// default 5s vitest timeout is too tight for these end-to-end installs.
-describe('Windows installer end-to-end', { timeout: 30000 }, () => {
+// Windows runners are slower at spawning cmd.exe, powershell.exe, and
+// node.exe, so the default 5s vitest timeout is too tight for these E2E tests.
+describe('Windows installer end-to-end', { timeout: 60_000 }, () => {
   itOnWindows(
     'installs a local standalone archive with checksum verification',
     () => {
@@ -3901,20 +3950,127 @@ describe('Windows installer end-to-end', { timeout: 30000 }, () => {
     },
   );
 
+  itOnWindows(
+    '#7118 installs when Windows PowerShell cannot resolve Get-FileHash',
+    ({ skip }) => {
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const programFiles =
+          process.env.ProgramW6432 || process.env.ProgramFiles;
+        const systemRoot = process.env.SystemRoot;
+        const userProfile = process.env.USERPROFILE;
+        if (!programFiles || !systemRoot || !userProfile) {
+          throw new Error('Windows environment paths are unavailable.');
+        }
+
+        const powerShell7ModuleRoot = path.join(
+          programFiles,
+          'PowerShell',
+          '7',
+          'Modules',
+        );
+        if (!existsSync(powerShell7ModuleRoot)) {
+          skip('PowerShell 7 modules are unavailable on this Windows host.');
+          return;
+        }
+
+        const modulePath = [
+          powerShell7ModuleRoot,
+          path.join(userProfile, 'Documents', 'WindowsPowerShell', 'Modules'),
+          path.join(programFiles, 'WindowsPowerShell', 'Modules'),
+          path.join(
+            systemRoot,
+            'system32',
+            'WindowsPowerShell',
+            'v1.0',
+            'Modules',
+          ),
+        ].join(path.delimiter);
+        const getFileHashState = runWindowsCommand(
+          `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$command = Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue; if ($null -eq $command) { [Console]::Write('absent') } else { [Console]::Write('present') }"`,
+          { PSModulePath: modulePath },
+        )
+          .toString()
+          .trim();
+        expect(['absent', 'present']).toContain(getFileHashState);
+        if (getFileHashState === 'present') {
+          skip(
+            'This Windows host does not reproduce #7118 with PowerShell 7 modules first.',
+          );
+          return;
+        }
+
+        const archive = createFakeWindowsStandaloneArchive(tmpDir);
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+        const output = runWindowsInstaller(
+          archive,
+          installRoot,
+          home,
+          'standalone',
+          { PSModulePath: modulePath },
+        ).toString();
+
+        expect(output).not.toMatch(
+          /Could not calculate SHA-256|SHA-256 calculation failed|Get-FileHash/,
+        );
+        expect(existsSync(path.join(installRoot, 'bin', 'qwen.cmd'))).toBe(
+          true,
+        );
+        expect(
+          existsSync(path.join(installRoot, 'qwen-code', 'node', 'node.exe')),
+        ).toBe(true);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   itOnWindows('rejects a tampered local archive', () => {
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
     try {
       const archive = createFakeWindowsStandaloneArchive(tmpDir);
+      const installRoot = path.join(tmpDir, 'install');
+      const home = path.join(tmpDir, 'home');
       appendFileSync(archive, 'tamper');
 
-      expect(() =>
-        runWindowsInstaller(
-          archive,
-          path.join(tmpDir, 'install'),
-          path.join(tmpDir, 'home'),
-        ),
-      ).toThrow(/Checksum mismatch/);
+      expect(() => runWindowsInstaller(archive, installRoot, home)).toThrow(
+        /Checksum mismatch/,
+      );
+      expectNoStandaloneInstallSideEffects(installRoot, home);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnWindows('reports an underlying checksum calculation error', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const archive = path.join(tmpDir, 'qwen-code-win-x64.zip');
+      const installRoot = path.join(tmpDir, 'install');
+      const home = path.join(tmpDir, 'home');
+      mkdirSync(archive);
+      writeFileSync(
+        path.join(tmpDir, 'SHA256SUMS'),
+        `${'0'.repeat(64)}  ${path.basename(archive)}\n`,
+      );
+
+      const failureMessage = captureFailure(() =>
+        runWindowsInstaller(archive, installRoot, home),
+      );
+      expect(failureMessage).toContain(
+        'ERROR: Could not calculate SHA-256 checksum for archive.',
+      );
+      expect(failureMessage).toMatch(/SHA-256 calculation failed: .+/);
+      expect(failureMessage).not.toContain('Checksum mismatch');
+      expect(failureMessage).not.toContain('Failed to inspect archive');
+      expect(failureMessage).not.toContain(
+        'Failed to extract standalone archive',
+      );
+      expectNoStandaloneInstallSideEffects(installRoot, home);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -4734,6 +4890,7 @@ function runWindowsPowerShellScript(scriptPath, args = [], env = {}) {
 const WINDOWS_COMMAND_ENV_OVERRIDES = [
   'PROCESSOR_ARCHITECTURE',
   'PROCESSOR_ARCHITEW6432',
+  'PSModulePath',
 ];
 
 function prepareWindowsCommand(command, env = {}, baseEnv = process.env) {
@@ -4757,6 +4914,45 @@ function prepareWindowsCommand(command, env = {}, baseEnv = process.env) {
     command: [...commandPrefix, command].join(' && '),
     env: commandEnv,
   };
+}
+
+function captureFailure(action) {
+  try {
+    action();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error('Expected command to fail.');
+}
+
+function expectNoStandaloneInstallSideEffects(installRoot, home) {
+  const installDir = path.join(installRoot, 'qwen-code');
+  const wrapper = path.join(installRoot, 'bin', 'qwen.cmd');
+  const unexpectedPaths = [
+    installDir,
+    `${installDir}.new`,
+    `${installDir}.old`,
+    wrapper,
+    `${wrapper}.new`,
+    path.join(installDir, 'bin', 'qwen.cmd'),
+    path.join(installDir, 'node', 'node.exe'),
+    path.join(home, '.qwen', 'source.json'),
+  ];
+  for (const unexpectedPath of unexpectedPaths) {
+    expect(existsSync(unexpectedPath), unexpectedPath).toBe(false);
+  }
+}
+
+function readBatchRoutine(script, label) {
+  const normalized = script.replaceAll('\r\n', '\n');
+  const marker = `:${label}\n`;
+  const labelMatch = new RegExp(`(?:^|\\n)${marker}`).exec(normalized);
+  if (!labelMatch) throw new Error(`Batch label not found: ${label}`);
+  const start = labelMatch.index + (labelMatch[0].startsWith('\n') ? 1 : 0);
+  const rest = normalized.slice(start + marker.length);
+  const nextLabel = /\n:[A-Za-z0-9_]+\n/.exec(rest);
+  if (!nextLabel) throw new Error(`Next batch label not found after: ${label}`);
+  return normalized.slice(start, start + marker.length + nextLabel.index);
 }
 
 function createSymlinkStandaloneArchive(tmpDir) {

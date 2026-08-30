@@ -183,6 +183,8 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
+  'toolDisplayName.ReportFindings': '上報評審發現',
+  'toolDisplayName.DisplayImage': '顯示圖片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '進入計畫模式',
   'toolDisplayName.ExitPlanMode': '退出計畫模式',
@@ -205,6 +207,7 @@ export default {
   'toolDisplayName.TeamDelete': '刪除團隊',
   'toolDisplayName.TeamPlanApproval': '團隊計畫審批',
   'toolDisplayName.SendMessage': '傳送訊息',
+  'toolDisplayName.RequestShutdown': '請求下線',
   'toolDisplayName.StructuredOutput': '結構化輸出',
   'toolDisplayName.Monitor': '監控',
   'toolDisplayName.NotebookEdit': '編輯 Notebook',
@@ -723,6 +726,7 @@ export default {
   'Tool Output Truncation Lines': '工具輸出截斷行數',
   'Folder Trust': '檔案夾信任',
   'Tool Schema Compliance': 'Tool Schema 兼容性',
+  Unset: '未設定',
   'Auto (detect from system)': '自動（從系統檢測）',
   'Auto (follow user input)': '自動（跟隨使用者輸入）',
   'Auto (detect terminal theme)': '自動（檢測終端主題）',
@@ -1299,6 +1303,13 @@ export default {
   'Already generating summary, wait for previous request to complete':
     '正在生成摘要，請等待上一個請求完成',
   'No conversation found to summarize.': '未找到要總結的對話',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    '摘要路徑已存在且非產生的摘要：{{path}}',
+  'Summary path must be within the project root.': '摘要路徑必須在專案根目錄內',
+  'Summary path resolves to an existing directory: {{path}}':
+    '摘要路徑解析為一個已存在的目錄：{{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    '摘要路徑以分隔符結尾，但是一個已存在的檔案：{{path}}',
   'Failed to generate project context summary: {{error}}':
     '生成項目上下文摘要失敗：{{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1317,8 +1328,8 @@ export default {
     '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，[model-id] 可立即切換）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
     '切換此會話的模型（--fast 建議模型，--voice 語音轉寫模型，--vision 視覺橋接模型，--project 持久化到專案設定，--global 持久化到使用者設定，[model-id] 立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
-    '切換此會話的模型（--fast 建議模型，--voice 語音轉寫模型，--vision 視覺橋接模型，--image 圖像生成模型，--project 持久化到專案設定，--global 持久化到使用者設定，[model-id] 立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切換此會話的模型（--fast 建議模型，--voice 語音轉寫模型，--vision 視覺橋接模型，--compaction 聊天壓縮模型，--image 圖像生成模型，--project 持久化到專案設定，--global 持久化到使用者設定，[model-id] 立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "此模式不支援內聯一次性覆寫——請先執行 '/model {{model}}'，再發送你的提示。",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1332,6 +1343,8 @@ export default {
   'Set the image-capable model used to transcribe images for a text-only main model':
     '設定用於為純文字主模型轉寫圖像的圖像能力模型',
   'Set the model used to generate images': '設置用於生成圖像的模型',
+  'Set the model used for chat compression (auto-compaction)':
+    '設置用於聊天壓縮（自動壓縮）的模型',
   'Persist the model selection to the project settings (workspace scope)':
     '將模型選擇持久化到專案設定（工作區）',
   'Persist the model selection to the user settings (global scope)':
@@ -1339,10 +1352,15 @@ export default {
   'Select Fast Model': '選擇快速模型',
   'Select Vision Model': '選擇視覺模型',
   'Select Image Model': '選擇圖像模型',
+  'Select Compaction Model': '選擇壓縮模型',
   'Select Voice Model': '選擇語音模型',
   'Vision Model': '視覺模型',
   'Image Model': '圖像模型',
+  'Compaction Model': '壓縮模型',
   'Voice Model': '語音模型',
+  'Selected compaction model is unavailable.': '所選壓縮模型不可用。',
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.':
+    '在 settings.modelProviders 中配置模型並確保設置了所需的環境變量。在交互模式下，運行 /auth 配置或切換 provider，或運行 /model --compaction（不帶模型參數）從已配置的模型中選擇。',
   'Selected voice model is unavailable.': '所選語音模型不可用。',
   'Selected image model is unavailable.': '所選圖像模型不可用。',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
@@ -1406,6 +1424,12 @@ export default {
     '聊天歷史壓縮未能減小大小。這可能表明壓縮提示存在問題。',
   'Could not compress chat history due to a token counting error.':
     '由於 token 計數錯誤，無法壓縮聊天歷史。',
+  'Could not compress chat history because the compression summary was empty.':
+    '由於壓縮摘要為空，無法壓縮聊天歷史。',
+  'Could not compress chat history because the compression summary was truncated.':
+    '由於壓縮摘要被截斷，無法壓縮聊天歷史。',
+  'Could not compress chat history due to an API error.':
+    '由於 API 錯誤，無法壓縮聊天歷史。',
   'Configuration is not available.': '配置不可用。',
   'Please provide at least one path to add.': '請提供至少一個要添加的路徑。',
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
@@ -1546,12 +1570,16 @@ export default {
   audio: '音頻',
   video: '視頻',
   'not set': '未設置',
+  'not set (falls back to the main model)': '未設置（回退到主模型）',
   'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
     '當前語音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 設置語音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '當前視覺模型：{{visionModel}}\n使用 "/model --vision <model-id>" 設置視覺橋接模型。',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     '當前圖像模型：{{imageModel}}\n使用 "/model --image <model-id>" 設置圖像生成模型。',
+  'Compaction model override cleared': '壓縮模型覆蓋已清除',
+  'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.':
+    '當前壓縮模型：{{compactionModel}}\n使用 "/model --compaction <model-id>" 設置壓縮模型，或使用 "/model --compaction clear" 清除覆蓋設置。',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "語音模型 '{{modelName}}' 不唯一。請先配置唯一的模型 ID，再使用 /model --voice。",
   "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.":
@@ -1641,6 +1669,7 @@ export default {
     'Ctrl+Q 排到下一輪 · ↑ 編輯排隊消息',
   'Enter to steer · Ctrl+Q to queue':
     'Enter 追加到目前任務 · Ctrl+Q 排到下一輪',
+  '{{count}} queued': '{{count}} 條已排隊',
   'Queue message for the next turn': '將消息排到下一輪',
   'No MCP servers configured.': '未配置 MCP servers',
   '◌ MCP servers are starting up ({{count}} initializing)...':
@@ -1999,6 +2028,7 @@ export default {
     '設定具備推理能力的模型思考的強度（{{tiers}}）；依各供應商進行映射與鉗制。',
   'Set a goal — keep working until the condition is met':
     '設定目標 — 持續工作直到條件滿足',
+  'Set or control a session goal': '設定或控制工作階段目標',
   'Exited plan mode. Previous approval mode restored.':
     '已退出計劃模式，已恢復之前的審批模式。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -2039,6 +2069,17 @@ export default {
   'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',
   'Ask a quick side question without affecting the main conversation':
     '在不影響主對話的情況下快速提問旁支問題',
+  'Get a second opinion on the current conversation from a reviewer model':
+    '讓審查模型對目前對話給出第二意見',
+  'Consulting advisor...': '正在諮詢審查模型...',
+  'Advisor review failed: {{error}}': '審查失敗：{{error}}',
+  'No conversation context available for /advisor':
+    '沒有可供 /advisor 使用的對話上下文',
+  'Focus too long (max {{max}} chars)': '關注點過長（最多 {{max}} 個字元）',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    '另一個操作正在進行中，請等待其完成後再執行 /advisor',
+  'No response received.': '未收到回覆。',
+  'No model configured.': '未設定模型。',
   'Manage Arena sessions': '管理 Arena 會話',
   'Start an Arena session with multiple models competing on the same task':
     '啟動一個 Arena 會話，讓多個模型在同一任務上競爭',
@@ -2095,8 +2136,18 @@ export default {
   'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
+  'from nested agent': '來自嵌套 agent',
   Running: '執行中',
+  Pausing: '暫停中',
   Paused: '已暫停',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    '暫停是協作式的；在工作流暫停之前，進行中的工作可能會先完成。等待工具審批的 agent 呼叫會讓執行保持在此狀態，且在審批得到回應前仍會計入活躍時間上限。',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    '已暫停：不會啟動新的 agent；agent 呼叫之間的指令碼會繼續執行。按 p 恢復。/clear、/branch 以及切換會話會取消已暫停的執行。',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    '暫停/恢復被拒絕；工作流狀態已變更。請重試。',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    '提示：使用 `/workflows p <runId>`，或在背景任務中按 p 協作暫停/恢復；使用 `/workflows <runId>` 檢視詳情。',
   Completed: '已完成',
   Failed: '失敗',
   Stopped: '已停止',
@@ -2376,4 +2427,7 @@ export default {
     '安全模式下禁止變更自動技能管理器。',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
+  'Kept model as {{model}}': '模型保持為 {{model}}',
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny）',
 };

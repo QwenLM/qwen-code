@@ -828,8 +828,8 @@ export interface PostToolBatchToolCall {
   status: 'success' | 'error' | 'cancelled';
   /**
    * Serialized ToolCallResponseInfo fields for the resolved call:
-   * response_parts, result_display, error, error_type, content_length, and
-   * vision_bridge_notice when applicable.
+   * response_parts, result_display, error, error_type, execution_status,
+   * content_length, and vision_bridge_notice when applicable.
    */
   tool_response?: Record<string, unknown>;
 }
@@ -1279,6 +1279,7 @@ export interface TodoItem {
   id: string;
   content: string;
   status: TodoStatus;
+  blockedBy?: string[];
 }
 
 /**

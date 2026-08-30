@@ -1,4 +1,10 @@
-import type { ACPToolCall, Message, TodoItem } from '../adapters/types';
+import type {
+  ACPToolCall,
+  Message,
+  PermissionRequest,
+  TodoItem,
+} from '../adapters/types.js';
+import { isSubAgentToolCall } from '../adapters/toolClassification.js';
 
 /**
  * The todo tool is registered as `todo_write` on the wire, but older paths and
@@ -10,47 +16,75 @@ export function isTodoWriteToolName(name: string): boolean {
   return normalized === 'todo_write' || normalized === 'todowrite';
 }
 
+/**
+ * The full exit-plan approval rule: the switch_mode frame kind plus the
+ * exit_plan_mode wire name. Shared by App, ChatPane, and ToolApproval so the
+ * surfaces that gate the revision-bound approval UI never drift.
+ */
+export function isExitPlanApprovalRequest(
+  request: Pick<PermissionRequest, 'toolKind' | 'toolName'> | null | undefined,
+): boolean {
+  return (
+    request?.toolKind === 'switch_mode' &&
+    request?.toolName?.toLowerCase() === 'exit_plan_mode'
+  );
+}
+
 export function parseTodoItemsFromEntries(
   entries: readonly unknown[],
-): TodoItem[] | undefined {
+): TodoItem[] {
   const todos = entries.flatMap((entry, index): TodoItem[] => {
     const item = getRecord(entry);
     const content = getString(item, 'content');
     if (!content) return [];
+    const meta = getRecord(item?.['_meta']);
+    const qwenTodo = getRecord(meta?.['qwenTodo']);
+    const blockedBy = getStringArray(qwenTodo, 'blockedBy');
     return [
       {
-        id: getString(item, 'id') ?? `plan-${index}`,
+        id:
+          getString(qwenTodo, 'id') ?? getString(item, 'id') ?? `plan-${index}`,
         content,
         status: getTodoStatus(getString(item, 'status')),
         priority: getTodoPriority(getString(item, 'priority')),
+        ...(blockedBy ? { blockedBy } : {}),
       },
     ];
   });
-  return todos.length > 0 ? todos : undefined;
+  return todos;
 }
 
 export function extractTodosFromToolCall(
   tool: ACPToolCall,
 ): TodoItem[] | undefined {
-  if (!isTodoWriteToolName(tool.toolName) && tool.kind !== 'other') {
+  const isTodoTool = isTodoWriteToolName(tool.toolName);
+  if (!isTodoTool && tool.kind !== 'other') {
     return undefined;
   }
 
+  const rawOutput = getRecord(tool.rawOutput);
+  const hasPlanMetadata =
+    getString(getRecord(rawOutput?.['plan']), 'id') !== undefined;
   const argsTodos = getTodoArray(tool.args);
   if (argsTodos) {
-    return parseTodoItemsFromEntries(argsTodos);
+    const todos = parseTodoItemsFromEntries(argsTodos);
+    return todos.length > 0 || isTodoTool ? todos : undefined;
   }
 
-  const rawOutput = getRecord(tool.rawOutput);
   const outputTodos = getTodoArray(rawOutput);
   if (outputTodos) {
-    return parseTodoItemsFromEntries(outputTodos);
+    const todos = parseTodoItemsFromEntries(outputTodos);
+    return todos.length > 0 || isTodoTool || hasPlanMetadata
+      ? todos
+      : undefined;
   }
 
   const entries = Array.isArray(rawOutput?.['entries'])
     ? rawOutput['entries']
     : undefined;
-  return entries ? parseTodoItemsFromEntries(entries) : undefined;
+  if (!entries) return undefined;
+  const todos = parseTodoItemsFromEntries(entries);
+  return todos.length > 0 || isTodoTool || hasPlanMetadata ? todos : undefined;
 }
 
 export function hasActiveTodos(todos: readonly TodoItem[]): boolean {
@@ -72,27 +106,26 @@ export function getTodoStatusIcon(status: TodoItem['status']): string {
 
 export interface FloatingTodosState {
   todos: TodoItem[];
+  planId: string | null;
   /** Every item is completed — the panel shows a transient "all done" state. */
   allCompleted: boolean;
   /** Transcript message the latest todo update came from. */
   sourceMessageId: string | null;
-  /** Tool call id within the source message, when it came from a tool call. */
-  sourceCallId: string | null;
 }
 
 const EMPTY_FLOATING_TODOS: FloatingTodosState = {
   todos: [],
+  planId: null,
   allCompleted: false,
   sourceMessageId: null,
-  sourceCallId: null,
 };
 
 export function getFloatingTodos(
   messages: readonly Message[],
 ): FloatingTodosState {
   let todos: TodoItem[] = [];
+  let planId: string | null = null;
   let sourceMessageId: string | null = null;
-  let sourceCallId: string | null = null;
   let userMessageAfter = false;
 
   for (const message of messages) {
@@ -102,8 +135,8 @@ export function getFloatingTodos(
     }
     if (message.role === 'plan') {
       todos = message.todos;
+      planId = null;
       sourceMessageId = message.id;
-      sourceCallId = null;
       userMessageAfter = false;
       continue;
     }
@@ -113,8 +146,8 @@ export function getFloatingTodos(
       const nextTodos = extractTodosFromToolCall(tool);
       if (nextTodos) {
         todos = nextTodos;
+        planId = getTodoPlanId(tool);
         sourceMessageId = message.id;
-        sourceCallId = tool.callId;
         userMessageAfter = false;
       }
     }
@@ -123,7 +156,83 @@ export function getFloatingTodos(
   if (todos.length === 0) return EMPTY_FLOATING_TODOS;
   const allCompleted = !hasActiveTodos(todos);
   if (userMessageAfter) return EMPTY_FLOATING_TODOS;
-  return { todos, allCompleted, sourceMessageId, sourceCallId };
+  return { todos, planId, allCompleted, sourceMessageId };
+}
+
+export function getActiveTodosForPlanRevision(
+  messages: readonly Message[],
+  revision: { planId: string; sourceCallId: string } | null | undefined,
+): TodoItem[] {
+  if (!revision) return [];
+  for (const message of messages) {
+    if (message.role !== 'tool_group') continue;
+    for (const tool of message.tools) {
+      if (
+        tool.callId !== revision.sourceCallId ||
+        getTodoPlanId(tool) !== revision.planId
+      ) {
+        continue;
+      }
+      const todos = extractTodosFromToolCall(tool) ?? [];
+      return todos;
+    }
+  }
+  return [];
+}
+
+export function getAgentToolsForPlan(
+  messages: readonly Message[],
+  plan: Pick<FloatingTodosState, 'planId' | 'sourceMessageId'>,
+): ACPToolCall[] {
+  if (plan.sourceMessageId === null) return [];
+
+  const tools: ACPToolCall[] = [];
+  const startIndex = messages.findIndex((message) => {
+    if (plan.planId === null) return message.id === plan.sourceMessageId;
+    if (message.role !== 'tool_group') return false;
+    return message.tools.some(
+      (tool) =>
+        extractTodosFromToolCall(tool) !== undefined &&
+        getTodoPlanId(tool) === plan.planId,
+    );
+  });
+  if (startIndex < 0) return [];
+
+  let planCompleted = false;
+  for (let index = startIndex; index < messages.length; index++) {
+    const message = messages[index];
+    if (
+      index > startIndex &&
+      planCompleted &&
+      (message.role === 'user' || message.role === 'user_shell')
+    ) {
+      return tools;
+    }
+    if (message.role === 'plan') {
+      if (index > startIndex) break;
+      planCompleted = !hasActiveTodos(message.todos);
+      continue;
+    }
+    if (message.role !== 'tool_group') continue;
+    for (const tool of message.tools) {
+      const snapshot = extractTodosFromToolCall(tool);
+      if (snapshot !== undefined) {
+        if (
+          index > startIndex &&
+          (plan.planId === null || getTodoPlanId(tool) !== plan.planId)
+        ) {
+          return tools;
+        }
+        planCompleted = !hasActiveTodos(snapshot);
+        continue;
+      }
+      if (!tool.parentToolCallId && isSubAgentToolCall(tool)) {
+        if (planCompleted) return tools;
+        tools.push(tool);
+      }
+    }
+  }
+  return tools;
 }
 
 /** A status transition surfaced for a single todo snapshot. */
@@ -144,17 +253,20 @@ interface TodoSnapshot {
   todos: TodoItem[];
   /** Cumulative-usage baseline the agent stamped on this snapshot, if any. */
   stats?: TodoStatsSnapshot;
+  /** Per-tool boundary time; one merged group may contain several snapshots. */
+  timestamp?: number;
 }
 
 /**
  * Identity used to track an item across snapshots. Folds content into the key
- * because todo ids are NOT globally unique: the ACP bridge assigns positional
- * ids (`plan-0`, `plan-1`, …) and models restart numbering at `1, 2, 3` for each
- * new `todo_write` plan, so a later, unrelated list reuses an earlier list's
- * ids. Keying on id alone would diff a new plan's items against a previous
- * plan's stale terminal status; id+content keeps distinct tasks separate, and —
- * unlike a user-turn reset — it still tracks a list correctly when it spans
- * turns (a "continue" turn that completes an item carried over from before).
+ * because todo ids are NOT globally unique. Modern Qwen plan metadata preserves
+ * the core id, but legacy ACP records fall back to positional ids (`plan-0`,
+ * `plan-1`, …), and models commonly restart numbering at `1, 2, 3` for a new
+ * `todo_write` plan. Keying on id alone would diff a new plan's items against a
+ * previous plan's stale terminal status; id+content keeps distinct tasks
+ * separate and, unlike a user-turn reset, still tracks a list correctly when it
+ * spans turns (a "continue" turn that completes an item carried over from
+ * before).
  *
  * Two rare cases this trades for, affecting the collapsed diff and the per-task
  * detail ({@link computeTodoDetails}) but not the expanded list itself:
@@ -180,7 +292,9 @@ export function todoStateKey(todo: TodoItem): string {
  */
 function todoSnapshotsOf(message: Message): TodoSnapshot[] {
   if (message.role === 'plan') {
-    return [{ key: message.id, todos: message.todos }];
+    return [
+      { key: message.id, todos: message.todos, timestamp: message.timestamp },
+    ];
   }
   if (message.role === 'tool_group') {
     const snapshots: TodoSnapshot[] = [];
@@ -191,6 +305,7 @@ function todoSnapshotsOf(message: Message): TodoSnapshot[] {
           key: tool.callId,
           todos,
           stats: extractTodoStats(tool),
+          timestamp: tool.endTime ?? tool.startTime ?? message.timestamp,
         });
       }
     }
@@ -267,31 +382,29 @@ export function todoTimelineSignature(messages: readonly Message[]): string {
 
 /**
  * Like {@link todoTimelineSignature} but folds in everything
- * {@link computeTodoDetails} reads beyond item status: each snapshot's message
- * timestamp and stamped stats, plus every non-todo tool span (whose durations
- * feed tool time). App memoizes the detail map on this so the TodoDetailContext
- * value stays referentially stable across streaming ticks that touch none of it.
+ * {@link computeTodoDetails} reads beyond item status: each snapshot's boundary
+ * timestamp and stamped stats, plus every tool span (non-todo spans feed tool
+ * time; todo spans supply snapshot boundaries). App memoizes the detail map on
+ * this so the TodoDetailContext value stays referentially stable across
+ * streaming ticks that touch none of it.
  */
 export function todoDetailSignature(messages: readonly Message[]): string {
   const parts: string[] = [];
   for (const message of messages) {
     if (message.role === 'tool_group') {
       for (const tool of message.tools) {
-        if (
-          !isTodoWriteToolName(tool.toolName) &&
-          (tool.startTime !== undefined || tool.endTime !== undefined)
-        ) {
+        if (tool.startTime !== undefined || tool.endTime !== undefined) {
           parts.push(
             JSON.stringify(['span', tool.callId, tool.startTime, tool.endTime]),
           );
         }
       }
     }
-    for (const { key, todos, stats } of todoSnapshotsOf(message)) {
+    for (const { key, todos, stats, timestamp } of todoSnapshotsOf(message)) {
       parts.push(
         JSON.stringify([
           key,
-          message.timestamp,
+          timestamp,
           todos.map((t) => [t.id, t.status, t.content]),
           stats,
         ]),
@@ -552,8 +665,7 @@ export function computeTodoDetails(
   };
 
   for (const message of messages) {
-    const ts = message.timestamp;
-    for (const { todos, stats } of todoSnapshotsOf(message)) {
+    for (const { todos, stats, timestamp: ts } of todoSnapshotsOf(message)) {
       for (const todo of todos) {
         const stateKey = todoStateKey(todo);
         const prev = lastStatus.get(stateKey);
@@ -643,4 +755,20 @@ function getString(
 ): string | undefined {
   const value = record?.[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function getStringArray(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): string[] | undefined {
+  const value = record?.[key];
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? value
+    : undefined;
+}
+
+export function getTodoPlanId(tool: ACPToolCall): string | null {
+  const rawOutput = getRecord(tool.rawOutput);
+  const plan = getRecord(rawOutput?.['plan']);
+  return getString(plan, 'id') ?? null;
 }

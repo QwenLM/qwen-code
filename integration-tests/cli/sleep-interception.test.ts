@@ -20,9 +20,12 @@ describe('sleep-interception', () => {
     }
   });
 
+  // Mirrors the optionality of the parsed telemetry these come from: a
+  // malformed record yields `undefined` rather than a crash. The predicates
+  // below only match an explicit `success` boolean.
   type ShellCall = {
-    args: string;
-    success: boolean;
+    args?: string;
+    success?: boolean;
     error?: string;
   };
 
@@ -67,7 +70,7 @@ describe('sleep-interception', () => {
     );
 
     const foundBlockedCall = await waitForShellCall(
-      (call) => call.args.includes('sleep 5') && !call.success,
+      (call) => !!call.args?.includes('sleep 5') && call.success === false,
     );
 
     if (!foundBlockedCall) {
@@ -85,7 +88,7 @@ describe('sleep-interception', () => {
     // error attribute is only available from file-based telemetry; the
     // podman stdout fallback leaves it undefined.
     const blockedCall = shellCalls().find(
-      (call) => call.args.includes('sleep 5') && !call.success,
+      (call) => !!call.args?.includes('sleep 5') && call.success === false,
     );
     if (blockedCall?.error !== undefined) {
       expect(blockedCall.error).toContain('Monitor');
@@ -107,7 +110,7 @@ describe('sleep-interception', () => {
     );
 
     const foundSuccessfulCall = await waitForShellCall(
-      (call) => call.args.includes('sleep 1') && call.success,
+      (call) => !!call.args?.includes('sleep 1') && call.success === true,
     );
 
     if (!foundSuccessfulCall) {
@@ -140,7 +143,8 @@ describe('sleep-interception', () => {
     // The escape hatch worked iff a call carrying the intentional-sleep
     // comment completed successfully.
     const foundIntentionalCall = await waitForShellCall(
-      (call) => call.args.includes('intentional-sleep') && call.success,
+      (call) =>
+        !!call.args?.includes('intentional-sleep') && call.success === true,
     );
 
     if (!foundIntentionalCall) {
@@ -175,7 +179,7 @@ describe('sleep-interception', () => {
     );
 
     const foundBlockedCall = await waitForShellCall(
-      (call) => call.args.includes('sleep 5') && !call.success,
+      (call) => !!call.args?.includes('sleep 5') && call.success === false,
     );
 
     if (!foundBlockedCall) {

@@ -11,6 +11,7 @@ import {
   createDaemonTranscriptState,
   createDaemonTranscriptStore,
   daemonUiEventToTerminalText,
+  estimateDaemonTranscriptBlockBytes,
   getOutputText,
   isDaemonUiSensitiveKey,
   normalizeDaemonEvent,
@@ -61,6 +62,57 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks).toMatchObject([
       { kind: 'user', text: 'hello' },
       { kind: 'assistant', text: 'hi there', streaming: true },
+    ]);
+  });
+
+  it('attaches branchRecordId when the decorated chunk merges into an existing block', () => {
+    // A checkpointed record replayed as 2+ chunks creates its block from
+    // the first (undecorated) chunk; the decorated final chunk must merge
+    // into that block and carry the branchRecordId with it.
+    const first = normalizeDaemonEvent({
+      id: 3,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'historical ' },
+          _meta: {
+            qwenTranscript: { sourceRecordIds: ['record-1'] },
+          },
+        },
+      },
+    });
+    const second = normalizeDaemonEvent({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'answer' },
+          _meta: {
+            qwenTranscript: {
+              sourceRecordIds: ['record-1'],
+              branchRecordId: 'checkpoint-record',
+            },
+          },
+        },
+      },
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [...first, ...second],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'assistant',
+        text: 'historical answer',
+        branchRecordId: 'checkpoint-record',
+      },
     ]);
   });
 
@@ -215,6 +267,20 @@ describe('daemon UI normalizer and transcript reducer', () => {
     });
   });
 
+  it('stores text file attachment metadata on local user messages', () => {
+    const store = createDaemonTranscriptStore();
+
+    store.appendLocalUserMessage('check this', undefined, undefined, [
+      { name: 'app.log', mimeType: 'text/plain' },
+    ]);
+
+    expect(store.getSnapshot().blocks[0]).toMatchObject({
+      kind: 'user',
+      text: 'check this',
+      files: [{ name: 'app.log', mimeType: 'text/plain' }],
+    });
+  });
+
   it('stores input annotations from replayed user message chunks', () => {
     const inputAnnotations = [
       {
@@ -296,6 +362,53 @@ describe('daemon UI normalizer and transcript reducer', () => {
     });
   });
 
+  it('keeps discrete thought messages separate with their metadata', () => {
+    const makeThought = (id: number, text: string, taskId: string) =>
+      normalizeDaemonEvent({
+        id,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_thought_chunk',
+            content: { type: 'text', text },
+            _meta: {
+              qwenDiscreteMessage: true,
+              backgroundTask: { taskId },
+            },
+          },
+        },
+      });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        ...makeThought(11, 'first thought', 'task-a'),
+        ...makeThought(12, 'second thought', 'task-b'),
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'thought',
+        text: 'first thought',
+        meta: {
+          qwenDiscreteMessage: true,
+          backgroundTask: { taskId: 'task-a' },
+        },
+      },
+      {
+        kind: 'thought',
+        text: 'second thought',
+        meta: {
+          qwenDiscreteMessage: true,
+          backgroundTask: { taskId: 'task-b' },
+        },
+      },
+    ]);
+  });
+
   it('keeps discrete assistant messages separate from normal text blocks', () => {
     const normalBefore = normalizeDaemonEvent({
       id: 11,
@@ -362,9 +475,18 @@ describe('daemon UI normalizer and transcript reducer', () => {
         update: {
           sessionUpdate: 'plan',
           entries: [
-            { content: 'Task', status: 'completed', priority: 'medium' },
+            {
+              content: 'Task',
+              status: 'completed',
+              priority: 'medium',
+              _meta: {
+                qwenTodo: { id: 'task', blockedBy: ['prepare'] },
+              },
+            },
           ],
           _meta: {
+            qwenTodoPlan: { id: 'plan-1' },
+            qwenTranscript: { planToolCallId: 'call-1' },
             stats: {
               promptTokens: 100,
               cachedTokens: 10,
@@ -381,7 +503,15 @@ describe('daemon UI normalizer and transcript reducer', () => {
       type: 'tool.update',
       toolName: 'todo_write',
       rawOutput: {
-        entries: [{ content: 'Task', status: 'completed', priority: 'medium' }],
+        entries: [
+          {
+            content: 'Task',
+            status: 'completed',
+            priority: 'medium',
+            _meta: { qwenTodo: { id: 'task', blockedBy: ['prepare'] } },
+          },
+        ],
+        plan: { id: 'plan-1', sourceCallId: 'call-1' },
         stats: {
           promptTokens: 100,
           cachedTokens: 10,
@@ -527,6 +657,111 @@ describe('daemon UI normalizer and transcript reducer', () => {
         usage: { inputTokens: 105, outputTokens: 23 },
       },
     ]);
+  });
+
+  it('keeps usage emitted after a tool update in the current turn', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'user.text.delta', text: 'question' },
+        { type: 'assistant.text.delta', text: 'checking' },
+        {
+          type: 'tool.update',
+          toolCallId: 'tool-1',
+          status: 'running',
+        },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 100, outputTokens: 20, cachedTokens: 80 },
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks[1]).toMatchObject({
+      kind: 'assistant',
+      text: 'checking',
+      usage: { inputTokens: 100, outputTokens: 20, cachedTokens: 80 },
+    });
+
+    const nextTurn = reduceDaemonTranscriptEvents(
+      state,
+      [
+        { type: 'user.text.delta', text: 'next question' },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 5, outputTokens: 1 },
+        },
+      ],
+      { now: 3 },
+    );
+    expect(nextTurn.blocks[1]).toMatchObject({
+      usage: { inputTokens: 100, outputTokens: 20, cachedTokens: 80 },
+    });
+  });
+
+  it('does not fall back sub-agent usage into the parent assistant block', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1, retainSubagentBlocks: true }),
+      [
+        { type: 'user.text.delta', text: 'question' },
+        { type: 'assistant.text.delta', text: 'delegating' },
+        {
+          type: 'tool.update',
+          toolCallId: 'sub-1',
+          status: 'running',
+        },
+        {
+          type: 'assistant.text.delta',
+          text: 'child answer',
+          parentToolCallId: 'sub-1',
+        },
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 5000, outputTokens: 800 },
+          parentToolCallId: 'sub-1',
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks[1]).not.toHaveProperty('usage');
+    expect(state.blocks[3]).not.toHaveProperty('usage');
+  });
+
+  it('deduplicates legacy sub-agent usage repeated after its execution summary', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'user.text.delta', text: 'question' },
+        { type: 'assistant.text.delta', text: 'delegating' },
+        {
+          type: 'tool.update',
+          toolCallId: 'sub-1',
+          status: 'completed',
+          sourceRecordIds: ['subagent-result'],
+          rawOutput: {
+            executionSummary: {
+              inputTokens: 5000,
+              outputTokens: 800,
+              cachedTokens: 4500,
+            },
+          },
+        },
+        {
+          type: 'assistant.usage',
+          usage: {
+            inputTokens: 5000,
+            outputTokens: 800,
+            cachedTokens: 4500,
+          },
+          sourceRecordIds: ['subagent-result'],
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks[1]).not.toHaveProperty('usage');
   });
 
   it('keeps sub-agent usage in the parent turn total by default', () => {
@@ -1077,6 +1312,511 @@ describe('daemon UI normalizer and transcript reducer', () => {
       .map(([toolCallId]) => toolCallId);
     expect(trimmedToolCallIds).toHaveLength(2);
     expect(Object.keys(state.toolBlockByCallId)).toHaveLength(4);
+  });
+
+  it('evicts oldest blocks to stay under the retention byte budget', () => {
+    // The block-count window is not a memory ceiling: blocks carry raw tool
+    // payloads. With a generous block window but a tight byte budget, heavy
+    // blocks must still be evicted oldest-first.
+    const large = 'x'.repeat(20_000);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      maxRetainedBytes: 90_000,
+      now: 1,
+    });
+    for (let index = 0; index < 4; index += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [
+          {
+            type: 'tool.update',
+            toolCallId: `tool-${index}`,
+            title: `Tool ${index}`,
+            status: 'completed',
+            rawOutput: large,
+          },
+        ],
+        { now: index + 2 },
+      );
+    }
+
+    expect(state.blocks.length).toBeGreaterThan(0);
+    expect(state.blocks.length).toBeLessThan(4);
+    expect(state.retainedBytes).toBeLessThanOrEqual(90_000);
+    // Most recent blocks survive eviction.
+    const keptToolCallIds = state.blocks.map(
+      (block) => (block as { toolCallId?: string }).toolCallId,
+    );
+    expect(keptToolCallIds).toContain('tool-3');
+    expect(keptToolCallIds).not.toContain('tool-0');
+    // The running estimate matches the blocks actually retained.
+    const expected = state.blocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    );
+    expect(state.retainedBytes).toBe(expected);
+  });
+
+  it('backs the record-boundary snap off the floor instead of cutting mid-record (R12-21)', () => {
+    // One persisted record can fan out into several blocks. When byte pressure
+    // evicts down to the last block, the forward snap's at-least-one-block
+    // floor stops it from advancing — even when the evicted penultimate block
+    // shares the record with the survivor, which would ship a mid-record cut.
+    // The snap must back off the floor and keep the record whole instead.
+    const large = 'x'.repeat(100_000);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      // Fits one ~100 KB block but not both, so the byte loop evicts to the
+      // floor (one block left) and the snap is pinned there.
+      maxRetainedBytes: 150_000,
+      now: 1,
+    });
+    for (const toolCallId of ['tool-a', 'tool-b']) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [
+          {
+            type: 'tool.update',
+            toolCallId,
+            title: `Tool ${toolCallId}`,
+            status: 'completed',
+            rawOutput: large,
+            sourceRecordIds: ['record-x'],
+          },
+        ],
+        { now: 2 },
+      );
+    }
+
+    // Both siblings of record-x stay: evicting only tool-a would leave a
+    // mid-record cut that exclusive-before pagination can never re-fetch.
+    const keptToolCallIds = state.blocks.map(
+      (block) => (block as { toolCallId?: string }).toolCallId,
+    );
+    expect(keptToolCallIds).toEqual(['tool-a', 'tool-b']);
+    expect(state.blocks).toHaveLength(2);
+    for (const block of state.blocks) {
+      expect(block.sourceRecordIds).toContain('record-x');
+    }
+  });
+
+  it('backs the record-boundary snap off the floor across a 3-block record (R12-21)', () => {
+    // A single record fans out into 3+ contiguous blocks; the floor back-off
+    // must loop (not stop after one block) or the tail is still cut mid-record.
+    const large = 'x'.repeat(100_000);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      maxRetainedBytes: 150_000,
+      now: 1,
+    });
+    for (const toolCallId of ['tool-a', 'tool-b', 'tool-c']) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [
+          {
+            type: 'tool.update',
+            toolCallId,
+            title: `Tool ${toolCallId}`,
+            status: 'completed',
+            rawOutput: large,
+            sourceRecordIds: ['record-x'],
+          },
+        ],
+        { now: 2 },
+      );
+    }
+    // All three record-x siblings stay — the loop re-retains tool-a and tool-b
+    // after the byte loop pins the cut to the floor.
+    expect(
+      state.blocks.map(
+        (block) => (block as { toolCallId?: string }).toolCallId,
+      ),
+    ).toEqual(['tool-a', 'tool-b', 'tool-c']);
+  });
+
+  it('counts Blob-backed file payloads against the retention budget', () => {
+    // Blob/File payloads live in non-enumerable internal slots, so a plain
+    // record walk would only charge the fixed object overhead — an 8 MiB file
+    // would count as ~64 bytes and the byte budget would never fire. Charge
+    // their real size instead.
+    const eightMiB = new Blob([new Uint8Array(8 * 1024 * 1024)]);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      maxRetainedBytes: 100_000_000,
+      now: 1,
+    });
+    state = appendLocalUserTranscriptMessage(state, '', {
+      files: [
+        {
+          name: 'big.bin',
+          mimeType: 'application/octet-stream',
+          data: eightMiB,
+        },
+      ],
+    });
+    expect(state.retainedBytes).toBeGreaterThanOrEqual(8 * 1024 * 1024);
+  });
+
+  it('evicts Blob-backed file blocks that cross the retention budget', () => {
+    const fourMiB = new Blob([new Uint8Array(4 * 1024 * 1024)]);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      maxRetainedBytes: 9 * 1024 * 1024,
+      now: 1,
+    });
+    for (let index = 0; index < 4; index += 1) {
+      state = appendLocalUserTranscriptMessage(state, `attach ${index}`, {
+        files: [
+          {
+            name: `f${index}.bin`,
+            mimeType: 'application/octet-stream',
+            data: fourMiB,
+          },
+        ],
+      });
+    }
+    // 4 × 4 MiB = 16 MiB > 9 MiB budget: the byte trim must fire only because
+    // the Blob payloads are counted. Without it, retainedBytes would stay at
+    // the fixed record overhead and no block would be evicted.
+    expect(state.blocks.length).toBeLessThan(4);
+    expect(state.retainedBytes).toBeGreaterThan(4 * 1024 * 1024);
+  });
+
+  it('tolerates a degenerate maxBlocks without crashing the trim (R14-1)', () => {
+    // maxBlocks is a public option with no validated lower bound. A
+    // non-positive value must not evict down to zero blocks — the record snap
+    // would then read one past the end of the block array and throw on every
+    // dispatch. Keep at least one block instead.
+    const store = createDaemonTranscriptStore({ maxBlocks: 0 });
+    expect(() =>
+      store.dispatch({ type: 'user.text.delta', text: 'survives' }),
+    ).not.toThrow();
+    expect(store.getSnapshot().blocks).toHaveLength(1);
+    // A second dispatch must not throw either (the crash repeated on every
+    // dispatch before the floor clamp).
+    expect(() =>
+      store.dispatch({ type: 'user.text.delta', text: 'still alive' }),
+    ).not.toThrow();
+    expect(store.getSnapshot().blocks.length).toBeGreaterThanOrEqual(1);
+
+    // A positive fractional maxBlocks must also be integral-ized (R15-1):
+    // without the floor, removeCount went fractional and the record snap read a
+    // fractional index one past the end, throwing on later dispatches.
+    const fractionalStore = createDaemonTranscriptStore({ maxBlocks: 2.5 });
+    for (let index = 0; index < 5; index += 1) {
+      expect(() =>
+        fractionalStore.dispatch({
+          type: 'user.text.delta',
+          text: `delta ${index}`,
+        }),
+      ).not.toThrow();
+    }
+    expect(fractionalStore.getSnapshot().blocks.length).toBeGreaterThanOrEqual(
+      1,
+    );
+  });
+
+  it('keeps the retention estimate current when a tool payload is replaced', () => {
+    let state = createDaemonTranscriptState({
+      maxBlocks: 10,
+      maxRetainedBytes: 10_000_000,
+      now: 1,
+    });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'tool-a',
+          title: 'Tool',
+          status: 'running',
+          rawOutput: 'small',
+        },
+      ],
+      { now: 2 },
+    );
+    const before = state.retainedBytes;
+    expect(before).toBeGreaterThan(0);
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'tool-a',
+          status: 'completed',
+          rawOutput: 'y'.repeat(50_000),
+        },
+      ],
+      { now: 3 },
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.retainedBytes).toBeGreaterThan(before);
+    expect(state.retainedBytes).toBe(
+      estimateDaemonTranscriptBlockBytes(state.blocks[0]!),
+    );
+  });
+
+  it('applies the default retention budget when none is configured', () => {
+    // The eviction comparison degrades to "never fires" if the creation-time
+    // default is dropped, so pin the exact value for callers that rely on it.
+    expect(createDaemonTranscriptState().maxRetainedBytes).toBe(
+      128 * 1024 * 1024,
+    );
+    expect(createDaemonTranscriptStore().getSnapshot().maxRetainedBytes).toBe(
+      128 * 1024 * 1024,
+    );
+  });
+
+  it('keeps a configured retention budget across store reset', () => {
+    // reset() carries maxBlocks and retainSubagentBlocks forward from the
+    // current state; maxRetainedBytes must behave the same or a custom
+    // budget silently reverts to the default on every replay/session switch.
+    const store = createDaemonTranscriptStore({ maxRetainedBytes: 5_000_000 });
+    expect(store.getSnapshot().maxRetainedBytes).toBe(5_000_000);
+    store.reset();
+    expect(store.getSnapshot().maxRetainedBytes).toBe(5_000_000);
+  });
+
+  it('keeps a seeded truncation listener across dispatches and resets', () => {
+    // Store consumers (e.g. the session provider reconciling its pagination
+    // anchor with eviction) register onTruncation through the seed; the
+    // listener must fire on evictions and survive reset(), which replaces
+    // the state wholesale.
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({ maxBlocks: 2, onTruncation });
+    const toolEvent = (index: number) => ({
+      type: 'tool.update' as const,
+      toolCallId: `tool-${index}`,
+      title: `Tool ${index}`,
+      status: 'completed' as const,
+      sourceRecordIds: [`record-${index}`],
+    });
+    store.dispatch([toolEvent(0), toolEvent(1)]);
+    expect(onTruncation).not.toHaveBeenCalled();
+    store.dispatch(toolEvent(2));
+    expect(onTruncation).toHaveBeenCalledTimes(1);
+    expect(onTruncation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'blocks',
+        oldestRetainedRecordId: 'record-1',
+      }),
+    );
+
+    onTruncation.mockClear();
+    store.reset({ maxBlocks: 2 });
+    store.dispatch([toolEvent(3), toolEvent(4)]);
+    expect(onTruncation).not.toHaveBeenCalled();
+    store.dispatch(toolEvent(5));
+    expect(onTruncation).toHaveBeenCalledTimes(1);
+    expect(onTruncation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'blocks',
+        oldestRetainedRecordId: 'record-4',
+      }),
+    );
+  });
+
+  it('counts every image merged into a user block against the retention budget', () => {
+    const data = 'I'.repeat(100_000);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 10,
+      maxRetainedBytes: 10_000_000,
+      now: 1,
+    });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'user.image.delta',
+          data,
+          mimeType: 'image/png',
+          sourceRecordIds: ['record-1'],
+        },
+        {
+          type: 'user.image.delta',
+          data,
+          mimeType: 'image/png',
+          sourceRecordIds: ['record-1'],
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    const block = state.blocks[0]!;
+    expect((block as { images?: unknown[] }).images).toHaveLength(2);
+    expect(state.retainedBytes).toBe(estimateDaemonTranscriptBlockBytes(block));
+  });
+
+  it('releases the retention budget when a rewind drops blocks', () => {
+    const large = 'x'.repeat(100_000);
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      maxRetainedBytes: 1_000_000,
+      now: 1,
+    });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'user.text.delta', text: 'turn zero' }],
+      { now: 2 },
+    );
+    for (let index = 0; index < 3; index += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [
+          {
+            type: 'tool.update',
+            toolCallId: `tool-${index}`,
+            title: `Tool ${index}`,
+            status: 'completed',
+            rawOutput: large,
+          },
+        ],
+        { now: index + 3 },
+      );
+    }
+    expect(state.blocks).toHaveLength(4);
+    expect(state.retainedBytes).toBeGreaterThan(0);
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'session.rewound', promptId: 'prompt-1', targetTurnIndex: 0 }],
+      { now: 9 },
+    );
+    expect(state.blocks).toHaveLength(0);
+    expect(state.retainedBytes).toBe(0);
+
+    // Ghost bytes from the dropped blocks must not collapse later growth:
+    // with an inflated counter every dispatch looks over budget and evicts
+    // the freshly appended blocks down to the last survivor.
+    for (let index = 0; index < 3; index += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [
+          {
+            type: 'tool.update',
+            toolCallId: `post-${index}`,
+            title: `Post ${index}`,
+            status: 'completed',
+            rawOutput: large,
+          },
+        ],
+        { now: index + 10 },
+      );
+    }
+    expect(
+      state.blocks.map(
+        (block) => (block as { toolCallId?: string }).toolCallId,
+      ),
+    ).toEqual(['post-0', 'post-1', 'post-2']);
+    const expected = state.blocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    );
+    expect(state.retainedBytes).toBe(expected);
+  });
+
+  it('releases the retention budget when a subagent tool block is discarded', () => {
+    let state = createDaemonTranscriptState({
+      maxBlocks: 10,
+      maxRetainedBytes: 10_000_000,
+      retainSubagentBlocks: false,
+      now: 1,
+    });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'sub-1',
+          title: 'Subagent',
+          status: 'running',
+          rawOutput: 'y'.repeat(50_000),
+        },
+      ],
+      { now: 2 },
+    );
+    expect(state.blocks).toHaveLength(1);
+    expect(state.retainedBytes).toBeGreaterThan(0);
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'sub-1',
+          parentToolCallId: 'parent-1',
+          status: 'completed',
+        },
+      ],
+      { now: 3 },
+    );
+    expect(state.blocks).toHaveLength(0);
+    expect(state.retainedBytes).toBe(0);
+  });
+
+  it('accounts streamed assistant text against the retention byte budget', () => {
+    let state = createDaemonTranscriptState({
+      maxBlocks: 100,
+      maxRetainedBytes: 250_000,
+      now: 1,
+    });
+    const chunk = 'A'.repeat(25_000);
+    for (let blockIndex = 0; blockIndex < 2; blockIndex += 1) {
+      for (let chunkIndex = 0; chunkIndex < 4; chunkIndex += 1) {
+        state = reduceDaemonTranscriptEvents(
+          state,
+          [{ type: 'assistant.text.delta', text: chunk }],
+          { now: blockIndex * 10 + chunkIndex + 2 },
+        );
+      }
+      state = reduceDaemonTranscriptEvents(
+        state,
+        [{ type: 'assistant.done', reason: 'end_turn' }],
+        { now: blockIndex * 10 + 8 },
+      );
+    }
+
+    // Each text block caps at 100k chars (~200KB estimated), so the 250KB
+    // budget cannot hold both streamed blocks and the older one is evicted.
+    expect(state.blocks).toHaveLength(1);
+    expect(state.retainedBytes).toBeLessThanOrEqual(250_000);
+    const expected = state.blocks.reduce(
+      (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+      0,
+    );
+    expect(state.retainedBytes).toBe(expected);
+  });
+
+  it('does not signal truncation when the byte budget cannot evict anything', () => {
+    const onTruncation = vi.fn();
+    let state = createDaemonTranscriptState({
+      maxBlocks: 10,
+      maxRetainedBytes: 100,
+      now: 1,
+      onTruncation,
+    });
+    // A single block whose estimate exceeds the budget can never be evicted
+    // (the last block always survives).
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'status', text: 'x'.repeat(100) }],
+      { now: 2 },
+    );
+    expect(state.blocks).toHaveLength(1);
+    onTruncation.mockClear();
+    const blocksBefore = state.blocks;
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'session.metadata.changed', sessionId: 'session-1' }],
+      { now: 3 },
+    );
+
+    expect(onTruncation).not.toHaveBeenCalled();
+    expect(state.blocks).toBe(blocksBefore);
   });
 
   it('keeps active assistant text open when reporting trimmed tool updates', () => {
@@ -2199,6 +2939,24 @@ describe('daemon UI normalizer and transcript reducer', () => {
     });
   });
 
+  it('caps oversized generic key_value preview values', () => {
+    // A generic tool input whose only usable field is one large primitive
+    // string must not embed the full value in the preview row — the row value
+    // is capped like other rendered detail strings.
+    const preview = createDaemonToolPreview({
+      someBigTextField: 'x'.repeat(100_000),
+    });
+    expect(preview.kind).toBe('key_value');
+    const row = (
+      preview as { rows?: Array<{ label: string; value: string }> }
+    ).rows?.find((entry) => entry.label === 'someBigTextField');
+    expect(row).toBeDefined();
+    expect(row?.value.length).toBeLessThanOrEqual(
+      4096 + '... [truncated]'.length,
+    );
+    expect(row?.value.endsWith('... [truncated]')).toBe(true);
+  });
+
   it('recognizes common secret-key aliases before rendering previews', () => {
     expect(
       [
@@ -2492,6 +3250,278 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('does not surface usage_update as a debug transcript event', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: {
+          sessionUpdate: 'usage_update',
+          used: 46_351,
+          size: 1_000_000,
+        },
+      }),
+    );
+    expect(events).toEqual([]);
+  });
+
+  it('stamps debugReason on unrecognized daemon events', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('some_future_event', { sessionId: 's1' }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'unrecognized_event',
+      }),
+    ]);
+  });
+
+  it('stamps debugReason on unrecognized session_update kinds', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: { sessionUpdate: 'some_future_kind', payload: { a: 1 } },
+      }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'unrecognized_session_update',
+      }),
+    ]);
+  });
+
+  it('caps the embedded payload of unrecognized session_update debug text', () => {
+    // One transcript block per such frame is appended, so an unrecognized
+    // kind streaming at high frequency must not embed its full payload
+    // (up to 100KB wire frames) — the text is capped like tool details.
+    const events = normalizeDaemonEvent(
+      envelopeOf('session_update', {
+        update: {
+          sessionUpdate: 'some_future_kind',
+          payload: 'x'.repeat(100_000),
+        },
+      }),
+    );
+
+    expect(events).toHaveLength(1);
+    const text = (events[0] as { text?: string }).text ?? '';
+    expect(text.length).toBeLessThanOrEqual(4096 + '... [truncated]'.length);
+    expect(text.endsWith('... [truncated]')).toBe(true);
+  });
+
+  it('caps the embedded payload of the sibling debug-block paths too', () => {
+    // The one-block-per-frame accumulation hazard is not specific to the
+    // unrecognized session_update branch: every debug path that embeds the
+    // raw payload must stay capped, or a high-frequency frame taking any
+    // sibling path reproduces the same unbounded-growth OOM.
+    const large = 'x'.repeat(100_000);
+    const expectCapped = (events: ReturnType<typeof normalizeDaemonEvent>) => {
+      expect(events).toHaveLength(1);
+      const text = (events[0] as { text?: string }).text ?? '';
+      expect(text.length).toBeLessThanOrEqual(4096 + '... [truncated]'.length);
+      expect(text.endsWith('... [truncated]')).toBe(true);
+    };
+
+    // Top-level unrecognized event type.
+    expectCapped(
+      normalizeDaemonEvent(envelopeOf('some_future_event', { payload: large })),
+    );
+    // session_update with a non-record payload (no usable update record).
+    expectCapped(normalizeDaemonEvent(envelopeOf('session_update', large)));
+    // permission_request with a non-record payload and one without requestId.
+    expectCapped(normalizeDaemonEvent(envelopeOf('permission_request', large)));
+    expectCapped(
+      normalizeDaemonEvent(
+        envelopeOf('permission_request', { payload: large }),
+      ),
+    );
+    // permission_resolved without requestId.
+    expectCapped(
+      normalizeDaemonEvent(
+        envelopeOf('permission_resolved', { payload: large }),
+      ),
+    );
+  });
+
+  it('classifies a session_update with no usable discriminator as malformed', () => {
+    // `getSessionUpdatePayload` accepts any record, so these reach the default
+    // branch with `kind === undefined`. They are broken frames, not kinds from
+    // a newer daemon — marking them unrecognized would let renderers hide the
+    // only diagnostic they produce.
+    for (const update of [
+      {},
+      { sessionUpdate: 42 },
+      { sessionUpdate: '' },
+      // Truthy but no more usable than an empty string.
+      { sessionUpdate: '   ' },
+    ]) {
+      expect(
+        normalizeDaemonEvent(envelopeOf('session_update', { update })),
+      ).toEqual([
+        expect.objectContaining({
+          type: 'debug',
+          debugReason: 'malformed_payload',
+        }),
+      ]);
+    }
+  });
+
+  it('stamps debugReason on malformed payloads of known events', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('memory_changed', { scope: 'not-a-scope' }),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'malformed_payload',
+      }),
+    ]);
+  });
+
+  it('routes unrecognized diagnostics to the sidechannel with classification intact', () => {
+    // The normalizer tests above inspect events directly and the Web Shell
+    // adapter tests construct blocks by hand, so neither would notice if the
+    // reducer dropped the field on the way across. Unrecognized diagnostics
+    // are routed to `unrecognizedDiagnostics` instead of `blocks[]` (they
+    // must not finalize a streaming assistant block or consume the
+    // `maxBlocks` budget), so the classification must survive onto the
+    // sidechannel entry.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(
+        envelopeOf('some_future_event', { sessionId: 's1' }),
+      ),
+    );
+
+    expect(state.blocks).toEqual([]);
+    expect(state.unrecognizedDiagnostics).toEqual([
+      expect.objectContaining({
+        debugReason: 'unrecognized_event',
+      }),
+    ]);
+  });
+
+  it('carries the envelope coordinates and correlation fields onto sidechannel entries (#8823)', () => {
+    // Every field the type promises must actually land: a mutation deleting
+    // any one spread (or swapping `clientReceivedAt` for a constant) used to
+    // leave the whole suite green because only `debugReason` was asserted.
+    // `now` is distinct from `serverTimestamp` and `eventId` so
+    // `clientReceivedAt` discriminates.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      normalizeDaemonEvent({
+        id: 42,
+        v: 1,
+        type: 'some_future_event',
+        promptId: 'prompt-1',
+        originatorClientId: 'client-9',
+        serverTimestamp: 1234,
+        data: {
+          update: {
+            sessionUpdate: 'mystery_kind',
+            _meta: {
+              qwenTranscript: {
+                sourceRecordIds: ['rec-1', 'rec-2'],
+                branchRecordId: 'branch-1',
+              },
+            },
+          },
+        },
+      } as never),
+      { now: 5 },
+    );
+
+    expect(state.unrecognizedDiagnostics).toEqual([
+      {
+        debugReason: 'unrecognized_event',
+        text: expect.any(String),
+        promptId: 'prompt-1',
+        sourceRecordIds: ['rec-1', 'rec-2'],
+        branchRecordId: 'branch-1',
+        originatorClientId: 'client-9',
+        eventId: 42,
+        serverTimestamp: 1234,
+        clientReceivedAt: 5,
+      },
+    ]);
+  });
+
+  it('caps sidechannel text at the block-length limit (#8823)', () => {
+    // The replaced `appendStatusBlock` path truncated exactly these
+    // diagnostics; the sidechannel must not admit unbounded strings.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'debug',
+          debugReason: 'unrecognized_event',
+          text: 'x'.repeat(110_000),
+        },
+      ],
+    );
+
+    const entry = state.unrecognizedDiagnostics[0];
+    expect(entry).toBeDefined();
+    expect(entry?.text.endsWith('\n[truncated]\n')).toBe(true);
+    // Same total bound as the block path's `truncateText`: the suffix fits
+    // within the cap, not on top of it.
+    expect(entry?.text.length).toBeLessThanOrEqual(100_000);
+  });
+
+  it('still stamps debugReason on the block path for malformed payloads (#8823)', () => {
+    // Block-level `debugReason` stays load-bearing for the events that still
+    // take the block path (and for legacy persisted blocks): dropping the
+    // stamp in `appendStatusBlock` must not ship green.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'debug',
+          debugReason: 'malformed_payload',
+          text: 'broken frame payload',
+        },
+      ],
+    );
+
+    expect(state.unrecognizedDiagnostics).toEqual([]);
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toEqual(
+      expect.objectContaining({
+        kind: 'debug',
+        debugReason: 'malformed_payload',
+      }),
+    );
+  });
+
+  it('leaves client-dispatched debug blocks without a debugReason', () => {
+    // The mirror of the test above, and the invariant that keeps Web Shell's
+    // model-switch summary visible. Without it, defaulting the field in
+    // `appendStatusBlock` (e.g. `event.debugReason ?? 'unrecognized_event'`)
+    // passes every other test in both suites while silently tagging the
+    // summary as unrecognized, which Web Shell then filters out.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'debug',
+          text: 'Model switched to qwen3-coder-plus',
+          source: 'model_switch_summary',
+        },
+      ],
+    );
+
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toEqual(
+      expect.objectContaining({
+        kind: 'debug',
+        source: 'model_switch_summary',
+      }),
+    );
+    expect(state.blocks[0]).not.toHaveProperty('debugReason');
+  });
+
   it('normalizes memory_changed with closed-enum scope + mode', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('memory_changed', {
@@ -2582,6 +3612,76 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
         enabled: false,
       }),
     ]);
+  });
+
+  it('normalizes skill-toggle mutation metadata on settings_changed', () => {
+    const mutation = {
+      id: 'mutation-1',
+      kind: 'skill_toggle',
+      skills: [{ name: 'web-search', enabled: true }],
+      activation: 'applied',
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    const events = normalizeDaemonEvent(
+      envelopeOf('settings_changed', {
+        key: 'skills.disabled',
+        value: [],
+        scope: 'workspace',
+        mutation,
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.settings.changed',
+        key: 'skills.disabled',
+        scope: 'workspace',
+        value: [],
+        mutation,
+      }),
+    ]);
+  });
+
+  it('keeps settings_changed when skill-toggle mutation metadata is malformed', () => {
+    const validMutation = {
+      id: 'mutation-1',
+      kind: 'skill_toggle',
+      skills: [{ name: 'web-search', enabled: true }],
+      activation: 'applied',
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    const malformed = [
+      { kind: 'skill_toggle' },
+      { ...validMutation, kind: 'other' },
+      { ...validMutation, activation: 'soon' },
+      { ...validMutation, skills: [] },
+      { ...validMutation, skills: 'not-an-array' },
+      { ...validMutation, sessionsFailed: Number.POSITIVE_INFINITY },
+      { ...validMutation, skills: [{ name: '', enabled: true }] },
+      {
+        ...validMutation,
+        skills: [{ name: 'web-search', enabled: 'yes' }],
+      },
+    ];
+    for (const mutation of malformed) {
+      const events = normalizeDaemonEvent(
+        envelopeOf('settings_changed', {
+          key: 'skills.disabled',
+          value: ['skill-a'],
+          scope: 'workspace',
+          mutation,
+        }),
+      );
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: 'workspace.settings.changed',
+          key: 'skills.disabled',
+          value: ['skill-a'],
+        }),
+      ]);
+      expect(events[0]).not.toHaveProperty('mutation');
+    }
   });
 
   it('normalizes settings_reloaded as a settings refresh signal', () => {
@@ -3522,7 +4622,10 @@ describe('daemon UI reducer state machine (PR-E)', () => {
       expect.objectContaining({
         type: 'status',
         source: 'history_truncated',
-        text: expect.stringContaining('History truncated') as string,
+        text: expect.stringContaining(
+          'History truncated in replay history',
+        ) as string,
+        data: expect.objectContaining({ truncatedTurns: 2 }),
       }),
     ]);
 
@@ -3545,6 +4648,80 @@ describe('daemon UI reducer state machine (PR-E)', () => {
     );
   });
 
+  it('describes live truncation precisely and preserves structured data', () => {
+    const data = {
+      reason: 'replay_window_exceeded',
+      scope: 'live_journal',
+      truncatedEvents: 16_371,
+      retainedEvents: 10_000,
+      maxBytes: 8_388_608,
+      maxEvents: 10_000,
+      fullTranscriptAvailable: true,
+    };
+    const [event] = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data,
+    } as never);
+
+    expect(event).toMatchObject({
+      type: 'status',
+      source: 'history_truncated',
+      data,
+      text: expect.stringContaining(
+        'kept the latest 10000 source events and dropped 16371 older source events',
+      ) as string,
+    });
+    expect((event as { text: string }).text).toContain(
+      'limits: 10000 replay entries / 8388608 bytes',
+    );
+    expect((event as { text: string }).text).toContain(
+      'Complete content remains available after the turn finishes.',
+    );
+  });
+
+  it('does not promise recovery when a full transcript is unavailable', () => {
+    const [event] = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        scope: 'live_journal',
+        truncatedEvents: 1,
+        retainedEvents: 2,
+        maxBytes: 512,
+        maxEvents: 2,
+        fullTranscriptAvailable: false,
+      },
+    } as never);
+
+    expect((event as { text: string }).text).toContain(
+      'not available for automatic recovery',
+    );
+    expect((event as { text: string }).text).not.toContain(
+      'remains available after the turn finishes',
+    );
+  });
+
+  it('does not infer replay ownership for a future truncation scope', () => {
+    const [event] = normalizeDaemonEvent({
+      v: 1,
+      type: 'history_truncated',
+      data: {
+        reason: 'replay_window_exceeded',
+        scope: 'future_scope',
+        truncatedEvents: 1,
+        retainedEvents: 2,
+        maxBytes: 512,
+        fullTranscriptAvailable: true,
+      },
+    } as never);
+
+    expect((event as { text: string }).text).toContain('History truncated:');
+    expect((event as { text: string }).text).not.toContain('live turn');
+    expect((event as { text: string }).text).not.toContain('replay history');
+  });
+
   it('routes malformed history truncation payloads to debug', () => {
     const events = normalizeDaemonEvent({
       v: 1,
@@ -3564,6 +4741,29 @@ describe('daemon UI reducer state machine (PR-E)', () => {
         text: 'history_truncated: malformed history_truncated payload',
       }),
     ]);
+  });
+
+  it('routes malformed optional history truncation fields to debug', () => {
+    for (const extra of [{ scope: 5 }, { maxEvents: -1 }, { maxEvents: 1.5 }]) {
+      const events = normalizeDaemonEvent({
+        v: 1,
+        type: 'history_truncated',
+        data: {
+          reason: 'replay_window_exceeded',
+          truncatedEvents: 4,
+          retainedEvents: 2,
+          maxBytes: 512,
+          fullTranscriptAvailable: true,
+          ...extra,
+        },
+      } as never);
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: 'debug',
+          text: 'history_truncated: malformed history_truncated payload',
+        }),
+      ]);
+    }
   });
 
   it('mirrors approval mode from session.approval_mode.changed event', async () => {
@@ -5384,6 +6584,43 @@ describe('transcriptBlockToTerminalText (wenshao review — coverage)', () => {
 });
 
 describe('daemon UI WeakMap memo hits (wenshao glm-5.1 review)', () => {
+  it('shares the block index for text updates and copies it for appends', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: 'first' } as never],
+      { now: 2 },
+    );
+    const firstState = state;
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.text.delta', text: ' second' } as never],
+      { now: 3 },
+    );
+
+    expect(state.blocks).not.toBe(firstState.blocks);
+    expect(state.blockIndexById).toBe(firstState.blockIndexById);
+    expect(Object.isFrozen(state.blockIndexById)).toBe(true);
+    expect(
+      () =>
+        ((state.blockIndexById as Record<string, number>)['assistant-1'] = 99),
+    ).toThrow(TypeError);
+    expect(state.blocks[0]).toMatchObject({ text: 'first second' });
+    expect(firstState.blocks[0]).toMatchObject({ text: 'first' });
+
+    const updatedState = state;
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'status', text: 'done' } as never],
+      { now: 4 },
+    );
+
+    expect(state.blockIndexById).not.toBe(updatedState.blockIndexById);
+    expect(updatedState.blockIndexById).not.toHaveProperty('status-2');
+    expect(state.blockIndexById).toHaveProperty('status-2', 1);
+  });
+
   // wenshao 5-23 13:03: lazy COW means non-block-mutating dispatches
   // preserve `state.blocks` reference, so the WeakMap caches actually hit
   // across renders. Verify by checking reference identity.
@@ -6061,9 +7298,274 @@ describe('R5 review batch — coverage additions', () => {
     expect(events).toEqual([
       expect.objectContaining({
         type: 'status',
-        text: 'Inserted message: 你好',
+        text: '你好',
         source: 'mid_turn_message_injected',
         data: { sessionId: 's1', messages: ['你好'] },
+      }),
+    ]);
+  });
+
+  it('keeps each message in an injected mid-turn batch separate', () => {
+    const events = normalizeDaemonEvent({
+      id: 3,
+      v: 1,
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 's1',
+        messages: ['with image', 'text only'],
+        messageIds: ['mid-1', 'mid-2'],
+        items: [
+          {
+            content: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
+          },
+          {},
+        ],
+      },
+    });
+
+    expect(events).toMatchObject([
+      {
+        type: 'status',
+        text: 'with image',
+        data: {
+          messages: ['with image'],
+          messageIds: ['mid-1'],
+          items: [
+            {
+              content: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
+            },
+          ],
+        },
+      },
+      {
+        type: 'status',
+        text: 'text only',
+        data: {
+          messages: ['text only'],
+          messageIds: ['mid-2'],
+          items: [{}],
+        },
+      },
+    ]);
+  });
+
+  it('preserves replay source metadata on an image-only user block', () => {
+    const events = normalizeDaemonEvent({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+          _meta: {
+            source: 'mid_turn_message_injected',
+            qwenDiscreteMessage: true,
+            qwenTranscript: { sourceRecordIds: ['record-1'] },
+          },
+        },
+      },
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      events,
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'user',
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      },
+    ]);
+  });
+
+  it('normalizes a reference-only image block into the media-unavailable placeholder', () => {
+    // Replay producers persist uploaded attachments as media references
+    // (`attachmentId`, no inline bytes). Paths that normalize without hydrating
+    // (offline record projections) must degrade to a visible placeholder
+    // instead of silently dropping the user's message.
+    expect(
+      normalizeDaemonEvent({
+        id: 7,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: {
+              type: 'image',
+              attachmentId: 'media-1',
+              mimeType: 'image/png',
+              size: 3,
+            },
+            _meta: {
+              source: 'mid_turn_message_injected',
+              qwenDiscreteMessage: true,
+              qwenTranscript: { sourceRecordIds: ['record-1'] },
+            },
+          },
+        },
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'user.text.delta',
+        text: '[Attachment is no longer available]',
+        sourceRecordIds: ['record-1'],
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      }),
+    ]);
+  });
+
+  it('leaves file attachment references for lazy preview consumers', () => {
+    const textEvents = normalizeDaemonEvent({
+      id: 7,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'check this' },
+      },
+    });
+    const events = normalizeDaemonEvent({
+      id: 8,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'user_message_chunk',
+        content: {
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 0,
+        },
+      },
+    });
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'user.file.delta',
+        name: 'notes.txt',
+        mimeType: 'text/plain',
+        attachmentId: 'notes.txt',
+      }),
+    ]);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [...textEvents, ...events],
+    );
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'user',
+        text: 'check this',
+        files: [
+          {
+            name: 'notes.txt',
+            mimeType: 'text/plain',
+            attachmentId: 'notes.txt',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('normalizes an image-only mid-turn message without dropping its slot', () => {
+    const data = {
+      sessionId: 's1',
+      messages: [''],
+      items: [
+        {
+          content: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
+        },
+      ],
+    };
+    expect(
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        text: '',
+        source: 'mid_turn_message_injected',
+        data,
+      }),
+    ]);
+  });
+
+  it('normalizes a resource-only mid-turn message without dropping its slot', () => {
+    const data = {
+      sessionId: 's1',
+      messages: [''],
+      items: [
+        {
+          content: [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 0,
+            },
+          ],
+        },
+      ],
+    };
+    expect(
+      normalizeDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        text: '',
+        source: 'mid_turn_message_injected',
+        data,
+      }),
+    ]);
+  });
+
+  it('normalizes a degraded-media mid-turn echo instead of dropping it', () => {
+    // The drain's media-failure path publishes `messages: ['']` whose item
+    // content is the media-unavailable text block (no image blocks); the
+    // guard must keep the user's injected echo renderable.
+    const data = {
+      sessionId: 's1',
+      messages: [''],
+      messageIds: ['mid-gone'],
+      items: [
+        {
+          content: [
+            { type: 'text', text: '[Attachment is no longer available]' },
+          ],
+        },
+      ],
+    };
+    expect(
+      normalizeDaemonEvent({
+        id: 5,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        text: '',
+        source: 'mid_turn_message_injected',
+        data,
       }),
     ]);
   });
@@ -7166,6 +8668,41 @@ describe('parallel subAgent text interleaving fix', () => {
       inputTokens: 4500,
       outputTokens: 1000,
       totalTokens: 5500,
+    });
+  });
+
+  it('retains executionMode in compacted task_execution output', () => {
+    let state = createDaemonTranscriptState({
+      now: 1,
+      retainSubagentBlocks: false,
+    });
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-task-mode',
+        toolName: 'agent',
+        status: 'running',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'running',
+          executionMode: 'background',
+          subagentName: 'probe',
+        },
+      },
+    ] as DaemonUiEvent[]);
+
+    // Web Shell classification treats executionMode as authoritative from
+    // the first running update; summary-mode compaction must not drop it.
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolCallId: 'agent-task-mode',
+      rawOutput: {
+        type: 'task_execution',
+        status: 'running',
+        executionMode: 'background',
+        subagentName: 'probe',
+      },
     });
   });
 

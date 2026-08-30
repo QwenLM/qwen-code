@@ -1,15 +1,19 @@
 import {
   useState,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useRef,
   useMemo,
   useId,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
-import { isAgentTool } from '@qwen-code/webui/daemon-react-sdk';
-import type { PermissionRequest } from '../../adapters/types';
+import { isAgentTool } from '@qwen-code/web-shell/daemon-react-sdk';
+import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { PlanExecutionView } from './PlanExecutionView';
+import { isExitPlanApprovalRequest } from '../../utils/todos';
+import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './ToolApproval.module.css';
 
@@ -28,6 +32,7 @@ interface ToolApprovalProps {
    * it — it just never grabs focus on its own.
    */
   keyboardActive?: boolean;
+  planTodos?: readonly TodoItem[];
 }
 
 export function parseTitle(title?: string): {
@@ -89,7 +94,23 @@ function getDescriptionText(request: PermissionRequest): string | undefined {
   return request.title;
 }
 
-function getSafeDefaultIndex(options: PermissionRequest['options']): number {
+function getSafeDefaultIndex(
+  options: PermissionRequest['options'],
+  isAgent = false,
+): number {
+  if (isAgent) {
+    // Launching the agent is the model's proposed next action: default the
+    // selection to the one-shot allow instead of the reject button, and never
+    // to a permanent allow rule.
+    const allowOnceIdx = options.findIndex((o) => o.kind === 'allow_once');
+    if (allowOnceIdx >= 0) return allowOnceIdx;
+    // No one-shot option: fall back to the reject (safe) rather than landing
+    // on a permanent allow rule.
+    const rejectIdx = options.findIndex(
+      (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
+    );
+    return rejectIdx >= 0 ? rejectIdx : 0;
+  }
   if (
     options.length > 1 &&
     (options[0].kind === 'allow_always' || options[0].kind === 'reject_always')
@@ -200,15 +221,17 @@ export function ToolApproval({
   onConfirm,
   variant = 'inline',
   keyboardActive = true,
+  planTodos = [],
 }: ToolApprovalProps) {
   const { t } = useI18n();
+  const isAgent = isAgentTool(request.toolName);
   const displayOptions = useMemo(
     () => prepareDisplayOptions(request.options),
     [request.options],
   );
   const safeDefaultIndex = useMemo(
-    () => getSafeDefaultIndex(displayOptions),
-    [displayOptions],
+    () => getSafeDefaultIndex(displayOptions, isAgent),
+    [displayOptions, isAgent],
   );
   // Prefer the localized label. Known producers give every option a distinct
   // i18n key (plan mode's restore_previous has its own), so this normally
@@ -238,6 +261,7 @@ export function ToolApproval({
   const safeDefaultIndexRef = useRef(safeDefaultIndex);
   safeDefaultIndexRef.current = safeDefaultIndex;
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const headingId = useId();
   const questionId = useId();
   const descId = useId();
@@ -287,7 +311,14 @@ export function ToolApproval({
   // already topmost on mount still focuses its default.
   const prevKeyboardActiveRef = useRef(false);
   const prevRequestIdRef = useRef(request.id);
-  useEffect(() => {
+  // Must be a layout effect, not a passive one: the commit that mounts this
+  // overlay also hides the composer, and sibling layout effects can force a
+  // synchronous style recalculation (by reading layout) before any passive
+  // effect runs — Chromium drops focus from the just-hidden composer during
+  // that recalculation, so a passive guard would read `body` and miss.
+  // Layout effects run right after DOM mutation, before any recalculation,
+  // while the hidden composer still holds focus.
+  useLayoutEffect(() => {
     const wasActive = prevKeyboardActiveRef.current;
     const prevRequestId = prevRequestIdRef.current;
     prevKeyboardActiveRef.current = keyboardActive;
@@ -295,6 +326,15 @@ export function ToolApproval({
     if (!keyboardActive) return;
     const requestChanged = request.id !== prevRequestId;
     if (wasActive && !requestChanged) return;
+    // The approval can appear while the user is mid-typing in the composer:
+    // the same commit hides the composer and mounts this overlay. Grabbing
+    // focus would redirect the in-progress keystrokes — Enter-to-send, Space,
+    // digits — to the safe-default option and can confirm the request
+    // unintentionally. Yield to the editable target; the dialog stays
+    // reachable by Tab/click.
+    if (isEditableTarget(getShadowAwareActiveElement(panelRef.current))) {
+      return;
+    }
     // Fresh request → safe default; same request re-activated (e.g. a covering
     // panel closed) → restore the option the user had selected rather than
     // snapping focus back to the default and silently changing their choice.
@@ -321,6 +361,13 @@ export function ToolApproval({
   // the focused option natively; digits confirm by position; Escape rejects.
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (
+        e.key !== 'Escape' &&
+        e.target instanceof Element &&
+        e.target.closest('[data-plan-interactive]')
+      ) {
+        return;
+      }
       const count = displayOptions.length;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
@@ -357,11 +404,12 @@ export function ToolApproval({
   );
 
   const isExec = isExecKind(request);
-  const isAgent = isAgentTool(request.toolName);
   const command = getCommandFromRawInput(request);
   const showsCommandBlock = Boolean(
     (isExec && command) || (contentText && contentText !== request.title),
   );
+  const isExitPlanApproval = isExitPlanApprovalRequest(request);
+  const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
   const questionText = isAgent
     ? t('approval.launchAgentQuestion')
     : isExec
@@ -370,9 +418,12 @@ export function ToolApproval({
 
   return (
     <div
+      ref={panelRef}
       className={
         variant === 'floating'
-          ? `${styles.approval} ${styles.floating}`
+          ? `${styles.approval} ${styles.floating}${
+              showsPlanWorkflow ? ` ${styles.floatingWorkflow}` : ''
+            }`
           : styles.approval
       }
       data-web-shell-permission-panel
@@ -414,10 +465,22 @@ export function ToolApproval({
           </pre>
         </div>
       ) : contentText && contentText !== request.title ? (
-        <pre className={styles.content} id={commandId} title={contentText}>
+        <pre
+          className={`${styles.content}${
+            isExitPlanApproval ? ` ${styles.planContent}` : ''
+          }`}
+          id={commandId}
+          title={contentText}
+        >
           {contentText}
         </pre>
       ) : null}
+
+      {showsPlanWorkflow && (
+        <div className={styles.workflow}>
+          <PlanExecutionView todos={planTodos} tools={[]} tasks={[]} />
+        </div>
+      )}
 
       <div className={styles.question} id={questionId}>
         {questionText}

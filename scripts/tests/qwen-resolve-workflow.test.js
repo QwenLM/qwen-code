@@ -346,7 +346,9 @@ describe('qwen resolve workflow', () => {
     const contextStep = step(reviewJob, 'Resolve PR context');
     const runStep = step(reviewJob, 'Run review');
 
-    expect(reviewJob).toContain('timeout-minutes: 260');
+    expect(reviewJob).toContain(
+      "timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'",
+    );
     expect(contextStep).toContain('DEFAULT_TIMEOUT_MINUTES=180');
     expect(contextStep).toContain('case "$token" in');
     expect(contextStep).toContain('--timeout=*)');
@@ -354,9 +356,98 @@ describe('qwen resolve workflow', () => {
     expect(contextStep).toContain('timeout=*)');
     expect(contextStep).toContain('TIMEOUT_MINUTES="${token#timeout=}"');
     expect(runStep).toContain('if [ "${#TIMEOUT_MINUTES}" -gt 3 ]; then');
-    expect(runStep).toContain('timeout_minutes must not exceed 240 minutes');
-    expect(runStep).toContain('QWEN_TIMEOUT="$TIMEOUT_MINUTES"');
+    // The cap still comes from the repository variable, but reaches the script
+    // through the step's env: the run body must stay free of `${{ }}` or the
+    // whole workflow exceeds the 21000-character expression limit and becomes
+    // invalid. Both halves are asserted so neither can drift alone.
+    expect(runStep).toContain('MAX_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"');
+    expect(runStep).toContain(
+      "MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'",
+    );
+    expect(runStep).toContain(
+      'if [ "$TIMEOUT_MINUTES" -gt "$MAX_TIMEOUT_MINUTES" ]; then',
+    );
+    expect(runStep).toContain(
+      'fail "timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes"',
+    );
+    expect(runStep).toContain('QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"');
     expect(runStep).not.toContain('QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 5))');
+  });
+
+  it('tiers the default review timeout by PR size unless overridden', () => {
+    const contextStep = step(reviewJob, 'Resolve PR context');
+    const runStep = step(reviewJob, 'Run review');
+
+    // The context step records whether the caller chose a timeout explicitly.
+    expect(contextStep).toContain('TIMEOUT_EXPLICIT=false');
+    expect(contextStep).toContain('TIMEOUT_EXPLICIT=true');
+    expect(contextStep).toContain('echo "timeout_explicit=$TIMEOUT_EXPLICIT"');
+    expect(runStep).toContain(
+      "TIMEOUT_EXPLICIT: '${{ steps.context.outputs.timeout_explicit }}'",
+    );
+
+    // Auto-tiering only applies without an explicit --timeout, keys off
+    // additions + deletions, and never exceeds the QWEN_REVIEW_MAX_TIMEOUT_MINUTES
+    // cap: small PRs keep 180, anything larger gets the full cap.
+    expect(runStep).toContain('EFFECTIVE_TIMEOUT_MINUTES="$TIMEOUT_MINUTES"');
+    expect(runStep).toContain(
+      'if [ "${TIMEOUT_EXPLICIT:-false}" != "true" ]; then',
+    );
+    expect(runStep).toContain('--json additions,deletions');
+    expect(runStep).toContain('if [ -n "$PR_SIZE_LINES" ]; then');
+    expect(runStep).toContain('if [ "$PR_SIZE_LINES" -le 300 ]; then');
+    // The size guard must WRAP the comparison it protects: swapping the two
+    // ifs keeps both texts present while an empty PR_SIZE_LINES (a failed
+    // size lookup) hits the bare integer test and silently gets the cap.
+    const sizeGuardStart = runStep.indexOf('if [ -n "$PR_SIZE_LINES" ]; then');
+    expect(sizeGuardStart).toBeGreaterThan(-1);
+    const sizeGuardArm = runStep.slice(
+      sizeGuardStart,
+      runStep.indexOf('else', sizeGuardStart),
+    );
+    expect(sizeGuardArm).toContain('if [ "$PR_SIZE_LINES" -le 300 ]; then');
+    expect(runStep).toContain('EFFECTIVE_TIMEOUT_MINUTES=180');
+    expect(runStep).toContain(
+      'EFFECTIVE_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"',
+    );
+    expect(runStep).toContain(
+      "MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'",
+    );
+    // Slice the small-PR arm so a swap of the two assignments between the
+    // branches fails: unordered containment keeps both texts present.
+    const smallPrStart = runStep.indexOf(
+      'if [ "$PR_SIZE_LINES" -le 300 ]; then',
+    );
+    expect(smallPrStart).toBeGreaterThan(-1);
+    const smallPrArm = runStep.slice(
+      smallPrStart,
+      runStep.indexOf('else', smallPrStart),
+    );
+    expect(smallPrArm).toContain('EFFECTIVE_TIMEOUT_MINUTES=180');
+    expect(smallPrArm).not.toContain('MAX_TIMEOUT_MINUTES_VAR');
+    expect(runStep).not.toContain('EFFECTIVE_TIMEOUT_MINUTES=210');
+    expect(runStep).toContain(
+      'echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"',
+    );
+    // Every check above is order-independent containment: pin that both
+    // tiering writes precede both consumers, or a block moved below its
+    // consumer keeps the suite green while non-small PRs run on the
+    // pre-tier budget (the exact incident this feature exists for).
+    const tierInit = runStep.indexOf(
+      'EFFECTIVE_TIMEOUT_MINUTES="$TIMEOUT_MINUTES"',
+    );
+    const tierStart = runStep.indexOf(
+      'if [ "${TIMEOUT_EXPLICIT:-false}" != "true" ]; then',
+    );
+    for (const consumer of [
+      runStep.indexOf('QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"'),
+      runStep.indexOf(
+        'echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"',
+      ),
+    ]) {
+      expect(tierInit).toBeLessThan(consumer);
+      expect(tierStart).toBeLessThan(consumer);
+    }
   });
 
   it('tells maintainers how to retry timed-out reviews with more time', () => {
@@ -369,13 +460,79 @@ describe('qwen resolve workflow', () => {
       'REASON="Qwen review timed out after ${attempt_timeout} seconds (of the ${QWEN_TIMEOUT}-minute budget)."',
     );
     expect(runStep).toContain('[ "$qwen_status" -eq 137 ]');
-    expect(fallbackStep).toContain('FAILURE_KIND:');
-    expect(fallbackStep).toContain('TIMEOUT_MINUTES:');
-    expect(fallbackStep).toContain('@qwen-code /review --timeout=240');
+    expect(fallbackStep).toContain('failure() &&');
     expect(fallbackStep).toContain(
-      'This run already used the maximum 240 minute timeout.',
+      'FAILURE_KIND: "${{ steps.review.outputs.failure_kind || \'\' }}"',
+    );
+    expect(fallbackStep).toContain('TIMEOUT_MINUTES:');
+    expect(fallbackStep).toContain(
+      "TIMEOUT_MINUTES: '${{ steps.review.outputs.effective_timeout_minutes || steps.context.outputs.timeout_minutes }}'",
+    );
+    expect(fallbackStep).toContain(
+      'MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
+    );
+    expect(fallbackStep).toContain('if [ "$FAILURE_KIND" = "timeout" ]; then');
+    // Slice the below-max arm so a transposition of the two bodies fails:
+    // unordered containment keeps both texts present in the wrong arms.
+    // Search for the else from the arm start so an unrelated earlier if/else
+    // in this step cannot invert the slice.
+    const belowMaxStart = fallbackStep.indexOf(
+      'if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then',
+    );
+    expect(belowMaxStart).toBeGreaterThan(-1);
+    const belowMaxArm = fallbackStep.slice(
+      belowMaxStart,
+      fallbackStep.indexOf('else', belowMaxStart),
+    );
+    expect(belowMaxArm).toContain(
+      '@qwen-code /review --timeout=${MAX_TIMEOUT_MINUTES}',
+    );
+    expect(belowMaxArm).not.toContain('This run already used the maximum');
+    // Symmetric slice for the at-max arm: it is an adjacent body= assignment
+    // in the same if-chain as the quota branch, the exact transposition class
+    // the belowMaxArm slice catches.
+    const atMaxStart = fallbackStep.indexOf('else', belowMaxStart);
+    expect(atMaxStart).toBeGreaterThan(-1);
+    // Line-anchored end: a bare indexOf('fi') stops at the first word
+    // CONTAINING "fi" ("specified", "notification"), silently truncating the
+    // arm and giving the not-toContain below a vacuous pass.
+    const atMaxEnd = fallbackStep.slice(atMaxStart).search(/\n\s*fi\b/);
+    expect(atMaxEnd).toBeGreaterThan(-1);
+    const atMaxArm = fallbackStep.slice(atMaxStart, atMaxStart + atMaxEnd);
+    expect(atMaxArm).toContain(
+      'This run already used the maximum ${MAX_TIMEOUT_MINUTES} minute timeout.',
+    );
+    expect(atMaxArm).not.toContain('/review --timeout=');
+    // The quota branch carries its own recovery advice; pin it to its arm.
+    const quotaStart = fallbackStep.indexOf(
+      'elif [ "$FAILURE_KIND" = "quota" ]; then',
+    );
+    expect(quotaStart).toBeGreaterThan(-1);
+    const quotaArm = fallbackStep.slice(
+      quotaStart,
+      fallbackStep.indexOf('else', quotaStart),
+    );
+    expect(quotaArm).toContain(
+      '**Qwen Code review paused — model quota exhausted.**',
+    );
+    // The branch CONDITION, not just both branch bodies: with both bodies
+    // pinned as substrings, any comparison flip (-ge/-gt/-le) keeps both
+    // strings present and ships the wrong recovery advice on every timeout.
+    expect(fallbackStep).toContain(
+      'if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then',
     );
     expect(fallbackStep).toContain('**Qwen Code review timed out.**');
+    // The comment must come AFTER all three arms: containment holds wherever
+    // the line sits, so a move into one arm would silently drop the others.
+    const genericBodyStart = fallbackStep.indexOf(
+      '**Qwen Code review did not complete successfully.**',
+    );
+    expect(genericBodyStart).toBeGreaterThan(-1);
+    const commentStart = fallbackStep.indexOf('gh pr comment "$PR_NUMBER"');
+    expect(commentStart).toBeGreaterThan(genericBodyStart);
+    // The wiring that delivers every body pinned above: pointing the command
+    // at a different variable posts text none of these assertions protect.
+    expect(fallbackStep).toContain('--body "$body"');
     expect(fallbackStep).not.toContain(
       '_Qwen Code review did not complete successfully:',
     );
@@ -383,15 +540,26 @@ describe('qwen resolve workflow', () => {
 
   it('skips stale automatic review runs before invoking qwen', () => {
     const runStep = step(reviewJob, 'Run review');
+    const staleHeadStart = runStep.indexOf(
+      'if [ "$EVENT_NAME" = "pull_request_target" ]; then',
+    );
+    // Without this, a reworded guard makes `indexOf` return -1 and the slice
+    // below silently degrades instead of failing.
+    expect(staleHeadStart).toBeGreaterThan(-1);
     const staleHeadCheck = runStep.slice(
-      runStep.indexOf(
-        'if [ "${{ github.event_name }}" = "pull_request_target" ]; then',
-      ),
+      staleHeadStart,
       runStep.indexOf('PROMPT="/review ${REVIEW_URL}"'),
     );
 
+    // Both context values arrive as step env so the run body carries no
+    // `${{ }}` — see the expression-length test in
+    // qwen-pr-review-workflow.test.js for why that is load-bearing.
+    expect(runStep).toContain("EVENT_NAME: '${{ github.event_name }}'");
+    expect(runStep).toContain(
+      "EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'",
+    );
     expect(staleHeadCheck).toContain(
-      'EVENT_HEAD_SHA="${{ github.event.pull_request.head.sha }}"',
+      'if [ "$CURRENT_HEAD_SHA" != "$EVENT_HEAD_SHA" ]; then',
     );
     expect(runStep).toContain(
       'PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq \'[.state, .headRefOid] | @tsv\')"',
@@ -425,9 +593,7 @@ describe('qwen resolve workflow', () => {
     expect(runStep).toContain(
       'QWEN_CI_REVIEW_EXPECTED_HEAD_SHA="$EXPECTED_HEAD_SHA"',
     );
-    expect(runStep).toContain(
-      'echo "expected_head_sha=$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"',
-    );
+    expect(runStep).toContain('echo "expected_head_sha=$EXPECTED_HEAD_SHA"');
     expect(fallbackStep).toContain('EXPECTED_HEAD_SHA:');
     expect(fallbackStep).toContain(
       'Skipping fallback comment: PR #${PR_NUMBER} is ${pr_state}.',
@@ -539,9 +705,13 @@ describe('qwen resolve workflow', () => {
     expect(authorizeStep).toMatch(
       /if \[ "\$PR_ACTION" = "review_requested" \]; then\s+principal="\$SENDER"/,
     );
+    const reviewRequestedStart = authorizeStep.indexOf(
+      'if [ "$PR_ACTION" = "review_requested" ]; then',
+    );
+    expect(reviewRequestedStart).toBeGreaterThan(-1);
     const reviewRequestedBranch = authorizeStep.slice(
-      authorizeStep.indexOf('if [ "$PR_ACTION" = "review_requested" ]; then'),
-      authorizeStep.indexOf('else'),
+      reviewRequestedStart,
+      authorizeStep.indexOf('else', reviewRequestedStart),
     );
     expect(reviewRequestedBranch).toContain('principal="$SENDER"');
     expect(reviewRequestedBranch).not.toContain(

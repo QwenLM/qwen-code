@@ -120,8 +120,8 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | `ChannelPlugin`      | Plugin factory interface (what you export)                               |
 | `Envelope`           | Normalized inbound message format                                        |
 | `SenderPolicy`       | `'allowlist' \| 'pairing' \| 'open'`                                     |
-| `GroupPolicy`        | `'disabled' \| 'allowlist' \| 'open'`                                    |
-| `SessionScope`       | `'user' \| 'thread' \| 'single'`                                         |
+| `GroupPolicy`        | `'disabled' \| 'allowlist' \| 'pairing' \| 'open'`                       |
+| `SessionScope`       | `'user' \| 'chat_thread' \| 'single'`; legacy `'thread'` is deprecated   |
 | `GroupConfig`        | Per-group settings (e.g. `requireMention`)                               |
 | `SessionTarget`      | Maps a session back to its channel/sender/chat                           |
 | `ToolCallEvent`      | Agent tool-call event delivered to adapters                              |
@@ -197,7 +197,11 @@ interface ChannelAgentBridge {
   prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: {
+      images?: Array<{ data: string; mimeType: string }>; // ordered, preferred
+      imageBase64?: string; // legacy fallback (first image only)
+      imageMimeType?: string; // legacy fallback (first image only)
+    },
   ): Promise<string>;
   cancelSession(sessionId: string): Promise<void>;
   shellCommand?(
@@ -208,6 +212,8 @@ interface ChannelAgentBridge {
 }
 ```
 
+`prompt` carries images through `options.images` — an ordered array of `{ data, mimeType }` entries delivered to the model in array order. The legacy `imageBase64`/`imageMimeType` pair is a fallback that carries only the first image. Built-in bridges normalize MIME types before use: lowercased, parameters stripped (`image/png; charset=binary` → `image/png`), and the `image/jpg` alias mapped to `image/jpeg`. Daemon-backed bridges upload images to the daemon attachment store and restrict them to its supported subtypes (`image/bmp`, `image/gif`, `image/jpeg`, `image/png`, `image/webp`) and its per-item admission rule (non-empty and at most 8 MiB once decoded); daemons without attachment support take the same images inline in the prompt body, kept under an aggregate base64 budget. Images outside those limits are skipped with a log line instead of failing the turn, while `AcpBridge` delivers any normalized `image/*` inline.
+
 ### AcpBridge
 
 `AcpBridge` is the current implementation used by standalone `qwen channel start`. It manages the `qwen-code --acp` child process and implements `ChannelAgentBridge`.
@@ -216,14 +222,14 @@ interface ChannelAgentBridge {
 constructor(options: { cliEntryPath: string; cwd: string; model?: string })
 ```
 
-| Method                              | Description                                                                                                       |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `start()`                           | Spawn the agent process                                                                                           |
-| `stop()`                            | Kill the agent process                                                                                            |
-| `newSession(cwd)`                   | Create a new ACP session, returns `sessionId`                                                                     |
-| `loadSession(sessionId, cwd)`       | Restore an existing session                                                                                       |
-| `prompt(sessionId, text, options?)` | Send a message to the agent, returns the full response text. Supports optional `imageBase64` and `imageMimeType`. |
-| `isConnected`                       | Whether the agent process is alive                                                                                |
+| Method                              | Description                                                                                                                                                                                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `start()`                           | Spawn the agent process                                                                                                                                                                                                        |
+| `stop()`                            | Kill the agent process                                                                                                                                                                                                         |
+| `newSession(cwd)`                   | Create a new ACP session, returns `sessionId`                                                                                                                                                                                  |
+| `loadSession(sessionId, cwd)`       | Restore an existing session                                                                                                                                                                                                    |
+| `prompt(sessionId, text, options?)` | Send a message to the agent, returns the full response text. Supports an ordered `images` array (`{ data, mimeType }` per image, preferred), falling back to the legacy `imageBase64`/`imageMimeType` pair for a single image. |
+| `isConnected`                       | Whether the agent process is alive                                                                                                                                                                                             |
 
 **Events** (EventEmitter):
 
@@ -263,9 +269,9 @@ constructor(bridge: ChannelAgentBridge, defaultCwd: string, scope?: SessionScope
 constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: PairingStore)
 ```
 
-| Method                         | Description                                                  |
-| ------------------------------ | ------------------------------------------------------------ |
-| `check(senderId, senderName?)` | Returns `{ allowed: boolean, pairingCode?: string \| null }` |
+| Method                         | Description                                                          |
+| ------------------------------ | -------------------------------------------------------------------- |
+| `check(senderId, senderName?)` | Returns `{ allowed: boolean, pairing?: CreatePairingRequestResult }` |
 
 **Policy behavior:**
 
@@ -278,12 +284,12 @@ constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: Pairin
 ### GroupGate
 
 ```typescript
-constructor(policy?: GroupPolicy, groups?: Record<string, GroupConfig>)
+constructor(policy?: GroupPolicy, groups?: Record<string, GroupConfig>, pairingStore?: PairingStore)
 ```
 
-| Method            | Description                                                                                    |
-| ----------------- | ---------------------------------------------------------------------------------------------- |
-| `check(envelope)` | Returns `{ allowed: boolean, reason?: 'disabled' \| 'not_allowlisted' \| 'mention_required' }` |
+| Method                      | Description                                                                                                                                                                                                                            |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check(envelope, options?)` | Returns the group policy decision and an optional pairing result. Under `pairing`, a mention/reply from an unapproved group creates (or reuses) a pending pairing request; pass `{ createPairingRequest: false }` for read-only probes |
 
 **Policy behavior:**
 
@@ -291,6 +297,7 @@ constructor(policy?: GroupPolicy, groups?: Record<string, GroupConfig>)
 | ----------- | ---------------------------------------- |
 | `disabled`  | All group messages rejected              |
 | `allowlist` | Only groups listed in config are allowed |
+| `pairing`   | A group must be approved once by chat ID |
 | `open`      | All groups allowed                       |
 
 When `requireMention` is `true` (default), group messages are only processed if the bot is @mentioned or the message is a reply to the bot.
@@ -301,16 +308,20 @@ When `requireMention` is `true` (default), group messages are only processed if 
 constructor(channelName: string, workspaceCwd?: string)
 ```
 
-Persists pairing state to `{channelName}-pairing.json` and `{channelName}-allowlist.json`. With `workspaceCwd` (what `ChannelBase` passes — the channel's `cwd`), the files live under the workspace-scoped directory `~/.qwen/channels/<workspace-scope>/` so two workspaces reusing the same channel name never share pairing requests or allowlist entries. Without it, the legacy global `~/.qwen/channels/` layout is used. The first time a given (workspace, channel) pair is constructed, existing legacy global files are copied in once (grandfathering) so already-approved senders stay approved; a per-channel `<channel>.migrated` sentinel in the scope directory marks that decision, after which legacy files are never consulted again for that channel. Channel names are URI-encoded in file names, so a name containing path separators cannot escape the scope directory. `revoke(senderId)` removes the sender only from this store's allowlist and never mutates the legacy global baseline.
+Persists pending pairing state to `{channelName}-pairing.json`, user approvals to `{channelName}-allowlist.json`, and group approvals to `{channelName}-groups.json`. With `workspaceCwd` (what `ChannelBase` passes — the channel's `cwd`), the files live under the workspace-scoped directory `~/.qwen/channels/<workspace-scope>/` so two workspaces reusing the same channel name never share pairing requests or allowlist entries. Without it, the legacy global `~/.qwen/channels/` layout is used. The first time a given (workspace, channel) pair is constructed, existing legacy global files are copied in once (grandfathering) so already-approved senders stay approved; a per-channel `<channel>.migrated` sentinel in the scope directory marks that decision, after which legacy files are never consulted again for that channel. Channel names are URI-encoded in file names, so a name containing path separators cannot escape the scope directory. `revoke(senderId)` removes the sender only from this store's allowlist and never mutates the legacy global baseline.
 
-| Method                                | Description                                                                                               |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `createRequest(senderId, senderName)` | Generate an 8-char pairing code (or return existing). Returns `null` if 3 pending requests already exist. |
-| `approve(code)`                       | Approve a pairing request, adds sender to allowlist. Returns the request or `null`.                       |
-| `isApproved(senderId)`                | Check if sender is in the approved allowlist                                                              |
-| `listPending()`                       | Get active (non-expired) pending requests                                                                 |
-| `getAllowlist()`                      | Get approved sender IDs                                                                                   |
-| `revoke(senderId)`                    | Remove an approved sender. Returns whether the sender was present.                                        |
+| Method                                | Description                                                                                                                                                                                                       |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createRequest(senderId, senderName)` | Generate an 8-char pairing code (or return the existing one). Returns `{ rejected: 'sender_pending' }` if the sender already holds a request, or `{ rejected: 'cap_reached' }` if 3 requests are already pending. |
+| `createGroupRequest(...)`             | Generate a request keyed by stable group ID and record its initiating sender.                                                                                                                                     |
+| `approve(code)`                       | Approve a user or group request and update its corresponding allowlist.                                                                                                                                           |
+| `isApproved(senderId)`                | Check if sender is in the approved allowlist                                                                                                                                                                      |
+| `isGroupApproved(groupId)`            | Check if a group is approved                                                                                                                                                                                      |
+| `listPending()`                       | Get active (non-expired) pending requests                                                                                                                                                                         |
+| `getAllowlist()`                      | Get approved sender IDs                                                                                                                                                                                           |
+| `getGroupAllowlist()`                 | Get approved group IDs                                                                                                                                                                                            |
+| `revoke(senderId)`                    | Remove an approved sender. Returns whether the sender was present.                                                                                                                                                |
+| `revokeGroup(groupId)`                | Remove an approved group. Returns whether the group was present.                                                                                                                                                  |
 
 ## Envelope
 

@@ -144,6 +144,7 @@ export function resolveVoiceWorkspaceTarget({
     const matches = registered.filter((workspace) => workspace.cwd === cwd);
     if (matches.length !== 1) return undefined;
     const workspace = matches[0];
+    if (workspace.kind === 'live') return undefined;
     if (workspace.primary) return legacyTarget(workspace.cwd, sessionId);
     if (!workspace.trusted) return undefined;
 

@@ -11,6 +11,7 @@ import type { CompletedToolCall } from '../core/coreToolScheduler.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import type { FileDiff } from '../tools/tools.js';
 import type { AuthType } from '../core/contentGenerator.js';
+import type { ToolExecutionStatus } from '../core/turn.js';
 import {
   getDecisionFromOutcome,
   ToolCallDecision,
@@ -23,6 +24,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
 import type { AgentTool } from '../tools/agent/agent.js';
+import type { ToolErrorType } from '../tools/tool-error.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;
@@ -175,10 +177,12 @@ export class UserRetryEvent implements BaseTelemetryEvent {
 export class ToolCallEvent implements BaseTelemetryEvent {
   'event.name': 'tool_call';
   'event.timestamp': string;
+  call_id?: string;
   function_name: string;
   function_args: Record<string, unknown>;
   duration_ms: number;
   status: 'success' | 'error' | 'cancelled';
+  execution_status?: ToolExecutionStatus | 'unknown';
   success: boolean; // Keep for backward compatibility
   decision?: ToolCallDecision;
   error?: string;
@@ -194,6 +198,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   constructor(call: CompletedToolCall) {
     this['event.name'] = 'tool_call';
     this['event.timestamp'] = new Date().toISOString();
+    this.call_id = call.request.callId;
     this.function_name = call.request.name;
     // structured_output args ARE the user's final structured payload (the
     // command's actual answer, already emitted in stdout `result` /
@@ -204,7 +209,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     // placeholder constant so consumers still see the call happened —
     // duration, success, decision metrics are preserved — but the
     // payload itself doesn't ride along. The same constant is used by
-    // `redactStructuredOutputArgsForRecording` in `core/geminiChat.ts`
+    // `redactStructuredOutputArgsForRecording` in `core/llm-chat.ts`
     // for the on-disk JSONL surface so neither side can silently drift.
     this.function_args =
       call.request.name === ToolNames.STRUCTURED_OUTPUT
@@ -212,6 +217,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
         : call.request.args;
     this.duration_ms = call.durationMs ?? 0;
     this.status = call.status;
+    this.execution_status = call.response.executionStatus;
     this.success = call.status === 'success'; // Keep for backward compatibility
     this.decision = call.outcome
       ? getDecisionFromOutcome(call.outcome)
@@ -481,6 +487,8 @@ export enum LoopType {
   TURN_TOOL_CALL_CAP = 'turn_tool_call_cap',
   /** The same tool repeatedly failed schema validation with fresh tool-call ids. */
   INVALID_TOOL_PARAMS_STAGNATION = 'invalid_tool_params_stagnation',
+  /** The same tool execution failure continued after a corrective reminder. */
+  REPEATED_TOOL_EXECUTION_FAILURE = 'repeated_tool_execution_failure',
 }
 
 export class LoopDetectedEvent implements BaseTelemetryEvent {
@@ -494,6 +502,95 @@ export class LoopDetectedEvent implements BaseTelemetryEvent {
     this['event.timestamp'] = new Date().toISOString();
     this.loop_type = loop_type;
     this.prompt_id = prompt_id;
+  }
+}
+
+export type RepeatedToolFailureGuardTelemetryMode =
+  | 'shadow'
+  | 'warn'
+  | 'enforce';
+export type RepeatedToolFailureGuardTelemetryPhase =
+  | 'idle'
+  | 'tracking'
+  | 'warned'
+  | 'latched';
+export type RepeatedToolFailureGuardTelemetryDecision =
+  | 'reset'
+  | 'tracked'
+  | 'would_warn'
+  | 'warned'
+  | 'would_stop'
+  | 'stopped';
+export type RepeatedToolFailureGuardCountBucket =
+  | '0'
+  | '1-2'
+  | '3-4'
+  | '5-7'
+  | '8+';
+export type RepeatedToolFailureGuardBatchBucket = '0' | '1' | '2' | '3+';
+export type RepeatedToolFailureGuardResetReason =
+  | 'success'
+  | 'cancelled'
+  | 'not_started'
+  | 'post_execution_failure'
+  | 'unknown'
+  | 'mixed'
+  | 'incomplete'
+  | 'external_input'
+  | 'queued_prompt'
+  | 'unreliable_input'
+  | 'contract_violation';
+
+export class RepeatedToolFailureGuardEvent implements BaseTelemetryEvent {
+  'event.name': 'repeated_tool_failure_guard';
+  'event.timestamp': string;
+  prompt_id: string;
+  route: 'acp_foreground';
+  mode: RepeatedToolFailureGuardTelemetryMode;
+  phase_before: RepeatedToolFailureGuardTelemetryPhase;
+  phase_after: RepeatedToolFailureGuardTelemetryPhase;
+  decision: RepeatedToolFailureGuardTelemetryDecision;
+  failure_count_bucket: RepeatedToolFailureGuardCountBucket;
+  batch_count_bucket: RepeatedToolFailureGuardBatchBucket;
+  candidate_ordinal: number;
+  declare reset_reason?: RepeatedToolFailureGuardResetReason;
+  declare terminal_status?: 'error';
+  declare execution_status?: 'error';
+  declare execution_error_type?: ToolErrorType;
+  declare tool_type?: 'native' | 'mcp';
+
+  constructor(
+    params: Omit<
+      RepeatedToolFailureGuardEvent,
+      'event.name' | 'event.timestamp'
+    >,
+  ) {
+    this['event.name'] = 'repeated_tool_failure_guard';
+    this['event.timestamp'] = new Date().toISOString();
+    this.prompt_id = params.prompt_id;
+    this.route = params.route;
+    this.mode = params.mode;
+    this.phase_before = params.phase_before;
+    this.phase_after = params.phase_after;
+    this.decision = params.decision;
+    this.failure_count_bucket = params.failure_count_bucket;
+    this.batch_count_bucket = params.batch_count_bucket;
+    this.candidate_ordinal = params.candidate_ordinal;
+    if (params.reset_reason !== undefined) {
+      this.reset_reason = params.reset_reason;
+    }
+    if (params.terminal_status !== undefined) {
+      this.terminal_status = params.terminal_status;
+    }
+    if (params.execution_status !== undefined) {
+      this.execution_status = params.execution_status;
+    }
+    if (params.execution_error_type !== undefined) {
+      this.execution_error_type = params.execution_error_type;
+    }
+    if (params.tool_type !== undefined) {
+      this.tool_type = params.tool_type;
+    }
   }
 }
 
@@ -559,6 +656,8 @@ export interface ChatCompressionEvent extends BaseTelemetryEvent {
   tokens_after: number;
   compression_input_token_count?: number;
   compression_output_token_count?: number;
+  cache_sharing_attempted?: boolean;
+  cache_sharing_used?: boolean;
 }
 
 export function makeChatCompressionEvent({
@@ -566,6 +665,8 @@ export function makeChatCompressionEvent({
   tokens_after,
   compression_input_token_count,
   compression_output_token_count,
+  cache_sharing_attempted,
+  cache_sharing_used,
 }: Omit<ChatCompressionEvent, CommonFields>): ChatCompressionEvent {
   return {
     'event.name': 'chat_compression',
@@ -578,6 +679,10 @@ export function makeChatCompressionEvent({
     ...(compression_output_token_count !== undefined
       ? { compression_output_token_count }
       : {}),
+    ...(cache_sharing_attempted !== undefined
+      ? { cache_sharing_attempted }
+      : {}),
+    ...(cache_sharing_used !== undefined ? { cache_sharing_used } : {}),
   };
 }
 
@@ -733,7 +838,7 @@ export class ProtocolTagSanitizedEvent implements BaseTelemetryEvent {
  * Phase 4b — HTTP-status retry telemetry. Emitted by `retryWithBackoff` (via
  * the `onRetry` callback opt-in) for HTTP 429 / 5xx retries at LLM call sites.
  *
- * Distinct from {@link ContentRetryEvent}, which is emitted by `geminiChat`'s
+ * Distinct from {@link ContentRetryEvent}, which is emitted by `llmChat`'s
  * for-loop for `InvalidStreamError` retries that use
  * `INVALID_STREAM_RETRY_CONFIG`, not `retryWithBackoff`. A single user prompt
  * may fire BOTH event types; sum across event types to count total retries per
@@ -1124,6 +1229,7 @@ export type TelemetryEvent =
   | FlashFallbackEvent
   | RipgrepRuntimeRecoveryEvent
   | LoopDetectedEvent
+  | RepeatedToolFailureGuardEvent
   | LoopDetectionDisabledEvent
   | NextSpeakerCheckEvent
   | KittySequenceOverflowEvent
@@ -1415,7 +1521,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
     | 'already_running'
     | 'queued'
     | 'memory_tool'
-    | 'memory_pressure';
+    | 'memory_pressure'
+    | 'session_mismatch';
   patches_count: number;
   touched_topics: string;
   duration_ms: number;
@@ -1427,7 +1534,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
       | 'already_running'
       | 'queued'
       | 'memory_tool'
-      | 'memory_pressure';
+      | 'memory_pressure'
+      | 'session_mismatch';
     patches_count: number;
     touched_topics: string[];
     duration_ms: number;
@@ -1498,6 +1606,15 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
   }
 }
 
+/**
+ * Delivery stage, orthogonal to `strategy`. `phase` says *when* a result
+ * reached the model — `fast` is the deterministic result injected on the
+ * initial turn when the model selector had not settled inside the initial
+ * budget, `refined` is the model-selected result. `strategy` separately says
+ * *how* the documents were chosen. Both dimensions are needed: a `fast`
+ * delivery is always `heuristic`, but a `refined` delivery may be `model` or,
+ * when the selector failed, `heuristic`.
+ */
 export type MemoryRecallDeliveryPhase = 'fast' | 'refined';
 export type MemoryRecallDeliveryPoint = 'initial' | 'tool_result' | 'discarded';
 export type MemoryRecallDiscardReason =
@@ -1506,7 +1623,9 @@ export type MemoryRecallDiscardReason =
   | 'reset'
   | 'abort'
   | 'shutdown'
-  | 'no_relevant_results';
+  | 'no_relevant_results'
+  /** Every document the refined result selected was already delivered by the fast phase. */
+  | 'already_delivered';
 
 export class MemoryRecallDeliveryEvent implements BaseTelemetryEvent {
   'event.name': 'qwen-code.memory.recall.delivery';

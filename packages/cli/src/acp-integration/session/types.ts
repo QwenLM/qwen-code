@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, ToolArtifact } from '@qwen-code/qwen-code-core';
+import type {
+  ApprovalModeValue,
+  Config,
+  ToolArtifact,
+  ToolResultBoundaryArtifact,
+} from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import type {
   SessionUpdate,
@@ -13,12 +18,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { MessageRewriteMiddleware } from './rewrite/index.js';
 
-export type ApprovalModeValue =
-  | 'plan'
-  | 'default'
-  | 'auto-edit'
-  | 'auto'
-  | 'yolo';
+export type { ApprovalModeValue };
 
 /**
  * Interface for sending session updates to the ACP client.
@@ -123,6 +123,8 @@ export interface ToolCallResultParams {
   error?: Error;
   /** Structured artifacts produced by the tool result. */
   artifacts?: ToolArtifact[];
+  persistedOutputFiles?: string[];
+  boundaryArtifact?: ToolResultBoundaryArtifact;
   /** Original args (fallback for TodoWriteTool todos extraction) */
   args?: Record<string, unknown>;
   /** Optional subagent metadata */
@@ -138,6 +140,12 @@ export interface TodoItem {
   id: string;
   content: string;
   status: 'pending' | 'in_progress' | 'completed';
+  blockedBy?: string[];
+}
+
+export interface TodoPlanSnapshot {
+  planId?: string;
+  todos: TodoItem[];
 }
 
 /**

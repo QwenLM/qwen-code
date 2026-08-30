@@ -39,3 +39,29 @@ describe('ChatViewer tool routing', () => {
     expect(html).toContain('ReadToolCall');
   });
 });
+
+describe('ChatViewer user transcript projection', () => {
+  it('renders released single-field display provenance instead of model-facing hook context', () => {
+    const taggedContext =
+      '<qwen:user-prompt-submit-context>\nhook-only context\n</qwen:user-prompt-submit-context>';
+    const message: ChatMessageData = {
+      uuid: 'user-1',
+      timestamp: '2026-03-22T16:48:35.000Z',
+      type: 'user',
+      message: {
+        role: 'user',
+        parts: [{ text: 'expanded model prompt' }, { text: taggedContext }],
+      },
+      systemPayload: {
+        displayText: 'raw @file prompt',
+      },
+    };
+
+    const html = renderToStaticMarkup(<ChatViewer messages={[message]} />);
+
+    expect(html).toContain('raw @file prompt');
+    expect(html).not.toContain('expanded model prompt');
+    expect(html).not.toContain('hook-only context');
+    expect(html).not.toContain('qwen:user-prompt-submit-context');
+  });
+});

@@ -13,6 +13,10 @@ import type {
   ToolResultDisplay,
   ToolConfirmationPayload,
   McpToolProgressData,
+  McpAppResultDisplay,
+  McpAppResourceCsp,
+  McpAppResourcePermissions,
+  McpAppToolResult,
   ToolConfirmationOutcome,
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
@@ -23,12 +27,16 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
-import { ToolErrorType } from './tool-error.js';
+import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
-import { truncateToolOutput } from '../utils/truncation.js';
+import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
-import { getMCPServerStatus, MCPServerStatus } from './mcp-status.js';
+import {
+  getAllMCPServerStatuses,
+  getMCPServerStatus,
+  MCPServerStatus,
+} from './mcp-status.js';
 import {
   getInvocationContext,
   INVOCATION_CONTEXT_META_KEY,
@@ -41,6 +49,24 @@ import { isImagePart } from '../services/visionBridge/image-part-utils.js';
 
 const debugLogger = createDebugLogger('MCP_TOOL');
 
+/**
+ * The dead-session responses an HTTP server emits right after a restart: it
+ * comes back with a fresh `mcp-session-id` space and answers our stale id
+ * with a `-32001` whose message phrases the session as not found /
+ * terminated / expired. TWO decision sites must agree on exactly these
+ * variants and both consume this single pattern:
+ *
+ *  - `MCP_CONNECTION_ERROR_PATTERNS` below (drives `shouldAttemptReconnect`)
+ *  - the execution-timeout carve-out in `isExecutionTimeoutFailure`
+ *
+ * A divergence between the two would misroute a covered variant — either
+ * into a hard EXECUTION_TIMEOUT the user has to retry by hand (carve-out
+ * narrower than the matcher) or past the reconnect matcher (matcher narrower
+ * than the carve-out). Keep this the single source of truth.
+ */
+const MCP_DEAD_SESSION_ERROR_PATTERN =
+  /session (not found|terminated|expired)/i;
+
 const MCP_CONNECTION_ERROR_PATTERNS = [
   /ECONNREFUSED/i,
   /ENOTFOUND/i,
@@ -50,13 +76,148 @@ const MCP_CONNECTION_ERROR_PATTERNS = [
   /not connected/i,
   /disconnected/i,
   /transport closed/i,
+  // The server no longer knows our session id (see
+  // `MCP_DEAD_SESSION_ERROR_PATTERN`) — the canonical failure right after an
+  // HTTP server restart. Reconnect (a fresh `initialize`) is the remedy.
+  MCP_DEAD_SESSION_ERROR_PATTERN,
 ];
+// The MCP SDK's generic `RequestTimeout` code. It is emitted for both
+// client-configured timeouts (`timeout` / `resetTimeoutOnProgress`) and
+// server-side timeouts, so both collapse into a single EXECUTION_TIMEOUT
+// classification here.
+const MCP_REQUEST_TIMEOUT_CODE = -32001;
+
+// Structural dead-session signal. Per the MCP spec, an HTTP server that no
+// longer recognizes a request's `mcp-session-id` (the canonical state right
+// after a restart) MUST answer the POST with 404; the SDK surfaces that as
+// a `StreamableHTTPError` whose `code` is the HTTP status. The prose a
+// server wraps the 404 in is NOT spec-pinned — "Unknown session" is just as
+// dead as "Session not found" — so the structural code must trigger
+// recovery on its own, alongside `MCP_DEAD_SESSION_ERROR_PATTERN` (which
+// only covers enumerated phrasings) (issue #9944).
+const MCP_DEAD_SESSION_HTTP_CODE = 404;
+
+function isMcpRequestTimeout(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === MCP_REQUEST_TIMEOUT_CODE
+  );
+}
+
+function isMcpDeadSessionHttpError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === MCP_DEAD_SESSION_HTTP_CODE
+  );
+}
+
+/**
+ * A `-32001` rejection only tells us the request never got a response. That is
+ * a genuine execution timeout while the transport is believed healthy, but
+ * when the server is known to be DISCONNECTED the same code just means the
+ * connection died mid-request — which `handleReconnectOnError` can still
+ * recover from by reconnecting and retrying. Classifying that as
+ * EXECUTION_TIMEOUT would turn a recoverable transport failure into a hard
+ * error the user has to retry by hand.
+ *
+ * Deliberately checks for a *recorded* DISCONNECTED rather than
+ * `getMCPServerStatus(...) !== CONNECTED`: that getter reports DISCONNECTED
+ * for servers it has never seen, so the simpler comparison would misroute
+ * every timeout from a server whose status was never registered. Default to
+ * "timeout" and only divert on positive evidence the transport is dead.
+ */
+function isExecutionTimeoutFailure(
+  error: unknown,
+  serverName: string,
+  signal: AbortSignal,
+): boolean {
+  // A `-32001` that lands while the parent signal is aborted is the SDK's
+  // abort rejection (forwarded by createParentAbortRace) or a timeout that
+  // raced with a cancel. Classifying it as EXECUTION_TIMEOUT would count a
+  // user cancellation against the timeout SLI, so the abort side wins.
+  if (signal.aborted) return false;
+  if (!isMcpRequestTimeout(error)) return false;
+  // `-32001` doubles as the server's dead-session response code when it no
+  // longer recognizes our `mcp-session-id` (typical right after an HTTP
+  // server restart). That is a dead connection `handleReconnectOnError` can
+  // repair, not an execution timeout — without this carve-out the error
+  // would be reported as a timeout whenever the client-side status has not
+  // flipped to DISCONNECTED yet (e.g. servers that keep no GET SSE stream),
+  // and the reconnect path would never run (issue #9944). Consumes the same
+  // `MCP_DEAD_SESSION_ERROR_PATTERN` as `MCP_CONNECTION_ERROR_PATTERNS` so
+  // the reconnect matcher and this carve-out can never drift apart.
+  if (MCP_DEAD_SESSION_ERROR_PATTERN.test(getErrorMessage(error))) {
+    return false;
+  }
+  const statuses = getAllMCPServerStatuses();
+  return !(
+    statuses.has(serverName) &&
+    statuses.get(serverName) === MCPServerStatus.DISCONNECTED
+  );
+}
+
+const PARENT_ABORT_OUTCOME = Symbol('parent_abort_outcome');
+
+type ParentAbortOutcome = {
+  [PARENT_ABORT_OUTCOME]: true;
+  reason: unknown;
+};
+
+function createToolCallAbortError(): Error {
+  return Object.assign(new Error('Tool call aborted'), { name: 'AbortError' });
+}
+
+function isParentAbortOutcome(value: unknown): value is ParentAbortOutcome {
+  return (
+    typeof value === 'object' && value !== null && PARENT_ABORT_OUTCOME in value
+  );
+}
+
+function createParentAbortRace(
+  signal: AbortSignal,
+  forwardAbort?: (reason: unknown) => void,
+): {
+  promise: Promise<ParentAbortOutcome>;
+  dispose: () => void;
+} {
+  let onAbort: (() => void) | undefined;
+  const promise = new Promise<ParentAbortOutcome>((resolve) => {
+    onAbort = () => {
+      const reason = createToolCallAbortError();
+      // Freeze the parent outcome before forwarding to the SDK, whose abort
+      // rejection uses the same -32001 code as a genuine request timeout.
+      // Ordering-safe: resolve() queues its Promise.race reaction as a
+      // microtask before forwardAbort triggers the SDK rejection, so the
+      // parent outcome always wins the race.
+      resolve({ [PARENT_ABORT_OUTCOME]: true, reason });
+      forwardAbort?.(reason);
+    };
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+
+  return {
+    promise,
+    dispose: () => {
+      if (onAbort) {
+        signal.removeEventListener('abort', onAbort);
+      }
+    },
+  };
+}
 
 type ToolParams = Record<string, unknown>;
 
 /**
  * Minimal interface for the raw MCP Client's callTool method.
- * This avoids a direct import of @modelcontextprotocol/sdk in this file,
+ * This avoids a direct import of the MCP SDK in this file,
  * keeping the dependency contained in mcp-client.ts.
  */
 export interface McpDirectClient {
@@ -66,7 +227,6 @@ export interface McpDirectClient {
       arguments?: Record<string, unknown>;
       _meta?: Record<string, unknown>;
     },
-    resultSchema?: unknown,
     options?: {
       onprogress?: (progress: {
         progress: number;
@@ -77,20 +237,30 @@ export interface McpDirectClient {
       signal?: AbortSignal;
     },
   ): Promise<McpCallToolResult>;
+  readResource?(
+    params: { uri: string },
+    options?: { timeout?: number; signal?: AbortSignal },
+  ): Promise<McpReadResourceResult>;
 }
 
 /** The result shape returned by MCP SDK Client.callTool(). */
-interface McpCallToolResult {
-  content?: Array<{
-    type: string;
-    text?: string;
-    data?: string;
+type McpCallToolResult = McpAppToolResult;
+
+interface McpReadResourceResult {
+  contents: Array<{
+    uri: string;
     mimeType?: string;
+    text?: string;
+    blob?: string;
+    _meta?: Record<string, unknown>;
     [key: string]: unknown;
   }>;
-  isError?: boolean;
   [key: string]: unknown;
 }
+
+const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
+const MCP_APP_RESOURCE_MAX_BYTES = 1024 * 1024;
+const MCP_APP_RESOURCE_TIMEOUT_MS = 10_000;
 
 // Discriminated union for MCP Content Blocks to ensure type safety.
 type McpTextBlock = {
@@ -143,6 +313,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ToolResult
 > {
   private static readonly MAX_RECONNECT_RETRIES = 3;
+  private static readonly UNSAFE_REPLAY_ERROR_MESSAGE =
+    'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call could not be verified as safe to replay. Do not retry automatically; verify the outcome before trying again.';
 
   constructor(
     private readonly mcpTool: CallableTool,
@@ -159,6 +331,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly mcpToolIdleTimeoutMs?: number,
     private readonly annotations?: McpToolAnnotations,
     private readonly allowInvocationContext: boolean = false,
+    private readonly appResourceUri?: string,
+    private readonly appResourceUi?: Record<string, unknown>,
     private readonly retryCount: number = 0,
   ) {
     super(params);
@@ -259,8 +433,31 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ): Promise<ToolResult> {
     debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
 
+    if (signal.aborted) {
+      throw error;
+    }
+
     if (!this.shouldAttemptReconnect(error)) {
       throw error;
+    }
+
+    if (!this.cliConfig) {
+      throw error;
+    }
+
+    if (!this.canSafelyReplay()) {
+      // This specific call cannot be auto-replayed — its outcome is ambiguous
+      // and re-running it could apply the side effect twice. The dead
+      // connection itself is still repairable though: re-initialize the
+      // server session and reload the tool registry so the NEXT call does not
+      // inherit the stale session (issue #9944). Pre-fix, tools without
+      // `readOnlyHint`/`idempotentHint` annotations never reached
+      // `attemptReconnect`, so an HTTP server that restarted with a new
+      // `mcp-session-id` stayed unusable until a full session restart.
+      // Best-effort: if the reconnect fails we throw the same error as
+      // before.
+      await this.attemptReconnect();
+      throw new Error(DiscoveredMCPToolInvocation.UNSAFE_REPLAY_ERROR_MESSAGE);
     }
 
     if (this.retryCount < DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES) {
@@ -276,16 +473,23 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           this.displayName,
           newTool.name,
           newTool.permissionAliases,
-          this.trust,
+          newTool.trust,
           this.params,
           this.cliConfig,
           newTool['mcpClient'],
           this.mcpTimeout,
           this.mcpToolIdleTimeoutMs,
-          this.annotations,
+          newTool.annotations,
           newTool['allowInvocationContext'] === true,
+          newTool['appResourceUri'],
+          newTool.appResourceUi,
           this.retryCount + 1,
         );
+        if (!newInvocation.canSafelyReplay()) {
+          throw new Error(
+            DiscoveredMCPToolInvocation.UNSAFE_REPLAY_ERROR_MESSAGE,
+          );
+        }
         return newInvocation.execute(signal, updateOutput);
       }
     } else if (
@@ -299,12 +503,52 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     throw error;
   }
 
+  private canSafelyReplay(): boolean {
+    if (
+      this.trust !== true ||
+      this.cliConfig?.isTrustedFolder() !== true ||
+      !this.annotations
+    ) {
+      return false;
+    }
+
+    if (
+      this.annotations.readOnlyHint === true &&
+      (this.annotations.destructiveHint === true ||
+        this.annotations.idempotentHint === false)
+    ) {
+      return false;
+    }
+
+    return (
+      this.annotations.idempotentHint === true ||
+      this.annotations.readOnlyHint === true
+    );
+  }
+
   private shouldAttemptReconnect(error: unknown): boolean {
     if (isAbortError(error)) {
       return false;
     }
 
+    // An executor-boundary guard authorizes one concrete invocation attempt.
+    // A transport error is ambiguous: the MCP server may have applied the
+    // side effect before its response was lost. Reusing the original allow
+    // decision for an internal reconnect would turn one authorization into
+    // multiple execution attempts, so guarded invocations fail closed.
+    if (this.cliConfig?.getToolInvocationGuard?.()) {
+      return false;
+    }
+
     if (getMCPServerStatus(this.serverName) === MCPServerStatus.DISCONNECTED) {
+      return true;
+    }
+
+    // Spec-pinned structural signal: HTTP 404 on the session POST means the
+    // server no longer knows our `mcp-session-id`, regardless of the prose
+    // it wrapped the 404 in — the patterns below only cover enumerated
+    // phrasings (issue #9944).
+    if (isMcpDeadSessionHttpError(error)) {
       return true;
     }
 
@@ -336,13 +580,22 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    if (signal.aborted) {
+      throw createToolCallAbortError();
+    }
+
     // Create an AbortController for idle timeout
     const idleTimeoutController = new AbortController();
+    const parentAbortController = new AbortController();
+    const parentAbortRace = createParentAbortRace(signal, (reason) => {
+      parentAbortController.abort(reason);
+    });
     let idleTimeoutId: ReturnType<typeof setTimeout> | undefined;
+    let idleTimeoutWon = false;
 
     // Combine the external signal with our idle timeout controller
     const combinedSignal = AbortSignal.any([
-      signal,
+      parentAbortController.signal,
       idleTimeoutController.signal,
     ]);
 
@@ -352,6 +605,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       }
       if (this.mcpToolIdleTimeoutMs && this.mcpToolIdleTimeoutMs > 0) {
         const timer = setTimeout(() => {
+          if (signal.aborted) {
+            return;
+          }
+          idleTimeoutWon = true;
           const error = new Error(
             `MCP tool '${this.serverToolName}' on server '${this.serverName}' ` +
               `did not respond within ${this.mcpToolIdleTimeoutMs}ms idle timeout`,
@@ -371,7 +628,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       const invocationContext = this.allowInvocationContext
         ? getInvocationContext()
         : undefined;
-      const callToolResult = await this.mcpClient!.callTool(
+      const callPromise = this.mcpClient!.callTool(
         {
           name: this.serverToolName,
           arguments: this.params as Record<string, unknown>,
@@ -383,7 +640,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
               }
             : {}),
         },
-        undefined,
         {
           onprogress: (progress) => {
             // Reset idle timeout on progress
@@ -403,6 +659,19 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           signal: combinedSignal,
         },
       );
+      const outcome = await Promise.race([
+        callPromise,
+        parentAbortRace.promise,
+      ]);
+      if (isParentAbortOutcome(outcome)) {
+        throw outcome.reason;
+      }
+      const callToolResult = outcome;
+
+      if (idleTimeoutId) {
+        clearTimeout(idleTimeoutId);
+        idleTimeoutId = undefined;
+      }
 
       // Wrap the raw CallToolResult into the Part[] format that the
       // existing transform/display functions expect.
@@ -420,22 +689,103 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       const transformedParts = transformMcpContentToParts(rawResponseParts);
       const truncated = await this.truncateTextParts(transformedParts);
+      const fallbackText = getDisplayFromPartsWithPersistedOutput(
+        transformedParts,
+        truncated.persistedOutputFiles,
+      );
+      const appDisplay = await this.loadMcpAppDisplay(
+        callToolResult,
+        fallbackText,
+        signal,
+      );
 
       return {
         llmContent: truncated.parts,
-        returnDisplay: getDisplayFromPartsWithPersistedOutput(
-          transformedParts,
-          truncated.persistedOutputFiles,
-        ),
+        returnDisplay: appDisplay ?? fallbackText,
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
+      // `idleTimeoutWon` is our own client-side timer firing, so it is an
+      // execution timeout regardless of what the transport thinks.
+      if (
+        idleTimeoutWon ||
+        isExecutionTimeoutFailure(error, this.serverName, signal)
+      ) {
+        throw new StructuredToolError(
+          getErrorMessage(error),
+          ToolErrorType.EXECUTION_TIMEOUT,
+        );
+      }
       return this.handleReconnectOnError(error, signal, updateOutput);
     } finally {
       // Clear the idle timeout in all cases
       if (idleTimeoutId) {
         clearTimeout(idleTimeoutId);
       }
+      parentAbortRace.dispose();
+    }
+  }
+
+  private async loadMcpAppDisplay(
+    toolResult: McpCallToolResult,
+    fallbackText: string,
+    signal: AbortSignal,
+  ): Promise<McpAppResultDisplay | undefined> {
+    if (!this.appResourceUri || !this.mcpClient?.readResource) return undefined;
+
+    try {
+      const resource = await this.mcpClient.readResource(
+        { uri: this.appResourceUri },
+        {
+          timeout: Math.min(
+            this.mcpTimeout ?? MCP_APP_RESOURCE_TIMEOUT_MS,
+            MCP_APP_RESOURCE_TIMEOUT_MS,
+          ),
+          signal: AbortSignal.any([
+            signal,
+            AbortSignal.timeout(MCP_APP_RESOURCE_TIMEOUT_MS),
+          ]),
+        },
+      );
+      const content = resource.contents.find(
+        (entry) => entry.uri === this.appResourceUri,
+      );
+      if (!content || content.mimeType !== MCP_APP_RESOURCE_MIME_TYPE) {
+        throw new Error(
+          `resource must return ${MCP_APP_RESOURCE_MIME_TYPE} for ${this.appResourceUri}`,
+        );
+      }
+      const html =
+        typeof content.text === 'string'
+          ? content.text
+          : typeof content.blob === 'string'
+            ? Buffer.from(content.blob, 'base64').toString('utf8')
+            : undefined;
+      if (!html) throw new Error('resource did not return HTML content');
+      if (Buffer.byteLength(html, 'utf8') > MCP_APP_RESOURCE_MAX_BYTES) {
+        throw new Error('resource HTML exceeds the 1 MiB host limit');
+      }
+
+      const metadata = getMcpAppResourceMetadata(
+        content._meta,
+        this.appResourceUi,
+      );
+      return {
+        type: 'mcp_app',
+        serverName: this.serverName,
+        resourceUri: this.appResourceUri,
+        html,
+        toolResult,
+        toolArguments: this.params,
+        fallbackText,
+        ...metadata,
+      };
+    } catch (error) {
+      if (signal.aborted) return undefined;
+      debugLogger.warn(
+        `Failed to load MCP App '${this.appResourceUri}' from '${this.serverName}': ${getErrorMessage(error)}`,
+      );
+      return undefined;
     }
   }
 
@@ -446,44 +796,29 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   private async executeWithCallableTool(
     signal: AbortSignal,
   ): Promise<ToolResult> {
+    if (signal.aborted) {
+      throw createToolCallAbortError();
+    }
+
     const functionCalls: FunctionCall[] = [
       {
         name: this.serverToolName,
         args: this.params,
       },
     ];
+    const parentAbortRace = createParentAbortRace(signal);
 
     // Race MCP tool call with abort signal to respect cancellation
     try {
-      const rawResponseParts = await new Promise<Part[]>((resolve, reject) => {
-        if (signal.aborted) {
-          const error = new Error('Tool call aborted');
-          error.name = 'AbortError';
-          reject(error);
-          return;
-        }
-        const onAbort = () => {
-          cleanup();
-          const error = new Error('Tool call aborted');
-          error.name = 'AbortError';
-          reject(error);
-        };
-        const cleanup = () => {
-          signal.removeEventListener('abort', onAbort);
-        };
-        signal.addEventListener('abort', onAbort, { once: true });
-
-        this.mcpTool
-          .callTool(functionCalls)
-          .then((res) => {
-            cleanup();
-            resolve(res);
-          })
-          .catch((err) => {
-            cleanup();
-            reject(err);
-          });
-      });
+      const callPromise = this.mcpTool.callTool(functionCalls);
+      const outcome = await Promise.race([
+        callPromise,
+        parentAbortRace.promise,
+      ]);
+      if (isParentAbortOutcome(outcome)) {
+        throw outcome.reason;
+      }
+      const rawResponseParts = outcome;
 
       if (this.isMCPToolError(rawResponseParts)) {
         return await this.buildMcpToolError(rawResponseParts, functionCalls[0]);
@@ -501,7 +836,15 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
+      if (isExecutionTimeoutFailure(error, this.serverName, signal)) {
+        throw new StructuredToolError(
+          getErrorMessage(error),
+          ToolErrorType.EXECUTION_TIMEOUT,
+        );
+      }
       return this.handleReconnectOnError(error, signal);
+    } finally {
+      parentAbortRace.dispose();
     }
   }
 
@@ -629,6 +972,8 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     readonly annotations?: McpToolAnnotations,
     alwaysLoad = false,
     private readonly allowInvocationContext: boolean = false,
+    readonly appResourceUri?: string,
+    readonly appResourceUi?: Record<string, unknown>,
   ) {
     super(
       nameOverride ??
@@ -664,6 +1009,32 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.annotations,
       this.alwaysLoad,
       this.allowInvocationContext,
+      this.appResourceUri,
+      this.appResourceUi,
+    );
+  }
+
+  withAppResourceUi(
+    appResourceUi: Record<string, unknown> | undefined,
+  ): DiscoveredMCPTool {
+    if (appResourceUi === this.appResourceUi) return this;
+    return new DiscoveredMCPTool(
+      this.mcpTool,
+      this.serverName,
+      this.serverToolName,
+      this.description,
+      this.parameterSchema,
+      this.trust,
+      this.name,
+      this.cliConfig,
+      this.mcpClient,
+      this.mcpTimeout,
+      this.mcpToolIdleTimeoutMs,
+      this.annotations,
+      this.alwaysLoad,
+      this.allowInvocationContext,
+      this.appResourceUri,
+      appResourceUi,
     );
   }
 
@@ -672,17 +1043,25 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
    * keeping every other field (including the shared underlying
    * `CallableTool` / MCP transport) identical.
    *
-   * pool path: a single shared pool entry produces one
-   * `DiscoveredMCPTool` snapshot; each `SessionMcpView` clones with
-   * its own per-session trust before registering into its session's
-   * `ToolRegistry`. Without this clone, mutating `trust` on the shared
-   * instance would cross-contaminate sessions.
-   *
-   * Trust is the only field that legitimately varies per session;
-   * everything else (transport, schema, name) is transport-level.
+   * Kept as the trust-only convenience used by non-pool callers. Pooled
+   * session views use `withSessionConfig` because eager loading can differ
+   * between sessions too.
    */
   withTrust(trust: boolean | undefined): DiscoveredMCPTool {
-    if (trust === this.trust) return this;
+    return this.withSessionConfig(trust, this.alwaysLoad);
+  }
+
+  /**
+   * Return a per-session projection of metadata that does not belong to the
+   * shared MCP transport snapshot. Pool entries can be shared by sessions
+   * whose trust and eager-loading settings differ, so neither field may be
+   * mutated on the canonical tool instance.
+   */
+  withSessionConfig(
+    trust: boolean | undefined,
+    alwaysLoad: boolean,
+  ): DiscoveredMCPTool {
+    if (trust === this.trust && alwaysLoad === this.alwaysLoad) return this;
     return new DiscoveredMCPTool(
       this.mcpTool,
       this.serverName,
@@ -700,8 +1079,10 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.mcpTimeout,
       this.mcpToolIdleTimeoutMs,
       this.annotations,
-      this.alwaysLoad,
+      alwaysLoad,
       this.allowInvocationContext,
+      this.appResourceUri,
+      this.appResourceUi,
     );
   }
 
@@ -723,8 +1104,59 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.mcpToolIdleTimeoutMs,
       this.annotations,
       this.allowInvocationContext,
+      this.appResourceUri,
+      this.appResourceUi,
     );
   }
+}
+
+function getMcpAppResourceMetadata(
+  meta: Record<string, unknown> | undefined,
+  listingUi?: Record<string, unknown>,
+): {
+  csp?: McpAppResourceCsp;
+  permissions?: McpAppResourcePermissions;
+} {
+  const ui = getRecord(meta?.['ui']) ?? listingUi;
+  const rawCsp = getRecord(ui?.['csp']);
+  const rawPermissions = getRecord(ui?.['permissions']);
+  const csp = rawCsp
+    ? {
+        ...readStringArray(rawCsp, 'connectDomains'),
+        ...readStringArray(rawCsp, 'resourceDomains'),
+        ...readStringArray(rawCsp, 'frameDomains'),
+        ...readStringArray(rawCsp, 'baseUriDomains'),
+      }
+    : undefined;
+  const permissions = rawPermissions
+    ? Object.fromEntries(
+        ['camera', 'microphone', 'geolocation', 'clipboardWrite']
+          .filter((key) => getRecord(rawPermissions[key]))
+          .map((key) => [key, {}]),
+      )
+    : undefined;
+  return {
+    ...(csp && Object.keys(csp).length > 0 ? { csp } : {}),
+    ...(permissions && Object.keys(permissions).length > 0
+      ? { permissions: permissions as McpAppResourcePermissions }
+      : {}),
+  };
+}
+
+function getRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readStringArray(
+  value: Record<string, unknown>,
+  key: keyof McpAppResourceCsp,
+): Partial<McpAppResourceCsp> {
+  const entry = value[key];
+  return Array.isArray(entry) && entry.every((item) => typeof item === 'string')
+    ? { [key]: entry }
+    : {};
 }
 
 /**

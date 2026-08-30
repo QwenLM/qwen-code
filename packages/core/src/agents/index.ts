@@ -23,5 +23,6 @@ export {
   getSubagentSessionDir,
   getSubagentsRootDir,
   readAgentMeta,
+  sanitizeFilenameComponent,
 } from './agent-transcript.js';
 export * from './tasks/types.js';

@@ -192,6 +192,8 @@ export default {
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
   'toolDisplayName.RecordArtifact': 'toolDisplayName.RecordArtifact',
+  'toolDisplayName.ReportFindings': 'toolDisplayName.ReportFindings',
+  'toolDisplayName.DisplayImage': 'toolDisplayName.DisplayImage',
   'toolDisplayName.Skill': 'toolDisplayName.Skill',
   'toolDisplayName.EnterPlanMode': 'toolDisplayName.EnterPlanMode',
   'toolDisplayName.ExitPlanMode': 'toolDisplayName.ExitPlanMode',
@@ -214,6 +216,7 @@ export default {
   'toolDisplayName.TeamDelete': 'toolDisplayName.TeamDelete',
   'toolDisplayName.TeamPlanApproval': 'toolDisplayName.TeamPlanApproval',
   'toolDisplayName.SendMessage': 'toolDisplayName.SendMessage',
+  'toolDisplayName.RequestShutdown': 'toolDisplayName.RequestShutdown',
   'toolDisplayName.StructuredOutput': 'toolDisplayName.StructuredOutput',
   'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
   'toolDisplayName.NotebookEdit': 'toolDisplayName.NotebookEdit',
@@ -764,6 +767,7 @@ export default {
   'Tool Output Truncation Lines': 'Tool Output Truncation Lines',
   'Folder Trust': 'Folder Trust',
   'Tool Schema Compliance': 'Tool Schema Compliance',
+  Unset: 'Unset',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
   'Auto (follow user input)': 'Auto (follow user input)',
@@ -1469,6 +1473,14 @@ export default {
   'Already generating summary, wait for previous request to complete':
     'Already generating summary, wait for previous request to complete',
   'No conversation found to summarize.': 'No conversation found to summarize.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'Summary path already exists and is not a generated summary: {{path}}',
+  'Summary path must be within the project root.':
+    'Summary path must be within the project root.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Summary path resolves to an existing directory: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Summary path ends with a separator but is an existing file: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Failed to generate project context summary: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1491,8 +1503,8 @@ export default {
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
-    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1508,6 +1520,8 @@ export default {
     'Set the image-capable model used to transcribe images for a text-only main model',
   'Set the model used to generate images':
     'Set the model used to generate images',
+  'Set the model used for chat compression (auto-compaction)':
+    'Set the model used for chat compression (auto-compaction)',
   'Persist the model selection to the project settings (workspace scope)':
     'Persist the model selection to the project settings (workspace scope)',
   'Persist the model selection to the user settings (global scope)':
@@ -1515,10 +1529,21 @@ export default {
   'Select Fast Model': 'Select Fast Model',
   'Select Vision Model': 'Select Vision Model',
   'Select Image Model': 'Select Image Model',
+  'Select Compaction Model': 'Select Compaction Model',
   'Select Voice Model': 'Select Voice Model',
   'Vision Model': 'Vision Model',
   'Image Model': 'Image Model',
+  'Compaction Model': 'Compaction Model',
+  'Compaction model override cleared': 'Compaction model override cleared',
+  'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.':
+    'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
+  'not set (falls back to the main model)':
+    'not set (falls back to the main model)',
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.':
+    'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.',
   'Voice Model': 'Voice Model',
+  'Selected compaction model is unavailable.':
+    'Selected compaction model is unavailable.',
   'Selected voice model is unavailable.':
     'Selected voice model is unavailable.',
   'Selected image model is unavailable.':
@@ -1596,6 +1621,12 @@ export default {
     'Chat history compression did not reduce size. This may indicate issues with the compression prompt.',
   'Could not compress chat history due to a token counting error.':
     'Could not compress chat history due to a token counting error.',
+  'Could not compress chat history because the compression summary was empty.':
+    'Could not compress chat history because the compression summary was empty.',
+  'Could not compress chat history because the compression summary was truncated.':
+    'Could not compress chat history because the compression summary was truncated.',
+  'Could not compress chat history due to an API error.':
+    'Could not compress chat history due to an API error.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1870,6 +1901,7 @@ export default {
   'Ctrl+Q to queue · ↑ to edit queued messages':
     'Ctrl+Q to queue · ↑ to edit queued messages',
   'Enter to steer · Ctrl+Q to queue': 'Enter to steer · Ctrl+Q to queue',
+  '{{count}} queued': '{{count}} queued',
   'Queue message for the next turn': 'Queue message for the next turn',
 
   // ============================================================================
@@ -2025,8 +2057,18 @@ export default {
     'rejected — edit config to re-approve',
   'Background agent needs approval': 'Background agent needs approval',
   'Approve or deny the request above': 'Approve or deny the request above',
+  'from nested agent': 'from nested agent',
   Running: 'Running',
+  Pausing: 'Pausing',
   Paused: 'Paused',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Pause/resume was rejected; the workflow state changed. Try again.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.',
   Completed: 'Completed',
   Failed: 'Failed',
   Stopped: 'Stopped',
@@ -2460,6 +2502,7 @@ export default {
     'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.',
   'Set a goal — keep working until the condition is met':
     'Set a goal — keep working until the condition is met',
+  'Set or control a session goal': 'Set or control a session goal',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -2491,6 +2534,17 @@ export default {
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':
     'Ask a quick side question without affecting the main conversation',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Get a second opinion on the current conversation from a reviewer model',
+  'Consulting advisor...': 'Consulting advisor...',
+  'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
+  'No conversation context available for /advisor':
+    'No conversation context available for /advisor',
+  'Focus too long (max {{max}} chars)': 'Focus too long (max {{max}} chars)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Another operation is in progress, wait for it to complete before running /advisor',
+  'No response received.': 'No response received.',
+  'No model configured.': 'No model configured.',
   'Manage Arena sessions': 'Manage Arena sessions',
   'Start an Arena session with multiple models competing on the same task':
     'Start an Arena session with multiple models competing on the same task',
@@ -2794,4 +2848,7 @@ export default {
     'Auto-skill curator changes are disabled in safe mode.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
+  'Kept model as {{model}}': 'Kept model as {{model}}',
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    'Review messages held from other Qwen Code sessions (accept | deny)',
 };

@@ -15,11 +15,14 @@ import type {
   ApprovalMode,
   DaemonBridgeTelemetryMetrics,
 } from '@qwen-code/qwen-code-core';
+import { MAX_SUB_SESSION_PROMPT_CHARS } from '@qwen-code/qwen-code-core/subSessionConstants';
 import type { ChannelFactory } from './channel.js';
 import type { PermissionPolicy } from './permission.js';
 import type { PermissionAuditPublisher } from './permissionMediator.js';
 import type { ServePreflightCell, ServeWorkspaceEnvStatus } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
+import type { JournalGrowthSessionLimit } from './replayWindowLimits.js';
+import type { PromptLedgerRecord } from './prompt-ledger.js';
 
 /**
  * Sink for serve-level diagnostic lines (set by the cli daemon logger).
@@ -32,6 +35,26 @@ export type DiagnosticLineSink = (
   line: string,
   level?: 'info' | 'warn' | 'error',
 ) => void;
+
+/**
+ * Append-only sink for the per-session prompt terminal ledger. The bridge
+ * owns only the writes (best-effort, synchronous so the daemon-shutdown
+ * flush lands before process exit); path resolution, reads, and cold-load
+ * reconciliation live in the serve layer, which knows the session storage
+ * layout. Keeping this a bare callable seam means the bridge needs no
+ * filesystem layout knowledge and no core dependency for ledger paths.
+ */
+export interface PromptLedgerSink {
+  appendSync(sessionId: string, record: PromptLedgerRecord): void;
+  /**
+   * Uuid of the transcript's last record right now, or `undefined` when
+   * there is no transcript evidence (fresh session, unreadable file). The
+   * bridge stamps it into the `in_flight` record at admission as the
+   * dispatch marker; best-effort — a failure or absence only degrades
+   * cold-load reconciliation back to its marker-less evidence chain.
+   */
+  transcriptTailUuid?(sessionId: string): string | undefined;
+}
 
 export interface BridgeFreshSessionAdmissionContext {
   readonly operation: 'spawn' | 'load' | 'resume' | 'branch';
@@ -65,6 +88,42 @@ export type BridgeSessionLifecycleEvent =
 export type BridgeSessionLifecycle = (
   event: BridgeSessionLifecycleEvent,
 ) => void;
+
+/**
+ * Trusted child-to-daemon request made immediately before a tool executor.
+ * `sessionId` and `promptId` are revalidated by BridgeClient against its
+ * runtime-owned active entry before this reaches the host handler.
+ */
+export interface ExternalToolGuardPrepareRequest {
+  readonly sessionId: string;
+  /**
+   * Runtime-owned active-prompt binding. Absent for context-less shell
+   * checks: subagent reasoning loops, cron turns, background notifications,
+   * and resumed background agents run without an invocation context by
+   * design. A host policy that requires a live prompt must fail closed when
+   * the binding is missing.
+   */
+  readonly promptId?: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+  /** Daemon-owned current session working directory. */
+  readonly effectiveCwd?: string;
+  /**
+   * Directory the child will actually run the tool in, when it differs from
+   * the session's own. Untrusted: the host validates it against state it
+   * owns before using it as a containment basis.
+   */
+  readonly invocationCwd?: string;
+}
+
+export type ExternalToolGuardPrepareResult =
+  | { readonly allowed: true }
+  | { readonly allowed: false; readonly reason?: string };
+
+export type ExternalToolGuardHandler = (
+  request: ExternalToolGuardPrepareRequest,
+) => Promise<ExternalToolGuardPrepareResult>;
 
 /**
  * Optional injection seam for daemon-host-specific status cells —
@@ -156,6 +215,12 @@ export interface BridgeTelemetry {
  */
 export interface BridgeOptions {
   /**
+   * Runtime-owned directory for persistent session attachment bytes. Daemon
+   * callers provide a workspace-scoped directory under the Qwen runtime temp
+   * root. Direct embedded callers may omit it for process-local storage.
+   */
+  sessionAttachmentsRoot?: string;
+  /**
    * `single` shares one session per workspace across HTTP
    * clients (live-collaboration default); `thread` gives each `spawnOrAttach`
    * call its own session for strict isolation.
@@ -173,6 +238,12 @@ export interface BridgeOptions {
   channelFactory?: ChannelFactory;
   /** How long to wait for the child's `initialize` reply before giving up. */
   initializeTimeoutMs?: number;
+  /**
+   * How long to wait for `session/load` and `session/resume`. Defaults to
+   * 60 seconds; an explicitly configured `initializeTimeoutMs` can raise it,
+   * but never lower it.
+   */
+  sessionRestoreTimeoutMs?: number;
   /**
    * Cap on concurrent live sessions. `spawnOrAttach` calls that would
    * cross this throw `SessionLimitExceededError`; attaches to an
@@ -219,27 +290,72 @@ export interface BridgeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
-   * Per-session cap on the number of raw events retained in the in-flight
-   * live journal (the current unfinished turn). When exceeded, the oldest
-   * journal entries are dropped. Defaults to 10 000. Must be a positive
-   * safe integer.
+   * Per-session cap on replay entries retained in the in-flight live journal
+   * (the current unfinished turn). Consecutive compatible text/thought chunks
+   * share bounded entries. When exceeded, the oldest journal entries are
+   * dropped. Defaults to 10 000. Must be a positive safe integer.
    */
   maxJournalEvents?: number;
   /**
-   * Per-session byte cap on the in-flight live journal. When exceeded, the
-   * oldest journal entries are dropped (at least one entry is always kept).
-   * Defaults to 8 MiB. Must be a positive safe integer.
+   * Per-session source-event byte cap on the in-flight live journal (the
+   * current unfinished turn) — accounted from serialized source events even
+   * when compatible chunks share a replay entry. When exceeded, the oldest
+   * journal entries are dropped whole (at least one entry is always kept),
+   * so the retained tail can be much smaller than the cap. Defaults to
+   * 8 MiB. Must be a positive safe integer.
    */
   maxJournalBytes?: number;
   /**
-   * Per-`requestPermission` wall clock. After this many ms with
-   * no client vote, the agent's permission promise resolves as
-   * cancelled — the per-session FIFO can drain instead of poisoning
-   * forever on a missing SSE subscriber. Defaults to 5 minutes.
-   * `0` / `Infinity` / non-finite disable the timeout (matches
-   * legacy behavior, NOT recommended).
+   * Pool, in bytes, that per-session live-journal caps may grow into when
+   * an in-flight turn outgrows `maxJournalEvents` / `maxJournalBytes`
+   * (adaptive growth). The bridge doubles a breaching session's caps —
+   * never past a per-session hard cap of 256 MiB — while the growth
+   * granted across every live session sharing the pool stays within it.
+   * The pool is a DAEMON-WIDE ceiling: `runQwenServe` derives one from the
+   * memory budget and hands the same value plus a shared session-limits
+   * provider (see `journalGrowthSessionLimits`) to every bridge it
+   * constructs, so concurrent growth across workspaces is accounted
+   * against one aggregate, not one pool per bridge. `undefined` (the
+   * default) disables growth: fixed-cap eviction, exactly the pre-growth
+   * behavior. `runQwenServe` skips the pool when the operator pinned the
+   * journal flags or the budget resolution leaves no usable headroom. Must
+   * be a positive safe integer when provided.
+   */
+  journalGrowthPoolBytes?: number;
+  /**
+   * Current journal byte caps of EVERY live session sharing this bridge's
+   * growth pool, including this bridge's own, each with the baseline cap
+   * that session started at (bridges sharing a pool may run different
+   * baselines). `runQwenServe` wires an aggregator over all of its
+   * bridges so the daemon-wide pool is accounted once; a standalone
+   * bridge leaves it unset and the advisor accounts only this bridge's
+   * sessions. Ignored without `journalGrowthPoolBytes`.
+   */
+  journalGrowthSessionLimits?: () => readonly JournalGrowthSessionLimit[];
+  /**
+   * Registers this bridge's own live-session journal-cap enumerator with
+   * the shared pool (called once at construction when growth is enabled)
+   * and receives the unregister hook, invoked on bridge shutdown. Wired by
+   * `runQwenServe` alongside `journalGrowthSessionLimits`; ignored without
+   * `journalGrowthPoolBytes`.
+   */
+  registerJournalGrowthSessionLimits?: (
+    provider: () => readonly JournalGrowthSessionLimit[],
+  ) => () => void;
+  /**
+   * Per-`requestPermission` wall clock. After this many ms with no client
+   * vote, the agent's permission promise resolves as cancelled. Defaults to
+   * disabled so human permissions and questions wait for an explicit decision
+   * or session lifecycle cancellation.
+   * `0` / `Infinity` / non-finite disable the timeout.
    */
   permissionResponseTimeoutMs?: number;
+  /**
+   * When true, load/resume re-hangs a trailing unanswered ask_user_question
+   * via a tracked restore prompt. Default false. Must match the ACP child
+   * `--restore-ask-user-question` extraArg.
+   */
+  restoreAskUserQuestion?: boolean;
   /**
    * Enables direct daemon shell execution through session shell APIs.
    * Defaults to false. Callers should turn this on only after the daemon has
@@ -303,6 +419,14 @@ export interface BridgeOptions {
    */
   childEnvOverrides?: Readonly<Record<string, string | undefined>>;
   /**
+   * Optional managed-ACP tool guard. When present, the private ACP child may
+   * request one pre-execution decision through the authenticated channel.
+   * BridgeClient validates session ownership and the active prompt before
+   * invoking this handler. Omitted callers retain the existing behavior and
+   * the child-to-parent method is unavailable.
+   */
+  externalToolGuard?: ExternalToolGuardHandler;
+  /**
    * -- optional callback for persisting `tools.
    * approvalMode` to the workspace settings file. Invoked by
    * `setSessionApprovalMode` ONLY when the route caller passes
@@ -342,21 +466,36 @@ export interface BridgeOptions {
   statusProvider?: DaemonStatusProvider;
   /** Optional daemon telemetry seam. Omitted callers get no-op spans/logs. */
   telemetry?: BridgeTelemetry;
+  /**
+   * Optional prompt terminal ledger sink. When provided, the bridge appends
+   * an `in_flight` record when a prompt is admitted and a terminal record at
+   * the single `publishPromptTerminal` exit (including the close/kill/
+   * channel-crash/daemon-shutdown flushes), so a restarted daemon can
+   * reconcile dangling prompts on cold session load. Writes are best-effort:
+   * failures are logged to stderr and never block prompt execution or
+   * teardown. Omitted callers keep the pre-existing behavior (no
+   * persistence, cold loads answer "unknown" for pre-restart prompts).
+   */
+  promptLedger?: PromptLedgerSink;
 
   /**
-   * Optional fs injection seam. When provided, `BridgeClient.readTextFile` and
-   * `BridgeClient.writeTextFile` delegate every ACP fs call to this
-   * implementation instead of using BridgeClient's inline
-   * `fs.realpath` / `fs.writeFile` / `fs.readFile` proxy.
+   * Whether ACP text reads are delegated to the client filesystem service.
+   * Defaults to true for generic ACP, IDE, remote, and virtual-filesystem
+   * compatibility. Same-host runtimes may set false so the child uses its
+   * regular CLI filesystem service for every `FileSystemService.readTextFile`
+   * consumer. Final ACP text writes remain delegated independently.
+   */
+  delegateReadTextFileToClient?: boolean;
+
+  /**
+   * Optional fs injection seam. When provided, the enabled
+   * `BridgeClient.readTextFile` / `BridgeClient.writeTextFile` callbacks
+   * delegate ACP fs calls to this implementation instead of using
+   * BridgeClient's inline `fs.realpath` / `fs.writeFile` / `fs.readFile`
+   * proxy.
    *
-   * The immediate F1 follow-up will land a serve-side adapter that
-   * wraps its `WorkspaceFileSystem` and a `runQwenServe` wiring
-   * patch so production `qwen serve` writes pick up its TOCTOU +
-   * symlink-substitution + trust-gate + `.gitignore` + audit
-   * machinery — closing the follow-up thread about
-   * `BridgeClient`'s inline fs proxy bypassing `WorkspaceFileSystem`
-   * (originally raised in code review). Until that lands, BridgeClient's inline
-   * proxy continues to handle writes (current behavior preserved).
+   * Production `qwen serve` injects a `WorkspaceFileSystem` adapter for final
+   * text writes and for defensive handling of unexpected delegated reads.
    *
    * When omitted (tests, Mode A in-process consumers, channels /
    * IDE companion using the bridge directly), BridgeClient's inline
@@ -464,6 +603,9 @@ export interface BridgeOptions {
    * reports itself unavailable (daemon-only).
    */
   onCreateSubSession?: CreateSubSessionHandler;
+  /** Handles a trusted `cron_create` request to bind a durable task to the
+   * caller's currently executing daemon session. */
+  onCreateCurrentSessionScheduledTask?: CurrentSessionScheduledTaskCreateHandler;
   /** Handles one child-initiated Channel delivery attempt. The bridge
    * authenticates the session and publishes the sanitized result event. */
   onChannelDelivery?: ChannelDeliveryHandler;
@@ -488,9 +630,8 @@ export type ClientMcpMessageSender = (
   | undefined;
 
 /** Ceiling on a sub-session prompt arriving over `extMethod`. The child is a
- * separate process, so this is a trust boundary — mirrors the scheduled-task
- * REST route's `MAX_PROMPT_LENGTH` and the core tool's own client-side check. */
-export const MAX_SUB_SESSION_PROMPT_CHARS = 100_000;
+ * separate process, so this trust boundary keeps its own enforcement. */
+export { MAX_SUB_SESSION_PROMPT_CHARS };
 
 /** Ceiling on the sub-session display name. It is a label — the launcher
  * truncates it to 60 chars for display anyway. */
@@ -511,6 +652,10 @@ export interface CreateSubSessionInfo {
   model?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
+  /** Optional immutable creator attribution for the fresh session. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
   /**
    * The calling session's id. REQUIRED, and authenticated against the
    * connection's owned sessions before it reaches the host — it keys the
@@ -537,6 +682,72 @@ export interface CreateSubSessionResult {
 export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
+
+export interface CurrentSessionScheduledTaskCreateInfo {
+  callerSessionId: string;
+  promptId: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  assertCallerPromptActive: () => void;
+}
+
+export interface CurrentSessionScheduledTaskCreateResult {
+  id: string;
+  cron: string;
+}
+
+export type CurrentSessionScheduledTaskCreateHandler = (
+  info: CurrentSessionScheduledTaskCreateInfo,
+) => Promise<CurrentSessionScheduledTaskCreateResult>;
+
+export const MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS = 32_000;
+
+export interface LiveScreenContextCaptureInfo {
+  callerSessionId: string;
+}
+
+export interface LiveScreenContextCaptureResult {
+  appName: string;
+  windowTitle?: string;
+  accessibilityText: string;
+  screenshotPath: string;
+}
+
+export type LiveScreenContextCaptureHandler = (
+  info: LiveScreenContextCaptureInfo,
+) => Promise<LiveScreenContextCaptureResult>;
+
+export const LIVE_TASK_TOOL_NAMES = [
+  'list_threads',
+  'read_thread',
+  'wait_threads',
+  'send_message_to_thread',
+  'create_thread',
+] as const;
+
+export type LiveTaskToolName = (typeof LIVE_TASK_TOOL_NAMES)[number];
+
+export interface LiveTaskToolRequestInfo {
+  callerSessionId: string;
+  name: LiveTaskToolName;
+  arguments: Record<string, unknown>;
+}
+
+export type LiveTaskToolRequestHandler = (
+  info: LiveTaskToolRequestInfo,
+) => Promise<Record<string, unknown>>;
+
+export const MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS = 32_000;
+
+export interface LiveSpeakToUserInfo {
+  callerSessionId: string;
+  message: string;
+}
+
+export type LiveSpeakToUserHandler = (
+  info: LiveSpeakToUserInfo,
+) => Promise<void>;
 
 // Canonical set — cli channel-delivery-ipc.ts and bridgeClient.ts import this;
 // sdk-typescript events.ts carries an independent copy with a cross-check test.

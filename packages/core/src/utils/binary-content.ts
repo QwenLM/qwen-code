@@ -217,6 +217,9 @@ export function sniffFileKind(
       extensionSource: 'magic',
     };
   }
+  // The review evidence gate keeps a stricter copy of these four image
+  // signatures (sniffImageFormat in packages/cli/src/commands/review/lib/
+  // assets.ts); admitting or correcting a format means editing both sites.
   if (
     bytes.length >= 8 &&
     bytes[0] === 0x89 &&

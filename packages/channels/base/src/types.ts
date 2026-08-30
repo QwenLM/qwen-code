@@ -6,7 +6,7 @@ import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
-export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
+export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
 export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
 
@@ -59,7 +59,10 @@ export interface ChannelConfig {
   clientSecret?: string;
   senderPolicy: SenderPolicy;
   allowedUsers: string[];
+  /** Channel routing scope. `thread` is retained for existing configurations only. */
   sessionScope: SessionScope;
+  /** Retain an owner-scoped catalog of named sessions in daemon-managed mode. */
+  multiSession?: boolean;
   cwd: string;
   approvalMode?: string;
   instructions?: string;
@@ -106,6 +109,8 @@ export interface Envelope {
   chatId: string;
   chatName?: string;
   text: string;
+  /** User-authored text to display when `text` contains model-only context. */
+  displayText?: string;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
   messageId?: string;
@@ -114,6 +119,19 @@ export interface Envelope {
   isReplyToBot: boolean;
   /** Text of the message being replied to (quoted/referenced message). */
   referencedText?: string;
+  /**
+   * Stable identifiers (staffId preferred, platform ID fallback) of non-bot
+   * members mentioned alongside the bot in a group message, deduplicated and
+   * excluding the bot itself. Kept separate from `text` (like `metadata`) so
+   * slash-command parsing sees the message body alone; ChannelBase renders it
+   * as a `[Mentioned …]` wrapper AFTER prompt sanitization so the delivered
+   * format stays uniform regardless of the identifier list length.
+   * Rendered only when sender attribution is rendered (group/single-scope,
+   * not `alreadyPrefixed`, not a recognized slash command) — self-prefixing
+   * adapters must render it themselves. Group history backfill records the
+   * message body only; mention IDs are intentionally not persisted.
+   */
+  mentionedMemberIds?: string[];
   /** Base64-encoded image data (e.g. from WeChat CDN download). */
   imageBase64?: string;
   /** MIME type for the image (e.g. "image/jpeg", "image/png"). */
@@ -384,20 +402,97 @@ export type ChannelConfigFieldKind =
   | 'secret'
   | 'boolean'
   | 'number'
-  | 'enum';
+  | 'enum'
+  | 'string-list'
+  | 'record'
+  | 'object';
 
-export interface ChannelConfigFieldDescriptor {
+interface ChannelConfigFieldDescriptorBase {
   key: string;
   label: string;
-  kind: ChannelConfigFieldKind;
-  required?: boolean;
-  envResolvable?: boolean;
   options?: ReadonlyArray<{ value: string; label: string }>;
+  default?: string;
   description?: string;
 }
 
+export interface ChannelConfigValueFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'string' | 'secret';
+  required?: boolean;
+  envResolvable?: boolean;
+  properties?: never;
+}
+
+export interface ChannelConfigPlainValueFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'boolean' | 'string-list' | 'record';
+  required?: boolean;
+  envResolvable?: never;
+  properties?: never;
+}
+
+export interface ChannelConfigEnumFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'enum';
+  required?: boolean;
+  envResolvable?: never;
+  options: ReadonlyArray<{ value: string; label: string }>;
+  properties?: never;
+}
+
+export interface ChannelConfigNumberFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'number';
+  required?: boolean;
+  envResolvable?: never;
+  exclusiveMinimum?: number;
+  properties?: never;
+}
+
+export interface ChannelConfigObjectFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'object';
+  required?: false;
+  envResolvable?: never;
+  properties: readonly ChannelConfigNestedFieldDescriptor[];
+}
+
+export type ChannelConfigNestedFieldDescriptor =
+  | (Omit<ChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: Exclude<
+        ChannelConfigFieldKind,
+        'secret' | 'enum' | 'number' | 'object'
+      >;
+      envResolvable?: never;
+    })
+  | (Omit<ChannelConfigEnumFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: 'enum';
+      envResolvable?: never;
+    })
+  | (Omit<ChannelConfigNumberFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: 'number';
+      envResolvable?: never;
+    })
+  | ChannelConfigObjectFieldDescriptor;
+
+export type ChannelConfigFieldDescriptor =
+  | ChannelConfigValueFieldDescriptor
+  | ChannelConfigPlainValueFieldDescriptor
+  | ChannelConfigEnumFieldDescriptor
+  | ChannelConfigNumberFieldDescriptor
+  | ChannelConfigObjectFieldDescriptor;
+
 export interface ChannelManagementDescriptor {
   fields: readonly ChannelConfigFieldDescriptor[];
+
+  /**
+   * Cross-field validation applied to the resolved config during managed
+   * upserts, after secret updates. Return an error message to reject the
+   * update, or undefined to accept it.
+   */
+  validateConfig?: (
+    config: Readonly<Record<string, unknown>>,
+  ) => string | undefined;
 }
 
 /**
@@ -424,7 +519,10 @@ export interface ChannelPlugin {
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;
 
-  /** Default session scope for this channel type (applied when config omits sessionScope). */
+  /**
+   * Default Channel routing scope (applied when config omits sessionScope).
+   * `thread` is retained for existing configurations only.
+   */
   defaultSessionScope?: SessionScope;
 
   /** Create a channel adapter instance. */

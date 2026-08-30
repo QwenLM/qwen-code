@@ -18,9 +18,10 @@ import type {
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
-} from '@qwen-code/webui/daemon-react-sdk';
-import { useMcp, useSettings } from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import { useMcp, useSettings } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { extractErrorDetail } from '../../utils/errorDetail';
 import styles from './McpManagerPage.module.css';
 import type { SerializedMcpStatusMessage } from '../messages/McpStatusMessage';
@@ -378,6 +379,7 @@ export function McpManagerPage({
   embedded,
 }: McpManagerPageProps) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const mcp = useMcp({ autoLoad: false });
   const settings = useSettings({ autoLoad: false });
   const [status, setStatus] = useState<McpStatus>(message.status);
@@ -1435,6 +1437,7 @@ export function McpManagerPage({
                     href={notice.authUrl}
                     target="_blank"
                     rel="noreferrer"
+                    onClick={(event) => openExternalLink(event, notice.authUrl)}
                   >
                     {t('mcp.oauth.open')}
                   </a>

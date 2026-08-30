@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import stripAnsi from 'strip-ansi';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { getPlainTextLength, RenderInline } from './InlineMarkdownRenderer.js';
 import { HYPERLINK_ENV_KEYS } from './osc8.js';
@@ -246,6 +247,45 @@ math then literal: $x^2\$$`;
       // OSC 8 target is the URL without the trailing period.
       expect(out).toContain(`\x1b]8;;${url}\x07`);
       expect(out).not.toContain(`\x1b]8;;${url}.\x07`);
+    });
+
+    it('stops the bare-URL hyperlink at glued-on full-width CJK punctuation', () => {
+      enableHyperlinks();
+      const url = 'https://github.com/QwenLM/qwen-code/pull/8742';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`PR：${url}（2 commits，等 CI）`} />,
+      );
+
+      const out = lastFrame() ?? '';
+      // OSC 8 target is exactly the URL — the （2 run is not swallowed into
+      // the link (https://github.com/QwenLM/qwen-code/issues/8750).
+      expect(out).toContain(`\x1b]8;;${url}\x07`);
+      expect(out).not.toContain(`\x1b]8;;${url}（`);
+      // The glued-on punctuation renders as plain text after the link.
+      expect(out.replace(/\s+/g, ' ')).toContain('（2 commits，等 CI）');
+    });
+
+    it('does not treat underscores around a later URL as emphasis', () => {
+      enableHyperlinks();
+      const firstUrl = 'https://a.com/x';
+      const secondUrl = 'https://b.com/y';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`见 ${firstUrl}（说明_1）和 ${secondUrl}_。`} />,
+      );
+
+      const out = lastFrame() ?? '';
+      expect(out).toContain(`\x1b]8;;${firstUrl}\x07`);
+      expect(out).toContain(`\x1b]8;;${secondUrl}\x07`);
+      expect(out.replace(/\s+/g, ' ')).toContain('（说明_1）和');
+      expect(stripAnsi(out)).toContain(`${secondUrl}_`);
+    });
+
+    it('preserves dunder identifiers as visible text', () => {
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text="Python 的 __init__ 方法" />,
+      );
+
+      expect(stripAnsi(lastFrame() ?? '')).toContain('__init__');
     });
 
     it('leaves bare URLs unwrapped when unsupported', () => {

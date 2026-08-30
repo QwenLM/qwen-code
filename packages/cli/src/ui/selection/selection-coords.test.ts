@@ -9,7 +9,6 @@ import {
   terminalToGrid,
   pointInViewport,
   clampToViewport,
-  pointInAnyViewport,
 } from './selection-coords.js';
 
 describe('terminalToGrid', () => {
@@ -50,43 +49,5 @@ describe('clampToViewport', () => {
 
   it('leaves an interior point unchanged', () => {
     expect(clampToViewport({ x: 5, y: 4 }, rect)).toEqual({ x: 5, y: 4 });
-  });
-});
-
-describe('pointInAnyViewport', () => {
-  const rectA = { x: 0, y: 0, width: 10, height: 5 }; // rows 0-4
-  const rectB = { x: 0, y: 10, width: 10, height: 5 }; // rows 10-14
-
-  it('returns the first rect when the point is only inside it', () => {
-    expect(pointInAnyViewport({ x: 3, y: 2 }, [rectA, rectB])).toBe(rectA);
-  });
-
-  it('returns the second rect when the point is only inside it', () => {
-    expect(pointInAnyViewport({ x: 3, y: 12 }, [rectA, rectB])).toBe(rectB);
-  });
-
-  it('returns null when the point is inside neither rect', () => {
-    expect(pointInAnyViewport({ x: 3, y: 7 }, [rectA, rectB])).toBeNull();
-  });
-
-  it('returns the first matching rect deterministically when rects overlap', () => {
-    const overlapping = { x: 0, y: 0, width: 10, height: 20 };
-    expect(pointInAnyViewport({ x: 3, y: 2 }, [rectA, overlapping])).toBe(
-      rectA,
-    );
-    expect(pointInAnyViewport({ x: 3, y: 2 }, [overlapping, rectA])).toBe(
-      overlapping,
-    );
-  });
-
-  it('returns null for an empty rect list', () => {
-    expect(pointInAnyViewport({ x: 3, y: 2 }, [])).toBeNull();
-  });
-
-  it('skips null/undefined entries', () => {
-    expect(pointInAnyViewport({ x: 3, y: 12 }, [null, undefined, rectB])).toBe(
-      rectB,
-    );
-    expect(pointInAnyViewport({ x: 3, y: 12 }, [null, undefined])).toBeNull();
   });
 });

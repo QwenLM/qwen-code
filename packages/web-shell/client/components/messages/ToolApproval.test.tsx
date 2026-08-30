@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider, type WebShellLanguage } from '../../i18n';
-import type { PermissionRequest } from '../../adapters/types';
+import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { ToolApproval } from './ToolApproval';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -38,6 +38,18 @@ const execRequest: PermissionRequest = {
   },
 };
 
+const planRequest: PermissionRequest = {
+  id: 'req-plan',
+  toolKind: 'switch_mode',
+  toolName: 'exit_plan_mode',
+  title: 'Exit Plan Mode',
+  content: [{ type: 'text', text: 'Implement the approved workflow.' }],
+  options: [
+    { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
+    { id: 'reject', label: 'Keep planning', kind: 'reject_once' },
+  ],
+};
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let onConfirm: ReturnType<typeof vi.fn>;
@@ -56,6 +68,7 @@ afterEach(() => {
 function rerender(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
+  planTodos?: readonly TodoItem[],
   language: WebShellLanguage = 'en',
 ): void {
   act(() =>
@@ -65,6 +78,7 @@ function rerender(
           request={req}
           onConfirm={onConfirm}
           keyboardActive={keyboardActive}
+          planTodos={planTodos}
         />
       </I18nProvider>,
     ),
@@ -74,12 +88,13 @@ function rerender(
 function render(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
+  planTodos?: readonly TodoItem[],
   language: WebShellLanguage = 'en',
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive, req, language);
+  rerender(keyboardActive, req, planTodos, language);
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -103,6 +118,83 @@ function pressKey(target: Element, key: string): void {
 }
 
 describe('ToolApproval accessibility', () => {
+  it('shows the active Todo workflow before exiting Plan Mode', () => {
+    render(undefined, planRequest, [
+      { id: 'prepare', content: 'Prepare', status: 'completed' },
+      {
+        id: 'ship',
+        content: 'Ship',
+        status: 'pending',
+        blockedBy: ['prepare'],
+      },
+    ]);
+
+    expect(container!.querySelector('[data-plan-workflow]')).not.toBeNull();
+    expect(container!.textContent).toContain('Prepare');
+    expect(container!.textContent).toContain('Ship');
+    expect(container!.textContent).toContain(
+      'Implement the approved workflow.',
+    );
+  });
+
+  it('keeps the text-only Plan Mode approval when there are no Todos', () => {
+    render(undefined, planRequest);
+
+    expect(container!.querySelector('[data-plan-workflow]')).toBeNull();
+    expect(container!.textContent).toContain(
+      'Implement the approved workflow.',
+    );
+  });
+
+  it('shows a dependency-free Plan Mode workflow as a list', () => {
+    render(undefined, planRequest, [
+      { id: 'review', content: 'Review the change', status: 'pending' },
+    ]);
+
+    expect(container!.querySelector('[data-plan-workflow]')).toBeNull();
+    expect(container!.textContent).toContain('Review the change');
+  });
+
+  it('does not apply approval shortcuts to a focused workflow node', () => {
+    render(undefined, planRequest, [
+      { id: 'review', content: 'Review the change', status: 'pending' },
+    ]);
+    const node = container!.querySelector<HTMLButtonElement>(
+      '[data-plan-node-id="review"]',
+    )!;
+    node.focus();
+
+    pressKey(node, 'j');
+    expect(document.activeElement).toBe(node);
+    pressKey(node, '2');
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    const enter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => node.dispatchEvent(enter));
+    expect(enter.defaultPrevented).toBe(false);
+  });
+
+  it('does not show a stale workflow for another switch-mode tool', () => {
+    render(undefined, { ...planRequest, toolName: 'enter_plan_mode' }, [
+      { id: 'old', content: 'Old plan', status: 'pending' },
+    ]);
+
+    expect(container!.querySelector('[data-plan-workflow]')).toBeNull();
+    expect(container!.textContent).not.toContain('Old plan');
+  });
+
+  it('requires a switch-mode permission before showing the workflow', () => {
+    render(undefined, { ...planRequest, toolKind: 'other' }, [
+      { id: 'unsafe', content: 'Unrelated workflow', status: 'pending' },
+    ]);
+
+    expect(container!.textContent).not.toContain('Unrelated workflow');
+  });
+
   it('exposes an alertdialog of real, focusable buttons', () => {
     render(undefined);
     const panel = container!.querySelector('[data-web-shell-permission-panel]');
@@ -174,6 +266,112 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
+  describe('yielding to active typing (#9571)', () => {
+    let composer: HTMLTextAreaElement;
+
+    beforeEach(() => {
+      // The user is typing in the composer when the approval arrives. In the
+      // app the overlay commit hides the composer in the same render, so the
+      // editable target still holds focus when the focus effect runs (jsdom
+      // mirrors that: display:none never blurs).
+      composer = document.createElement('textarea');
+      document.body.appendChild(composer);
+      composer.focus();
+    });
+
+    afterEach(() => {
+      composer.remove();
+    });
+
+    it('does not grab focus to the default option while an editable target is focused', () => {
+      expect(document.activeElement).toBe(composer);
+      render(undefined);
+      // Stealing focus here redirects the in-progress keystroke (Enter to
+      // send, Space, digits) onto the safe-default option and can confirm it.
+      expect(document.activeElement).toBe(composer);
+      expect(optionButtons().some((o) => o === document.activeElement)).toBe(
+        false,
+      );
+    });
+
+    it('does not re-grab focus when a new request arrives mid-typing', () => {
+      render(undefined);
+      expect(document.activeElement).toBe(composer);
+      rerender(true, { ...request, id: 'req-2' });
+      expect(document.activeElement).toBe(composer);
+    });
+
+    it('does not grab focus on re-activation while typing', () => {
+      render(false);
+      expect(document.activeElement).toBe(composer);
+      rerender(true);
+      expect(document.activeElement).toBe(composer);
+    });
+
+    it('still operates by keyboard once the user tabs in', () => {
+      render(undefined);
+      expect(document.activeElement).toBe(composer);
+      // Explicit tab-in: focusing an option engages the usual roving behavior.
+      const opts = optionButtons();
+      act(() => {
+        opts[0]!.focus();
+      });
+      pressKey(opts[0]!, 'ArrowDown');
+      expect(document.activeElement).toBe(opts[1]);
+    });
+
+    it('yields to a contenteditable composer (CodeMirror shape)', () => {
+      // The production composer is a CodeMirror EditorView — a contenteditable
+      // div inside `.cm-editor` (the textarea backend is touch devices only).
+      // The textarea cases above never exercise isEditableTarget's
+      // contenteditable branches; pin them so simplifying the helper to bare
+      // form controls cannot silently re-open #9571.
+      const editor = document.createElement('div');
+      editor.className = 'cm-editor';
+      const editable = document.createElement('div');
+      editable.setAttribute('contenteditable', 'true');
+      editor.appendChild(editable);
+      document.body.appendChild(editor);
+      act(() => {
+        editable.focus();
+      });
+      expect(document.activeElement).toBe(editable);
+      render(undefined);
+      expect(document.activeElement).toBe(editable);
+      expect(optionButtons().some((o) => o === document.activeElement)).toBe(
+        false,
+      );
+      editor.remove();
+    });
+
+    it('yields in shadow-DOM (portal) mode, where document.activeElement retargets', () => {
+      // Portal mode mounts the shell inside a shadow root, where
+      // document.activeElement retargets to the non-editable host; the guard
+      // must resolve the active element from the panel's own root instead.
+      const host = document.createElement('div');
+      document.body.appendChild(host);
+      const shadowRoot = host.attachShadow({ mode: 'open' });
+      const shadowComposer = document.createElement('textarea');
+      shadowRoot.appendChild(shadowComposer);
+      const shadowContainer = document.createElement('div');
+      shadowRoot.appendChild(shadowContainer);
+      act(() => {
+        shadowComposer.focus();
+      });
+      expect(shadowRoot.activeElement).toBe(shadowComposer);
+
+      container = shadowContainer;
+      root = createRoot(container);
+      rerender(undefined);
+
+      expect(shadowRoot.activeElement).toBe(shadowComposer);
+      expect(optionButtons().some((o) => o === shadowRoot.activeElement)).toBe(
+        false,
+      );
+      host.remove();
+    });
+  });
+
   it('confirms the clicked option', () => {
     render(undefined);
     act(() => {
@@ -205,6 +403,7 @@ describe('ToolApproval accessibility', () => {
             },
           ],
         },
+        undefined,
         language,
       );
 
@@ -296,6 +495,68 @@ describe('ToolApproval accessibility', () => {
     expect(document.activeElement).toBe(optionButtons()[0]);
   });
 
+  it('defaults an agent-launch dialog to the one-shot allow, not Reject', () => {
+    render(undefined, {
+      id: 'req-agent-launch',
+      toolName: 'agent',
+      title: 'Launch Explore agent',
+      content: [],
+      options: [
+        {
+          id: 'proceed_always_project',
+          label: 'Always in project',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_always_user',
+          label: 'Always for user',
+          kind: 'allow_always',
+        },
+        { id: 'proceed_once', label: 'Allow', kind: 'allow_once' },
+        { id: 'cancel', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const opts = optionButtons();
+    expect(opts.map((o) => o.getAttribute('data-option-id'))).toEqual([
+      'cancel',
+      'proceed_always_user',
+      'proceed_always_project',
+      'proceed_once',
+    ]);
+    // Launching the agent is the proposed next action: focus and initial
+    // selection land on the one-shot allow instead of the reject button.
+    expect(document.activeElement).toBe(opts[3]);
+    expect(opts[3]!.tabIndex).toBe(0);
+  });
+
+  it('defaults an agent-launch dialog to Reject when no one-shot allow exists', () => {
+    render(undefined, {
+      id: 'req-agent-no-once',
+      toolName: 'agent',
+      title: 'Launch Explore agent',
+      content: [],
+      options: [
+        {
+          id: 'proceed_always_project',
+          label: 'Always in project',
+          kind: 'allow_always',
+        },
+        {
+          id: 'proceed_always_user',
+          label: 'Always for user',
+          kind: 'allow_always',
+        },
+        { id: 'cancel', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    const opts = optionButtons();
+    // No one-shot allow: the default must be the reject, never a permanent
+    // allow rule.
+    expect(opts[0]!.getAttribute('data-option-id')).toBe('cancel');
+    expect(document.activeElement).toBe(opts[0]);
+    expect(opts[0]!.tabIndex).toBe(0);
+  });
+
   it('leaves Enter to native button activation (no double-press guard)', () => {
     render(undefined);
     const opts = optionButtons();
@@ -365,6 +626,7 @@ describe('ToolApproval accessibility', () => {
             { id: 'reject', label: 'Reject', kind: 'reject_once' },
           ],
         },
+        undefined,
         language,
       );
       const opts = optionButtons();

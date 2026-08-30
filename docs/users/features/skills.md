@@ -38,6 +38,33 @@ Start typing `/` to autocomplete and browse available Skills alongside their des
 
 Skills are stored as directories containing a `SKILL.md` file.
 
+### Generate a project Skill with `/learn`
+
+Use `/learn` to distill an existing knowledge source into a reusable project
+Skill:
+
+```text
+/learn https://docs.example.com/api
+/learn ~/projects/acme-sdk
+/learn Our deploy process: run migrate, deploy the service, then check health
+```
+
+The command runs as a normal agent turn and creates the result under
+`.qwen/skills/learned-skill-<name>/SKILL.md` with `source: learned` in its
+frontmatter. Review the generated instructions before using or sharing them.
+
+`/learn` also accepts local or direct-link `.mp4`, `.webm`, `.mov`, and `.m4v`
+videos. Add text after the path or URL to focus the generated Skill on one part
+of the tutorial:
+
+```text
+/learn ./tutorial.mp4 focus on the deployment workflow
+```
+
+Video learning requires a video-capable model on an OpenAI-compatible provider.
+YouTube page URLs are not direct video input; download the video into the
+workspace and pass its local path instead.
+
 ### Personal Skills
 
 Personal Skills are available across all your projects. Store them in `~/.qwen/skills/`:
@@ -197,6 +224,7 @@ Qwen Code discovers Skills from:
 - Personal Skills: `~/.qwen/skills/`
 - Project Skills: `.qwen/skills/`
 - Extension Skills: Skills provided by installed extensions
+- Bundled Skills: Skills shipped with Qwen Code
 
 ### Extension Skills
 
@@ -324,7 +352,10 @@ code ~/.qwen/skills/my-skill/SKILL.md
 code .qwen/skills/my-skill/SKILL.md
 ```
 
-Changes take effect the next time you start Qwen Code. If Qwen Code is already running, restart it to load the updates.
+During a normal session, Qwen Code watches personal and project Skill
+directories. Adding, editing, or removing a Skill refreshes the Skill list and
+invocation state automatically after a short delay. Bare mode does not start
+these watchers, so restart Qwen Code to load Skill changes in that mode.
 
 ## Remove a Skill
 

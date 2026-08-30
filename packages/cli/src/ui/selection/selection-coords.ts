@@ -50,24 +50,3 @@ export function clampToViewport(point: Point, rect: ViewportRect): Point {
     y: Math.max(rect.y, Math.min(rect.y + rect.height - 1, point.y)),
   };
 }
-
-/**
- * Returns the first rect (in argument order) that contains `point`, or
- * `null` if none do. Used to test a point against multiple disjoint
- * selectable regions (e.g. the history viewport and the footer) without
- * merging them into a single bounding box, which could wrongly treat the
- * gap between two rects of differing width/x-offset as selectable.
- * `null`/`undefined` entries (e.g. a region that isn't currently mounted)
- * are skipped.
- */
-export function pointInAnyViewport(
-  point: Point,
-  rects: ReadonlyArray<ViewportRect | null | undefined>,
-): ViewportRect | null {
-  for (const rect of rects) {
-    if (rect && pointInViewport(point, rect)) {
-      return rect;
-    }
-  }
-  return null;
-}

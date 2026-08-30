@@ -5,10 +5,28 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { context, ROOT_CONTEXT } from '@opentelemetry/api';
 import type { Application, RequestHandler } from 'express';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonLogContext, DaemonLogger } from '../daemon-logger.js';
+
+const telemetryMocks = vi.hoisted(() => ({
+  getDaemonTelemetryInboundTraceId: vi.fn((): string | undefined => undefined),
+}));
+
+// The access log reads the caller trace id through this seam; mocking it
+// keeps the suite off the real telemetry module (and its core import graph).
+vi.mock('./telemetry-context.js', () => ({
+  getDaemonTelemetryInboundTraceId:
+    telemetryMocks.getDaemonTelemetryInboundTraceId,
+}));
+
 import { installAccessLogMiddleware } from './access-log.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  telemetryMocks.getDaemonTelemetryInboundTraceId.mockReset();
+});
 
 function fakeLogger(): DaemonLogger {
   return {
@@ -110,6 +128,30 @@ describe('installAccessLogMiddleware', () => {
     );
   });
 
+  it('joins the request log line to the caller trace when telemetry is off', () => {
+    telemetryMocks.getDaemonTelemetryInboundTraceId.mockReturnValueOnce(
+      '3'.repeat(32),
+    );
+    const h = harness();
+    h.begin({ path: '/traced' }).response.emit('finish');
+
+    expect(h.logger.info).toHaveBeenCalledWith(
+      'request completed',
+      expect.objectContaining({ traceId: '3'.repeat(32) }),
+    );
+  });
+
+  it('omits the traceId field when no inbound trace id was captured', () => {
+    const h = harness();
+    h.begin({ path: '/untraced' }).response.emit('finish');
+
+    const context = vi.mocked(h.logger.info).mock.calls[0]?.[1] as
+      | DaemonLogContext
+      | undefined;
+    expect(context).toBeDefined();
+    expect('traceId' in (context ?? {})).toBe(false);
+  });
+
   it('caps UTF-8 fields, uses the first raw client header, and tolerates clock retreat', () => {
     const h = harness();
     const sessionId = '你'.repeat(100);
@@ -182,6 +224,41 @@ describe('installAccessLogMiddleware', () => {
       statusOther: 0,
     });
     expect(h.logger.warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('flushes aggregate summaries in root context before the current request', () => {
+    const withContext = vi.spyOn(context, 'with');
+    const h = harness();
+    for (let i = 0; i < 60; i += 1) {
+      h.begin({ path: `/burst/${i}` }).response.emit('finish');
+    }
+    h.begin({ path: '/suppressed' }).response.emit('finish');
+
+    h.setNow(2_000);
+    h.begin({ path: '/current' }).response.emit('finish');
+
+    expect(withContext).toHaveBeenCalledWith(
+      ROOT_CONTEXT,
+      expect.any(Function),
+    );
+    expect(h.logger.warn).toHaveBeenCalledWith(
+      'access logs suppressed',
+      expect.objectContaining({ suppressed: 1 }),
+    );
+    expect(h.logger.info).toHaveBeenLastCalledWith(
+      'request completed',
+      expect.objectContaining({ route: 'GET /current' }),
+    );
+    expect(
+      vi.mocked(h.logger.warn).mock.invocationCallOrder.at(-1),
+    ).toBeLessThan(vi.mocked(h.logger.info).mock.invocationCallOrder.at(-1)!);
+  });
+
+  it('does not add access records for response close without finish', () => {
+    const h = harness();
+    h.begin({ path: '/aborted', status: 500 }).response.emit('close');
+    expect(h.logger.info).not.toHaveBeenCalled();
+    expect(h.logger.warn).not.toHaveBeenCalled();
   });
 
   it('does not move the token refill baseline backward with the clock', () => {

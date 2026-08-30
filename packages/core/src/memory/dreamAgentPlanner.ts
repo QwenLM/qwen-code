@@ -8,7 +8,7 @@ import type { Config } from '../config/config.js';
 import {
   runForkedAgent,
   type ForkedAgentResult,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import {
@@ -117,13 +117,12 @@ export async function planManagedAutoMemoryDreamByAgent(
     config: scopedConfig,
     taskPrompt: buildConsolidationTaskPrompt(memoryRoot, transcriptDir),
     systemPrompt: DREAM_AGENT_SYSTEM_PROMPT,
-    maxTurns: MAX_TURNS,
+    maxTurns: config.getMemoryAgentMaxTurns() ?? MAX_TURNS,
     maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? MAX_TIME_MINUTES,
     tools: [
       ToolNames.READ_FILE,
       ToolNames.GREP,
       ToolNames.GLOB,
-      ToolNames.LS,
       ToolNames.SHELL,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,

@@ -1,5 +1,5 @@
 //! FocusGuard — Rust port of Swift's `FocusGuard.withFocusSuppressed`
-//! (`libs/cua-driver/Sources/CuaDriverCore/Focus/FocusGuard.swift`).
+//! (`packages/cua-driver/Sources/CuaDriverCore/Focus/FocusGuard.swift`).
 //!
 //! ## What this does
 //!
@@ -183,13 +183,7 @@ mod tests {
     /// 50ms sleep doesn't deadlock.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn arms_lease_when_target_differs_from_prior() {
-        let n = with_focus_suppressed(
-            Some(123),
-            Some(456),
-            "test.armed",
-            || async { 99 },
-        )
-        .await;
+        let n = with_focus_suppressed(Some(123), Some(456), "test.armed", || async { 99 }).await;
         assert_eq!(n, 99);
     }
 

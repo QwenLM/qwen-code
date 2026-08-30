@@ -65,6 +65,10 @@
   overflow: hidden;
 }
 
+.bash-toolcall-row-content.bash-toolcall-full {
+  min-width: 0;
+}
+
 .bash-toolcall-pre {
   margin-block: 0;
   overflow: hidden;
@@ -87,6 +91,10 @@
   min-width: 0;
   width: 100%;
   box-sizing: border-box;
+}
+
+.bash-toolcall-output-subtle .bash-toolcall-pre {
+  overflow: visible;
 }
 
 .bash-toolcall-error-content {
@@ -157,6 +165,10 @@
   overflow: hidden;
 }
 
+.execute-toolcall-row-content.execute-toolcall-full {
+  min-width: 0;
+}
+
 .execute-toolcall-pre {
   margin-block: 0;
   overflow: hidden;
@@ -178,6 +190,10 @@
   min-width: 0;
   width: 100%;
   box-sizing: border-box;
+}
+
+.execute-toolcall-output-subtle .execute-toolcall-pre {
+  overflow: visible;
 }
 
 .execute-toolcall-error-content {

@@ -133,10 +133,14 @@ When `S ≤ 0` the cap is disabled (`getMaxToolCallsPerTurn()` returns
   `LoopDetectedEvent` would tell which fired in the wild (useful for validating
   the 10× multiplier). The headless message already hedges to cover both.
 - The ACP/daemon path (`recordDaemonToolCalls` in
-  `packages/cli/src/acp-integration/session/Session.ts`) has its own blunt
-  per-turn cap that does not use `LoopDetectionService`. It always treats the
-  value as a hard cap regardless of repetition. Aligning it with the adaptive
-  default is
-  a separate follow-up (it tracks tool calls in batches and would need its own
-  per-`(tool,args)` repeat tracking). The interactive TUI path that produced
-  the reported false positive is fixed here.
+  `packages/cli/src/acp-integration/session/Session.ts`) had its own blunt
+  per-turn cap that did not use `LoopDetectionService` and always treated the
+  value as a hard cap regardless of repetition. Landed in #8631: the daemon
+  now mirrors the adaptive default (explicit value = hard cap; default =
+  adaptive with the same stuck-repetition signal and hard backstop, reusing
+  the thresholds and the `(tool,args)` repeat key exported from this module),
+  and mirrors `checkGlobalDuplicate` on the same side of the
+  `skipLoopDetection` gate as core (off by default, since this detector
+  class is the false-positive-prone one; the always-on stuck signal still
+  only acts past the soft cap, as argued above). The interactive TUI path
+  that produced the reported false positive is fixed here.

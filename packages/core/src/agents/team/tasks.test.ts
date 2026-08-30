@@ -25,6 +25,7 @@ import {
   TaskOwnershipError,
   RECIPROCAL_CALLER,
 } from './tasks.js';
+import { mockCompromisedLock } from '../../test-utils/mock-compromised-lock.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
   const original =
@@ -151,6 +152,27 @@ describe('tasks', () => {
       });
       expect(updated!.status).toBe('in_progress');
       expect(updated!.owner).toBe('worker@team');
+    });
+
+    it('still updates the task when the lock is compromised', async () => {
+      const task = await createTask('team', {
+        subject: 'Test',
+        description: 'Desc',
+      });
+      const { lockSpy, getOnCompromised } = mockCompromisedLock();
+
+      try {
+        await expect(
+          updateTask('team', task.id, { status: 'in_progress' }),
+        ).resolves.toMatchObject({ id: task.id, status: 'in_progress' });
+        expect(getOnCompromised()).toBeTypeOf('function');
+      } finally {
+        lockSpy.mockRestore();
+      }
+
+      expect(await getTask('team', task.id)).toMatchObject({
+        status: 'in_progress',
+      });
     });
 
     it('clears owner with null', async () => {

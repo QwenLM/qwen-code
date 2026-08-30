@@ -18,13 +18,13 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let capabilities: any;
-let listWorkspaceSessions: ReturnType<typeof vi.fn>;
+let listWorkspaceSessionsPage: ReturnType<typeof vi.fn>;
 // Stable client object (per test) — the real `useWorkspace().client` is a
 // memoized `DaemonClient`, and the hook depends on its identity, so an unstable
 // mock would re-fire the load effect on every render (infinite loop).
-let client: { listWorkspaceSessions: ReturnType<typeof vi.fn> };
+let client: { listWorkspaceSessionsPage: ReturnType<typeof vi.fn> };
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => ({ client, capabilities }),
 }));
 
@@ -73,8 +73,8 @@ function session(id: string, cwd: string): DaemonSessionSummary {
 beforeEach(() => {
   enabled = true;
   capabilities = {};
-  listWorkspaceSessions = vi.fn(async () => []);
-  client = { listWorkspaceSessions };
+  listWorkspaceSessionsPage = vi.fn(async () => ({ sessions: [] }));
+  client = { listWorkspaceSessionsPage };
 });
 
 afterEach(() => {
@@ -94,14 +94,14 @@ describe('useOtherWorkspaceSessions', () => {
     await flush();
 
     expect(latest.sessions).toEqual([]);
-    expect(listWorkspaceSessions).not.toHaveBeenCalled();
+    expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
   });
 
   it('returns [] and never queries the daemon without a workspaces list', async () => {
     render();
     await flush();
     expect(latest.sessions).toEqual([]);
-    expect(listWorkspaceSessions).not.toHaveBeenCalled();
+    expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
   });
 
   it('lists only non-primary, trusted workspaces (live/active)', async () => {
@@ -112,13 +112,13 @@ describe('useOtherWorkspaceSessions', () => {
         ws('/c', false, false), // untrusted → skipped
       ],
     };
-    listWorkspaceSessions.mockImplementation(async (cwd: string) =>
-      cwd === '/b' ? [session('b1', '/b')] : [],
+    listWorkspaceSessionsPage.mockImplementation(async (cwd: string) =>
+      cwd === '/b' ? { sessions: [session('b1', '/b')] } : { sessions: [] },
     );
     render();
     await flush();
-    expect(listWorkspaceSessions).toHaveBeenCalledTimes(1);
-    expect(listWorkspaceSessions).toHaveBeenCalledWith('/b', {
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledWith('/b', {
       pageSize: SESSION_LIST_PAGE_SIZE,
       archiveState: 'active',
       sourceType: 'default',
@@ -135,8 +135,8 @@ describe('useOtherWorkspaceSessions', () => {
         ws('/c', false, true),
       ],
     };
-    listWorkspaceSessions.mockImplementation(async (cwd: string) => {
-      if (cwd === '/b') return [session('b1', '/b')];
+    listWorkspaceSessionsPage.mockImplementation(async (cwd: string) => {
+      if (cwd === '/b') return { sessions: [session('b1', '/b')] };
       throw new Error('workspace /c is unreachable');
     });
     render();
@@ -151,30 +151,32 @@ describe('useOtherWorkspaceSessions', () => {
     capabilities = {
       workspaces: [ws('/w', true, true), ws('/b', false, true)],
     };
-    listWorkspaceSessions.mockResolvedValue([session('b1', '/b')]);
+    listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [session('b1', '/b')],
+    });
     render();
     await flush();
-    expect(listWorkspaceSessions).toHaveBeenCalledTimes(1);
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
     // The callers drive refresh via reload() (poll tick / picker open) — it must
     // fetch again.
     await act(async () => {
       await latest.reload();
     });
-    expect(listWorkspaceSessions).toHaveBeenCalledTimes(2);
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
     expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
   });
 
   it('discards a stale in-flight fetch when the target set changes', async () => {
     // /b resolves slowly; after the target set switches to /c (a workspace is
     // (un)registered mid-flight), the stale /b result must not overwrite /c's.
-    let resolveB: (v: DaemonSessionSummary[]) => void = () => {};
-    const bPending = new Promise<DaemonSessionSummary[]>((r) => {
+    let resolveB: (v: { sessions: DaemonSessionSummary[] }) => void = () => {};
+    const bPending = new Promise<{ sessions: DaemonSessionSummary[] }>((r) => {
       resolveB = r;
     });
-    listWorkspaceSessions.mockImplementation(async (cwd: string) => {
+    listWorkspaceSessionsPage.mockImplementation(async (cwd: string) => {
       if (cwd === '/b') return bPending;
-      if (cwd === '/c') return [session('c1', '/c')];
-      return [];
+      if (cwd === '/c') return { sessions: [session('c1', '/c')] };
+      return { sessions: [] };
     });
 
     capabilities = {
@@ -193,12 +195,15 @@ describe('useOtherWorkspaceSessions', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(latest.sessions.map((s) => s.sessionId)).toEqual(['c1']);
+    // Background catalog loads intentionally share one slot, so /c waits
+    // until the obsolete /b request releases it.
+    expect(latest.sessions).toEqual([]);
 
     // Now resolve the stale /b fetch — its `cancelled` guard must drop it, so
     // the list stays on /c's result rather than reverting to /b's.
     await act(async () => {
-      resolveB([session('b1', '/b')]);
+      resolveB({ sessions: [session('b1', '/b')] });
+      await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
     });

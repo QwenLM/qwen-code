@@ -235,6 +235,8 @@ export class ModelRegistry {
       envKey: model.envKey,
       fastOnly: model.fastOnly,
       voiceOnly: model.voiceOnly,
+      visionOnly: model.visionOnly,
+      supportsImageGeneration: model.supportsImageGeneration,
       imageOnly: model.imageOnly,
     }));
   }
@@ -342,6 +344,7 @@ export class ModelRegistry {
     const selectorOnlyCount = [
       config.fastOnly,
       config.voiceOnly,
+      config.visionOnly,
       config.imageOnly,
     ].filter(Boolean).length;
     if (selectorOnlyCount > 1) {

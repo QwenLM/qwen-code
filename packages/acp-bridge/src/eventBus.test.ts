@@ -11,6 +11,7 @@ import {
   EventBus,
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
+  type EventBusSubscriberDiagnostic,
 } from './eventBus.js';
 
 async function collect(
@@ -216,6 +217,86 @@ describe('EventBus', () => {
     );
     expect(bus.subscriberCount).toBe(0);
     abort.abort();
+  });
+
+  it('routes contextual subscriber diagnostics without duplicating legacy stderr', async () => {
+    const bus = new EventBus();
+    const diagnostics: EventBusSubscriberDiagnostic[] = [];
+    const iter = bus.subscribe({
+      maxQueued: 2,
+      onSubscriberDiagnostic: (diagnostic) => {
+        diagnostics.push(diagnostic);
+        return true;
+      },
+    });
+
+    bus.publish({ type: 'first', data: 1 });
+    const thresholdEvent = bus.publish({
+      type: 'threshold-crossing',
+      data: 2,
+    });
+    const overflowingEvent = bus.publish({ type: 'overflowing', data: 3 });
+    const thresholdJson = JSON.stringify(thresholdEvent);
+    const overflowingJson = JSON.stringify(overflowingEvent);
+    if (!thresholdJson || !overflowingJson) {
+      throw new Error('Expected serializable published events');
+    }
+
+    for await (const _event of iter) {
+      // Drain the terminal subscription.
+    }
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics[0]).toMatchObject({
+      type: 'slow_client_warning',
+      data: {
+        triggerEventType: 'threshold-crossing',
+        triggerEventBytes: expect.any(Number),
+      },
+    });
+    expect(diagnostics[1]).toMatchObject({
+      type: 'client_evicted',
+      data: {
+        reason: 'queue_overflow',
+        triggerEventType: 'overflowing',
+        triggerEventBytes: expect.any(Number),
+      },
+    });
+    expect(diagnostics[0]?.data.triggerEventBytes).toBe(
+      new TextEncoder().encode(thresholdJson).byteLength,
+    );
+    expect(diagnostics[1]?.data.triggerEventBytes).toBe(
+      new TextEncoder().encode(overflowingJson).byteLength,
+    );
+    expect(process.stderr.write).not.toHaveBeenCalledWith(
+      expect.stringContaining('EventBus slow_client_warning'),
+    );
+    expect(process.stderr.write).not.toHaveBeenCalledWith(
+      expect.stringContaining('EventBus subscriber evicted'),
+    );
+  });
+
+  it.each([
+    ['returns false', () => false],
+    [
+      'throws',
+      () => {
+        throw new Error('diagnostic sink failed');
+      },
+    ],
+  ])('preserves legacy stderr when the diagnostic callback %s', (_name, cb) => {
+    const bus = new EventBus();
+    bus.subscribe({ maxQueued: 1, onSubscriberDiagnostic: cb });
+
+    expect(() => {
+      bus.publish({ type: 'threshold', data: 1 });
+      bus.publish({ type: 'overflow', data: 2 });
+    }).not.toThrow();
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining('EventBus slow_client_warning'),
+    );
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining('EventBus subscriber evicted'),
+    );
   });
 
   it('emits slow_client_warning exactly once per overflow episode', async () => {
@@ -1569,6 +1650,18 @@ describe('EventBus', () => {
       const bus = new EventBus(10, undefined, engine);
       bus.publish({ type: 'foo', data: 1 });
       expect(bus.snapshotReplay()?.degraded).toBeUndefined();
+    });
+
+    it('defaults replay snapshots to full and forwards summary mode', () => {
+      const engine = makeEngine();
+      const snapshot = vi.spyOn(engine, 'snapshot');
+      const bus = new EventBus(10, undefined, engine);
+
+      bus.snapshotReplay();
+      bus.snapshotReplay('summary');
+
+      expect(snapshot).toHaveBeenNthCalledWith(1, 'full');
+      expect(snapshot).toHaveBeenNthCalledWith(2, 'summary');
     });
 
     it('survives a throwing onCompactionError callback', () => {

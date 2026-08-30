@@ -1,5 +1,5 @@
 #!/bin/bash
-# cua-driver installer — download and install the Rust implementation.
+# Qwen CUA Driver installer — download and install the Rust implementation.
 # Downloads the latest release from GitHub Releases and wires it into the user's PATH.
 #
 # Usage (from README + release body):
@@ -10,16 +10,18 @@
 #                        ~/.local/bin (e.g. /usr/local/bin — that target needs sudo)
 #   --no-modify-path     skip auto-appending an `export PATH=...` line to your
 #                        shell rc when ~/.local/bin is missing from PATH
+#   --channel <name>     persist and install the latest stable or nightly release
 #   --backend=rust       explicit Rust backend (no-op; Rust is the only option)
 #   --experimental-rust  legacy alias for --backend=rust (no-op)
 #   --backend=swift      retired Swift backend (no-op; accepted for compat)
 #
 # Env overrides:
-#   CUA_DRIVER_RS_VERSION=0.7.0    pin a specific Rust release tag
-#   CUA_DRIVER_VERSION=0.7.0       legacy alias for CUA_DRIVER_RS_VERSION
+#   CUA_DRIVER_RS_VERSION=0.20.2   pin a specific Rust release tag
+#   CUA_DRIVER_VERSION=0.20.2      legacy alias for CUA_DRIVER_RS_VERSION
 #   CUA_DRIVER_RS_INSTALL_DIR=PATH same as --bin-dir
 #   CUA_DRIVER_BIN_DIR=PATH        legacy alias for --bin-dir
 #   CUA_DRIVER_NO_MODIFY_PATH=1    same as --no-modify-path
+#   CUA_DRIVER_RS_HOME=PATH        package and release-channel state home
 #
 # Uninstall:
 #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/uninstall.sh)"
@@ -94,6 +96,7 @@ fi
 LOCAL_RUST_INSTALLER=""
 if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "-" && -f "${BASH_SOURCE[0]}" ]]; then
     SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+    # Helper lives next to this script under packages/cua-driver/scripts/.
     CANDIDATE="$SCRIPT_DIR/_install-rust.sh"
     if [[ -f "$CANDIDATE" ]]; then
         LOCAL_RUST_INSTALLER="$CANDIDATE"

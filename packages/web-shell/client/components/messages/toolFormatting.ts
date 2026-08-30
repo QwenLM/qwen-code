@@ -1,5 +1,7 @@
 import type { ACPToolCall } from '../../adapters/types';
 
+export { isActiveToolStatus } from '../../adapters/toolClassification';
+
 /**
  * Internal-tool-name → display-name lookup. This is a standalone copy of
  * core's `ToolDisplayNames` (mapped to wire names, as the CLI's shared
@@ -53,11 +55,14 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   team_create: 'TeamCreate',
   team_delete: 'TeamDelete',
   team_plan_approval: 'TeamPlanApproval',
+  request_shutdown: 'RequestShutdown',
   workflow: 'Workflow',
   artifact: 'Artifact',
   record_artifact: 'RecordArtifact',
+  report_findings: 'ReportFindings',
   web_search: 'WebSearch',
   image_gen: 'ImageGen',
+  display_image: 'DisplayImage',
   bash: 'Shell',
   shell: 'Shell Command',
   read: 'ReadFile',
@@ -471,23 +476,23 @@ export function getAgentCancellationReason(agent: ACPToolCall): string {
   );
 }
 
+export function isAgentCancelled(agent: ACPToolCall): boolean {
+  if (!agent.rawOutput || typeof agent.rawOutput !== 'object') return false;
+  const raw = agent.rawOutput as Record<string, unknown>;
+  const status = typeof raw.status === 'string' ? raw.status.toLowerCase() : '';
+  const reason = getAgentCancellationReason(agent);
+  return (
+    status === 'cancelled' ||
+    status === 'canceled' ||
+    reason.toLowerCase().includes('cancel')
+  );
+}
+
 export function getAgentDisplayStatus(
   agent: ACPToolCall,
 ): ACPToolCall['status'] {
   if (agent.status === 'failed') return 'failed';
-  if (!agent.rawOutput || typeof agent.rawOutput !== 'object') {
-    return agent.status;
-  }
-  const raw = agent.rawOutput as Record<string, unknown>;
-  const status = typeof raw.status === 'string' ? raw.status.toLowerCase() : '';
-  const reason = getAgentCancellationReason(agent);
-  if (
-    status === 'cancelled' ||
-    status === 'canceled' ||
-    reason.toLowerCase().includes('cancel')
-  ) {
-    return 'failed';
-  }
+  if (isAgentCancelled(agent)) return 'failed';
   return agent.status;
 }
 
@@ -509,6 +514,13 @@ export function getAgentType(agent: ACPToolCall): string {
   const subagentType = agent.args?.subagent_type;
   if (typeof subagentType === 'string' && subagentType) return subagentType;
   return agent.toolName === 'task' ? 'task' : DEFAULT_SUBAGENT_TYPE;
+}
+
+// 'task' is getAgentType's other untyped-agent fallback and has no i18n key.
+export function isDefaultAgentType(agentType: string): boolean {
+  return (
+    agentType.toLowerCase() === DEFAULT_SUBAGENT_TYPE || agentType === 'task'
+  );
 }
 
 /**

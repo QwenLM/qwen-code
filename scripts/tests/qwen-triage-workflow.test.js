@@ -4,19 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
 const cacheProducerWorkflow = readFileSync(
@@ -27,7 +31,10 @@ const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
 );
+const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
+const hasGnuRealpath =
+  spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -67,6 +74,84 @@ function job(name) {
   return nextJob === -1
     ? workflow.slice(start)
     : workflow.slice(start, start + 1 + nextJob);
+}
+
+// Executed-harness factory shared by the claim and finalize lifecycle tests:
+// a stubbed `gh` on PATH with failure-injection arms, the real step script
+// run under GitHub's exact shell flags, and capture of the body/call the
+// stub saw plus whatever the step appended to $GITHUB_OUTPUT. GitHub runs
+// `shell: bash` as `bash --noprofile --norc -eo pipefail {0}`, and a step's
+// own `set -uo pipefail` does not turn `-e` back off — match that, or an
+// unguarded failing command kills the real step in production while the
+// harness stays green. One shared copy keeps that fidelity contract in one
+// place: the two pasted copies already diverged once (only the finalize stub
+// had the failure arms), and a later fix made on only one copy would silently
+// degrade exactly one test. The failure arms stay inert unless a scenario
+// sets GH_STUB_FAIL_LIST / GH_STUB_FAIL_WRITE; a POST (any write that is not
+// a PATCH) answers with GH_STUB_POST_ID (default 7777) like the comments
+// API's created-id payload.
+function makeGhHarness(label) {
+  const dir = mkdtempSync(join(tmpdir(), `triage-${label}-`));
+  const commentsFile = join(dir, 'comments.json');
+  const bodyOut = join(dir, 'body.md');
+  const callOut = join(dir, 'call.txt');
+  const outputFile = join(dir, 'github_output');
+  writeFileSync(
+    join(dir, 'gh'),
+    [
+      '#!/usr/bin/env bash',
+      'body=""',
+      'for a in "$@"; do case "$a" in body=*) body="${a#body=}";; esac; done',
+      'if [ -n "$body" ]; then',
+      '  printf "%s" "$body" > "$GH_STUB_OUT"',
+      '  printf "%s\\n" "$*" > "$GH_STUB_CALL"',
+      'fi',
+      'case "$*" in',
+      "  'api user --jq .login') echo qwen-code-ci-bot ;;",
+      '  *--paginate*) [ -n "${GH_STUB_FAIL_LIST:-}" ] && exit 1; cat "$GH_STUB_COMMENTS" ;;',
+      '  *PATCH*) [ -n "${GH_STUB_FAIL_WRITE:-}" ] && exit 1 ;;',
+      '  *) [ -n "${GH_STUB_FAIL_WRITE:-}" ] && exit 1; echo "${GH_STUB_POST_ID:-7777}" ;;',
+      'esac',
+      'exit 0',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  const RUN_URL = 'https://github.com/QwenLM/qwen-code/actions/runs/77';
+  const bashArgs = ['--noprofile', '--norc', '-eo', 'pipefail', '-c'];
+  const run = (script, env) => {
+    rmSync(bodyOut, { force: true });
+    rmSync(callOut, { force: true });
+    rmSync(outputFile, { force: true });
+    const proc = spawnSync('bash', [...bashArgs, script], {
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH}`,
+        GH_TOKEN: 'x',
+        GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+        NUMBER: '7999',
+        RUN_URL,
+        GITHUB_OUTPUT: outputFile,
+        GH_STUB_OUT: bodyOut,
+        GH_STUB_CALL: callOut,
+        GH_STUB_COMMENTS: commentsFile,
+        ...env,
+      },
+      encoding: 'utf8',
+    });
+    expect(proc.status, proc.stderr).toBe(0);
+    return {
+      body: existsSync(bodyOut) ? readFileSync(bodyOut, 'utf8') : null,
+      call: existsSync(callOut) ? readFileSync(callOut, 'utf8') : null,
+      out: `${proc.stdout}${proc.stderr}`,
+      outputs: existsSync(outputFile) ? readFileSync(outputFile, 'utf8') : '',
+    };
+  };
+  return {
+    commentsFile,
+    run,
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    RUN_URL,
+  };
 }
 
 // Spawns the real proxy against a streaming upstream (20 chunks, 200 ms
@@ -219,6 +304,16 @@ describe('qwen-triage tmux workflow', () => {
     expect(runStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
   });
 
+  it('pins the action reinstall to the version the job already runs', () => {
+    expect(workflow).toContain("id: 'ensure_qwen'");
+    expect(workflow).toContain(
+      'echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(workflow).toContain(
+      "qwen_cli_version: '${{ steps.ensure_qwen.outputs.version }}'",
+    );
+  });
+
   it('passes triage output through env before bash reads it', () => {
     const checkStep = step('Check triage response');
 
@@ -275,6 +370,63 @@ describe('qwen-triage tmux workflow', () => {
 
     // A real response still passes, and 'null' still counts as no response.
     expect(run({ RESPONSE: 'triaged' }).status).toBe(0);
+    expect(run({ RESPONSE: 'null' }).status).not.toBe(0);
+  });
+
+  it('fails an API-error response instead of passing it as a triage (#10314)', () => {
+    const checkStep = step('Check triage response');
+    const body = checkStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(body).toBeTruthy();
+    const script = body.replace(/^ {10}/gm, '');
+    const run = (env) => {
+      const proc = spawnSync('bash', ['-c', script], {
+        env: {
+          ...process.env,
+          RESPONSE: '',
+          TRIAGE_OUTCOME: 'success',
+          ...env,
+        },
+        encoding: 'utf8',
+      });
+      return { status: proc.status, out: `${proc.stdout}${proc.stderr}` };
+    };
+
+    // The verbatim 268-char response of run 33070765162 (triage for #10285):
+    // a bare model-layer connection error that the old check classified as a
+    // successful triage, so nothing retried or alerted.
+    const apiError =
+      '[API Error: Connection error. (cause: connect ETIMEDOUT 47.94.20.201:443; connect ENETUNREACH 2408:400a:3e:effd:6ac1:ae6e:cde9:4efe:443 - Local (:::0); connect ETIMEDOUT 101.201.58.201:443; connect ENETUNREACH 2408:400a:3e:effb:c146:fb04:1e3d:5cc1:443 - Local (:::0))]';
+    const bare = run({ RESPONSE: apiError });
+    expect(bare.status).not.toBe(0);
+    expect(bare.out).toContain('API error');
+
+    // The stream-json adapter appends the formatted error LAST
+    // (BaseJsonOutputAdapter appendText), optionally followed by rate-limit
+    // guidance: an error after partial output and a quota error ending in
+    // the guidance suffix must fail too. Same shapes as
+    // qwen-code-pr-review.yml's classifier.
+    expect(
+      run({ RESPONSE: `Partial triage notes\n${apiError}` }).status,
+    ).not.toBe(0);
+    expect(
+      run({
+        RESPONSE:
+          '[API Error: Quota exceeded.] Please wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method',
+      }).status,
+    ).not.toBe(0);
+
+    // A real summary still passes: one that merely QUOTES an API error
+    // mid-prose keeps writing afterwards (parity with the pr-review
+    // workflow's success_mentions_api_error case), and the normal
+    // empty/'null' behavior is untouched.
+    expect(
+      run({
+        RESPONSE:
+          'This issue reports "[API Error: Connection error.]" which points at the model endpoint; needs the endpoint config.',
+      }).status,
+    ).toBe(0);
+    expect(run({ RESPONSE: 'triaged' }).status).toBe(0);
+    expect(run({ RESPONSE: '' }).status).not.toBe(0);
     expect(run({ RESPONSE: 'null' }).status).not.toBe(0);
   });
 
@@ -460,25 +612,296 @@ describe('qwen-triage tmux workflow', () => {
     // Best-effort: a failed status post warns and continues, never fails triage.
     expect(statusStep).toContain('set -uo pipefail');
     expect(statusStep).toContain('continuing.');
+    // The claim exports the id of the comment it wrote; finalize PATCHes
+    // exactly that id, so the two steps cannot disagree about which comment
+    // this run owns — no body-URL matching, no second selection to race.
+    expect(statusStep).toContain("id: 'status'");
+    expect(statusStep).toContain(
+      'echo "comment_id=$COMMENT_ID" >> "$GITHUB_OUTPUT"',
+    );
+    // The executed claim harness's stub answers a POST with the already-
+    // extracted id, so nothing there exercises the POST arm's `--jq '.id'`
+    // (removing the flag keeps the suite green). Pin the flag statically.
+    expect(statusStep).toContain("--jq '.id'");
+    expect(statusStep).toContain('[watch live progress]($RUN_URL)');
+    expect(statusStep).toContain('[查看实时进度]($RUN_URL)');
 
     const finalizeStep = step('Finalize triage status comment');
-    // Runs on both outcomes and edits the SAME marker comment (no second post).
-    expect(finalizeStep).toContain("MARKER='<!-- qwen-triage lifecycle -->'");
+    // Runs on EVERY terminal outcome and PATCHes exactly the comment the
+    // claim step exported. always(), not success() || failure():
+    // cancellation — cancel-in-progress superseding the run, job timeout, or
+    // manual cancel — used to skip the step and leave the early comment
+    // claiming the run was still in progress.
     expect(finalizeStep).toContain(
-      "LEGACY_MARKER='<!-- qwen-triage stage=status -->'",
+      'if: "always() && steps.resolve.outputs.number != \'\'"',
     );
-    expect(finalizeStep).toContain('success() || failure()');
+    expect(finalizeStep).not.toContain('success() || failure()');
     expect(finalizeStep).toContain('steps.triage.outcome');
+    expect(finalizeStep).toContain("JOB_STATUS: '${{ job.status }}'");
+    expect(finalizeStep).toContain('Qwen Triage was cancelled');
+    expect(finalizeStep).toContain('已取消');
     expect(finalizeStep).toContain(
-      'Cannot resolve bot identity; skipping final status comment upsert.',
+      'elif [ "${JOB_STATUS:-}" = \'cancelled\' ]',
     );
-    expect(finalizeStep).toContain('select(.user.login == $bot)');
-    expect(finalizeStep).toContain('startswith($m)');
-    expect(finalizeStep).not.toContain('contains($m)');
+    expect(finalizeStep).toContain(
+      'if [ "${TRIAGE_OUTCOME:-}" = \'success\' ] && [ "${JOB_STATUS:-}" != \'failure\' ]; then',
+    );
+    // The id arrives through env like the other step inputs — and finalize
+    // must NOT re-derive it by listing comments: re-running a selection at
+    // finalize time is exactly the race this coupling removes.
+    expect(finalizeStep).toContain(
+      "STATUS_COMMENT_ID: '${{ steps.status.outputs.comment_id }}'",
+    );
+    expect(finalizeStep).not.toContain('--paginate');
+    expect(finalizeStep).not.toContain('gh api user');
+    expect(finalizeStep).toContain(
+      'repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID',
+    );
     expect(finalizeStep).toContain('--method PATCH');
+    // An empty id means this run never ended up owning a comment (a cancel
+    // landing before the claim posted, or a transiently failed claim write):
+    // no-op, never a fresh post or a lookup that could clobber a previous
+    // run's terminal wording.
+    expect(finalizeStep).toContain('if [ -z "${STATUS_COMMENT_ID:-}" ]; then');
+    expect(finalizeStep).toContain(
+      'This run claimed no status comment; nothing to finalize.',
+    );
     expect(finalizeStep).toContain('Qwen Triage finished');
     expect(finalizeStep).toContain('ended early');
+    expect(finalizeStep).toContain('[view run]($RUN_URL)');
   });
+
+  // Unordered substring pinning cannot tell which terminal state PATCHes which
+  // wording (swapping the success and cancelled bodies survives it), nor
+  // whether the ZH half is really Chinese. Execute the real composer against
+  // a stubbed `gh` and assert the body it sends for each terminal state.
+  const finalizeWordings = {
+    finished: ['Qwen Triage finished', 'Qwen Triage 已完成'],
+    cancelled: ['Qwen Triage was cancelled', 'Qwen Triage 已取消'],
+    early: ['Qwen Triage ended early', 'Qwen Triage 提前结束'],
+  };
+  const finalizeCombos = [
+    [
+      'green job',
+      { TRIAGE_OUTCOME: 'success', JOB_STATUS: 'success' },
+      'finished',
+    ],
+    // A timeout/manual cancel landing AFTER the triage step already
+    // succeeded still reports the success.
+    [
+      'triage success, job cancelled after',
+      { TRIAGE_OUTCOME: 'success', JOB_STATUS: 'cancelled' },
+      'finished',
+    ],
+    // A red job despite a successful triage step — 'Check triage response'
+    // exits 1 on an empty summary — must NOT say "finished" and point at
+    // stage comments that were never posted.
+    [
+      'triage success, job failed',
+      { TRIAGE_OUTCOME: 'success', JOB_STATUS: 'failure' },
+      'early',
+    ],
+    [
+      'triage cancelled',
+      { TRIAGE_OUTCOME: 'cancelled', JOB_STATUS: 'cancelled' },
+      'cancelled',
+    ],
+    [
+      'triage failed, job cancelled',
+      { TRIAGE_OUTCOME: 'failure', JOB_STATUS: 'cancelled' },
+      'cancelled',
+    ],
+    [
+      'triage failed, job failed',
+      { TRIAGE_OUTCOME: 'failure', JOB_STATUS: 'failure' },
+      'early',
+    ],
+    [
+      'triage skipped, job failed',
+      { TRIAGE_OUTCOME: 'skipped', JOB_STATUS: 'failure' },
+      'early',
+    ],
+  ];
+
+  it.each(finalizeCombos)(
+    'finalizes the claimed comment: %s',
+    (_label, env, expected) => {
+      const finalizeStep = step('Finalize triage status comment');
+      const script = finalizeStep
+        .match(/run: \|-\n([\s\S]*)$/)?.[1]
+        .replace(/^ {10}/gm, '');
+      expect(script).toBeTruthy();
+
+      const { run, cleanup } = makeGhHarness('finalize');
+      try {
+        const { body, call } = run(script, {
+          ...env,
+          STATUS_COMMENT_ID: '43',
+        });
+        expect(call).toContain('--method PATCH');
+        expect(call).toContain('issues/comments/43');
+        expect(body.startsWith('<!-- qwen-triage lifecycle -->'), body).toBe(
+          true,
+        );
+        for (const [kind, [en, zh]] of Object.entries(finalizeWordings)) {
+          if (kind === expected) {
+            expect(body, JSON.stringify(env)).toContain(en);
+            expect(body, JSON.stringify(env)).toContain(zh);
+          } else {
+            expect(body, JSON.stringify(env)).not.toContain(en);
+            expect(body, JSON.stringify(env)).not.toContain(zh);
+          }
+        }
+      } finally {
+        cleanup();
+      }
+    },
+  );
+
+  it('skips finalize when the run never claimed a comment, and survives a failed PATCH', () => {
+    const finalizeStep = step('Finalize triage status comment');
+    const script = finalizeStep
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    expect(script).toBeTruthy();
+
+    const { run, cleanup } = makeGhHarness('finalize-noop');
+    try {
+      // A cancel landing before the claim posted leaves the id empty: no
+      // write at all — a fresh post here would clobber a previous run's
+      // terminal wording, and a lookup-based finalize would PATCH whatever
+      // comment happens to be newest.
+      const noop = run(script, {
+        TRIAGE_OUTCOME: 'skipped',
+        JOB_STATUS: 'cancelled',
+      });
+      expect(noop.body).toBe(null);
+      expect(noop.call).toBe(null);
+      expect(noop.out).toContain(
+        'This run claimed no status comment; nothing to finalize.',
+      );
+
+      // A failing PATCH must not fail the step: under GitHub's `-eo
+      // pipefail` an unguarded write turns a transient API error into a red
+      // job even under if: always(). `run` asserts exit 0.
+      const patchFailed = run(script, {
+        TRIAGE_OUTCOME: 'failure',
+        JOB_STATUS: 'cancelled',
+        STATUS_COMMENT_ID: '43',
+        GH_STUB_FAIL_WRITE: '1',
+      });
+      expect(patchFailed.out).toContain(
+        'Failed to finalize triage status comment; continuing.',
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  // The claim step is the only selection left in the lifecycle: newest-wins
+  // marker reuse (the shared slot), with the chosen or created id exported
+  // for finalize to PATCH. Execute the real claim script against a stubbed
+  // `gh`.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'claims the newest marker and exports the comment id for finalize',
+    () => {
+      const statusStep = step('Post triage status comment');
+      const script = statusStep
+        .match(/run: \|-\n([\s\S]*)$/)?.[1]
+        .replace(/^ {10}/gm, '');
+      expect(script).toBeTruthy();
+
+      const { commentsFile, run, cleanup } = makeGhHarness('claim');
+      try {
+        const marker = '<!-- qwen-triage lifecycle -->';
+        const comment = (id, body) => ({
+          id,
+          user: { login: 'qwen-code-ci-bot' },
+          body,
+        });
+        const tombstone = (runId) =>
+          `${marker}\n\n✅ earlier verdict [finalize run](https://github.com/QwenLM/qwen-code/actions/runs/${runId})`;
+
+        // No marker yet: POST the running claim and export the created id.
+        // The body must START with the lifecycle marker — the selector is
+        // gated on startswith($m), so a composer that drops the marker posts
+        // a claim nothing ever recognizes or flips.
+        writeFileSync(commentsFile, '[]');
+        const fresh = run(script, {});
+        expect(fresh.call).toContain('issues/7999/comments');
+        expect(fresh.call).not.toContain('--method PATCH');
+        expect(fresh.body).toContain('Qwen Triage is running');
+        expect(fresh.body.startsWith(marker), fresh.body).toBe(true);
+        expect(fresh.outputs).toContain('comment_id=7777');
+
+        // Existing markers: reuse the NEWEST one — the marker comment is a
+        // shared slot, not a per-run log — and export the reused id.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            comment(42, tombstone(55)),
+            comment(44, tombstone(456)),
+          ]),
+        );
+        const newest = run(script, {});
+        expect(newest.call).toContain('--method PATCH');
+        expect(newest.call).toContain('issues/comments/44');
+        expect(newest.call).not.toContain('issues/comments/42');
+        expect(newest.outputs).toContain('comment_id=44');
+
+        // A legacy marker body is still a reusable slot: dropping
+        // startswith($legacy) from the claim jq loses single-slot healing
+        // for pre-migration threads and survives the suite.
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([
+            comment(
+              41,
+              '<!-- qwen-triage stage=status -->\n\nlegacy status wording',
+            ),
+          ]),
+        );
+        const legacy = run(script, {});
+        expect(legacy.call).toContain('--method PATCH');
+        expect(legacy.call).toContain('issues/comments/41');
+        expect(legacy.outputs).toContain('comment_id=41');
+
+        // A failing write exports an EMPTY id — finalize must see "this run
+        // never claimed anything", not a guessed id — and never fails the
+        // step: under GitHub's `-eo pipefail` an unguarded POST/PATCH turns
+        // a transient comments-API blip into a red job BEFORE 'Run Qwen
+        // Triage' starts. `run` asserts exit 0 for each arm.
+        writeFileSync(commentsFile, '[]');
+        const postFailed = run(script, { GH_STUB_FAIL_WRITE: '1' });
+        expect(postFailed.out).toContain(
+          'Failed to post triage status comment; continuing.',
+        );
+        expect(postFailed.outputs).toContain('comment_id=');
+        expect(postFailed.outputs).not.toContain('comment_id=7777');
+
+        writeFileSync(
+          commentsFile,
+          JSON.stringify([comment(45, tombstone(55))]),
+        );
+        const patchFailed = run(script, { GH_STUB_FAIL_WRITE: '1' });
+        expect(patchFailed.out).toContain(
+          'Failed to update triage status comment; continuing.',
+        );
+        expect(patchFailed.outputs).toContain('comment_id=');
+        expect(patchFailed.outputs).not.toContain('comment_id=45');
+
+        // An unreadable comment list is best-effort too: `|| EXISTING_ID=''`
+        // falls back to a fresh claim post; deleting the guard kills the
+        // step on a transient blip.
+        const listFailed = run(script, { GH_STUB_FAIL_LIST: '1' });
+        expect(listFailed.call).toContain('issues/7999/comments');
+        expect(listFailed.call).not.toContain('--method PATCH');
+        expect(listFailed.outputs).toContain('comment_id=7777');
+      } finally {
+        cleanup();
+      }
+    },
+  );
 
   it('reports timeout and infra-error without claiming the flow was exercised', () => {
     const postStep = step('Post tmux result comment');
@@ -831,7 +1254,8 @@ describe('qwen-triage tmux workflow', () => {
           const bin = join(dir, 'bin');
           mkdirSync(bin, { recursive: true });
           writeFileSync(join(dir, 'reviews.json'), JSON.stringify(reviews));
-          // Stand-in for `gh`: serves the review list and head SHA, and
+          // Stand-in for `gh`: serves the PR state, the review list and
+          // the head SHA, and
           // captures the comment body the step would have posted.
           writeFileSync(
             join(bin, 'gh'),
@@ -839,6 +1263,7 @@ describe('qwen-triage tmux workflow', () => {
               '#!/usr/bin/env bash',
               'case "$*" in',
               `  "api user --jq .login") echo bot ;;`,
+              `  "pr view 1 --repo QwenLM/qwen-code --json state,closedAt") echo '{"state":"OPEN","closedAt":null}' ;;`,
               `  *"/pulls/1/reviews"*) cat "${join(dir, 'reviews.json')}" ;;`,
               `  *"/pulls/1 --jq .head.sha") [ -n "$FAKE_HEAD" ] && echo "$FAKE_HEAD" || exit 1 ;;`,
               `  *"/issues/1/comments"*)`,
@@ -916,6 +1341,104 @@ describe('qwen-triage tmux workflow', () => {
       expect(noHead.status).toBe(0);
       expect(noHead.log).not.toContain('Triage re-run left no bot review');
       expect(noHead.comment).toContain('could not be read');
+    },
+  );
+
+  // A Stage 1-pre duplicate-close exit leaves no review at all, and the
+  // review-list check above cannot tell it apart from a re-run that did
+  // nothing: it announced "completed without a new review ... it did not"
+  // on the PR the same run just closed, and the ::warning dispatched a
+  // human to a correctly-handled run. The close IS the terminal action:
+  // the step must read the PR's own state and exit quietly. A close BEFORE
+  // the trigger keeps the old behaviour — that run still owes its summary.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'exits quietly when the PR was closed at/after the trigger comment',
+    () => {
+      const notifyStep = step('Notify silent triage re-run');
+      // The exemption reads the PR itself, not only the review list.
+      expect(notifyStep).toContain(
+        'gh pr view "$NUMBER" --repo "$GITHUB_REPOSITORY" --json state,closedAt',
+      );
+      const body = notifyStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+      expect(body).toBeTruthy();
+      const script = body.replace(/^ {10}/gm, '');
+
+      const run = (prState, reviews = []) => {
+        const dir = mkdtempSync(join(tmpdir(), 'triage-close-exit-'));
+        try {
+          const bin = join(dir, 'bin');
+          mkdirSync(bin, { recursive: true });
+          writeFileSync(join(dir, 'pr-state.json'), JSON.stringify(prState));
+          writeFileSync(join(dir, 'reviews.json'), JSON.stringify(reviews));
+          // Stand-in for `gh`: serves the PR state, an (empty) review list
+          // and the head SHA, and captures the comment body the step would
+          // have posted.
+          writeFileSync(
+            join(bin, 'gh'),
+            [
+              '#!/usr/bin/env bash',
+              'case "$*" in',
+              `  "api user --jq .login") echo bot ;;`,
+              `  "pr view 1 --repo QwenLM/qwen-code --json state,closedAt") cat "${join(dir, 'pr-state.json')}" ;;`,
+              `  *"/pulls/1/reviews"*) cat "${join(dir, 'reviews.json')}" ;;`,
+              `  *"/pulls/1 --jq .head.sha") echo head ;;`,
+              `  *"/issues/1/comments"*)`,
+              `    for a in "$@"; do case "$a" in body=*) printf '%s' "\${a#body=}" > "${join(dir, 'comment.txt')}" ;; esac; done`,
+              `    echo '{}' ;;`,
+              '  *) echo "unexpected gh call: $*" >&2; exit 1 ;;',
+              'esac',
+            ].join('\n'),
+            { mode: 0o755 },
+          );
+          const proc = spawnSync('bash', ['-c', script], {
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              NUMBER: '1',
+              TRIGGERED_AT: '2026-01-02T00:00:00Z',
+              RUN_URL: 'https://example.invalid/run',
+            },
+            encoding: 'utf8',
+          });
+          let comment = '';
+          try {
+            comment = readFileSync(join(dir, 'comment.txt'), 'utf8');
+          } catch {
+            comment = '';
+          }
+          return {
+            status: proc.status,
+            log: `${proc.stdout}${proc.stderr}`,
+            comment,
+          };
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      };
+
+      // The close-exit shape: closed after the trigger, no review left.
+      // Neither the summary comment nor the warning may fire.
+      const closeExit = run({
+        state: 'CLOSED',
+        closedAt: '2026-01-03T00:00:00Z',
+      });
+      expect(closeExit.status).toBe(0);
+      expect(closeExit.comment).toBe('');
+      expect(closeExit.log).not.toContain('Triage re-run left no bot review');
+      expect(closeExit.log).toContain('no re-run summary needed');
+
+      // The boundary: a close BEFORE the trigger comment is not this run's
+      // terminal action, so the old notify behaviour stays intact.
+      const closedBefore = run({
+        state: 'CLOSED',
+        closedAt: '2026-01-01T00:00:00Z',
+      });
+      expect(closedBefore.status).toBe(0);
+      expect(closedBefore.log).toContain('Triage re-run left no bot review');
+      expect(closedBefore.comment).toContain(
+        '<!-- qwen-triage stage=rerun-summary -->',
+      );
     },
   );
 
@@ -1120,9 +1643,12 @@ describe('qwen-triage verify workflow', () => {
     expect(runStep.indexOf(sweep)).toBeLessThan(
       runStep.indexOf('start_openai_proxy'),
     );
-    // Uploaded artifacts must not carry node-planted symlinks:
-    // actions/upload-artifact dereferences them.
-    expect(runStep).toContain('-type l -delete');
+    // Uploaded artifacts must not carry node-planted symlinks (or FIFOs/
+    // sockets/devices, which can hang or redirect the collection):
+    // actions/upload-artifact dereferences symlinks.
+    expect(runStep).toContain(
+      'find "$RUNNER_TEMP/verify-results" \\( -type l -o -type p -o -type s -o -type b -o -type c \\) -delete',
+    );
   });
 
   // RUNNER_TEMP hygiene between jobs is runner-managed; this pool is
@@ -1252,47 +1778,103 @@ describe('qwen-triage verify hardening', () => {
     // Fails the job when the workspace is not actually empty afterwards.
     expect(wipe).toContain('refusing to execute external code on it');
     expect(wipe).toContain('exit 1');
+    // The ported guard layers (#9265) — see the post-run wipe test for
+    // what each pin catches.
+    expect(wipe).toContain('realpath -m');
+    expect(wipe).toContain('realpath -m -- "$RWS"');
+    expect(wipe).toContain('RUNNER_WORKSPACE:?');
+    expect(wipe).toContain('"$RWS"/*');
+    // RWS-side layers: the '..' arm and the degenerate-root refusal that
+    // keeps a stripped-empty runner workspace from degenerating the
+    // allowlist pattern to `/*`.
+    expect(wipe).toContain("refusing runner workspace path containing '..'");
+    expect(wipe).toContain('runner workspace resolved to /');
+  });
+
+  it('carries the symlink heal in both wipes, ordered and bounded (#9480)', () => {
+    // The guard's own wedge: a workspace replaced by a symlink resolves to
+    // its target, the allowlist refuses, and the refusal removes nothing —
+    // so the runner dies here on every later job. The heal must therefore
+    // run BEFORE canonicalization, AFTER the allowlist root that bounds it,
+    // and after the raw trailing-slash strip, since both of its predicates
+    // resolve through a link when the path ends in '/'.
+    for (const stepName of [
+      'Wipe workspace before external code',
+      'Wipe workspace after external code',
+    ]) {
+      const run = stepIn('verify', stepName);
+      const healAt = run.indexOf('[ -L "$WS" ] || [ ! -d "$WS" ]');
+      expect(healAt, `${stepName} has no heal`).toBeGreaterThan(-1);
+      expect(healAt).toBeLessThan(run.indexOf('realpath -m -- "$WS"'));
+      expect(run.indexOf('RWS="${RUNNER_WORKSPACE:?}"')).toBeLessThan(healAt);
+      expect(run.indexOf('while [ "${WS%/}" != "$WS" ]')).toBeLessThan(healAt);
+      // Containment on the canonical PARENT — resolving $WS would follow
+      // the very link being removed, and a raw match cannot see
+      // intermediate symlink components.
+      expect(run).toContain(
+        'HEAL_PARENT="$(realpath -m -- "$(dirname -- "$WS")" 2>/dev/null)"',
+      );
+      expect(run).toContain('"$RWS"|"$RWS"/*)');
+      expect(run).toContain('refusing to heal workspace outside');
+      // Both legs fail closed, and the incident leaves a trace.
+      expect(run).toContain('rm -f -- "$WS" || {');
+      expect(run).toContain('mkdir -- "$WS" || {');
+      expect(run).toContain('::warning::healing workspace');
+    }
   });
 
   // The wipe is the deny-by-default control, so run the real step text
   // against a workspace carrying the vectors the allowlist sweep is built
   // to enumerate — plus one it is not — and require every one to be gone.
-  it('removes planted persistence vectors, known and unknown', () => {
-    const wipe = stepIn('verify', 'Wipe workspace before external code')
-      .match(/run: \|-\n([\s\S]*)$/)?.[1]
-      .replace(/^ {10}/gm, '');
-    expect(wipe).toBeTruthy();
+  it.skipIf(!hasGnuRealpath)(
+    'removes planted persistence vectors, known and unknown',
+    () => {
+      const wipe = stepIn('verify', 'Wipe workspace before external code')
+        .match(/run: \|-\n([\s\S]*)$/)?.[1]
+        .replace(/^ {10}/gm, '');
+      expect(wipe).toBeTruthy();
 
-    const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-'));
-    try {
-      const ws = join(dir, 'workspace');
-      mkdirSync(join(ws, '.git', 'hooks'), { recursive: true });
-      // Vectors the sweep enumerates...
-      writeFileSync(join(ws, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nid\n');
-      writeFileSync(
-        join(ws, '.git', 'config.worktree'),
-        '[core]\n\thooksPath = /\n',
-      );
-      // ...and ones it does not: a dotfile the next npm run would read,
-      // and an ordinary file. Deny-by-default has to take all of them.
-      writeFileSync(join(ws, '.npmrc'), 'script-shell=/tmp/evil\n');
-      writeFileSync(join(ws, 'package.json'), '{}');
-      mkdirSync(join(ws, 'node_modules'), { recursive: true });
+      const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-'));
+      try {
+        const ws = join(dir, 'workspace');
+        mkdirSync(join(ws, '.git', 'hooks'), { recursive: true });
+        // Vectors the sweep enumerates...
+        writeFileSync(
+          join(ws, '.git', 'hooks', 'pre-commit'),
+          '#!/bin/sh\nid\n',
+        );
+        writeFileSync(
+          join(ws, '.git', 'config.worktree'),
+          '[core]\n\thooksPath = /\n',
+        );
+        // ...and ones it does not: a dotfile the next npm run would read,
+        // and an ordinary file. Deny-by-default has to take all of them.
+        writeFileSync(join(ws, '.npmrc'), 'script-shell=/tmp/evil\n');
+        writeFileSync(join(ws, 'package.json'), '{}');
+        mkdirSync(join(ws, 'node_modules'), { recursive: true });
 
-      const res = spawnSync('bash', ['-c', wipe], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          GITHUB_WORKSPACE: ws,
-          GITHUB_STEP_SUMMARY: join(dir, 'summary'),
-        },
-      });
-      expect(res.status).toBe(0);
-      expect(readdirSync(ws)).toEqual([]);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+        // GitHub Actions runs `shell: bash` steps with `-eo pipefail`,
+        // so the battery must too: bare `bash -c` masks a failing
+        // sweep command into a green test (probed with a failing `find`
+        // stub on PATH: exit 0 here, exit 1 under the real step flags).
+        const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GITHUB_WORKSPACE: ws,
+            // The ported guard allowlists against the runner workspace
+            // (#9265): the test workspace must sit inside it.
+            RUNNER_WORKSPACE: dir,
+            GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+          },
+        });
+        expect(res.status).toBe(0);
+        expect(readdirSync(ws)).toEqual([]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   // The guard has to be exercised with the REAL dangerous paths — that is
   // the whole point of it — but a test that passes `/` to a live `rm -rf`
@@ -1327,7 +1909,31 @@ describe('qwen-triage verify hardening', () => {
         { mode: 0o755 },
       );
 
-      for (const bad of ['/', '/usr', '/etc', '/var', '/root', '/home', '']) {
+      // The second half are the spellings the ported guard layers exist
+      // for (#9265): the kernel resolves each of them to a guarded root,
+      // yet the bare denylist they faced before let every one through
+      // (measured on main in the issue). `/tmp` and `/opt` are refused by
+      // the allowlist alone — the denylist has no arm for them.
+      for (const bad of [
+        '/',
+        '/usr',
+        '/etc',
+        '/var',
+        '/root',
+        '/home',
+        '',
+        '/home/',
+        '/root/',
+        '/var/',
+        '//',
+        '/home//',
+        '/home/.',
+        '/home/..',
+        '//usr',
+        '//home',
+        '/tmp',
+        '/opt',
+      ]) {
         writeFileSync(calls, '');
         const guard = spawnSync('bash', ['-c', wipe], {
           encoding: 'utf8',
@@ -1336,12 +1942,18 @@ describe('qwen-triage verify hardening', () => {
             PATH: `${dir}:${process.env.PATH}`,
             RM_CALLS: calls,
             GITHUB_WORKSPACE: bad,
+            // The recorder dir doubles as the allowlist root: every bad
+            // path sits outside it, so the refusal is the guard's, not a
+            // side effect of the fixture layout.
+            RUNNER_WORKSPACE: dir,
             GITHUB_STEP_SUMMARY: join(dir, 'summary'),
           },
         });
-        // Non-zero, not exactly 1: two mechanisms refuse here — the `case`
-        // exits 1 for a named path, while an empty one never reaches it
-        // because `${GITHUB_WORKSPACE:?}` aborts the shell first (127).
+        // Non-zero, not exactly 1: several mechanisms refuse here — the
+        // `case` exits 1 for a named root, an empty path never reaches it
+        // because `${GITHUB_WORKSPACE:?}` aborts the shell first (127),
+        // and the allowlist exits 1 for everything outside the runner
+        // workspace. Which one fires depends on the host's realpath.
         expect(
           guard.status,
           `path ${bad || '<empty>'} was not refused`,
@@ -1356,6 +1968,574 @@ describe('qwen-triage verify hardening', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // The canonicalization layer needs its own pin: every bad path above
+  // sits OUTSIDE the recorder dir, so the allowlist refuses them
+  // identically whether `realpath -m` ran or not — deleting that line
+  // ships green against the battery. A raw '..' spelling does not pin it
+  // either: the '..' case arm refuses that vector first, mutant or not.
+  // What does pin it is a path whose INTERMEDIATE component leaves the
+  // runner workspace: it matches "$RWS"/* as a string and names a
+  // directory outside it, so with the line deleted find resolves the link
+  // through the kernel and hands that directory's entries to the rm
+  // recorder. It is deliberately a directory at the far end rather than
+  // the link itself — a workspace that IS a link is now healed rather
+  // than refused (#9480), and this test exists for the refusal.
+  const extractRun = (stepName) => {
+    const run = stepIn('verify', stepName)
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    expect(run, `run block for ${stepName}`).toBeTruthy();
+    return run;
+  };
+
+  it.skipIf(!hasGnuRealpath)(
+    'refuses an allowlist-escaping path reached through an intermediate symlink',
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-escape-'));
+      const outside = mkdtempSync(join(tmpdir(), 'verify-wipe-outside-'));
+      mkdirSync(join(outside, 'sub'));
+      writeFileSync(join(outside, 'sub', 'canary'), 'x');
+      symlinkSync(outside, join(dir, 'link'));
+      try {
+        const calls = join(dir, 'rm-calls');
+        writeFileSync(
+          join(dir, 'rm'),
+          `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+          { mode: 0o755 },
+        );
+
+        for (const stepName of [
+          'Wipe workspace before external code',
+          'Wipe workspace after external code',
+        ]) {
+          writeFileSync(calls, '');
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                PATH: `${dir}:${process.env.PATH}`,
+                GITHUB_WORKSPACE: join(dir, 'link', 'sub'),
+                RUNNER_WORKSPACE: dir,
+                GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+              },
+            },
+          );
+          expect(res.status, `${stepName} did not refuse`).not.toBe(0);
+          expect(res.stdout + res.stderr).toContain(
+            'outside the runner workspace',
+          );
+          expect(
+            readFileSync(calls, 'utf8'),
+            `${stepName} invoked rm on the escaping path`,
+          ).toBe('');
+          expect(readdirSync(join(outside, 'sub'))).toEqual(['canary']);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // The wedge the guard itself created, and the hole the first attempt at
+  // healing it shipped. Both wipes carry the same layer, so both are driven.
+  const WIPE_STEPS = [
+    'Wipe workspace before external code',
+    'Wipe workspace after external code',
+  ];
+
+  it.skipIf(!hasGnuRealpath)(
+    'heals a workspace a previous job replaced with a symlink',
+    () => {
+      // Without the heal this is permanent: canonicalization resolves the
+      // link to its target, the allowlist refuses, the step exits 1 having
+      // removed nothing, and every later job on the runner dies at the same
+      // line. The unlink must take the LINK and leave the target alone —
+      // which is also what pins the heal judging the canonical PARENT
+      // rather than $WS itself, since resolving $WS follows the very link
+      // being removed and would refuse a repair that must succeed.
+      for (const stepName of WIPE_STEPS) {
+        const parent = mkdtempSync(join(tmpdir(), 'verify-heal-'));
+        const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
+        const ws = join(parent, 'workspace');
+        writeFileSync(join(outside, 'canary'), 'x');
+        symlinkSync(outside, ws);
+        try {
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: ws,
+                RUNNER_WORKSPACE: parent,
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
+            },
+          );
+          expect(res.status, `${stepName}: ${res.stdout}${res.stderr}`).toBe(0);
+          expect(res.stdout + res.stderr).toContain('healing workspace');
+          expect(res.stdout + res.stderr).toContain(outside);
+          expect(lstatSync(ws).isSymbolicLink()).toBe(false);
+          expect(readdirSync(ws)).toEqual([]);
+          expect(readdirSync(outside)).toEqual(['canary']);
+        } finally {
+          rmSync(parent, { recursive: true, force: true });
+          rmSync(outside, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath)(
+    'refuses to heal through an intermediate symlink, before touching anything',
+    () => {
+      // The defect the first attempt kept through three rounds: it matched
+      // the RAW path, and `$RWS/link/sub` matches "$RWS"/* as a string while
+      // naming a file outside the runner workspace — so the unlink and the
+      // mkdir landed OUTSIDE, and only then did the allowlist refuse.
+      for (const stepName of WIPE_STEPS) {
+        const parent = mkdtempSync(join(tmpdir(), 'verify-heal-inter-'));
+        const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
+        writeFileSync(join(outside, 'sub'), 'canary');
+        symlinkSync(outside, join(parent, 'link'));
+        try {
+          const calls = join(parent, 'rm-calls');
+          writeFileSync(calls, '');
+          writeFileSync(
+            join(parent, 'rm'),
+            `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+            { mode: 0o755 },
+          );
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                PATH: `${parent}:${process.env.PATH}`,
+                GITHUB_WORKSPACE: join(parent, 'link', 'sub'),
+                RUNNER_WORKSPACE: parent,
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
+            },
+          );
+          expect(res.status, stepName).not.toBe(0);
+          expect(res.stdout + res.stderr).toContain(
+            'refusing to heal workspace outside the runner workspace',
+          );
+          expect(readFileSync(calls, 'utf8')).toBe('');
+          // The mutation the old shape performed before refusing: the file
+          // at the resolved target is still a file, with its contents.
+          expect(lstatSync(join(outside, 'sub')).isFile()).toBe(true);
+          expect(readFileSync(join(outside, 'sub'), 'utf8')).toBe('canary');
+        } finally {
+          rmSync(parent, { recursive: true, force: true });
+          rmSync(outside, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath)(
+    'heals a non-directory workspace, and sees it through a trailing slash',
+    () => {
+      // The `|| [ ! -d "$WS" ]` half, and the raw strip that has to precede
+      // both predicates: `[ -L "$WS/" ]` is false and `[ ! -d "$WS/" ]`
+      // resolves through the link, so one trailing slash hides the
+      // corruption entirely.
+      for (const stepName of WIPE_STEPS) {
+        const parent = mkdtempSync(join(tmpdir(), 'verify-heal-file-'));
+        const ws = join(parent, 'workspace');
+        writeFileSync(ws, 'not a directory');
+        try {
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: ws,
+                RUNNER_WORKSPACE: parent,
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
+            },
+          );
+          expect(res.status, `${stepName}: ${res.stdout}${res.stderr}`).toBe(0);
+          expect(res.stdout + res.stderr).toContain('it was not a directory');
+          expect(lstatSync(ws).isDirectory()).toBe(true);
+        } finally {
+          rmSync(parent, { recursive: true, force: true });
+        }
+
+        const linkParent = mkdtempSync(join(tmpdir(), 'verify-heal-slash-'));
+        const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
+        const linkWs = join(linkParent, 'workspace');
+        writeFileSync(join(outside, 'canary'), 'x');
+        symlinkSync(outside, linkWs);
+        try {
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: `${linkWs}/`,
+                RUNNER_WORKSPACE: linkParent,
+                GITHUB_STEP_SUMMARY: join(linkParent, 'summary'),
+              },
+            },
+          );
+          expect(res.status, `${stepName}: ${res.stdout}${res.stderr}`).toBe(0);
+          expect(lstatSync(linkWs).isSymbolicLink()).toBe(false);
+          expect(readdirSync(outside)).toEqual(['canary']);
+        } finally {
+          rmSync(linkParent, { recursive: true, force: true });
+          rmSync(outside, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath)(
+    'keeps a forged workflow command in the symlink target out of the log',
+    () => {
+      // On this lane the previous job may have run a contributor's code, and
+      // the runner parses `::` at the start of ANY stdout line as a workflow
+      // command — so a target of $'…\n::error::forged' would forge an
+      // annotation from the very step reporting the corruption.
+      for (const stepName of WIPE_STEPS) {
+        const parent = mkdtempSync(join(tmpdir(), 'verify-heal-inject-'));
+        const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
+        const ws = join(parent, 'workspace');
+        symlinkSync(`${outside}\n::error::forged-annotation`, ws);
+        try {
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: ws,
+                RUNNER_WORKSPACE: parent,
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
+            },
+          );
+          expect(res.status, `${stepName}: ${res.stdout}${res.stderr}`).toBe(0);
+          const out = res.stdout + res.stderr;
+          expect(out).toContain('healing workspace');
+          expect(out).toContain('pointed at');
+          for (const line of out.split('\n')) {
+            expect(line.startsWith('::error::')).toBe(false);
+          }
+        } finally {
+          rmSync(parent, { recursive: true, force: true });
+          rmSync(outside, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath)(
+    'fails closed when the healed workspace cannot be recreated',
+    () => {
+      // The mkdir leg's own refusal, reachable without a permission trick:
+      // `rm -f` returns 0 for a path whose parent is not a directory, and
+      // the mkdir that follows cannot succeed. Swallowed, the wipe would run
+      // against a path that does not exist.
+      for (const stepName of WIPE_STEPS) {
+        const parent = mkdtempSync(join(tmpdir(), 'verify-heal-mkdir-'));
+        writeFileSync(join(parent, 'file'), 'not a directory');
+        try {
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: join(parent, 'file', 'sub'),
+                RUNNER_WORKSPACE: parent,
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
+            },
+          );
+          expect(res.status, stepName).not.toBe(0);
+          expect(res.stdout + res.stderr).toContain('could not recreate');
+        } finally {
+          rmSync(parent, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath || process.getuid?.() === 0)(
+    'fails closed when the corrupt workspace cannot be unlinked',
+    () => {
+      // A swallowed `rm -f` failure would let the mkdir and the wipe run on
+      // a path that is still a symlink. Root bypasses the mode bits, so the
+      // fixture cannot produce the refusal there.
+      for (const stepName of WIPE_STEPS) {
+        const parent = mkdtempSync(join(tmpdir(), 'verify-heal-perm-'));
+        const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
+        const ws = join(parent, 'workspace');
+        writeFileSync(join(outside, 'canary'), 'x');
+        symlinkSync(outside, ws);
+        chmodSync(parent, 0o555);
+        try {
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: ws,
+                RUNNER_WORKSPACE: parent,
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
+            },
+          );
+          expect(res.status, stepName).not.toBe(0);
+          expect(res.stdout + res.stderr).toContain('could not remove');
+          expect(lstatSync(ws).isSymbolicLink()).toBe(true);
+          expect(readdirSync(outside)).toEqual(['canary']);
+        } finally {
+          chmodSync(parent, 0o755);
+          rmSync(parent, { recursive: true, force: true });
+          rmSync(outside, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  // Fronts PATH with a failing realpath so the script must fail closed instead
+  // of matching and wiping a raw, potentially misleading spelling.
+  const stubRealpath = () => {
+    const bin = mkdtempSync(join(tmpdir(), 'verify-wipe-bin-'));
+    writeFileSync(join(bin, 'realpath'), '#!/bin/sh\nexit 1\n');
+    chmodSync(join(bin, 'realpath'), 0o755);
+    return bin;
+  };
+
+  it('refuses to wipe when realpath is absent', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'verify-wipe-rws-'));
+    const ws = join(parent, 'repo');
+    mkdirSync(ws);
+    writeFileSync(join(ws, 'leftover'), 'x');
+    const bin = stubRealpath();
+    try {
+      // Both copies carry the fail-closed realpath leg; exercise each so
+      // a fail-open regression of either copy is caught.
+      for (const stepName of [
+        'Wipe workspace before external code',
+        'Wipe workspace after external code',
+      ]) {
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: `${parent}/`,
+              GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+            },
+          },
+        );
+        expect(res.status, `${stepName} did not fail closed`).not.toBe(0);
+        expect(readdirSync(ws), `${stepName} wiped without realpath`).toEqual([
+          'leftover',
+        ]);
+      }
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a trailing-slash GITHUB_WORKSPACE when realpath is absent', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-ws-'));
+    const bin = stubRealpath();
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      for (const stepName of [
+        'Wipe workspace before external code',
+        'Wipe workspace after external code',
+      ]) {
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${bin}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: '/home/',
+              RUNNER_WORKSPACE: '/home',
+              GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+            },
+          },
+        );
+        expect(res.status, `${stepName} did not refuse`).not.toBe(0);
+        expect(readFileSync(calls, 'utf8'), `${stepName} invoked rm`).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an allowlist-escaping .. path when realpath is absent', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'verify-wipe-fallback-'));
+    const outside = mkdtempSync(join(tmpdir(), 'verify-wipe-outside-'));
+    const bin = stubRealpath();
+    mkdirSync(join(dir, 'sub'));
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      for (const stepName of [
+        'Wipe workspace before external code',
+        'Wipe workspace after external code',
+      ]) {
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${dir}:${bin}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: `${dir}/sub/../../${basename(outside)}`,
+              RUNNER_WORKSPACE: dir,
+              GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+            },
+          },
+        );
+        expect(res.status, `${stepName} did not refuse`).not.toBe(0);
+        expect(
+          readFileSync(calls, 'utf8'),
+          `${stepName} invoked rm on the escaping path`,
+        ).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  // The degenerate-root arm keeps a stripped-empty RUNNER_WORKSPACE from
+  // turning the allowlist pattern into `/*` (which admits every absolute
+  // path). The reference suite covers the review workflow; each backported
+  // copy needs its own case — deleting the arm ships green otherwise.
+  it('refuses a runner workspace that resolves to / without invoking rm', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'verify-wipe-root-'));
+    const ws = join(parent, 'repo');
+    mkdirSync(ws);
+    writeFileSync(join(ws, 'leftover'), 'x');
+    try {
+      const calls = join(parent, 'rm-calls');
+      writeFileSync(calls, '');
+      writeFileSync(
+        join(parent, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      for (const stepName of [
+        'Wipe workspace before external code',
+        'Wipe workspace after external code',
+      ]) {
+        writeFileSync(calls, '');
+        const res = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${parent}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: ws,
+              RUNNER_WORKSPACE: '/',
+              GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+            },
+          },
+        );
+        expect(res.status, `${stepName} did not refuse`).not.toBe(0);
+        expect(readFileSync(calls, 'utf8'), `${stepName} invoked rm`).toBe('');
+        expect(readdirSync(ws), `${stepName} wiped`).toEqual(['leftover']);
+      }
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  // The RWS realpath line has no refusal of its own to observe, so pin it
+  // from the happy side: a RUNNER_WORKSPACE spelled with '..' that
+  // canonicalizes back to the real parent must still be allowed to wipe.
+  // Deleting the RWS realpath line leaves the raw spelling to the '..'
+  // arm, which refuses — and this test fails on that mutant.
+  it.skipIf(!hasGnuRealpath)(
+    'canonicalizes a ..-spelled runner workspace instead of refusing it',
+    () => {
+      const parent = mkdtempSync(join(tmpdir(), 'verify-wipe-rwsdot-'));
+      const ws = join(parent, 'repo');
+      mkdirSync(ws);
+      try {
+        for (const stepName of [
+          'Wipe workspace before external code',
+          'Wipe workspace after external code',
+        ]) {
+          writeFileSync(join(ws, 'leftover'), 'x');
+          const res = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', extractRun(stepName)],
+            {
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                GITHUB_WORKSPACE: ws,
+                RUNNER_WORKSPACE: join(ws, '..'),
+                GITHUB_STEP_SUMMARY: join(parent, 'summary'),
+              },
+            },
+          );
+          expect(res.status, `${stepName} refused a canonical RWS`).toBe(0);
+          expect(readdirSync(ws), `${stepName} did not wipe`).toEqual([]);
+        }
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
 
   // The pre-run wipe answers what an external run inherits; the
   // post-run wipe answers what it leaves behind for the next pool job.
@@ -1375,7 +2555,118 @@ describe('qwen-triage verify hardening', () => {
     );
     // Same path guard as the pre-run wipe.
     expect(postWipe).toContain('refusing to wipe suspicious workspace path');
+    // The ported guard layers (#9265), pinned on THIS copy: canonicalize
+    // before matching, and allowlist the target inside the runner
+    // workspace. The exec tests below prove behavior; these text pins
+    // catch a mutation that deletes a layer from this copy alone.
+    expect(postWipe).toContain('realpath -m');
+    expect(postWipe).toContain('realpath -m -- "$RWS"');
+    expect(postWipe).toContain('RUNNER_WORKSPACE:?');
+    expect(postWipe).toContain('"$RWS"/*');
+    expect(postWipe).toContain(
+      "refusing runner workspace path containing '..'",
+    );
+    expect(postWipe).toContain('runner workspace resolved to /');
   });
+
+  // The pre-run guard battery runs the post-run wipe too: it is a
+  // separate copy of the script, and the pre-run battery passing says
+  // nothing about mutations to this one.
+  it('refuses a suspicious workspace path in the post-run wipe without invoking rm', () => {
+    const wipe = extractRun('Wipe workspace after external code');
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-postwipe-guard-'));
+    try {
+      const calls = join(dir, 'rm-calls');
+      writeFileSync(
+        join(dir, 'rm'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+
+      for (const bad of [
+        '/',
+        '/usr',
+        '/etc',
+        '/var',
+        '/root',
+        '/home',
+        '',
+        '/home/',
+        '/root/',
+        '/var/',
+        '//',
+        '/home//',
+        '/home/.',
+        '/home/..',
+        '//usr',
+        '//home',
+        '/tmp',
+        '/opt',
+      ]) {
+        writeFileSync(calls, '');
+        const guard = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            GITHUB_WORKSPACE: bad,
+            RUNNER_WORKSPACE: dir,
+            GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+          },
+        });
+        expect(
+          guard.status,
+          `path ${bad || '<empty>'} was not refused`,
+        ).not.toBe(0);
+        expect(
+          readFileSync(calls, 'utf8'),
+          `rm was invoked for ${bad || '<empty>'}`,
+        ).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The post-run wipe still has to wipe: its `if: always()` means it is
+  // the ONLY cleanup a cancelled or timed-out external run gets, so a
+  // guard regression that refuses the legitimate workspace would leak
+  // every aborted run's tree into the next pool job.
+  it.skipIf(!hasGnuRealpath)(
+    'wipes a legitimate workspace in the post-run wipe and writes the summary',
+    () => {
+      const wipe = extractRun('Wipe workspace after external code');
+
+      const parent = mkdtempSync(join(tmpdir(), 'verify-postwipe-ok-'));
+      const ws = join(parent, 'workspace');
+      mkdirSync(join(ws, '.git', 'hooks'), { recursive: true });
+      writeFileSync(
+        join(ws, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\nid\n',
+      );
+      writeFileSync(join(ws, 'leftover.o'), 'x');
+      const summary = join(parent, 'summary');
+      try {
+        const res = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipe], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GITHUB_WORKSPACE: ws,
+            RUNNER_WORKSPACE: parent,
+            GITHUB_STEP_SUMMARY: summary,
+          },
+        });
+        expect(res.status).toBe(0);
+        expect(readdirSync(ws)).toEqual([]);
+        expect(readFileSync(summary, 'utf8')).toContain(
+          'Workspace wiped after external code',
+        );
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
 
   // The sponsored lane's pre-execution risk screen, driven for real: the
   // actual resolve-step text runs against a stubbed gh and a live local
@@ -1778,18 +3069,23 @@ describe('qwen-triage verify hardening', () => {
   // job's own commands: a bare step() lookup returns the tmux job's
   // identically named step, so verify-side regressions would pass silently.
   it('strips GitHub command files from every node-run verify command', () => {
-    // Bound to the lifecycle commands that run as node before the agent:
-    // npm ci and npm run build in the prepare step, plus the evidence
-    // browser download. The slice stops at the agent step, whose own
-    // `runuser` launches qwen under `env -i` and needs no per-variable
-    // stripping. Covering all three by construction (not enumeration) is
-    // what catches a future node-run command added without the strip.
+    // Bound to the commands that run as node before the agent: npm ci and
+    // npm run build in the prepare step, the evidence browser download,
+    // and the flake gate's four pre-sample git invocations — the .git
+    // sanitize, git reset --hard, git clean -ffd, and the PINNED_OID
+    // rev-parse (git filters run from PR-owned .git metadata). The slice
+    // stops at the agent step, whose own `runuser` launches qwen under
+    // `env -i` and needs no per-variable stripping; the gate's
+    // per-sample invocation is a line-continuation shape this
+    // single-line match does not fold. Covering all seven by
+    // construction (not enumeration) is what catches a future node-run
+    // command added without the strip.
     const prepare = verifyJob.slice(
       verifyJob.indexOf('Install and build PR app'),
       verifyJob.indexOf('Run verification agent'),
     );
     const commands = prepare.match(/runuser -u node -- env[\s\S]*?\n/g) ?? [];
-    expect(commands.length).toBe(3);
+    expect(commands.length).toBe(7);
     expect(step('Run verification agent')).toContain(
       'runuser -u node -- env -i',
     );
@@ -2543,7 +3839,9 @@ describe('qwen-triage verify hardening round 2', () => {
     const copy = runStep.indexOf(
       '-exec cp -r {} "$RUNNER_TEMP/verify-results/"',
     );
-    const strip = runStep.indexOf('-type l -delete');
+    const strip = runStep.indexOf(
+      'find "$RUNNER_TEMP/verify-results" \\( -type l -o -type p -o -type s -o -type b -o -type c \\) -delete',
+    );
     expect(copy).toBeGreaterThan(-1);
     expect(strip).toBeGreaterThan(copy);
   });
@@ -2612,7 +3910,7 @@ describe('qwen-triage verify hardening round 2', () => {
   });
 
   // The evidence-hosting path carries the untrusted-image checks; exercise
-  // it end to end against a bare local remote.
+  // it end to end against a local OSS uploader stub.
   it('hosts only valid, unique, in-limit PNGs and degrades to text', () => {
     const publishStep = step('Post verification report comment');
     const script = publishStep
@@ -2622,10 +3920,43 @@ describe('qwen-triage verify hardening round 2', () => {
     const sh = (cmd, opts = {}) =>
       spawnSync('bash', ['-c', cmd], { encoding: 'utf8', ...opts });
     try {
-      // A bare remote with a pr-assets branch, plus a gh stub.
-      sh(`git init -q --bare "${dir}/assets.git"`);
-      sh(
-        `mkdir -p "${dir}/seed" && cd "${dir}/seed" && git init -q && git checkout -q -b pr-assets/7999-verify && echo s > s.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm s && git push -q "${dir}/assets.git" pr-assets/7999-verify`,
+      // The uploader stub preserves the object layout while avoiding network
+      // access, and enforces the real uploader's flag contract: the workflow
+      // must pass --bucket, --config and --prefix with values, or the
+      // harness fails exactly where production would silently degrade every
+      // report to text-only. The gh stub captures the rendered report body.
+      writeFileSync(
+        join(dir, 'upload-assets'),
+        [
+          '#!/usr/bin/env bash',
+          'set -euo pipefail',
+          'if [ "${OSS_STUB_FAIL:-}" = 1 ]; then exit 1; fi',
+          'bucket=""; config=""; prefix=""',
+          'while [ "$#" -gt 0 ]; do',
+          '  case "$1" in',
+          '    --bucket) bucket="$2"; shift 2 ;;',
+          '    --config) config="$2"; shift 2 ;;',
+          '    --prefix) prefix="$2"; shift 2 ;;',
+          '    *) break ;;',
+          '  esac',
+          'done',
+          'if [ -z "$bucket" ] || [ -z "$config" ] || [ -z "$prefix" ]; then',
+          '  echo "upload-assets stub: --bucket, --config and --prefix are all required" >&2',
+          '  exit 1',
+          'fi',
+          // The real uploader hands --config to ossutil, which dies on a
+          // missing file: checking it here means a workflow mutation that
+          // drifts the flag away from the credential file the configure
+          // step writes turns the harness red instead of staying green.
+          'if [ ! -f "$config" ]; then',
+          '  echo "upload-assets stub: --config file does not exist: $config" >&2',
+          '  exit 1',
+          'fi',
+          'target="$OSS_STUB_ROOT/$bucket/$prefix"',
+          'mkdir -p "$target"',
+          'for file in "$@"; do cp "$file" "$target/$(basename "$file")"; done',
+        ].join('\n'),
+        { mode: 0o755 },
       );
       writeFileSync(
         join(dir, 'gh'),
@@ -2662,6 +3993,12 @@ describe('qwen-triage verify hardening round 2', () => {
       png(join(art, 'evidence', '04-edge.png'), 2 * 1024 * 1024 - 9);
       writeFileSync(join(art, 'report.md'), '## r\n');
 
+      // The stub arm receives --config "${RUNNER_TEMP}/.ossutilconfig" and
+      // (like the real uploader's ossutil) refuses to run without that
+      // file, so seed the configure step's product for the stub runs. The
+      // production arms below manage the file explicitly instead.
+      writeFileSync(join(dir, '.ossutilconfig'), '[Credentials]\n');
+
       const out = join(dir, 'comment.md');
       const res = sh(script, {
         cwd: work,
@@ -2682,29 +4019,27 @@ describe('qwen-triage verify hardening round 2', () => {
           AGENT_VERDICT: 'findings',
           SKIP_REASON: '',
           PREPARE_FAILURE_PHASE: '',
-          VERIFY_ASSETS_REMOTE: `${dir}/assets.git`,
+          ALIYUN_OSS_BUCKET: 'assets-bucket',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+          VERIFY_ASSETS_UPLOADER: join(dir, 'upload-assets'),
+          OSS_STUB_ROOT: join(dir, 'oss'),
         },
       });
       expect(res.status).toBe(0);
-      const hosted = sh(
-        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/7999-verify | grep verify/ || true`,
-      )
-        .stdout.trim()
-        .split('\n')
-        .filter(Boolean);
+      const hosted = readdirSync(
+        join(dir, 'oss', 'assets-bucket', 'pr-assets', 'verify', 'pr7999-77-1'),
+      );
       // Valid + at the exact 2 MiB boundary are hosted; the text file, the
       // oversize file and the duplicate name are not.
-      expect(hosted.map((p) => p.split('/').pop()).sort()).toEqual([
-        '01-ab.png',
-        '04-edge.png',
-      ]);
+      expect(hosted.sort()).toEqual(['01-ab.png', '04-edge.png']);
       const comment = readFileSync(out, 'utf8');
-      expect(comment).toContain('![01-ab](');
+      expect(comment).toContain(
+        '![01-ab](https://assets.example.test/pr-assets/verify/pr7999-77-1/01-ab.png)',
+      );
       expect(comment).not.toContain('02-fake');
       expect(comment).toContain('did not pass the hosting checks');
 
-      // Unreachable remote -> text-only, never an aborted report.
-      sh(`rm -rf "${dir}/empty.git" && mkdir -p "${dir}/empty.git"`);
+      // Upload failure -> text-only, never an aborted report.
       const out2 = join(dir, 'comment2.md');
       const res2 = sh(script, {
         cwd: work,
@@ -2725,7 +4060,11 @@ describe('qwen-triage verify hardening round 2', () => {
           AGENT_VERDICT: 'findings',
           SKIP_REASON: '',
           PREPARE_FAILURE_PHASE: '',
-          VERIFY_ASSETS_REMOTE: `${dir}/empty.git`,
+          ALIYUN_OSS_BUCKET: 'assets-bucket',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+          VERIFY_ASSETS_UPLOADER: join(dir, 'upload-assets'),
+          OSS_STUB_ROOT: join(dir, 'oss'),
+          OSS_STUB_FAIL: '1',
         },
       });
       expect(res2.status).toBe(0);
@@ -2733,19 +4072,8 @@ describe('qwen-triage verify hardening round 2', () => {
       expect(comment2).toContain('Sandboxed verification');
       expect(comment2).not.toContain('Evidence images');
 
-      // FIRST RUN on a PR: the remote is valid but the per-PR branch does
-      // not exist yet, so the clone fails and the orphan-init path runs for
-      // real. Both scenarios above take the clone-failed branch too, but
-      // both then fail to push (one seeded the branch, the other has no
-      // remote), so neither proves orphan-init can actually DELIVER. Without
-      // this, a bug in `checkout --orphan` or a dropped `remote add origin`
-      // would silently discard every image on every PR's first run.
-      sh(`git -C "${dir}/assets.git" branch -D pr-assets/7999-verify`);
-      expect(
-        sh(
-          `git -C "${dir}/assets.git" branch --list pr-assets/7999-verify`,
-        ).stdout.trim(),
-      ).toBe('');
+      // A later run gets an immutable prefix instead of overwriting or
+      // accumulating commits in the same Git ref.
       const out3 = join(dir, 'comment3.md');
       const res3 = sh(script, {
         cwd: work,
@@ -2766,31 +4094,309 @@ describe('qwen-triage verify hardening round 2', () => {
           AGENT_VERDICT: 'findings',
           SKIP_REASON: '',
           PREPARE_FAILURE_PHASE: '',
-          VERIFY_ASSETS_REMOTE: `${dir}/assets.git`,
+          ALIYUN_OSS_BUCKET: 'assets-bucket',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+          VERIFY_ASSETS_UPLOADER: join(dir, 'upload-assets'),
+          OSS_STUB_ROOT: join(dir, 'oss'),
         },
       });
       expect(res3.status).toBe(0);
-      // The branch was created by orphan-init and carries this run's images.
-      const hosted3 = sh(
-        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets/7999-verify | grep verify/ || true`,
-      )
-        .stdout.trim()
-        .split('\n')
-        .filter(Boolean);
-      expect(hosted3.map((p) => p.split('/').pop()).sort()).toEqual([
-        '01-ab.png',
-        '04-edge.png',
-      ]);
-      // Orphan, not a graft onto unrelated history: exactly one commit.
       expect(
-        sh(
-          `git -C "${dir}/assets.git" rev-list --count pr-assets/7999-verify`,
-        ).stdout.trim(),
-      ).toBe('1');
-      expect(readFileSync(out3, 'utf8')).toContain('![01-ab](');
+        readdirSync(
+          join(
+            dir,
+            'oss',
+            'assets-bucket',
+            'pr-assets',
+            'verify',
+            'pr7999-79-1',
+          ),
+        ).sort(),
+      ).toEqual(['01-ab.png', '04-edge.png']);
+      expect(readFileSync(out3, 'utf8')).toContain(
+        'https://assets.example.test/pr-assets/verify/pr7999-79-1/01-ab.png',
+      );
+
+      // The production arms below run WITHOUT the seeded credential file
+      // until the success arm writes it back — the missing-file case is
+      // exactly what res4b asserts on.
+      rmSync(join(dir, '.ossutilconfig'));
+
+      // An ossutil install failure is expected to degrade to a text-only
+      // report. This executes the production dispatch arm without touching
+      // the network and pins its successful return under set -e.
+      const out4 = join(dir, 'comment4.md');
+      const res4 = sh(script, {
+        cwd: work,
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_STUB_OUT: out4,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_RUN_ID: '80',
+          GITHUB_RUN_ATTEMPT: '1',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          VERIFY_RESULT: 'success',
+          VERDICT: 'pass',
+          AGENT_VERDICT: 'findings',
+          SKIP_REASON: '',
+          PREPARE_FAILURE_PHASE: '',
+          ALIYUN_OSS_BUCKET: 'assets-bucket',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+          OSSUTIL_INSTALL_OUTCOME: 'failure',
+          OSS_STUB_ROOT: join(dir, 'oss'),
+        },
+      });
+      expect(res4.status).toBe(0);
+      const comment4 = readFileSync(out4, 'utf8');
+      expect(comment4).toContain('Sandboxed verification');
+      expect(comment4).not.toContain('Evidence images');
+
+      // Install green but NO credential file: the configure step is
+      // continue-on-error, so this is what a missing/rotated OSS secret
+      // looks like from here. The publisher must degrade to text rather
+      // than hand the uploader a config it cannot read and pay three
+      // retry backoffs per image to learn that.
+      const out4b = join(dir, 'comment4b.md');
+      const res4b = sh(script, {
+        cwd: work,
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_STUB_OUT: out4b,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_RUN_ID: '80',
+          GITHUB_RUN_ATTEMPT: '2',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          VERIFY_RESULT: 'success',
+          VERDICT: 'pass',
+          AGENT_VERDICT: 'findings',
+          SKIP_REASON: '',
+          PREPARE_FAILURE_PHASE: '',
+          ALIYUN_OSS_BUCKET: 'assets-bucket',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+          OSSUTIL_INSTALL_OUTCOME: 'success',
+          OSS_STUB_ROOT: join(dir, 'oss'),
+        },
+      });
+      expect(res4b.status).toBe(0);
+      expect(existsSync(join(dir, '.ossutilconfig'))).toBe(false);
+      const comment4b = readFileSync(out4b, 'utf8');
+      expect(comment4b).toContain('Sandboxed verification');
+      expect(comment4b).not.toContain('Evidence images');
+
+      // Exercise the production success dispatch too: copy the verified
+      // binary into a job-private PATH and run the real uploader through it.
+      const realUploader = readFileSync(
+        'scripts/upload-aliyun-oss-assets.js',
+        'utf8',
+      );
+      const realUtils = readFileSync('scripts/release-script-utils.js', 'utf8');
+      mkdirSync(join(work, 'scripts'), { recursive: true });
+      writeFileSync(
+        join(work, 'scripts', 'upload-aliyun-oss-assets.js'),
+        realUploader,
+      );
+      writeFileSync(
+        join(work, 'scripts', 'release-script-utils.js'),
+        realUtils,
+      );
+      writeFileSync(
+        join(dir, 'ossutil'),
+        [
+          '#!/bin/bash',
+          'set -euo pipefail',
+          '[ "$1" = cp ]',
+          'src="$2"; dest="$3"',
+          'target="$OSS_STUB_ROOT/${dest#oss://}"',
+          '/bin/mkdir -p "$(/usr/bin/dirname "$target")"',
+          '/bin/cp "$src" "$target"',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      // The configure step's product. The stub ossutil ignores -c, but the
+      // publisher now refuses to dispatch without it — as production does.
+      writeFileSync(join(dir, '.ossutilconfig'), '[Credentials]\n');
+      const out5 = join(dir, 'comment5.md');
+      const res5 = sh(script, {
+        cwd: work,
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_STUB_OUT: out5,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_RUN_ID: '81',
+          GITHUB_RUN_ATTEMPT: '1',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          VERIFY_RESULT: 'success',
+          VERDICT: 'pass',
+          AGENT_VERDICT: 'findings',
+          SKIP_REASON: '',
+          PREPARE_FAILURE_PHASE: '',
+          ALIYUN_OSS_BUCKET: 'assets-bucket',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+          OSSUTIL_INSTALL_OUTCOME: 'success',
+          OSS_STUB_ROOT: join(dir, 'oss-production'),
+        },
+      });
+      if (res5.status !== 0) {
+        throw new Error(
+          `production dispatch failed:\n${res5.stdout}\n${res5.stderr}`,
+        );
+      }
+      expect(
+        readdirSync(
+          join(
+            dir,
+            'oss-production',
+            'assets-bucket',
+            'pr-assets',
+            'verify',
+            'pr7999-81-1',
+          ),
+        ).sort(),
+      ).toEqual(['01-ab.png', '04-edge.png']);
+      expect(readFileSync(out5, 'utf8')).toContain(
+        'https://assets.example.test/pr-assets/verify/pr7999-81-1/01-ab.png',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // The behavioural runs above either stub the uploader via
+  // VERIFY_ASSETS_UPLOADER or (res5) already exercise the production
+  // ossutil arm end-to-end through the real uploader. Pin the full
+  // invocation shape as well: node must resolve under the inherited PATH
+  // (never $RUNNER_TEMP — PATH hijack) and all three ossutil flags must be
+  // present — the real uploader exits 1 on a valueless --config, which in
+  // production silently degrades every /verify report to text-only.
+  it('pins the production uploader invocation and its ossutil flags', () => {
+    const script =
+      stepIn('publish-verify', 'Post verification report comment').match(
+        /run: \|-\n([\s\S]*)$/,
+      )?.[1] ?? '';
+    expect(script).toContain('node_bin="$(command -v node || true)"');
+    expect(script).toContain('upload_cmd=("$node_bin" "$uploader")');
+    expect(script).toContain('upload_path="$trusted_bin"');
+    expect(script).toContain('if ! PATH="$upload_path" "${upload_cmd[@]}"');
+    expect(script).not.toContain('PATH="$RUNNER_TEMP:$PATH"');
+    expect(script).toContain('--bucket "$ALIYUN_OSS_BUCKET"');
+    expect(script).toContain('--config "${RUNNER_TEMP:-/tmp}/.ossutilconfig"');
+    expect(script).toContain('--prefix "$prefix"');
+  });
+
+  // The credential lifecycle is security-relevant: dropping the cleanup
+  // (or its always() condition) leaves the OSS key pair in $RUNNER_TEMP —
+  // not exploitable on today's ephemeral ubuntu-latest runner, but the
+  // shape must not regress if the job ever returns to a persistent pool.
+  // A dropped sha256 check installs whatever the mirror serves. Consumers
+  // must also trust the Actions-computed outcome, never a marker in the
+  // PR-writable temp dir.
+  it('pins the ossutil install/configure/cleanup credential lifecycle', () => {
+    const install = stepIn('publish-verify', 'Install ossutil');
+    expect(install).toContain("id: 'install-ossutil'");
+    expect(install).toContain('continue-on-error: true');
+    expect(install).toContain('sha256sum -c');
+    const configure = stepIn(
+      'publish-verify',
+      'Configure Aliyun OSS credentials',
+    );
+    expect(configure).toContain(
+      'if: "${{ steps.install-ossutil.outcome == \'success\' }}"',
+    );
+    expect(configure).toContain('continue-on-error: true');
+    expect(configure).toContain('-c "$RUNNER_TEMP/.ossutilconfig"');
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    expect(publish).toContain(
+      "OSSUTIL_INSTALL_OUTCOME: '${{ steps.install-ossutil.outcome }}'",
+    );
+    // Both preconditions: the Actions-computed install outcome (never a
+    // marker in the PR-writable temp dir) AND the credential file the
+    // continue-on-error configure step is supposed to have written.
+    expect(publish).toContain(
+      'elif [ "${OSSUTIL_INSTALL_OUTCOME:-}" = \'success\' ] &&',
+    );
+    expect(publish).toContain(
+      '[ -f "${RUNNER_TEMP:-/tmp}/.ossutilconfig" ]; then',
+    );
+    const cleanup = stepIn('publish-verify', 'Cleanup Aliyun OSS credentials');
+    expect(cleanup).toContain("if: '${{ always() }}'");
+    expect(cleanup).toContain('rm -f "$RUNNER_TEMP/.ossutilconfig"');
+  });
+
+  // The publisher's checkout is the trust boundary for this job's OSS
+  // credentials: it must take only the trusted base-repo scripts, from the
+  // default-branch head (publish-verify only runs under issue_comment
+  // events, where github.sha is exactly that — never a PR merge ref).
+  // Dropping /package.json stops the uploader's `.js` parsing as ESM on
+  // Node versions that don't infer module syntax, and this job pins no Node.
+  it('checks out only trusted base-repo scripts at a pinned ref', () => {
+    const checkout = stepIn(
+      'publish-verify',
+      'Checkout the OSS publisher scripts',
+    );
+    expect(checkout).toContain("ref: '${{ github.sha }}'");
+    expect(checkout).toContain('persist-credentials: false');
+    expect(checkout).toContain('sparse-checkout-cone-mode: false');
+    for (const entry of [
+      '/package.json',
+      'scripts/upload-aliyun-oss-assets.js',
+      'scripts/release-script-utils.js',
+    ]) {
+      expect(checkout).toContain(`\n            ${entry}\n`);
+    }
+  });
+
+  // A CDN retry loop whose worst case exceeds the 10-minute job cap turns
+  // the intended "degrade to a text-only report" into "job killed
+  // mid-install"; pin the retry flags and compute the bound.
+  it('keeps the ossutil download retry budget inside the job cap', () => {
+    const install = stepIn('publish-verify', 'Install ossutil');
+    expect(install).toContain('--retry-all-errors');
+    const m = install.match(
+      /curl -fsSL --retry (\d+) --retry-delay (\d+) --retry-all-errors \\\n\s+--connect-timeout (\d+) --max-time (\d+)/,
+    );
+    expect(m).not.toBeNull();
+    const worstSeconds =
+      (Number(m[1]) + 1) * Number(m[4]) + Number(m[1]) * Number(m[2]);
+    const cap = job('publish-verify').match(/timeout-minutes: (\d+)/);
+    expect(cap).not.toBeNull();
+    expect(worstSeconds).toBeLessThan(Number(cap[1]) * 60);
+  });
+
+  // Overriding only one of the bucket/base-URL vars must not post comment
+  // links that 404 against (or show stale objects from) the other bucket:
+  // the default base URL is derived from whichever bucket wins. A stalled
+  // upload is additionally bounded per attempt so one black-hole socket
+  // cannot burn the job cap and lose the whole report.
+  it('derives the public URL from the resolved bucket and bounds uploads', () => {
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    expect(publish).toContain(
+      'ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || \'qwen-code-assets\' }}"',
+    );
+    expect(publish).toContain(
+      "ALIYUN_OSS_PUBLIC_BASE_URL: \"${{ vars.ALIYUN_OSS_PR_ASSETS_PUBLIC_BASE_URL || (vars.ALIYUN_OSS_PR_ASSETS_BUCKET == '' && vars.ALIYUN_OSS_PUBLIC_BASE_URL) || format('https://{0}.oss-cn-hangzhou.aliyuncs.com', vars.ALIYUN_OSS_PR_ASSETS_BUCKET || vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets') }}\"",
+    );
+    expect(publish).toContain("OSS_UPLOAD_ATTEMPT_TIMEOUT_MS: '120000'");
   });
 
   // Every publish fixture returned [] for the comments listing, so the
@@ -2860,7 +4466,6 @@ describe('qwen-triage verify hardening round 2', () => {
             AGENT_VERDICT: 'findings',
             SKIP_REASON: '',
             PREPARE_FAILURE_PHASE: '',
-            VERIFY_ASSETS_REMOTE: join(dir, 'none.git'),
             ...env,
           },
         });
@@ -3220,7 +4825,6 @@ describe('qwen-triage verify publish fidelity', () => {
         AGENT_VERDICT: '',
         SKIP_REASON: '',
         PREPARE_FAILURE_PHASE: '',
-        VERIFY_ASSETS_REMOTE: join(dir, 'nonexistent.git'),
         ...env,
       },
     });
@@ -4095,24 +5699,22 @@ describe('qwen-triage verify round-3 hardening', () => {
     },
   );
 
-  // The publish job must host images on a per-PR branch that can coexist
-  // with the existing pr-assets/* namespace — a bare `pr-assets` leaf
-  // cannot be created while `pr-assets/…` children exist.
-  it('hosts evidence on a per-PR branch, not a bare pr-assets leaf', () => {
+  it('hosts verification evidence on OSS without writing Git refs', () => {
     const publish = stepIn(
       'publish-verify',
       'Post verification report comment',
     );
-    expect(publish).toContain('pr-assets/${PR_NUMBER}-verify');
-    expect(publish).toContain('checkout -q --orphan');
-    expect(publish).not.toMatch(/--branch pr-assets["\s]/);
+    expect(publish).toContain(
+      'pr-assets/verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}',
+    );
+    expect(publish).toContain('scripts/upload-aliyun-oss-assets.js');
+    expect(publish).not.toContain('checkout -q --orphan');
+    expect(publish).not.toContain('git push');
   });
 
-  // Every `pr-assets/*` producer needs a deleter, or its branches are
-  // permanent: one single-commit branch per verified PR, forever, slowing
-  // `git ls-remote` and cluttering the branch list for every contributor.
-  // The verify lane became a second producer and was not added.
-  it('deletes both pr-assets producers when a PR closes', () => {
+  // Keep deleting legacy refs until the historical branch population has
+  // drained, even though new evidence is published to OSS.
+  it('deletes both legacy pr-assets refs when a PR closes', () => {
     const cleanup = readFileSync(
       '.github/workflows/web-shell-visuals-cleanup.yml',
       'utf8',
@@ -4838,7 +6440,6 @@ describe('qwen-triage verify maintainer-review round', () => {
             SKIP_REASON: '',
             PREPARE_FAILURE_PHASE: '',
             AGENT_VERDICT: '',
-            VERIFY_ASSETS_REMOTE: join(dir, 'none.git'),
           },
         });
         return {
@@ -4911,6 +6512,12 @@ describe('qwen-triage verify maintainer-review round', () => {
     const minutes = Number(publish.match(/timeout-minutes: (\d+)/)?.[1]);
     expect(minutes).toBeGreaterThan(0);
     expect(minutes).toBeLessThanOrEqual(30);
+  });
+
+  it('keeps the credential-bearing publisher on a hosted runner', () => {
+    const publish = job('publish-verify');
+    expect(publish).toContain("runs-on: 'ubuntu-latest'");
+    expect(publish).not.toContain('ecs-qwen');
   });
 
   // Upstream failure text can name resolved hosts and TLS detail; the agent
@@ -5360,6 +6967,7 @@ describe('qwen-triage npm cache producer', () => {
       "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
     );
     expect(cacheProducerWorkflow).toContain("image: 'node:22-bookworm'");
+    expect(cacheProducerWorkflow).toContain("options: '--init --user node'");
     for (const jobName of ['verify', 'tmux-testing']) {
       expect(job(jobName)).toContain(
         "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
@@ -5486,4 +7094,278 @@ describe('qwen-triage build-process guard', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30000);
+});
+
+describe('triage job budget', () => {
+  // The fixed 30-minute cap was measurably clipping the distribution: 22
+  // successful triage jobs sampled on 2026-08-09 ran median 5.8m / p90
+  // 22.3m / max 29.5m, and five substantial PRs died at exactly the cap,
+  // each discarding a full agent run for nothing — triage is advisory, so
+  // a killed run wastes the runner AND the work it was about to publish.
+  // The budget is a repository variable so the next resize needs no PR;
+  // the fallback keeps an unconfigured repo bounded. Both halves pinned so
+  // neither the knob nor its default can silently vanish.
+  it('is operator-tunable through the sanitized authorize output', () => {
+    // Pinned on the PARSED document, not job-text containment: relocating
+    // either line inside the same job (the output mapping into the budget
+    // step's env:, the job-level timeout-minutes onto a step) kept every
+    // substring match green while the knob silently died — probe-verified
+    // surviving mutations of the substring version. A parsed key also
+    // cannot match a commented-out line.
+    const doc = parse(workflow);
+    expect(doc.jobs.authorize.outputs.triage_timeout_minutes).toBe(
+      '${{ steps.budget.outputs.triage_timeout_minutes }}',
+    );
+    expect(doc.jobs.triage['timeout-minutes']).toBe(
+      '${{ fromJSON(needs.authorize.outputs.triage_timeout_minutes || 60) }}',
+    );
+  });
+
+  it('sanitizes the budget: integers clamp, garbage falls back with a warning', () => {
+    // The REAL sanitize step, replayed: timeout-minutes is evaluated before
+    // any step of the consuming job runs, so this bash is the only place a
+    // bad repository variable can be caught — and the knob's whole point is
+    // changing it without a PR, so nothing else reviews the value.
+    const doc = parse(workflow);
+    const budget = doc.jobs.authorize.steps.find((s) => s.id === 'budget');
+    expect(budget).toBeTruthy();
+    // The replay injects RAW itself, so pin the seams it cannot see: which
+    // repository variable feeds RAW (a typo'd name expands to '' and hits
+    // the silent default), and that the step is unconditional (a scoped
+    // step skips on comment events and '' || 60 kills the knob there).
+    expect(budget.env.RAW).toBe('${{ vars.QWEN_TRIAGE_TIMEOUT_MINUTES }}');
+    expect(budget.if).toBeUndefined();
+    const runBudget = (raw) => {
+      const dir = mkdtempSync(join(tmpdir(), 'budget-'));
+      try {
+        const outFile = join(dir, 'out');
+        writeFileSync(outFile, '');
+        // GitHub wraps `shell: bash` steps as `bash --noprofile --norc -eo
+        // pipefail {0}`; makeGhHarness pins the same contract. The script
+        // self-arms `set -euo pipefail`, but only the wrapper's `-e` keeps
+        // the replay fail-fast if a future edit drops that line.
+        const res = execFileSync(
+          'bash',
+          ['--noprofile', '--norc', '-eo', 'pipefail', '-c', budget.run],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, RAW: raw, GITHUB_OUTPUT: outFile },
+          },
+        );
+        return {
+          out: readFileSync(outFile, 'utf8').trim(),
+          warned: res.includes('::warning::'),
+          log: res,
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // unset → default, silently
+    expect(runBudget('')).toMatchObject({
+      out: 'triage_timeout_minutes=60',
+      warned: false,
+    });
+    // a sane value passes through untouched
+    expect(runBudget('90')).toMatchObject({
+      out: 'triage_timeout_minutes=90',
+      warned: false,
+    });
+    // a padded value must stay decimal — without 10#, bash parses 060 as
+    // octal (48)
+    expect(runBudget('060')).toMatchObject({
+      out: 'triage_timeout_minutes=60',
+      warned: false,
+    });
+    // exactly at the boundaries: no clamp, no warning
+    expect(runBudget('10')).toMatchObject({
+      out: 'triage_timeout_minutes=10',
+      warned: false,
+    });
+    expect(runBudget('600')).toMatchObject({
+      out: 'triage_timeout_minutes=600',
+      warned: false,
+    });
+    // 0 would be an instantly-cancelled job — clamped to the floor
+    expect(runBudget('0')).toMatchObject({
+      out: 'triage_timeout_minutes=10',
+      warned: true,
+    });
+    // a runaway value would hold the runner for days — ceiling
+    expect(runBudget('3600')).toMatchObject({
+      out: 'triage_timeout_minutes=600',
+      warned: true,
+    });
+    // over 18 digits bash's 64-bit math wraps — 92233720368547758180
+    // lands on 100, silently in range — so the length guard must clamp
+    // to the ceiling with a warning instead
+    expect(runBudget('92233720368547758180')).toMatchObject({
+      out: 'triage_timeout_minutes=600',
+      warned: true,
+    });
+    // The guard counts SIGNIFICANT digits: leading zeros are decoration,
+    // so a padded 60 passes through untouched instead of tripping the
+    // ceiling branch, and an all-zero value is still 0 → floor
+    expect(runBudget('000000000000000000060')).toMatchObject({
+      out: 'triage_timeout_minutes=60',
+      warned: false,
+    });
+    expect(runBudget('0'.repeat(22))).toMatchObject({
+      out: 'triage_timeout_minutes=10',
+      warned: true,
+    });
+    // ...and padding must not defeat the wrap guard either: 19
+    // significant digits still clamp to the ceiling
+    expect(runBudget('000' + '9'.repeat(19))).toMatchObject({
+      out: 'triage_timeout_minutes=600',
+      warned: true,
+    });
+    // every malformed shape the review enumerated falls back and NAMES the
+    // variable, so the operator's run log points at the knob, not fromJSON
+    for (const bad of ['60 minutes', '1h', '6O', '60.5', '"60"']) {
+      const r = runBudget(bad);
+      expect(r.out, bad).toBe('triage_timeout_minutes=60');
+      expect(r.log, bad).toContain('QWEN_TRIAGE_TIMEOUT_MINUTES');
+    }
+  });
+});
+
+describe('triage skips the autofix bot’s own bookkeeping issues (#9264)', () => {
+  // Every PR that defers findings for the first time opens a tracking issue
+  // upserted by the autofix bot, and `issues: [opened, edited, reopened]`
+  // triaged that bookkeeping issue with a full agent run per deferral. The
+  // guard keys on the same identity qwen-autofix.yml upserts under, so a
+  // rename on one side without the other silently re-opens the waste.
+  const botIdentityCore = "vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot'";
+  const botIdentity = `(${botIdentityCore})`;
+
+  // The parsed expressions keep their YAML line breaks, so whitespace is
+  // normalized before matching — the pin must survive a re-wrap, not test it.
+  const flat = (value) => String(value).replace(/\s+/g, ' ');
+
+  it('conditions the triage job’s issues clause on the creator not being the bot', () => {
+    // Parsed, not raw-text containment: a commented-out guard would still
+    // match a substring pin.
+    const doc = parse(workflow);
+    expect(flat(doc.jobs.triage.if)).toContain(
+      `(github.event_name == 'issues' && github.event.issue.user.login != ${botIdentity}) || (github.event_name == 'workflow_dispatch'`,
+    );
+  });
+
+  it('routes bot-created issues runs to a per-run concurrency group', () => {
+    // GitHub evaluates concurrency BEFORE the job `if`: a bot bookkeeping run
+    // inside the shared per-number group cancels an in-progress triage of the
+    // same issue even though its own job skips.
+    const doc = parse(workflow);
+    expect(flat(doc.jobs.triage.concurrency.group)).toContain(
+      `!startsWith(github.event.comment.body, '@qwen-code /triage'))) || (github.event_name == 'issues' && github.event.issue.user.login == ${botIdentity}) ) && format('{0}-run-{1}', github.workflow, github.run_id)`,
+    );
+  });
+
+  it('keeps the guard identity in sync with the autofix workflow', () => {
+    // qwen-autofix.yml defines AUTOFIX_BOT as the same variable-with-fallback
+    // (inside a bare `${{ }}`, so without the expression's parentheses).
+    expect(botIdentity).toContain(botIdentityCore);
+    const autofixDoc = parse(
+      readFileSync('.github/workflows/qwen-autofix.yml', 'utf8'),
+    );
+    expect(autofixDoc.env.AUTOFIX_BOT).toBe(`\${{ ${botIdentityCore} }}`);
+  });
+});
+
+describe('stage 1-pre duplicate gate', () => {
+  const section = prSkill.slice(
+    prSkill.indexOf('**1-pre. Duplicate / already-fixed check'),
+    prSkill.indexOf('**1a. Template check:**'),
+  );
+
+  it('reads linked issues from GitHub closing references, not a keyword grep', () => {
+    // A keyword grep misses 6 of the 9 closing-keyword forms and matches
+    // substrings like "prefixes"; GitHub's own parser is the linkage source.
+    expect(section).toContain('--json closingIssuesReferences');
+    expect(section).not.toContain("grep -oiE '(fixes|closes|resolves)");
+  });
+
+  it('runs only for PRs targeting the default branch', () => {
+    // Backports to release/* branches legitimately carry changes that already
+    // exist on the default branch; without this scope the gate closes them.
+    expect(section).toContain('Run 1-pre only when the PR targets the default');
+    expect(section).toContain('defaultBranchRef');
+    expect(section).not.toContain('?ref=main');
+  });
+
+  it('defines subsumption over the full diff, never over added lines alone', () => {
+    // Added-lines-only quantification closes deletions-only diffs vacuously;
+    // the deleted-lines clause must stay.
+    expect(section).toContain('every production line this PR adds');
+    expect(section).toContain('every production line this PR deletes');
+  });
+
+  it('never closes a diff with no production changes', () => {
+    // Stage 0 exclusions empty the comparison set for tests-only PRs; such a
+    // diff must be a remaining delta, never "Fully subsumed".
+    expect(section).toContain('NO production changes');
+    expect(section).toContain('never fully subsumed');
+  });
+
+  it('scopes linkage extraction to same-repo closing references', () => {
+    // A bare `.number` extraction drops the repository qualifier, so a
+    // cross-repo closing reference resolves against this repo's
+    // same-numbered unrelated issue. The scoping filter and the skip rule
+    // must stay.
+    expect(section).toContain('.repository.owner.login');
+    expect(section).toContain('cross-repo closing references are skipped');
+  });
+
+  it('guards the duplicate close against a human reopen', () => {
+    // A re-run on a reopened PR re-derives identical inputs; without the
+    // reopen guard the gate re-closes against a maintainer's deliberate
+    // reopen, and every later re-run closes again. Deleting the guard must
+    // make this red.
+    expect(section).toContain('**Reopen guard.**');
+    expect(section).toContain('do not post or close again');
+  });
+
+  it('binds each linked-issue state to its gate action', () => {
+    // The per-issue dispatch is the gate's decision table; deleting it or
+    // swapping the NOT_PLANNED and COMPLETED actions must not leave the
+    // suite green. The loop only collects states, so an OPEN issue must not
+    // short-circuit to 1a over a CLOSED one.
+    expect(section).toContain('"OPEN" -> contributes nothing');
+    expect(section).toContain('"CLOSED NOT_PLANNED" -> request changes');
+    expect(section).toContain('"CLOSED COMPLETED" -> run the closer query');
+    expect(section).not.toContain('"OPEN" -> proceed to 1a');
+  });
+
+  it('defines one fixed precedence for mixed linked-issue states', () => {
+    // xe6u: `fixes #101 and fixes #102` with #101 OPEN, #102 CLOSED-COMPLETED
+    // must have one deterministic outcome. Without an explicit precedence the
+    // per-issue loop legend and the aggregate bullets contradict each other.
+    expect(section).toContain('fixed precedence');
+    expect(section).toContain('never short-circuits');
+  });
+
+  it('never closes on an unresolvable closer', () => {
+    // The ambiguity bullet is the only explicit prohibition against closing
+    // on a closer that cannot be resolved; deleting it must make this red.
+    expect(section).toContain('never close on ambiguity');
+  });
+
+  it('SKILL.md restates the 1-pre boundary without a production qualifier', () => {
+    // xe6: SKILL.md's escalation summary must match pr-workflow.md's
+    // operational definition — request changes on ANY remaining delta, close
+    // only when the ENTIRE diff is subsumed. Re-qualifying either side with
+    // "production" contradicts "any non-production addition is a remaining
+    // delta" and "a diff with NO production changes is never fully subsumed",
+    // giving a tests-only PR opposite instructions in the two files.
+    const summary = triageSkillDoc.slice(
+      triageSkillDoc.indexOf('The escalation criteria are those defined in'),
+      triageSkillDoc.indexOf('Never execute PR-derived code'),
+    );
+    expect(summary).toContain('a remaining delta');
+    expect(summary).toContain('entire diff');
+    expect(summary).toContain('fully subsumed');
+    expect(summary).not.toContain('production delta');
+    expect(summary).not.toContain('production diff');
+  });
 });

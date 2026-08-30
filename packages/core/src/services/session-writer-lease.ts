@@ -12,6 +12,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { hasVerifiableInode } from '../utils/file-identity.js';
 
 const LEGACY_LOCK_SCHEMA_VERSION = 1;
 const LOCK_SCHEMA_VERSION = 2;
@@ -32,6 +33,97 @@ const TRANSCRIPT_APPEND_FLAGS =
   nodeConstants.O_RDWR |
   TRANSCRIPT_NO_FOLLOW_FLAG |
   TRANSCRIPT_NONBLOCK_FLAG;
+
+interface DurableLockDirectory {
+  path: string;
+  handle: fs.FileHandle;
+  dev: number;
+  ino: number;
+  inodeVerifiable: boolean;
+}
+
+async function openDurableLockDirectory(
+  directory: string,
+): Promise<DurableLockDirectory> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(
+      directory,
+      nodeConstants.O_RDONLY |
+        (process.platform === 'win32' ? 0 : (nodeConstants.O_NOFOLLOW ?? 0)),
+    );
+    const opened = await handle.stat();
+    const current = await fs.stat(directory);
+    const openedInodeVerifiable = hasVerifiableInode(opened.ino);
+    const currentInodeVerifiable = hasVerifiableInode(current.ino);
+    if (
+      !opened.isDirectory() ||
+      !current.isDirectory() ||
+      opened.dev !== current.dev ||
+      openedInodeVerifiable !== currentInodeVerifiable ||
+      (openedInodeVerifiable && opened.ino !== current.ino)
+    ) {
+      throw new Error('Session writer lock directory changed.');
+    }
+    return {
+      path: directory,
+      handle,
+      dev: opened.dev,
+      ino: opened.ino,
+      inodeVerifiable: openedInodeVerifiable,
+    };
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    if (error instanceof SessionWriterError) throw error;
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  }
+}
+
+async function syncDurableLockDirectory(
+  directory: DurableLockDirectory,
+): Promise<void> {
+  try {
+    const opened = await directory.handle.stat();
+    const openedInodeVerifiable = hasVerifiableInode(opened.ino);
+    if (
+      !opened.isDirectory() ||
+      opened.dev !== directory.dev ||
+      openedInodeVerifiable !== directory.inodeVerifiable ||
+      (directory.inodeVerifiable && opened.ino !== directory.ino)
+    ) {
+      throw new Error('Session writer lock directory changed.');
+    }
+    try {
+      await directory.handle.sync();
+    } catch (error) {
+      if (
+        process.platform !== 'win32' ||
+        !['EACCES', 'EINVAL', 'EPERM'].includes(
+          (error as NodeJS.ErrnoException).code ?? '',
+        )
+      ) {
+        throw error;
+      }
+    }
+    const current = await fs.stat(directory.path);
+    const currentInodeVerifiable = hasVerifiableInode(current.ino);
+    if (
+      !current.isDirectory() ||
+      current.dev !== directory.dev ||
+      currentInodeVerifiable !== directory.inodeVerifiable ||
+      (directory.inodeVerifiable && current.ino !== directory.ino)
+    ) {
+      throw new Error('Session writer lock directory changed.');
+    }
+  } catch (error) {
+    if (error instanceof SessionWriterError) throw error;
+    throw new SessionWriterUnavailableError({
+      cause: error instanceof Error ? error : undefined,
+    });
+  }
+}
 const debugLogger = createDebugLogger('SESSION_WRITER_LEASE');
 
 function describeError(error: unknown): string {
@@ -106,13 +198,34 @@ export class SessionTranscriptChangedError extends SessionWriterError {
 }
 
 export class SessionWriterUnavailableError extends SessionWriterError {
-  override readonly name = 'SessionWriterUnavailableError';
+  // Widened from the literal type so the subclass below can redeclare `name`.
+  // Narrowing this back to a literal makes that subclass fail to compile.
+  override readonly name: string = 'SessionWriterUnavailableError';
   readonly rpcCode = SESSION_WRITER_RPC_CODES.session_writer_unavailable;
   readonly errorKind = 'session_writer_unavailable';
   readonly httpStatus = 503;
 
-  constructor(options?: ErrorOptions) {
-    super('Session write ownership could not be verified.', options);
+  constructor(options?: ErrorOptions & { message?: string }) {
+    super(
+      options?.message ?? 'Session write ownership could not be verified.',
+      options,
+    );
+  }
+}
+
+export class SessionTranscriptIdentityUnavailableError extends SessionWriterUnavailableError {
+  override readonly name = 'SessionTranscriptIdentityUnavailableError';
+
+  constructor(cause?: Error) {
+    super({
+      message:
+        'Session transcript identity could not be verified on this filesystem.',
+      cause:
+        cause ??
+        new Error(
+          'The session transcript filesystem does not provide a verifiable inode identity (ino=0).',
+        ),
+    });
   }
 }
 
@@ -398,11 +511,60 @@ function transcriptFingerprint(stat: Stats): TranscriptFingerprint {
   };
 }
 
+function assertVerifiableTranscriptIdentity(
+  fingerprint: Pick<TranscriptFingerprint, 'ino'>,
+): void {
+  if (!hasVerifiableInode(fingerprint.ino)) {
+    throw new SessionTranscriptIdentityUnavailableError();
+  }
+}
+
+/**
+ * Fail acquisition on a filesystem that cannot produce a verifiable inode
+ * identity for the transcript.
+ *
+ * A transcript that already exists is probed directly, because every path
+ * into it runs through {@link transcriptStateFromStat}. A brand-new session
+ * has no file to stat yet, so without this the *first* `appendJsonLine` is
+ * what discovers `ino === 0`: the session looks like it started normally and
+ * then stops being recorded part-way through a turn.
+ *
+ * The nearest existing ancestor directory stands in for the not-yet-created
+ * transcript. `ino` comes from the same filesystem driver for files and
+ * directories, so a volume that cannot number one cannot number the other.
+ * If nothing can be stat'd, the probe declines rather than failing a session
+ * on a guess, and the first append keeps its own check.
+ */
+async function assertTranscriptFilesystemProvidesIdentity(
+  transcriptPath: string,
+): Promise<void> {
+  let dir = path.dirname(transcriptPath);
+  for (;;) {
+    try {
+      const stat = await fs.stat(dir);
+      assertVerifiableTranscriptIdentity({ ino: stat.ino });
+      return;
+    } catch (error) {
+      if (error instanceof SessionWriterError) throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return;
+      const parent = path.dirname(dir);
+      if (parent === dir) return;
+      dir = parent;
+    }
+  }
+}
+
 function sameFileIdentity(
   left: TranscriptFingerprint,
   right: TranscriptFingerprint,
 ): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
+  return (
+    left.ino !== 0 &&
+    right.ino !== 0 &&
+    left.dev === right.dev &&
+    left.ino === right.ino
+  );
 }
 
 function sameFileSecurityMetadata(
@@ -447,10 +609,12 @@ function sameTranscriptState(
 function transcriptStateFromStat(
   stat: Stats,
 ): Extract<TranscriptState, { exists: true }> {
+  const fingerprint = transcriptFingerprint(stat);
+  assertVerifiableTranscriptIdentity(fingerprint);
   return {
     exists: true,
     byteLength: stat.size,
-    fingerprint: transcriptFingerprint(stat),
+    fingerprint,
   };
 }
 
@@ -811,17 +975,10 @@ async function openTranscriptProof(
     ) {
       throw new SessionWriterUnavailableError();
     }
-    const beforeState: TranscriptState = {
-      exists: true,
-      byteLength: beforeStat.size,
-      fingerprint: transcriptFingerprint(beforeStat),
-    };
-    if (
-      !sameFileIdentity(
-        beforeState.fingerprint,
-        transcriptFingerprint(pathStat),
-      )
-    ) {
+    const beforeState = transcriptStateFromStat(beforeStat);
+    const beforePathFingerprint = transcriptFingerprint(pathStat);
+    assertVerifiableTranscriptIdentity(beforePathFingerprint);
+    if (!sameFileIdentity(beforeState.fingerprint, beforePathFingerprint)) {
       throw new SessionTranscriptChangedError();
     }
     if (beforeStat.size > 0) {
@@ -856,19 +1013,14 @@ async function openTranscriptProof(
       handle.stat(),
       fs.lstat(filePath),
     ]);
-    const afterState: TranscriptState = {
-      exists: true,
-      byteLength: afterStat.size,
-      fingerprint: transcriptFingerprint(afterStat),
-    };
+    const afterState = transcriptStateFromStat(afterStat);
+    const afterPathFingerprint = transcriptFingerprint(afterPathStat);
+    assertVerifiableTranscriptIdentity(afterPathFingerprint);
     if (
       !sameTranscriptState(beforeState, afterState) ||
       !afterPathStat.isFile() ||
       afterPathStat.isSymbolicLink() ||
-      !sameFileIdentity(
-        afterState.fingerprint,
-        transcriptFingerprint(afterPathStat),
-      )
+      !sameFileIdentity(afterState.fingerprint, afterPathFingerprint)
     ) {
       throw new SessionTranscriptChangedError();
     }
@@ -915,14 +1067,12 @@ async function validateOpenTranscriptProof(
     ) {
       throw new SessionWriterUnavailableError();
     }
-    const current: TranscriptState = {
-      exists: true,
-      byteLength: handleStat.size,
-      fingerprint: transcriptFingerprint(handleStat),
-    };
+    const current = transcriptStateFromStat(handleStat);
+    const pathFingerprint = transcriptFingerprint(pathStat);
+    assertVerifiableTranscriptIdentity(pathFingerprint);
     if (
       !sameTranscriptState(current, proof.state) ||
-      !sameFileIdentity(current.fingerprint, transcriptFingerprint(pathStat))
+      !sameFileIdentity(current.fingerprint, pathFingerprint)
     ) {
       throw new SessionTranscriptChangedError();
     }
@@ -1425,6 +1575,10 @@ export class SessionWriterLease {
   private expectedTranscriptState: TranscriptState | undefined;
   private expectedTranscriptHasher: Hash | undefined;
   private released = false;
+  private releaseDurabilityPending = false;
+  private releaseDirectory: DurableLockDirectory | undefined;
+  private releaseRetryable = true;
+  private terminalOperation: 'release' | 'seal' | undefined;
   private terminalPromise: Promise<void> | undefined;
   private operationTail: Promise<void> = Promise.resolve();
   private readonly lockRecordRaw: string;
@@ -1787,6 +1941,11 @@ export class SessionWriterLease {
         undefined,
         () => lease.released,
       );
+      if (!snapshot.state.exists) {
+        await assertTranscriptFilesystemProvidesIdentity(
+          options.transcriptPath,
+        );
+      }
       await lease.readOwnedLock();
       lease.expectedTranscriptState = snapshot.state;
       lease.expectedTranscriptHasher = snapshot.hasher;
@@ -1801,9 +1960,20 @@ export class SessionWriterLease {
       }
       return lease;
     } catch (error) {
-      try {
-        await lease.release();
-      } catch (releaseError) {
+      let releaseError: unknown;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt === 1) lease.releaseRetryable = false;
+        try {
+          await lease.release();
+          releaseError = undefined;
+          break;
+        } catch (candidate) {
+          releaseError = candidate;
+          if (candidate instanceof SessionWriterLostError) break;
+        }
+      }
+      if (releaseError !== undefined) {
+        await lease.closeReleaseDirectory();
         throw new SessionWriterUnavailableError({
           cause: new AggregateError(
             [error, releaseError],
@@ -1985,6 +2155,11 @@ export class SessionWriterLease {
       candidateHasher.update(bytes);
       const nextByteLength = expectedBefore.byteLength + bytes.byteLength;
       await this.readOwnedLock();
+      // Defence in depth only: every path that produces `beforeState` already
+      // went through `transcriptStateFromStat`, which asserts. Kept so the
+      // last statement before the write is the one that guarantees no bytes
+      // land on an unverifiable identity.
+      assertVerifiableTranscriptIdentity(beforeState.fingerprint);
       await handle.writeFile(bytes);
       await handle.sync();
       const afterStat = await handle.stat();
@@ -2132,17 +2307,39 @@ export class SessionWriterLease {
   }
 
   release(): Promise<void> {
-    this.terminalPromise ??= this.runExclusive(() => this.releaseOnce());
+    if (this.terminalOperation === 'seal') return this.terminalPromise!;
+    this.terminalOperation = 'release';
+    if (this.terminalPromise) return this.terminalPromise;
+    const terminal = this.runExclusive(() => this.releaseOnce()).catch(
+      (error: unknown) => {
+        if (
+          this.releaseRetryable &&
+          (!this.released || this.releaseDurabilityPending) &&
+          !(error instanceof SessionWriterLostError) &&
+          this.terminalPromise === terminal
+        ) {
+          this.terminalPromise = undefined;
+        }
+        throw error;
+      },
+    );
+    this.terminalPromise = terminal;
     return this.terminalPromise;
   }
 
   sealForHandoff(): Promise<void> {
+    if (this.terminalOperation === 'release') return this.release();
+    this.terminalOperation = 'seal';
     this.terminalPromise ??= this.runExclusive(() => this.sealForHandoffOnce());
     return this.terminalPromise;
   }
 
   get isReleased(): boolean {
     return this.released;
+  }
+
+  get isReleaseDurabilityPending(): boolean {
+    return this.releaseDurabilityPending;
   }
 
   private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
@@ -2155,37 +2352,65 @@ export class SessionWriterLease {
   }
 
   private async releaseOnce(): Promise<void> {
-    if (this.released) return;
-    await this.readOwnedLockForRelease();
+    if (this.released) {
+      if (this.releaseDurabilityPending) {
+        if (!this.releaseDirectory) throw new SessionWriterUnavailableError();
+        await syncDurableLockDirectory(this.releaseDirectory);
+        this.releaseDurabilityPending = false;
+        await this.closeReleaseDirectory();
+      }
+      return;
+    }
     try {
-      await fs.rename(this.lockPath, this.retiredPath);
+      this.releaseDirectory = await openDurableLockDirectory(
+        path.dirname(this.lockPath),
+      );
+      await this.readOwnedLockForRelease();
+      try {
+        await fs.rename(this.lockPath, this.retiredPath);
+      } catch (error) {
+        const [primaryState, retiredState] = await Promise.all([
+          this.inspectReleasePath(this.lockPath),
+          this.inspectReleasePath(this.retiredPath),
+        ]);
+        if (primaryState === 'missing' || primaryState === 'other') {
+          this.released = true;
+          if (retiredState === 'owned') {
+            this.releaseDurabilityPending = true;
+            await fs.unlink(this.retiredPath).catch(() => {});
+            await syncDurableLockDirectory(this.releaseDirectory);
+            this.releaseDurabilityPending = false;
+            await this.closeReleaseDirectory();
+            return;
+          }
+          throw new SessionWriterLostError();
+        }
+        if (error instanceof SessionWriterError) throw error;
+        throw new SessionWriterUnavailableError({
+          cause: error instanceof Error ? error : undefined,
+        });
+      }
       this.released = true;
+      this.releaseDurabilityPending = true;
       await fs.unlink(this.retiredPath).catch((error) => {
         debugLogger.debug(
           `Session writer retired lock cleanup failed path=${JSON.stringify(this.retiredPath)} ` +
             `error=${describeDiagnosticError(error)}`,
         );
       });
+      await syncDurableLockDirectory(this.releaseDirectory);
+      this.releaseDurabilityPending = false;
+      await this.closeReleaseDirectory();
     } catch (error) {
-      const [primaryState, retiredState] = await Promise.all([
-        this.inspectReleasePath(this.lockPath),
-        this.inspectReleasePath(this.retiredPath),
-      ]);
-      if (primaryState === 'missing' || primaryState === 'other') {
-        this.released = true;
-        if (retiredState === 'owned') {
-          await fs.unlink(this.retiredPath).catch(() => {});
-          throw new SessionWriterUnavailableError({
-            cause: error instanceof Error ? error : undefined,
-          });
-        }
-        throw new SessionWriterLostError();
-      }
-      if (error instanceof SessionWriterError) throw error;
-      throw new SessionWriterUnavailableError({
-        cause: error instanceof Error ? error : undefined,
-      });
+      if (!this.releaseDurabilityPending) await this.closeReleaseDirectory();
+      throw error;
     }
+  }
+
+  private async closeReleaseDirectory(): Promise<void> {
+    const directory = this.releaseDirectory;
+    this.releaseDirectory = undefined;
+    await directory?.handle.close().catch(() => undefined);
   }
 
   private async sealForHandoffOnce(): Promise<void> {

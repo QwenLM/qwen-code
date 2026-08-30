@@ -21,6 +21,10 @@ import {
 } from 'react';
 import { useI18n } from '../../i18n';
 import { useInteractionBlocker } from '../../interactionBlockContext';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
 import { Button } from '../ui/button';
 import { Checkbox } from '../ui/checkbox';
 import {
@@ -1927,7 +1931,7 @@ export function EnhancedTable({
     return () => {
       const focusReturn = cellDialogFocusReturnRef.current;
       cellDialogFocusReturnRef.current = null;
-      if (focusReturn?.isConnected) focusReturn.focus();
+      if (focusReturn?.isConnected) focusReturn.focus({ preventScroll: true });
     };
   }, [cellDialog]);
 
@@ -2107,10 +2111,9 @@ export function EnhancedTable({
   };
 
   const copyCellDialogValue = () => {
-    if (currentCellDialogText == null || !navigator.clipboard) return;
+    if (currentCellDialogText == null) return;
     const copyGeneration = copiedCellDialogGenRef.current;
-    void navigator.clipboard
-      .writeText(sanitizeForClipboard(currentCellDialogText))
+    void writeClipboardText(sanitizeForClipboard(currentCellDialogText))
       .then(() => {
         if (!mountedRef.current) return;
         if (copiedCellDialogGenRef.current !== copyGeneration) return;
@@ -2123,9 +2126,7 @@ export function EnhancedTable({
           2000,
         );
       })
-      .catch((error: unknown) =>
-        console.warn('[web-shell] clipboard write failed:', error),
-      );
+      .catch(warnClipboardWriteFailure);
   };
 
   const selectionRowBounds = useMemo(
@@ -2387,10 +2388,9 @@ export function EnhancedTable({
       visibleRows,
       orderedVisibleColumnIndexes,
     );
-    if (!text || !navigator.clipboard) return;
+    if (!text) return;
     const copyGeneration = copiedSelectionGenRef.current;
-    void navigator.clipboard
-      .writeText(text)
+    void writeClipboardText(text)
       .then(() => {
         if (!mountedRef.current) return;
         if (copiedSelectionGenRef.current !== copyGeneration) return;
@@ -2403,9 +2403,7 @@ export function EnhancedTable({
           2000,
         );
       })
-      .catch((error: unknown) =>
-        console.warn('[web-shell] clipboard write failed:', error),
-      );
+      .catch(warnClipboardWriteFailure);
   };
 
   const copyVisibleTable = () => {
@@ -2414,10 +2412,9 @@ export function EnhancedTable({
       visibleRows,
       orderedVisibleColumnIndexes,
     );
-    if (!text || !navigator.clipboard) return;
+    if (!text) return;
     const copyGeneration = copiedVisibleGenRef.current;
-    void navigator.clipboard
-      .writeText(text)
+    void writeClipboardText(text)
       .then(() => {
         if (!mountedRef.current) return;
         if (copiedVisibleGenRef.current !== copyGeneration) return;
@@ -2430,9 +2427,7 @@ export function EnhancedTable({
           2000,
         );
       })
-      .catch((error: unknown) =>
-        console.warn('[web-shell] clipboard write failed:', error),
-      );
+      .catch(warnClipboardWriteFailure);
   };
 
   const handleCopy = (event: ClipboardEvent<HTMLDivElement>) => {

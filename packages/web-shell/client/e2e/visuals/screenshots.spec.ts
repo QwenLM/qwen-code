@@ -5,10 +5,12 @@
  */
 
 import { expect, test } from '@playwright/test';
+import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
   permissionRequestEvent,
+  toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
 } from '../utils/mockDaemon';
@@ -60,6 +62,60 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-message-list] pre.shiki').first(),
       ).toBeVisible();
       await captureScreenshot(page, `session-transcript-${theme}`);
+    });
+
+    test(`parallel agents group`, async ({ page }, testInfo) => {
+      // The group renders only when a turn carries two or more background
+      // Agent tool calls; seed both as completed so the rows are static and
+      // leave no final answer, which keeps the turn expanded around them.
+      const agentToolCallEvent = (
+        id: number,
+        toolCallId: string,
+        description: string,
+      ): DaemonEvent =>
+        toolCallEvent(
+          toolCallId,
+          'Agent',
+          { description, run_in_background: true },
+          { id },
+        );
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Split the migration across parallel agents.', {
+            id: 1,
+          }),
+          agentToolCallEvent(
+            2,
+            'call-agent-schema-audit',
+            'Audit the schema drift between services',
+          ),
+          agentToolCallEvent(
+            3,
+            'call-agent-backfill-plan',
+            'Draft the backfill plan for the users table',
+          ),
+          turnCompleteEvent('prompt-parallel-agents', { id: 4 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      const summary = messageList.getByRole('button', {
+        name: /Parallel agents/,
+      });
+      await expect(summary).toBeVisible();
+      await captureScreenshot(page, `parallel-agents-collapsed-${theme}`);
+
+      await summary.click();
+      await expect(
+        messageList.getByText('Audit the schema drift between services'),
+      ).toBeVisible();
+      await captureScreenshot(page, `parallel-agents-expanded-${theme}`);
     });
 
     test(`extensions manager`, async ({ page }, testInfo) => {
@@ -197,6 +253,51 @@ for (const theme of THEMES) {
                 required: true,
                 envResolvable: true,
               },
+              {
+                key: 'senderPolicy',
+                label: 'Sender Policy',
+                kind: 'enum',
+                required: true,
+                default: 'allowlist',
+                options: [
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'allowedUsers',
+                label: 'Allowed Users',
+                kind: 'string-list',
+              },
+              {
+                key: 'groupPolicy',
+                label: 'Group Policy',
+                kind: 'enum',
+                required: true,
+                default: 'disabled',
+                options: [
+                  { value: 'disabled', label: 'Disabled' },
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'sessionScope',
+                label: 'Session Scope',
+                kind: 'enum',
+                required: true,
+                default: 'user',
+                options: [
+                  { value: 'user', label: 'Per user and chat' },
+                  {
+                    value: 'chat_thread',
+                    label: 'Per chat and thread',
+                  },
+                  { value: 'single', label: 'One shared session' },
+                ],
+              },
             ],
           },
           {
@@ -260,6 +361,8 @@ for (const theme of THEMES) {
                 type: 'dingtalk',
                 clientId: 'ding-visual-app',
                 senderPolicy: 'pairing',
+                groupPolicy: 'disabled',
+                sessionScope: 'user',
               },
               secrets: {
                 clientSecret: { present: true, source: 'literal' },
@@ -352,6 +455,145 @@ for (const theme of THEMES) {
         .getByRole('heading', { name: 'Pairing approvals' })
         .scrollIntoViewIfNeeded();
       await captureScreenshot(page, `channel-editor-existing-${theme}`);
+    });
+
+    test(`GitHub channel editor`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: [
+              {
+                key: 'token',
+                label: 'Personal Access Token',
+                kind: 'secret',
+                envResolvable: true,
+              },
+              {
+                key: 'useLocalGh',
+                label: 'Use Local GitHub CLI Authentication',
+                kind: 'boolean',
+              },
+              {
+                key: 'baseUrl',
+                label: 'Base URL',
+                kind: 'string',
+                envResolvable: true,
+              },
+              {
+                key: 'groupPolicy',
+                label: 'Group Policy',
+                kind: 'enum',
+                required: true,
+                default: 'open',
+                options: [
+                  { value: 'open', label: 'Open' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'disabled', label: 'Disabled' },
+                ],
+              },
+              {
+                key: 'senderPolicy',
+                label: 'Sender Policy',
+                kind: 'enum',
+                required: true,
+                options: [
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'allowedUsers',
+                label: 'Allowed Users',
+                kind: 'string-list',
+              },
+            ],
+          },
+        ],
+        channels: { revision: '1', instances: {} },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Channels', level: 1 }),
+      ).toBeVisible();
+      await page.getByRole('button', { name: 'Configure GitHub' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('switch', {
+          name: 'Use local GitHub CLI authentication',
+        }),
+      ).toBeVisible();
+      await captureScreenshot(page, `github-channel-editor-${theme}`);
+      await page.getByLabel('Instance name').fill('github-bot');
+      await page.getByRole('button', { name: 'Save' }).click();
+      await expect(
+        page.getByText(
+          'Enter a token or enable local GitHub CLI authentication.',
+        ),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `github-channel-editor-credential-${theme}`,
+      );
+      await page
+        .getByRole('switch', {
+          name: 'Use local GitHub CLI authentication',
+        })
+        .click();
+      await page.getByRole('button', { name: 'Save' }).click();
+      await expect(
+        page.getByText(
+          'Enter a token or enable local GitHub CLI authentication.',
+        ),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toHaveCount(0);
+      await expect
+        .poll(() =>
+          daemon.requests.filter(
+            (request) =>
+              request.method === 'PUT' &&
+              request.path.endsWith('/channels/github-bot'),
+          ),
+        )
+        .toEqual([
+          expect.objectContaining({
+            body: expect.objectContaining({
+              config: expect.objectContaining({
+                type: 'github',
+                useLocalGh: true,
+              }),
+            }),
+          }),
+        ]);
     });
 
     test(`mermaid diagram`, async ({ page }, testInfo) => {
@@ -581,7 +823,12 @@ for (const theme of THEMES) {
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the
       // screenshot and the capture differs between runs.
-      await expect(sidebar.getByText(primarySessionName)).toBeVisible();
+      await expect(
+        sidebar.getByRole('button', {
+          name: primarySessionName,
+          exact: true,
+        }),
+      ).toBeVisible();
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
@@ -698,6 +945,269 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-permission-panel]'),
       ).toBeVisible();
       await captureScreenshot(page, `permission-panel-${theme}`);
+    });
+
+    test(`code review artifact`, async ({ page }, testInfo) => {
+      // The dedicated code-review renderer is gated three ways: the
+      // `session_artifacts` capability, an artifact whose metadata marks it
+      // `code_review`, and a readable workspace file behind it. Without a
+      // scenario seeding all three, the whole detail view stays invisible to
+      // the before/after preview.
+      const reviewPath = '.qwen/reviews/pr-1234.json';
+      const reviewDocument = {
+        schemaVersion: 1,
+        target: 'local',
+        effort: 'high',
+        verdict: {
+          event: 'REQUEST_CHANGES',
+          verdictLine: 'Verdict: Request changes (1 Critical, 1 Suggestion)',
+          baseEvent: 'REQUEST_CHANGES',
+          cappedBy: ['Critical finding f-critical is unresolved'],
+          downgraded: false,
+          downgradedFrom: null,
+        },
+        findings: [
+          {
+            id: 'f-critical',
+            severity: 'Critical',
+            confidence: 'high',
+            source: 'review',
+            summary:
+              'Review verdict is reported even when the child process times out',
+            shortSummary: 'timeout treated as success',
+            failureScenario:
+              'When `review run` times out, the CLI still prints a verdict as if the review completed.',
+            witness:
+              'Probe: forced a 1ms timeout — BASE prints "Verdict: Approve", PR exits 1 with "review incomplete" — flipped.',
+            suggestedFix:
+              'Fail closed when timedOut is true instead of reporting the verdict.',
+            category: 'correctness',
+            locations: [
+              { file: 'packages/cli/src/commands/review.ts', line: 412 },
+            ],
+            outcome: 'fixed',
+            outcomeNote: 'Timeouts now surface as incomplete.',
+          },
+          {
+            id: 'f-suggestion',
+            severity: 'Suggestion',
+            confidence: 'low',
+            source: 'lint',
+            summary:
+              'Artifact evidence links should render their file name only',
+            shortSummary: 'verbose evidence labels',
+            failureScenario:
+              'Long asset URLs overflow the finding card in narrow panels.',
+            locations: [
+              {
+                file: 'packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx',
+                line: 540,
+              },
+            ],
+            assets: [
+              'https://assets.example.com/reviews/pr-1234/f-suggestion.png',
+            ],
+          },
+        ],
+        counts: {
+          total: 2,
+          bySeverity: { Critical: 1, Suggestion: 1, 'Nice to have': 0 },
+          byConfidence: { high: 1, low: 1 },
+          byOutcome: { fixed: 1, skipped: 0, no_change_needed: 0 },
+          held: 0,
+        },
+        outcomesRecorded: true,
+        markdownReportPath: '.qwen/reviews/pr-1234.md',
+      };
+      const reviewDocumentJson = JSON.stringify(reviewDocument);
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'session_artifacts',
+          ],
+        },
+        events: [
+          userTextEvent('Review my changes and save the report.', { id: 1 }),
+          toolCallEvent(
+            'call-record-review',
+            'record_artifact',
+            { title: 'Code review result', workspacePath: reviewPath },
+            { id: 2, rawOutput: { recorded: true } },
+          ),
+          assistantTextEvent('Review saved to the workspace.', { id: 3 }),
+          turnCompleteEvent('prompt-review', { id: 4 }),
+        ],
+        artifacts: [
+          {
+            id: 'artifact-code-review',
+            kind: 'other',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+            title: 'Code review result',
+            workspacePath: reviewPath,
+            mimeType: 'application/json',
+            sizeBytes: reviewDocumentJson.length,
+            metadata: { artifactType: 'code_review', schemaVersion: 1 },
+            retention: 'restorable',
+            clientRetained: false,
+            createdAt: '2026-07-03T00:00:00.000Z',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            toolCallId: 'call-record-review',
+            toolName: 'record_artifact',
+          },
+        ],
+        workspaceFiles: { [reviewPath]: reviewDocumentJson },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      // Open the artifact card the turn outputs render for the recorded
+      // artifact; the right panel then loads the workspace file and renders
+      // the dedicated detail view instead of the generic file preview.
+      await page
+        .locator('[data-web-shell-message-list]')
+        .getByRole('button', { name: 'Open', exact: true })
+        .click();
+      await expect(page.getByText('Authoritative verdict')).toBeVisible();
+      await expect(
+        page.getByText('Verdict: Request changes (1 Critical, 1 Suggestion)'),
+      ).toBeVisible();
+      await expect(
+        page.getByText(
+          'Review verdict is reported even when the child process times out',
+        ),
+      ).toBeVisible();
+      // The witness row — the executed evidence the witness rule delivers to
+      // the author; gating the shot on it keeps this scenario a coverage
+      // witness for the field, not just for the card.
+      await expect(page.getByText('forced a 1ms timeout')).toBeVisible();
+      await captureScreenshot(page, `code-review-artifact-${theme}`);
+
+      // Fullscreen is only reachable once the panel is open; without
+      // expanding it here, the toggle and the fullscreen surface stay
+      // invisible to the before/after preview.
+      await page
+        .getByRole('button', { name: 'Fullscreen', exact: true })
+        .click();
+      await expect(
+        page.locator('[class*="artifactPanelFullscreen"]'),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Exit fullscreen', exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `code-review-artifact-fullscreen-${theme}`);
+
+      // Escape shrinks the panel back to its dock. Assert the restore
+      // path without a second capture: the docked layout is the same
+      // view as the code-review-artifact shot above.
+      await page.keyboard.press('Escape');
+      await expect(
+        page.locator('[class*="artifactPanelFullscreen"]'),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole('button', { name: 'Fullscreen', exact: true }),
+      ).toBeVisible();
+    });
+
+    test(`drawer fullscreen`, async ({ page }, testInfo) => {
+      // The floating drawer's fullscreen path is styled independently of the
+      // docked surface (width, rounding, borders, safe-area padding); at a
+      // narrow viewport the panel floats, so capture it there.
+      const reportPath = 'reports/summary.json';
+      const reportJson = JSON.stringify({
+        summary: 'Drawer fullscreen visual check',
+      });
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'session_artifacts',
+          ],
+        },
+        events: [
+          userTextEvent('Open the saved report.', { id: 1 }),
+          toolCallEvent(
+            'call-record-report',
+            'record_artifact',
+            { title: 'Summary report', workspacePath: reportPath },
+            { id: 2, rawOutput: { recorded: true } },
+          ),
+          assistantTextEvent('Report saved to the workspace.', { id: 3 }),
+          turnCompleteEvent('prompt-drawer', { id: 4 }),
+        ],
+        artifacts: [
+          {
+            id: 'artifact-report',
+            kind: 'other',
+            storage: 'workspace',
+            source: 'tool',
+            status: 'available',
+            title: 'Summary report',
+            workspacePath: reportPath,
+            mimeType: 'application/json',
+            sizeBytes: reportJson.length,
+            retention: 'restorable',
+            clientRetained: false,
+            createdAt: '2026-07-03T00:00:00.000Z',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            toolCallId: 'call-record-report',
+            toolName: 'record_artifact',
+          },
+        ],
+        workspaceFiles: { [reportPath]: reportJson },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      // Below the (min-width: 1001px) dock breakpoint the panel floats in a
+      // drawer instead of docking.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page
+        .locator('[data-web-shell-message-list]')
+        .getByRole('button', { name: 'Open', exact: true })
+        .click();
+      const drawerAside = page.locator(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      );
+      await expect(drawerAside).toBeVisible();
+
+      await drawerAside
+        .getByRole('button', { name: 'Fullscreen', exact: true })
+        .click();
+      await expect(
+        page.locator('aside[class*="panelFullscreen"]'),
+      ).toBeVisible();
+      await captureScreenshot(page, `drawer-fullscreen-${theme}`);
+
+      // Escape shrinks the surface back to the drawer width; the drawer
+      // itself stays open.
+      await page.keyboard.press('Escape');
+      await expect(page.locator('aside[class*="panelFullscreen"]')).toHaveCount(
+        0,
+      );
+      await expect(drawerAside).toBeVisible();
     });
   });
 }

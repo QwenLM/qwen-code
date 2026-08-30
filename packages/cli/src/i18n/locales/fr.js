@@ -520,6 +520,7 @@ export default {
   'Tool Output Truncation Lines': 'Lignes de troncature de sortie des outils',
   'Folder Trust': 'Confiance des dossiers',
   'Tool Schema Compliance': 'Conformité Tool Schema',
+  Unset: 'Non défini',
   'Auto (detect from system)': 'Auto (détecter depuis le système)',
   'Auto (follow user input)': "Auto (suivre l'entrée utilisateur)",
   'Auto (detect terminal theme)': 'Auto (détecter le thème du terminal)',
@@ -1123,6 +1124,14 @@ export default {
     'Génération de résumé déjà en cours, attendez que la demande précédente se termine',
   'No conversation found to summarize.':
     'Aucune conversation trouvée à résumer.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    "Le chemin du résumé existe déjà et n'est pas un résumé généré : {{path}}",
+  'Summary path must be within the project root.':
+    'Le chemin du résumé doit se trouver dans la racine du projet.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'Le chemin du résumé correspond à un répertoire existant : {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'Le chemin du résumé se termine par un séparateur mais est un fichier existant : {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Échec de la génération du résumé du contexte du projet : {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1178,6 +1187,12 @@ export default {
     "La compression de l'historique du chat n'a pas réduit la taille. Cela peut indiquer des problèmes avec l'invite de compression.",
   'Could not compress chat history due to a token counting error.':
     "Impossible de compresser l'historique du chat en raison d'une erreur de comptage de tokens.",
+  'Could not compress chat history because the compression summary was empty.':
+    "Impossible de compresser l'historique du chat, car le résumé de compression était vide.",
+  'Could not compress chat history because the compression summary was truncated.':
+    "Impossible de compresser l'historique du chat, car le résumé de compression a été tronqué.",
+  'Could not compress chat history due to an API error.':
+    "Impossible de compresser l'historique du chat en raison d'une erreur d'API.",
   // ============================================================================
   // Commandes - Répertoire
   // ============================================================================
@@ -1592,10 +1607,20 @@ export default {
     'rejeté — modifiez la configuration pour réapprouver',
   'Background agent needs approval':
     "L'agent en arrière-plan nécessite une approbation",
+  'from nested agent': "de l'agent imbriqué",
   'Approve or deny the request above':
     'Approuvez ou refusez la demande ci-dessus',
   Running: 'En cours',
+  Pausing: 'Mise en pause',
   Paused: 'En pause',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    "La pause est coopérative ; le travail en cours peut se terminer avant que le workflow ne soit mis en pause. Un appel d'agent en attente d'une approbation d'outil maintient l'exécution dans cet état et continue de compter dans la limite de temps actif tant que l'approbation n'a pas été traitée.",
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    "En pause : aucun nouvel agent ne démarrera ; le code du script entre les appels d'agents continue de s'exécuter. Appuyez sur p pour reprendre. /clear, /branch et le changement de session annulent les exécutions en pause.",
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    "La mise en pause ou la reprise a été refusée ; l'état du workflow a changé. Réessayez.",
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Astuce : utilisez `/workflows p <runId>` ou Tâches en arrière-plan + p pour mettre en pause/reprendre de façon coopérative ; utilisez `/workflows <runId>` pour les détails.',
   Completed: 'Terminé',
   Failed: 'Échec',
   Stopped: 'Arrêté',
@@ -1984,6 +2009,19 @@ export default {
   'Manage extension settings': 'Gérer les paramètres de l’extension',
   'Ask a quick side question without affecting the main conversation':
     'Poser rapidement une question annexe sans affecter la conversation principale',
+  'Get a second opinion on the current conversation from a reviewer model':
+    "Obtenir un deuxième avis sur la conversation actuelle auprès d'un modèle examinateur",
+  'Consulting advisor...': "Consultation de l'advisor...",
+  'Advisor review failed: {{error}}':
+    "Échec de la revue de l'advisor : {{error}}",
+  'No conversation context available for /advisor':
+    'Aucun contexte de conversation disponible pour /advisor',
+  'Focus too long (max {{max}} chars)':
+    'Focus trop long (max {{max}} caractères)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    "Une autre opération est en cours, attendez qu'elle se termine avant d'exécuter /advisor",
+  'No response received.': 'Aucune réponse reçue.',
+  'No model configured.': 'Aucun modèle configuré.',
   'Manage Arena sessions': 'Gérer les sessions Arena',
   'Start an Arena session with multiple models competing on the same task':
     "Démarrer une session Arena où plusieurs modèles s'affrontent sur la même tâche",
@@ -2304,4 +2342,5 @@ export default {
     'Les modifications du gestionnaire de compétences automatiques sont désactivées en mode sécurisé.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Les modifications du gestionnaire de compétences automatiques ne sont disponibles que dans les espaces de travail approuvés. Marquez ce dossier comme approuvé avec `/trust`, puis réessayez.',
+  'Kept model as {{model}}': 'Modèle conservé : {{model}}',
 };
