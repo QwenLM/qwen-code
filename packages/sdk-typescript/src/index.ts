@@ -2,6 +2,7 @@ export { query } from './query/createQuery.js';
 export { AbortError, isAbortError } from './types/errors.js';
 export { Query } from './query/Query.js';
 export { SdkLogger } from './utils/logger.js';
+export { PERMISSION_MODES } from './types/permission-mode.js';
 
 // Daemon HTTP client (talks to `qwen serve`)
 export {
@@ -101,12 +102,20 @@ export {
   type DaemonMcpServerRestartRefusedEvent,
   type DaemonSettingsReloadedData,
   type DaemonSettingsReloadedEvent,
+  type DaemonSettingsChangedData,
+  type DaemonSettingsChangedEvent,
   type DaemonToolToggleResult,
   type DaemonSkillBatchToggleError,
   type DaemonSkillBatchToggleErrorCode,
   type DaemonSkillBatchToggleItem,
   type DaemonSkillBatchToggleResult,
+  type ExtensionMutationResponse,
+  type ExtensionWorkspaceBatchActivationState,
+  type ExtensionDefaultActivationBatchItem,
+  type ExtensionWorkspaceActivationBatchItem,
   type DaemonSkillToggleActivation,
+  type DaemonSkillToggleMutation,
+  type DaemonSkillToggleMutationSkill,
   type DaemonSkillToggleResult,
   type DaemonSkillScope,
   type DaemonSkillInstallSource,
@@ -223,6 +232,9 @@ export {
   type DaemonSessionListPage,
   type DaemonSessionListPageOptions,
   type DaemonSessionListView,
+  type DaemonSessionCatalogVersion,
+  type DaemonSessionLiveState,
+  type DaemonWorkspaceSessionLiveState,
   type DaemonSessionOrganizationResult,
   type DaemonSessionOrganizationUpdate,
   type DaemonSessionSubscribeOptions,
@@ -253,6 +265,8 @@ export {
   type DaemonWorkspaceFileBytes,
   type DaemonWorkspaceFileEditRequest,
   type DaemonWorkspaceFileEditResult,
+  type DaemonWorkspaceFileUploadRequest,
+  type DaemonWorkspaceFileUploadResult,
   type DaemonWorkspaceFileWriteRequest,
   type DaemonWorkspaceFileWriteResult,
   type DaemonWorkspaceMemoryDreamOptions,
@@ -263,6 +277,7 @@ export {
   type DaemonWorkspaceMemoryForgetResult,
   type DaemonWorkspaceMemoryForgetTask,
   type DaemonWorkspaceMemoryRememberContextMode,
+  type DaemonWorkspaceMemoryRememberTargetScope,
   type DaemonWorkspaceMemoryRememberOptions,
   type DaemonWorkspaceMemoryRememberResult,
   type DaemonWorkspaceMemoryRememberTask,
@@ -349,6 +364,33 @@ export {
   type SetSessionLanguageResult,
   type SessionMetadataResult,
   type SubscribeOptions,
+} from './daemon/index.js';
+
+export {
+  DaemonStandaloneCreationOutcomeUnknownError,
+  DaemonStandaloneProtocolError,
+  STANDALONE_SESSIONS_CAPABILITY,
+  isStandaloneCreationOutcomeUnknown,
+  isStandaloneSessionNotFoundError,
+  type CreateStandaloneSessionOptions,
+  type DaemonArchiveStandaloneSessionsResult,
+  type DaemonDeleteStandaloneSessionsResult,
+  type DaemonRestoredStandaloneSession,
+  type DaemonSessionRestoreStrategy,
+  type DaemonStandaloneBatchError,
+  type DaemonStandaloneCreationRecovery,
+  type DaemonStandaloneDirectoryResult,
+  type DaemonStandaloneFields,
+  type DaemonStandaloneMetadataResult,
+  type DaemonStandaloneSession,
+  type DaemonStandaloneSessionCreating,
+  type DaemonStandaloneSessionListOptions,
+  type DaemonStandaloneSessionListPage,
+  type DaemonStandaloneSessionLookup,
+  type DaemonStandaloneSessionSummary,
+  type DaemonStandaloneWorkingDirectory,
+  type DaemonUnarchiveStandaloneSessionsResult,
+  type RestoreStandaloneSessionRequest,
 } from './daemon/index.js';
 
 // Auth

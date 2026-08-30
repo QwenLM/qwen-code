@@ -18,9 +18,8 @@
  * (up to `PROBE_CONCURRENCY`), so a wedged child costs one timeout rather than
  * one per session.
  *
- * Read-only: clearing a goal stays on `POST /session/:id/goal/clear`, and
- * setting one stays a prompt (`/goal <objective>` updates the owning runtime,
- * which schedules the first Goal turn).
+ * Controls use the canonical `POST /session/:id/goal` route. This listing stays
+ * read-only and only projects each live runtime's current snapshot.
  */
 
 import type { Application } from 'express';
@@ -86,7 +85,7 @@ async function allSettledWithLimit<T, R>(
   return results;
 }
 
-/** One row of the Goals page. */
+/** One non-terminal Goal shown on the Goals page. */
 interface GoalView {
   sessionId: string;
   /** The session's label, when it has one — otherwise the client shows the id. */
@@ -102,6 +101,7 @@ interface GoalView {
    * that the goal specifically is running.
    */
   hasActivePrompt: boolean;
+  snapshot: BridgeSessionGoal['snapshot'];
 }
 
 export function registerGoalsRoutes(
@@ -145,17 +145,19 @@ export function registerGoalsRoutes(
           continue;
         }
         const { session, goal } = outcome.value;
-        if (!goal.active) continue;
+        const record = goal.snapshot.goal;
+        if (!record || record.status === 'complete') continue;
         goals.push({
           sessionId: session.sessionId,
           displayName: session.displayName ?? null,
-          condition: goal.active.condition,
-          iterations: goal.active.iterations,
-          setAt: goal.active.setAt,
-          ...(goal.active.lastReason !== undefined
-            ? { lastReason: goal.active.lastReason }
+          condition: record.objective,
+          iterations: record.turnCount,
+          setAt: record.createdAt,
+          ...(record.lastReason !== undefined
+            ? { lastReason: record.lastReason }
             : {}),
           hasActivePrompt: session.hasActivePrompt,
+          snapshot: goal.snapshot,
         });
       }
       if (dropped.length > 0) {

@@ -175,6 +175,7 @@ export {
   endSubagentSpan,
   runInSubagentSpanContext,
   getActiveInteractionSpan,
+  recordInteractionActivity,
   truncateSpanError,
 } from './session-tracing.js';
 export type {
@@ -202,7 +203,9 @@ export {
   captureDaemonTelemetryContext,
   createDaemonBridgeTelemetry,
   emitDaemonLog,
+  extractDaemonHttpTraceContext,
   extractDaemonTraceContext,
+  extractInboundTraceId,
   hashDaemonWorkspace,
   injectDaemonTraceContext,
   recordDaemonError,
@@ -212,6 +215,7 @@ export {
   withDaemonRequestSpan,
   withDaemonSpan,
   type DaemonBridgeTelemetryMetrics,
+  type DaemonRequestSpanOptions,
 } from './daemon-tracing.js';
 export {
   initializeDaemonMetrics,
@@ -240,6 +244,9 @@ export {
   registerAcpEventLoopLagGauge,
 } from './event-loop-lag-metrics.js';
 export {
+  addAgentInputMessageAttributes,
+  addAgentOutputMessageAttributes,
+  AgentOutputMessageCapture,
   addUserPromptAttributes,
   addSystemPromptAttributes,
   addToolSchemaAttributes,

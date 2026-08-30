@@ -126,6 +126,9 @@ describe('runTestDelta', () => {
       baseline,
       timeout: 60,
       now,
+      // Hermetic: the real gate reads the operator's own settings, and this
+      // helper's tests are about attribution, not about containment.
+      refuse: () => null,
       exec:
         typeof baseOutput === 'function'
           ? // Pass cwd through: swallowing it made the baseline-dir assertion
@@ -141,6 +144,56 @@ describe('runTestDelta', () => {
     mkdirSync(baseline);
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('refuses the base-side rerun under `required` instead of running it on the host', () => {
+    // The PR side now runs in a container with an env allowlist and no
+    // network. Running the base side on the host anyway does not just break
+    // the operator's `required` — it makes the two sides incomparable, and
+    // this file exists to compare them. So under `required` with no usable
+    // containment the answer is "not measured", never a delta between two
+    // differently-shaped runs.
+    vi.stubEnv('QWEN_REVIEW_SANDBOX', 'required');
+    let ran = 0;
+    try {
+      const r = runTestDelta({
+        report: writeReport([cmd({ output: ' FAIL  src/new.test.ts > x' })]),
+        baseline,
+        timeout: 60,
+        exec: (command) => {
+          ran += 1;
+          return cmd({ command, output: '' });
+        },
+      });
+      // The rerun did not happen at all — asserting only on the note would
+      // pass just as well with the host run still going ahead behind it.
+      expect(ran).toBe(0);
+      expect(r.entries).toEqual([]);
+      expect(r.netNew).toEqual([]);
+      // ...and it says so in the words that stop `netNew: []` from being read
+      // as "no regression".
+      expect(r.note).toContain('NOTHING was attributed');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('measures the base side normally when no policy demands containment', () => {
+    // The other half of the gate: without `required` nothing changes, so the
+    // refusal above cannot be a blanket "test-delta stopped working".
+    let ran = 0;
+    const r = runTestDelta({
+      report: writeReport([cmd({ output: ' FAIL  src/new.test.ts > x' })]),
+      baseline,
+      timeout: 60,
+      refuse: () => null,
+      exec: (command) => {
+        ran += 1;
+        return cmd({ command, output: '' });
+      },
+    });
+    expect(ran).toBe(1);
+    expect(r.entries).toHaveLength(1);
+  });
 
   it('attributes a PR-only failure as netNew and a both-sides failure as shared', () => {
     const r = runWith(
@@ -527,6 +580,52 @@ describe('runTestDelta', () => {
     expect(r.shared).toEqual(['src/a.test.ts', 'src/b.test.ts']);
   });
 
+  it("prefers the PR side's capture-time set, so a trimmed netNew survives", () => {
+    // The direction that matters: `src/z.test.ts` fails on the PR side only.
+    // Re-parsing the trimmed report finds only `src/a.test.ts` and reports an
+    // EMPTY netNew — a failure the PR caused, measured away. The report that
+    // carries `failingFiles` was measured before the trim, so it still says so.
+    const r = runWith(
+      [
+        cmd({
+          output: 'FAIL src/a.test.ts\n\n... [120000 characters omitted] ...\n',
+          failingFiles: ['src/a.test.ts', 'src/z.test.ts'],
+        }),
+      ],
+      'FAIL src/a.test.ts',
+    );
+
+    expect(r.netNew).toEqual(['src/z.test.ts']);
+    expect(r.shared).toEqual(['src/a.test.ts']);
+    // The trim marker is still in `output`; the disclosure would be a false
+    // alarm now that the set no longer comes from there.
+    expect(r.entries[0].prTruncated).toBe(false);
+    expect(r.note ?? '').not.toContain('may be partial');
+  });
+
+  it('treats a malformed failingFiles as no measurement, not a crash', () => {
+    // The report is a file anything may have edited. A field that is not a
+    // string array must read as "this seam supplied no measurement" — the
+    // fallback an absent field has always taken — never reach `.filter` as-is.
+    // `[]` too: the producer omits the field when nothing parsed, so an empty
+    // array can only be hand-made — taken as authoritative it would skip the
+    // reparse and understate both sets.
+    for (const bad of ['a string', [null], [{ file: 'x' }], 42, []]) {
+      const r = runWith(
+        [
+          cmd({
+            output: 'FAIL src/a.test.ts',
+            failingFiles: bad as unknown as string[],
+          }),
+        ],
+        'FAIL src/a.test.ts',
+      );
+      // The reparse fallback still measures off the stored output.
+      expect(r.shared).toEqual(['src/a.test.ts']);
+      expect(r.netNew).toEqual([]);
+    }
+  });
+
   it('discloses a PR-side output that was already trimmed', () => {
     // build-test trimmed it before this command ran, so the PR failing set may
     // be short. That understates `shared`; it cannot invent a netNew. Say so.
@@ -688,6 +787,7 @@ describe('the CLI option contract', () => {
 
     const report = runTestDelta({
       ...parsed,
+      refuse: () => null,
       // The base side prints the SAME failure under its own root.
       exec: (command) => ({
         command,

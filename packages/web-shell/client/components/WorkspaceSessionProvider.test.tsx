@@ -29,7 +29,7 @@ const mocks = vi.hoisted(() => ({
   appProps: [] as Array<Record<string, unknown>>,
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: ({
     children,
     ...props
@@ -59,7 +59,7 @@ vi.mock('../App', () => ({
 
 import { WorkspaceSessionProvider } from './WorkspaceSessionProvider';
 
-describe('WorkspaceSessionProvider transactional targets', () => {
+describe('WorkspaceSessionProvider targets', () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -113,7 +113,7 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     return onSessionIdChange;
   }
 
-  it('keeps the modern provider mounted until the desired target commits', async () => {
+  it('updates the provider immediately without remounting for a different target', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     expect(mocks.providerMounts).toBe(1);
     expect(container.textContent).toBe('/work/a');
@@ -125,78 +125,31 @@ describe('WorkspaceSessionProvider transactional targets', () => {
       sessionId: 'session-b',
       workspaceCwd: '/work/b',
     });
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: true,
-      initialSelectedWorkspaceCwd: '/work/a',
-    });
-
-    await act(async () => {
-      const commit = mocks.providerProps.at(-1)?.[
-        'onSessionTransitionCommit'
-      ] as (target: { sessionId: string; workspaceCwd: string }) => void;
-      commit({ sessionId: 'session-b', workspaceCwd: '/work/b' });
-    });
     expect(container.textContent).toBe('/work/b');
-    expect(mocks.providerProps.at(-1)).toMatchObject({
-      sessionId: 'session-b',
-      workspaceCwd: '/work/b',
-    });
     expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: false,
+      initialSelectedWorkspaceCwd: '/work/b',
     });
-    const appReport = mocks.appProps.at(-1)?.['onSessionIdChange'] as (
-      sessionId: string,
-      workspaceId: string,
-      workspaceCwd: string,
-    ) => void;
-    appReport('session-b', 'b', '/work/b');
-    expect(onSessionIdChange).toHaveBeenCalledTimes(1);
-    expect(onSessionIdChange).toHaveBeenCalledWith('session-b', 'b', '/work/b');
   });
 
-  it('keeps one modern provider and updates the write gate during rapid props', async () => {
+  it('keeps one provider during rapid prop changes', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
 
     await renderTarget('session-b', '/work/b', onSessionIdChange);
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: true,
-    });
-
     await renderTarget('session-a', '/work/a', onSessionIdChange);
-    expect(mocks.providerMounts).toBe(1);
-    expect(mocks.providerUnmounts).toBe(0);
     expect(mocks.providerProps.at(-1)).toMatchObject({
       sessionId: 'session-a',
       workspaceCwd: '/work/a',
     });
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: false,
-      initialSelectedWorkspaceCwd: '/work/a',
-    });
-
     await renderTarget('session-b', '/work/b', onSessionIdChange);
     expect(mocks.providerMounts).toBe(1);
     expect(mocks.providerUnmounts).toBe(0);
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: true,
-    });
   });
 
-  it('does not feed stale host props back after an action-driven commit', async () => {
+  it('passes session changes from the app to the host', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
-
-    await act(async () => {
-      const commit = mocks.providerProps.at(-1)?.[
-        'onSessionTransitionCommit'
-      ] as (target: { sessionId: string; workspaceCwd: string }) => void;
-      commit({ sessionId: 'session-b', workspaceCwd: '/work/b' });
-    });
-
-    expect(mocks.providerProps.at(-1)).toMatchObject({
-      sessionId: 'session-b',
-      workspaceCwd: '/work/b',
-    });
-    expect(onSessionIdChange).not.toHaveBeenCalled();
+    expect(mocks.providerProps.at(-1)).not.toHaveProperty(
+      'transactionalSessionSwitching',
+    );
     const appReport = mocks.appProps.at(-1)?.['onSessionIdChange'] as (
       sessionId: string,
       workspaceId: string,
@@ -204,9 +157,10 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     ) => void;
     appReport('session-b', 'b', '/work/b');
     expect(onSessionIdChange).toHaveBeenCalledWith('session-b', 'b', '/work/b');
+    expect(onSessionIdChange).toHaveBeenCalledOnce();
   });
 
-  it('keeps the committed app visible while a workspace target is unresolved', async () => {
+  it('does not keep the previous app visible while a target is unresolved', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     mocks.workspace = {
       ...mocks.workspace,
@@ -214,18 +168,11 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     };
 
     await renderTarget('session-b', '/work/missing', onSessionIdChange);
-    expect(mocks.providerMounts).toBe(1);
-    expect(container.textContent).toBe('/work/a');
-    expect(mocks.providerProps.at(-1)).toMatchObject({
-      sessionId: 'session-a',
-      workspaceCwd: '/work/a',
-    });
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: true,
-    });
+    expect(mocks.providerUnmounts).toBe(1);
+    expect(container.textContent).not.toContain('/work/a');
   });
 
-  it('unblocks the committed session after workspace resolution fails', async () => {
+  it('shows the target workspace error without restoring the previous app', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     onSessionIdChange.mockClear();
     mocks.workspace = {
@@ -240,16 +187,12 @@ describe('WorkspaceSessionProvider transactional targets', () => {
 
     await renderTarget('session-b', '/work/missing', onSessionIdChange);
 
-    expect(mocks.providerMounts).toBe(1);
-    expect(container.textContent).toBe('/work/a');
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: false,
-    });
-    expect(onSessionIdChange).toHaveBeenCalledTimes(1);
-    expect(onSessionIdChange).toHaveBeenCalledWith('session-a', 'a', '/work/a');
+    expect(container.textContent).not.toContain('/work/a');
+    expect(container.textContent).toContain('Failed to load workspace');
+    expect(onSessionIdChange).not.toHaveBeenCalled();
 
     await renderTarget('session-b', '/work/missing', onSessionIdChange);
-    expect(onSessionIdChange).toHaveBeenCalledTimes(1);
+    expect(onSessionIdChange).not.toHaveBeenCalled();
   });
 
   it('does not preserve a target that never connected', async () => {
@@ -270,75 +213,7 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     expect(container.textContent).not.toContain('/work/a');
   });
 
-  it('rolls a still-current controlled target back after restore failure', async () => {
-    const onSessionIdChange = await renderTarget('session-a', '/work/a');
-    onSessionIdChange.mockClear();
-    await renderTarget('session-b', '/work/b', onSessionIdChange);
-    mocks.connection = {
-      status: 'connected',
-      sessionId: 'session-a',
-      workspaceCwd: '/work/a',
-      sessionTransition: {
-        phase: 'failed',
-        operation: 'load',
-        origin: 'controlled',
-        targetSessionId: 'session-b',
-        targetWorkspaceCwd: '/work/b',
-      },
-    };
-    await renderTarget('session-b', '/work/b', onSessionIdChange);
-    expect(onSessionIdChange).toHaveBeenCalledTimes(1);
-    expect(onSessionIdChange).toHaveBeenCalledWith('session-a', 'a', '/work/a');
-    expect(mocks.appProps.at(-1)).toMatchObject({
-      desiredSessionTargetPending: false,
-    });
-  });
-
-  it('rolls back a primary-workspace target when workspace props are omitted', async () => {
-    const onSessionIdChange = vi.fn();
-    await act(async () => {
-      root.render(
-        <WorkspaceSessionProvider
-          sessionId="session-a"
-          webShellProps={{ onSessionIdChange }}
-        />,
-      );
-    });
-    onSessionIdChange.mockClear();
-
-    await act(async () => {
-      root.render(
-        <WorkspaceSessionProvider
-          sessionId="session-b"
-          webShellProps={{ onSessionIdChange }}
-        />,
-      );
-    });
-    mocks.connection = {
-      status: 'connected',
-      sessionId: 'session-a',
-      workspaceCwd: '/work/a',
-      sessionTransition: {
-        phase: 'failed',
-        operation: 'load',
-        origin: 'controlled',
-        targetSessionId: 'session-b',
-        targetWorkspaceCwd: '/work/a',
-      },
-    };
-    await act(async () => {
-      root.render(
-        <WorkspaceSessionProvider
-          sessionId="session-b"
-          webShellProps={{ onSessionIdChange }}
-        />,
-      );
-    });
-
-    expect(onSessionIdChange).toHaveBeenCalledWith('session-a', 'a', '/work/a');
-  });
-
-  it('preserves keyed remounts for legacy daemons', async () => {
+  it('keeps one provider for legacy daemons', async () => {
     mocks.workspace = {
       ...mocks.workspace,
       capabilities: {
@@ -352,8 +227,8 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     };
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
     await renderTarget('session-b', '/work/b', onSessionIdChange);
-    expect(mocks.providerMounts).toBe(2);
-    expect(mocks.providerUnmounts).toBe(1);
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
     expect(mocks.appProps.at(-1)).toMatchObject({
       initialSelectedWorkspaceCwd: '/work/b',
     });

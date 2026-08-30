@@ -65,10 +65,13 @@ const UNESCAPE_REGEX = (() => {
 /**
  * Replaces the home directory with a tilde.
  * @param filePath - The path to tildeify.
+ * @param homeOverride - Optional home directory override for callers that
+ * track home themselves (e.g. memory discovery resolves it at load time so
+ * display and discovery agree).
  * @returns The tildeified path.
  */
-export function tildeifyPath(filePath: string): string {
-  const rawHomeDir = os.homedir();
+export function tildeifyPath(filePath: string, homeOverride?: string): string {
+  const rawHomeDir = homeOverride ?? os.homedir();
   if (!rawHomeDir) {
     return filePath;
   }
@@ -481,6 +484,69 @@ export function realpathNearestExisting(inputPath: string): string {
 
   try {
     return path.join(fs.realpathSync(current), ...missingSegments);
+  } catch {
+    return resolved;
+  }
+}
+
+async function resolveLeafSymlinkAsync(inputPath: string): Promise<string> {
+  const maxHops = 40; // POSIX SYMLOOP_MAX
+  let current = path.resolve(inputPath);
+  for (let i = 0; i < maxHops; i++) {
+    let stat: fs.Stats;
+    try {
+      stat = await fs.promises.lstat(current);
+    } catch {
+      return current; // missing or unreadable — nothing left to follow
+    }
+    if (!stat.isSymbolicLink()) {
+      return current;
+    }
+    const target = await fs.promises.readlink(current);
+    if (path.isAbsolute(target)) {
+      current = target;
+    } else {
+      let parent: string;
+      try {
+        parent = await fs.promises.realpath(path.dirname(current));
+      } catch {
+        parent = path.dirname(current);
+      }
+      current = path.resolve(parent, target);
+    }
+  }
+  return current; // chain too deep — caller still range-checks the result
+}
+
+/**
+ * Promise-based {@link realpathNearestExisting} for callers on a shared event
+ * loop (the daemon guard evaluates shell calls for every workspace/session).
+ */
+export async function realpathNearestExistingAsync(
+  inputPath: string,
+): Promise<string> {
+  const resolved = await resolveLeafSymlinkAsync(inputPath);
+  const missingSegments: string[] = [];
+  let current = resolved;
+
+  for (;;) {
+    let exists = true;
+    try {
+      await fs.promises.access(current);
+    } catch {
+      exists = false;
+    }
+    if (exists) break;
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return resolved;
+    }
+    missingSegments.unshift(path.basename(current));
+    current = parent;
+  }
+
+  try {
+    return path.join(await fs.promises.realpath(current), ...missingSegments);
   } catch {
     return resolved;
   }

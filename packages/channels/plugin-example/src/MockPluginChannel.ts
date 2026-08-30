@@ -4,8 +4,10 @@ import type {
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
+  ChannelOutputSegmentContext,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
   InboundMessage,
   OutboundMessage,
@@ -19,7 +21,7 @@ export interface MockPluginConfig extends ChannelConfig {
 export class MockPluginChannel extends ChannelBase {
   private ws: WebSocket | null = null;
   private serverWsUrl: string;
-  private pendingMessageId: string | undefined;
+  private inboundMessage = new AsyncLocalStorage<{ messageId?: string }>();
 
   constructor(
     name: string,
@@ -83,13 +85,15 @@ export class MockPluginChannel extends ChannelBase {
   protected override onResponseChunk(
     chatId: string,
     chunk: string,
-    _sessionId: string,
+    sessionId: string,
+    segment?: ChannelOutputSegmentContext,
   ): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
     const msg: ChunkMessage = {
       type: 'chunk',
-      messageId: this.pendingMessageId || 'unknown',
+      messageId:
+        segment?.messageId ?? this.getResponseMessageId(sessionId) ?? 'unknown',
       chatId,
       text: chunk,
     };
@@ -99,19 +103,28 @@ export class MockPluginChannel extends ChannelBase {
   protected override async onResponseComplete(
     chatId: string,
     fullText: string,
-    _sessionId: string,
+    sessionId: string,
+    segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
-    await this.sendMessage(chatId, fullText);
+    this.sendOutbound(
+      chatId,
+      fullText,
+      segment?.messageId ?? this.getResponseMessageId(sessionId),
+    );
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    this.sendOutbound(chatId, text, this.inboundMessage.getStore()?.messageId);
+  }
+
+  private sendOutbound(chatId: string, text: string, messageId?: string): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return;
     }
 
     const outbound: OutboundMessage = {
       type: 'outbound',
-      messageId: this.pendingMessageId || 'unknown',
+      messageId: messageId ?? 'unknown',
       chatId,
       text,
     };
@@ -127,11 +140,8 @@ export class MockPluginChannel extends ChannelBase {
   }
 
   override async handleInbound(envelope: Envelope): Promise<void> {
-    this.pendingMessageId = envelope.messageId;
-    try {
-      await super.handleInbound(envelope);
-    } finally {
-      this.pendingMessageId = undefined;
-    }
+    await this.inboundMessage.run({ messageId: envelope.messageId }, async () =>
+      super.handleInbound(envelope),
+    );
   }
 }

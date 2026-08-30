@@ -46,9 +46,10 @@ surfaces:
   not inherited by an embedded child.
 - `/embedded` may provide ergonomic adapters, but canonical lifecycle behavior
   belongs to Rust and is generated into Python and TypeScript.
-- Python wheels, the public npm package, and native npm platform packages ship
-  from the same Cua Driver tag and exact version. Release validation rejects
-  source version drift before registry publication.
+- Python wheels and the single public `@qwen-code/cua-sdk` package ship from
+  the same Cua Driver tag and exact version. Native Node payloads remain GitHub
+  Release assets. Release validation rejects source version drift before
+  registry publication.
 
 ## Validation matrix
 

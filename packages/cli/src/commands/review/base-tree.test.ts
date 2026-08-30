@@ -894,6 +894,39 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(false);
     expect(r.note).toMatch(/base worktree could not be created/);
   });
+
+  it('ignores an exported GIT_DIR redirect when adding the base tree', () => {
+    // An exported GIT_DIR overrides repository discovery for every git call
+    // that inherits it: the add would land in the redirected repository and
+    // the A/B measure the wrong program while every check against the given
+    // tree passes. The sha below IS a commit — just not of this repo.
+    const foreign = mkdtempSync(join(tmpdir(), 'qwen-base-tree-foreign-'));
+    try {
+      git(foreign, 'init', '-q', '-b', 'main');
+      git(foreign, 'config', 'user.email', 't@t.t');
+      git(foreign, 'config', 'user.name', 't');
+      writeFileSync(join(foreign, 'b.txt'), 'x\n');
+      git(foreign, 'add', '-A');
+      git(foreign, 'commit', '-qm', 'foreign');
+      const foreignSha = git(foreign, 'rev-parse', 'HEAD');
+
+      process.env['GIT_DIR'] = join(foreign, '.git');
+      let r: BaseTreeReport;
+      try {
+        r = run({ plan: { mergeBaseSha: foreignSha } });
+      } finally {
+        delete process.env['GIT_DIR'];
+      }
+
+      expect(r.available).toBe(false);
+      expect(r.note).toMatch(/base worktree could not be created/);
+      // The foreign repository gained no worktree from this call — its list
+      // still holds only its own main checkout.
+      expect(git(foreign, 'worktree', 'list').split('\n')).toHaveLength(1);
+    } finally {
+      rmSync(foreign, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('the base-tree CLI option contract', () => {
