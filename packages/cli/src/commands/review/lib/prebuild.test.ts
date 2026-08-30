@@ -336,4 +336,60 @@ describe('prebuildCovered', () => {
     mkdirSync(join(qwenHome, 'settings.json'));
     expect(prebuildCovered()).toBe(false);
   });
+
+  describe('workspace scope', () => {
+    // The session's shell timer arms the FULL settings merge, where
+    // Workspace overrides User, while the cover is welded into the
+    // operator scopes. The gate must read both merges: the op-only one so
+    // a repository cannot GRANT itself cover, and the full one so a
+    // checkout cannot REVOKE the welded cover under the timer while the
+    // gate still certifies it.
+    let workspace: string;
+    let cwdSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      workspace = realpathSync(
+        mkdtempSync(join(tmpdir(), 'qwen-cover-workspace-')),
+      );
+      mkdirSync(join(workspace, '.qwen'), { recursive: true });
+      cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(workspace);
+    });
+
+    afterEach(() => {
+      cwdSpy.mockRestore();
+      rmSync(workspace, { recursive: true, force: true });
+    });
+
+    function weldWorkspace(value: unknown): void {
+      writeFileSync(
+        join(workspace, '.qwen', 'settings.json'),
+        JSON.stringify({ tools: { shell: { defaultTimeoutMs: value } } }),
+      );
+    }
+
+    it('is not covered when a below-cover workspace value overrides the welded cover', () => {
+      weld(PREBUILD_COVER_MS);
+      weldWorkspace(600_000);
+      expect(prebuildCovered()).toBe(false);
+    });
+
+    it('is not covered when a gate-invalid workspace value falls back to the built-in', () => {
+      weld(PREBUILD_COVER_MS);
+      weldWorkspace('lots');
+      expect(prebuildCovered()).toBe(false);
+    });
+
+    it('is not covered when only the workspace scope carries the cover', () => {
+      // The upward direction: a repository must not grant its own
+      // review's cover — the op-only read has just the 120000ms built-in.
+      weldWorkspace(PREBUILD_COVER_MS);
+      expect(prebuildCovered()).toBe(false);
+    });
+
+    it('stays covered when the workspace scope carries the cover too', () => {
+      weld(PREBUILD_COVER_MS);
+      weldWorkspace(PREBUILD_COVER_MS);
+      expect(prebuildCovered()).toBe(true);
+    });
+  });
 });

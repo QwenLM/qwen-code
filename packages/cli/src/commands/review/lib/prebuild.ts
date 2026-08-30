@@ -183,30 +183,37 @@ export function prebuildRequested(
  * cover where it welds the opt-in; a local run has only the built-in, far
  * below the budget, and a prebuild started under it dies mid-install with
  * the whole `fetch-pr` call — the fail-open path never gets to record
- * anything. This gate reads the SAME value the caller's shell tool applies:
- * operator-controlled scopes only (`skipWorkspaceSettings` — a repository
- * must not toggle its own review's cover through `.qwen/settings.json`),
- * with the runtime gate `Config` applies to the value: only in-range
- * integers reach the shell tool, anything else falls back to the built-in.
+ * anything.
+ *
+ * The gate reads BOTH settings merges, because the timer arms one and the
+ * cover is welded where the other reads. Operator-controlled scopes only
+ * (`skipWorkspaceSettings`): a repository must not GRANT its own review's
+ * cover through `.qwen/settings.json`. And the full merge the shell tool
+ * actually applies, where Workspace overrides User: a checkout carrying a
+ * below-cover workspace value would otherwise REVOKE the welded cover under
+ * the timer while this gate still certifies it. Both reads apply the
+ * runtime gate `Config` applies to the value: only in-range integers reach
+ * the shell tool, anything else falls back to the built-in.
  */
 export function prebuildCovered(): boolean {
-  let raw: unknown;
+  let opOnly: unknown;
+  let full: unknown;
   try {
-    raw = loadSettings(undefined, { skipWorkspaceSettings: true }).merged.tools
-      ?.shell?.defaultTimeoutMs;
+    opOnly = loadSettings(undefined, { skipWorkspaceSettings: true }).merged
+      .tools?.shell?.defaultTimeoutMs;
+    full = loadSettings(undefined).merged.tools?.shell?.defaultTimeoutMs;
   } catch {
     // An unreadable settings file ends the review nowhere else this early;
     // it must not end it here either. No readable cover, no prebuild.
     return false;
   }
-  const effectiveMs =
+  const covers = (raw: unknown): boolean =>
     typeof raw === 'number' &&
     Number.isInteger(raw) &&
     raw >= 0 &&
-    raw <= 2_147_483_647
-      ? raw
-      : 120_000; // shell.ts DEFAULT_FOREGROUND_TIMEOUT_MS
-  return effectiveMs >= PREBUILD_COVER_MS;
+    raw <= 2_147_483_647 &&
+    raw >= PREBUILD_COVER_MS;
+  return covers(opOnly) && covers(full);
 }
 
 export interface PrebuildArgs {
