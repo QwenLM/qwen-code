@@ -6301,6 +6301,10 @@ export class LlmChat {
       }
     }
 
+    const recordedUsage = coercedUsage
+      ? { ...usageMetadata, ...coercedUsage }
+      : usageMetadata;
+
     if (
       terminalChunks.length > 0 &&
       this.historyMutationVersion !== streamHistoryMutationVersion
@@ -6308,6 +6312,12 @@ export class LlmChat {
       debugLogger.warn(
         'Discarding a terminal response because history changed while the provider stream was closing.',
       );
+      if (recordedUsage && goalContext && this.chatRecordingService) {
+        this.chatRecordingService.recordGoalTurnUsage(
+          goalContext,
+          recordedUsage,
+        );
+      }
       yield {
         candidates: [
           {
@@ -6637,9 +6647,7 @@ export class LlmChat {
                     )
                 : []),
             ],
-        tokens: coercedUsage
-          ? { ...usageMetadata, ...coercedUsage }
-          : usageMetadata,
+        tokens: recordedUsage,
         contextWindowSize,
         ...(goalContext ? { goalContext: { ...goalContext } } : {}),
       };

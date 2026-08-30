@@ -15009,6 +15009,8 @@ describe('LlmChat', async () => {
     });
 
     it('does not append a terminal response after history is replaced during drain', async () => {
+      const recordGoalTurnUsage = vi.fn();
+      const recordingChat = chatWithRecorder(vi.fn(), recordGoalTurnUsage);
       const original = {
         role: 'user',
         parts: [{ text: 'original' }],
@@ -15017,7 +15019,13 @@ describe('LlmChat', async () => {
         role: 'user',
         parts: [{ text: 'replacement' }],
       } as Content;
-      chat.setHistory([original]);
+      const usage = {
+        promptTokenCount: 10,
+        candidatesTokenCount: 2,
+        totalTokenCount: 12,
+      };
+      const goal = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+      recordingChat.setHistory([original]);
       let markDrainStarted!: () => void;
       const drainStarted = new Promise<void>((resolve) => {
         markDrainStarted = resolve;
@@ -15027,11 +15035,13 @@ describe('LlmChat', async () => {
         releaseProvider = resolve;
       });
       const response = (async function* () {
-        yield makeChunk([{ text: 'stale' }], 'MAX_TOKENS');
+        yield Object.assign(makeChunk([{ text: 'stale' }], 'MAX_TOKENS'), {
+          usageMetadata: usage,
+        });
         markDrainStarted();
         await providerGate;
       })();
-      const internalChat = chat as unknown as {
+      const internalChat = recordingChat as unknown as {
         processStreamResponse(
           model: string,
           stream: AsyncGenerator<GenerateContentResponse>,
@@ -15045,21 +15055,22 @@ describe('LlmChat', async () => {
         'test-model',
         response,
         'test-route',
-        undefined,
+        goal,
         undefined,
         'on-max-tokens',
       );
       const pendingTerminal = iterator.next();
 
       await drainStarted;
-      chat.setHistory([replacement]);
+      recordingChat.setHistory([replacement]);
       releaseProvider();
       const terminal = await pendingTerminal;
 
       expect(terminal.value?.candidates?.[0]?.finishReason).toBe(
         FinishReason.STOP,
       );
-      expect(chat.getHistory()).toEqual([replacement]);
+      expect(recordingChat.getHistory()).toEqual([replacement]);
+      expect(recordGoalTurnUsage).toHaveBeenCalledWith(goal, usage);
       await iterator.return?.(undefined);
     });
 
