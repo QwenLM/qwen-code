@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import {
   isLocalIpcPath,
+  resolvePeerSocketCandidates,
   MAX_SOCKET_PATH_BYTES,
   resolvePeerSocketPath,
 } from './socket-path.js';
@@ -79,6 +80,27 @@ describe.skipIf(isWindows)('resolvePeerSocketPath', () => {
   });
 });
 
+/**
+ * Set env vars for one test and put the real environment back afterwards.
+ * Replacing `process.env` wholesale would leave the C-level environment
+ * (which os.tmpdir() consults) carrying the test's values.
+ */
+function withEnv(values: Record<string, string | undefined>): () => void {
+  const saved = Object.fromEntries(
+    Object.keys(values).map((key) => [key, process.env[key]]),
+  );
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  return () => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+}
+
 describe('isLocalIpcPath', () => {
   it.skipIf(isWindows)('accepts an absolute posix path', () => {
     expect(isLocalIpcPath('/run/user/1000/qwen-socks/1.sock')).toBe(true);
@@ -102,5 +124,58 @@ describe('isLocalIpcPath', () => {
     expect(isLocalIpcPath('')).toBe(false);
     expect(isLocalIpcPath(undefined as unknown as string)).toBe(false);
     expect(isLocalIpcPath(42 as unknown as string)).toBe(false);
+  });
+});
+
+describe('resolvePeerSocketCandidates', () => {
+  it('lists the runtime directory first, then a nonce directory under tmpdir, then /tmp', () => {
+    const restore = withEnv({
+      XDG_RUNTIME_DIR: '/run/user/1000',
+      TMPDIR: '/var/tmp',
+    });
+    try {
+      const candidates = resolvePeerSocketCandidates(42);
+      expect(candidates[0]).toBe('/run/user/1000/qwen-socks/42.sock');
+      expect(candidates[1]).toMatch(
+        /^\/var\/tmp\/qwen-socks-[0-9a-f]{16}\/42\.sock$/,
+      );
+      expect(candidates[2]).toMatch(
+        /^\/tmp\/qwen-socks-[0-9a-f]{16}\/42\.sock$/,
+      );
+      // The same nonce for both fallbacks: one session, one directory name.
+      expect(candidates[1]!.split('/')[3]).toBe(candidates[2]!.split('/')[2]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('drops candidates that cannot fit in sun_path', () => {
+    const restore = withEnv({
+      XDG_RUNTIME_DIR: '/' + 'r'.repeat(120),
+      TMPDIR: undefined,
+    });
+    try {
+      const candidates = resolvePeerSocketCandidates(42);
+      expect(candidates.some((c) => c.startsWith('/rrr'))).toBe(false);
+      expect(candidates.every((c) => Buffer.byteLength(c) <= 103)).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps one candidate even when nothing fits, so the failure can name it', () => {
+    const restore = withEnv({
+      XDG_RUNTIME_DIR: undefined,
+      TMPDIR: '/' + 't'.repeat(200),
+    });
+    try {
+      // /tmp/qwen-socks-<16hex>/<pid>.sock always fits; force a giant pid to
+      // push even that over the limit is not possible, so check the shape.
+      const candidates = resolvePeerSocketCandidates(42);
+      expect(candidates.length).toBeGreaterThan(0);
+      expect(candidates.at(-1)).toMatch(/^\/tmp\/qwen-socks-/);
+    } finally {
+      restore();
+    }
   });
 });

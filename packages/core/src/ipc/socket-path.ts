@@ -42,23 +42,43 @@ export const SOCKET_DIR_NAME = 'qwen-socks';
  * long to bind.
  */
 export function resolvePeerSocketPath(pid: number = process.pid): string {
+  return resolvePeerSocketCandidates(pid)[0]!;
+}
+
+/**
+ * Every place this process could bind its socket, best first.
+ *
+ * The runtime directory is preferred but is not always usable: in a
+ * rootless container or a user namespace it can be absent, owned by an
+ * unmapped uid, or mounted read-only, and a session whose inbox silently
+ * fails there is a session nobody can reach and nobody knows why. So the
+ * bind tries these in order and only gives up when the last one fails.
+ * Candidates over the `sun_path` limit are dropped up front.
+ */
+export function resolvePeerSocketCandidates(
+  pid: number = process.pid,
+): string[] {
+  const candidates: string[] = [];
   const runtimeDir = process.env['XDG_RUNTIME_DIR'];
   if (runtimeDir) {
-    const preferred = path.join(runtimeDir, SOCKET_DIR_NAME, `${pid}.sock`);
-    if (Buffer.byteLength(preferred) <= MAX_SOCKET_PATH_BYTES) {
-      return preferred;
-    }
+    candidates.push(path.join(runtimeDir, SOCKET_DIR_NAME, `${pid}.sock`));
   }
-
   const nonce = randomBytes(8).toString('hex');
-  const fallback = path.join(
-    os.tmpdir(),
-    `${SOCKET_DIR_NAME}-${nonce}`,
-    `${pid}.sock`,
+  candidates.push(
+    path.join(os.tmpdir(), `${SOCKET_DIR_NAME}-${nonce}`, `${pid}.sock`),
   );
-  if (Buffer.byteLength(fallback) <= MAX_SOCKET_PATH_BYTES) return fallback;
+  candidates.push(
+    path.join('/tmp', `${SOCKET_DIR_NAME}-${nonce}`, `${pid}.sock`),
+  );
 
-  return path.join('/tmp', `${SOCKET_DIR_NAME}-${nonce}`, `${pid}.sock`);
+  const fitting = candidates.filter(
+    (candidate, index) =>
+      Buffer.byteLength(candidate) <= MAX_SOCKET_PATH_BYTES &&
+      candidates.indexOf(candidate) === index,
+  );
+  // Nothing fits: keep the last (shortest) candidate so the bind can fail
+  // with a path-too-long cause that names it, rather than with nothing.
+  return fitting.length > 0 ? fitting : [candidates[candidates.length - 1]!];
 }
 
 /**

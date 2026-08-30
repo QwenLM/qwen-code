@@ -26,7 +26,35 @@ import {
   sendPeerFrame,
   PeerSendError,
 } from './uds-client.js';
-import { startPeerInbox, type PeerInbox } from './uds-inbox.js';
+import {
+  getLastPeerInboxFailure,
+  describePeerInboxFailure,
+  startPeerInbox,
+  sweepOrphanSocketDirs,
+  sweepOrphanSockets,
+  type PeerInbox,
+} from './uds-inbox.js';
+
+/**
+ * Set env vars for one test and put the real environment back afterwards.
+ * Replacing `process.env` wholesale would leave the C-level environment
+ * (which os.tmpdir() consults) carrying the test's values.
+ */
+function withEnv(values: Record<string, string | undefined>): () => void {
+  const saved = Object.fromEntries(
+    Object.keys(values).map((key) => [key, process.env[key]]),
+  );
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  return () => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+}
 
 let tmpDir: string;
 let inbox: PeerInbox | null = null;
@@ -147,6 +175,92 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
       onFrame: () => {},
     });
     expect(started).toBeNull();
+    expect(getLastPeerInboxFailure()).toMatchObject({
+      cause: 'non_local',
+      socketPath: 'relative.sock',
+      attempts: 1,
+    });
+  });
+
+  it('names the cause when the socket directory is not a directory', async () => {
+    await fs.writeFile(path.join(tmpDir, 'socks'), 'a file');
+    const started = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'a.sock'),
+      onFrame: () => {},
+    });
+    expect(started).toBeNull();
+    const failure = getLastPeerInboxFailure();
+    expect(failure?.cause).toBe('not_directory');
+    expect(describePeerInboxFailure(failure!)).toContain(
+      'not a plain directory',
+    );
+    expect(describePeerInboxFailure(failure!)).toContain('XDG_RUNTIME_DIR');
+  });
+
+  it('names the cause when a planted symlink sits where the directory should be', async () => {
+    const elsewhere = path.join(tmpDir, 'elsewhere');
+    await fs.mkdir(elsewhere);
+    await fs.symlink(elsewhere, path.join(tmpDir, 'socks'));
+    await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'a.sock'),
+      onFrame: () => {},
+    });
+    expect(getLastPeerInboxFailure()?.cause).toBe('not_directory');
+  });
+
+  it('names the cause when the path is too long to bind', async () => {
+    const long = path.join(tmpDir, 'x'.repeat(120), 'a.sock');
+    const started = await startPeerInbox({
+      socketPath: long,
+      onFrame: () => {},
+    });
+    expect(started).toBeNull();
+    expect(getLastPeerInboxFailure()?.cause).toBe('path_too_long');
+    expect(describePeerInboxFailure(getLastPeerInboxFailure()!)).toContain(
+      'shorter directory',
+    );
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'names the cause when a parent directory is not writable',
+    async () => {
+      const locked = path.join(tmpDir, 'locked');
+      await fs.mkdir(locked, { mode: 0o500 });
+      await fs.chmod(locked, 0o500);
+      const started = await startPeerInbox({
+        socketPath: path.join(locked, 'socks', 'a.sock'),
+        onFrame: () => {},
+      });
+      expect(started).toBeNull();
+      expect(getLastPeerInboxFailure()?.cause).toBe('permission');
+      await fs.chmod(locked, 0o700);
+    },
+  );
+
+  it('clears the recorded failure once a bind succeeds', async () => {
+    await startPeerInbox({ socketPath: 'relative.sock', onFrame: () => {} });
+    expect(getLastPeerInboxFailure()).not.toBeNull();
+    await listen();
+    expect(getLastPeerInboxFailure()).toBeNull();
+  });
+
+  it('falls back to the next candidate when the runtime directory is unusable', async () => {
+    // XDG_RUNTIME_DIR pointing at a file is what a broken container mount
+    // looks like from inside; the session must still get an inbox.
+    const runtime = path.join(tmpDir, 'runtime');
+    await fs.writeFile(runtime, 'not a directory');
+    const tmp = path.join(tmpDir, 'tmp');
+    await fs.mkdir(tmp);
+    const restore = withEnv({ XDG_RUNTIME_DIR: runtime, TMPDIR: tmp });
+    try {
+      const started = await startPeerInbox({ onFrame: () => {} });
+      expect(started).not.toBeNull();
+      inbox = started;
+      expect(started!.socketPath.startsWith(tmp + path.sep)).toBe(true);
+      expect(getLastPeerInboxFailure()).toBeNull();
+    } finally {
+      restore();
+    }
   });
 
   it('unlinks the socket on close', async () => {
@@ -239,6 +353,53 @@ describe.skipIf(isWindows)('framing', () => {
 
     expect(received).toHaveLength(1);
     expect(received[0]).toMatchObject({ message: { content: 'after' } });
+  });
+
+  it('drops a connection that sends no complete line by the deadline, even if bytes trickle in', async () => {
+    const started = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'a.sock'),
+      onFrame: (frame) => received.push(frame),
+      lineDeadlineMs: 120,
+    });
+    if (!started) throw new Error('inbox failed to start');
+    inbox = started;
+    const socket = await connectRaw(started.socketPath);
+    const closed = new Promise<void>((resolve) =>
+      socket.on('close', () => resolve()),
+    );
+    // One byte every 40 ms would reset an idle timer forever.
+    const dribble = setInterval(() => socket.write('x'), 40);
+    const start = Date.now();
+    await closed;
+    clearInterval(dribble);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(100);
+    expect(Date.now() - start).toBeLessThan(2_000);
+    expect(received).toHaveLength(0);
+  });
+
+  it('re-arms the deadline from each complete line, not from each byte', async () => {
+    const started = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'a.sock'),
+      onFrame: (frame) => received.push(frame),
+      lineDeadlineMs: 150,
+    });
+    if (!started) throw new Error('inbox failed to start');
+    inbox = started;
+    const socket = await connectRaw(started.socketPath);
+    let open = true;
+    socket.on('close', () => {
+      open = false;
+    });
+    // Two whole frames 100 ms apart both land; the connection is still
+    // open after the second because each line re-armed the deadline.
+    socket.write(encodePeerFrame(buildUserFrame({ content: 'one' })));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    socket.write(encodePeerFrame(buildUserFrame({ content: 'two' })));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(received).toHaveLength(2);
+    expect(open).toBe(true);
+    socket.end();
+    await settle();
   });
 
   it('drops a connection that never sends a newline', async () => {
@@ -377,6 +538,76 @@ describe.skipIf(isWindows)('client errors', () => {
     } finally {
       for (const conn of conns) conn.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+describe.skipIf(isWindows)('orphan socket sweeps', () => {
+  it('removes sockets whose process is provably dead and keeps the rest', async () => {
+    const dir = path.join(tmpDir, 'qwen-socks');
+    await fs.mkdir(dir);
+    // 2^22-1 is above the default pid_max on Linux, so nothing owns it.
+    const dead = path.join(dir, '4194303.sock');
+    const live = path.join(dir, `${process.pid}.sock`);
+    const self = path.join(dir, '4194302.sock');
+    const foreign = path.join(dir, 'notes.sock');
+    for (const file of [dead, live, self, foreign])
+      await fs.writeFile(file, '');
+
+    expect(await sweepOrphanSockets(dir, self)).toBe(1);
+    expect(await fs.readdir(dir)).toEqual(
+      expect.arrayContaining([
+        'notes.sock',
+        `${process.pid}.sock`,
+        '4194302.sock',
+      ]),
+    );
+    await expect(fs.stat(dead)).rejects.toThrow();
+  });
+
+  it('removes a fallback directory holding only dead sockets, never one with anything else', async () => {
+    const parent = path.join(tmpDir, 'tmp');
+    const nonce = (n: string) =>
+      path.join(parent, `qwen-socks-${n.repeat(16)}`);
+    const dead = nonce('a');
+    const mixed = nonce('b');
+    const empty = nonce('c');
+    const own = nonce('d');
+    for (const d of [dead, mixed, empty, own])
+      await fs.mkdir(d, { recursive: true });
+    await fs.writeFile(path.join(dead, '4194303.sock'), '');
+    await fs.writeFile(path.join(mixed, '4194303.sock'), '');
+    await fs.writeFile(path.join(mixed, 'keep.txt'), '');
+    await fs.mkdir(path.join(parent, 'qwen-socks-notanonce'));
+
+    expect(await sweepOrphanSocketDirs(parent, own)).toBe(2);
+    const left = await fs.readdir(parent);
+    expect(left).toEqual(
+      expect.arrayContaining([
+        path.basename(mixed),
+        path.basename(own),
+        'qwen-socks-notanonce',
+      ]),
+    );
+    expect(left).not.toContain(path.basename(dead));
+    expect(left).not.toContain(path.basename(empty));
+  });
+
+  it('sweeps the shared runtime directory on bind', async () => {
+    const runtime = path.join(tmpDir, 'runtime');
+    const dir = path.join(runtime, 'qwen-socks');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, '4194303.sock'), '');
+    const restore = withEnv({ XDG_RUNTIME_DIR: runtime });
+    try {
+      const started = await startPeerInbox({ onFrame: () => {} });
+      if (!started) throw new Error('inbox failed to start');
+      inbox = started;
+      expect(path.dirname(started.socketPath)).toBe(dir);
+      await settle();
+      await expect(fs.stat(path.join(dir, '4194303.sock'))).rejects.toThrow();
+    } finally {
+      restore();
     }
   });
 });

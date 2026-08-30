@@ -12,7 +12,20 @@ import type { HeldMessage } from '@qwen-code/qwen-code-core';
 // behind it. The wording assertions below only depend on these stubs; the
 // stubs mirror the real helpers, whose behavior is pinned by core's own
 // tests (peer-envelope.test.ts, peer-frames.test.ts).
+const inboxFailure = vi.hoisted(() => ({
+  current: null as null | {
+    cause: string;
+    socketPath: string;
+    detail: string;
+    hint: string;
+    attempts: number;
+  },
+}));
+
 vi.mock('@qwen-code/qwen-code-core', () => ({
+  getLastPeerInboxFailure: () => inboxFailure.current,
+  describePeerInboxFailure: (failure: { cause: string; hint: string }) =>
+    `${failure.cause}: ${failure.hint}`,
   describeHoldCause: (cause: string) =>
     cause === 'mode-mismatch'
       ? 'this session can apply some actions without per-action review and the sender does not'
@@ -284,10 +297,31 @@ describe('/peers', () => {
   it('does not tell a user to enable a setting they already enabled', async () => {
     // Same null inbox, different cause: registration or the bind failed.
     // "Turn it on" would send them back to a setting that is already on.
+    inboxFailure.current = null;
     const result = await run(null, '', true);
     expect(result.messageType).toBe('error');
-    expect(result.content).toContain('failed to bind');
+    expect(result.content).toContain('failed to register');
     expect(result.content).not.toContain('Enable it with');
+  });
+
+  it('repeats the bind failure and what to change when the inbox could not bind', async () => {
+    inboxFailure.current = {
+      cause: 'foreign_owner',
+      socketPath: '/run/user/1000/qwen-socks/1.sock',
+      detail: 'belongs to uid 65534',
+      hint: 'Set XDG_RUNTIME_DIR to a directory you own, then restart.',
+      attempts: 3,
+    };
+    try {
+      const result = await run(null, '', true);
+      expect(result.messageType).toBe('error');
+      expect(result.content).toContain('failed to bind its socket');
+      expect(result.content).toContain('foreign_owner');
+      expect(result.content).toContain('XDG_RUNTIME_DIR');
+      expect(result.content).not.toContain('Enable it with');
+    } finally {
+      inboxFailure.current = null;
+    }
   });
 
   it('lists held messages by default', async () => {

@@ -43,6 +43,7 @@ import {
   createDebugLogger,
   describeDeliveryStatus,
   describeHoldCause,
+  describePeerInboxFailure,
   getErrorMessage,
   getAllMemoryFilenames,
   ShellExecutionService,
@@ -251,7 +252,10 @@ import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
-import { usePeerMessaging } from '../peerMessaging/PeerMessagingContext.js';
+import {
+  usePeerInboxFailure,
+  usePeerMessaging,
+} from '../peerMessaging/PeerMessagingContext.js';
 import {
   MAX_ACCEPTED_BACKLOG,
   type PeerMessaging,
@@ -2630,6 +2634,24 @@ export const AppContainer = (props: AppContainerProps) => {
       );
     });
   }, [historyManager, peerMessaging]);
+
+  // Say so when the inbox could not bind. With the feature on, a session
+  // without an inbox is unreachable, and its only other symptom is peers
+  // reporting it absent — a problem the user would otherwise discover
+  // from the wrong side. One line, once, with the cause and what to do.
+  const peerInboxFailure = usePeerInboxFailure();
+  const announcedInboxFailureRef = useRef(false);
+  useEffect(() => {
+    if (!peerInboxFailure || announcedInboxFailureRef.current) return;
+    announcedInboxFailureRef.current = true;
+    historyManager.addItem(
+      {
+        type: MessageType.ERROR,
+        text: `Cross-session messaging is OFF for this session — the inbox could not bind: ${describePeerInboxFailure(peerInboxFailure)}`,
+      },
+      Date.now(),
+    );
+  }, [historyManager, peerInboxFailure]);
 
   // A held message may only be waiting on a mode mismatch, so re-run the
   // gate whenever the approval mode changes rather than making the user
