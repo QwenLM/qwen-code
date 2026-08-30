@@ -633,6 +633,8 @@ class FakeBridge {
     originatorClientId: string;
   }> = [];
   runtimeMcpRemoves: Array<{ name: string; originatorClientId: string }> = [];
+  workspaceMemoryRememberCalls: Array<Record<string, unknown>> = [];
+  workspaceMemoryForgetCalls: Array<Record<string, unknown>> = [];
   runtimeMcpAddResult: {
     shadowedSettings?: boolean;
     skipped?: boolean;
@@ -667,10 +669,16 @@ class FakeBridge {
       originatorClientId,
     };
   }
-  async runWorkspaceMemoryRemember() {
-    return { summary: 'remembered', filesTouched: [], touchedScopes: [] };
+  async runWorkspaceMemoryRemember(request: Record<string, unknown>) {
+    this.workspaceMemoryRememberCalls.push(request);
+    return {
+      summary: 'remembered',
+      filesTouched: ['/mem/project/remembered.md'],
+      touchedScopes: ['project'],
+    };
   }
-  async runWorkspaceMemoryForget() {
+  async runWorkspaceMemoryForget(request: Record<string, unknown>) {
+    this.workspaceMemoryForgetCalls.push(request);
     return {
       summary: 'forgot',
       removedEntries: [],
@@ -7911,35 +7919,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // own spawnOrAttach would block on bridge.gate and never grant ownership.
     bridge.gate = new Promise<void>((r) => (releaseLoad = r));
     const connStream = await openStream(connId);
-    const got = takeFrames(connStream, 3); // session/new + close reject + load success
-    await new Promise((r) => setTimeout(r, 50));
-    // Load goes in-flight (awaits bridge.gate); pre-await closingSessions empty.
-    void post(connId, {
-      jsonrpc: '2.0',
-      id: 340,
-      method: 'session/load',
-      params: { sessionId: 'sess-1' },
-    });
-    await new Promise((r) => setTimeout(r, 20));
-    // Close starts DURING the load → marks sess-1 closing (awaits closeGate).
-    void post(connId, {
-      jsonrpc: '2.0',
-      id: 341,
-      method: 'session/close',
-      params: { sessionId: 'sess-1' },
-    });
-    await new Promise((r) => setTimeout(r, 20));
-    releaseLoad(); // loadSession resolves after close has been rejected.
-    const frames = (await got) as Array<{
-      id: number;
-      result?: { replayed?: boolean };
-      error?: { code: number; message: string; data?: { errorKind?: string } };
-    }>;
-    const closeReply = frames.find((f) => f.id === 341);
-    expect(closeReply?.error?.code).toBe(-32603);
-    expect(closeReply?.error?.data?.errorKind).toBe('session_archiving');
-    const loadReply = frames.find((f) => f.id === 340);
-    expect(loadReply?.result?.replayed).toBe(true);
+    const reader = frameReader(connStream);
+    const frameTimeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : 2_000;
+    let loadReply: { id: number; result?: { replayed?: boolean } } | undefined;
+    try {
+      // Load goes in-flight (awaits bridge.gate); pre-await closingSessions empty.
+      void post(connId, {
+        jsonrpc: '2.0',
+        id: 340,
+        method: 'session/load',
+        params: { sessionId: 'sess-1' },
+      });
+      await waitUntil(
+        () =>
+          bridge.loadRequests.some((request) => request.sessionId === 'sess-1'),
+        frameTimeoutMs,
+      );
+      // Close starts DURING the load and is rejected by the archive gate.
+      void post(connId, {
+        jsonrpc: '2.0',
+        id: 341,
+        method: 'session/close',
+        params: { sessionId: 'sess-1' },
+      });
+      const closeReply = (await reader.next(frameTimeoutMs)) as {
+        id: number;
+        error?: {
+          code: number;
+          message: string;
+          data?: { errorKind?: string };
+        };
+      };
+      expect(closeReply).toMatchObject({
+        id: 341,
+        error: { code: -32603, data: { errorKind: 'session_archiving' } },
+      });
+      releaseLoad();
+      loadReply = (await reader.next(frameTimeoutMs)) as typeof loadReply;
+    } finally {
+      releaseLoad();
+      reader.close();
+    }
+    expect(loadReply).toMatchObject({ id: 340, result: { replayed: true } });
     expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(false);
     expect(bridge.killed).not.toContain('sess-1');
 
@@ -10218,7 +10241,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         };
         expect(completed.result).toMatchObject({
           status: 'completed',
-          result: { summary: 'No memory files updated.' },
+          result: { summary: 'Memory update completed.' },
         });
       } finally {
         reader.close();
@@ -10257,6 +10280,49 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           status: 'completed',
           result: { summary: 'forgot' },
         });
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/workspace/memory/forget carries a scope through, and omits it when unscoped', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 84,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'stale project note', scope: 'project' },
+        });
+        const scoped = (await reader.next()) as {
+          result: { taskId: string; status: string; scope?: string };
+        };
+        // The dispatcher's `...(rawScope ? { scope: rawScope } : {})` is the
+        // only thing carrying the caller's scope into the destructive lane;
+        // until now no test over the wire drove either direction of it.
+        expect(scoped.result.scope).toBe('project');
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'anything' },
+        });
+        const unscoped = (await reader.next()) as {
+          result: { taskId: string; status: string };
+        };
+        expect(unscoped.result).not.toHaveProperty('scope');
+
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        // A `scope: undefined` reaching the bridge reads as a requested scope
+        // to anything checking for the key, so the omitted arm is asserted
+        // strictly rather than by value.
+        expect(bridge.workspaceMemoryForgetCalls).toStrictEqual([
+          { query: 'stale project note', scope: 'project' },
+          { query: 'anything' },
+        ]);
       } finally {
         reader.close();
       }
@@ -10380,7 +10446,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(completed!.result).toMatchObject({
           taskId: restTask.taskId,
           status: 'completed',
-          result: { summary: 'No memory files updated.' },
+          result: { summary: 'Memory update completed.' },
         });
       } finally {
         reader.close();
@@ -10891,6 +10957,8 @@ describe('ACP WebSocket transport security', () => {
       cdpTunnelOverWs?: boolean;
       daemonEnv?: Readonly<NodeJS.ProcessEnv>;
       localControlToken?: string;
+      hostname?: string;
+      reportedLocalPort?: number;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -10912,6 +10980,7 @@ describe('ACP WebSocket transport security', () => {
         token: opts.token,
         credentials,
         allowedOrigins: opts.allowedOrigins,
+        hostname: opts.hostname,
         workspaceRememberLane: new WorkspaceRememberTaskLane(
           bridge as unknown as HttpAcpBridge,
         ),
@@ -10937,6 +11006,14 @@ describe('ACP WebSocket transport security', () => {
       });
       const listeningServer = app.listen(0, '127.0.0.1', () => {
         port = (listeningServer.address() as AddressInfo).port;
+        if (opts.reportedLocalPort !== undefined) {
+          listeningServer.prependListener('upgrade', (_request, socket) => {
+            Object.defineProperty(socket, 'localPort', {
+              configurable: true,
+              value: opts.reportedLocalPort,
+            });
+          });
+        }
         handle?.attachServer(listeningServer);
         acpHandle = handle;
         if (!opts.localControlToken) {
@@ -11062,6 +11139,59 @@ describe('ACP WebSocket transport security', () => {
     // The Host header will be 127.0.0.1:PORT which is in the allowlist
     expect(result.code).toBe(101);
   });
+
+  it('accepts the exact IPv4 loopback Host and Origin the daemon binds', async () => {
+    await startServer({ hostname: '127.0.0.2' });
+    const result = await wsConnectRaw('127.0.0.1', `http://127.0.0.2:${port}`, {
+      Host: `127.0.0.2:${port}`,
+    });
+    expect(result.code).toBe(101);
+  });
+
+  it.each([
+    { port: 80, authority: 'localhost', scheme: 'http', expectedCode: 101 },
+    { port: 80, authority: 'localhost', scheme: 'https', expectedCode: 403 },
+    {
+      port: 80,
+      authority: '127.0.0.2',
+      scheme: 'http',
+      expectedCode: 101,
+    },
+    {
+      port: 80,
+      authority: '127.0.0.2',
+      scheme: 'https',
+      expectedCode: 403,
+    },
+    { port: 443, authority: 'localhost', scheme: 'https', expectedCode: 101 },
+    { port: 443, authority: 'localhost', scheme: 'http', expectedCode: 403 },
+    {
+      port: 443,
+      authority: '127.0.0.2',
+      scheme: 'https',
+      expectedCode: 101,
+    },
+    {
+      port: 443,
+      authority: '127.0.0.2',
+      scheme: 'http',
+      expectedCode: 403,
+    },
+  ])(
+    'handles port-less $scheme://$authority on reported port $port with code $expectedCode',
+    async ({ port: reportedLocalPort, authority, scheme, expectedCode }) => {
+      await startServer({
+        hostname: '127.0.0.2',
+        reportedLocalPort,
+      });
+      const result = await wsConnectRaw(
+        '127.0.0.1',
+        `${scheme}://${authority}`,
+        { Host: authority },
+      );
+      expect(result.code).toBe(expectedCode);
+    },
+  );
 
   // ── CSWSH origin check ─────────────────────────────────────────────
   it('rejects WS upgrade with cross-origin Origin header', async () => {

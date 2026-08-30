@@ -97,7 +97,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
     since: 'v1',
     modes: ['workspace', 'clean'],
   },
+  // Explicit remember targets and scoped forget (`scope` parameter). Old
+  // daemons silently ignore an unknown `scope`, so the SDK pre-flights the
+  // matching tag before sending one. The sibling no-op behavior change — a
+  // zero-write remember now fails `remember_no_update` instead of completing
+  // with 'No memory files updated.' — is deliberately untagged: it changes a
+  // task's terminal outcome, not the surface shape, and every client sees it
+  // as a typed `failed` task status that cannot be mistaken for success.
+  workspace_memory_remember_project_scope: { since: 'v1' },
+  workspace_memory_remember_user_scope: { since: 'v1' },
   workspace_memory_forget: { since: 'v1' },
+  workspace_memory_forget_scope: { since: 'v1' },
   workspace_memory_dream: { since: 'v1' },
   // Workspace agents CRUD (`GET/POST /workspace/agents` +
   // `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
@@ -258,8 +268,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_btw: { since: 'v1' },
   // Direct daemon-side shell execution for an existing session.
   // Advertised CONDITIONALLY: operators must explicitly enable it and
-  // configure bearer auth. Clients must still send a session-bound
-  // X-Qwen-Client-Id when calling the route.
+  // either configure bearer auth or use trusted-loopback mode. Clients must
+  // still send a session-bound X-Qwen-Client-Id when calling the route.
   session_shell_command: { since: 'v1' },
   // Daemon hosts a workspace-shared MCP transport
   // pool (`QwenAgent.mcpPool`); `GET /workspace/mcp` reflects pool-level
@@ -357,6 +367,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_display_name: { since: 'v1' },
   scratch_workspace_registration: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
+  // A native OS directory picker can be opened on the daemon host
+  // (osascript on macOS, PowerShell on Windows, zenity on a Linux host
+  // with a display). Headless hosts omit the tag so clients hide the
+  // Browse affordance instead of surfacing a guaranteed picker failure.
+  native_directory_picker: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
   // memory, workspace agent CRUD, and persisted session organization surfaces.
@@ -502,6 +517,7 @@ export interface AdvertiseFeatureToggles {
   persistentWorkspaceRegistrationAvailable?: boolean;
   scratchWorkspaceRegistrationAvailable?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  nativeDirectoryPickerAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
@@ -639,6 +655,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'workspace_runtime_removal',
     (toggles) => toggles.workspaceRuntimeRemovalAvailable === true,
+  ],
+  [
+    'native_directory_picker',
+    (toggles) => toggles.nativeDirectoryPickerAvailable === true,
   ],
   [
     'workspace_qualified_acp',
