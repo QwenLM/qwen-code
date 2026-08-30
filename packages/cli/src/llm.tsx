@@ -60,6 +60,7 @@ import { ExtensionRefreshState } from './config/extension-refresh-state.js';
 import { initializeI18n, resolveLanguageSetting } from './i18n/index.js';
 import {
   setupStartupWorktree,
+  discardStartupWorktree,
   persistStartupWorktreeSidecar,
   buildStartupWorktreeNotice,
   type StartupWorktreeContext,
@@ -883,8 +884,18 @@ export async function main() {
     }
   }
 
-  const exitStartup = (code: number, message?: string): never => {
+  const exitStartup = async (
+    code: number,
+    message?: string,
+  ): Promise<never> => {
     if (message) writeStderrLine(message);
+    if (startupWorktreeContext && !startupWorktreeContext.wasReattached) {
+      try {
+        await discardStartupWorktree(startupWorktreeContext);
+      } catch (error) {
+        debugLogger.warn(`Failed to discard startup worktree: ${error}`);
+      }
+    }
     process.exit(code);
   };
 

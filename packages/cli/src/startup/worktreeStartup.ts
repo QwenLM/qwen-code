@@ -334,6 +334,23 @@ export async function setupStartupWorktree(
   };
 }
 
+export async function discardStartupWorktree(
+  context: StartupWorktreeContext,
+): Promise<void> {
+  if (context.wasReattached) return;
+
+  process.chdir(context.repoRoot);
+  const result = await new GitWorktreeService(
+    context.repoRoot,
+  ).removeUserWorktree(context.slug, {
+    deleteBranch: true,
+    forceDeleteBranch: true,
+  });
+  if (!result.success) {
+    throw new Error(result.error ?? 'failed to remove startup worktree');
+  }
+}
+
 /**
  * Result of the post-`loadCliConfig` sidecar persist step. Callers use the
  * boolean fields to decide whether to surface an INFO line in TUI / a
