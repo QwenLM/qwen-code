@@ -26,16 +26,19 @@ const workflowsDir = join(
   'workflows',
 );
 
-// Lane labels the ECS fleet registers, and the convention that keeps them
-// assignable at a glance. Each Linux host carries 25 runner registrations:
+// Lane labels the ECS fleet registers. Each of the five Linux hosts carries
+// 25 runner registrations, and a host is dedicated to one lane so the pool
+// stays assignable at a glance:
 //
-//   1        ecs-light   seconds-long jobs (authorize, label, route-style)
-//   2 – 15   ecs-agent   review / autofix (6–8 hour budgets)
-//   16 – 25  ecs-qwen    CI (90 minute budget)
+//   hk-…6t, hk-…6u    all 25   ecs-agent   review / autofix (6–8h budgets)
+//   64c, sg, hk-j6cdq      1   ecs-light   seconds-long jobs
+//                       2–25   ecs-qwen    CI (90 minute budget)
 //
-// Separating them is about head-of-line blocking, not capacity: the
-// seconds-long jobs are ~71% of the queue and ~13% of the machine time, so
-// they starve behind the long lanes while costing almost nothing to move.
+// Separating light from qwen is about head-of-line blocking, not capacity:
+// the seconds-long jobs are ~71% of the queue and ~13% of the machine time,
+// so they starve behind the long lanes while costing almost nothing to move.
+// Three light slots drain a 89-job peak in about seven minutes at their
+// ~15-second median.
 //
 // Adding an entry here is NOT what makes a label exist. Register it on the
 // runners first (`POST /repos/{owner}/{repo}/actions/runners/{id}/labels`),
@@ -46,7 +49,7 @@ const REGISTERED_LANES = new Set([
   'ecs-agent',
   'ecs-qwen',
   'ecs-win',
-  // Not part of the 25-per-host convention above: a single benchmark host
+  // Not part of the per-host convention above: a single benchmark host
   // registered on its own for the DSW SWE-verified release lane.
   'qwen-benchmark-dsw-hk-eas',
 ]);
