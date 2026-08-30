@@ -125,9 +125,20 @@ export function createModuleLoader(options) {
     // itself a registered root: a registered entry carries a canonical baseline
     // and its own re-link/revocation guard above, which the implicit branch
     // must not undermine by independently following a swapped symlink.
-    const cwdRootIsRegistered = moduleRoots.some(
-      (candidate) => path.resolve(candidate.path) === cwdRoot,
-    );
+    const cwdRootIsRegistered = moduleRoots.some((candidate) => {
+      try {
+        // Canonicalize the stable parent, not node_modules itself: the root
+        // may have been replaced, and following it here would erase the
+        // registration-time identity that the branch above just rejected.
+        const anchoredPath = path.join(
+          canonicalDirectory(path.dirname(candidate.path)),
+          path.basename(candidate.path),
+        );
+        return sameCanonicalPath(anchoredPath, cwdRoot);
+      } catch {
+        return false;
+      }
+    });
     if (!cwdRootIsRegistered) {
       try {
         // The implicit root has no registration-time baseline, so there is no
@@ -164,9 +175,21 @@ export function createModuleLoader(options) {
     let firstError = null;
     for (const base of [...new Set(bases)]) {
       try {
-        const resolved = getRequireForBase(base).resolve(specifier, {
-          conditions: IMPORT_CONDITIONS,
-        });
+        const parentUrl = pathToFileURL(
+          path.join(base, '__qwen_node_repl__.mjs'),
+        ).href;
+        let resolved;
+        try {
+          resolved = fileURLToPath(import.meta.resolve(specifier, parentUrl));
+        } catch (importError) {
+          try {
+            resolved = getRequireForBase(base).resolve(specifier, {
+              conditions: IMPORT_CONDITIONS,
+            });
+          } catch {
+            throw importError;
+          }
+        }
         const canonical = fs.realpathSync(resolved);
         if (!roots.some((root) => isUnder(canonical, root.canonicalPath))) {
           continue;

@@ -51,7 +51,7 @@ const {
   ] as Message[],
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: ({ children }: { children: ReactNode }) => children,
   useConnection: () => connection,
   useWorkspace: () => ({ client: workspaceClient }),
@@ -75,14 +75,14 @@ vi.mock('../../hooks/useSessionArtifacts', () => ({
   useSessionArtifacts: () => ({ artifacts: [] }),
 }));
 
-vi.mock('../../App', async () => {
+vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return { CompactModeContext: createContext(false) };
 });
 
 vi.mock('../MessageList', async () => {
   const React = await import('react');
-  const { CompactModeContext } = await import('../../App');
+  const { CompactModeContext } = await import('../../WebShellContexts');
   return {
     MessageList: (props: Record<string, unknown>) => {
       latestMessageListProps.current = props;
@@ -96,7 +96,7 @@ vi.mock('../MessageList', async () => {
 });
 
 const { SubagentDetail } = await import('./SubagentDetail');
-const { CompactModeContext } = await import('../../App');
+const { CompactModeContext } = await import('../../WebShellContexts');
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 

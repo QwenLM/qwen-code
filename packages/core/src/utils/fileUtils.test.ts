@@ -36,7 +36,7 @@ import {
   detectFileEncoding,
   fileExists,
 } from './fileUtils.js';
-import { decodeBufferWithEncodingInfo } from './sync-file-encoding.js';
+import { decodeBufferWithEncodingInfo } from '../services/sync-file-encoding.js';
 import { iconvEncode } from './iconvHelper.js';
 import { LargeNonUtf8TextError } from './read-text-range.js';
 import type { Config } from '../config/config.js';
@@ -47,7 +47,7 @@ import {
   renderPDFPagesToImages,
   resetPdftotextCache,
 } from './pdf.js';
-import { VISION_BRIDGE_MAX_IMAGES } from '../services/visionBridge/vision-bridge-constants.js';
+import { VISION_BRIDGE_MAX_IMAGES } from './vision-bridge-constants.js';
 
 vi.mock('mime/lite', () => ({
   default: { getType: vi.fn() },

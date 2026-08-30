@@ -51,7 +51,7 @@ vi.mock('../adapters/transcriptToMessages', async (importOriginal) => {
   };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => hookState.connection,
   useTranscriptBlocks: () => hookState.blocks,
   useWorkspace: () => ({ client: hookState.client }),
@@ -350,7 +350,7 @@ describe('transcriptBlocksToLocalizedMessages', () => {
     ).toBeUndefined();
   });
 
-  it('falls back when an insight marker spans the appended-text boundary', async () => {
+  it('projects an insight marker that spans the appended-text boundary', async () => {
     const container = document.createElement('div');
     const root = createRoot(container);
     const t = (key: string) => key;
@@ -361,6 +361,7 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       text: 'prefix "insi',
       streaming: true,
     });
+    let latest: Message[] = [];
     function Consumer({
       blocks,
       summary,
@@ -368,7 +369,7 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       blocks: DaemonTranscriptBlock[];
       summary: DaemonTranscriptBlockChangeSummary;
     }) {
-      useMessagesFromBlocks(t, blocks, summary);
+      latest = useMessagesFromBlocks(t, blocks, summary);
       return null;
     }
 
@@ -400,11 +401,15 @@ describe('transcriptBlocksToLocalizedMessages', () => {
     );
 
     expect(adapterSpies.project).toHaveBeenCalledOnce();
+    expect(latest).toMatchObject([
+      { role: 'thinking', content: 'prefix "insight_progress":{}' },
+    ]);
     await act(async () => root.unmount());
   });
 
-  it('falls back when a later append completes an insight message', () => {
+  it('projects a later append that completes an insight message', () => {
     const t = (key: string) => key;
+    const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
     const assistant = baseBlock({
       id: 'assistant',
       kind: 'assistant',
@@ -415,41 +420,126 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       ...assistant,
       text: `${assistant.text}}`,
     };
-    const messages = transcriptBlocksToLocalizedMessages([assistant], t);
+    const messages = transcriptBlocksToLocalizedMessages([user, assistant], t);
     const source = {};
+
+    const projected = projectStreamingTailMessages(
+      {
+        blocks: [user, assistant],
+        messages,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 1,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, completedAssistant],
+      t,
+      {
+        source,
+        revision: 2,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+
+    expect(projected?.[0]).toBe(messages[0]);
+    expect(projected).toMatchObject([
+      { role: 'user' },
+      { role: 'insight_progress' },
+    ]);
+    expect(
+      projectStreamingTailMessages(
+        { blocks: [user, assistant], messages, t },
+        [user, completedAssistant],
+        t,
+      ),
+    ).toMatchObject([{ role: 'user' }, { role: 'insight_progress' }]);
+
+    const partialReady = {
+      ...completedAssistant,
+      text: `${completedAssistant.text}\n{"insight_ready":{"path":"/tmp/report.md"`,
+    };
+    const partialReadyMessages = projectStreamingTailMessages(
+      {
+        blocks: [user, completedAssistant],
+        messages: projected!,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 2,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, partialReady],
+      t,
+      {
+        source,
+        revision: 3,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+    const completedReady = {
+      ...partialReady,
+      text: `${partialReady.text}}}`,
+    };
+    const readyMessages = projectStreamingTailMessages(
+      {
+        blocks: [user, partialReady],
+        messages: partialReadyMessages!,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 3,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, completedReady],
+      t,
+      {
+        source,
+        revision: 4,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+
+    expect(readyMessages?.[0]).toBe(messages[0]);
+    expect(readyMessages).toMatchObject([
+      { role: 'user' },
+      { role: 'insight_ready', path: '/tmp/report.md' },
+    ]);
+  });
+
+  it('falls back when an insight tail has no matching projected message', () => {
+    const t = (key: string) => key;
+    const thought = baseBlock({
+      id: 'merged-thought',
+      kind: 'thought',
+      text: 'prefix "insi',
+      streaming: true,
+    });
 
     expect(
       projectStreamingTailMessages(
         {
-          blocks: [assistant],
-          messages,
+          blocks: [thought],
+          messages: [
+            {
+              id: 'earlier-assistant',
+              role: 'thinking',
+              content: thought.text,
+              isStreaming: true,
+            },
+          ],
           t,
-          blockChangeSummary: {
-            source,
-            revision: 1,
-            tailAppendBarrierRevision: 1,
-          },
         },
-        [completedAssistant],
-        t,
-        {
-          source,
-          revision: 2,
-          tailAppendBarrierRevision: 1,
-          tailBlockId: assistant.id,
-        },
-      ),
-    ).toBeUndefined();
-    expect(
-      projectStreamingTailMessages(
-        { blocks: [assistant], messages, t },
-        [completedAssistant],
+        [{ ...thought, text: 'prefix "insight_progress":{}' }],
         t,
       ),
     ).toBeUndefined();
-    expect(
-      transcriptBlocksToLocalizedMessages([completedAssistant], t),
-    ).toMatchObject([{ role: 'insight_progress' }]);
   });
 
   it.each([undefined, ''])(
@@ -642,6 +732,158 @@ describe('background agent task reconciliation', () => {
     expect(latest).toMatchObject([
       { role: 'tool_group', tools: [{ status: 'completed' }] },
       { role: 'thinking', content: 'ab' },
+    ]);
+    await act(async () => root.unmount());
+  });
+
+  it('keeps agent reconciliation when an insight tail has no projected message', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    // An empty assistant block projects no message (unlike thought), so the
+    // insight append below hits the "no matching projected message" fallback.
+    const tail = baseBlock({
+      id: 'empty-assistant',
+      kind: 'assistant',
+      text: '',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [
+            agent,
+            { ...tail, text: 'prefix "insight_progress":{}', updatedAt: 2 },
+          ],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(latest[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ status: 'completed' }],
+    });
+    await act(async () => root.unmount());
+  });
+
+  it('keeps agent reconciliation when an insight tail matches a projected message', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    // An empty thought block projects a thinking message (unlike assistant),
+    // so the insight append below matches the tail's projected message.
+    const tail = baseBlock({
+      id: 'empty-thought',
+      kind: 'thought',
+      text: '',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+    const reconciledToolGroup = latest[0];
+
+    adapterSpies.project.mockClear();
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [
+            agent,
+            { ...tail, text: 'prefix "insight_progress":{}', updatedAt: 2 },
+          ],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(adapterSpies.project).toHaveBeenCalled();
+    expect(latest[0]).toBe(reconciledToolGroup);
+    expect(latest).toMatchObject([
+      { role: 'tool_group', tools: [{ status: 'completed' }] },
+      { role: 'thinking', content: 'prefix "insight_progress":{}' },
     ]);
     await act(async () => root.unmount());
   });

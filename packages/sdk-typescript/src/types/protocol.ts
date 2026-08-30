@@ -1,6 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { PermissionMode } from './permission-mode.js';
+
+export type { PermissionMode } from './permission-mode.js';
 export interface Annotation {
   type: string;
   value: string;
@@ -120,7 +123,7 @@ export interface SDKSystemMessage {
     status: string;
   }>;
   model?: string;
-  permission_mode?: string;
+  permission_mode?: PermissionMode;
   slash_commands?: string[];
   qwen_code_version?: string;
   output_style?: string;
@@ -229,8 +232,6 @@ export interface SDKPartialAssistantMessage {
   event: StreamEvent;
   parent_tool_use_id: string | null;
 }
-
-export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
 
 /**
  * Authentication types supported by the CLI.

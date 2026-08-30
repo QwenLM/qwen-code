@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Content, Part } from '@google/genai';
-import type { Config } from '../config/config.js';
+import type { ApprovalModeValue, Config } from '../config/config.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -35,7 +35,7 @@ import {
   buildDeferredToolsReminder,
   buildMcpServerInstructionsReminder,
   getInitialChatHistory,
-} from '../utils/environmentContext.js';
+} from '../core/environmentContext.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {
@@ -106,8 +106,6 @@ const WORKTREE_ISOLATION_BLOCKED_REASON =
   'Background task worktree isolation cannot be reconstructed after session restore.';
 const INCOMPATIBLE_ISOLATION_BLOCKED_REASON =
   'Background task isolation metadata is incompatible.';
-
-type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
 
 /**
  * Returns true when the subagent's effective tool surface will include the
@@ -991,6 +989,8 @@ export class BackgroundAgentResumeService {
           resumeHistory ?? [],
           currentForkRuntime!,
           meta.executionAllowedTools,
+          meta.agentId,
+          meta.description,
         );
       } else {
         const resumeSubagentConfig =
@@ -1001,6 +1001,8 @@ export class BackgroundAgentResumeService {
           .getSubagentManager()
           .createAgentHeadless(resumeSubagentConfig, activeAgentConfig, {
             eventEmitter: bgEventEmitter,
+            taskName: meta.description,
+            subagentId: meta.agentId,
             promptConfigOverrides: {
               initialMessages: resumeHistory,
             },
@@ -1587,11 +1589,11 @@ export class BackgroundAgentResumeService {
     CurrentForkRuntime | undefined
   > {
     try {
-      const geminiClient = this.config.getGeminiClient();
-      const generationConfig = geminiClient?.getChat().getGenerationConfig();
+      const llmClient = this.config.getLlmClient();
+      const generationConfig = llmClient?.getChat().getGenerationConfig();
       if (!generationConfig?.systemInstruction) {
         debugLogger.debug(
-          '[BackgroundAgentResume] Current fork runtime unavailable (no_system_instruction): parent Gemini client or system instruction is missing.',
+          '[BackgroundAgentResume] Current fork runtime unavailable (no_system_instruction): parent LLM client or system instruction is missing.',
         );
         return undefined;
       }
@@ -1672,6 +1674,8 @@ export class BackgroundAgentResumeService {
     initialMessages: Content[],
     runtime: CurrentForkRuntime,
     executionAllowedTools?: string[],
+    subagentId?: string,
+    taskName?: string,
   ): Promise<AgentHeadless> {
     const promptConfig: PromptConfig = {
       renderedSystemPrompt: structuredClone(runtime.systemInstruction),
@@ -1697,6 +1701,10 @@ export class BackgroundAgentResumeService {
       { max_turns: FORK_DEFAULT_MAX_TURNS },
       toolConfig,
       eventEmitter,
+      undefined,
+      undefined,
+      taskName,
+      subagentId,
     );
   }
 

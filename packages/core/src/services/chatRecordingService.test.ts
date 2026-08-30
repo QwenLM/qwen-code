@@ -40,7 +40,7 @@ import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
-import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
+import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
 
 function branchTestRecord(
   uuid: string,
@@ -84,10 +84,10 @@ const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
 );
 vi.mock(
-  '../utils/tool-result-boundary-diagnostics.js',
+  '../tools/tool-result-boundary-diagnostics.js',
   async (importOriginal) => ({
     ...(await importOriginal<
-      typeof import('../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../tools/tool-result-boundary-diagnostics.js')
     >()),
     observeToolResultBoundary: boundaryObserveMock,
   }),
@@ -2873,6 +2873,47 @@ describe('ChatRecordingService', () => {
   });
 
   describe('legacy recorder', () => {
+    it('reanchors session source after more than the tail window is appended', async () => {
+      await expect(
+        chatRecordingService.recordSessionSource('channel', 'channel-main'),
+      ).resolves.toBe(true);
+
+      chatRecordingService.recordUserMessage([{ text: 'x'.repeat(65 * 1024) }]);
+      await chatRecordingService.flush();
+
+      const sourceRecords = vi
+        .mocked(mockLease.appendJsonLine)
+        .mock.calls.map((call) => call[0] as ChatRecord)
+        .filter((record) => record.subtype === 'session_source');
+      expect(sourceRecords).toHaveLength(2);
+      expect(sourceRecords.at(-1)?.systemPayload).toEqual({
+        sourceType: 'channel',
+        sourceId: 'channel-main',
+      });
+    });
+
+    it('reanchors a restored session source on the next append', async () => {
+      const service = new ChatRecordingService(mockConfig);
+      service.activate(mockLease, undefined, undefined, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null],
+        sourceType: 'channel',
+        sourceId: 'channel-main',
+      });
+
+      service.recordUserMessage([{ text: 'next' }]);
+      await service.flush();
+
+      const sourceRecord = vi
+        .mocked(mockLease.appendJsonLine)
+        .mock.calls.map((call) => call[0] as ChatRecord)
+        .find((record) => record.subtype === 'session_source');
+      expect(sourceRecord?.systemPayload).toEqual({
+        sourceType: 'channel',
+        sourceId: 'channel-main',
+      });
+    });
+
     it('restores reduced recorder state without the full conversation', async () => {
       const service = new ChatRecordingService(mockConfig, undefined, false, {
         lastCompletedUuid: 'projected-leaf',
@@ -3361,6 +3402,38 @@ describe('ChatRecordingService', () => {
       vi.mocked(mockLease.release).mockRejectedValueOnce(cleanupFailure);
 
       await expect(chatRecordingService.close()).rejects.toBe(cleanupFailure);
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+    });
+
+    it('retries release durability without reporting stale write ownership', async () => {
+      const cleanupFailure = new SessionWriterUnavailableError();
+      let released = false;
+      let durabilityPending = false;
+      Object.defineProperties(mockLease, {
+        isReleased: {
+          configurable: true,
+          get: () => released,
+        },
+        isReleaseDurabilityPending: {
+          configurable: true,
+          get: () => durabilityPending,
+        },
+      });
+      vi.mocked(mockLease.release)
+        .mockImplementationOnce(async () => {
+          released = true;
+          durabilityPending = true;
+          throw cleanupFailure;
+        })
+        .mockImplementationOnce(async () => {
+          durabilityPending = false;
+        });
+
+      await expect(chatRecordingService.close()).rejects.toBe(cleanupFailure);
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
+
+      await expect(chatRecordingService.close()).resolves.toBeUndefined();
+      expect(mockLease.release).toHaveBeenCalledTimes(2);
       expect(chatRecordingService.hasWriteOwnership()).toBe(false);
     });
   });

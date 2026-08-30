@@ -17,7 +17,7 @@ import {
 } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
+import { DEFAULT_FILE_FILTERING_OPTIONS } from '../utils/file-filtering-options.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';

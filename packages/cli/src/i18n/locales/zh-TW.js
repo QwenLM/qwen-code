@@ -183,6 +183,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
+  'toolDisplayName.ReportFindings': '上報評審發現',
   'toolDisplayName.DisplayImage': '顯示圖片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '進入計畫模式',
@@ -206,6 +207,7 @@ export default {
   'toolDisplayName.TeamDelete': '刪除團隊',
   'toolDisplayName.TeamPlanApproval': '團隊計畫審批',
   'toolDisplayName.SendMessage': '傳送訊息',
+  'toolDisplayName.RequestShutdown': '請求下線',
   'toolDisplayName.StructuredOutput': '結構化輸出',
   'toolDisplayName.Monitor': '監控',
   'toolDisplayName.NotebookEdit': '編輯 Notebook',
@@ -1422,6 +1424,12 @@ export default {
     '聊天歷史壓縮未能減小大小。這可能表明壓縮提示存在問題。',
   'Could not compress chat history due to a token counting error.':
     '由於 token 計數錯誤，無法壓縮聊天歷史。',
+  'Could not compress chat history because the compression summary was empty.':
+    '由於壓縮摘要為空，無法壓縮聊天歷史。',
+  'Could not compress chat history because the compression summary was truncated.':
+    '由於壓縮摘要被截斷，無法壓縮聊天歷史。',
+  'Could not compress chat history due to an API error.':
+    '由於 API 錯誤，無法壓縮聊天歷史。',
   'Configuration is not available.': '配置不可用。',
   'Please provide at least one path to add.': '請提供至少一個要添加的路徑。',
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
@@ -2420,4 +2428,6 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
   'Kept model as {{model}}': '模型保持為 {{model}}',
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny）',
 };

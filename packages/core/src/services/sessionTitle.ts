@@ -11,7 +11,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   getStartupContextLength,
   stripSystemReminderBlocks,
-} from '../utils/environmentContext.js';
+} from '../core/environmentContext.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
 import { SESSION_TITLE_MAX_LENGTH } from './sessionService.js';
@@ -89,7 +89,7 @@ const TRAILING_PAIRED_BRACKETS_RE =
  *
  * - `no_fast_model`: config.getFastModel() returned undefined.
  *   User needs to configure one via `/model --fast <name>`.
- * - `no_client`: BaseLlmClient or GeminiClient not yet initialized. Rare,
+ * - `no_client`: BaseLlmClient or LlmClient not yet initialized. Rare,
  *   usually means the session hasn't authenticated yet.
  * - `empty_history`: the conversation has fewer than 2 turns of usable text.
  *   User should send at least one message before asking for a title.
@@ -129,10 +129,10 @@ export async function tryGenerateSessionTitle(
     const model = config.getFastModel();
     if (!model) return { ok: false, reason: 'no_fast_model' };
 
-    const geminiClient = config.getGeminiClient();
-    if (!geminiClient) return { ok: false, reason: 'no_client' };
+    const llmClient = config.getLlmClient();
+    if (!llmClient) return { ok: false, reason: 'no_client' };
 
-    const fullHistory = geminiClient.getHistoryShallow();
+    const fullHistory = llmClient.getHistoryShallow();
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
 
     const hasDisplayProjection = userDisplayTexts.some(

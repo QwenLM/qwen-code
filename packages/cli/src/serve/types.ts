@@ -190,7 +190,8 @@ export interface ServeOptions {
   requireAuth?: boolean;
   /**
    * Opt in to direct session shell execution. The effective policy also
-   * requires a configured bearer token and a session-bound client id.
+   * requires either a configured bearer token or trusted-loopback mode, plus
+   * a session-bound client id.
    */
   enableSessionShell?: boolean;
   /**
@@ -339,9 +340,9 @@ export interface ServeOptions {
    */
   sessionRestoreTimeoutMs?: number;
   /**
-   * Wall-clock timeout in ms for a single human permission /
-   * ask_user_question response in daemon (ACP) mode. 0 = disabled
-   * (wait forever). Default: 300000 (5 min).
+   * Wall-clock timeout in ms for a human permission or `ask_user_question`
+   * response in daemon mode. 0 = disabled. Default: 0 (wait until an explicit
+   * decision or session lifecycle cancellation).
    */
   permissionResponseTimeoutMs?: number;
   /**
@@ -560,6 +561,11 @@ export interface ServeAuthProviderInstallResult {
   modelId?: string;
   baseUrl?: string;
   message: string;
+  runtimeSync?: ServeModelProviderRuntimeSyncResult;
+}
+
+export interface ServeModelProviderRuntimeSyncResult {
+  status: 'applied' | 'deferred' | 'failed';
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

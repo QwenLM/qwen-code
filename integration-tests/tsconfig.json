@@ -11,7 +11,7 @@
     "composite": false,
     // The root turns `noPropertyAccessFromIndexSignature` on, which forced
     // bracket-access rewrites in production SDK sources just to satisfy this
-    // test program (packages/desktop already sets it false). Relax it here so
+    // test program. Relax it here so
     // packages keep their own compiler regime and the tests keep dot access.
     "noPropertyAccessFromIndexSignature": false,
     // Matches packages/cli. The suite drives browser-side code in
@@ -124,10 +124,10 @@
       "@qwen-code/acp-bridge/workspacePaths": [
         "../packages/acp-bridge/src/workspacePaths.ts"
       ],
-      // qwen-serve-webui-live-journal-recovery.test.ts imports this subpath;
-      // without an entry it resolves through the exports map to dist.
-      "@qwen-code/webui/daemon-react-sdk": [
-        "../packages/webui/src/daemon-react-sdk.ts"
+      // qwen-serve-webui-live-journal-recovery.test.ts imports Web Shell's
+      // daemon bindings; map to source so typecheck does not depend on dist.
+      "@qwen-code/web-shell/daemon-react-sdk": [
+        "../packages/web-shell/client/daemon-react-sdk.ts"
       ],
       // channel-plugin.test.ts and the plugin-example sources it imports
       // both import `@qwen-code/channel-base`. Map it to source so the
@@ -135,7 +135,7 @@
       // sites share one declaration — mixing src and dist declarations
       // produces duplicate-private-class errors.
       "@qwen-code/channel-base": ["../packages/channels/base/src/index.ts"],
-      // cli's channel-registry.ts imports the eight builtin channel
+      // cli's channel-registry.ts imports the nine builtin channel
       // adapters and html.ts imports web-templates; without entries they
       // resolve through their exports maps to dist, leaving the typecheck
       // dependent on those packages being built.
@@ -146,6 +146,7 @@
       "@qwen-code/channel-dingtalk": [
         "../packages/channels/dingtalk/src/index.ts"
       ],
+      "@qwen-code/channel-dws": ["../packages/channels/dws/src/index.ts"],
       "@qwen-code/channel-wecom": ["../packages/channels/wecom/src/index.ts"],
       "@qwen-code/channel-feishu": ["../packages/channels/feishu/src/index.ts"],
       "@qwen-code/channel-qqbot": ["../packages/channels/qqbot/src/index.ts"],

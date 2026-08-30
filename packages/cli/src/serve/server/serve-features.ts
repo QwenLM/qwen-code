@@ -44,6 +44,7 @@ interface CreateServeFeaturesDeps {
   persistSettingAvailable: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
   sessionGenerationAvailable: () => boolean;
+  currentSessionSchedulingAvailable: boolean;
   workspaceGenerationAvailable: () => boolean;
   reloadAvailable: boolean;
   channelReloadAvailable: () => boolean;
@@ -55,8 +56,10 @@ interface CreateServeFeaturesDeps {
   persistentWorkspaceRegistrationAvailable: boolean;
   scratchWorkspaceRegistrationAvailable: () => boolean;
   realtimeVoiceEnabled: () => boolean;
+  standaloneSessionsAvailable?: () => boolean;
   acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  nativeDirectoryPickerAvailable?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   isPrimaryWorkspaceTrusted?: () => boolean;
   env?: Readonly<Record<string, string | undefined>>;
@@ -78,6 +81,7 @@ export function createServeFeatures(
     persistSettingAvailable,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable,
+    currentSessionSchedulingAvailable,
     workspaceGenerationAvailable,
     reloadAvailable,
     channelReloadAvailable,
@@ -89,8 +93,10 @@ export function createServeFeatures(
     persistentWorkspaceRegistrationAvailable,
     scratchWorkspaceRegistrationAvailable,
     realtimeVoiceEnabled,
+    standaloneSessionsAvailable,
     acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
+    nativeDirectoryPickerAvailable,
     workspaceTrustHotReloadAvailable,
   } = deps;
   const getEnv = deps.getEnv ?? (() => deps.env ?? process.env);
@@ -131,6 +137,7 @@ export function createServeFeatures(
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
         sessionGenerationAvailable: sessionGenerationAvailable(),
+        currentSessionSchedulingAvailable,
         workspaceGenerationAvailable: workspaceGenerationAvailable(),
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
@@ -143,9 +150,11 @@ export function createServeFeatures(
         scratchWorkspaceRegistrationAvailable:
           scratchWorkspaceRegistrationAvailable(),
         workspaceRuntimeRemovalAvailable,
+        nativeDirectoryPickerAvailable,
         workspaceTrustHotReloadAvailable,
         acpHttpEnabled: currentAcpHttpEnabled,
         realtimeVoiceEnabled: realtimeVoiceEnabled(),
+        standaloneSessionsAvailable: standaloneSessionsAvailable?.() === true,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
         browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(

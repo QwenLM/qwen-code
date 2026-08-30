@@ -9,6 +9,8 @@ import {
   stripExportMeta,
   extractAndStripMeta,
   createWorkflowSandbox,
+  compileWorkflowScript,
+  describeWorkflowCompileError,
 } from './workflow-sandbox.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
@@ -1131,12 +1133,12 @@ describe('createWorkflowSandbox security', () => {
     await expect(run).rejects.toThrow(/exceeded 100 ms of active time/);
   });
 
-  it('re-arms the pause-suspended watchdog on abort so a cancelled paused run still settles', async () => {
+  it('settles a cancelled paused run at once, not on the banked wall-clock remainder', async () => {
     // Cancelling a paused run aborts the controller, but abortPending()
-    // emits no scheduler transition — a pause-suspended watchdog that
-    // never re-armed would leave a script hung in ungated code pending
-    // forever (no settlement, snapshot, or telemetry). The abort must
-    // re-arm the banked remainder.
+    // emits no scheduler transition. Before the abort arm, settlement
+    // depended on the watchdog re-arming with its banked remainder — the
+    // user watched a cancelled run refuse to end for up to that long. Now
+    // the abort settles the run immediately; the re-arm stays as a backstop.
     vi.useFakeTimers();
     const scheduler = new WorkflowDispatchScheduler(1);
     const abortOnTimeout = new AbortController();
@@ -1166,10 +1168,9 @@ describe('createWorkflowSandbox security', () => {
       expect(scheduler.snapshot().state).toBe('paused');
 
       abortOnTimeout.abort();
-      await vi.advanceTimersByTimeAsync(20);
-      expect(settled).toBe(false);
-      await vi.advanceTimersByTimeAsync(100);
-      await expect(run).rejects.toThrow(/exceeded 200 ms of active time/);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(true);
+      await expect(run).rejects.toThrow(/aborted \(cancelled\)/);
     } finally {
       abortOnTimeout.abort();
       await vi.runAllTimersAsync();
@@ -1178,12 +1179,11 @@ describe('createWorkflowSandbox security', () => {
     }
   });
 
-  it('keeps the watchdog armed when a post-abort drain lands paused', async () => {
+  it('settles a run cancelled mid-pausing before the post-abort drain lands', async () => {
     // An in-flight dispatch that settles AFTER the abort still lands the
-    // scheduler's `pausing` → `paused` transition (pump's finally). The
-    // watchdog must not re-suspend on that post-abort transition, or a
-    // script that catches the abort and hangs in ungated code is
-    // orphaned again.
+    // scheduler's `pausing` → `paused` transition (pump's finally). The run
+    // must already be settled by then: a script that catches the abort and
+    // hangs in ungated code used to be orphaned until the wall clock.
     const scheduler = new WorkflowDispatchScheduler(1);
     const abortOnTimeout = new AbortController();
     let finishDispatch: ((value: string) => void) | undefined;
@@ -1211,12 +1211,12 @@ describe('createWorkflowSandbox security', () => {
     expect(scheduler.snapshot().state).toBe('pausing');
 
     abortOnTimeout.abort();
+    await expect(run).rejects.toThrow(/aborted \(cancelled\)/);
+
+    // The drain still completes its transition afterwards; nothing about a
+    // settled run is disturbed by it.
     finishDispatch?.('late');
     await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
-
-    // The post-abort `paused` transition must not re-suspend the
-    // watchdog — the hung script still settles on the banked remainder.
-    await expect(run).rejects.toThrow(/exceeded 150 ms of active time/);
   });
 
   it('suspends the watchdog of a sandbox created while the scheduler is already paused', async () => {
@@ -1252,28 +1252,59 @@ describe('createWorkflowSandbox security', () => {
     await expect(run).rejects.toThrow(/exceeded 100 ms of active time/);
   });
 
-  it('keeps the seeded watchdog armed when the shared signal is already aborted', async () => {
+  it('does not run a script whose signal was already aborted before run()', async () => {
     // Production shares one controller between the registry (which
     // pre-registers the run before run() resolves) and the sandbox, so a
     // user cancel can land before run() begins: the scheduler is already
-    // paused AND the signal is already aborted. The abort re-arm listener
-    // is dead on an already-aborted signal and no scheduler transition
-    // can follow, so only the seed guard's !aborted() check keeps the
-    // watchdog armed — deleting it suspends the newborn watchdog and the
-    // hung run never settles.
+    // paused AND the signal is already aborted. The run must settle as
+    // cancelled without executing a line of model-authored code.
     const abortOnTimeout = new AbortController();
     const scheduler = new WorkflowDispatchScheduler(1, abortOnTimeout.signal);
     expect(scheduler.pause()).toBe(true);
     abortOnTimeout.abort();
+    const dispatch = vi.fn(async () => 'ignored');
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      dispatch: async () => 'ignored',
+      dispatch,
       maxWallClockMs: 100,
       scheduler,
       abortOnTimeout,
     });
-    await expect(sandbox.run(`return new Promise(() => {});`)).rejects.toThrow(
-      /exceeded 100 ms of active time/,
+    await expect(
+      sandbox.run(`await agent('never'); return new Promise(() => {});`),
+    ).rejects.toThrow(/aborted \(cancelled\)/);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('cancellation settles the run at once while the script still runs its own finally', async () => {
+    // The host-side run settles immediately; the script's promise is left
+    // to finish on its own. Its dispatches reject on the aborted signal, so
+    // a `finally` inside the script still executes — cleanup the author
+    // wrote is not skipped just because the user stopped waiting.
+    const controller = new AbortController();
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      abortOnTimeout: controller,
+      dispatch: () =>
+        new Promise<string>((_, reject) => {
+          controller.signal.addEventListener(
+            'abort',
+            () => reject(new Error('dispatch aborted')),
+            { once: true },
+          );
+        }),
+    });
+    const run = sandbox.run(`
+      try { await agent('a'); }
+      finally { log('cleanup ran'); }
+    `);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    await expect(run).rejects.toThrow(/aborted \(cancelled\)/);
+    await vi.waitFor(() =>
+      expect(sandbox.getLogs().some((l) => l.includes('cleanup ran'))).toBe(
+        true,
+      ),
     );
   });
 
@@ -2109,7 +2140,10 @@ describe('createWorkflowSandbox primitives', () => {
         'Workflow subagent x did not complete (terminate mode: CANCELLED).',
       ),
     );
-    await runPromise;
+    // The abort arm settles the run as cancelled even though the script had
+    // already returned — cancel wins a same-tick race, matching the runner,
+    // which reports a cancelled registry entry over an ok outcome.
+    await expect(runPromise).rejects.toThrow(/aborted \(cancelled\)/);
     expect(sandbox.getLogs()).toEqual([]);
   });
 
@@ -2700,5 +2734,163 @@ describe('createWorkflowSandbox primitives', () => {
     `);
     expect(result).toBe('agent-response:write a hello');
     expect(sandbox.getPhases()).toEqual(['plan']);
+  });
+
+  // ── Compilation ──────────────────────────────────────────────────────
+  describe('compileWorkflowScript', () => {
+    it('compiles a body and hands back its meta', () => {
+      const { script, meta } = compileWorkflowScript(
+        "export const meta = { name: 'n', description: 'd' }\nawait agent('x');",
+      );
+      expect(script).toBeDefined();
+      expect(meta?.name).toBe('n');
+    });
+
+    it('throws on a body that does not parse', () => {
+      expect(() => compileWorkflowScript("const x: string = 'a';")).toThrow(
+        SyntaxError,
+      );
+    });
+
+    // The body runs in strict mode, so an undeclared assignment throws
+    // instead of quietly creating a sandbox global that outlives the
+    // statement. Asserted through a real run, because the directive only
+    // matters at execution time.
+    it('runs the body in strict mode', async () => {
+      const sandbox = createWorkflowSandbox({
+        args: undefined,
+        dispatch: async () => 'ok',
+      });
+      await expect(sandbox.run('undeclaredBinding = 1;')).rejects.toThrow(
+        /not defined/,
+      );
+    });
+
+    it('still allows a declared binding', async () => {
+      const sandbox = createWorkflowSandbox({
+        args: undefined,
+        dispatch: async () => 'ok',
+      });
+      await expect(
+        sandbox.run('const declared = 1; return declared;'),
+      ).resolves.toBe(1);
+    });
+  });
+
+  describe('describeWorkflowCompileError', () => {
+    function renderFor(source: string): string {
+      try {
+        compileWorkflowScript(source);
+      } catch (e) {
+        return describeWorkflowCompileError(
+          e,
+          source.split(/\r\n|[\n\r\u2028\u2029]/).length,
+        );
+      }
+      throw new Error('expected the source to fail compilation');
+    }
+
+    // The wrapper shifts every body line by one, so V8's own line number is
+    // one more than the author's. Reporting the raw number sends them to the
+    // wrong line, which is worse than reporting none.
+    it('reports the line number the author wrote, not the wrapped one', () => {
+      const rendered = renderFor("await agent('a');\nconst x: string = 1;");
+      expect(rendered).toContain('line 2');
+      expect(rendered).not.toContain('workflow.js');
+      expect(rendered).toContain(
+        'SyntaxError: Missing initializer in const declaration',
+      );
+    });
+
+    it('preserves author line numbers after a multiline meta block', () => {
+      const rendered = renderFor(`export const meta = {
+  name: 'n',
+  description: 'd',
+}
+await agent('a');
+const x: string = 1;`);
+      expect(rendered.split('\n')[0]).toBe('line 6');
+      expect(rendered).toContain('const x: string = 1;');
+    });
+
+    it.each([
+      ['CRLF', '\r\n'],
+      ['lone CR', '\r'],
+    ])(
+      'preserves author line numbers after a meta block with %s separators',
+      (_name, separator) => {
+        const rendered = renderFor(
+          [
+            'export const meta = {',
+            "  name: 'n',",
+            "  description: 'd',",
+            '}',
+            'const x: string = 1;',
+          ].join(separator),
+        );
+        expect(rendered.split('\n')[0]).toBe('line 5');
+        expect(rendered).toContain('const x: string = 1;');
+      },
+    );
+
+    it('does not attribute a closing-wrapper error to the author', () => {
+      const rendered = renderFor('await agent(');
+      expect(rendered).toContain('unmatched or incomplete syntax');
+      expect(rendered).toContain('braces');
+      expect(rendered).not.toContain("Unexpected token '}'");
+      expect(rendered).not.toContain('line 2');
+      expect(rendered).not.toContain('})()');
+    });
+
+    it('carries the offending source line and a caret under it', () => {
+      const rendered = renderFor('const x: string = 1;');
+      const lines = rendered.split('\n');
+      expect(lines[1]).toContain('const x');
+      expect(lines[2]).toContain('^');
+      // The caret has to sit under the source line, not float past its end.
+      expect(lines[2].indexOf('^')).toBeLessThanOrEqual(lines[1].length);
+    });
+
+    it('windows a long line while keeping the caret aligned', () => {
+      const padding = 'y'.repeat(300);
+      const rendered = renderFor(
+        `const a = '${padding}'; const x: string = 1;`,
+      );
+      const lines = rendered.split('\n');
+      expect(lines[1].length).toBeLessThan(120);
+      expect(lines[1]).toContain('…');
+      expect(lines[2]).toContain('^');
+      expect(lines[2].indexOf('^')).toBe(lines[1].indexOf('x: string'));
+    });
+
+    it('preserves a multi-column V8 caret on a long line', () => {
+      const padding = 'y'.repeat(120);
+      const rendered = renderFor(`const pad = '${padding}'; const x = 123abc;`);
+      const lines = rendered.split('\n');
+      expect(lines[1]).toContain('123abc');
+      expect(lines[2]).toContain('^^^');
+      expect(lines[2].indexOf('^^^')).toBe(lines[1].indexOf('123abc'));
+    });
+
+    it('keeps an author source line that begins with at', () => {
+      const rendered = renderFor('    at work();');
+      expect(rendered).toContain('line 1');
+      expect(rendered).toContain('    at work();');
+      expect(rendered).toContain('^^^^');
+      expect(rendered).toContain("Unexpected identifier 'work'");
+    });
+
+    it('omits a long source frame when V8 provides no caret', () => {
+      const rendered = renderFor(`const value = ${'a'.repeat(1100)}@;`);
+      expect(rendered).toContain('line 1');
+      expect(rendered).toContain('SyntaxError: Invalid or unexpected token');
+      expect(rendered).not.toContain('const value');
+    });
+
+    it('falls back to the plain message when there is no source frame', () => {
+      expect(
+        describeWorkflowCompileError(new Error('meta must be an object'), 1),
+      ).toBe('meta must be an object');
+    });
   });
 });

@@ -43,11 +43,11 @@ import {
   truncateLlmContent,
   truncateToolOutput,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
-} from '../utils/truncation.js';
+} from '../tools/truncation.js';
 import {
   finalizeToolResponses,
   toolResponseTextLength,
-} from '../utils/tool-response-finalizer.js';
+} from '../tools/tool-response-finalizer.js';
 import { ToolConfirmationOutcome, Kind } from '../tools/tools.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { logToolCall } from '../telemetry/loggers.js';
@@ -65,7 +65,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { resolveToolName } from '../permissions/rule-parser.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
-import { approvedPlanRedactionText } from './geminiChat.js';
+import { approvedPlanRedactionText } from './llm-chat.js';
 import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
@@ -83,7 +83,7 @@ import {
   toolResultBoundaryArtifact,
   toolResultPartDiagnosticValues,
   type ToolResultBoundaryValue,
-} from '../utils/tool-result-boundary-diagnostics.js';
+} from '../tools/tool-result-boundary-diagnostics.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
 import { CONCURRENCY_SAFE_KINDS, isShellProgressData } from '../tools/tools.js';
@@ -92,7 +92,7 @@ import { parsePositiveIntegerEnv } from '../utils/env.js';
 import {
   isAlreadyTruncated,
   persistAndTruncateToolResult,
-} from '../utils/truncation.js';
+} from '../tools/truncation.js';
 import {
   injectPermissionRulesIfMissing,
   persistPermissionOutcome,
@@ -205,6 +205,7 @@ import {
 } from '../utils/invocation-context.js';
 import { evaluateToolInvocationGuard } from './tool-invocation-guard.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
+import { goalToolResultProvenance } from '../goals/goal-tool-result-provenance.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -2128,7 +2129,7 @@ export class CoreToolScheduler {
 
     // MCP tool whose server is gone / unconfigured: explain in MCP terms
     // instead of falling through to a Levenshtein suggestion that would surface
-    // unrelated tools (e.g. "did you mean computer_use__click?").
+    // unrelated tools (e.g. "did you mean read_file?").
     const mcpMessage = this.getMcpToolUnavailableMessage(unknownToolName);
     if (mcpMessage) {
       return mcpMessage;
@@ -2470,10 +2471,28 @@ export class CoreToolScheduler {
             const matchingRule = pm.findMatchingDenyRule({
               toolName: canonicalName,
             });
-            const ruleInfo = matchingRule
-              ? ` Matching deny rule: "${matchingRule}".`
-              : '';
-            const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.${ruleInfo}`;
+            let permissionErrorMessage: string;
+            if (matchingRule) {
+              permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined. Matching deny rule: "${matchingRule}".`;
+            } else if (
+              // The legacy `coreTools` allowlist (`--core-tools` / settings
+              // `tools.core`) keeps its hard-disable semantic: an unlisted
+              // core tool is never registered (#9827). Attribute the miss
+              // to the real knob — neither `permissions.allow` (pure
+              // auto-approval since #10075) nor `tools.eager` (which only
+              // defers) can reject a call here, so a rejection without a
+              // deny rule points at the coreTools list. The optional call
+              // keeps scoped PermissionManager shims (installed via `as
+              // unknown as PermissionManager`, e.g.
+              // memory-scoped-agent-config.ts) from throwing until they
+              // grow the delegation.
+              typeof pm.isToolDisabledByCoreToolsAllowList === 'function' &&
+              pm.isToolDisabledByCoreToolsAllowList(canonicalName)
+            ) {
+              permissionErrorMessage = `"${reqInfo.name}" is not listed in the active core tools allowlist (--core-tools or settings tools.core), so the tool is not available. Add it to the core tools list to re-enable it.`;
+            } else {
+              permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
+            }
             newToolCalls.push({
               status: 'error',
               request: reqInfo,
@@ -2988,7 +3007,7 @@ export class CoreToolScheduler {
             // fast-path AUTO call.
             const messages =
               this.config
-                .getGeminiClient?.()
+                .getLlmClient?.()
                 ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
             const decision = await runInRequestGoalContext(reqInfo, () =>
               evaluateAutoMode({
@@ -5513,7 +5532,7 @@ export class CoreToolScheduler {
             // throws here and skips the redaction entirely.
             const savedPlan = fsSync.readFileSync(planPath, 'utf-8');
             const redacted = this.config
-              .getGeminiClient?.()
+              .getLlmClient?.()
               ?.getChat()
               .redactApprovedPlanFromHistory(
                 callId,
@@ -6242,28 +6261,14 @@ export class CoreToolScheduler {
         error: call.response.error,
         errorType: call.response.errorType,
       };
-      const goalContext = call.request.goalContext;
-      if (!goalContext) {
-        this.chatRecordingService.recordToolResult(
-          call.response.responseParts,
-          result,
-        );
-      } else if (
-        call.request.name === ToolNames.GET_GOAL ||
-        call.request.name === ToolNames.UPDATE_GOAL
-      ) {
-        this.chatRecordingService.recordToolResult(
-          call.response.responseParts,
-          result,
-          { goalContext: { ...goalContext }, provenance: 'goal_runtime' },
-        );
-      } else {
-        this.chatRecordingService.recordToolResult(
-          call.response.responseParts,
-          result,
-          { goalContext: { ...goalContext } },
-        );
-      }
+      const goalProvenance = goalToolResultProvenance(call.request);
+      this.chatRecordingService.recordToolResult(
+        call.response.responseParts,
+        result,
+        // Passed only inside a Goal turn, so recording outside one keeps its
+        // two-argument shape.
+        ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+      );
     }
   }
 
@@ -6360,7 +6365,7 @@ export class CoreToolScheduler {
           const fallback = shouldFallback(denialState);
           const messages =
             this.config
-              .getGeminiClient?.()
+              .getLlmClient?.()
               ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
           const decision = await runInRequestGoalContext(
             pendingTool.request,

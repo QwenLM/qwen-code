@@ -43,38 +43,16 @@ if (!versionType) {
 run(`npm version ${versionType} --no-git-tag-version --allow-same-version`);
 
 // 3. Get all workspaces and filter out the one we don't want to version.
-// We intend to maintain sdk and mobile-mcp versions independently.
-const workspacesToExclude = ['@qwen-code/sdk', '@qwen-code/mobile-mcp'];
-let lsOutput;
-try {
-  lsOutput = JSON.parse(
-    execSync('npm ls --workspaces --json --depth=0').toString(),
-  );
-} catch (e) {
-  // `npm ls` can exit with a non-zero status code if there are issues
-  // with dependencies, but it will still produce the JSON output we need.
-  // We'll try to parse the stdout from the error object.
-  if (e.stdout) {
-    console.warn(
-      'Warning: `npm ls` exited with a non-zero status code. Attempting to proceed with the output.',
-    );
-    try {
-      lsOutput = JSON.parse(e.stdout.toString());
-    } catch (parseError) {
-      console.error(
-        'Error: Failed to parse JSON from `npm ls` output even after `npm ls` failed.',
-      );
-      console.error('npm ls stderr:', e.stderr.toString());
-      console.error('Parse error:', parseError);
-      process.exit(1);
-    }
-  } else {
-    console.error('Error: `npm ls` failed with no output.');
-    console.error(e.stderr?.toString() || e);
-    process.exit(1);
-  }
-}
-const allWorkspaces = Object.keys(lsOutput.dependencies || {});
+// We intend to maintain sdk, mobile-mcp, and node-repl versions independently.
+const workspacesToExclude = [
+  '@qwen-code/sdk',
+  '@qwen-code/mobile-mcp',
+  '@qwen-code/node-repl-mcp',
+];
+const workspaceNames = JSON.parse(
+  execSync('npm pkg get name --workspaces --json').toString(),
+);
+const allWorkspaces = Object.keys(workspaceNames);
 const workspacesToVersion = allWorkspaces.filter(
   (wsName) => !workspacesToExclude.includes(wsName),
 );

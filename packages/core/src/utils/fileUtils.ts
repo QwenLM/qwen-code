@@ -12,7 +12,7 @@ import type { Part, PartListUnion } from '@google/genai';
 import mime from 'mime/lite';
 import { isUtf8CompatibleEncoding } from './encoding.js';
 import { loadIconvLite } from './load-iconv-lite.js';
-import { ToolErrorType } from '../tools/tool-error.js';
+import { ToolErrorType } from './tool-error-type.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
@@ -34,7 +34,7 @@ import {
   renderPDFPagesToImages,
   shouldRequirePDFPageRange,
 } from './pdf.js';
-import { VISION_BRIDGE_MAX_IMAGES } from '../services/visionBridge/vision-bridge-constants.js';
+import { VISION_BRIDGE_MAX_IMAGES } from './vision-bridge-constants.js';
 import type { VisionBridgePdfContinuation } from '../services/visionBridge/vision-bridge-service.js';
 import {
   extensionForMimeType,

@@ -5,8 +5,6 @@
  */
 
 import type {
-  CountTokensParameters,
-  CountTokensResponse,
   EmbedContentParameters,
   EmbedContentResponse,
   GenerateContentParameters,
@@ -33,7 +31,7 @@ import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
 import type { ReasoningEffort } from './reasoning-effort.js';
 
 /**
- * Interface abstracting the core functionalities for generating content and counting tokens.
+ * Interface abstracting the core content generation functionality.
  */
 export interface ContentGenerator {
   generateContent(
@@ -46,20 +44,11 @@ export interface ContentGenerator {
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>>;
 
-  countTokens(request: CountTokensParameters): Promise<CountTokensResponse>;
-
   embedContent(request: EmbedContentParameters): Promise<EmbedContentResponse>;
-
-  useSummarizedThinking(): boolean;
 }
 
-export enum AuthType {
-  USE_OPENAI = 'openai',
-  QWEN_OAUTH = 'qwen-oauth',
-  USE_GEMINI = 'gemini',
-  USE_VERTEX_AI = 'vertex-ai',
-  USE_ANTHROPIC = 'anthropic',
-}
+import { AuthType } from '../utils/auth-type.js';
+export { AuthType };
 
 export type PromptCacheSharingParameters = GenerateContentParameters & {
   /**
@@ -98,9 +87,10 @@ export type ContentGeneratorConfig = {
   // Total-lifetime cap for one streaming response, NOT refreshed by chunk
   // arrival: a drip-fed stream resets the idle watchdog forever while never
   // completing the message (issue #8597), so that shape needs a bound the
-  // chunks cannot reset. `<= 0` disables it. Honored only by the
-  // OpenAI-compatible pipeline today — the Anthropic/Gemini generators do not
-  // implement it, so on those auth types the drip-fed shape stays unbounded.
+  // chunks cannot reset. `<= 0` disables it. Honored by the OpenAI-compatible
+  // pipeline and the Anthropic generator (shared `withStreamGuards`,
+  // issue #9005 finding 4); the Gemini generator does not implement it, so on
+  // that auth type the drip-fed shape stays unbounded.
   streamMaxLifetimeMs?: number;
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryInitialDelayMs?: number; // Initial delay for stream rate-limit retries
@@ -439,10 +429,7 @@ class LazyContentGenerator implements ContentGenerator {
   private generatorPromise?: Promise<ContentGenerator>;
   private preloadedOnly = false;
 
-  constructor(
-    private readonly loader: () => Promise<ContentGenerator>,
-    private readonly summarizedThinking: boolean,
-  ) {}
+  constructor(private readonly loader: () => Promise<ContentGenerator>) {}
 
   private getGenerator(): Promise<ContentGenerator> {
     this.generatorPromise ??= this.loader();
@@ -487,20 +474,10 @@ class LazyContentGenerator implements ContentGenerator {
     );
   }
 
-  async countTokens(
-    request: CountTokensParameters,
-  ): Promise<CountTokensResponse> {
-    return (await this.getGeneratorForUse()).countTokens(request);
-  }
-
   async embedContent(
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
     return (await this.getGeneratorForUse()).embedContent(request);
-  }
-
-  useSummarizedThinking(): boolean {
-    return this.summarizedThinking;
   }
 }
 
@@ -586,10 +563,10 @@ export async function createContentGenerator(
       authType === AuthType.USE_VERTEX_AI
     ) {
       loadBaseGenerator = async () => {
-        const { createGeminiContentGenerator } = await import(
-          './geminiContentGenerator/index.js'
+        const { createLlmContentGenerator } = await import(
+          './llm-content-generator/index.js'
         );
-        return createGeminiContentGenerator(generatorConfig, config);
+        return createLlmContentGenerator(generatorConfig, config);
       };
     } else {
       throw new Error(
@@ -600,22 +577,19 @@ export async function createContentGenerator(
     throw wrapProviderLoadError(error, authType);
   }
 
-  return new LazyContentGenerator(
-    async () => {
-      try {
-        const [baseGenerator, { LoggingContentGenerator }] = await Promise.all([
-          loadBaseGenerator(),
-          import('./loggingContentGenerator/index.js'),
-        ]);
-        return new LoggingContentGenerator(
-          baseGenerator,
-          config,
-          generatorConfig,
-        );
-      } catch (error) {
-        throw wrapProviderLoadError(error, authType);
-      }
-    },
-    authType === AuthType.USE_GEMINI || authType === AuthType.USE_VERTEX_AI,
-  );
+  return new LazyContentGenerator(async () => {
+    try {
+      const [baseGenerator, { LoggingContentGenerator }] = await Promise.all([
+        loadBaseGenerator(),
+        import('./loggingContentGenerator/index.js'),
+      ]);
+      return new LoggingContentGenerator(
+        baseGenerator,
+        config,
+        generatorConfig,
+      );
+    } catch (error) {
+      throw wrapProviderLoadError(error, authType);
+    }
+  });
 }
