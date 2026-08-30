@@ -221,6 +221,38 @@ export class NamedSessionManager {
     });
   }
 
+  lookup(
+    input: NamedSessionOwnerInput,
+    name?: string,
+  ): Promise<NamedSessionSelection | undefined> {
+    return this.withOwnerLock(input, async () => {
+      const owner = await this.ensureOwner(input, false);
+      const taskName = name ?? owner?.activeTaskName;
+      if (!owner || !taskName) return undefined;
+      const task = this.findTask(owner, taskName);
+      return task ? this.selection(owner, task) : undefined;
+    });
+  }
+
+  resumeReserved(
+    input: NamedSessionOwnerInput,
+    sessionId: string,
+  ): Promise<boolean> {
+    return this.withOwnerLock(input, async () => {
+      const owner = await this.ensureOwner(input, false);
+      const task = owner?.tasks.find(
+        (candidate) =>
+          candidate.sessionId === sessionId && candidate.status === 'open',
+      );
+      if (!task) return false;
+      await this.loadTask(
+        task,
+        `Could not reload reserved task "${task.name}".`,
+      );
+      return true;
+    });
+  }
+
   create(
     input: NamedSessionOwnerInput,
     name: string,
@@ -237,7 +269,6 @@ export class NamedSessionManager {
           'You already have eight open tasks. Close one before creating another.',
         );
       }
-      this.assertCanLeaveSelected(owner, undefined);
       const timestamp = this.nextTimestamp(owner);
 
       const target = this.target(input);
@@ -284,12 +315,6 @@ export class NamedSessionManager {
       if (!owner) throw new Error('No named tasks exist in this chat.');
       const task = this.findTask(owner, name);
       if (!task) throw new Error(`Task "${name}" was not found.`);
-      this.assertCanLeaveSelected(owner, task.name);
-      if (this.isBusy(task.sessionId)) {
-        throw new Error(
-          `Task "${task.name}" is still running or waiting for permission.`,
-        );
-      }
       if (
         task.status === 'closed' &&
         this.openTaskCount(owner) >= MAX_OPEN_TASKS
@@ -357,11 +382,6 @@ export class NamedSessionManager {
         : undefined;
       let replacementLoaded = false;
       if (replacement) {
-        if (this.isBusy(replacement.sessionId)) {
-          throw new Error(
-            `Task "${replacement.name}" is still running or waiting for permission.`,
-          );
-        }
         replacementLoaded = await this.loadTask(
           replacement,
           `Could not load fallback task "${replacement.name}". Task "${task.name}" was not closed.`,
@@ -635,24 +655,6 @@ export class NamedSessionManager {
       lastSelectedAt: timestamp,
     };
     this.commitOwner(this.createOwner(target, task.name, [task]));
-  }
-
-  private assertCanLeaveSelected(
-    owner: StoredOwner,
-    nextTaskName: string | undefined,
-  ): void {
-    if (
-      !owner.activeTaskName ||
-      (nextTaskName && this.sameName(owner.activeTaskName, nextTaskName))
-    ) {
-      return;
-    }
-    const selected = this.findTask(owner, owner.activeTaskName);
-    if (selected && this.isBusy(selected.sessionId)) {
-      throw new Error(
-        `Task "${selected.name}" is still running or waiting for permission.`,
-      );
-    }
   }
 
   private async loadTask(

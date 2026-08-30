@@ -43,6 +43,7 @@ import { SessionRouter } from './SessionRouter.js';
 import {
   NamedSessionManager,
   type NamedSessionOwnerInput,
+  type NamedSessionSelection,
   type NamedSessionTaskReference,
 } from './named-session-manager.js';
 import { getGlobalQwenDir } from './paths.js';
@@ -2797,6 +2798,7 @@ export abstract class ChannelBase {
   private pendingPermissionForEnvelope(
     envelope: Envelope,
     args: string,
+    selectedSessionId?: string | null,
   ): PendingPermissionLookup {
     const trimmed = args.trim();
     if (trimmed) {
@@ -2820,6 +2822,8 @@ export abstract class ChannelBase {
       .filter(
         (pending): pending is PendingPermission =>
           pending !== undefined &&
+          (selectedSessionId === undefined ||
+            pending.sessionId === selectedSessionId) &&
           this.canEnvelopeAnswerPendingPermission(envelope, pending),
       );
     if (matching.length === 0) {
@@ -2971,7 +2975,24 @@ export abstract class ChannelBase {
       );
       return true;
     }
-    const lookup = this.pendingPermissionForEnvelope(envelope, args);
+    let selectedTask: NamedSessionSelection | undefined;
+    if (this.namedSessions && args.trim() === '') {
+      try {
+        selectedTask = await this.namedSessions.lookup(
+          this.namedSessionOwner(envelope),
+        );
+      } catch (error) {
+        await this.sendNamedSessionError(envelope, error);
+        return true;
+      }
+    }
+    const lookup = this.pendingPermissionForEnvelope(
+      envelope,
+      args,
+      this.namedSessions && args.trim() === ''
+        ? (selectedTask?.sessionId ?? null)
+        : undefined,
+    );
     if (lookup.kind === 'ambiguous') {
       const requestList = lookup.requestIds
         .slice(0, 6)
@@ -2997,7 +3018,11 @@ export abstract class ChannelBase {
         envelope.threadId,
         lookup.explicit
           ? 'No pending permission request with that id for this chat.'
-          : 'No pending permission request for this chat.',
+          : selectedTask
+            ? `No pending permission request for selected task "${selectedTask.name}". Use an explicit request ID to answer another task.`
+            : this.namedSessions
+              ? 'No task is currently selected. Use an explicit request ID to answer a named task.'
+              : 'No pending permission request for this chat.',
       );
       return true;
     }
@@ -3296,7 +3321,7 @@ export abstract class ChannelBase {
             await this.sendThreadMessage(
               envelope.chatId,
               envelope.threadId,
-              'Worktree tasks are not available in Part 2 yet. Create a shared task with /session new <name>.',
+              'Worktree tasks are planned for Part 4. Create a shared task with /session new <name>.',
             );
             return true;
           }
@@ -3331,13 +3356,49 @@ export abstract class ChannelBase {
           );
           return true;
         }
-        case 'cancel':
+        case 'cancel': {
+          if (parts.length > 1) break;
+          const taskName = parts[0];
+          const task = await namedSessions.lookup(owner, taskName);
+          if (!task) {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              taskName
+                ? `Task "${sanitizeQuotedText(taskName, 32)}" was not found.`
+                : 'No task is currently selected.',
+            );
+            return true;
+          }
+          if (task.status !== 'open') {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              `Task "${task.name}" is closed.`,
+            );
+            return true;
+          }
+          if (!this.activePrompts.has(task.sessionId)) {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              `No request is currently running for task "${task.name}".`,
+            );
+            return true;
+          }
+          const cancelled = await this.requestActivePromptCancellation(
+            task.sessionId,
+            'cancel_command',
+          );
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            'Named task cancellation is not available in Part 2 yet. Wait for the selected task to finish before switching; Telegram users can use /cancel.',
+            cancelled
+              ? `Cancelled task "${task.name}".`
+              : `Failed to cancel task "${task.name}".`,
           );
           return true;
+        }
         default:
           break;
       }
@@ -3615,7 +3676,7 @@ export abstract class ChannelBase {
         ...(this.namedSessions
           ? [
               '/sessions [all] — List your named tasks',
-              '/session current|new|use|close — Manage your named tasks',
+              '/session current|new|use|close|cancel — Manage your named tasks',
             ]
           : []),
       ];
@@ -5855,17 +5916,18 @@ export abstract class ChannelBase {
         return;
       }
       try {
-        sessionId = await this.namedSessions.resolve(
+        const resumed = await this.namedSessions.resumeReserved(
           this.namedSessionOwner(envelope),
           namedTurn.sessionId,
         );
+        sessionId = resumed ? namedTurn.sessionId : undefined;
       } catch (error) {
         await this.sendNamedSessionError(envelope, error);
         return;
       }
       if (!sessionId) {
         process.stderr.write(
-          `[${this.name}] dropped collected turn from ${envelope.senderId} for session ${namedTurn.sessionId}: selected task changed before it ran\n`,
+          `[${this.name}] dropped collected turn from ${envelope.senderId} for session ${namedTurn.sessionId}: reserved task is no longer available\n`,
         );
         return;
       }
