@@ -328,6 +328,15 @@ connection.sessionContext`) so draft standalone chats hide project
   effects, command discovery, and submit-time handlers; tests assert zero
   workspace requests or panels from both pending and attached standalone
   contexts.
+- **Generic transcript branching is excluded from standalone** (review
+  P1): `/branch` and the per-message Branch action call
+  `POST /session/:id/branch`, whose route is registered with
+  `rejectStandalone: true` (`packages/cli/src/serve/routes/session.ts`) —
+  the action deterministically fails for standalone sessions. Pending and
+  attached standalone contexts omit the Branch action, drop `/branch` from
+  command discovery, and block its submit-time handler; tests assert no
+  generic branch request is issued. `/fork` stays separate — guarded
+  background fork-agent work is supported.
 - **The legacy input-history fallback is disabled for standalone
   identities** (review P1): `useComposerCore`/`useInputHistory` fall back
   to the unscoped `qwen-web-shell-history` key whenever a scoped history is
@@ -542,6 +551,13 @@ Unit/component (vitest, `packages/web-shell`):
   history key is populated (review P1).
 - `ScheduledTasksDialog.onCreateViaChat` forces workspace intent even from
   an active standalone context (review P1).
+- Standalone contexts omit the Branch action, drop `/branch` from
+  discovery, and block its handler — zero generic branch requests;
+  `/fork` remains available (review P1).
+- Session-overview, `/resume`, `/delete`, `/release` ingresses hidden or
+  blocked from pending and attached standalone contexts; `/resume <id>`
+  for a standalone session routes only through the explicit standalone
+  context (review P1).
 
 E2E (Playwright, `packages/web-shell/client/e2e`):
 
@@ -565,7 +581,17 @@ PR6 does not add: standalone attachments/uploads (waits on the workspace
 upload follow-up), moving/forking a standalone session into a project,
 durable standalone scheduling, storage quotas, or child-session management
 UI. `SessionOverviewPanel` and `ResumeDialog` remain workspace-scoped in
-this PR; the top-level Recents group lives in the sidebar only. Split View
+this PR, and every ingress to them is gated (review P1): bare `/resume`,
+`/delete`, and `/release` mount workspace dialogs keyed by
+`lockedWorkspaceCwd`, and when it is undefined `useScopedSessions` selects
+the primary WebShell catalog — so `/delete` could act on unrelated
+workspace sessions from a standalone context. Non-workspace effective
+contexts hide or block the sidebar `canOpenSessionsOverview` entry,
+`shellApi.openSessionOverview()`, and the bare workspace dialog commands,
+issuing zero legacy catalog or destructive requests; `/resume <id>` for a
+standalone session routes only through the explicit standalone context.
+Both pending and attached standalone states are tested. The top-level
+Recents group lives in the sidebar only. Split View
 stays workspace-only (context-bearing pane descriptors are a follow-up).
 The one in-scope provider change is the prompt-admission error-code capture
 plus repair-and-reload transition, because the Repair UI depends on it; any
