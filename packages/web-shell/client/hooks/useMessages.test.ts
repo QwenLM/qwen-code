@@ -7,14 +7,16 @@ import {
   DaemonHttpError,
   type DaemonStatusTranscriptBlock,
   type DaemonTranscriptBlock,
+  type DaemonTranscriptBlockChangeSummary,
 } from '@qwen-code/sdk/daemon';
 import {
   type BackgroundAgentResolution,
   getBackgroundAgentNotificationKey,
   getPendingBackgroundAgentKey,
+  projectStreamingTailMessages,
   reconcileBackgroundAgentResolutions,
   transcriptBlocksToLocalizedMessages,
-  useMessages,
+  useMessagesFromBlocks,
 } from './useMessages';
 import type { Message } from '../adapters/types';
 
@@ -33,7 +35,23 @@ const hookState = vi.hoisted(() => {
   };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+const adapterSpies = vi.hoisted(() => ({ project: vi.fn() }));
+
+vi.mock('../adapters/transcriptToMessages', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../adapters/transcriptToMessages')>();
+  return {
+    ...actual,
+    transcriptBlocksToDaemonMessages: (
+      ...args: Parameters<typeof actual.transcriptBlocksToDaemonMessages>
+    ) => {
+      adapterSpies.project();
+      return actual.transcriptBlocksToDaemonMessages(...args);
+    },
+  };
+});
+
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => hookState.connection,
   useTranscriptBlocks: () => hookState.blocks,
   useWorkspace: () => ({ client: hookState.client }),
@@ -96,6 +114,467 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       { content: 'localized:error.loopDetected' },
     ]);
   });
+
+  it.each(['assistant', 'thought'] as const)(
+    'skips complete projection for a streaming %s tail update',
+    async (kind) => {
+      const container = document.createElement('div');
+      const root = createRoot(container);
+      const t = (key: string) => key;
+      const source = {};
+      let latest: Message[] = [];
+      const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
+      const tail = baseBlock({
+        id: kind,
+        kind,
+        text: 'a',
+        streaming: true,
+        serverTimestamp: 1_001,
+      });
+      function Consumer({
+        blocks,
+        summary,
+      }: {
+        blocks: DaemonTranscriptBlock[];
+        summary: DaemonTranscriptBlockChangeSummary;
+      }) {
+        latest = useMessagesFromBlocks(t, blocks, summary);
+        return null;
+      }
+
+      adapterSpies.project.mockClear();
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [user, tail],
+            summary: {
+              source,
+              revision: 1,
+              tailAppendBarrierRevision: 1,
+            },
+          }),
+        ),
+      );
+      const firstProjection = latest;
+      const initialProjectionCount = adapterSpies.project.mock.calls.length;
+      const grownTail = {
+        ...tail,
+        text: 'ab',
+        updatedAt: 2,
+        serverTimestamp: 1_002,
+      };
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [user, grownTail],
+            summary: {
+              source,
+              revision: 2,
+              tailAppendBarrierRevision: 1,
+              tailBlockId: kind,
+            },
+          }),
+        ),
+      );
+
+      expect(adapterSpies.project).toHaveBeenCalledTimes(
+        initialProjectionCount,
+      );
+      expect(latest[0]).toBe(firstProjection[0]);
+      expect(latest[1]).not.toBe(firstProjection[1]);
+      expect(latest[1]).toMatchObject({
+        content: 'ab',
+        isStreaming: true,
+        timestamp: 1_002,
+      });
+
+      const changedUser = { ...user, text: 'changed', updatedAt: 2 };
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [changedUser, grownTail],
+            summary: {
+              source,
+              revision: 3,
+              tailAppendBarrierRevision: 3,
+            },
+          }),
+        ),
+      );
+      expect(adapterSpies.project).toHaveBeenCalledTimes(
+        initialProjectionCount + 1,
+      );
+      expect(latest[0]).not.toBe(firstProjection[0]);
+
+      await act(async () => root.unmount());
+    },
+  );
+
+  it('does not scan transcript history for a summarized tail append', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const history = Array.from({ length: 100 }, (_, index) =>
+      baseBlock({ id: `user-${index}`, kind: 'user', text: `${index}` }),
+    );
+    const tail = baseBlock({
+      id: 'thought',
+      kind: 'thought',
+      text: 'a',
+      streaming: true,
+    });
+    let indexedReads = 0;
+    const countReads = (blocks: DaemonTranscriptBlock[]) =>
+      new Proxy(blocks, {
+        get(target, property, receiver) {
+          if (typeof property === 'string' && /^\d+$/.test(property)) {
+            indexedReads += 1;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: countReads([...history, tail]),
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+
+    indexedReads = 0;
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: countReads([...history, { ...tail, text: 'ab' }]),
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(indexedReads).toBeLessThan(10);
+    await act(async () => root.unmount());
+  });
+
+  it('rejects matching revisions from a different transcript store', () => {
+    const t = (key: string) => key;
+    const thought = baseBlock({
+      id: 'thought',
+      kind: 'thought',
+      text: 'a',
+      streaming: true,
+    });
+    const messages = transcriptBlocksToLocalizedMessages([thought], t);
+
+    expect(
+      projectStreamingTailMessages(
+        {
+          blocks: [thought],
+          messages,
+          t,
+          blockChangeSummary: {
+            source: {},
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        },
+        [{ ...thought, text: 'ab' }],
+        t,
+        {
+          source: {},
+          revision: 2,
+          tailAppendBarrierRevision: 1,
+          tailBlockId: thought.id,
+        },
+      ),
+    ).toBeUndefined();
+  });
+
+  it('reuses only valid streaming history without a block change summary', () => {
+    const t = (key: string) => key;
+    const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
+    const assistant = baseBlock({
+      id: 'assistant',
+      kind: 'assistant',
+      text: 'a',
+      streaming: true,
+    });
+    const messages = transcriptBlocksToLocalizedMessages([user, assistant], t);
+
+    const projected = projectStreamingTailMessages(
+      { blocks: [user, assistant], messages, t },
+      [user, { ...assistant, text: 'ab' }],
+      t,
+    );
+
+    expect(projected?.[0]).toBe(messages[0]);
+    expect(projected?.[1]).not.toBe(messages[1]);
+    expect(projected?.[1]).toMatchObject({ content: 'ab' });
+    expect(
+      projectStreamingTailMessages(
+        { blocks: [user, assistant], messages, t },
+        [
+          { ...user, text: 'changed' },
+          { ...assistant, text: 'ab' },
+        ],
+        t,
+      ),
+    ).toBeUndefined();
+    expect(
+      projectStreamingTailMessages(
+        { blocks: [user, assistant], messages, t },
+        [user, { ...assistant, text: 'replacement' }],
+        t,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('projects an insight marker that spans the appended-text boundary', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const thought = baseBlock({
+      id: 'thought',
+      kind: 'thought',
+      text: 'prefix "insi',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [thought],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    adapterSpies.project.mockClear();
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [{ ...thought, text: 'prefix "insight_progress":{}' }],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: thought.id,
+          },
+        }),
+      ),
+    );
+
+    expect(adapterSpies.project).toHaveBeenCalledOnce();
+    expect(latest).toMatchObject([
+      { role: 'thinking', content: 'prefix "insight_progress":{}' },
+    ]);
+    await act(async () => root.unmount());
+  });
+
+  it('projects a later append that completes an insight message', () => {
+    const t = (key: string) => key;
+    const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
+    const assistant = baseBlock({
+      id: 'assistant',
+      kind: 'assistant',
+      text: '{"insight_progress":{"stage":"scanning","progress":10}',
+      streaming: true,
+    });
+    const completedAssistant = {
+      ...assistant,
+      text: `${assistant.text}}`,
+    };
+    const messages = transcriptBlocksToLocalizedMessages([user, assistant], t);
+    const source = {};
+
+    const projected = projectStreamingTailMessages(
+      {
+        blocks: [user, assistant],
+        messages,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 1,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, completedAssistant],
+      t,
+      {
+        source,
+        revision: 2,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+
+    expect(projected?.[0]).toBe(messages[0]);
+    expect(projected).toMatchObject([
+      { role: 'user' },
+      { role: 'insight_progress' },
+    ]);
+    expect(
+      projectStreamingTailMessages(
+        { blocks: [user, assistant], messages, t },
+        [user, completedAssistant],
+        t,
+      ),
+    ).toMatchObject([{ role: 'user' }, { role: 'insight_progress' }]);
+
+    const partialReady = {
+      ...completedAssistant,
+      text: `${completedAssistant.text}\n{"insight_ready":{"path":"/tmp/report.md"`,
+    };
+    const partialReadyMessages = projectStreamingTailMessages(
+      {
+        blocks: [user, completedAssistant],
+        messages: projected!,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 2,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, partialReady],
+      t,
+      {
+        source,
+        revision: 3,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+    const completedReady = {
+      ...partialReady,
+      text: `${partialReady.text}}}`,
+    };
+    const readyMessages = projectStreamingTailMessages(
+      {
+        blocks: [user, partialReady],
+        messages: partialReadyMessages!,
+        t,
+        blockChangeSummary: {
+          source,
+          revision: 3,
+          tailAppendBarrierRevision: 1,
+        },
+      },
+      [user, completedReady],
+      t,
+      {
+        source,
+        revision: 4,
+        tailAppendBarrierRevision: 1,
+        tailBlockId: assistant.id,
+      },
+    );
+
+    expect(readyMessages?.[0]).toBe(messages[0]);
+    expect(readyMessages).toMatchObject([
+      { role: 'user' },
+      { role: 'insight_ready', path: '/tmp/report.md' },
+    ]);
+  });
+
+  it('falls back when an insight tail has no matching projected message', () => {
+    const t = (key: string) => key;
+    const thought = baseBlock({
+      id: 'merged-thought',
+      kind: 'thought',
+      text: 'prefix "insi',
+      streaming: true,
+    });
+
+    expect(
+      projectStreamingTailMessages(
+        {
+          blocks: [thought],
+          messages: [
+            {
+              id: 'earlier-assistant',
+              role: 'thinking',
+              content: thought.text,
+              isStreaming: true,
+            },
+          ],
+          t,
+        },
+        [{ ...thought, text: 'prefix "insight_progress":{}' }],
+        t,
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each([undefined, ''])(
+    'falls back safely when a streaming block has empty text (%j)',
+    async (text) => {
+      const container = document.createElement('div');
+      const root = createRoot(container);
+      const t = (key: string) => key;
+      let latest: Message[] = [];
+      const assistant = baseBlock({
+        id: 'assistant',
+        kind: 'assistant',
+        text: text as unknown as string,
+        streaming: true,
+      });
+      function Consumer({ blocks }: { blocks: DaemonTranscriptBlock[] }) {
+        latest = useMessagesFromBlocks(t, blocks);
+        return null;
+      }
+
+      await act(async () =>
+        root.render(createElement(Consumer, { blocks: [assistant] })),
+      );
+      await act(async () =>
+        root.render(
+          createElement(Consumer, {
+            blocks: [{ ...assistant, updatedAt: 2 }],
+          }),
+        ),
+      );
+
+      expect(latest).toEqual([]);
+      await act(async () => root.unmount());
+    },
+  );
 });
 
 function backgroundAgentMessage(status: 'pending' | 'completed' = 'pending') {
@@ -147,12 +626,23 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function mountStatusConsumer(options: { allTools?: boolean } = {}) {
+function mountStatusConsumer(
+  options: {
+    allTools?: boolean;
+    getBlockChangeSummary?: () =>
+      | DaemonTranscriptBlockChangeSummary
+      | undefined;
+  } = {},
+) {
   const container = document.createElement('div');
   const root = createRoot(container);
   const t = (key: string) => key;
   function Consumer() {
-    const messages = useMessages(t);
+    const messages = useMessagesFromBlocks(
+      t,
+      hookState.blocks,
+      options.getBlockChangeSummary?.(),
+    );
     const status = options.allTools
       ? messages
           .flatMap((message) =>
@@ -175,6 +665,229 @@ function mountStatusConsumer(options: { allTools?: boolean } = {}) {
 }
 
 describe('background agent task reconciliation', () => {
+  it('reuses reconciled history across a streaming thought tail append', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    const tail = baseBlock({
+      id: 'thought',
+      kind: 'thought',
+      text: 'a',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+
+    adapterSpies.project.mockClear();
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, { ...tail, text: 'ab' }],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(adapterSpies.project).not.toHaveBeenCalled();
+    expect(latest).toMatchObject([
+      { role: 'tool_group', tools: [{ status: 'completed' }] },
+      { role: 'thinking', content: 'ab' },
+    ]);
+    await act(async () => root.unmount());
+  });
+
+  it('keeps agent reconciliation when an insight tail has no projected message', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    // An empty assistant block projects no message (unlike thought), so the
+    // insight append below hits the "no matching projected message" fallback.
+    const tail = baseBlock({
+      id: 'empty-assistant',
+      kind: 'assistant',
+      text: '',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [
+            agent,
+            { ...tail, text: 'prefix "insight_progress":{}', updatedAt: 2 },
+          ],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(latest[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ status: 'completed' }],
+    });
+    await act(async () => root.unmount());
+  });
+
+  it('keeps agent reconciliation when an insight tail matches a projected message', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const t = (key: string) => key;
+    const source = {};
+    const agent = backgroundAgentBlock('agent-call');
+    // An empty thought block projects a thinking message (unlike assistant),
+    // so the insight append below matches the tail's projected message.
+    const tail = baseBlock({
+      id: 'empty-thought',
+      kind: 'thought',
+      text: '',
+      streaming: true,
+    });
+    let latest: Message[] = [];
+    hookState.connection.status = 'connected';
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('completed'),
+    );
+    function Consumer({
+      blocks,
+      summary,
+    }: {
+      blocks: DaemonTranscriptBlock[];
+      summary: DaemonTranscriptBlockChangeSummary;
+    }) {
+      latest = useMessagesFromBlocks(t, blocks, summary);
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [agent, tail],
+          summary: {
+            source,
+            revision: 1,
+            tailAppendBarrierRevision: 1,
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(latest[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ status: 'completed' }],
+      }),
+    );
+    const reconciledToolGroup = latest[0];
+
+    adapterSpies.project.mockClear();
+    await act(async () =>
+      root.render(
+        createElement(Consumer, {
+          blocks: [
+            agent,
+            { ...tail, text: 'prefix "insight_progress":{}', updatedAt: 2 },
+          ],
+          summary: {
+            source,
+            revision: 2,
+            tailAppendBarrierRevision: 1,
+            tailBlockId: tail.id,
+          },
+        }),
+      ),
+    );
+
+    expect(adapterSpies.project).toHaveBeenCalled();
+    expect(latest[0]).toBe(reconciledToolGroup);
+    expect(latest).toMatchObject([
+      { role: 'tool_group', tools: [{ status: 'completed' }] },
+      { role: 'thinking', content: 'prefix "insight_progress":{}' },
+    ]);
+    await act(async () => root.unmount());
+  });
+
   it('uses terminal agent notifications as a reconciliation trigger without requiring toolUseId', () => {
     expect(
       getBackgroundAgentNotificationKey([
@@ -601,6 +1314,460 @@ describe('background agent task reconciliation', () => {
 
     await act(async () => unmount());
     warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('does not fail an agent while its launch approval is unanswered', async () => {
+    vi.useFakeTimers();
+    // The agent call is pending with an unresolved permission request for the
+    // same callId; its subagent session cannot exist yet, so the
+    // reconciliation 404 probe must be skipped rather than accumulating
+    // missing-agent misses and painting a failure.
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'session-1',
+        title: 'Launch agent',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      baseBlock({
+        id: 'agent-block-agent-call',
+        kind: 'tool',
+        toolCallId: 'agent-call',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    // The pending-permission agent is excluded from reconciliation, so the
+    // probe never fires and the card cannot be marked failed.
+    expect(hookState.resolveSubagentSession).not.toHaveBeenCalled();
+    expect(container.textContent).toBe('pending');
+
+    // Even after several retry windows of wall-clock time it stays active.
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(hookState.resolveSubagentSession).not.toHaveBeenCalled();
+    expect(container.textContent).toBe('pending');
+
+    // Once the launch approval resolves, the reconciliation must resume
+    // probing: the subagent session may now register, and a missing session
+    // crosses the grace into a visible failure exactly like any other
+    // background agent.
+    hookState.blocks = [
+      {
+        ...hookState.blocks[0],
+        resolved: 'selected:proceed_once',
+      },
+      hookState.blocks[1],
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    // First 404 miss keeps the card pending.
+    expect(container.textContent).toBe('pending');
+    // The retry's second miss crosses the missing-agent grace → failed.
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('probes only the healthy agent while a sibling launch approval is pending', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent-a',
+        kind: 'permission',
+        requestId: 'req-a',
+        sessionId: 'session-1',
+        title: 'Launch agent A',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call-a',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent A',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      baseBlock({
+        id: 'agent-a',
+        kind: 'tool',
+        toolCallId: 'agent-call-a',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+      baseBlock({
+        id: 'agent-b',
+        kind: 'tool',
+        toolCallId: 'agent-call-b',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue({
+      status: 'running',
+      sessionId: 'sub-agent-b',
+    });
+    const { render, unmount } = mountStatusConsumer({ allTools: true });
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalled(),
+    );
+    // Exclusion is per callId: the healthy sibling keeps probing while the
+    // approved agent is skipped.
+    const probed = hookState.resolveSubagentSession.mock.calls.map(
+      (call) => call[1],
+    );
+    expect(probed).toContain('agent-call-b');
+    expect(probed).not.toContain('agent-call-a');
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('resets accumulated missing-agent misses when an approval engages', async () => {
+    vi.useFakeTimers();
+    const source = {};
+    let summary: DaemonTranscriptBlockChangeSummary = {
+      source,
+      revision: 1,
+      tailAppendBarrierRevision: 1,
+    };
+    // Phase 1: no permission yet — one probe fires and 404s (miss 1).
+    hookState.blocks = [
+      baseBlock({
+        id: 'agent-a',
+        kind: 'tool',
+        toolCallId: 'agent-call-a',
+        title: 'Agent',
+        status: 'in_progress',
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call-a' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer({
+      getBlockChangeSummary: () => summary,
+    });
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Phase 2: the launch approval arrives — exclusion engages and must reset
+    // the accumulated miss, so no further probe fires while it is open.
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent-a',
+        kind: 'permission',
+        requestId: 'req-a',
+        sessionId: 'session-1',
+        title: 'Launch agent A',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call-a',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent A',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      hookState.blocks[0],
+    ];
+    summary = {
+      source,
+      revision: 2,
+      tailAppendBarrierRevision: 2,
+    };
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+
+    // Phase 3: the approval resolves — probing resumes with a fresh grace;
+    // the pre-exclusion miss must not carry over, so the second post-approval
+    // 404 still leaves the card pending, and a third marks it failed.
+    hookState.blocks = [
+      {
+        ...hookState.blocks[0],
+        resolved: 'selected:proceed_once',
+      },
+      hookState.blocks[1],
+    ];
+    summary = {
+      source,
+      revision: 3,
+      tailAppendBarrierRevision: 3,
+    };
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('ignores a permanent failure that settles after approval engages', async () => {
+    const probe = deferred<BackgroundAgentResolution>();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockReturnValueOnce(probe.promise);
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent',
+        kind: 'permission',
+        requestId: 'req-agent',
+        sessionId: 'session-1',
+        title: 'Launch agent',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      backgroundAgentBlock('agent-call'),
+    ];
+    await act(async () => render());
+    await act(async () => {
+      probe.reject(
+        new DaemonHttpError(
+          400,
+          { code: 'invalid_subagent_ref' },
+          'bad request',
+        ),
+      );
+    });
+
+    expect(container.textContent).toBe('pending');
+    await act(async () => unmount());
+  });
+
+  it('does not count a late 404 after approval engages', async () => {
+    vi.useFakeTimers();
+    const probe = deferred<BackgroundAgentResolution>();
+    const missing = new DaemonHttpError(
+      404,
+      { code: 'session_not_found', toolCallId: 'agent-call' },
+      'not found',
+    );
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockReturnValueOnce(probe.promise)
+      .mockRejectedValue(missing);
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-agent',
+        kind: 'permission',
+        requestId: 'req-agent',
+        sessionId: 'session-1',
+        title: 'Launch agent',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Launch agent',
+          rawInput: { run_in_background: true },
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      backgroundAgentBlock('agent-call'),
+    ];
+    await act(async () => render());
+    await act(async () => probe.reject(missing));
+    expect(container.textContent).toBe('pending');
+
+    hookState.blocks = [
+      { ...hookState.blocks[0], resolved: 'selected:proceed_once' },
+      hookState.blocks[1],
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => expect(container.textContent).toBe('failed'));
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('paces transient-error attempts across permission churn', async () => {
+    vi.useFakeTimers();
+    const agent = backgroundAgentBlock('agent-call');
+    const permission = baseBlock({
+      id: 'perm-file',
+      kind: 'permission',
+      requestId: 'req-file',
+      sessionId: 'session-1',
+      title: 'Write file',
+      options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+      toolCall: {
+        toolCallId: 'file-call',
+        kind: 'other',
+        status: 'pending',
+        title: 'Write file',
+        rawInput: {},
+      },
+      preview: { kind: 'generic' as const },
+    });
+    hookState.blocks = [agent];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    for (let index = 0; index < 8; index += 1) {
+      hookState.blocks = index % 2 === 0 ? [permission, agent] : [agent];
+      await act(async () => render());
+      await vi.waitFor(() =>
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(
+          index + 2,
+        ),
+      );
+    }
+
+    expect(container.textContent).toBe('pending');
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      '[web-shell] background agent reconciliation retry budget exhausted; marking agents failed',
+      expect.anything(),
+    );
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('keeps the missing-agent grace when an unrelated permission re-probes', async () => {
+    vi.useFakeTimers();
+    // Phase 1: a background agent probes and 404s once (miss 1).
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Phase 2: an unrelated permission appears inside the retry window. The
+    // effect re-runs and probes again immediately; that second 404 must not
+    // count toward the grace because the base backoff has not elapsed — the
+    // ladder is wall-clock paced, not round-paced.
+    hookState.blocks = [
+      baseBlock({
+        id: 'perm-file',
+        kind: 'permission',
+        requestId: 'req-file',
+        sessionId: 'session-1',
+        title: 'Write file',
+        options: [{ optionId: 'allow', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'file-call',
+          kind: 'other',
+          status: 'pending',
+          title: 'Write file',
+          rawInput: {},
+        },
+        preview: { kind: 'generic' as const },
+      }),
+      backgroundAgentBlock('agent-call'),
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    // Two immediate 404s inside the backoff window must leave the miss count
+    // at 1, so the card stays pending.
+    expect(container.textContent).toBe('pending');
+
+    // Phase 3: the next probe after the base backoff crosses the grace.
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
     vi.useRealTimers();
   });
 
@@ -1161,13 +2328,15 @@ describe('background agent task reconciliation', () => {
       );
       expect(container.textContent).toBe('pending');
 
-      // The double-count must not shorten the documented budget: failure
-      // still takes eight erroring rounds in total.
-      for (const delay of [6_000, 12_000, 24_000, 48_000, 60_000, 60_000]) {
+      // The immediate identity-triggered round is inside the pacing window,
+      // so only wall-clock-paced errors consume the documented budget.
+      for (const delay of [
+        6_000, 12_000, 24_000, 48_000, 60_000, 60_000, 60_000,
+      ]) {
         await act(async () => vi.advanceTimersByTimeAsync(delay));
       }
       await vi.waitFor(() => {
-        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8);
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(9);
         expect(container.textContent).toBe('failed');
       });
     } finally {

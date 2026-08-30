@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
-import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
+import { sessionMatchesGitQuery } from '../sidebar/sessionSearch';
+import { useConnection } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
@@ -61,7 +62,8 @@ export function DeleteSessionDialog({
             const q = filterQuery.toLowerCase();
             return (
               (s.displayName || '').toLowerCase().includes(q) ||
-              s.sessionId.toLowerCase().includes(q)
+              s.sessionId.toLowerCase().includes(q) ||
+              sessionMatchesGitQuery(s, q)
             );
           })
         : sessions,

@@ -27,6 +27,23 @@
   align-items: center;
 }
 
+.sidebar.mobileOpen {
+  width: clamp(
+    var(--web-shell-sidebar-min-width, 220px),
+    70%,
+    var(--web-shell-sidebar-max-width, 420px)
+  );
+  min-width: clamp(
+    var(--web-shell-sidebar-min-width, 220px),
+    70%,
+    var(--web-shell-sidebar-max-width, 420px)
+  );
+}
+
+.sidebar.mobileOpen .resizeHandle {
+  display: none;
+}
+
 .newChatButton,
 .pluginButton,
 .footerButton,
@@ -725,8 +742,6 @@
   align-items: stretch;
   gap: 10px;
   padding: 12px 14px;
-  border: 1px solid var(--border);
-  box-shadow: none;
   font-size: 12px;
   line-height: 20px;
 }
@@ -776,6 +791,20 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Match the session-row badge text: neutral muted tone, not the global link
+   blue — a blue/purple link would clash with the merged state icon's purple. */
+.sessionDetailsRow a {
+  color: color-mix(
+    in srgb,
+    var(--muted-foreground, #6b7280) 75%,
+    var(--foreground)
+  );
+}
+
+.sessionDetailsRow a:hover {
+  color: var(--foreground);
 }
 
 .sessionDetailsIdRow {
@@ -885,6 +914,32 @@
   animation: sidebarPulse 1.6s ease-in-out infinite;
 }
 
+.sessionStatusDotOverlay {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 5px;
+  height: 5px;
+  box-shadow: 0 0 0 1.5px var(--sidebar-background);
+}
+
+.sessionSourceIcon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+}
+
+.sessionSourceIcon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+}
+
 .collapsedSessionStatusDot {
   position: absolute;
   top: 1px;
@@ -947,6 +1002,12 @@
   justify-content: flex-end;
 }
 
+.sessionMetaSlot:not(
+  :has(.sessionLoading, .sessionAttention, .sessionGitIcon)
+) {
+  padding-right: 10px;
+}
+
 .sessionAttention {
   height: 22px;
   display: inline-flex;
@@ -964,10 +1025,6 @@
 .sessionAttentionUserInput {
   background: color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
   color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
-}
-
-.sessionAttention + .sessionLoading {
-  margin-left: 10px;
 }
 
 .sessionRow:hover .sessionMetaSlot,
@@ -993,7 +1050,7 @@
 }
 
 .sessionLoading {
-  margin-right: 10px;
+  margin: 0 10px;
   width: 12px;
   height: 12px;
   display: inline-flex;
@@ -1797,9 +1854,6 @@
   .sidebar.mobileOpen {
     display: flex;
     z-index: 50;
-    /* The width var is shared with the desktop resize handle and can be wider
-       than a phone viewport; cap it so the drawer never overflows the screen. */
-    max-width: 100vw;
   }
 
   .resizeHandle {

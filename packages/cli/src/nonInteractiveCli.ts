@@ -26,13 +26,14 @@ import {
   executeToolCall,
   shutdownTelemetry,
   isTelemetrySdkInitialized,
-  GeminiEventType,
+  LlmEventType,
   FatalInputError,
   promptIdContext,
   OutputFormat,
   InputFormat,
   LoopType,
   ToolNames,
+  goalToolResultProvenance,
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
@@ -49,6 +50,9 @@ import {
   isSystemReminderContent,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
+  getCachedToolCallFingerprint,
+  isReplayOfHandledToolCall,
+  recordHandledToolCall,
   isToolCallConcurrencySafe,
   canonicalToolName,
   parsePositiveIntegerEnv,
@@ -69,6 +73,7 @@ import {
   endInteractionSpan,
   getErrorType,
   getActiveInteractionSpan,
+  buildGoalContinuationParts,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -91,7 +96,7 @@ import { RunBudgetEnforcer } from './utils/runBudget.js';
 import {
   settleChatRecording,
   subscribeToHeadlessChatRecordingFailures,
-} from './utils/chat-recording-failure.js';
+} from './nonInteractive/chat-recording-failure.js';
 import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
 
@@ -148,8 +153,8 @@ function suppressedOutputBody(structuredCaptured: boolean): string {
     : SUPPRESSED_OUTPUT_RETRY;
 }
 
+import { normalizePartList } from './utils/normalize-part-list.js';
 import {
-  normalizePartList,
   extractPartsFromUserMessage,
   buildSystemMessage,
   createToolProgressHandler,
@@ -157,7 +162,7 @@ import {
   computeUsageFromMetrics,
   buildInitialSystemReminders,
   insertAfterFunctionResponses,
-} from './utils/nonInteractiveHelpers.js';
+} from './nonInteractive/nonInteractiveHelpers.js';
 
 // Human-readable labels for the detectors that can fire mid-stream.
 // Surfaced to stderr in TEXT mode so a headless run that halts on a loop
@@ -165,8 +170,12 @@ import {
 const LOOP_TYPE_LABELS: Record<LoopType, string> = {
   [LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS]:
     'the model repeated the same tool call with identical arguments',
+  // Reasoning-stream chants fire this type too (checkReasoningContentLoop),
+  // and getResponseText filters reasoning out of visible output — the label
+  // must name both channels so a headless halt on an empty stdout is not
+  // mistaken for a detector misfire.
   [LoopType.CHANTING_IDENTICAL_SENTENCES]:
-    'the model repeated the same sentence in its output',
+    'the model repeated the same sentence in its output or reasoning',
   [LoopType.REPETITIVE_THOUGHTS]:
     'the model repeated the same reasoning thought',
   [LoopType.READ_FILE_LOOP]:
@@ -215,6 +224,8 @@ interface HeadlessGoalTurn {
   controller: AbortController;
   origin: 'runtime' | 'user';
   continuationContext: string;
+  objectiveUpdated?: boolean;
+  windDown?: boolean;
   verifierFeedback?: string;
 }
 
@@ -227,23 +238,6 @@ function sameGoalPermit(
     left.revision === right.revision &&
     left.turnId === right.turnId
   );
-}
-
-function buildGoalContinuationParts(turn: HeadlessGoalTurn): Part[] {
-  return [
-    {
-      text: [
-        'Continue working on the active Goal.',
-        'Use get_goal for the authoritative objective and evidence state.',
-        "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
-        'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
-        `Runtime continuation context: ${turn.continuationContext}`,
-        ...(turn.verifierFeedback
-          ? [`Verifier feedback: ${turn.verifierFeedback}`]
-          : []),
-      ].join('\n'),
-    },
-  ];
 }
 
 function projectLegacyActiveGoal(snapshot: GoalSnapshotV2): ActiveGoal | null {
@@ -395,7 +389,7 @@ async function emitNonInteractiveFinalMessage(params: {
   // (systemMessage should already be emitted by caller)
   adapter.startAssistantMessage();
   adapter.processEvent({
-    type: GeminiEventType.Content,
+    type: LlmEventType.Content,
     value: message,
   } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
   adapter.finalizeAssistantMessage();
@@ -591,18 +585,18 @@ export async function runNonInteractive(
       });
     };
 
-    const geminiClient = config.getGeminiClient();
+    const llmClient = config.getLlmClient();
     const abortController = options.abortController ?? new AbortController();
     const queuedGoalTurns: HeadlessGoalTurn[] = [];
     let activeGoalTurn: HeadlessGoalTurn | undefined;
     let goalRuntimeUnsubscribe: (() => void) | undefined;
     const emitGoalSnapshot = (snapshot: GoalSnapshotV2) => {
       adapter.processEvent({
-        type: GeminiEventType.GoalState,
+        type: LlmEventType.GoalState,
         value: snapshot,
       });
       adapter.processEvent({
-        type: GeminiEventType.ActiveGoal,
+        type: LlmEventType.ActiveGoal,
         value: projectLegacyActiveGoal(snapshot),
       });
     };
@@ -640,6 +634,10 @@ export async function runNonInteractive(
           controller: new AbortController(),
           origin: 'runtime',
           continuationContext: input.continuationContext,
+          ...(input.objectiveUpdated
+            ? { objectiveUpdated: input.objectiveUpdated }
+            : {}),
+          ...(input.windDown ? { windDown: true } : {}),
           ...(input.verifierFeedback
             ? { verifierFeedback: input.verifierFeedback }
             : {}),
@@ -654,6 +652,13 @@ export async function runNonInteractive(
     };
     const bindGoalHost = () => {
       goalHostUnbind ??= config.bindGoalTurnHost(goalHost);
+    };
+    const markGoalTurnDelivered = (turn: HeadlessGoalTurn): void => {
+      try {
+        config.getGoalRuntime().markTurnDelivered(turn.turnKey);
+      } catch {
+        // Goal runtime is optional during early initialization.
+      }
     };
     let settlingGoalTurn: HeadlessGoalTurn | undefined;
     let goalTurnSettlement: Promise<void> | undefined;
@@ -1081,7 +1086,7 @@ export async function runNonInteractive(
         // runs once per (rare) continue request, so the full clone is fine.
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
-          apiHistory: geminiClient.getChat().getHistory(),
+          apiHistory: llmClient.getChat().getHistory(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
           kind: recoveryPlan.kind,
@@ -1210,6 +1215,7 @@ export async function runNonInteractive(
                   'The Goal runtime did not schedule a continuation.',
                 );
               }
+              markGoalTurnDelivered(activeGoalTurn);
               initialPartList = buildGoalContinuationParts(activeGoalTurn);
               slashHandled = true;
               break;
@@ -1277,7 +1283,7 @@ export async function runNonInteractive(
       }
 
       // Inject a worktree context notice into the model's first prompt.
-      // Two sources: the `--worktree` startup flag (set by gemini.tsx
+      // Two sources: the `--worktree` startup flag (set by llm.tsx
       // before loadCliConfig) takes precedence over the Phase C resume
       // restore. TUI does this via historyManager.addItem(INFO); here in
       // headless we prepend a `<system-reminder>` block since there is
@@ -1540,7 +1546,7 @@ export async function runNonInteractive(
       // An explicit inline `/model <id> <prompt>` override wins for the whole
       // turn: while active, skill-tool `modelOverride` writes (including the
       // undefined-clears case) are skipped so they cannot silently revert the
-      // submitted prompt to the session model mid-turn. Unlike useGeminiStream's
+      // submitted prompt to the session model mid-turn. Unlike useLlmStream's
       // ref-based `applyModelOverride`/`clearModelOverride` helpers, this is a
       // run-scoped const — non-interactive mode is single-turn, so there is no
       // retry-clearing or skill-tool takeover to guard against, just the
@@ -1692,8 +1698,11 @@ export async function runNonInteractive(
        * helper returns (main-turn → emitStructuredSuccess(); drain-turn
        * → return so the post-drain code emits success).
        */
-      const handledProviderToolCallIds =
-        geminiClient.getHistoryFunctionResponseIds();
+      // Fresh map per call today; copy so a future cached accessor cannot
+      // turn this run's cross-turn recording into shared-state mutation.
+      const handledToolCallFingerprints = new Map(
+        llmClient.getHistoryToolCallFingerprints(),
+      );
       // Tracks duplicate-error responses emitted during this headless run.
       // Once a provider id reaches this set, seeing it again is terminal for
       // the current tool batch so we do not send partial tool responses.
@@ -1748,10 +1757,26 @@ export async function runNonInteractive(
           }
           return true;
         });
+        const isReplayOfHandledRequest = (
+          request: ToolCallRequestInfo,
+        ): boolean => {
+          const providerCallId = getProviderResponseId(request);
+          return providerCallId
+            ? isReplayOfHandledToolCall(
+                handledToolCallFingerprints,
+                providerCallId,
+                getCachedToolCallFingerprint(
+                  request,
+                  request.name,
+                  request.args,
+                ),
+              )
+            : false;
+        };
         const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
           [...uniqueBatchRequests, ...duplicateBatchRequests],
           getProviderResponseId,
-          handledProviderToolCallIds,
+          isReplayOfHandledRequest,
           duplicateProviderToolCallResponseIds,
         );
         if (repeatedDuplicateRequest) {
@@ -1777,8 +1802,16 @@ export async function runNonInteractive(
             continue;
           }
 
-          if (!handledProviderToolCallIds.has(providerCallId)) {
-            handledProviderToolCallIds.add(providerCallId);
+          if (!isReplayOfHandledRequest(requestInfo)) {
+            recordHandledToolCall(
+              handledToolCallFingerprints,
+              providerCallId,
+              getCachedToolCallFingerprint(
+                requestInfo,
+                requestInfo.name,
+                requestInfo.args,
+              ),
+            );
             executableBatchRequests.push(requestInfo);
             continue;
           }
@@ -1969,7 +2002,7 @@ export async function runNonInteractive(
           responseByRequest.set(requestInfo, toolResponse);
           terminateTurn ||= toolResponse.terminateTurn === true;
           config
-            .getGeminiClient()
+            .getLlmClient()
             .recordCompletedToolCall(
               requestInfo.name,
               requestInfo.args as Record<string, unknown>,
@@ -2225,18 +2258,23 @@ export async function runNonInteractive(
           const { request, response } = orderedResponses[index];
           const finalizedParts = finalized[index].responseParts;
           toolResponseParts.push(...finalizedParts);
-          chatRecordingService?.recordToolResult?.(finalizedParts, {
-            callId: request.callId,
-            status:
-              statusByResponse.get(response) ??
-              (response.error ? 'error' : 'success'),
-            resultDisplay: response.resultDisplay,
-            persistedOutputFiles: finalized[index].persistedOutputFiles,
-            artifacts: finalized[index].artifacts,
-            error: response.error,
-            errorType: response.errorType,
-            executionStatus: response.executionStatus,
-          });
+          const goalProvenance = goalToolResultProvenance(request);
+          chatRecordingService?.recordToolResult?.(
+            finalizedParts,
+            {
+              callId: request.callId,
+              status:
+                statusByResponse.get(response) ??
+                (response.error ? 'error' : 'success'),
+              resultDisplay: response.resultDisplay,
+              persistedOutputFiles: finalized[index].persistedOutputFiles,
+              artifacts: finalized[index].artifacts,
+              error: response.error,
+              errorType: response.errorType,
+              executionStatus: response.executionStatus,
+            },
+            ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+          );
         }
 
         return {
@@ -2314,7 +2352,7 @@ export async function runNonInteractive(
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const apiStartTime = Date.now();
-        const responseStream = geminiClient.sendMessageStream(
+        const responseStream = llmClient.sendMessageStream(
           currentMessages[0]?.parts || [],
           abortController.signal,
           currentPromptId,
@@ -2357,21 +2395,21 @@ export async function runNonInteractive(
           }
           // Use adapter for all event processing
           adapter.processEvent(event);
-          if (event.type === GeminiEventType.ToolCallRequest) {
+          if (event.type === LlmEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
-          if (event.type === GeminiEventType.ModelFallback) {
+          if (event.type === LlmEventType.ModelFallback) {
             toolCallRequests.length = 0;
           }
           if (
-            event.type === GeminiEventType.Content &&
+            event.type === LlmEventType.Content &&
             plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
           ) {
             const remaining =
               PLAIN_TEXT_PREVIEW_LIMIT - plainTextPreview.length;
             plainTextPreview += String(event.value).slice(0, remaining);
           }
-          if (event.type === GeminiEventType.LoopDetected) {
+          if (event.type === LlmEventType.LoopDetected) {
             if (!loopDetected) {
               loopDetectedMessage = emitLoopDetectedMessage(
                 config,
@@ -2382,7 +2420,7 @@ export async function runNonInteractive(
           }
           if (
             outputFormat === OutputFormat.TEXT &&
-            event.type === GeminiEventType.Error
+            event.type === LlmEventType.Error
           ) {
             const errorText = parseAndFormatApiError(
               event.value.error,
@@ -2458,7 +2496,7 @@ export async function runNonInteractive(
             return emitLoopDetectedResult();
           }
           if (terminateTurn && activeGoalTurn) {
-            geminiClient.addHistory({
+            llmClient.addHistory({
               role: 'user',
               parts: toolResponseParts,
             });
@@ -2470,6 +2508,7 @@ export async function runNonInteractive(
             const nextGoalTurn = queuedGoalTurns.shift();
             if (nextGoalTurn) {
               activeGoalTurn = nextGoalTurn;
+              markGoalTurnDelivered(nextGoalTurn);
               isFirstGoalSegment = true;
               currentMessages = [
                 {
@@ -2500,6 +2539,7 @@ export async function runNonInteractive(
             const nextGoalTurn = queuedGoalTurns.shift();
             if (nextGoalTurn) {
               activeGoalTurn = nextGoalTurn;
+              markGoalTurnDelivered(nextGoalTurn);
               isFirstGoalSegment = true;
               currentMessages = [
                 {
@@ -2640,7 +2680,7 @@ export async function runNonInteractive(
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
               const itemApiStartTime = Date.now();
               selectActiveInteraction(itemPromptId, itemIsFirstTurn);
-              const itemStream = geminiClient.sendMessageStream(
+              const itemStream = llmClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
                 abortController.signal,
                 itemPromptId,
@@ -2682,10 +2722,10 @@ export async function runNonInteractive(
                   await routeAbort();
                 }
                 adapter.processEvent(event);
-                if (event.type === GeminiEventType.ToolCallRequest) {
+                if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
                 }
-                if (event.type === GeminiEventType.LoopDetected) {
+                if (event.type === LlmEventType.LoopDetected) {
                   if (!loopDetected) {
                     loopDetectedMessage = emitLoopDetectedMessage(
                       config,
@@ -2696,7 +2736,7 @@ export async function runNonInteractive(
                 }
                 if (
                   outputFormat === OutputFormat.TEXT &&
-                  event.type === GeminiEventType.Error
+                  event.type === LlmEventType.Error
                 ) {
                   const errorText = parseAndFormatApiError(
                     event.value.error,
@@ -2936,7 +2976,7 @@ export async function runNonInteractive(
           }
 
           const memoryTaskPromises = config
-            .getGeminiClient()
+            .getLlmClient()
             .consumePendingMemoryTaskPromises();
           if (memoryTaskPromises.length > 0) {
             await Promise.allSettled(memoryTaskPromises);

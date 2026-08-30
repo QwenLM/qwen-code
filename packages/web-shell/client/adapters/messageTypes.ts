@@ -6,6 +6,15 @@
 
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 
+export interface AttachmentPreviewRequest {
+  name: string;
+  mimeType?: string;
+  data?: Blob;
+  text?: string;
+  workspacePath?: string;
+  attachmentId?: string;
+}
+
 export type DaemonMessageToolCallStatus =
   | 'pending'
   | 'in_progress'
@@ -42,10 +51,11 @@ export interface DaemonMessageToolCall {
   callId: string;
   toolName: string;
   args?: Record<string, unknown>;
+  executionMode?: 'foreground' | 'background';
   status: DaemonMessageToolCallStatus;
   parentToolCallId?: string;
   title?: string;
-  content?: DaemonMessageToolCallContent[];
+  content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
   locations?: DaemonMessageToolCallLocation[];
   kind?: DaemonMessageToolKind;
@@ -82,7 +92,13 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
   role: 'user';
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
-  files?: Array<{ name: string; mimeType: string }>;
+  files?: Array<{
+    name: string;
+    mimeType: string;
+    data?: Blob;
+    text?: string;
+    attachmentId?: string;
+  }>;
   inputAnnotations?: DaemonInputAnnotation[];
   source?: string;
 }
@@ -143,6 +159,11 @@ export interface DaemonSystemMessage extends DaemonMessageMeta {
   source?: string;
   data?: unknown;
   images?: Array<{ data: string; mimeType: string }>;
+  files?: Array<{
+    name: string;
+    mimeType: string;
+    attachmentId?: string;
+  }>;
 }
 
 export interface DaemonUserShellMessage extends DaemonMessageMeta {

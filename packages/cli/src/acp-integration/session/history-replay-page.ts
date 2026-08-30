@@ -7,6 +7,8 @@
 import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
+  lastHistoryContentFromRecords,
+  restorableAskUserQuestionCallIds,
   type ChatRecord,
   type Config,
   type GoalSnapshotV2,
@@ -19,7 +21,7 @@ import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { Buffer } from 'node:buffer';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
-import { observeAcpToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
+import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { HistoryReplayer } from './history-replayer.js';
 import type { PendingReplayToolCall } from './history-replayer.js';
 import type { CumulativeUsage, SessionEmitterContext } from './types.js';
@@ -251,6 +253,8 @@ export async function collectHistoryReplayUpdates({
   replayState,
   goalBootstrap,
   limits,
+  suppressRestoreAskUserQuestion,
+  finalizeDangling,
 }: {
   sessionId: string;
   config?: Config;
@@ -261,16 +265,50 @@ export async function collectHistoryReplayUpdates({
   replayState?: unknown;
   goalBootstrap?: import('./history-replayer.js').HistoryReplayGoalBootstrap;
   limits?: HistoryReplayLimits;
+  /**
+   * The daemon declined the re-hang (no attached client / fork restore):
+   * finalize the trailing ask_user_question normally instead of skipping it,
+   * so the replayed card doesn't spin forever with no restore prompt coming.
+   */
+  suppressRestoreAskUserQuestion?: boolean;
+  /**
+   * Ungated live-session loads (qwen/session/loadUpdates) while the
+   * session still has an active turn must not finalize dangling calls: a
+   * trailing unmatched call is in-flight, not abandoned, and its result
+   * arrives through the live stream (#9704). The gated live loadSession
+   * path and non-live loads pass true.
+   */
+  finalizeDangling?: boolean;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
   try {
     const initial = parseTranscriptReplayState(replayState, logger);
+    // Prefer live chat when it is initialized (authoritative after startChat
+    // preserve). Cold bulk replay runs before startChat — `getChat()` throws
+    // — so fall back to the transcript tail instead of finalizing the
+    // dangling question that load is about to re-hang.
+    let skipFinalizeCallIds: Set<string> | undefined;
+    if (
+      suppressRestoreAskUserQuestion !== true &&
+      config?.getRestoreAskUserQuestion?.() === true
+    ) {
+      const replayClient = config.getLlmClient?.();
+      const lastHistoryContent =
+        replayClient?.isInitialized?.() === true
+          ? (replayClient.getChat?.()?.peekLastHistoryEntry?.() ??
+            lastHistoryContentFromRecords(records))
+          : lastHistoryContentFromRecords(records);
+      skipFinalizeCallIds =
+        restorableAskUserQuestionCallIds(lastHistoryContent);
+    }
     await new HistoryReplayer(
       replayContext(sessionId, updates, cumulativeUsage, config, limits),
     ).replay(records, gaps, {
       ...(initial.goalState ? { initialGoalState: initial.goalState } : {}),
       ...(initial.goalCause ? { initialGoalCause: initial.goalCause } : {}),
       ...(goalBootstrap ? { goalBootstrap } : {}),
+      ...(skipFinalizeCallIds ? { skipFinalizeCallIds } : {}),
+      ...(finalizeDangling === undefined ? {} : { finalizeDangling }),
     });
   } catch (error) {
     if (error instanceof HistoryReplayLimitError) throw error;

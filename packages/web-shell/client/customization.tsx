@@ -11,8 +11,11 @@ import type {
   MarkdownChartLabelOverrides,
 } from '@datafe-open/markdown-chart';
 import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart-react';
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
-import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
+import type {
+  DaemonInputAnnotation,
+  GoalSnapshotV2,
+} from '@qwen-code/sdk/daemon';
+import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
@@ -115,14 +118,18 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
-export type WebShellChatHeaderItem = 'title' | 'environment' | 'rightPanel';
+export type WebShellChatHeaderItem =
+  | 'title'
+  | 'environment'
+  | 'rightPanel'
+  | 'tokenUsage';
 
 export interface WebShellChatHeaderOptions {
-  /** Built-in header actions to show. Defaults to all actions. */
+  /** Built-in header actions to show. Token usage is opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
 
-export type WebShellRightPanelItem = 'review' | 'sideTask';
+export type WebShellRightPanelItem = 'review' | 'sideTask' | 'terminal';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to all actions. */
@@ -157,6 +164,10 @@ export interface ChatHeaderRenderInfo {
   onEnvironmentPanelOpenChange: (open: boolean) => void;
   /** Opens or closes the right extension panel. */
   onRightPanelOpenChange: (open: boolean) => void;
+  /** Opens token usage for the current session, when available. */
+  onOpenTokenUsage?: () => void;
+  /** Opens Settings deep-linked to Local Control (Daemon category). */
+  onOpenLocalControlSettings?: () => void;
 }
 
 /**
@@ -168,8 +179,25 @@ export type ChatHeaderRenderer = (info: ChatHeaderRenderInfo) => ReactNode;
 export interface UserMessageContentRenderInfo {
   content: string;
   images?: readonly { data: string; mimeType: string }[];
-  files?: readonly { name: string; mimeType: string }[];
+  files?: readonly {
+    name: string;
+    mimeType: string;
+    data?: Blob;
+    text?: string;
+    attachmentId?: string;
+  }[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellPreparedSubmit {
+  prompt: string;
+  inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellSubmitSnapshot {
+  sessionId?: string;
+  prompt: string;
+  inputAnnotations: readonly DaemonInputAnnotation[];
 }
 
 export type UserMessageContentRenderer = (
@@ -280,6 +308,7 @@ export interface WebShellComposerInput {
   text?: string;
   tags?: readonly WebShellComposerTag[];
   tagPlacement?: WebShellComposerTagPlacement;
+  clearAttachments?: boolean;
   submit?: boolean;
 }
 
@@ -345,6 +374,7 @@ export interface WebShellAtProvider {
 }
 
 export interface WebShellComposerApi {
+  focus?(): void;
   insertText(text: string, options?: WebShellComposerTextOptions): void;
   setText(text: string): void;
   addTags(
@@ -451,6 +481,9 @@ export interface WebShellFooterRenderInfo {
   model: string;
   streamingState: DaemonStreamingState;
   contextUsageRatio: number;
+  /** Canonical daemon-owned Goal state for the active session. */
+  goalSnapshot: GoalSnapshotV2 | null;
+  /** @deprecated Prefer goalSnapshot. */
   activeGoal: { condition: string; setAt: number } | null;
   tasks: readonly WebShellTaskInfo[];
   availableModes: readonly string[];
@@ -476,6 +509,8 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  /** Host-specific label for the Ask User Question free-text choice. */
+  askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
@@ -518,6 +553,16 @@ export interface WebShellCustomization {
    * trust / qualified-route safety checks) to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /**
+   * Directory that drag-and-dropped files upload into, **relative to the
+   * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
+   * `'uploads'`, `'uploads/images'`, or omit it to upload into the
+   * workspace root (the default). A leading-slash path like `'/uploads'`
+   * is rejected by the daemon as outside the workspace. The directory
+   * (including intermediate components) is created automatically on upload
+   * when it does not exist.
+   */
+  fileUploadDirectory?: string;
 }
 
 const WebShellCustomizationContext = createContext<WebShellCustomization>({});

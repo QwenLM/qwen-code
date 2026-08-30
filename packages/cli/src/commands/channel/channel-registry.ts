@@ -104,6 +104,17 @@ function managementFieldsWithSharedControls(
             options: SESSION_SCOPE_OPTIONS,
           },
         ]),
+    ...(declared.has('multiSession')
+      ? []
+      : [
+          {
+            key: 'multiSession',
+            label: 'Named Sessions',
+            kind: 'boolean' as const,
+            description:
+              'Retain an owner-scoped catalog of named tasks in daemon-managed mode',
+          },
+        ]),
   ];
 }
 
@@ -288,6 +299,7 @@ function ensureBuiltins(): Promise<void> {
         { name: 'telegram', promise: import('@qwen-code/channel-telegram') },
         { name: 'weixin', promise: import('@qwen-code/channel-weixin') },
         { name: 'dingtalk', promise: import('@qwen-code/channel-dingtalk') },
+        { name: 'dws', promise: import('@qwen-code/channel-dws') },
         { name: 'wecom', promise: import('@qwen-code/channel-wecom') },
         { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
         { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },

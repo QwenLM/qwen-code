@@ -1152,6 +1152,25 @@ describe('daemon event schema', () => {
     expect(cleared.displayName).toBeUndefined();
   });
 
+  it('keeps displayName on a pr-binding metadata event that echoes the name', () => {
+    // The bridge echoes the current displayName on pr-binding events because
+    // the fold treats an absent name as "cleared" — a pr event without the
+    // echo would blank the title until the next rename.
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {
+          sessionId: 's-1',
+          displayName: 'My Session',
+          prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
+        },
+      },
+    ]);
+    expect(state.displayName).toBe('My Session');
+  });
+
   it('recognizes slow_client_warning frames as known events', () => {
     // PR 14b fix (codex round 8 — sibling consistency): `satisfies
     // DaemonEvent` keeps `v: 1` / `type: 'slow_client_warning'`

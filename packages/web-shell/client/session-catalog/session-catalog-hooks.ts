@@ -1,9 +1,20 @@
-import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
-import { useSessions, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
+import {
+  useSessions,
+  useWorkspace,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonClient,
   DaemonSessionArchiveState,
   DaemonSessionListPageOptions,
+  DaemonSessionSummary,
 } from '@qwen-code/sdk/daemon';
 import {
   getSessionCatalogQueryKey,
@@ -82,10 +93,13 @@ export function useSessionCatalogQuery(
     getSnapshot,
     getServerSnapshot,
   );
-  const reload = useCallback(() => {
-    if (!enabled || !stableQuery) return Promise.resolve(undefined);
-    return store.refresh(stableQuery);
-  }, [enabled, stableQuery, store]);
+  const reload = useCallback(
+    (options: { interactive?: boolean } = {}) => {
+      if (!enabled || !stableQuery) return Promise.resolve(undefined);
+      return store.refresh(stableQuery, options);
+    },
+    [enabled, stableQuery, store],
+  );
 
   return {
     ...snapshot,
@@ -156,6 +170,63 @@ export function useSessionCatalogQueries(
   return useSyncExternalStore(subscribe, getSnapshot, () => EMPTY_SNAPSHOTS);
 }
 
+export function useSessionHasActivePrompt(
+  client: DaemonClient,
+  workspaceCwd: string | undefined,
+  sessionId: string | undefined,
+): boolean {
+  const store = useMemo(() => getSessionCatalogStore(client), [client]);
+  const subscribeLiveSessions = useCallback(
+    (listener: () => void) =>
+      workspaceCwd
+        ? store.subscribeLiveSessions(workspaceCwd, listener)
+        : () => undefined,
+    [store, workspaceCwd],
+  );
+  const hasLiveSessions = useSyncExternalStore(
+    subscribeLiveSessions,
+    () => (workspaceCwd ? store.hasLiveSessions(workspaceCwd) : false),
+    () => false,
+  );
+  // The live-state response is authoritative and independent of catalog
+  // paging. Arm the full-catalog fallback only when nothing tracks live-state
+  // for this workspace — i.e. the daemon lacks workspace_session_live_state.
+  // Evaluating in an effect (after mount) lets the sidebar's live-state
+  // retain win first; deciding at render time would fire one redundant
+  // full-catalog fetch on every page load before the first live-state
+  // response arrives, breaking the "no catalog polling" smoke contract.
+  const [catalogFallbackArmed, setCatalogFallbackArmed] = useState(false);
+  useEffect(() => {
+    setCatalogFallbackArmed(
+      Boolean(
+        workspaceCwd &&
+          !hasLiveSessions &&
+          !store.isWorkspaceLiveStateEnabled(workspaceCwd),
+      ),
+    );
+  }, [store, workspaceCwd, hasLiveSessions]);
+  const catalogQuery = useMemo<SessionCatalogQuery | undefined>(() => {
+    if (!catalogFallbackArmed || hasLiveSessions || !workspaceCwd) {
+      return undefined;
+    }
+    return { routeKind: 'qualified', workspaceCwd, options: {} };
+  }, [catalogFallbackArmed, hasLiveSessions, workspaceCwd]);
+  // autoLoad keeps the fallback page loading (and the store's error-retry
+  // timer armed) for observer panes that never trigger an invalidation.
+  const { sessions } = useSessionCatalogQuery(client, catalogQuery, {
+    autoLoad: true,
+  });
+  if (!workspaceCwd || !sessionId) return false;
+  if (hasLiveSessions) {
+    return (
+      store.getLiveSession(workspaceCwd, sessionId)?.hasActivePrompt === true
+    );
+  }
+  return sessions.some(
+    (session) => session.sessionId === sessionId && session.hasActivePrompt,
+  );
+}
+
 export function useSessionCatalogPolling(
   client: DaemonClient,
   query: SessionCatalogQuery | undefined,
@@ -188,9 +259,15 @@ export function useSessionCatalogController(client: DaemonClient) {
       invalidateWorkspace(workspaceCwd: string) {
         update(() => store.invalidateWorkspace(workspaceCwd));
       },
+      refreshWorkspace(workspaceCwd: string) {
+        update(() =>
+          store.invalidateWorkspace(workspaceCwd, { interactive: true }),
+        );
+      },
       sessionCreated(workspaceCwd: string, _sessionId: string) {
         update(() => {
           store.invalidateWorkspace(workspaceCwd);
+          if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) return;
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });
       },
@@ -199,6 +276,7 @@ export function useSessionCatalogController(client: DaemonClient) {
           store.patchSession(workspaceCwd, sessionId, {
             hasActivePrompt: true,
           });
+          if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) return;
           store.invalidateWorkspace(workspaceCwd);
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });
@@ -206,6 +284,7 @@ export function useSessionCatalogController(client: DaemonClient) {
       promptAdmissionUncertain(workspaceCwd: string) {
         update(() => {
           store.invalidateWorkspace(workspaceCwd);
+          if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) return;
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });
       },
@@ -215,8 +294,29 @@ export function useSessionCatalogController(client: DaemonClient) {
           store.invalidateWorkspace(workspaceCwd);
         });
       },
-      turnCompleted(workspaceCwd: string) {
+      toggleSessionPinned(
+        workspaceCwd: string,
+        session: DaemonSessionSummary,
+        toggle: { pinned: boolean; pinnedAt?: string },
+      ) {
+        update(() =>
+          store.applySessionPinToggle(workspaceCwd, session, toggle),
+        );
+      },
+      turnCompleted(workspaceCwd: string, sessionId: string) {
         update(() => {
+          if (store.isWorkspaceLiveStateEnabled(workspaceCwd)) {
+            // The catalog revision doesn't advance on turn completion; record
+            // the completion so the live-state loop can settle it from the
+            // response's updatedAt watermark instead of a full catalog scan.
+            store.recordSessionActivity(workspaceCwd, sessionId);
+            return;
+          }
+          // Mirror promptAdmitted's optimistic patch: a failed clearing
+          // refresh must not pin hasActivePrompt true forever (#9487).
+          store.patchSession(workspaceCwd, sessionId, {
+            hasActivePrompt: false,
+          });
           store.invalidateWorkspace(workspaceCwd);
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });
@@ -294,15 +394,18 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
   });
   const reloadPage = result.reload;
-  const reload = useCallback(async () => {
-    try {
-      return (await reloadPage())?.sessions;
-    } catch {
-      return undefined;
-    }
-  }, [reloadPage]);
+  const reload = useCallback(
+    async (reloadOptions: { interactive?: boolean } = {}) => {
+      try {
+        return (await reloadPage(reloadOptions))?.sessions;
+      } catch {
+        return undefined;
+      }
+    },
+    [reloadPage],
+  );
   const invalidate = useCallback(() => {
-    if (workspaceCwd) controller.invalidateWorkspace(workspaceCwd);
+    if (workspaceCwd) controller.refreshWorkspace(workspaceCwd);
   }, [controller, workspaceCwd]);
   const deleteSession = useCallback(
     async (sessionId: string) => {

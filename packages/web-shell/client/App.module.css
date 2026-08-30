@@ -347,6 +347,7 @@
     position: fixed;
     top: 0;
     left: 0;
+    right: 0;
     bottom: 0;
     z-index: 50;
     pointer-events: none;
@@ -453,9 +454,9 @@
   --streaming-label-color: #b794f4;
   --agent-logo-gradient: linear-gradient(
     90deg,
-    #4796e4 0%,
-    #847ace 52%,
-    #c3677f 100%
+    #5b8def 0%,
+    #6d44e8 55%,
+    #a78bfa 100%
   );
   --subtle-bg: rgba(255, 255, 255, 0.04);
   --subtle-bg-strong: rgba(255, 255, 255, 0.06);
@@ -527,9 +528,9 @@
   --streaming-label-color: #7b4ab8;
   --agent-logo-gradient: linear-gradient(
     90deg,
-    #0b66c3 0%,
-    #7357b8 52%,
-    #bd4f67 100%
+    #2563eb 0%,
+    #6d44e8 55%,
+    #7c3aed 100%
   );
   --subtle-bg: rgba(32, 31, 25, 0.05);
   --subtle-bg-strong: rgba(32, 31, 25, 0.08);
@@ -719,14 +720,8 @@
    the wrapper must shrink to its content instead of filling the pane — the same
    thing `.content` already does in this state. */
 .appChatEmpty .chatViewWrap {
-  position: relative;
-  z-index: 1;
   flex: 0 0 auto;
   overflow: visible;
-}
-
-.appChatEmpty .chatPane {
-  position: relative;
 }
 
 .footer {
@@ -754,13 +749,16 @@
   pointer-events: auto;
 }
 
+/* In-flow bottom sheet: the approval replaces the hidden composer, so the
+   message list shrinks above it instead of being covered by a floating
+   overlay. The relative positioning + z-index still keeps the sheet above
+   portal-hosted DialogShell modals (backdrop at z-50) without overlapping
+   the message list. */
 .approvalOverlay {
-  position: absolute;
-  right: 20px;
-  bottom: calc(100% + 8px);
-  left: 20px;
+  position: relative;
   z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 10);
-  pointer-events: auto;
+  margin-bottom: 8px;
+  min-width: 0;
 }
 
 .approvalOverlay:focus,
@@ -831,6 +829,10 @@
 .composer {
   flex-shrink: 0;
   padding: 0;
+}
+
+.composerHidden {
+  display: none;
 }
 
 .composerHeader {
@@ -934,18 +936,12 @@
     overflow: hidden;
   }
 
-  /* Override chatViewWrap's relative positioning so the absolute footer
-     anchors to chatPane. The wrap remains a flex item, so the z-index: 1 it
-     gets from `.appChatEmpty .chatViewWrap` still applies under static
-     positioning and keeps the welcome content and composer above the dot
-     field. The welcome-middle + custom-footer variant keeps the positioned
-     wrap: `.footerWithCustomFooter` renders `display: contents` there, so
-     the wrap must remain the containing block for `.bottomPanels`. */
+  /* The custom-footer variant renders the composer footer `display: contents`,
+     so this wrap stays the containing block for the absolutely-positioned
+     bottom panels (status panel) anchored above it. */
   .appChatEmpty
-    .chatViewWithMobileComposerBottom:not(
-      .chatViewWithWelcomeMiddle.chatViewWithCustomFooter
-    ) {
-    position: static;
+    .chatViewWithMobileComposerBottom.chatViewWithWelcomeMiddle.chatViewWithCustomFooter {
+    position: relative;
   }
 
   .appChatEmpty .chatViewWithMobileComposerBottom .footer {
@@ -1031,12 +1027,6 @@
   color: var(--foreground);
 }
 
-.queuedPromptAmbiguity {
-  color: var(--secondary-foreground);
-  font-size: 12px;
-  line-height: 18px;
-}
-
 .queuedPrompt + .queuedPrompt {
   border-top: 0;
 }
@@ -1095,6 +1085,32 @@
 
 .queuedPromptImageInteractive:hover {
   opacity: 0.85;
+}
+
+.queuedPromptFile {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 120px;
+  height: 22px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--muted);
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.queuedPromptFile:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.queuedPromptFile span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .queuedPromptState {
@@ -1179,4 +1195,24 @@
 
 .queuedHint {
   display: none;
+}
+
+.tokenUsageHeaderButton {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.tokenUsageHeaderButton:hover,
+.tokenUsageHeaderButton:focus-visible {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
 }

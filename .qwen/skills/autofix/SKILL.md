@@ -138,6 +138,16 @@ dispositions, changed files, checks actually run, and remaining blocker.
   just moves the rejection later and wastes the round. Record the exact
   commands you ran and their results in your summary (see the per-mode
   outcomes); a bare "verified" without them is not acceptable.
+- Every guard, branch, or behavior a round's commits add needs its OWN witness
+  in the tests the round commits. Verify with a mutation probe before
+  committing: temporarily remove or negate the new guard or branch, re-run the
+  focused tests that should catch it, and confirm they FAIL; then restore it
+  and re-run to green. If the suite stays green with your guard deleted, the
+  guard has no coverage — write a test that pins it (or drop the guard)
+  instead of shipping it: the deterministic gate re-runs only the tests that
+  exist, so an unwitnessed guard passes every gate and its hole resurfaces as
+  a new finding in a later round. Record each probe and its result in your
+  summary alongside the verification commands.
 - Regenerate committed generated artifacts when you change their source. If you
   edit `packages/cli/src/config/settingsSchema.ts` (or `settings.ts`), run
   `npm run generate:settings-schema` and commit the regenerated
@@ -187,6 +197,18 @@ dispositions, changed files, checks actually run, and remaining blocker.
   Keep `failure.md` and `handoff.md` English-only WITHOUT a details block:
   handoff comments embed a byte-truncated excerpt of them, and a severed
   `<details>` tag would swallow the rest of the comment when rendered.
+
+  Instead, whenever you write `<workdir>/failure.md`, ALSO write
+  `<workdir>/failure.zh.md` — a complete paragraph-by-paragraph Chinese
+  translation of it. The workflow wraps `failure.zh.md` in its OWN collapsed
+  `<details><summary>中文说明</summary>` block when posting the handoff
+  comment, so Chinese maintainers can act on the escalation without reading
+  the English body. Constraints on `failure.zh.md`, because the workflow
+  byte-truncates it inside that wrapper: plain Markdown only; NO HTML tags at
+  all (no `<details>`, `<summary>`, or any `<…>`); no `<!--` sequences. A
+  missing `failure.zh.md` degrades the comment to the headline translation
+  alone, so write it even when the stop is a single paragraph. Translate the
+  whole of `failure.md`, section by section; do not summarize or omit.
 
 - Never ask the user a question in this headless workflow. Write
   `<workdir>/failure.md` and stop only when a required runnable check remains
@@ -329,10 +351,14 @@ silently overriding or silently complying.
   drop one silently.
 - Critical-only mode: when `feedback.md` contains a
   `Deferred non-Critical feedback` section, the workflow's deterministic brake
-  has engaged — the PR has completed five suggestion-capable, change-producing
-  rounds, or its diff has grown past the counting window's net-growth budget
-  (source and test lines are budgeted separately; the section's preamble names
-  the cause). That section is an audit record,
+  has engaged — the window's round counter has reached five, or its diff has
+  grown past the counting window's net-growth budget (source and test lines are
+  budgeted separately; the section's preamble names the cause). The counter is
+  not always the count of rounds YOU have run: a maintainer taking over a PR
+  that already spent N rounds in ordinary review can seed the window at N
+  (`@qwen-code /takeover from N`), so the brake can engage on your second or
+  third round. The preamble says so when it applies; treat it exactly the same
+  either way. That section is an audit record,
   not work: do not modify code, resolve threads, or write comment replies for
   those items. Everything rendered in the actionable sections IS in scope —
   the deterministic filter defers the automated reviewer's non-Critical
@@ -349,18 +375,45 @@ silently overriding or silently complying.
   root-cause, subtractive fixes over additive guards, and read a rising
   trajectory as a signal — if closing a finding would grow the diff materially
   AND the same class of gap keeps reappearing on code an earlier round added,
-  the right response is to escalate for a split, not to add another guard.
-- Not converging (the diff keeps growing past budget): when `feedback.md`
-  contains a `Needs a maintainer's decision — this PR is not converging`
-  section, the growth brake has been over budget across rounds and the diff is
-  still not shrinking — the findings themselves are driving the growth, so
-  Critical-only cannot help (the Criticals ARE the growth). Do NOT apply more
-  code fixes this round. This is a `defer-to-human` item: STOP `BLOCKED` with a
-  handoff that names the decision and lays out the options — split the PR (land
-  the core, track the remaining findings as follow-up issues), redesign, or
-  accept the current state with the tail deferred — plus your recommendation.
-  Continuing to patch, or deciding the split yourself, is exactly the wrong
-  move; the call is the maintainer's.
+  consolidate or subtract instead of adding another guard.
+- Growth audit required (the window is over its growth budget): when
+  `feedback.md` contains a `Growth audit required` section, this is a
+  growth-audit round. Solving the problem is primary, growth control
+  secondary — a size signal triggers a JUDGMENT, never a stop: the takeover
+  exists to land fixes, not to police line counts. BEFORE any other work or
+  edit this round, audit the approach on the two axes below, then record
+  `growth-audit.json` in the workdir — a single JSON document, verdict
+  `sound|drift|conflict` plus `kiss.result` and `minimal_change.result`
+  each `pass|fail`, the drift alternative or untraceable hunks, and a
+  rationale — and route on the verdict. The verification gate rejects the
+  round without a valid verdict (the taxonomy is enforced — `sound`
+  requires both axes `pass`, `drift` at least one `fail` — and a conflict
+  verdict must stop the round with the handoff), and a repeated verdict
+  after a prior audit this window must bring new evidence (the feedback
+  section lists the prior audits).
+  - KISS (structure): assume the PR IS over-engineered and try to prove it.
+    Either NAME a structurally simpler approach that achieves the same goal
+    (shape, not prose) or justify each accumulated piece as load-bearing for
+    a specific finding or failure mode.
+  - Minimal change (footprint): every changed file/hunk must trace to (a) the
+    PR's original problem, (b) an accepted review finding, or (c) fixing a
+    failing check. Hunks with no trace are deletion candidates.
+  - `sound` — the approach is justified; continue addressing feedback
+    normally. The workflow re-arms the counting window at the current size
+    and the loop continues.
+  - `drift` — implement the named simpler alternative and/or the deletion
+    list FIRST (typically net-negative), then continue addressing feedback.
+  - `conflict` — two defensible directions and the choice is not yours: STOP
+    `BLOCKED` with a handoff carrying the audit's reasoning — the narrowed
+    contested choice with evidence, not "the diff is too big".
+    Write that handoff to `<workdir>/handoff.md` — English-only, no details
+    block — naming the decision, the options, your recommendation, and what
+    was tried; then stop without writing anything else: no commit, no
+    `address-summary.md`, no `no-action.md`, no `failure.md`. The harness
+    recognizes a handoff with no fix verdict as a deliberate deferral: the
+    round ends cleanly, the note is posted to the PR, and the item waits for
+    the maintainer instead of being re-run. This is the ONLY growth-related
+    path to a human.
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether
@@ -506,5 +559,7 @@ Finish with exactly one outcome:
   answered when you escalated. Each body is bilingual per GitHub Actions Rules.
   Omit the file when every inline finding was resolved.
 - No change: write `<workdir>/no-action.md` (bilingual per GitHub Actions Rules).
+- Stopped by the growth brake: write `<workdir>/handoff.md` per the
+  not-converging rule (English-only, no details block) — and commit nothing.
 - The GitHub Actions Rules' objective stop condition applies: write
   `<workdir>/failure.md` and do not commit.

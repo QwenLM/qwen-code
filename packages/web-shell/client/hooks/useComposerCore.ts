@@ -47,7 +47,7 @@ import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import {
   useOptionalWorkspace,
   type UseDaemonFollowupSuggestionReturn,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   getImplicitTabCompletion,
   getMissingSlashPrefixCompletion,
@@ -81,6 +81,7 @@ import {
   getComposerTagIconUrl,
   getComposerTagSerialized,
   isBuiltinComposerTagIconUrl,
+  isPreviewableFileComposerTag,
   parseUserMessageContentSafely,
 } from '../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
@@ -101,13 +102,15 @@ import type {
 import { useWebShellPortalRoot } from '../portalRoot';
 import {
   dedupeAttachmentName,
+  extractFiles,
   extractFileTransfer,
   hasFileTransferPayload,
   MAX_IMAGE_ATTACHMENT_DATA_BYTES,
-  MAX_TEXT_ATTACHMENT_DATA_BYTES,
+  MAX_FILE_ATTACHMENT_DATA_BYTES,
   readImageTransfer,
-  readTextTransfer,
+  readFileTransfer,
   sanitizeAttachmentName,
+  type ExtractedFileTransfer,
 } from '../utils/imageIngestion';
 
 const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
@@ -1092,12 +1095,22 @@ export interface UseComposerCoreOptions {
   ) => boolean | void;
   onInputTextChange?: (text: string) => void;
   onCycleMode?: () => void;
+  cycleModeOnTab?: boolean;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
+  /**
+   * Whether the composer may react to FILE drags at all (drag highlight and
+   * drop ingestion on the inline image/text lane). `false` leaves paste
+   * working but makes file drag-and-drop inert, matching a host that
+   * force-disables file upload via `fileUploadEnabled={false}`. Defaults to
+   * `true`.
+   */
+  fileDragEnabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
@@ -1119,6 +1132,7 @@ export interface UseComposerCoreOptions {
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
+  onFileTagClick?: ComposerTagClickHandler;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /**
    * Invoked when the user selects the @ panel's "Upload file" item, with the
@@ -1321,6 +1335,7 @@ function createImageIngestionLane(generation: number): ImageIngestionLane {
 export interface UseComposerCoreReturn {
   containerRef: React.RefObject<HTMLDivElement | null>;
   viewRef: React.RefObject<EditorView | null>;
+  workspaceActionsRef: React.RefObject<AtMentionWorkspaceActions | undefined>;
   mobileComposer: MobileComposerBackend | null;
   focus: () => void;
   submitText: () => void;
@@ -1333,6 +1348,7 @@ export interface UseComposerCoreReturn {
   pendingImageBatchCount: number;
   imageDragActive: boolean;
   clearImageDragState: () => void;
+  ingestFiles: (files: readonly File[]) => boolean;
   imageTransferHandlers: ComposerImageTransferHandlers;
   handle: EditorHandle;
   pastedImages: PromptImage[];
@@ -1366,9 +1382,10 @@ export interface UseComposerCoreReturn {
   onAcceptFollowup: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
   onDismissFollowup: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
   slashMenu: SlashMenuState | null;
+  openSlashMenu: () => boolean;
   closeSlashMenu: () => void;
   selectSlashCompletion: (index: number) => boolean;
-  acceptSlashCompletion: (index?: number) => boolean;
+  acceptSlashCompletion: (index?: number, submit?: boolean) => boolean;
   atMenu: AtMentionMenuState | null;
   closeAtMenu: () => void;
   selectAtCompletion: (index: number) => boolean;
@@ -1386,12 +1403,15 @@ export function useComposerCore(
     onSubmit,
     onInputTextChange,
     onCycleMode,
+    cycleModeOnTab = false,
     onToggleShortcuts,
     disabled = false,
+    fileDragEnabled = true,
     placeholderText = 'Type a message...',
     commands,
     skills = [],
     slashCommandCategoryOrder,
+    autoSubmitSlashCommands = false,
     queuedMessages = [],
     onPopQueuedMessages,
     currentMode = 'default',
@@ -1412,6 +1432,7 @@ export function useComposerCore(
     renderComposerTag,
     renderComposerTagTooltip,
     onComposerTagClick,
+    onFileTagClick,
     onImageIngestionNotice,
     onFileUploadRequest,
     workspaceUploadBusy = false,
@@ -1501,10 +1522,14 @@ export function useComposerCore(
   }, []);
   const onCycleModeRef = useRef(onCycleMode);
   onCycleModeRef.current = onCycleMode;
+  const cycleModeOnTabRef = useRef(cycleModeOnTab);
+  cycleModeOnTabRef.current = cycleModeOnTab;
   const onToggleShortcutsRef = useRef(onToggleShortcuts);
   onToggleShortcutsRef.current = onToggleShortcuts;
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
+  const fileDragEnabledRef = useRef(fileDragEnabled);
+  fileDragEnabledRef.current = fileDragEnabled;
   const workspaceUploadBusyRef = useRef(workspaceUploadBusy);
   workspaceUploadBusyRef.current = workspaceUploadBusy;
   const commandsRef = useRef(commands);
@@ -1585,6 +1610,8 @@ export function useComposerCore(
   renderComposerTagTooltipRef.current = renderComposerTagTooltip;
   const onComposerTagClickRef = useRef(onComposerTagClick);
   onComposerTagClickRef.current = onComposerTagClick;
+  const onFileTagClickRef = useRef(onFileTagClick);
+  onFileTagClickRef.current = onFileTagClick;
   const resolveComposerTagIcon = useCallback(
     (tag: WebShellComposerTag): InlineComposerTag => {
       const iconUrl =
@@ -1605,6 +1632,12 @@ export function useComposerCore(
         typeof tooltip === 'string' || typeof tooltip === 'number'
           ? String(tooltip)
           : undefined;
+      const onClick =
+        tag.kind === 'file'
+          ? isPreviewableFileComposerTag(tag)
+            ? (onFileTagClickRef.current ?? onComposerTagClickRef.current)
+            : onComposerTagClickRef.current
+          : onComposerTagClickRef.current;
       return {
         ...tag,
         ...(iconUrl ? { iconUrl } : {}),
@@ -1613,9 +1646,7 @@ export function useComposerCore(
           : {}),
         ...(tooltip !== undefined && tooltip !== null ? { tooltip } : {}),
         ...(tooltipText ? { tooltipText } : {}),
-        ...(onComposerTagClickRef.current
-          ? { onClick: onComposerTagClickRef.current }
-          : {}),
+        ...(onClick ? { onClick } : {}),
       };
     },
     [],
@@ -1734,9 +1765,8 @@ export function useComposerCore(
     },
     [],
   );
-  const enqueueImageTransfer = useCallback(
-    (dataTransfer: DataTransfer, source: 'paste' | 'drop') => {
-      const transfer = extractFileTransfer(dataTransfer, source);
+  const enqueueExtractedTransfer = useCallback(
+    (transfer: ExtractedFileTransfer) => {
       if (!transfer.claimed) return false;
       if (disabledRef.current) return true;
 
@@ -1756,27 +1786,12 @@ export function useComposerCore(
             transfer.imageCandidates,
             {
               ...readerLifecycle,
-              maxEncodedBytes: Math.max(
-                0,
-                MAX_IMAGE_ATTACHMENT_DATA_BYTES -
-                  pastedImagesRef.current.reduce(
-                    (total, image) => total + image.data.length,
-                    0,
-                  ),
-              ),
+              maxBytes: MAX_IMAGE_ATTACHMENT_DATA_BYTES,
             },
           );
           if (imageIngestionLaneRef.current !== lane) return;
-          const textResult = await readTextTransfer(transfer.textCandidates, {
-            ...readerLifecycle,
-            maxEncodedBytes: Math.max(
-              0,
-              MAX_TEXT_ATTACHMENT_DATA_BYTES -
-                pastedFilesRef.current.reduce(
-                  (total, file) => total + (file.size ?? file.text.length),
-                  0,
-                ),
-            ),
+          const fileResult = await readFileTransfer(transfer.fileCandidates, {
+            maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
           });
           if (imageIngestionLaneRef.current !== lane) return;
           if (imageResult.accepted.length > 0) {
@@ -1784,11 +1799,11 @@ export function useComposerCore(
             pastedImagesRef.current = next;
             setPastedImages(next);
           }
-          if (textResult.accepted.length > 0) {
+          if (fileResult.accepted.length > 0) {
             const taken = new Set(
               pastedFilesRef.current.map((file) => file.name),
             );
-            const named = textResult.accepted.map((file) => {
+            const named = fileResult.accepted.map((file) => {
               const name = dedupeAttachmentName(
                 sanitizeAttachmentName(file.name),
                 taken,
@@ -1803,7 +1818,7 @@ export function useComposerCore(
           const rejected = [
             ...transfer.rejected,
             ...imageResult.rejected,
-            ...textResult.rejected,
+            ...fileResult.rejected,
           ];
           const skipped = rejected.filter(
             ({ reason }) => reason !== 'read-failed' && reason !== 'too-large',
@@ -1850,6 +1865,15 @@ export function useComposerCore(
     },
     [emitImageIngestionNotice],
   );
+  const enqueueImageTransfer = useCallback(
+    (dataTransfer: DataTransfer, source: 'paste' | 'drop') =>
+      enqueueExtractedTransfer(extractFileTransfer(dataTransfer, source)),
+    [enqueueExtractedTransfer],
+  );
+  const ingestFiles = useCallback(
+    (files: readonly File[]) => enqueueExtractedTransfer(extractFiles(files)),
+    [enqueueExtractedTransfer],
+  );
   const imageTransferHandlers = useMemo<ComposerImageTransferHandlers>(
     () => ({
       onPasteCapture: (event) => {
@@ -1859,18 +1883,30 @@ export function useComposerCore(
         }
       },
       onDragEnterCapture: (event) => {
-        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (
+          !fileDragEnabledRef.current ||
+          !hasFileTransferPayload(event.dataTransfer)
+        )
+          return;
         event.preventDefault();
         imageDragDepthRef.current += 1;
         if (!disabledRef.current) setImageDragActive(true);
       },
       onDragOverCapture: (event) => {
-        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (
+          !fileDragEnabledRef.current ||
+          !hasFileTransferPayload(event.dataTransfer)
+        )
+          return;
         event.preventDefault();
         event.dataTransfer.dropEffect = 'copy';
       },
       onDragLeaveCapture: (event) => {
-        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (
+          !fileDragEnabledRef.current ||
+          !hasFileTransferPayload(event.dataTransfer)
+        )
+          return;
         imageDragDepthRef.current = Math.max(0, imageDragDepthRef.current - 1);
         const nextTarget = event.relatedTarget;
         if (
@@ -1882,6 +1918,13 @@ export function useComposerCore(
       },
       onDropCapture: (event) => {
         if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (!fileDragEnabledRef.current) {
+          // File drags are inert, but still cancel the drop so the browser
+          // cannot navigate to the file. Capture-phase preventDefault does
+          // not stop propagation, so a host handler can still react.
+          event.preventDefault();
+          return;
+        }
         event.preventDefault();
         event.stopPropagation();
         clearImageDragState();
@@ -1908,6 +1951,12 @@ export function useComposerCore(
   useEffect(() => {
     if (disabled) clearImageDragState();
   }, [clearImageDragState, disabled]);
+  useEffect(() => {
+    // A host flipping `fileUploadEnabled` to false mid-drag gates the
+    // leave handler, so a depth already counted would never drain; clear
+    // the highlight explicitly instead of waiting for dragend/blur.
+    if (fileDragEnabled === false) clearImageDragState();
+  }, [clearImageDragState, fileDragEnabled]);
   useEffect(
     () => () => {
       resetImageIngestion(false);
@@ -2141,6 +2190,46 @@ export function useComposerCore(
     closeAtMenuState();
   }, [clearAutoAtTriggerIfIntact, closeAtMenuState]);
 
+  const openSlashMenu = useCallback(() => {
+    const view = viewRef.current;
+    if (
+      !view ||
+      disabledRef.current ||
+      shellModeRef.current ||
+      historyBrowseActiveRef.current
+    ) {
+      return false;
+    }
+    closeAtMenu();
+    let cursor = view.state.selection.main.head;
+    const line = view.state.doc.lineAt(cursor);
+    if (!line.text.startsWith('/')) {
+      if (view.state.doc.length > 0) return false;
+      view.dispatch({
+        changes: { from: cursor, to: cursor, insert: '/' },
+        selection: { anchor: cursor + 1 },
+        scrollIntoView: true,
+      });
+      cursor += 1;
+    }
+    const result = getSlashCommandCompletionResult(
+      view.state.doc.toString(),
+      cursor,
+      commandsRef.current,
+      skillsRef.current,
+      languageRef.current,
+      tRef.current,
+      slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
+    );
+    if (!result) return false;
+    setSlashMenu({
+      ...result,
+      selectedIndex: 0,
+    });
+    view.focus();
+    return true;
+  }, [closeAtMenu, setSlashMenu]);
+
   const closeAtMenuIfOpenFn = atMenu.closeIfOpen;
   const closeAtMenuIfOpen = useCallback(() => {
     const result = closeAtMenuIfOpenFn();
@@ -2237,20 +2326,33 @@ export function useComposerCore(
     [setSlashMenu],
   );
 
-  const acceptSlashCompletion = useCallback((index?: number) => {
-    const view = viewRef.current;
-    const current = slashMenuRef.current;
-    if (!view || !current) return false;
-    const item = current.items[index ?? current.selectedIndex];
-    if (!item) return false;
-    view.dispatch({
-      changes: { from: current.from, to: current.to, insert: item.apply },
-      selection: { anchor: current.from + item.apply.length },
-      scrollIntoView: true,
-    });
-    view.focus();
-    return true;
-  }, []);
+  const acceptSlashCompletion = useCallback(
+    (index?: number, submit = false) => {
+      const view = viewRef.current;
+      const current = slashMenuRef.current;
+      if (!view || !current) return false;
+      const item = current.items[index ?? current.selectedIndex];
+      if (!item) return false;
+      const commandReplacesEntireDraft =
+        current.from === 0 && current.to === view.state.doc.length;
+      view.dispatch({
+        changes: { from: current.from, to: current.to, insert: item.apply },
+        selection: { anchor: current.from + item.apply.length },
+        scrollIntoView: true,
+      });
+      view.focus();
+      if (
+        submit &&
+        autoSubmitSlashCommands &&
+        item.autoSubmit &&
+        commandReplacesEntireDraft
+      ) {
+        submitTextRef.current(view);
+      }
+      return true;
+    },
+    [autoSubmitSlashCommands],
+  );
 
   // Track whether editor has content for send button state
   const [hasContent, setHasContent] = useState(false);
@@ -2800,9 +2902,30 @@ export function useComposerCore(
             return true;
           }
           if (slashMenuRef.current) {
-            return acceptSlashCompletion();
+            return acceptSlashCompletion(undefined, true);
           }
           if (completionStatus(view.state) === 'active') return false;
+          const text = view.state.doc.toString();
+          const subcommandResult = getSlashCommandCompletionResult(
+            `${text} `,
+            text.length + 1,
+            commandsRef.current,
+            skillsRef.current,
+            languageRef.current,
+            (key) => tRef.current(key),
+            slashCommandCategoryOrderRef.current ??
+              DEFAULT_COMMAND_CATEGORY_ORDER,
+          );
+          if (
+            /^\/[^\s/]+$/.test(text) &&
+            subcommandResult?.kind === 'subcommand'
+          ) {
+            view.dispatch({
+              changes: { from: text.length, insert: ' ' },
+              selection: { anchor: text.length + 1 },
+            });
+            return true;
+          }
           const followup = followupStateRef.current;
           const hasInlineTags = hasInlineComposerTags(view);
           const followupCompletion = hasInlineTags
@@ -2981,10 +3104,12 @@ export function useComposerCore(
             return true;
           }
           if (slashMenuRef.current) {
-            return acceptSlashCompletion();
+            if (acceptSlashCompletion()) return true;
+            if (!cycleModeOnTabRef.current) return false;
           }
           if (completionStatus(view.state) === 'active') {
-            return acceptCompletion(view);
+            if (acceptCompletion(view)) return true;
+            if (!cycleModeOnTabRef.current) return false;
           }
           const text = view.state.doc.toString();
           const implicitResult = getImplicitTabCompletion(
@@ -3017,6 +3142,9 @@ export function useComposerCore(
               selection: { anchor: missingSlash.length },
             });
             return true;
+          }
+          if (cycleModeOnTabRef.current) {
+            onCycleModeRef.current?.();
           }
           return true;
         },
@@ -3115,8 +3243,11 @@ export function useComposerCore(
       }
     });
 
+    const initialDraft =
+      loadComposerDraft(draftIdentityRef.current.storageKey) ?? '';
     const state = EditorState.create({
-      doc: loadComposerDraft(draftIdentityRef.current.storageKey) ?? '',
+      doc: initialDraft,
+      selection: { anchor: initialDraft.length },
       extensions: [
         Prec.highest(submitKeymap),
         minimalSetup,
@@ -3456,15 +3587,22 @@ export function useComposerCore(
         [
           command.name,
           command.description ?? '',
+          command.completionLabel ?? '',
+          command.completionSection ?? '',
           command.source ?? '',
           command.displayCategory ?? '',
           command.argumentHint ?? '',
           command.subcommands?.join(',') ?? '',
+          command.autoSubmit ? '1' : '0',
         ].join('\u0000'),
       )
       .join('\u0001'),
     skills
-      .map((skill) => [skill.name, skill.description].join('\u0000'))
+      .map((skill) =>
+        [skill.name, skill.description, skill.argumentHint ?? ''].join(
+          '\u0000',
+        ),
+      )
       .join('\u0001'),
     slashCommandCategoryOrder?.join('|') ?? '',
   ].join('\u0002');
@@ -4002,6 +4140,14 @@ export function useComposerCore(
     const view = viewRef.current;
     if (!view && !isTouchComposer) return;
 
+    if (input.clearAttachments) {
+      pastedImagesRef.current = [];
+      pastedFilesRef.current = [];
+      restoredInputAnnotationsRef.current = [];
+      setPastedImages([]);
+      setPastedFiles([]);
+    }
+
     const tagPlacement = input.tagPlacement ?? 'top';
     if (input.tags !== undefined && tagPlacement === 'top') {
       setComposerTags([...input.tags]);
@@ -4339,6 +4485,7 @@ export function useComposerCore(
   return {
     containerRef,
     viewRef,
+    workspaceActionsRef,
     mobileComposer: isTouchComposer
       ? {
           textareaRef: mobileTextareaRef,
@@ -4367,6 +4514,7 @@ export function useComposerCore(
     pendingImageBatchCount,
     imageDragActive,
     clearImageDragState,
+    ingestFiles,
     imageTransferHandlers,
     handle,
     pastedImages,
@@ -4414,6 +4562,7 @@ export function useComposerCore(
     onDismissFollowup:
       onDismissFollowup as UseDaemonFollowupSuggestionReturn['onDismissFollowup'],
     slashMenu,
+    openSlashMenu,
     closeSlashMenu,
     selectSlashCompletion,
     acceptSlashCompletion,

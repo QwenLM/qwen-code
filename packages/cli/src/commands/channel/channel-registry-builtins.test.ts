@@ -52,7 +52,7 @@ describe('built-in channel registry', () => {
     expect(catalog.map((entry) => entry.type)).toContain('gitlab');
     expect(
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),
-    ).toEqual(['wecom', 'feishu', 'github', 'gitlab']);
+    ).toEqual(['dws', 'wecom', 'feishu', 'github', 'gitlab']);
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining(
         'Invalid management metadata in "dingtalk" channel: Channel field "settings" cannot be a required object.',
@@ -125,6 +125,7 @@ describe('built-in channel registry', () => {
       'allowedUsers',
       'groupPolicy',
       'sessionScope',
+      'multiSession',
     ]);
     expect(
       entry?.fields.find((field) => field.key === 'senderPolicy'),

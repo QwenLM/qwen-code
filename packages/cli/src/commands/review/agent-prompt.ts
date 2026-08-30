@@ -41,6 +41,7 @@ import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import {
   writeStdoutLine,
   writeStderrLine,
@@ -53,6 +54,7 @@ import {
 import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
 import {
   clearBudgetStop,
+  claimRetirementDegradeNote,
   expectedAdmissionSeconds,
   readRoundStamps,
   reverseAuditBudgetExhausted,
@@ -96,6 +98,12 @@ import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
+import { inertPath, scratchLabel } from './lib/paths.js';
+import {
+  RESIDUE_PATH_CAP,
+  worktreeResidue,
+  type WorktreeResidue,
+} from './lib/worktree.js';
 import {
   isTerritoryFanOut,
   requiredAgents,
@@ -147,9 +155,10 @@ interface PlanReport {
   prNumber?: unknown;
   ownerRepo?: unknown;
   worktreePath?: unknown;
+  /** The PR head sha fetch-pr recorded — the probe's identity anchor. */
+  fetchedSha?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
-  incremental?: unknown;
   repositoryContext?: unknown;
   /**
    * The two size fields the topology gate reads (#9242) and the ones
@@ -167,6 +176,163 @@ interface PlanReport {
   srcDiffLines?: unknown;
   diffLines?: unknown;
   budget?: { agentToolBudget?: unknown; reverseAuditRounds?: unknown };
+  /** Present only on a `--since`-scoped round — see incrementalScopeOf. */
+  incremental?: unknown;
+}
+
+/**
+ * The `incremental.scope` block a `--since`-scoped plan carries, re-validated field by
+ * field: the plan is parsed off disk with an unchecked cast, and a malformed
+ * block must degrade to "not an incremental round" (full-scope briefs, which
+ * are always safe) rather than render `undefined` into an agent's contract.
+ */
+interface IncrementalScope {
+  anchor: string;
+  deltaFiles: string[];
+  interaction: Array<{ path: string; importsChanged: string[] }>;
+}
+
+/**
+ * The per-file scope bullets for ONE chunk's files — uncapped, because the
+ * agent holding that chunk is the sole reviewer of those files and has no
+ * other source for their class.
+ */
+function chunkScopeBullets(
+  incremental: IncrementalScope,
+  chunk: DiffChunk | undefined,
+): string[] {
+  if (!chunk) return [];
+  const paths = new Set(
+    (Array.isArray(chunk.files) ? chunk.files : [])
+      .map((f) => f?.path)
+      .filter((p): p is string => typeof p === 'string'),
+  );
+  const delta = incremental.deltaFiles.filter((p) => paths.has(p));
+  const seam = incremental.interaction.filter((e) => paths.has(e.path));
+  if (delta.length === 0 && seam.length === 0) return [];
+  return [
+    "Your territory's files, by scope class:",
+    ...delta.map(
+      (p) =>
+        `- ${inertPath(p)} — **changed since the last round**: review its hunks in full.`,
+    ),
+    ...seam.map(
+      (e) =>
+        `- ${inertPath(e.path)} — **interaction only**: cleared last round, back in ` +
+        `scope because it imports ${e.importsChanged.map(inertPath).join(', ')}. ` +
+        `Review that seam, not the rest of its diff.`,
+    ),
+  ];
+}
+
+const SCOPE_LIST_CAP = 30;
+/** Edge lists are capped per entry in the WHOLE-DIFF frame — the entry cap
+ *  alone still let one interaction row carry hundreds of imports into every
+ *  brief. The chunk-level bullets are uncapped on purpose: that agent is the
+ *  sole reviewer of its files' seams and has nowhere to recover a tail. */
+const SCOPE_EDGE_CAP = 8;
+function cappedEdges(edges: readonly string[]): string {
+  const shown = edges.slice(0, SCOPE_EDGE_CAP).map(inertPath);
+  const rest = edges.length - SCOPE_EDGE_CAP;
+  return shown.join(', ') + (rest > 0 ? ` (+${rest} more)` : '');
+}
+/**
+ * The per-file scope lists a whole-diff brief renders under its incremental
+ * frame. Capped per class: past the cap the tail is counted, not listed —
+ * the plan's own `incremental.scope` block remains the complete record.
+ *
+ * This doc used to sit above `chunkScopeBullets`, the function that is
+ * explicitly UNCAPPED, where hover picked it up and the cap rationale read
+ * as documentation of its own contradiction.
+ */
+function scopeFileLists(incremental: IncrementalScope): string[] {
+  const cap = <T>(items: T[], render: (item: T) => string): string => {
+    const shown = items.slice(0, SCOPE_LIST_CAP).map(render);
+    const rest = items.length - SCOPE_LIST_CAP;
+    return shown.join(', ') + (rest > 0 ? ` (+${rest} more)` : '');
+  };
+  const out: string[] = [];
+  if (incremental.deltaFiles.length > 0) {
+    out.push(
+      `Changed since the last round (full review): ` +
+        `${cap(incremental.deltaFiles, inertPath)}.`,
+    );
+  }
+  if (incremental.interaction.length > 0) {
+    out.push(
+      `Interaction only (cleared last round; check the seam with what each ` +
+        `imports): ${cap(
+          incremental.interaction,
+          (e) =>
+            `${inertPath(e.path)} (imports ${cappedEdges(e.importsChanged)})`,
+        )}.`,
+    );
+  }
+  return out;
+}
+
+function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
+  // `incremental.scope`, not `incremental`: the outer block is the anchor
+  // RULING (`since`/`effective`/`reason`), and the scope it produced is
+  // nested under it — absent on every refusal and every up-to-date round, so
+  // reading the outer object for these fields would find nothing anyway. Both
+  // levels stay defensively parsed: the plan is `JSON.parse`d with an
+  // unchecked cast, and a malformed block must degrade to "not an incremental
+  // round" (full-scope briefs, which are always safe) rather than render
+  // `undefined` into an agent's contract.
+  const raw = (report.incremental as { scope?: unknown } | undefined | null)
+    ?.scope as
+    | {
+        anchor?: unknown;
+        deltaFiles?: unknown;
+        interaction?: unknown;
+      }
+    | undefined
+    | null;
+  if (!raw || typeof raw.anchor !== 'string' || raw.anchor === '') return null;
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v)
+      ? v.filter((s): s is string => typeof s === 'string' && s.length > 0)
+      : [];
+  const interaction = Array.isArray(raw.interaction)
+    ? raw.interaction
+        .filter(
+          (e): e is { path: string; importsChanged?: unknown } =>
+            !!e &&
+            typeof (e as { path?: unknown }).path === 'string' &&
+            (e as { path: string }).path.length > 0 &&
+            // An interaction entry IS its edge: with no surviving
+            // importsChanged the brief would read "because it imports ,
+            // which changed" — a seam pointing at nothing.
+            strings((e as { importsChanged?: unknown }).importsChanged).length >
+              0,
+        )
+        .map((e) => ({
+          path: e.path,
+          importsChanged: strings(e.importsChanged),
+        }))
+    : [];
+  // The SAME validity notion the roster applies
+  // (`incrementalInteractionPaths`): a partially corrupt delta list
+  // invalidates the block wholesale. The two consumers used to disagree —
+  // the roster widened on a list this function still filtered and narrowed
+  // with, so one plan told a chunk agent "interaction only" for a file the
+  // roster said it could not safely classify.
+  if (
+    !Array.isArray(raw.deltaFiles) ||
+    raw.deltaFiles.some((p) => typeof p !== 'string')
+  ) {
+    return null;
+  }
+  const deltaFiles = strings(raw.deltaFiles);
+  // Degrade-to-full-scope means DEGRADE: a block whose lists all failed
+  // validation must not render an incremental frame with zero scope bullets.
+  if (deltaFiles.length === 0 && interaction.length === 0) return null;
+  return {
+    anchor: raw.anchor,
+    deltaFiles,
+    interaction,
+  };
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -214,6 +380,8 @@ const FINDING_FORMAT = `Format each finding using this structure:
 - **Issue:** <one-line statement of the defect>
 - **Failure scenario:** <the concrete trigger and the concrete wrong outcome: what input, state, timing, or config makes this code misbehave, and what incorrect output / crash / leak / exposure results>
 - **Suggested fix:** <concrete code suggestion when possible, or "N/A">
+- **Fix witness:** <the test that must go RED if that fix is removed — the test file and the behaviour it pins — or "N/A" when the fix adds no guard, branch or behaviour a test can pin>
+- **Fix constraint:** <an existing fact the fix must not violate, with its source — the quoted constant or the file:line — and OMIT THIS LINE when you observed none; never write "N/A">
 - **Severity:** Critical | Suggestion | Nice to have
 - **Confidence:** high | low
 
@@ -226,7 +394,11 @@ const FINDING_FORMAT = `Format each finding using this structure:
 - A line too long to quote whole — a multi-KB single-line Markdown paragraph — may be quoted as a distinctive verbatim **fragment** of at least 12 characters (measured after whitespace collapse); it resolves to the line containing it.
 - Fill in **File** and the line number anyway. The path selects the file and the line breaks a tie when the snippet genuinely repeats. Neither is trusted as the answer.
 
-**The failure scenario is the finding's evidence, and it gates reporting.** For a quality finding, state the concrete cost instead of a crash — what is duplicated, wasted, or made harder to change — or quote the rule it violates. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely **is not a finding: do not report it.** A suspected **Critical** whose trigger you cannot pin down IS still reported, at \`Confidence: low\`, with the scenario naming the mechanism and what remains uncertain — a later verification stage rules on it. "This looks risky", with no nameable trigger and no nameable cost, is how a hallucinated finding reaches a pull request.`;
+**The failure scenario is the finding's evidence, and it gates reporting.** For a quality finding, state the concrete cost instead of a crash — what is duplicated, wasted, or made harder to change — or quote the rule it violates. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely **is not a finding: do not report it.** A suspected **Critical** whose trigger you cannot pin down IS still reported, at \`Confidence: low\`, with the scenario naming the mechanism and what remains uncertain — a later verification stage rules on it. "This looks risky", with no nameable trigger and no nameable cost, is how a hallucinated finding reaches a pull request.
+
+**A fix that adds a guard owes a test that fails without it — say so in the finding.** The fix round is this loop's largest single source of its own next round: measured across six multi-round pull requests, roughly a third of every post-first-round finding was introduced by the fix immediately before it, and the dominant shape was a guard or branch added with no test of its own. The suite re-runs only the tests that exist, so an unwitnessed guard passes every gate and its hole comes back as next round's finding. So when your **Suggested fix** adds or changes a guard, a branch, or a behaviour, fill **Fix witness** with the test that must go red without it — the file and what it asserts — and, where you can, the mutation that proves it: remove the guard, run that test, watch it fail. Write \`N/A\` when there is genuinely nothing to pin — a rename, a comment, a docs line, a type-only change, a fix whose whole content is deleting code. **This field never gates reporting**: a finding whose fix you cannot pin is still filed, with \`N/A\`. It is an acceptance criterion for the author, not a bar for you.
+
+**A fix that introduces a premise owes the fact it must respect — with its source, or not at all.** Fix witness pins the fix's *claim*: does it do what it says. Nothing pins the fix's *premises* — the assumptions a fix newly introduces — and those pass a witnessed test cleanly. Two Criticals on one merged fix each had the test that reds without the guard, and were still wrong: a hand-picked \`hops < 16\` lineage cap sat below the user-configurable \`MAX_SUBAGENT_DEPTH_LIMIT = 100\`, so deep lineages silently got back the hang the fix was for; and parking several runtimes' approvals on one registry entry broke a \`callId\` uniqueness that dedup and resolve relied on elsewhere, so a user's answer reached the wrong agent. So when your **Suggested fix** introduces a bound, shares a resource, or changes a shape, and you have already seen the existing fact it must not violate — a configured limit any new bound must stay within, a second site that reads the same field, a uniqueness the resource's key currently guarantees — fill **Fix constraint** with that fact and where it lives. The bar is the **Witness** bar, not the Fix witness bar: **quote the constant or give the \`file:line\`, or omit the line.** The costs are asymmetric — a wrong Fix witness is one test not written; a wrong constraint is confidently-stated misdirection the fixer will follow. "Be careful about concurrency", "keep this consistent with the other path" — a caution with no quoted fact and no location — is forbidden in this field exactly as "this looks risky" is forbidden in the failure scenario. And when you observed nothing, **omit the line entirely** — not \`N/A\`, not "none observed": an absent constraint says nothing and would lengthen every finding. Like Fix witness, this field never gates reporting.`;
 
 /**
  * What not to report.
@@ -489,6 +661,7 @@ export function buildChunkAgentPrompt(
   report: PlanReport,
   id: number,
   rules?: string,
+  residue?: WorktreeResidue,
 ): string {
   const { chunk, total } = chunkFrom(report, id);
 
@@ -554,12 +727,80 @@ export function buildChunkAgentPrompt(
     );
   }
 
+  // Incremental rounds carry two scopes in one diff, and the difference is
+  // the agent's whole brief for the second kind: an interaction file's diff
+  // was already reviewed clean once, and re-litigating it from scratch is how
+  // an incremental round quietly costs what it saved — or worse, re-reports
+  // findings the previous round already ruled on.
+  const incremental = incrementalScopeOf(report);
+  if (incremental) {
+    const chunkPaths = new Set(
+      (Array.isArray(chunk.files) ? chunk.files : [])
+        .map((f) => f?.path)
+        .filter((p): p is string => typeof p === 'string'),
+    );
+    const deltaHere = incremental.deltaFiles.filter((p) => chunkPaths.has(p));
+    const seamHere = incremental.interaction.filter((e) =>
+      chunkPaths.has(e.path),
+    );
+    const lines = [
+      '',
+      `**This is an INCREMENTAL round** — the diff holds only what changed since the ` +
+        `previous clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), ` +
+        `plus still-clean files one import hop from a change. Your files' scopes:`,
+    ];
+    if (deltaHere.length > 0) {
+      lines.push(
+        ...deltaHere.map(
+          (p) =>
+            `- ${inertPath(p)} — **changed since the last round**: its hunks here are ` +
+            `its full change against the review's base (the previous round's clean verdict ` +
+            `no longer covers this file); review them in full, as usual.`,
+        ),
+      );
+    }
+    if (seamHere.length > 0) {
+      lines.push(
+        ...seamHere.map(
+          (e) =>
+            `- ${inertPath(e.path)} — **unchanged, cleared by the previous round**, back in ` +
+            `scope because it imports ${e.importsChanged.map(inertPath).join(', ')}, ` +
+            `which ` +
+            `changed. Review the INTERACTION only: do this file's uses of what it imports ` +
+            `still hold — signatures, argument contracts, invariants, error behaviour — ` +
+            `now that the imported side moved? Read the changed side from the worktree to ` +
+            `answer that. Do not re-review the rest of this file's diff from scratch, and ` +
+            `do not report defects in it that the change it imports does not affect.`,
+        ),
+      );
+      lines.push(
+        // The generic duties below this block (the line-by-line walk, the
+        // deletion audit, every-dimension ownership) predate incremental
+        // scope and address the ordinary case. Without this sentence an
+        // agent obeys whichever instruction it read last — measured in
+        // review: told "interaction only", then told "audit all deletions
+        // in your territory", it re-opened round-1 findings.
+        `Where those general duties below conflict with a file's scope class ` +
+          `above, the scope class WINS: for an interaction file, every duty ` +
+          `applies only to its interaction surface with what changed.`,
+      );
+    }
+    // A frame with a header and no scope bullets tells the agent nothing and
+    // implies its files are out of scope — render it only when at least one
+    // of this chunk's files actually carries a class.
+    if (deltaHere.length > 0 || seamHere.length > 0) parts.push(...lines);
+  }
+
   parts.push(
     '',
     'You may also `read_file` the **full source files** above from the worktree whenever a ' +
       "hunk's correctness depends on code outside it. Diff context is three lines deep; state " +
       'invariants are not. Page a source file that comes back truncated rather than reasoning ' +
       'from its first screenful.',
+    // A chunk agent reads source files out of the shared worktree, which is
+    // exactly the exposure #9207 is about — so it gets the same rule the role
+    // briefs do, from the same builder.
+    ...worktreeEvidenceBlock(report, residue),
     '',
     '## What to review',
     '',
@@ -764,9 +1005,16 @@ export function buildChunkLaunchPrompt(
 export function buildWholeDiffBlock(
   report: PlanReport,
   rules?: string,
+  residue?: WorktreeResidue,
 ): string {
   const diffPath = requireDiffPath(report);
   const parts = [...diffReadingBlock(report, diffPath)];
+  // An Agent 8 specialist reads source out of the same shared worktree every
+  // other agent is pinned to, so it owes the same rule (#9207). It is the one
+  // launch class built outside `buildLaunch`, which is exactly how it was
+  // missed: the stderr tripwire fired on its build while the block it produced
+  // said nothing — and only the orchestrator sees stderr, never the agent.
+  parts.push(...worktreeEvidenceBlock(report, residue));
   const repositoryContext = repositoryContextOf(report);
   if (repositoryContext) {
     parts.push('', ...repositoryContextBlock(repositoryContext));
@@ -856,9 +1104,53 @@ function diffReadingBlock(
     (c) => c.maxLineChars > READ_FILE_CHAR_CAP,
   );
 
+  // Whole-diff readers (dimension agents, auditors) get the incremental frame
+  // once, up front: without it, "the diff" reads as the whole PR, and an agent
+  // that notices most of the PR is absent invents its own explanation — or
+  // walks the worktree re-reviewing scope the previous round already cleared.
+  const incremental = incrementalScopeOf(report);
+
   const parts = [
     '## The diff',
     '',
+    ...(incremental
+      ? [
+          `**Incremental round.** This diff is scoped to what changed since the previous ` +
+            `clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), plus ` +
+            `still-clean files one import hop from a change — each of those is in scope ` +
+            `only for its interaction with what it imports. The rest of the change was ` +
+            `reviewed clean last round and is deliberately absent; do not go find it. ` +
+            `A defect in absent code is reportable only when a change IN this diff is ` +
+            `what makes it wrong now. Where the sweep duties below (walk every ` +
+            `hunk, audit every deletion, own every dimension) conflict with a ` +
+            `file's scope class, the scope class WINS: for an interaction file ` +
+            `every duty applies only to its interaction surface with what ` +
+            `changed — its other hunks were cleared last round and re-reporting ` +
+            `them is the cost this scoping exists to prevent.`,
+          '',
+          // A whole-diff reader must know WHICH file carries which scope —
+          // told only that the two classes coexist, it cannot tell the file
+          // owed a full review from the one owed a seam check. Capped so a
+          // wide round cannot flood the brief; the chunk briefs always carry
+          // their own files' classes in full.
+          ...scopeFileLists(incremental),
+          '',
+        ]
+      : []),
+    // A CHUNK-scoped role brief (the reverse auditors) owns one territory and
+    // is its sole reviewer: the capped global list above can elide its own
+    // files past entry 30, leaving the agent no way to learn their class or
+    // recover the tail. Its own files are therefore listed in full, exactly
+    // as the bare chunk agent's brief lists them.
+    ...(incremental && scoped
+      ? [
+          ...chunkScopeBullets(
+            incremental,
+            chunks.find((c) => c.id === chunkId),
+          ),
+          '',
+        ]
+      : []),
     scoped
       ? `Your territory is **chunk ${chunkId}** of the diff. It is a file on disk — ` +
         'nothing in this prompt contains the code. Read your chunk:'
@@ -941,23 +1233,6 @@ function tail(
  * increment is exactly the class of defect this checklist hunts, and it is
  * invisible in the file's text. The `-` lines are the only evidence it existed.
  */
-/**
- * A PR-controlled path, flattened for display inside a brief or prompt. The
- * brief is the file the agent is told is the whole of its instructions — a git
- * path can legally contain newlines, and a newline inside an interpolated path
- * would let PR content open its own Markdown line there. Functional arguments
- * (the `read_file` path) are JSON-quoted instead, which both survives the
- * newline and remains the parseable single-line form the transcripts checks read.
- */
-function inertPath(p: string): string {
-  // \p{Cc} covers every control character (newlines, tabs, ESC — a terminal
-  // control sequence in a filename must not reach a terminal either); U+2500 is
-  // the roster separator glyph; the backtick would close the Markdown code span
-  // these paths are rendered inside, letting the tail of a filename run as
-  // markup in the file the agent treats as authoritative.
-  return p.replace(/[\p{Cc}\u2500`]+/gu, ' ');
-}
-
 function invariantFileBlock(
   report: PlanReport,
   diffPath: string,
@@ -1050,6 +1325,160 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
   ];
 }
 
+/**
+ * The plan's fetched head sha when it carries a usable one. Absent or
+ * malformed answers nothing rather than a broken anchor: every worktree-mode
+ * fetch writes the field, so both call sites fail closed on that absence,
+ * each in its own way.
+ *
+ * A usable one is a FULL Git object ID: 40 hex for SHA-1 repositories and
+ * 64 for SHA-256 ones — fetch-pr records `git rev-parse` verbatim, and the
+ * pipeline's own shape contract admits both lengths (pr-context's
+ * COMMIT_SHA_RE carries its {40,64} breadth for exactly that class). A
+ * validator matching only the SHA-1 length would drop the record every
+ * SHA-256 review writes, failing closed as though the plan were tampered
+ * with and welding an unpinned scratch-tree command.
+ */
+function fetchedShaOf(report: PlanReport): string | undefined {
+  const sha = report.fetchedSha;
+  return typeof sha === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha)
+    ? sha
+    : undefined;
+}
+
+/**
+ * The review worktree's residue, or nothing at all when there is no worktree to
+ * have any. Resolved against the process cwd, like every other use of
+ * `worktreePath` here: the report stores it repo-relative and review commands
+ * run from the project root.
+ *
+ * Exported for `emit-workflow`, which must probe the tree exactly the way this
+ * command's handler does: both paths build through `buildLaunch`, and a probe
+ * only one of them ran is a divergence in the briefs the two paths bake.
+ */
+export function worktreeResidueOf(report: PlanReport): WorktreeResidue {
+  const wt = report.worktreePath;
+  if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
+  // Hand over the sha fetch-pr recorded: committing the contamination moves
+  // a forge's HEAD off it, so with it the probe refuses a forged admin entry
+  // (see worktreeResidue). The record raises the plant's cost; it does not
+  // make planting impossible — it is re-read from the plan file at every
+  // invocation, and a same-user writer can rewrite it along with the forge.
+  // Absent or malformed it fails CLOSED: every worktree-mode fetch writes
+  // the field, so a plan that names a worktree without it is tampered or
+  // corrupted, and measuring unpinned would certify whichever index the
+  // gitfile names.
+  const sha = fetchedShaOf(report);
+  if (sha === undefined) {
+    return {
+      paths: [],
+      total: 0,
+      unmeasured:
+        'the plan carries no usable record of the fetched head sha — ' +
+        'every worktree-mode fetch writes one, so its absence means ' +
+        'tampering or corruption, and measuring without it would certify ' +
+        'whichever index the .git gitfile names',
+    };
+  }
+  return worktreeResidue(resolve(wt), RESIDUE_PATH_CAP, sha);
+}
+
+/**
+ * What every code-reading agent of a worktree-mode review needs to know about
+ * the tree it is standing in: it is shared, and shared with agents that write.
+ *
+ * The isolation half of #9207 removes the source — a verifier's probes now run
+ * in its own scratch tree — and this is the reader half, because "no agent
+ * writes here any more" is exactly the kind of guarantee that is one regression
+ * away from being false, and the reader is the one who pays. Measured live: an
+ * auditor read a probe's mutant plus a leftover probe file, nearly filed a
+ * Critical against them, and recovered only by improvising evidence from
+ * `git show HEAD:` — a fallback no brief mentioned. It is one sentence here so
+ * the next auditor does not have to invent it.
+ *
+ * `residue` is that check made concrete: the paths the tree carried when this
+ * launch was built. Named, not counted — a reader can only act on "distrust
+ * THESE files". Nothing is emitted when the review has no worktree (a local,
+ * file-path or cross-repo review, where the working tree is the user's own and
+ * uncommitted changes may be the very thing under review).
+ */
+function worktreeEvidenceBlock(
+  report: PlanReport,
+  residue: WorktreeResidue | undefined,
+  opts: { rule?: boolean } = {},
+): string[] {
+  const wt = report.worktreePath;
+  if (typeof wt !== 'string' || !wt) return [];
+  const parts: string[] = [];
+  // The RULE is for agents that review code. The residue paragraph below is for
+  // everyone: Agent 7 does not read the tree, it BUILDS it, and residue that
+  // predates the round reaches its compile and its test run — where a
+  // `[build]`/`[test]` finding is pre-confirmed and skips verification, which
+  // is how a stray probe file becomes a merge-blocking phantom Critical.
+  if (opts.rule !== false) {
+    parts.push(
+      '',
+      '**Your working directory is a SHARED review worktree.** Other agents read it ' +
+        'while you do, and Step 4 verifiers may write in it — their probes run in ' +
+        'their own throwaway trees, but a stray uncommitted change here is still ' +
+        'possible, and it is not part of the pull request. So: **code that is not in ' +
+        'the diff and not in the commit is not a finding.** Before reporting anything ' +
+        'that surprises you — a test file the diff never added, a line the diff never ' +
+        'touched — check it against the commit under review with ' +
+        '`git show HEAD:<path>` and judge THAT. **A path that command cannot produce ' +
+        "(`exists on disk, but not in 'HEAD'`) is not in the commit at all** — it is " +
+        "not the PR's code, so it is neither evidence nor a finding. (An auditor of a " +
+        "real run took a verifier's live probe for the PR's own code and came within a " +
+        'step of filing a Critical against it.)',
+    );
+  }
+  if (residue?.unmeasured) {
+    parts.push(
+      '',
+      `**Whether it is clean could not be measured** (reason: ` +
+        `${inertPath(residue.unmeasured)}). That is not the same as clean: treat ` +
+        'anything that surprises you in this tree as unverified until you have ' +
+        'checked it against `git show HEAD:<path>`.',
+    );
+  }
+  if (residue && residue.paths.length > 0) {
+    const unlisted = residue.total - residue.paths.length;
+    parts.push(
+      '',
+      `**And right now it is not clean.** These paths differ from the commit under ` +
+        `review: ${residue.paths.map((p) => `\`${inertPath(p)}\``).join(', ')}` +
+        (unlisted > 0
+          ? `, and ${unlisted} more not listed here — this list is capped, and ` +
+            '`git status --porcelain --untracked-files=all` has the full set ' +
+            '(without `--untracked-files=all` it collapses a whole probe directory ' +
+            'to one entry)'
+          : '') +
+        ". **What is not the PR's code is the DIFFERENCE, not always the file.** " +
+        'A path `git show HEAD:<path>` cannot produce was written into the tree ' +
+        "after the commit: none of it is the PR's code, and a failure, a behaviour " +
+        'or a defect confined to it is not a finding — a build or test failure it ' +
+        'causes included. A path that DOES have a HEAD version is a file the ' +
+        'commit contains, possibly one this PR changes: only the uncommitted edit ' +
+        'is foreign, so read `git show HEAD:<path>` and judge THAT — a defect ' +
+        'present in the committed version is a finding like any other, and only a ' +
+        'defect that exists solely in the working copy is not. ' +
+        'The names above are flattened for display (a filename can carry control ' +
+        'or invisible characters); `git status --porcelain --untracked-files=all` ' +
+        'in that worktree has the exact bytes if one does not match. Say in your ' +
+        'return that you saw them, so the orchestrator can have the tree cleared ' +
+        '— by shape: `git checkout HEAD -- <path>` for a tracked ' +
+        'file, `rm -rf <path>` for anything untracked, and `git rm --cached ' +
+        '<path>` first for a path STAGED as new, which `git checkout HEAD --` ' +
+        'cannot match at all. A staged RENAME is listed under both of its ' +
+        'names and they take opposite commands — the new name is the ' +
+        'staged-new case, the original is in HEAD and comes back with ' +
+        '`git checkout HEAD -- <original>`. (A dirty submodule is restored ' +
+        'inside the submodule, not from here.)',
+    );
+  }
+  return parts;
+}
+
 function repositoryBuildBoundary(context: RepositoryContext): string[] {
   return [
     '## Repository-specific verification boundary',
@@ -1079,6 +1508,16 @@ export function buildRoleBrief(
     file?: string;
     planPath?: string;
     chunk?: number;
+    /**
+     * This launch's record key — unique per role, chunk, round and findings
+     * digest: in an --all-chunks round every shard shares one findings file
+     * and therefore one digest, and the chunk id is what separates the keys.
+     * The verifier's scratch tree is named after it, which is what keeps the
+     * shards of one round out of each other's trees (`scratchWorktreePath`).
+     */
+    key?: string;
+    /** Paths the review worktree carries that its commit does not, if any. */
+    residue?: WorktreeResidue;
   } = {},
 ): string {
   const brief = BRIEFS[role];
@@ -1203,14 +1642,15 @@ export function buildRoleBrief(
     }
   }
 
-  // Cross-repo lightweight mode: there is no tree, only the diff. Two briefs assume
-  // one, and the degradation used to be a sentence the orchestrator was told to add
-  // by hand — which is not a thing that survives, and is now not a thing it can do:
-  // it does not write these any more. So the builder degrades them, from the same
-  // plan the roster reads.
+  // Cross-repo lightweight mode: there is no tree, only the diff. Several briefs
+  // assume one, and the degradation used to be a sentence the orchestrator was told
+  // to add by hand — which is not a thing that survives, and is now not a thing it
+  // can do: it does not write these any more. So the builder degrades them, from
+  // the same plan the roster reads.
   //
-  // 1b's is a *precision* rule, not a convenience: an agent that cannot grep for a
-  // re-establishment and asserts one is missing files a false Critical, and a false
+  // The clause below is a *precision* rule, not a convenience: an agent that
+  // cannot grep for a re-establishment (1b), a caller (1c), or a wrapper's call
+  // sites (1e) and asserts one is missing files a false Critical, and a false
   // Critical blocks a merge.
   if (reviewMode(report as RosterPlan) === 'diff-only' && brief.reviewsCode) {
     parts.push(
@@ -1219,14 +1659,113 @@ export function buildRoleBrief(
         'local checkout to read enclosing functions from, and nothing to `grep_search`. ' +
         'Work from the diff alone.',
     );
-    if (role === '1b' || role === '1c') {
+    // 1e's forwarding-completeness walk greps the wrapper's call sites, and a
+    // caller lives outside the diff exactly like 1b's replacement or 1c's
+    // consumers — the same precision rule applies.
+    if (role === '1b' || role === '1c' || role === '1e') {
       parts.push(
         '',
         'Which changes what you may conclude. When the evidence you would need sits **outside ' +
           'the diff** — the replacement for a deleted export, the call sites of a changed ' +
-          'signature, the read sites of a new field — you cannot check it, and you must not ' +
+          'signature, the read sites of a new field, the callers a wrapper does not forward — ' +
+          'you cannot check it, and you must not ' +
           'assert it is missing. Report the candidate at `Confidence: low` and say plainly that ' +
           'the check could not be made. A false Critical blocks a merge.',
+      );
+    }
+  }
+
+  // The other side of the same coin: in worktree mode there IS a tree, and it is
+  // shared with agents that write into it (#9207). The RULE goes to the roles
+  // that review code; the residue paragraph goes to every role, Agent 7
+  // included — residue that predates the round lands in the build and the test
+  // run it owns, and a `[build]`/`[test]` finding is pre-confirmed downstream,
+  // so a stray probe file would arrive as a merge-blocking Critical nothing
+  // verifies.
+  // Every role that JUDGES code gets the rule — which is every role except
+  // Agent 7, whose job is running commands: `reviewsCode` was the wrong gate
+  // (it exists to scope the path-rule checklists), and it left Agent 0 and the
+  // test matrix reading worktree source with no rule about what they were
+  // reading.
+  parts.push(
+    ...worktreeEvidenceBlock(report, opts.residue, { rule: role !== '7' }),
+  );
+
+  // The verifier is the last writing step without a tree of its own (Agent 7's
+  // efficacy probe has had one since #6832), so it gets one here
+  // — the command welded in with its path and its per-shard label, the way Agent
+  // 7's build-test invocation is, because a probe run in the shared worktree is
+  // read by the next round's auditors as the PR's own code (#9207).
+  if (role === 'verify') {
+    const wt = report.worktreePath;
+    if (typeof wt === 'string' && wt) {
+      // The record key is unique per role, chunk, round and findings digest,
+      // so two shards of one round get two trees — in an --all-chunks round
+      // every shard shares one findings file and therefore one digest, and the
+      // chunk id is what still separates their keys. Falling back to the role
+      // name keeps a direct build working; it is never the roster/CLI path,
+      // which always has a key.
+      // Sanitised HERE, not just where the path is built: this string is
+      // written into a shell command, and the one function that decides the
+      // tree's name is also what keeps a metacharacter out of that command.
+      const label = scratchLabel(opts.key ?? role);
+      // The identity anchor fetch-pr recorded, when the plan carries a usable
+      // one: with it the probe pins the shared tree and a healthy run measures
+      // clean — without it the no-record refusal fires on every run, and a
+      // tampering note that fires always is a note nobody reads.
+      const sha = fetchedShaOf(report);
+      parts.push(
+        '',
+        '**Your scratch tree — where every probe, mutant and candidate fix goes.** ' +
+          'Stand it up the first time a finding needs a run, and again to reset it ' +
+          'between findings: every call puts every tracked file back at the commit ' +
+          "under review and deletes what you wrote, with the review worktree's " +
+          '`node_modules` linked in so a unit harness starts without an install. ' +
+          'Everything that is not in the commit goes with it: your probe files, ' +
+          'your edits, and the IGNORED state too — a build cache, a `dist/` you ' +
+          'rebuilt, a `node_modules` you installed at any depth — with the ' +
+          'dependency farm re-linked from the review worktree afterwards.',
+        '',
+        '```bash',
+        // Quoted, like every other path this file prints into a command: an
+        // ordinary macOS workspace (`~/Documents/John's Projects/…`) word-splits
+        // a bare interpolation, and the failure would be silent — every shard's
+        // scratch tree unavailable, every probe demoted to a reading.
+        `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} \\`,
+        `  --label ${label}${sha === undefined ? '' : ' \\'}`,
+        ...(sha === undefined ? [] : [`  --fetched-sha ${sha}`]),
+        '```',
+        '',
+        'It reports `path` — work there, and leave what you leave: `cleanup` sweeps ' +
+          'it at the end of the review. `available: false` means the isolation ' +
+          'failed, and then the probe does not run at all: an unisolated probe ' +
+          'contaminates the tree the next round is reading, so the finding falls ' +
+          'back to its reading-based verdict and the low-confidence floor. It also ' +
+          'reports `sharedTreeResidue` — paths the REVIEW worktree carries that its ' +
+          'commit does not. That list must be empty; if it is not, something has ' +
+          'written into the tree the other agents are reading, so restore those ' +
+          'paths (`git checkout HEAD -- <path>` for anything tracked — plain ' +
+          '`git checkout --` restores from the index and leaves STAGED residue in ' +
+          'place — and delete anything untracked) before you go on, and say so in ' +
+          'your report.',
+        '',
+        '**The farm is borrowed, not copied.** Its `node_modules` entries are ' +
+          "symlinks into the review worktree's, so writing THROUGH one — an " +
+          '`npm rebuild`, a `writeFileSync(require.resolve(…))`, a package that ' +
+          'writes into its own directory — lands in the shared tree, where the ' +
+          'residue check cannot see it (`node_modules` is gitignored) and every ' +
+          'other shard would inherit it. Installing INTO your scratch tree is ' +
+          'fine (the next call re-links it); if a probe needs to MODIFY a ' +
+          'dependency, replace the link with a copy first.',
+        '',
+        '**One limit of the scratch tree, so you do not spend a run rediscovering ' +
+          'it:** its `node_modules` is linked from the review worktree, and in a ' +
+          'monorepo that means a workspace package (`@scope/pkg`) resolves to the ' +
+          "review worktree's built copy, not to your scratch tree's source. A probe " +
+          'and a fix INSIDE one package flip normally; a fix you apply in package A ' +
+          'while the probe runs in package B will NOT be seen, however correct it is. ' +
+          'That is the harness, not the finding: say so and treat the flip as ' +
+          'inconclusive rather than reporting the fix as ineffective.',
       );
     }
   }
@@ -1336,11 +1875,13 @@ export function buildRoleBrief(
           `\`${wt}\`. Do not \`cd\` elsewhere and do not build the user's main checkout.`,
       );
     }
-    // On a delta-scoped incremental round the probe's range must match the
-    // round's scope: test-efficacy recomputes its own diff as base..HEAD, and
-    // handed the merge base it would reverse hunks and delete mutants from
-    // commits an earlier round already reviewed — spending the probe budget
-    // out of scope and reporting survivors this round's diff never contains.
+    // On a narrowed incremental round the probe's range must cover the
+    // published scope: test-efficacy recomputes its own diff as base..HEAD.
+    // The published hunks are hunks of `diffBase..head` — the merge-base
+    // range the producer assembled them from — so that range covers every
+    // one of them and never a byte the PR's diff does not display; the
+    // anchor range, by contrast, can carry hunks an undo round netted out
+    // of the PR's diff, which no comment can anchor on.
     const inc = report.incremental as
       | { effective?: unknown; upToDate?: unknown; diffBase?: unknown }
       | undefined;
@@ -1429,13 +1970,14 @@ export function buildRoleBrief(
           'at 106s and `packages/cli` at 401s, before the rest). Work is left when ' +
           '`testScope.notRun` is non-empty, or when any `test[]` entry has ' +
           '`"clamped": true` — a suite the budget started too late and killed, which ' +
-          'says nothing about the suite. A third shape carries no field at all: a ' +
+          'says nothing about the suite. A third shape ends before any suite: a ' +
           'single-package repo whose budget ran out before its one suite has an ' +
-          'empty `test[]` and no `testScope`, and only its `note` says so — read ' +
-          'the note before calling the dimension finished. That shape cannot be ' +
-          'continued (a continuation has no recorded scope to read, and answers ' +
-          '"ended before its test phase" without running anything): report the ' +
-          'dimension UNFINISHED and do not spend a continuation on it. A resumed ' +
+          'empty `test[]`, no `testScope`, and `"endedBeforeTests": true` — the ' +
+          "report's own stamp — with the note naming the unrun suite. That shape " +
+          'cannot be continued (a continuation has no recorded scope to read; a ' +
+          '`--resume` on it answers "ended before its test phase" and points at a ' +
+          'fresh run): report the dimension UNFINISHED and do not spend a ' +
+          'continuation on it. A resumed ' +
           'call skips install and build and ' +
           'runs only what is left, merging into the SAME report file. Same ' +
           `\`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\`, and at most ` +
@@ -1767,12 +2309,15 @@ export function findingsSection(
  * Build one agent's brief and launch prompt, write the brief beside the plan, and
  * return the key and the prompt for the caller to record and print.
  *
- * One body for both callers on purpose: the single-agent path and `--roster` must
- * emit byte-identical prompts for the same agent, because the delivery check
- * compares agents against records — a drift between the two paths would read as a
- * rewritten launch on a run that did everything right.
+ * One body for every caller on purpose: the single-agent path, `--roster` and
+ * `emit-workflow` must emit byte-identical prompts for the same agent, because
+ * the delivery check compares agents against records — a drift between the
+ * paths would read as a rewritten launch on a run that did everything right.
+ * Exported for that reason: a caller that rebuilt this would be a second
+ * implementation of the invariant, and byte-parity would become something a
+ * test asserts rather than something the code cannot break.
  */
-function buildLaunch(
+export function buildLaunch(
   report: PlanReport,
   planPath: string,
   spec: {
@@ -1783,6 +2328,7 @@ function buildLaunch(
     round?: number;
   },
   rules?: string,
+  residue?: WorktreeResidue,
 ): { key: string; prompt: string } {
   if (spec.role) {
     const key =
@@ -1800,6 +2346,8 @@ function buildLaunch(
         file: spec.file,
         planPath,
         chunk: spec.chunk,
+        key,
+        residue,
       }),
     );
     return {
@@ -1816,7 +2364,7 @@ function buildLaunch(
   const briefFile = writeBrief(
     planPath,
     key,
-    buildChunkAgentPrompt(report, id, rules),
+    buildChunkAgentPrompt(report, id, rules, residue),
   );
   return { key, prompt: buildChunkLaunchPrompt(report, id, briefFile) };
 }
@@ -1935,7 +2483,33 @@ function rosterLabel(req: RequiredAgent): string {
  * the list it builds is the same one `check-coverage` will hold the run to,
  * because both come from `requiredAgents(plan)`.
  */
-function runRoster(report: PlanReport, planPath: string, rules?: string): void {
+/**
+ * The launch parameters every review agent needs, on every emission path.
+ *
+ * It lived inside `runRoster`'s worktree-only note because that block began as
+ * a `working_dir` reminder — so three review modes were told nothing, and then
+ * so were Step 4's verify shards and Step 5's audit rounds, which are the most
+ * numerous agents a high-effort review launches and the ones furthest from
+ * SKILL.md's own statement of the rule. Omitting the type is not a no-op:
+ * `AgentTool.execute` resolves an omitted `subagent_type` to `general-purpose`,
+ * which declares no `tools` and so takes `prepareTools`' inherit-everything
+ * branch — the entire cost `review-agent` exists to remove, spent silently.
+ * Before the review had its own type, forgetting the parameter was harmless
+ * because the default WAS the right answer.
+ */
+const TYPE_NOTE =
+  `\n\n**Set \`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\` and ` +
+  `\`run_in_background: false\` on EVERY agent call below**, in every review ` +
+  `mode and at every step. An omitted \`subagent_type\` is not left blank — it ` +
+  `resolves to the general-purpose default, which inherits every tool in the ` +
+  `session and re-declares them on each agent's every turn.`;
+
+function runRoster(
+  report: PlanReport,
+  planPath: string,
+  rules?: string,
+  residue?: WorktreeResidue,
+): void {
   // The roster reads `plan.effort` (written by the capturing command), so a
   // `medium` plan builds the reduced set here without an `--effort` flag — and
   // `check-coverage` holds the run to that same set from the same field.
@@ -1948,6 +2522,7 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
         ? { chunk: req.chunk }
         : { role: req.role, file: req.file },
       rules,
+      residue,
     );
     // The roster is what coverage checks; the key is what this command records
     // under. They are derived in two files, and if they ever disagree, every
@@ -1973,12 +2548,20 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
   const paramNote =
     typeof wt === 'string' && wt
       ? `\n\n**Agent tool parameters (worktree mode):** Set ` +
-        `\`working_dir: "${wt}"\` and ` +
-        `\`subagent_type: "general-purpose"\`, \`run_in_background: false\` ` +
-        `on EVERY agent call below. Do NOT set \`isolation\` — the worktree ` +
-        `already exists; \`isolation\` creates a new copy and is mutually ` +
-        `exclusive with \`working_dir\`.`
+        `\`working_dir: "${wt}"\` on EVERY agent call below. Do NOT set ` +
+        `\`isolation\` — the worktree already exists; \`isolation\` creates a ` +
+        `new copy and is mutually exclusive with \`working_dir\`.`
       : '';
+  // The type belongs OUTSIDE that gate. It was written inside it because the
+  // block began as a `working_dir` reminder, and worktrees are the only mode
+  // that needs one — but the type is needed by all four (local diff, file
+  // path and cross-repo lightweight reviews have no worktree and were
+  // therefore told nothing). Omitting it is not a no-op: `AgentTool.execute`
+  // substitutes `general-purpose` for an omitted `subagent_type`, which
+  // declares no `tools` and so takes prepareTools' inherit-everything branch —
+  // 13 agents × 4 turns × ~17.7k tokens of tool declarations, the entire cost
+  // this type exists to remove. Before the review had its own type, forgetting
+  // the parameter was harmless because the default WAS the right answer.
   // The Agent tool's `description` is the task name the user watches in the
   // TUI while the agent runs, and nothing downstream reads it — the delivery
   // check compares prompts, coverage reads transcripts. So it is the one part
@@ -2005,6 +2588,7 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
         `--chunk <id>, or --role <r> (--file <path> for an invariant agent), ` +
         `plus the same --rules this call was given.` +
         descNote +
+        TYPE_NOTE +
         paramNote,
       ...blocks,
       `───── end of roster — ${roster.length} agents ─────`,
@@ -2173,6 +2757,61 @@ function noteUncertifiedChunks(planPath: string, diagnostics: string[]): void {
 }
 
 /**
+ * The schedule read shared by the round builder and the per-chunk path
+ * (#9272 — hand-rolled at both sites and edited in lockstep across three
+ * consecutive PRs: the naming, the repair suppression, the deferral): a
+ * throwing read degrades to "everything is due" — never to fewer
+ * auditors — and composes the round's degrade NOTE, which the caller
+ * prints only once the round is admitted (#9259: printed before the
+ * gate, it promised an audit the gate then refused). `noteTail` names
+ * the build's own scope.
+ */
+function reverseAuditScheduleOrNote(
+  planPath: string,
+  chunkIds: number[],
+  round: number,
+  env: NodeJS.ProcessEnv,
+  diffPathAbsolute: unknown,
+  noteTail: string,
+): { schedule: RoundSchedule | null; scheduleNote: string | null } {
+  try {
+    return {
+      schedule: scheduleReverseAuditRound(
+        planPath,
+        chunkIds,
+        round,
+        env,
+        typeof diffPathAbsolute === 'string' ? diffPathAbsolute : undefined,
+      ),
+      scheduleNote: null,
+    };
+  } catch (err) {
+    return {
+      schedule: null,
+      scheduleNote:
+        `NOTE: reverse-audit retirement unavailable this round — ` +
+        `${(err as Error).message ?? String(err)} — ${noteTail}`,
+    };
+  }
+}
+
+/**
+ * Print the round's deferred degrade NOTE exactly once per round per run
+ * — the claim-plus-write glued at both build sites (#9272: a lockstep
+ * duplicate of the claim condition or the writer channel would diverge
+ * the two modes' diagnostics silently).
+ */
+function printRetirementDegradeNoteOnce(
+  planPath: string,
+  round: number | undefined,
+  scheduleNote: string | null,
+): void {
+  if (scheduleNote !== null && claimRetirementDegradeNote(planPath, round)) {
+    writeStderrLineSafe(scheduleNote);
+  }
+}
+
+/**
  * Topology anomaly note (#9242): the plan's own size fields decide the
  * topology (Step 3A whole-diff vs Step 3B territory fan-out), and the
  * reverse-audit round-cap tier is priced against that decision — but the
@@ -2214,6 +2853,7 @@ function runAllChunks(
   findingsContent: string,
   rules?: string,
   round?: number,
+  residue?: WorktreeResidue,
 ): void {
   const chunks = requireAuditableChunks(report);
 
@@ -2227,6 +2867,11 @@ function runAllChunks(
   // three yielded in most: the loop earns its keep in the hot territories,
   // and the cold ones were a third of its bill.
   let schedule: RoundSchedule | null = null;
+  // The catch NOTE is deferred until the round is ADMITTED (#9259): a
+  // note printed before the budget/round-cap gate promises `auditing
+  // every chunk.` on a round the gate then refuses — a false continuation
+  // claim on the diagnostic channel this exists to keep truthful.
+  let scheduleNote: string | null = null;
   // Retirement needs two consecutive dry audits, so nothing retires before
   // round 3 (the scheduler's own guard says the same).
   const retirementReadsFrom = 3;
@@ -2235,29 +2880,16 @@ function runAllChunks(
     round !== undefined &&
     round >= retirementReadsFrom
   ) {
-    try {
-      schedule = scheduleReverseAuditRound(
-        planPath,
-        chunks.map((c) => c.id),
-        round,
-        process.env,
-        typeof report.diffPathAbsolute === 'string'
-          ? report.diffPathAbsolute
-          : undefined,
-      );
-    } catch (err) {
-      // Transcripts unavailable, an unreadable plan stat, anything: the
-      // schedule is an optimization, and a broken optimizer must degrade to
-      // today's behaviour — every territory audited — never to fewer
-      // auditors. `null` below means "everything is due". But not SILENTLY
-      // (#9206): a schedule that dies here retires nothing for the rest of
-      // the run, and the round's own output is where the reader can see it.
-      schedule = null;
-      writeStderrLineSafe(
-        `NOTE: reverse-audit retirement unavailable this round — ` +
-          `${(err as Error).message ?? String(err)} — auditing every chunk.`,
-      );
-    }
+    const read = reverseAuditScheduleOrNote(
+      planPath,
+      chunks.map((c) => c.id),
+      round,
+      process.env,
+      report.diffPathAbsolute,
+      'auditing every chunk.',
+    );
+    schedule = read.schedule;
+    scheduleNote = read.scheduleNote;
   }
 
   if (schedule !== null && schedule.converged) {
@@ -2295,6 +2927,11 @@ function runAllChunks(
   ) {
     return;
   }
+  // The admission succeeded, so the round IS being built — now the
+  // deferred catch NOTE tells the truth (#9259), claimed cross-process
+  // so a dead-schedule round's per-chunk builds print it exactly once
+  // (#9272).
+  printRetirementDegradeNoteOnce(planPath, round, scheduleNote);
 
   const dueSet = schedule === null ? null : new Set(schedule.due);
   const dueChunks =
@@ -2324,6 +2961,7 @@ function runAllChunks(
       planPath,
       { role, chunk: c.id, key, round },
       rules,
+      residue,
     );
     const printed = foldFindings(role, findingsContent, prompt, findingsFile);
     recordPrompt(planPath, key, printed);
@@ -2383,7 +3021,8 @@ function runAllChunks(
         `rebuild just the missing chunks with --chunk <id>. Write each ` +
         `Agent call's \`description\` (the task ` +
         `name the user watches) in your output language, translating the ` +
-        `separator label — display only; the prompt stays the block VERBATIM.`,
+        `separator label — display only; the prompt stays the block VERBATIM.` +
+        TYPE_NOTE,
       ...blocks,
       `───── end of round — ${dueChunks.length} auditors ─────`,
       ...retirementNote,
@@ -2632,6 +3271,42 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     }
   }
 
+  // The state of the shared review worktree AT BUILD TIME (#9207), read once and
+  // handed to every brief this call builds. Every wave of agents — the roster,
+  // each verify shard, each reverse-audit round — passes through this command
+  // just before it is launched, which makes this the one place the pipeline can
+  // notice that the tree those agents are about to read is not the commit they
+  // think it is. Cheap enough to do unconditionally (one `git status` per call,
+  // not per agent) and silent on a clean tree, which is every healthy run.
+  const residue = worktreeResidueOf(report);
+  if (residue.unmeasured) {
+    writeStderrLine(
+      `warning: could not measure whether the review worktree is clean (reason: ` +
+        `${inertPath(residue.unmeasured)}). Every brief built by this call says so; an unmeasured tree is ` +
+        'not a clean one.',
+    );
+  }
+  if (residue.paths.length > 0) {
+    const unlisted = residue.total - residue.paths.length;
+    writeStderrLine(
+      `warning: the review worktree carries changes its commit does not: ${residue.paths
+        .map(inertPath)
+        .join(', ')}` +
+        (unlisted > 0
+          ? ` (and ${unlisted} more — this list is capped; \`git status --porcelain --untracked-files=all\` has the full set)`
+          : '') +
+        '. Every brief built by this call names those paths and says a defect confined to them ' +
+        'is not a finding; the code-reading ones also carry the rule that evidence comes from ' +
+        '`git show HEAD:<path>`. Restore them BEFORE launching this wave — a probe left in the ' +
+        "shared tree reads to an auditor as the PR's own code, and to Agent 7's build and test " +
+        "run as the PR's own failure — and then RE-RUN this same command so the wave is rebuilt: " +
+        'the suppression above is baked into the blocks it printed, so launching them after a ' +
+        'restore tells every agent to drop findings in a file that is by then exactly the ' +
+        "PR's code. (The prompt records are overwritten, so a rebuild is what the delivery " +
+        'check compares against.)',
+    );
+  }
+
   // Write down what was handed out, at a path derived from the plan. The caller is
   // never told this path and is never asked to write to it: it is the CLI's record
   // of its own output, and the only thing that can tell a delivered prompt from a
@@ -2641,7 +3316,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // summary of its own — and every check downstream passed, because a paraphrase
   // keeps the diff path.
   if (args.roster) {
-    runRoster(report, args.plan, rules);
+    runRoster(report, args.plan, rules, residue);
     return;
   }
 
@@ -2772,33 +3447,27 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     )
       .map((c) => c?.id)
       .filter((id): id is number => typeof id === 'number');
+    // The catch NOTE is deferred past the admission gate (#9259 — a note
+    // printed before it promises an audit the gate can then refuse) and
+    // claimed cross-process via the record-dir sidecar, never keyed on
+    // the stamp: the stamp lands on the admission build whether or not
+    // that build's schedule read failed, so stamp-keyed suppression
+    // silenced a round whose admission build read cleanly and whose
+    // LATER builds began to throw — the never-retire shape with no word
+    // (#9259). The sidecar is run-epoch fenced, so a retried headless
+    // run re-prints — the safe side.
+    let scheduleNote: string | null = null;
     if (args.round !== undefined) {
-      let schedule: RoundSchedule | null = null;
-      try {
-        schedule = scheduleReverseAuditRound(
-          args.plan,
-          planChunkIds,
-          args.round,
-          process.env,
-          typeof report.diffPathAbsolute === 'string'
-            ? report.diffPathAbsolute
-            : undefined,
-        );
-      } catch (err) {
-        // Same degradation as the round builder: an unreadable history must
-        // fall back to building the auditor, never to refusing it — named,
-        // as the round builder names it (#9206). Named only on the builds
-        // that are NOT repairs: the round's admission build (its first
-        // chunk build, or the round builder itself) already spoke for it,
-        // and a repair stays the clean rebuild its exemption promises.
-        schedule = null;
-        if (!roundAdmitted) {
-          writeStderrLineSafe(
-            `NOTE: reverse-audit retirement unavailable this round — ` +
-              `${(err as Error).message ?? String(err)} — auditing the chunk.`,
-          );
-        }
-      }
+      const read = reverseAuditScheduleOrNote(
+        args.plan,
+        planChunkIds,
+        args.round,
+        process.env,
+        report.diffPathAbsolute,
+        'auditing the chunk.',
+      );
+      const schedule = read.schedule;
+      scheduleNote = read.scheduleNote;
       if (!roundAdmitted && schedule !== null && schedule.converged) {
         refuseConverged(args.plan);
         return;
@@ -2825,6 +3494,11 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       )
     )
       return;
+    // Admitted (or a stamped repair): the audit IS happening, so the
+    // deferred NOTE tells the truth now (#9259) — once per round per
+    // RUN, across the per-chunk processes, via the sidecar claim
+    // (#9272).
+    printRetirementDegradeNoteOnce(args.plan, args.round, scheduleNote);
     // The note belongs to the round's ADMISSION — a stamped rebuild
     // was ruled on when the round was admitted, so it stays silent.
     if (!roundAdmitted) {
@@ -2843,6 +3517,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       findingsContent,
       rules,
       args.round,
+      residue,
     );
     return;
   }
@@ -2851,7 +3526,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   let key: string;
   let findingsFile: string | null = null;
   if (args.wholeDiff) {
-    prompt = buildWholeDiffBlock(report, rules);
+    prompt = buildWholeDiffBlock(report, rules, residue);
     key = 'whole-diff';
   } else {
     // The record key must be unique per launch. An invariant agent is keyed by its
@@ -2899,6 +3574,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           }
         : { chunk: args.chunk },
       rules,
+      residue,
     ));
   }
 
@@ -2911,6 +3587,21 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       ? foldFindings(args.role as RoleId, findingsContent, prompt, findingsFile)
       : prompt;
   recordPrompt(args.plan, key, printed);
+  // The whole output of this path IS the block the orchestrator pastes
+  // verbatim, and the delivery check compares that paste against the record.
+  // So the launch note gets NO channel here, and the second-best channel is
+  // not stderr: `ShellExecutionService` builds its result as
+  // `stdout + separator + stderr`, and `ShellToolInvocation` hands that
+  // combined string back, so a note on stderr arrives inside the very text
+  // the caller is told to copy. It fails the same equality as stdout would,
+  // only invisibly — the five tests that catch the stdout version see
+  // nothing. Removing it by hand is the edit the delivery gate forbids, so
+  // the launch would enter drift/relaunch repair.
+  //
+  // The rule still reaches these launches: SKILL.md states it for every
+  // `agent` call, and the two paths that CAN carry a note — the roster
+  // header and the audit-round header — do, because there the note sits
+  // outside the ───── blocks that get pasted.
   writeStdoutLine(printed);
   // Admitted AND built — the single-build twin of the all-chunks stamp in
   // `runAllChunks`. A `--chunk <id>` build lands here too: the first chunk

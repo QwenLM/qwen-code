@@ -226,7 +226,10 @@ async function readOwnerRecord(
         : fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
     );
   } catch (error) {
-    throw new UnsafeOwnershipStateError(undefined, { cause: error });
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new UnsafeOwnershipStateError(undefined, { cause: error });
+    }
+    throw error;
   }
   try {
     const handleStat = await handle.stat();
@@ -243,9 +246,10 @@ async function readOwnerRecord(
     ) {
       throw new UnsafeOwnershipStateError();
     }
+    const serialized = await handle.readFile('utf8');
     let parsed: unknown;
     try {
-      parsed = JSON.parse(await handle.readFile('utf8'));
+      parsed = JSON.parse(serialized);
     } catch (error) {
       throw new UnsafeOwnershipStateError(undefined, { cause: error });
     }

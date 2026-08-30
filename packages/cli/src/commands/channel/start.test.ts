@@ -611,6 +611,56 @@ describe('startCommand.handler', () => {
     }
   });
 
+  it('rejects named sessions in standalone single-channel mode', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockParseChannelConfig.mockResolvedValue({
+      ...mockParsedChannelConfig,
+      multiSession: true,
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('only for daemon-managed Channels'),
+    );
+    expect(mockAcpBridge).not.toHaveBeenCalled();
+  });
+
+  it('rejects named sessions in standalone all-channel mode', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockParseChannelConfig.mockResolvedValue({
+      ...mockParsedChannelConfig,
+      multiSession: true,
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('only for daemon-managed Channels'),
+    );
+    expect(mockAcpBridge).not.toHaveBeenCalled();
+  });
+
   it('loads settings.merged.proxy when no CLI proxy is provided', async () => {
     const settingsProxy = 'http://settings.example.com:8080';
     const envProxy = 'http://env.example.com:8080';

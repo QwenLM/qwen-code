@@ -33,27 +33,54 @@ const repoRoot = resolve(
   '..',
 );
 
-const SKILL_PATH = join(
-  repoRoot,
-  'packages/core/src/skills/bundled/review/SKILL.md',
-);
+const SKILL_DIR = join(repoRoot, 'packages/core/src/skills/bundled/review');
 
 /** The `{target}` token, rendered per class exactly as the skill defines it. */
 const TARGETS = {
   pr: { cls: { kind: 'pr', number: '9014' } as const, token: 'pr-9014' },
   file: { cls: { kind: 'file', base: 'foo.ts' } as const, token: 'foo.ts' },
+  // A nested target: the token is the flattened repo-relative path, and this
+  // is the shape where the pre-PR `<filename>` stem and the pin disagreed.
+  fileNested: {
+    cls: { kind: 'file', base: 'src_foo.ts' } as const,
+    token: 'src_foo.ts',
+  },
+  // A markdown target: the pin deliberately does NOT double the `.md`, and
+  // the Step 8 template carries the matching no-doubling rule — the shape
+  // where every file review of a `.md` path used to lose its `Report:` line.
+  fileMd: {
+    cls: { kind: 'file', base: 'docs_guide.md' } as const,
+    token: 'docs_guide.md',
+  },
   local: { cls: { kind: 'local' } as const, token: 'local' },
 };
 
 describe('run pins match the bundled skill templates', () => {
-  const skill = existsSync(SKILL_PATH)
-    ? readFileSync(SKILL_PATH, 'utf8').replace(/\r\n/g, '\n')
+  // The skill is a corpus since #9787, and each oracle reads only the
+  // files the owning step is GUARANTEED to see: the composed-name template
+  // lives in the core SKILL.md (injected on every run), the report stems in
+  // references/persistence.md (the one reference loaded before Step 8 on
+  // every run that has a Step 8). Accepting a template from ANY corpus file
+  // would stay green on a move into a verdict-gated file that many runs
+  // never load, while those runs improvise artifact names.
+  const coreSkill = existsSync(join(SKILL_DIR, 'SKILL.md'))
+    ? readFileSync(join(SKILL_DIR, 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n')
     : null;
+  const step8Corpus = (() => {
+    if (coreSkill === null) return null;
+    const persistence = join(SKILL_DIR, 'references', 'persistence.md');
+    return existsSync(persistence)
+      ? `${coreSkill}\n${readFileSync(persistence, 'utf8').replace(/\r\n/g, '\n')}`
+      : null;
+  })();
 
   // A sparse or partial checkout has no skill to read; the pins are still
   // covered by run.test.ts's own cases. Failing here would report a checkout
   // shape as a contract drift.
-  const itWithSkill = skill === null ? it.skip : it;
+  const itWithSkill = coreSkill === null ? it.skip : it;
+  // The stems oracle additionally reads references/persistence.md, so a
+  // checkout that has SKILL.md but not that file must skip it too.
+  const itWithStep8 = step8Corpus === null ? it.skip : it;
 
   itWithSkill('composedNameFor renders Step 6’s --out template', () => {
     // The template as the skill writes it, e.g.
@@ -66,7 +93,7 @@ describe('run pins match the bundled skill templates', () => {
     // class, so no future suffix character has to be foreseen.
     const m =
       /--out\s+\.qwen\/tmp\/(qwen-review-\{target\}-composed\.json)(?=\s|$)/.exec(
-        skill as string,
+        coreSkill as string,
       );
     // A null here means SKILL.md no longer writes that `--out` line: update
     // composedNameFor and this oracle together to the new template.
@@ -78,41 +105,56 @@ describe('run pins match the bundled skill templates', () => {
     }
   });
 
-  itWithSkill('reportPatternFor accepts Step 8’s report stems', () => {
+  itWithStep8('reportPatternFor accepts Step 8’s report stems', () => {
     // The stems as the skill lists them, e.g.
     //   `.qwen/reviews/<YYYY-MM-DD>-<HHMMSS>-pr-<number>.md`
     const stems = [
-      ...(skill as string).matchAll(
+      ...(step8Corpus as string).matchAll(
         /`\.qwen\/reviews\/<YYYY-MM-DD>-<HHMMSS>-([^`]+)\.md`/g,
       ),
     ].map((s) => s[1]);
     // A miss here means Step 8 no longer lists those stems: update
     // reportPatternFor and this oracle together to the new template.
     expect(stems).toEqual(
-      expect.arrayContaining(['local', 'pr-<number>', '<filename>']),
+      expect.arrayContaining(['local', 'pr-<number>', '<target>']),
     );
 
-    const render = (stem: string): string =>
+    const render = (stem: string, token: string): string =>
       `2026-08-13-101010-${stem}.md`
         .replace('pr-<number>', 'pr-9014')
-        .replace('<filename>', 'foo.ts');
+        .replace('<target>', token);
 
-    expect(reportPatternFor(TARGETS.pr.cls).test(render('pr-<number>'))).toBe(
-      true,
+    expect(
+      reportPatternFor(TARGETS.pr.cls).test(render('pr-<number>', '')),
+    ).toBe(true);
+    // The file stem renders from the capture's token — for a root file and
+    // for a nested one alike, since the pin builds from the same derivation.
+    for (const { cls, token } of [TARGETS.file, TARGETS.fileNested]) {
+      expect(reportPatternFor(cls).test(render('<target>', token))).toBe(true);
+    }
+    // A token that already ends in `.md`: the template ends the name at the
+    // token — the prose rule beside it, pinned here so a template edit that
+    // drops the rule fails next to the pin it must agree with.
+    expect(step8Corpus as string).toContain('do not double the extension');
+    const mdName = `2026-08-13-101010-${TARGETS.fileMd.token}`;
+    expect(reportPatternFor(TARGETS.fileMd.cls).test(mdName)).toBe(true);
+    // …and the DOUBLED rendering — what a template without the rule writes —
+    // must not match, or the run's `Report:` line is silently lost again.
+    expect(reportPatternFor(TARGETS.fileMd.cls).test(`${mdName}.md`)).toBe(
+      false,
     );
-    expect(reportPatternFor(TARGETS.file.cls).test(render('<filename>'))).toBe(
-      true,
-    );
-    expect(reportPatternFor(TARGETS.local.cls).test(render('local'))).toBe(
+    expect(reportPatternFor(TARGETS.local.cls).test(render('local', ''))).toBe(
       true,
     );
     // And each class refuses the neighbouring classes' rendered stems — the
     // cross-capture this pinning exists to prevent.
-    expect(reportPatternFor(TARGETS.pr.cls).test(render('local'))).toBe(false);
+    expect(reportPatternFor(TARGETS.pr.cls).test(render('local', ''))).toBe(
+      false,
+    );
     expect(
-      reportPatternFor(TARGETS.local.cls).test(render('pr-<number>')),
+      reportPatternFor(TARGETS.local.cls).test(render('pr-<number>', '')),
     ).toBe(false);
-    expect(reportPatternFor(TARGETS.file.cls).test(render('local'))).toBe(
+    expect(reportPatternFor(TARGETS.file.cls).test(render('local', ''))).toBe(
       false,
     );
   });

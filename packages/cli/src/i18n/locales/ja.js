@@ -392,6 +392,7 @@ export default {
   'Tool Output Truncation Threshold': 'ツール出力切り詰めのしきい値',
   'Tool Output Truncation Lines': 'ツール出力の切り詰め行数',
   'Tool Schema Compliance': 'Tool Schema 準拠',
+  Unset: '未設定',
   'Auto (detect from system)': '自動(システムから検出)',
   'Auto (follow user input)': '自動(ユーザー入力に従う)',
   'Auto (detect terminal theme)': '自動（端末テーマを検出）',
@@ -815,6 +816,12 @@ export default {
     'チャット履歴の圧縮でサイズが減少しませんでした。圧縮プロンプトに問題がある可能性があります',
   'Could not compress chat history due to a token counting error.':
     'トークンカウントエラーのため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because the compression summary was empty.':
+    '圧縮サマリーが空だったため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history because the compression summary was truncated.':
+    '圧縮サマリーが切り詰められたため、チャット履歴を圧縮できませんでした',
+  'Could not compress chat history due to an API error.':
+    'API エラーのため、チャット履歴を圧縮できませんでした',
   // Directory
   'Configuration is not available.': '設定が利用できません',
   'Please provide at least one path to add.':
@@ -970,6 +977,7 @@ export default {
   'rejected — edit config to re-approve': '拒否済み — 設定を編集して再承認',
   'Background agent needs approval':
     'バックグラウンドエージェントが承認待ちです',
+  'from nested agent': 'ネストされた agent から',
   'Approve or deny the request above':
     '上のリクエストを承認または拒否してください',
   Running: '実行中',

@@ -27,7 +27,7 @@ import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import {
-  type GeminiClient,
+  type LlmClient,
   SlashCommandStatus,
   ToolConfirmationOutcome,
   makeFakeConfig,
@@ -252,7 +252,7 @@ describe('useSlashCommandProcessor', () => {
         false, // isProcessing
         setIsProcessing,
         isIdleRef,
-        vi.fn(), // setGeminiMdFileCount
+        vi.fn(), // setMemoryFileCount
         createMockActions(),
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
@@ -489,6 +489,7 @@ describe('useSlashCommandProcessor', () => {
           evidenceCursor: { recordId: 'record-ui' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 1,
         },
@@ -567,6 +568,7 @@ describe('useSlashCommandProcessor', () => {
           evidenceCursor: { recordId: 'record-status' },
           turnCount: 1,
           activeTimeMs: 5,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 2,
         },
@@ -1404,8 +1406,8 @@ describe('useSlashCommandProcessor', () => {
     it('should handle "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
-      } as unknown as GeminiClient;
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
+      } as unknown as LlmClient;
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(mockClient);
 
       const command = createTestCommand({
         name: 'load',
@@ -1432,8 +1434,8 @@ describe('useSlashCommandProcessor', () => {
     it('should preserve thoughts when handling "load_history" action', async () => {
       const mockClient = {
         setHistory: vi.fn(),
-      } as unknown as GeminiClient;
-      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
+      } as unknown as LlmClient;
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(mockClient);
 
       const historyWithThoughts = [
         {
@@ -2350,7 +2352,7 @@ describe('useSlashCommandProcessor', () => {
           false, // isProcessing
           vi.fn(), // setIsProcessing
           { current: true }, // isIdleRef
-          vi.fn(), // setGeminiMdFileCount
+          vi.fn(), // setMemoryFileCount
           createMockActions(),
           new Map(), // extensionsUpdateState
           true, // isConfigInitialized

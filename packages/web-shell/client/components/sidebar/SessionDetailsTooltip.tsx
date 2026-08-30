@@ -8,8 +8,12 @@ import {
   RadioTowerIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { writeClipboardText } from '../../utils/clipboard';
+import { isExternalOpenUrl } from '../../utils/externalOpen';
 import { workspaceBasename } from '../../utils/workspace';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
+import { SessionPrStateIcon, sessionPrStateLabel } from '../SessionPrStateIcon';
 import styles from './WebShellSidebar.module.css';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 
@@ -18,6 +22,7 @@ interface SessionDetailsTooltipProps {
   label: string;
   time: string;
   completedUnread: boolean;
+  worktreeOnly?: boolean;
   children: ReactElement;
 }
 
@@ -26,9 +31,11 @@ export function SessionDetailsTooltip({
   label,
   time,
   completedUnread,
+  worktreeOnly = false,
   children,
 }: SessionDetailsTooltipProps) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const [open, setOpen] = useState(false);
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>(
     'idle',
@@ -110,7 +117,7 @@ export function SessionDetailsTooltip({
       </PopoverAnchor>
       <PopoverContent
         side="right"
-        align="start"
+        align={worktreeOnly ? 'center' : 'start'}
         sideOffset={0}
         collisionBoundary={collisionBoundary ?? undefined}
         collisionPadding={8}
@@ -123,82 +130,119 @@ export function SessionDetailsTooltip({
         onPointerLeave={closeAfterDelay}
         className={styles.sessionDetailsTooltip}
       >
-        <div className={styles.sessionDetailsHeader}>
-          <span className={styles.sessionDetailsTitle} title={label}>
-            {label}
-          </span>
-          {time && <span className={styles.sessionDetailsTime}>{time}</span>}
-        </div>
-        <div className={styles.sessionDetailsRow}>
-          <FolderClosedIcon aria-hidden="true" />
-          <span title={folderPath}>{folderName}</span>
-        </div>
+        {!worktreeOnly && (
+          <>
+            <div className={styles.sessionDetailsHeader}>
+              <span className={styles.sessionDetailsTitle} title={label}>
+                {label}
+              </span>
+              {time && (
+                <span className={styles.sessionDetailsTime}>{time}</span>
+              )}
+            </div>
+            <div className={styles.sessionDetailsRow}>
+              <FolderClosedIcon aria-hidden="true" />
+              <span title={folderPath}>{folderName}</span>
+            </div>
+          </>
+        )}
         {branch && (
           <div className={styles.sessionDetailsRow}>
             <GitBranchIcon aria-hidden="true" />
             <span title={branch}>{branch}</span>
           </div>
         )}
-        <div className={styles.sessionDetailsRow}>
-          <RadioTowerIcon aria-hidden="true" />
-          <span>{status}</span>
-        </div>
-        <div className={styles.sessionDetailsIdRow}>
-          <span title={session.sessionId}>{session.sessionId}</span>
-          <button
-            type="button"
-            tabIndex={-1}
-            className={styles.sessionDetailsCopyButton}
-            aria-label={t('sidebar.copySessionId')}
-            title={t('sidebar.copySessionId')}
-            onClick={() => {
-              const copyAttempt = ++copyAttemptRef.current;
-              if (
-                typeof navigator === 'undefined' ||
-                !navigator.clipboard?.writeText
-              ) {
-                setCopyStatus('failed');
-                return;
-              }
-              void navigator.clipboard
-                .writeText(session.sessionId)
-                .then(() => {
-                  if (copyAttemptRef.current === copyAttempt) {
-                    setCopyStatus('copied');
-                    window.clearTimeout(copyResetTimerRef.current);
-                    copyResetTimerRef.current = window.setTimeout(() => {
+        {[...(session.prs ?? [])]
+          .reverse()
+          .filter((pr) => isExternalOpenUrl(pr.url))
+          .map((pr, index) => {
+            const stateLabel = sessionPrStateLabel(t, pr.state);
+            return (
+              // Index composite: a hand-edited sidecar can carry duplicate
+              // numbers (the reader validates shape, not uniqueness), and a
+              // duplicate key would reconcile rows against each other. The
+              // list is a stable per-snapshot order, so index keys are safe.
+              <div
+                className={styles.sessionDetailsRow}
+                key={`${index}-${pr.number}`}
+              >
+                <SessionPrStateIcon state={pr.state} />
+                <a
+                  href={pr.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={pr.url}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openExternalLink(event, pr.url);
+                  }}
+                >
+                  {t('sidebar.sessionPr', { number: pr.number })}
+                  {stateLabel ? (
+                    <span className="sr-only">{` · ${stateLabel}`}</span>
+                  ) : null}
+                </a>
+              </div>
+            );
+          })}
+        {!worktreeOnly && (
+          <>
+            <div className={styles.sessionDetailsRow}>
+              <RadioTowerIcon aria-hidden="true" />
+              <span>{status}</span>
+            </div>
+            <div className={styles.sessionDetailsIdRow}>
+              <span title={session.sessionId}>{session.sessionId}</span>
+              <button
+                type="button"
+                tabIndex={-1}
+                className={styles.sessionDetailsCopyButton}
+                aria-label={t('sidebar.copySessionId')}
+                title={t('sidebar.copySessionId')}
+                onClick={() => {
+                  const copyAttempt = ++copyAttemptRef.current;
+                  void writeClipboardText(session.sessionId)
+                    .then(() => {
                       if (copyAttemptRef.current === copyAttempt) {
-                        setCopyStatus('idle');
+                        setCopyStatus('copied');
+                        window.clearTimeout(copyResetTimerRef.current);
+                        copyResetTimerRef.current = window.setTimeout(() => {
+                          if (copyAttemptRef.current === copyAttempt) {
+                            setCopyStatus('idle');
+                          }
+                        }, 2000);
                       }
-                    }, 2000);
-                  }
-                })
-                .catch(() => {
-                  if (copyAttemptRef.current === copyAttempt) {
-                    setCopyStatus('failed');
-                  }
-                });
-            }}
-          >
-            {copyStatus === 'copied' ? (
-              <CheckIcon aria-hidden="true" />
-            ) : (
-              <CopyIcon aria-hidden="true" />
-            )}
-          </button>
-          <span
-            className={
-              copyStatus === 'copied' ? 'sr-only' : styles.sessionDetailsCopied
-            }
-            aria-live="polite"
-          >
-            {copyStatus === 'copied'
-              ? t('sidebar.sessionIdCopied')
-              : copyStatus === 'failed'
-                ? t('sidebar.copySessionIdFailed')
-                : ''}
-          </span>
-        </div>
+                    })
+                    .catch(() => {
+                      if (copyAttemptRef.current === copyAttempt) {
+                        setCopyStatus('failed');
+                      }
+                    });
+                }}
+              >
+                {copyStatus === 'copied' ? (
+                  <CheckIcon aria-hidden="true" />
+                ) : (
+                  <CopyIcon aria-hidden="true" />
+                )}
+              </button>
+              <span
+                className={
+                  copyStatus === 'copied'
+                    ? 'sr-only'
+                    : styles.sessionDetailsCopied
+                }
+                aria-live="polite"
+              >
+                {copyStatus === 'copied'
+                  ? t('sidebar.sessionIdCopied')
+                  : copyStatus === 'failed'
+                    ? t('sidebar.copySessionIdFailed')
+                    : ''}
+              </span>
+            </div>
+          </>
+        )}
       </PopoverContent>
     </Popover>
   );
