@@ -3169,6 +3169,17 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('rejects readiness when chat recording is disabled instead of throwing synchronously', async () => {
+      const config = new Config({ ...baseParams, chatRecording: false });
+
+      await expect(config.getGoalRuntimeReady()).rejects.toBeInstanceOf(
+        GoalPersistenceUnavailableError,
+      );
+      await expect(config.getGoalRuntimePrepared()).rejects.toBeInstanceOf(
+        GoalPersistenceUnavailableError,
+      );
+    });
+
     it('does not leak the canonical Goal runtime through subagent prototypes', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const canonical = config.getGoalRuntime();
