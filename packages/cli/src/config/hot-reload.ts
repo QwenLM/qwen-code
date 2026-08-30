@@ -22,6 +22,9 @@ import {
 import { appEvents, AppEvent } from '../utils/events.js';
 
 const debugLogger = createDebugLogger('MCP_HOT_RELOAD');
+const modelProvidersDebugLogger = createDebugLogger(
+  'MODEL_PROVIDERS_HOT_RELOAD',
+);
 
 /**
  * The three connection-admission lists discovery consults to decide whether a
@@ -281,7 +284,7 @@ export function registerModelProvidersHotReload(
   settings: LoadedSettings,
   config: Config,
 ): () => void {
-  debugLogger.debug(
+  modelProvidersDebugLogger.debug(
     'registered modelProviders hot-reload listener on SettingsWatcher',
   );
   let lastApplied = settings.merged.modelProviders;
@@ -290,8 +293,15 @@ export function registerModelProvidersHotReload(
     if (equal(lastApplied ?? {}, next ?? {})) {
       return;
     }
-    lastApplied = next;
-    debugLogger.debug('modelProviders changed — reloading model registry');
+    modelProvidersDebugLogger.debug(
+      'modelProviders changed — reloading model registry',
+    );
+    // Advance the snapshot only AFTER a successful reload: if the rebuild
+    // throws (the ACP paths wrap this same primitive in try/catch), the
+    // watcher's Promise.allSettled swallows the error — keeping the old
+    // snapshot lets the next event retry instead of silently dropping the
+    // edit forever.
     config.reloadModelProvidersConfig(next);
+    lastApplied = next;
   });
 }

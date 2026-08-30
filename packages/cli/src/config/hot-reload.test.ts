@@ -662,4 +662,23 @@ describe('registerModelProvidersHotReload', () => {
 
     expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
   });
+
+  it('retries the same snapshot on the next event after a throwing reload', async () => {
+    reloadModelProvidersConfig.mockImplementationOnce(() => {
+      throw new Error('rebuild failed');
+    });
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    expect(() => listener([])).toThrow('rebuild failed');
+
+    // The snapshot must NOT have advanced — the same edit retries and lands.
+    await listener([]);
+    expect(reloadModelProvidersConfig).toHaveBeenCalledTimes(2);
+    expect(reloadModelProvidersConfig).toHaveBeenLastCalledWith(
+      merged.modelProviders,
+    );
+  });
 });
