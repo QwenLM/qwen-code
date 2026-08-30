@@ -3103,11 +3103,16 @@ export interface DaemonModelDeleteRequest {
   baseUrl?: string;
 }
 
+export interface DaemonModelProviderRuntimeSyncResult {
+  status: 'applied' | 'deferred' | 'failed';
+}
+
 export interface DaemonModelDeleteResult {
   removed: boolean;
   clearedActiveModel: boolean;
   /** True when a committed write targets a restart-required setting. */
   requiresRestart?: boolean;
+  runtimeSync?: DaemonModelProviderRuntimeSyncResult;
 }
 
 export type DaemonVoiceMode = 'hold' | 'tap';
@@ -3553,6 +3558,7 @@ export interface DaemonReloadResponse {
   sessionsRefreshed?: string[];
   sessionsSkipped?: string[];
   childError?: string;
+  runtimeEnvironmentApplied?: boolean;
 }
 
 /** A bounded, credential-redacted adapter startup diagnostic. */
@@ -4155,6 +4161,7 @@ export interface DaemonAuthProviderInstallResult {
   modelId?: string;
   baseUrl?: string;
   message: string;
+  runtimeSync?: DaemonModelProviderRuntimeSyncResult;
 }
 
 /** A frame in the SSE event stream. */

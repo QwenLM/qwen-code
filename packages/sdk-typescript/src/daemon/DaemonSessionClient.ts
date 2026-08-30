@@ -950,9 +950,9 @@ export class DaemonSessionClient {
 
   /**
    * Execute a direct daemon-side shell command for this session. Requires the
-   * daemon to opt in to direct session shell and bearer auth; this wrapper
-   * automatically forwards the client id bound when the session was created
-   * or attached.
+   * daemon to opt in to direct session shell with bearer auth or
+   * trusted-loopback authority; this wrapper automatically forwards the client
+   * id bound when the session was created or attached.
    */
   shellCommand(
     command: string,
