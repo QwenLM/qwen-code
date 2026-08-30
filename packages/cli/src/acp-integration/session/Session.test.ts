@@ -5239,6 +5239,36 @@ describe('Session', () => {
       );
     });
 
+    it('keeps a model switch live when incompatible preference cleanup fails', async () => {
+      const state = installReasoningPreference('max');
+      const setValue = vi.mocked(mockSettings.setValue);
+      const write = setValue.getMockImplementation();
+      setValue.mockImplementation((scope, key, value, ...rest) => {
+        if (key === 'model.reasoningEffort' && value === undefined) {
+          throw new Error('settings are read-only');
+        }
+        return write?.(scope, key, value, ...rest);
+      });
+
+      await expect(
+        session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `qwen3.7-plus(${AuthType.USE_OPENAI})`,
+        }),
+      ).resolves.toBeDefined();
+
+      expect(state.live.reasoning).toBeUndefined();
+      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
+        modelId: 'qwen3.7-plus',
+        authType: AuthType.USE_OPENAI,
+      });
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        'model.name',
+        'qwen3.7-plus',
+      );
+    });
+
     it('persists none in the model scope and removes a shadowing workspace tier', () => {
       const state = installReasoningPreference('max', { trusted: true });
 
@@ -5249,6 +5279,59 @@ describe('Session', () => {
         'reasoningEffort',
       );
       expect(mockSettings.merged.model?.reasoningEffort).toBe('none');
+    });
+
+    it('does not delete a sibling preference when the target write fails', () => {
+      const state = installReasoningPreference('low', { trusted: true });
+      Object.assign(state.workspace.settings, { modelProviders: {} });
+      Object.assign(state.workspace.originalSettings, { modelProviders: {} });
+      delete state.workspace.settings.model.reasoningEffort;
+      delete state.workspace.originalSettings.model.reasoningEffort;
+      mockSettings.recomputeMerged();
+      const setValue = vi.mocked(mockSettings.setValue);
+      const write = setValue.getMockImplementation();
+      setValue.mockImplementation((scope, key, value, ...rest) => {
+        if (
+          scope === SettingScope.Workspace &&
+          key === 'model.reasoningEffort' &&
+          value === 'medium'
+        ) {
+          throw new Error('workspace settings are read-only');
+        }
+        return write?.(scope, key, value, ...rest);
+      });
+
+      expect(() => session.persistReasoningSelection('medium')).toThrow(
+        'workspace settings are read-only',
+      );
+
+      expect(state.user.settings.model.reasoningEffort).toBe('low');
+      expect(state.workspace.settings.model).not.toHaveProperty(
+        'reasoningEffort',
+      );
+    });
+
+    it('rolls back earlier scope clears when a later clear fails', () => {
+      const state = installReasoningPreference('max', { trusted: true });
+      const setValue = vi.mocked(mockSettings.setValue);
+      const write = setValue.getMockImplementation();
+      setValue.mockImplementation((scope, key, value, ...rest) => {
+        if (
+          scope === SettingScope.User &&
+          key === 'model.reasoningEffort' &&
+          value === undefined
+        ) {
+          throw new Error('user settings are read-only');
+        }
+        return write?.(scope, key, value, ...rest);
+      });
+
+      expect(() => session.persistReasoningSelection('default')).toThrow(
+        'user settings are read-only',
+      );
+
+      expect(state.workspace.settings.model.reasoningEffort).toBe('max');
+      expect(state.user.settings.model.reasoningEffort).toBe('max');
     });
 
     it('treats default as a delete command across writable scopes', () => {

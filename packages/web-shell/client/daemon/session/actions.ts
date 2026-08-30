@@ -1705,11 +1705,11 @@ export function createDaemonSessionActions({
     },
 
     async clearSession() {
+      const session = sessionRef.current;
+      manualSessionClearRef.current = true;
       if (pendingPersistedReasoningAction) {
         await pendingPersistedReasoningAction.catch(() => undefined);
       }
-      const session = sessionRef.current;
-      manualSessionClearRef.current = true;
       clearActiveSessionState();
       sessionRef.current = undefined;
       setConnection((current) =>

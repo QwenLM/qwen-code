@@ -11462,11 +11462,15 @@ export function App({
       if (!connectionRef.current.sessionId) {
         const models = connectionRef.current.models;
         const reasoningIntent = pendingReasoningIntentRef.current;
+        const sourceReasoningIntent =
+          reasoningIntent?.modelId === currentModelRef.current
+            ? reasoningIntent
+            : undefined;
         const sourceReasoningPreview = models?.find(
           (model) => model.id === currentModelRef.current,
         )?.reasoningPreview;
         const sourceReasoningSelection =
-          reasoningIntent?.value ??
+          sourceReasoningIntent?.value ??
           (sourceReasoningPreview
             ? getReasoningSelection(sourceReasoningPreview)
             : undefined);
@@ -11478,8 +11482,8 @@ export function App({
           reasoningPreview &&
           reasoningPreviewSupports(reasoningPreview, sourceReasoningSelection);
         setPendingReasoningIntent(
-          reasoningIntent && keepReasoningIntent
-            ? { modelId, value: reasoningIntent.value }
+          sourceReasoningIntent && keepReasoningIntent
+            ? { modelId, value: sourceReasoningIntent.value }
             : sourceReasoningSelection && !keepReasoningIntent
               ? { modelId, value: 'default' }
               : undefined,

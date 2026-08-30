@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Config } from '@qwen-code/qwen-code-core';
 import { describe, expect, it } from 'vitest';
 import {
+  applyReasoningSelection,
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
   getModelConfiguration,
@@ -163,5 +165,25 @@ describe('model configuration manifest', () => {
     'qwen3-coder-next',
   ])('does not broaden the manifest to %s', (modelId) => {
     expect(getModelConfiguration(modelId)).toBeUndefined();
+  });
+
+  it('preserves reasoning siblings when returning to the model default', () => {
+    const live = {
+      reasoning: { effort: 'high' as const, budget_tokens: 42_000 },
+    };
+    const rebuildable = {
+      reasoning: { effort: 'high' as const, budget_tokens: 42_000 },
+    };
+    const config = {
+      getContentGeneratorConfig: () => live,
+      getModelsConfig: () => ({
+        getGenerationConfig: () => rebuildable,
+      }),
+    } as unknown as Config;
+
+    applyReasoningSelection(config, 'default');
+
+    expect(live.reasoning).toEqual({ budget_tokens: 42_000 });
+    expect(rebuildable.reasoning).toEqual({ budget_tokens: 42_000 });
   });
 });

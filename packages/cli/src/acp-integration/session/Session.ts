@@ -9930,21 +9930,15 @@ export class Session implements SessionContext {
       );
     }
 
-    const key = 'model.reasoningEffort';
     const persistScope = getPersistScopeForModelSelection(this.settings);
-    this.clearPersistedReasoningSelection(
+    const clears = this.getReasoningSelectionClearWrites(
       selection === REASONING_EFFORT_DEFAULT ? undefined : persistScope,
     );
-    if (selection !== REASONING_EFFORT_DEFAULT) {
-      try {
-        this.settings.setValue(persistScope, key, selection, undefined, {
-          throwOnWriteFailure: true,
-        });
-      } catch (error) {
-        this.settings.reloadScopeFromDisk(persistScope);
-        throw error;
-      }
-    }
+    this.commitReasoningSelectionWrites(
+      selection === REASONING_EFFORT_DEFAULT
+        ? clears
+        : [{ scope: persistScope, value: selection }, ...clears],
+    );
     return true;
   }
 
@@ -9968,7 +9962,17 @@ export class Session implements SessionContext {
       !supported;
 
     if (mustClear) {
-      if (options.persist) this.clearPersistedReasoningSelection();
+      if (options.persist) {
+        try {
+          this.clearPersistedReasoningSelection();
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to clear incompatible reasoning preference: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
       applyReasoningSelection(this.config, REASONING_EFFORT_DEFAULT);
       return;
     }
@@ -9976,36 +9980,97 @@ export class Session implements SessionContext {
   }
 
   private clearPersistedReasoningSelection(except?: SettingScope): void {
+    this.commitReasoningSelectionWrites(
+      this.getReasoningSelectionClearWrites(except),
+    );
+  }
+
+  private getReasoningSelectionClearWrites(
+    except?: SettingScope,
+  ): Array<{ scope: SettingScope; value: undefined }> {
     const key = 'model.reasoningEffort';
-    let changed = false;
-    for (const scope of getWritableScopes(this.settings)) {
-      if (scope === except) continue;
+    return getWritableScopes(this.settings).flatMap((scope) => {
+      if (scope === except) return [];
       const settingsFile =
         scope === SettingScope.Workspace
           ? this.settings.workspace
           : this.settings.user;
-      if (!settingExistsInScope(key, settingsFile.settings)) continue;
+      return settingExistsInScope(key, settingsFile.settings)
+        ? [{ scope, value: undefined }]
+        : [];
+    });
+  }
+
+  private commitReasoningSelectionWrites(
+    writes: ReadonlyArray<{
+      scope: SettingScope;
+      value: ReasoningSelection | undefined;
+    }>,
+  ): void {
+    const key = 'model.reasoningEffort';
+    const committed: Array<{
+      scope: SettingScope;
+      existed: boolean;
+      value: unknown;
+    }> = [];
+    for (const write of writes) {
+      const settingsFile =
+        write.scope === SettingScope.Workspace
+          ? this.settings.workspace
+          : this.settings.user;
+      const snapshot = {
+        scope: write.scope,
+        existed: settingExistsInScope(key, settingsFile.settings),
+        value: settingsFile.settings.model?.reasoningEffort,
+      };
       try {
-        this.settings.setValue(scope, key, undefined, undefined, {
-          throwOnWriteFailure: true,
-        });
+        this.writeReasoningSelection(write.scope, write.value);
       } catch (error) {
-        this.settings.reloadScopeFromDisk(scope);
+        this.settings.reloadScopeFromDisk(write.scope);
+        for (const previous of committed.reverse()) {
+          try {
+            this.writeReasoningSelection(
+              previous.scope,
+              previous.existed ? previous.value : undefined,
+            );
+          } catch (rollbackError) {
+            this.settings.reloadScopeFromDisk(previous.scope);
+            debugLogger.warn(
+              `Failed to roll back reasoning preference: ${
+                rollbackError instanceof Error
+                  ? rollbackError.message
+                  : String(rollbackError)
+              }`,
+            );
+          }
+        }
         throw error;
       }
+      committed.push(snapshot);
+    }
+  }
+
+  private writeReasoningSelection(scope: SettingScope, value: unknown): void {
+    const key = 'model.reasoningEffort';
+    this.settings.setValue(scope, key, value, undefined, {
+      throwOnWriteFailure: true,
+    });
+    if (value !== undefined) return;
+    const settingsFile =
+      scope === SettingScope.Workspace
+        ? this.settings.workspace
+        : this.settings.user;
+    deleteNestedPropertySafe(
+      settingsFile.settings as Record<string, unknown>,
+      key,
+    );
+    if (settingsFile.originalSettings) {
       deleteNestedPropertySafe(
-        settingsFile.settings as Record<string, unknown>,
+        settingsFile.originalSettings as Record<string, unknown>,
         key,
       );
-      if (settingsFile.originalSettings) {
-        deleteNestedPropertySafe(
-          settingsFile.originalSettings as Record<string, unknown>,
-          key,
-        );
-      }
-      changed = true;
     }
-    if (changed) this.settings.recomputeMerged();
+    this.settings.recomputeMerged();
   }
 
   /**

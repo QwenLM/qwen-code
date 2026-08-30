@@ -4680,7 +4680,11 @@ class QwenAgent implements Agent {
 
     await clearCachedCredentialFile();
     try {
-      await this.config.refreshAuth(method);
+      await this.refreshAuthWithPersistedReasoning(
+        this.config,
+        this.settings,
+        method,
+      );
       this.settings.setValue(
         SettingScope.User,
         'security.auth.selectedType',
@@ -4836,7 +4840,7 @@ class QwenAgent implements Agent {
             initializationDeadline?.signal.throwIfAborted();
             if (!provisionalStandalone) {
               await profiler.time('auth', () =>
-                this.ensureAuthenticated(config),
+                this.ensureAuthenticated(config, settings),
               );
               initializationDeadline?.signal.throwIfAborted();
               profiler.timeSync('file_system_setup', () =>
@@ -5124,7 +5128,9 @@ class QwenAgent implements Agent {
         if (!provisionalStandalone) {
           await profiler.time('restore_session_model', () =>
             restoreSessionModelThenAuthenticate(config, projection, () =>
-              profiler.time('auth', () => this.ensureAuthenticated(config)),
+              profiler.time('auth', () =>
+                this.ensureAuthenticated(config, settings),
+              ),
             ),
           );
           profiler.timeSync('file_system_setup', () =>
@@ -5143,7 +5149,7 @@ class QwenAgent implements Agent {
                         projection,
                         () =>
                           profiler.time('auth', () =>
-                            this.ensureAuthenticated(config),
+                            this.ensureAuthenticated(config, settings),
                           ),
                       ),
                     ),
@@ -5477,7 +5483,9 @@ class QwenAgent implements Agent {
         if (!provisionalStandalone) {
           await profiler.time('restore_session_model', () =>
             restoreSessionModelThenAuthenticate(config, projection, () =>
-              profiler.time('auth', () => this.ensureAuthenticated(config)),
+              profiler.time('auth', () =>
+                this.ensureAuthenticated(config, settings),
+              ),
             ),
           );
           profiler.timeSync('file_system_setup', () =>
@@ -5496,7 +5504,7 @@ class QwenAgent implements Agent {
                         projection,
                         () =>
                           profiler.time('auth', () =>
-                            this.ensureAuthenticated(config),
+                            this.ensureAuthenticated(config, settings),
                           ),
                       ),
                     ),
@@ -5740,16 +5748,10 @@ class QwenAgent implements Agent {
 
           const persist =
             params._meta?.[PERSIST_REASONING_SELECTION_META_KEY] === true;
-          if (persist) {
-            reasoningSelectionPersisted =
-              session.persistReasoningSelection(selected);
-          }
-          if (
+          const tierSelected =
             selected !== REASONING_EFFORT_NONE &&
-            selected !== REASONING_EFFORT_DEFAULT &&
-            modelReasoning &&
-            !modelReasoning.toggleOnly
-          ) {
+            selected !== REASONING_EFFORT_DEFAULT;
+          if (modelReasoning && !modelReasoning.toggleOnly) {
             for (const source of ['extra_body', 'samplingParams'] as const) {
               const layer = generation[source];
               if (!layer) continue;
@@ -5760,11 +5762,19 @@ class QwenAgent implements Agent {
               generation[source] = next;
             }
           }
-          applyReasoningSelection(config, selected);
-          if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
-            config.setReasoningEffort?.(
-              selected === REASONING_EFFORT_DEFAULT ? undefined : selected,
-            );
+          if (
+            !modelReasoning &&
+            tierSelected &&
+            generation.reasoning === false
+          ) {
+            config.setReasoningEffort?.(selected);
+          } else {
+            applyReasoningSelection(config, selected);
+            if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
+              config.setReasoningEffort?.(
+                selected === REASONING_EFFORT_DEFAULT ? undefined : selected,
+              );
+            }
           }
           const confirmedOption = this.buildConfigOptions(config).find(
             (candidate) => candidate.id === 'reasoning_effort',
@@ -5782,6 +5792,10 @@ class QwenAgent implements Agent {
                 ? `Reasoning selection was not applied: ${selected}`
                 : 'Reasoning effort cannot be applied while thinking is disabled',
             );
+          }
+          if (persist) {
+            reasoningSelectionPersisted =
+              session.persistReasoningSelection(selected);
           }
           break;
         }
@@ -8204,7 +8218,12 @@ class QwenAgent implements Agent {
             this.config
               .getModelsConfig()
               .syncAfterAuthRefresh(authType, modelId, baseUrl),
-          refreshAuth: (authType) => this.config.refreshAuth(authType),
+          refreshAuth: (authType) =>
+            this.refreshAuthWithPersistedReasoning(
+              this.config,
+              this.settings,
+              authType,
+            ),
         });
         const effectiveModelId =
           (adapter.getValue('model.name') as string | undefined) ??
@@ -12187,7 +12206,11 @@ class QwenAgent implements Agent {
               }
             } else if ((providersChanged || envChanged) && authType) {
               try {
-                await config.refreshAuth(authType);
+                await this.refreshAuthWithPersistedReasoning(
+                  config,
+                  this.settings,
+                  authType,
+                );
               } catch (err) {
                 debugLogger.warn(
                   `reload: refreshAuth failed for session ${id}: ${err}`,
@@ -12822,7 +12845,37 @@ class QwenAgent implements Agent {
     }
   }
 
-  private async ensureAuthenticated(config: Config): Promise<void> {
+  private async refreshAuthWithPersistedReasoning(
+    config: Config,
+    settings: LoadedSettings,
+    authType: AuthType,
+    isInitialAuth?: boolean,
+  ): Promise<void> {
+    if (isInitialAuth === undefined) {
+      await config.refreshAuth(authType);
+    } else {
+      await config.refreshAuth(authType, isInitialAuth);
+    }
+    if (settings.merged.model?.reasoningEffort !== REASONING_EFFORT_NONE) {
+      return;
+    }
+    const generation = config.getContentGeneratorConfig?.();
+    const modelId = generation?.model ?? config.getModel();
+    if (
+      isReasoningSelectionSupported(
+        modelId,
+        REASONING_EFFORT_NONE,
+        generation?.thinkingMandatory === true,
+      )
+    ) {
+      applyReasoningSelection(config, REASONING_EFFORT_NONE);
+    }
+  }
+
+  private async ensureAuthenticated(
+    config: Config,
+    settings: LoadedSettings,
+  ): Promise<void> {
     const selectedType = config.getModelsConfig().getCurrentAuthType();
     if (!selectedType) {
       throw RequestError.authRequired(
@@ -12832,7 +12885,12 @@ class QwenAgent implements Agent {
     }
 
     try {
-      await config.refreshAuth(selectedType, true);
+      await this.refreshAuthWithPersistedReasoning(
+        config,
+        settings,
+        selectedType,
+        true,
+      );
     } catch (e) {
       debugLogger.error(`Authentication failed: ${e}`);
       throw RequestError.authRequired(
@@ -12945,7 +13003,7 @@ class QwenAgent implements Agent {
           if (options.beforeDeferredWorkspaceActivation) {
             await options.beforeDeferredWorkspaceActivation();
           } else {
-            await this.ensureAuthenticated(config);
+            await this.ensureAuthenticated(config, settings);
           }
           this.assertManagedSessionAdmission();
           await config.activateProvisionalWorkspace();

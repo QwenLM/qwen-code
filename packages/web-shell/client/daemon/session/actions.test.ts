@@ -3260,14 +3260,16 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
-  it('waits for an in-flight persisted reasoning change before clearing', async () => {
+  it('captures and marks a clear before waiting for persisted reasoning', async () => {
     const session = createMockSession('session-a');
+    const replacement = createMockSession('session-b');
+    const manualSessionClearRef = { current: false };
     const persisted = createDeferred<{
       configOptions: ReturnType<typeof reasoningConfigOptions>;
       persisted: boolean;
     }>();
     session.setConfigOption.mockReturnValueOnce(persisted.promise);
-    const { actions, getConnection } = createActionsHarness({
+    const { actions, getConnection, sessionRef } = createActionsHarness({
       connection: {
         status: 'connected',
         sessionId: 'session-a',
@@ -3275,13 +3277,16 @@ describe('createDaemonSessionActions', () => {
         providers: workspaceProvidersStatus('low'),
       },
       session,
+      manualSessionClearRef,
     });
 
     const update = actions.setReasoningEffort('medium', { persist: true });
     const clear = actions.clearSession();
     await Promise.resolve();
 
+    expect(manualSessionClearRef.current).toBe(true);
     expect(session.detach).not.toHaveBeenCalled();
+    sessionRef.current = replacement as unknown as DaemonSessionClient;
     persisted.resolve({
       configOptions: reasoningConfigOptions('medium'),
       persisted: true,
@@ -3290,10 +3295,11 @@ describe('createDaemonSessionActions', () => {
     await clear;
 
     expect(session.detach).toHaveBeenCalledOnce();
+    expect(replacement.detach).not.toHaveBeenCalled();
     expect(getConnection().sessionId).toBeUndefined();
     expect(getConnection().models?.[0]?.reasoningPreview).toMatchObject({
       enabled: true,
-      effort: 'medium',
+      effort: 'low',
     });
   });
 

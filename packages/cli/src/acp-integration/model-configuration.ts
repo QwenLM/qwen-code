@@ -158,7 +158,13 @@ export function applyReasoningSelection(
       return;
     }
     if (selection === REASONING_EFFORT_DEFAULT) {
-      generation.reasoning = undefined;
+      if (!generation.reasoning) {
+        generation.reasoning = undefined;
+        return;
+      }
+      const next = { ...generation.reasoning };
+      delete next.effort;
+      generation.reasoning = Object.keys(next).length > 0 ? next : undefined;
       return;
     }
     generation.reasoning = {

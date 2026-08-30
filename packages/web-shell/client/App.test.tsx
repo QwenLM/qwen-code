@@ -121,6 +121,7 @@ type ChatEditorTestProps = {
     defaultEffort: string;
     canDisable?: boolean;
   };
+  onSelectModel?: (modelId: string) => void;
   onSelectReasoningEffort?: (value: string) => Promise<void> | void;
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
@@ -14642,6 +14643,57 @@ describe('App session callbacks', () => {
       'default',
       { persist: true },
     );
+  });
+
+  it('does not retarget a stale model-bound reasoning intent', async () => {
+    const reasoningPreview = (effort: string) => ({
+      enabled: true,
+      effort,
+      efforts: ['low', 'medium', 'max'],
+      defaultEffort: effort,
+      canDisable: true,
+    });
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.currentModel = 'model-a';
+    mockConnection.models = [
+      {
+        id: 'model-a',
+        label: 'model-a',
+        reasoningPreview: reasoningPreview('low'),
+      },
+      {
+        id: 'model-b',
+        label: 'model-b',
+        reasoningPreview: reasoningPreview('medium'),
+      },
+      {
+        id: 'model-c',
+        label: 'model-c',
+        reasoningPreview: reasoningPreview('low'),
+      },
+    ];
+
+    renderApp();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSelectReasoningEffort?.('max');
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.reasoning?.effort).toBe('max');
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('/model model-b');
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.reasoning?.effort).toBe('medium');
+
+    act(() => {
+      testState.latestChatEditorProps?.onSelectModel?.('model-c');
+    });
+    await flush();
+
+    expect(testState.latestChatEditorProps?.reasoning?.effort).toBe('low');
   });
 
   it('commits the first prompt after creating its session', async () => {
