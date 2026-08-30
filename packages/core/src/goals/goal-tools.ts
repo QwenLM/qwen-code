@@ -15,6 +15,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { ApprovalMode } from '../config/config.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolErrorType } from '../tools/tool-error.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
 import {
   GoalConflictError,
   GoalInvalidTransitionError,
@@ -617,6 +618,13 @@ export interface ProposeGoalToolParams {
  */
 export interface PendingGoalProposal {
   objective: string;
+  /**
+   * The `prompt_id` of the turn whose dialog approved it. Only that turn's
+   * terminal boundary may set the Goal; any other frame that finds it parked
+   * discards it. This is what keeps a cancelled or hook-blocked turn from
+   * leaking its approval into a later Notification, Cron, or user turn.
+   */
+  turnKey: string;
 }
 
 export interface ProposeGoalToolConfig extends GoalToolConfig {
@@ -698,6 +706,8 @@ export const PROPOSE_GOAL_UNAVAILABLE_MESSAGE =
   'This session cannot persist Goals, so no Goal can be set.';
 export const PROPOSE_GOAL_NOT_APPROVED_MESSAGE =
   'The Goal was not set: the user did not approve it. Do not ask why and do not propose the same or a reworded objective again.';
+export const PROPOSE_GOAL_NO_TURN_MESSAGE =
+  'The Goal was not set: this call is not attributable to a turn, so its approval could not be bound to one. Hand the user a `/goal set <objective>` line instead.';
 export const PROPOSE_GOAL_PENDING_MESSAGE =
   'Another approved Goal proposal is already waiting for this turn to end. Do not propose another one.';
 
@@ -826,8 +836,17 @@ class ProposeGoalInvocation extends BaseToolInvocation<
     const objective = this.params.objective.trim();
     const current = this.config.getGoalRuntime().getSnapshot().goal;
     // Parked, not dispatched: the client sets it when this turn ends. Doing
-    // it here would strip the rest of the turn of its Goal permit.
-    if (!this.config.setPendingGoalProposal({ objective })) {
+    // it here would strip the rest of the turn of its Goal permit. The
+    // approval is bound to this turn's prompt id so no other frame can
+    // apply it.
+    const turnKey = getInvocationContext()?.promptId;
+    if (!turnKey) {
+      return this.errorResult(
+        PROPOSE_GOAL_NO_TURN_MESSAGE,
+        ToolErrorType.EXECUTION_DENIED,
+      );
+    }
+    if (!this.config.setPendingGoalProposal({ objective, turnKey })) {
       return this.errorResult(
         PROPOSE_GOAL_PENDING_MESSAGE,
         ToolErrorType.EXECUTION_DENIED,

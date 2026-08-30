@@ -18,6 +18,7 @@ import {
   type GetGoalToolParams,
   GetGoalTool,
   PROPOSE_GOAL_NOT_APPROVED_MESSAGE,
+  PROPOSE_GOAL_NO_TURN_MESSAGE,
   PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS,
   PROPOSE_GOAL_PENDING_MESSAGE,
   PROPOSE_GOAL_PLAN_MODE_MESSAGE,
@@ -33,6 +34,7 @@ import {
 import { ApprovalMode } from '../config/config.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { ToolErrorType } from '../tools/tool-error.js';
+import { runWithInvocationContext } from '../utils/invocation-context.js';
 import { goalTurnContext } from './goal-turn-context.js';
 import {
   emptyGoalSnapshot,
@@ -1525,6 +1527,17 @@ describe('UpdateGoalTool', () => {
 });
 
 describe('ProposeGoalTool', () => {
+  const TURN = {
+    version: 1 as const,
+    sessionId: 'session-1',
+    promptId: 'user-turn-key',
+  };
+  /** Runs the tool the way the scheduler does: inside the turn's invocation context. */
+  const execute = (invocation: ReturnType<ProposeGoalTool['build']>) =>
+    runWithInvocationContext(TURN, () =>
+      invocation.execute(new AbortController().signal),
+    );
+
   const objective =
     'Outcome: auth tests pass. Done when: 1) `npm test` exits 0 (paste the summary line). Must not: edit test files. Budget: stop as blocked after 20 turns. On block: report the blocker.';
 
@@ -1616,7 +1629,7 @@ describe('ProposeGoalTool', () => {
     expect(details.prompt).toContain('Set this as the session Goal?');
     expect(details.prompt).toContain(objective);
 
-    const result = await invocation.execute(new AbortController().signal);
+    const result = await execute(invocation);
     expect(result.error).toBeUndefined();
     const payload = JSON.parse(result.llmContent as string);
     expect(payload.approved).toBe(true);
@@ -1628,7 +1641,7 @@ describe('ProposeGoalTool', () => {
     // proposing turn of its Goal permit. The client applies it at the
     // turn boundary (see applyPendingGoalProposal below).
     expect(config.setPendingGoalProposal).toHaveBeenCalledTimes(1);
-    expect(config.pending()?.objective).toBe(objective);
+    expect(config.pending()).toEqual({ objective, turnKey: 'user-turn-key' });
     expect(runtime.getSnapshot().goal).toBeNull();
     expect(host.started).toHaveLength(0);
 
@@ -1657,12 +1670,8 @@ describe('ProposeGoalTool', () => {
       objective: secondObjective,
     });
 
-    expect(
-      await first.invocation.execute(new AbortController().signal),
-    ).not.toHaveProperty('error');
-    const secondResult = await second.invocation.execute(
-      new AbortController().signal,
-    );
+    expect(await execute(first.invocation)).not.toHaveProperty('error');
+    const secondResult = await execute(second.invocation);
 
     expect(secondResult.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
     expect(config.pending()?.objective).toBe(firstObjective);
@@ -1689,11 +1698,31 @@ describe('ProposeGoalTool', () => {
       tool,
       ToolConfirmationOutcome.ProceedOnce,
     );
-    const result = await invocation.execute(new AbortController().signal);
+    const result = await execute(invocation);
 
     expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
     expect(result.llmContent).toBe(PROPOSE_GOAL_PENDING_MESSAGE);
     expect(config.setPendingGoalProposal).toHaveBeenCalledTimes(1);
+    expect(runtime.getSnapshot().goal).toBeNull();
+    expect(host.started).toHaveLength(0);
+  });
+
+  it('refuses to park an approval it cannot bind to a turn', async () => {
+    const { runtime, host } = idleRuntime();
+    const config = proposeConfig(runtime);
+    const tool = new ProposeGoalTool(config);
+    const { invocation } = await confirm(
+      tool,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    // No invocation context: the settle boundary could not tell this
+    // approval apart from a stale one, so it is refused instead of parked.
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(result.llmContent).toBe(PROPOSE_GOAL_NO_TURN_MESSAGE);
+    expect(config.setPendingGoalProposal).not.toHaveBeenCalled();
     expect(runtime.getSnapshot().goal).toBeNull();
     expect(host.started).toHaveLength(0);
   });
@@ -1704,7 +1733,7 @@ describe('ProposeGoalTool', () => {
     const tool = new ProposeGoalTool(config);
 
     const { invocation } = await confirm(tool, ToolConfirmationOutcome.Cancel);
-    const result = await invocation.execute(new AbortController().signal);
+    const result = await execute(invocation);
     expect(config.setPendingGoalProposal).not.toHaveBeenCalled();
     expect(config.pending()).toBeUndefined();
 
@@ -1784,7 +1813,7 @@ describe('ProposeGoalTool', () => {
     );
     await runtime.dispatch({ action: 'create', objective: 'Typed by hand' });
 
-    const result = await invocation.execute(new AbortController().signal);
+    const result = await execute(invocation);
 
     expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
     expect(config.pending()).toBeUndefined();
@@ -1812,7 +1841,7 @@ describe('ProposeGoalTool', () => {
     if (details.type !== 'info') throw new Error('expected info');
     expect(details.prompt).toContain('Replace the paused Goal');
 
-    const result = await invocation.execute(new AbortController().signal);
+    const result = await execute(invocation);
     const payload = JSON.parse(result.llmContent as string);
     expect(payload.replacesGoalId).toBe(paused.goalId);
     expect(runtime.getSnapshot().goal?.goalId).toBe(paused.goalId);
@@ -1834,7 +1863,7 @@ describe('ProposeGoalTool', () => {
       tool,
       ToolConfirmationOutcome.ProceedOnce,
     );
-    await invocation.execute(new AbortController().signal);
+    await execute(invocation);
 
     // The user typed `/goal set …` before the proposing turn ended.
     await runtime.dispatch({ action: 'create', objective: 'Typed by hand' });
@@ -1863,6 +1892,7 @@ describe('ProposeGoalTool', () => {
     });
     const applied = applyPendingGoalProposal(runtime, {
       objective,
+      turnKey: 'user-turn-key',
     });
 
     await expect(resumed).resolves.toMatchObject({
@@ -1902,6 +1932,7 @@ describe('ProposeGoalTool', () => {
 
     const applied = await applyPendingGoalProposal(stale, {
       objective,
+      turnKey: 'user-turn-key',
     });
     expect(applied.applied).toBe(false);
     expect(runtime.getSnapshot().goal?.goalId).toBe(paused.goalId);

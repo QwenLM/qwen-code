@@ -835,17 +835,19 @@ export class LlmClient {
   /**
    * Applies a `propose_goal` approval at the true end of the turn that made it.
    *
-   * Only when the model has stopped calling tools: a proposal made
-   * mid-turn stays parked through the tool-result continuations, because
-   * creating the Goal earlier would leave those continuations without a
-   * permit. Tail continuations keep the proposal parked until their final
-   * boundary. An aborted turn drops the approval instead of starting a loop
-   * the user just cancelled; an abort during dispatch pauses the new Goal.
+   * Only when the model has stopped calling tools, and only in the turn
+   * that parked it (matched by prompt id): a proposal made mid-turn stays
+   * parked through the tool-result continuations, because creating the Goal
+   * earlier would leave those continuations without a permit. Tail
+   * continuations keep the proposal parked until their final boundary. An
+   * aborted turn drops the approval instead of starting a loop the user just
+   * cancelled; an abort during dispatch pauses the new Goal.
    */
   private async settlePendingGoalProposal(
     turnEnded: boolean,
     signal: AbortSignal,
     loadGoalRuntime: (required: boolean) => Promise<GoalRuntime | undefined>,
+    turnKey: string,
   ): Promise<void> {
     const take = this.config.takePendingGoalProposal;
     if (typeof take !== 'function') return;
@@ -856,6 +858,18 @@ export class LlmClient {
     if (!turnEnded) return;
     const proposal = take.call(this.config);
     if (!proposal) return;
+    // The approval is bound to the turn that produced it. A frame settling
+    // under any other prompt id -- a Notification, Cron, or Teammate turn, the
+    // user's next query, a hook-blocked or recursive frame -- is not that
+    // turn, however it got here, so the approval is dropped rather than
+    // applied under work the user never started. This one comparison is what
+    // the per-exit-path discards approximate.
+    if (proposal.turnKey !== turnKey) {
+      debugLogger.debug(
+        `Dropping an approved Goal proposal parked by turn ${proposal.turnKey}: it surfaced in turn ${turnKey}`,
+      );
+      return;
+    }
     const runtime = await loadGoalRuntime(false);
     if (!runtime) {
       debugLogger.debug(
@@ -4314,7 +4328,12 @@ export class LlmClient {
               value: warning,
             };
             debugLogger.warn(warning);
-            await this.settlePendingGoalProposal(true, signal, loadGoalRuntime);
+            await this.settlePendingGoalProposal(
+              true,
+              signal,
+              loadGoalRuntime,
+              prompt_id,
+            );
             for (const goalEvent of takePendingGoalEvents()) {
               yield goalEvent;
             }
@@ -4389,7 +4408,12 @@ export class LlmClient {
               ? response.nonGoalBlockingStopReason || 'No reason provided'
               : continueReason;
           if (!continuationReasonAfterSteer && !pendingSteer) {
-            await this.settlePendingGoalProposal(true, signal, loadGoalRuntime);
+            await this.settlePendingGoalProposal(
+              true,
+              signal,
+              loadGoalRuntime,
+              prompt_id,
+            );
             for (const goalEvent of takePendingGoalEvents()) {
               yield goalEvent;
             }
@@ -4512,7 +4536,12 @@ export class LlmClient {
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
           }
-          await this.settlePendingGoalProposal(true, signal, loadGoalRuntime);
+          await this.settlePendingGoalProposal(
+            true,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+          );
           for (const goalEvent of takePendingGoalEvents()) {
             yield goalEvent;
           }
@@ -4602,6 +4631,7 @@ export class LlmClient {
         turn.pendingToolCalls.length === 0,
         signal,
         loadGoalRuntime,
+        prompt_id,
       );
       for (const goalEvent of takePendingGoalEvents()) {
         yield goalEvent;

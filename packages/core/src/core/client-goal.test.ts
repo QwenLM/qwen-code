@@ -19,10 +19,6 @@ import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
-import {
-  __resetActiveGoalStoreForTests,
-  setActiveGoal,
-} from '../goals/activeGoalStore.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { ApprovalMode } from '../config/config.js';
 import {
@@ -286,7 +282,7 @@ describe('LlmClient Goal admission', () => {
     const takePendingGoalProposal = vi
       .fn()
       .mockReturnValueOnce(undefined) // the new-query discard
-      .mockReturnValueOnce({ objective: 'ship it' });
+      .mockReturnValueOnce({ objective: 'ship it', turnKey: 'real-user-key' });
     Object.assign(config, {
       takePendingGoalProposal,
       getUsageStatisticsEnabled: vi.fn(() => false),
@@ -315,7 +311,7 @@ describe('LlmClient Goal admission', () => {
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string } | undefined;
+    let pending: { objective: string; turnKey: string } | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -327,7 +323,7 @@ describe('LlmClient Goal admission', () => {
       getUsageStatisticsEnabled: vi.fn(() => false),
     });
     turnMocks.run.mockImplementationOnce(() => {
-      pending = { objective: 'ship it' };
+      pending = { objective: 'ship it', turnKey: 'default-exit-key' };
       return emptyStream();
     });
 
@@ -354,7 +350,7 @@ describe('LlmClient Goal admission', () => {
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string } | undefined;
+    let pending: { objective: string; turnKey: string } | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -374,7 +370,7 @@ describe('LlmClient Goal admission', () => {
       getUsageStatisticsEnabled: vi.fn(() => false),
     });
     turnMocks.run.mockImplementationOnce(() => {
-      pending = { objective: 'ship it' };
+      pending = { objective: 'ship it', turnKey: 'stop-cap-key' };
       return emptyStream();
     });
 
@@ -407,7 +403,7 @@ describe('LlmClient Goal admission', () => {
       tokensAtStart: 1,
       hookId: 'old-goal-hook',
     });
-    let pending: { objective: string } | undefined;
+    let pending: { objective: string; turnKey: string } | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -434,7 +430,7 @@ describe('LlmClient Goal admission', () => {
       getUsageStatisticsEnabled: vi.fn(() => false),
     });
     turnMocks.run.mockImplementationOnce(() => {
-      pending = { objective: 'ship it' };
+      pending = { objective: 'ship it', turnKey: 'stop-clear-key' };
       return emptyStream();
     });
     const getSteerInput = vi
@@ -467,7 +463,10 @@ describe('LlmClient Goal admission', () => {
     const { client, config, runtime } = setupGoalClient();
     const controller = new AbortController();
     controller.abort();
-    let pending: { objective: string } | undefined = { objective: 'ship it' };
+    let pending: { objective: string; turnKey: string } | undefined = {
+      objective: 'ship it',
+      turnKey: 'settle-key',
+    };
     const loadGoalRuntime = vi.fn(async () => runtime);
     Object.assign(config, {
       takePendingGoalProposal: vi.fn(() => {
@@ -481,6 +480,7 @@ describe('LlmClient Goal admission', () => {
       true,
       controller.signal,
       loadGoalRuntime,
+      'settle-key',
     );
 
     expect(pending).toBeUndefined();
@@ -496,7 +496,7 @@ describe('LlmClient Goal admission', () => {
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string } | undefined;
+    let pending: { objective: string; turnKey: string } | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -510,7 +510,7 @@ describe('LlmClient Goal admission', () => {
     turnMocks.pendingToolCalls.push([{ name: 'read_file' }], []);
     turnMocks.run
       .mockImplementationOnce(() => {
-        pending = { objective: 'ship it' };
+        pending = { objective: 'ship it', turnKey: 'pending-tool-key' };
         return emptyStream();
       })
       .mockImplementation(emptyStream);
@@ -526,7 +526,10 @@ describe('LlmClient Goal admission', () => {
 
     expect(takePendingGoalProposal).toHaveBeenCalledOnce();
     expect(runtime.dispatch).not.toHaveBeenCalled();
-    expect(pending).toEqual({ objective: 'ship it' });
+    expect(pending).toEqual({
+      objective: 'ship it',
+      turnKey: 'pending-tool-key',
+    });
 
     await drain(
       client.sendMessageStream(
@@ -555,7 +558,7 @@ describe('LlmClient Goal admission', () => {
     const { client, config, runtime } = setupGoalClient();
     vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
     nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
-    let pending: { objective: string } | undefined;
+    let pending: { objective: string; turnKey: string } | undefined;
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -592,7 +595,7 @@ describe('LlmClient Goal admission', () => {
     });
     turnMocks.run
       .mockImplementationOnce(() => {
-        pending = { objective: 'ship it' };
+        pending = { objective: 'ship it', turnKey: 'real-user-key' };
         return emptyStream();
       })
       .mockImplementation(emptyStream);
@@ -630,7 +633,7 @@ describe('LlmClient Goal admission', () => {
       activity: 'idle',
       goal: null,
     });
-    let pending: { objective: string } | undefined;
+    let pending: { objective: string; turnKey: string } | undefined;
     Object.assign(config, {
       takePendingGoalProposal: vi.fn(() => {
         const proposal = pending;
@@ -642,7 +645,7 @@ describe('LlmClient Goal admission', () => {
     });
     turnMocks.run
       .mockImplementationOnce(async function* () {
-        pending = { objective: 'stale proposal' };
+        pending = { objective: 'stale proposal', turnKey: 'failed-user-key' };
         yield {
           type: LlmEventType.Error,
           value: { error: { status: 500 } },
@@ -672,8 +675,18 @@ describe('LlmClient Goal admission', () => {
 
   it('drops a proposal when cancellation lands during runtime readiness', async () => {
     const { client, config, runtime } = setupGoalClient();
+    // No Goal at the boundary, as in production: the only thing standing
+    // between the approval and `create` is the post-loader abort guard.
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
     const controller = new AbortController();
-    let pending: { objective: string } | undefined = { objective: 'ship it' };
+    let pending: { objective: string; turnKey: string } | undefined = {
+      objective: 'ship it',
+      turnKey: 'settle-key',
+    };
     const takePendingGoalProposal = vi.fn(() => {
       const proposal = pending;
       pending = undefined;
@@ -688,6 +701,7 @@ describe('LlmClient Goal admission', () => {
         controller.abort();
         return runtime;
       },
+      'settle-key',
     );
 
     // Dropped means taken and not applied: the slot is empty afterwards, so
@@ -701,7 +715,10 @@ describe('LlmClient Goal admission', () => {
     const { client, config, runtime } = setupGoalClient();
     const controller = new AbortController();
     Object.assign(config, {
-      takePendingGoalProposal: vi.fn(() => ({ objective: 'ship it' })),
+      takePendingGoalProposal: vi.fn(() => ({
+        objective: 'ship it',
+        turnKey: 'settle-key',
+      })),
     });
     const appliedGoal = {
       goalId: 'proposal-goal',
@@ -739,6 +756,7 @@ describe('LlmClient Goal admission', () => {
       true,
       controller.signal,
       async () => runtime,
+      'settle-key',
     );
 
     expect(runtime.dispatch).toHaveBeenNthCalledWith(1, {
@@ -752,6 +770,51 @@ describe('LlmClient Goal admission', () => {
     });
   });
 
+  it('drops an approval parked by another turn instead of settling it', async () => {
+    // A turn cancelled during tool execution never reaches a settle or
+    // discard site (that path does not flow through sendMessageStream), and
+    // a hook-blocked or recursive frame can return without either. Whatever
+    // left it parked, the next frame to settle is not the proposing turn:
+    // its prompt id differs, so the approval is dropped, never applied under
+    // a Notification/Cron turn the user did not start.
+    const { client, config, runtime } = setupGoalClient();
+    // Same shape as the settling tests above, so this frame reaches the
+    // bottom-of-try settle site rather than an early exit.
+    nextSpeakerMocks.check.mockResolvedValue({ next_speaker: 'user' });
+    vi.mocked(runtime.getSnapshot).mockReturnValue({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+    let pending: { objective: string; turnKey: string } | undefined = {
+      objective: 'approved earlier',
+      turnKey: 'cancelled-user-key',
+    };
+    const takePendingGoalProposal = vi.fn(() => {
+      const proposal = pending;
+      pending = undefined;
+      return proposal;
+    });
+    Object.assign(config, {
+      takePendingGoalProposal,
+      getMaxSessionTurns: vi.fn(() => 0),
+      getUsageStatisticsEnabled: vi.fn(() => false),
+    });
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: 'background task finished' }],
+        new AbortController().signal,
+        'notification-key',
+        { type: SendMessageType.Notification },
+      ),
+    );
+
+    expect(takePendingGoalProposal).toHaveBeenCalled();
+    expect(pending).toBeUndefined();
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+  });
+
   it('discards a proposal still parked when the next user query starts', async () => {
     // The proposing turn was cancelled before its boundary; the approval must
     // not start a loop from under the user's next message.
@@ -763,7 +826,10 @@ describe('LlmClient Goal admission', () => {
     });
     const takePendingGoalProposal = vi
       .fn()
-      .mockReturnValueOnce({ objective: 'stale' })
+      .mockReturnValueOnce({
+        objective: 'stale',
+        turnKey: 'cancelled-turn-key',
+      })
       .mockReturnValue(undefined);
     Object.assign(config, {
       takePendingGoalProposal,
