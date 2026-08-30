@@ -1286,9 +1286,9 @@ class DaemonSessionClientTest {
         try (DaemonClient daemon = clientBuilder()
                 .requestTimeout(Duration.ofMillis(150)).build();
                 DaemonSessionClient session = daemon.createSession()) {
+            long started = System.nanoTime();
             PromptCall call = session.startPrompt(PromptRequest.text("go"),
                     PromptObserver.NOOP);
-            long started = System.nanoTime();
             CompletionException failure = assertThrows(CompletionException.class,
                     () -> call.acceptanceFuture().join());
             assertInstanceOf(PromptAdmissionUnknownException.class,
