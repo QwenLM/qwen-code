@@ -4071,6 +4071,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
       getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      // Per-session folder-trust flag (security.folderTrust.enabled of the
+      // admission workspace), bound once at Config construction. Default off;
+      // bootRelocatableSession overrides it to reflect the fed workspace.
+      getFolderTrust: vi.fn().mockReturnValue(false),
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
@@ -4479,6 +4483,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
+      // The gate reads config.getFolderTrust() (admission-workspace flag),
+      // so mirror the fed workspace's security.folderTrust.enabled here.
+      getFolderTrust: vi
+        .fn()
+        .mockReturnValue(
+          settings.merged.security?.folderTrust?.enabled ?? false,
+        ),
     });
     Object.assign(innerConfig.getLlmClient(), {
       addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
@@ -5605,8 +5616,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // "latest loaded" cache to a workspace that DISABLES folder trust.
       // Reading that cache in the cd gate (the pre-fix bug) would switch off
       // session A's trust check and admit the untrusted cd; the fix reads
-      // session A's own workspace settings (loadSettingsCached over the
-      // session's cwd), so the gate still enforces.
+      // config.getFolderTrust() (A's admission-workspace flag), so the gate
+      // still enforces.
       (agent as unknown as { settings: LoadedSettings }).settings =
         makeSessionSettings({
           mcpServers: {},
@@ -5661,6 +5672,50 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             allowedRoots: [canonicalRoot],
           }),
         ).resolves.toMatchObject({ newCwd: canonicalTarget });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+  });
+
+  it('keeps the cd trust gate armed after the cwd drifts into a settings-less subdirectory', async () => {
+    // The gate must bind folder-trust to the ADMISSION workspace, not re-read
+    // it from the current cwd: a prior cd moves targetDir into a subdirectory
+    // that carries no `.qwen/settings.json`, so a cwd-keyed read would resolve
+    // disabled (isFolderTrustEnabled defaults to false) and disarm the gate
+    // for the rest of the session. config.getFolderTrust() stays true, so an
+    // untrusted cd is still rejected.
+    await withEmptyTrustedFolders(async (directory) => {
+      const root = path.join(directory, 'Conversations');
+      const target = path.join(root, 'conversation-subtree-drift');
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+      const canonicalRoot = await fs.realpath(root);
+      const canonicalTarget = await fs.realpath(target);
+      const aSettings = makeSessionSettings({
+        mcpServers: {},
+        security: { folderTrust: { enabled: true } },
+      });
+      const { agent, agentPromise, sessionId, innerConfig } =
+        await bootRelocatableSession(aSettings, 'expected-capability');
+      // cwd has drifted into a subdirectory whose settings disable folder
+      // trust. A cwd-keyed gate would read this and skip; the admission-bound
+      // config.getFolderTrust() must not.
+      innerConfig.getTargetDir.mockReturnValue('/tmp/sub');
+      vi.mocked(loadSettings).mockImplementation((cwd?: string) =>
+        cwd === '/tmp/sub'
+          ? makeSessionSettings({ mcpServers: {} })
+          : aSettings,
+      );
+
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+            sessionId,
+            path: canonicalTarget,
+            allowedRoots: [canonicalRoot],
+          }),
+        ).rejects.toThrow('Directory not trusted');
       } finally {
         mockConnectionState.resolve();
         await agentPromise;

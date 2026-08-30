@@ -307,7 +307,6 @@ import {
 } from '../i18n/index.js';
 import {
   isWorkspaceTrusted,
-  isFolderTrustEnabled,
   loadTrustedFolders,
 } from '../config/trustedFolders.js';
 import {
@@ -10156,18 +10155,19 @@ class QwenAgent implements Agent {
         const validateTrust = () => {
           if (
             managedTrustAllowed ||
-            // Read folder-trust from THIS session's own workspace, live — not
-            // the process-wide `this.settings` "latest loaded" cache, which in
-            // a multi-workspace daemon may hold another workspace's settings
-            // and would let a workspace that disables folder trust switch off
-            // this session's trust gate. `previousCwd` is the session's
-            // current workspace (captured before the cd); `loadSettingsCached`
-            // is fingerprint-invalidated, so a mid-session settings edit — e.g.
-            // an operator enabling folder trust and reloading to lock down — is
-            // honored on the next cd (a frozen admission-time flag would not
-            // be). Same per-request-settings pattern as the other cwd-scoped
-            // handlers in this file.
-            !isFolderTrustEnabled(loadSettingsCached(previousCwd).merged)
+            // Folder-trust enablement is bound to the workspace this session
+            // was admitted under: `config.getFolderTrust()` is
+            // `security.folderTrust.enabled` from that workspace, set once at
+            // construction and never moved by `relocateWorkingDirectory`.
+            // Deliberately NOT the process-wide `this.settings` cache (holds
+            // another workspace's value in a multi-workspace daemon — the bug
+            // this fixes), and deliberately NOT a live re-read keyed on the
+            // current cwd: a cd moves `targetDir` into a subdirectory that
+            // carries no `.qwen/settings.json`, so a cwd-keyed read resolves
+            // disabled after the first cd and disarms the gate for the rest of
+            // the session. `security.folderTrust.enabled` is `requiresRestart`,
+            // so binding it at admission matches its declared semantics.
+            !config.getFolderTrust()
           ) {
             trustValidated = true;
             return;
