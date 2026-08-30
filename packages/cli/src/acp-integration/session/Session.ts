@@ -13541,6 +13541,16 @@ export class Session implements SessionContext {
       debugLogger.debug(
         `vision bridge: failed before replacement; falling back to text-only parts error=${String(error instanceof Error ? error.message : error)}`,
       );
+      // An abort racing with a failed vision bridge must fail-close any
+      // still-raw audio too (the audio bridge skipped on a natively
+      // audio-capable route), not merely strip images: a cancelled turn must
+      // never persist unbridged media (R52-33).
+      if (abortSignal.aborted) {
+        return replaceAudioPartsWithUnavailable(
+          splitImageParts(parts).nonImageParts,
+          'transcription was cancelled',
+        );
+      }
       return splitImageParts(parts).nonImageParts;
     }
     debugLogger.debug(
@@ -13562,7 +13572,15 @@ export class Session implements SessionContext {
 
     if (abortSignal.aborted) {
       debugLogger.debug('vision bridge: turn aborted after bridge returned');
-      return splitImageParts(parts).nonImageParts;
+      // Fail-close still-raw audio as well as stripping images (R52-33): the
+      // audio bridge can have skipped on a natively audio-capable route. This
+      // keeps #buildMidTurnParts' finalize premise true — the conversion's
+      // own abort return fail-closes the parts — and mirrors the pre-vision
+      // abort return above (completed transcripts already replaced the audio).
+      return replaceAudioPartsWithUnavailable(
+        splitImageParts(parts).nonImageParts,
+        'transcription was cancelled',
+      );
     }
 
     if (bridgeResult.applied && bridgeResult.parts != null) {
@@ -13571,7 +13589,17 @@ export class Session implements SessionContext {
 
     // Bridge did not apply (e.g. skipped after cancel). Strip images before
     // forwarding to the text-only primary model — never send raw inlineData to
-    // a model that cannot interpret it.
+    // a model that cannot interpret it. On an abort, fail-close any still-raw
+    // audio too (R52-33) so every abort return from this conversion keeps
+    // #buildMidTurnParts' finalize premise true. A NON-abort skip keeps the
+    // plain image-only strip: the audio bridge only skips when the route
+    // natively supports audio, so retained native audio stays deliverable.
+    if (abortSignal.aborted) {
+      return replaceAudioPartsWithUnavailable(
+        splitImageParts(parts).nonImageParts,
+        'transcription was cancelled',
+      );
+    }
     return splitImageParts(parts).nonImageParts;
   }
 

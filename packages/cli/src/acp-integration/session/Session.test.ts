@@ -9726,6 +9726,163 @@ describe('Session', () => {
       expect(preservedJson).toContain('transcription was cancelled');
     });
 
+    it('fail-closes still-raw audio when cancelled while the vision bridge is failing (audio bridge skipped)', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // The route natively supports audio: the audio bridge skips and leaves
+      // the raw audio in place, so the vision bridge (image) runs with the
+      // still-raw audio riding along.
+      const audioBridgeSpy = vi
+        .spyOn(audioBridgeService, 'runAudioBridge')
+        .mockImplementation(async ({ parts }: { parts: Part[] }) => ({
+          status: 'skipped',
+          parts,
+          audioCount: 0,
+          convertedCount: 0,
+          egressCount: 0,
+        }));
+      let rejectVisionBridge!: (error: Error) => void;
+      const visionGate = new Promise<never>((_resolve, reject) => {
+        rejectVisionBridge = reject;
+      });
+      runVisionBridgeSpy.mockImplementation(() => visionGate);
+
+      try {
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'listen and look' },
+            {
+              type: 'audio',
+              mimeType: 'audio/wav',
+              data: 'UklGRgPROBE==',
+            },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'iVBORPROBE==',
+            },
+          ],
+        });
+        await vi.waitFor(() =>
+          expect(runVisionBridgeSpy).toHaveBeenCalledTimes(1),
+        );
+        // Cancel while the vision bridge is in flight, then let it fail: the
+        // abort races into the bridge's catch exit, which must fail-close the
+        // still-raw audio (R52-33), not just strip the image.
+        await session.cancelPendingPrompt();
+        rejectVisionBridge(new Error('vision bridge aborted'));
+        await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      } finally {
+        rejectVisionBridge(new Error('vision bridge aborted'));
+        audioBridgeSpy.mockRestore();
+      }
+
+      const preservedUserEntries = vi
+        .mocked(mockChat.addHistory)
+        .mock.calls.map(([entry]) => entry)
+        .filter((entry) => (entry as { role?: string }).role === 'user');
+      expect(preservedUserEntries.length).toBeGreaterThan(0);
+      const preservedJson = JSON.stringify(preservedUserEntries);
+      expect(preservedJson).not.toContain('UklGRgPROBE==');
+      expect(preservedJson).not.toContain('audio/wav');
+      expect(preservedJson).not.toContain('iVBORPROBE==');
+      expect(preservedJson).not.toContain('image/png');
+      expect(preservedJson).toContain('transcription was cancelled');
+    });
+
+    it('fail-closes still-raw audio when cancelled just after the vision bridge returns skipped (audio bridge skipped)', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const audioBridgeSpy = vi
+        .spyOn(audioBridgeService, 'runAudioBridge')
+        .mockImplementation(async ({ parts }: { parts: Part[] }) => ({
+          status: 'skipped',
+          parts,
+          audioCount: 0,
+          convertedCount: 0,
+          egressCount: 0,
+        }));
+      let resolveVisionBridge!: (result: {
+        applied: boolean;
+        status: 'skipped';
+        convertedCount: number;
+        omittedCount: number;
+      }) => void;
+      const visionGate = new Promise<{
+        applied: boolean;
+        status: 'skipped';
+        convertedCount: number;
+        omittedCount: number;
+      }>((resolve) => {
+        resolveVisionBridge = resolve;
+      });
+      runVisionBridgeSpy.mockImplementation(() => visionGate);
+
+      try {
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'listen and look' },
+            {
+              type: 'audio',
+              mimeType: 'audio/wav',
+              data: 'UklGRgPROBE==',
+            },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'iVBORPROBE==',
+            },
+          ],
+        });
+        await vi.waitFor(() =>
+          expect(runVisionBridgeSpy).toHaveBeenCalledTimes(1),
+        );
+        // Cancel first, then let the bridge settle with a skip: the abort is
+        // already set when the conversion resumes, so the post-bridge abort
+        // exit must fail-close the still-raw audio (R52-33).
+        await session.cancelPendingPrompt();
+        resolveVisionBridge({
+          applied: false,
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+        });
+        await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      } finally {
+        resolveVisionBridge({
+          applied: false,
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+        });
+        audioBridgeSpy.mockRestore();
+      }
+
+      const preservedUserEntries = vi
+        .mocked(mockChat.addHistory)
+        .mock.calls.map(([entry]) => entry)
+        .filter((entry) => (entry as { role?: string }).role === 'user');
+      expect(preservedUserEntries.length).toBeGreaterThan(0);
+      const preservedJson = JSON.stringify(preservedUserEntries);
+      expect(preservedJson).not.toContain('UklGRgPROBE==');
+      expect(preservedJson).not.toContain('audio/wav');
+      expect(preservedJson).not.toContain('iVBORPROBE==');
+      expect(preservedJson).not.toContain('image/png');
+      expect(preservedJson).toContain('transcription was cancelled');
+    });
+
     it('fails closed oversized ACP audio in an embedded resource block', async () => {
       const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
       const original = process.env[ENV_KEY];
