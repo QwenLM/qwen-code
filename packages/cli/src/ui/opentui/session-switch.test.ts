@@ -38,9 +38,15 @@ interface FakeConfigCalls {
   startNewSession: Array<[string, unknown]>;
   rebuildTurnBoundaries: number;
   clientInitialize: number;
+  swapBegin: number;
+  swapCommit: number;
+  swapAbort: number;
 }
 
-function createFakeConfig(options?: { failClientInitialize?: boolean }): {
+function createFakeConfig(options?: {
+  failClientInitialize?: boolean;
+  beginTelemetrySwapReturns?: boolean;
+}): {
   config: Config;
   calls: FakeConfigCalls;
 } {
@@ -48,6 +54,9 @@ function createFakeConfig(options?: { failClientInitialize?: boolean }): {
     startNewSession: [],
     rebuildTurnBoundaries: 0,
     clientInitialize: 0,
+    swapBegin: 0,
+    swapCommit: 0,
+    swapAbort: 0,
   };
   // Stable registry objects so tests can flip their behavior live.
   const backgroundTaskRegistry = {
@@ -88,6 +97,19 @@ function createFakeConfig(options?: { failClientInitialize?: boolean }): {
         if (options?.failClientInitialize) {
           throw new Error('client init failed');
         }
+      },
+    }),
+    getLlmClient: () => ({
+      beginTelemetrySwap: () => {
+        calls.swapBegin += 1;
+        return options?.beginTelemetrySwapReturns ?? true;
+      },
+      commitTelemetrySwap: () => {
+        calls.swapCommit += 1;
+      },
+      abortTelemetrySwap: () => {
+        calls.swapAbort += 1;
+        return true;
       },
     }),
     loadPausedBackgroundAgents: async () => [],
@@ -206,6 +228,45 @@ describe('handleResumeSession', () => {
     expect(calls.startNewSession).toHaveLength(0);
     expect(host.addItem).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'error' }),
+      expect.any(Number),
+    );
+  });
+
+  it('commits the telemetry swap transaction at the UI commit point (R2-6)', async () => {
+    const { config, calls } = createFakeConfig();
+    const host = createFakeHost(config);
+    await handleResumeSession(host, 'target-session');
+    expect(calls.swapBegin).toBe(1);
+    expect(calls.swapCommit).toBe(1);
+    expect(calls.swapAbort).toBe(0);
+  });
+
+  it('aborts the telemetry swap exactly once when the swap fails (R2-6)', async () => {
+    const { config, calls } = createFakeConfig({
+      failClientInitialize: true,
+    });
+    const host = createFakeHost(config);
+    await handleResumeSession(host, 'target-session');
+    expect(calls.swapBegin).toBe(1);
+    expect(calls.swapAbort).toBe(1);
+    expect(calls.swapCommit).toBe(0);
+  });
+
+  it('rejects a concurrent switch when the swap slot is held (R2-6)', async () => {
+    const { config, calls } = createFakeConfig({
+      beginTelemetrySwapReturns: false,
+    });
+    const host = createFakeHost(config);
+    await handleResumeSession(host, 'target-session');
+    expect(calls.swapBegin).toBe(1);
+    expect(calls.startNewSession).toHaveLength(0);
+    expect(calls.swapCommit).toBe(0);
+    expect(calls.swapAbort).toBe(0);
+    expect(host.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('already in progress'),
+      }),
       expect.any(Number),
     );
   });

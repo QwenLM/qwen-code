@@ -47,11 +47,89 @@ import {
   isValidStackedSkillPrefix,
 } from '../commands/commands.js';
 import { getCommandDisplayName } from '../../services/commandMetadata.js';
-import { toCodePoints } from '../utils/textUtils.js';
+import { getCachedStringWidth, toCodePoints } from '../utils/textUtils.js';
 import type { InputHistory } from './input-history.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 
 export { MAX_SUGGESTIONS_TO_SHOW };
+
+// ── OpenTUI cursor coordinate conversion ──────────────────────────────────
+//
+// The pinned @opentui/core reports cursor coordinates in display-width
+// (terminal-cell) units: edit-buffer.zig's Cursor documents "row, col in
+// display-width coordinates" with "offset: Global display-width offset from
+// buffer start", and text-buffer-iterators.zig's coordsToOffset computes
+// line_start_weight + col where the rope weighs each newline as 1. The
+// helpers in this module work in code-point units (toCodePoints
+// coordinates, matching the ink ports they were derived from). These pure
+// converters bridge the two; the component calls them at the editor
+// boundary so every helper keeps its code-point contract.
+
+const codePointWidth = (cp: string): number => getCachedStringWidth(cp);
+
+/** Display-width column within one line → code-point index in that line. */
+export function displayColToCodePointIndex(
+  line: string,
+  displayCol: number,
+): number {
+  const codePoints = toCodePoints(line);
+  let width = 0;
+  for (let i = 0; i < codePoints.length; i++) {
+    if (width >= displayCol) return i;
+    width += codePointWidth(codePoints[i]!);
+  }
+  return codePoints.length;
+}
+
+/** Code-point index in a line → display-width column. */
+export function codePointIndexToDisplayCol(
+  line: string,
+  index: number,
+): number {
+  const codePoints = toCodePoints(line);
+  const limit = Math.min(index, codePoints.length);
+  let width = 0;
+  for (let i = 0; i < limit; i++) {
+    width += codePointWidth(codePoints[i]!);
+  }
+  return width;
+}
+
+/** Global display-width offset over the whole buffer → code-point index. */
+export function displayOffsetToCodePointIndex(
+  text: string,
+  displayOffset: number,
+): number {
+  let index = 0;
+  let width = 0;
+  for (const line of text.split('\n')) {
+    const codePoints = toCodePoints(line);
+    for (const cp of codePoints) {
+      if (width >= displayOffset) return index;
+      width += codePointWidth(cp);
+      index++;
+    }
+    // The rope weighs the newline itself as 1 in the global offset.
+    if (width >= displayOffset) return index;
+    width += 1;
+    index++;
+  }
+  return index;
+}
+
+/** Code-point index over the whole buffer → global display-width offset. */
+export function codePointIndexToDisplayOffset(
+  text: string,
+  index: number,
+): number {
+  const codePoints = toCodePoints(text);
+  const limit = Math.min(index, codePoints.length);
+  let width = 0;
+  for (let i = 0; i < limit; i++) {
+    width += codePoints[i] === '\n' ? 1 : codePointWidth(codePoints[i]!);
+  }
+  return width;
+}
 
 export enum CompletionMode {
   IDLE = 'IDLE',

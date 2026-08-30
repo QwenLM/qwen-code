@@ -210,6 +210,27 @@ describe('foldLiveEvent tool-result diff', () => {
       fileName: 'a.txt',
     });
   });
+
+  it('carries the vision-bridge egress disclosure onto the tool item (R2-3)', () => {
+    let items = foldLiveEvent([], {
+      type: 'tool-start',
+      id: 'tool1',
+      tool: 'read_file',
+      title: 'read_file',
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-result',
+      id: 'tool1',
+      display: '',
+      visionBridgeNotice:
+        'Content was sent to the vision model — your data left this machine.',
+    });
+    const tool = items[0];
+    if (tool.kind !== 'tool') throw new Error('expected tool item');
+    expect(tool.visionBridgeNotice).toBe(
+      'Content was sent to the vision model — your data left this machine.',
+    );
+  });
 });
 
 describe('foldLiveEvent tool-result ansi', () => {

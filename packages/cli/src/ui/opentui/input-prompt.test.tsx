@@ -25,6 +25,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { render } from '@testing-library/react';
 import { OpenTuiInputPrompt } from './input-prompt.js';
+import { cpLen, cpSlice } from '../utils/textUtils.js';
+import {
+  codePointIndexToDisplayCol,
+  displayColToCodePointIndex,
+} from './input-prompt-model.js';
 
 interface FakeEditor {
   plainText: string;
@@ -50,26 +55,38 @@ const mocks = vi.hoisted(() => {
     editors: [] as unknown[],
     pasteHandlers: [] as Array<(event: unknown) => void>,
     slashCommands: [] as unknown[],
+    fileSearchResults: [] as string[],
+    fileSearchDelay: Promise.resolve() as Promise<void>,
   };
 
   function createFakeEditor() {
+    // The fake models the REAL editor contract: cursor coordinates are
+    // display-width (terminal-cell) units, exactly like the pinned
+    // @opentui/core's edit-buffer (row/col/offset in display width). The
+    // cursor position is tracked internally as a code-point column and
+    // converted with the production converters, so wide characters make
+    // reads and writes diverge from string indices like they do natively.
     let text = '';
-    let col = 0;
+    let col = 0; // code-point column within row 0 (the fake is single-line)
+    const displayCol = () => codePointIndexToDisplayCol(text, col);
+    const setColFromDisplay = (display: number) => {
+      col = displayColToCodePointIndex(text, display);
+    };
     const editor = {
       get plainText() {
         return text;
       },
       get logicalCursor() {
-        return { row: 0, col, offset: col };
+        return { row: 0, col: displayCol(), offset: displayCol() };
       },
       get lineCount() {
         return text.split('\n').length;
       },
       get cursorOffset() {
-        return col;
+        return displayCol();
       },
       set cursorOffset(offset: number) {
-        col = offset;
+        setColFromDisplay(offset);
       },
       deleteCharBackwardCalls: 0,
       deleteWordBackwardCalls: 0,
@@ -78,7 +95,7 @@ const mocks = vi.hoisted(() => {
       deleteCharBackward() {
         editor.deleteCharBackwardCalls += 1;
         if (col > 0) {
-          text = text.slice(0, col - 1) + text.slice(col);
+          text = cpSlice(text, 0, col - 1) + cpSlice(text, col);
           col -= 1;
         }
         return true;
@@ -86,35 +103,35 @@ const mocks = vi.hoisted(() => {
       deleteWordBackward() {
         // Coarse whitespace-word delete, enough to observe the wiring.
         editor.deleteWordBackwardCalls += 1;
-        const before = text.slice(0, col);
+        const before = cpSlice(text, 0, col);
         const match = /^(.*?)(\S+\s*)$/s.exec(before);
         if (match?.[1] !== undefined) {
-          text = match[1] + text.slice(col);
-          col = match[1].length;
+          text = match[1] + cpSlice(text, col);
+          col = cpLen(match[1]);
         }
         return true;
       },
       insertText(t: string) {
         editor.insertCalls.push(t);
-        text = text.slice(0, col) + t + text.slice(col);
-        col += t.length;
+        text = cpSlice(text, 0, col) + t + cpSlice(text, col);
+        col += cpLen(t);
       },
       setText(t: string) {
         text = t;
-        col = t.length;
+        col = cpLen(t);
       },
       setCursor(_row: number, c: number) {
-        col = c;
+        setColFromDisplay(c);
       },
       setCursorByOffset(offset: number) {
-        col = offset;
+        setColFromDisplay(offset);
       },
       clear() {
         text = '';
         col = 0;
       },
       gotoLineEnd() {
-        col = text.length;
+        col = cpLen(text);
       },
       newLine() {
         editor.newLineCalls += 1;
@@ -195,6 +212,24 @@ vi.mock('@opentui/react', () => ({
   useRenderer: () => mocks.renderer,
   useTerminalDimensions: () => ({ width: 80, height: 24 }),
 }));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    FileSearchFactory: {
+      create: () => ({
+        initialize: async () => {},
+        search: async () => {
+          await mocks.state.fileSearchDelay;
+          return mocks.state.fileSearchResults;
+        },
+        dispose: async () => {},
+      }),
+    },
+  };
+});
 
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
@@ -424,6 +459,40 @@ describe('OpenTuiInputPrompt submit guard', () => {
     mocks.state.editors.length = 0;
     mocks.state.pasteHandlers.length = 0;
     mocks.state.slashCommands = [];
+    mocks.state.fileSearchResults = [];
+    mocks.state.fileSearchDelay = Promise.resolve();
+  });
+
+  it('Esc invalidates in-flight @ searches: a late resolve must not reopen the dropdown (R2-2)', async () => {
+    let releaseSearch!: () => void;
+    mocks.state.fileSearchResults = ['hit-file.txt'];
+    mocks.state.fileSearchDelay = new Promise<void>((resolve) => {
+      releaseSearch = resolve;
+    });
+    const submitted: string[] = [];
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={(text) => submitted.push(text)}
+        userMessages={[]}
+      />,
+    );
+    const editor = currentEditor();
+    await typeText('@x');
+    // Give the async initialize+search chain a tick to start.
+    await act(async () => {});
+    // Esc dismisses the dropdown while the search is still pending.
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
+    });
+    // The late resolution must not re-populate the dismissed dropdown.
+    releaseSearch();
+    await act(async () => {});
+    // Enter submits the typed text instead of accepting the stale hit.
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(submitted).toEqual(['@x']);
+    expect(editor.plainText).toBe('');
   });
 
   it('Enter still submits the typed text', async () => {
@@ -747,6 +816,47 @@ describe('OpenTuiInputPrompt large-paste collapsing (G10)', () => {
     // The freed id is reused by the next same-size paste.
     await emitPaste(handler, 'z'.repeat(1500));
     expect(editor.plainText).toBe('[Pasted Content 1500 chars]');
+  });
+
+  it('backspace removes the placeholder whole after wide characters (R2-1)', async () => {
+    // 你好 occupies 4 display cells but 2 code points: the cursor's
+    // display offset (4 + placeholder width) is NOT its code-point index
+    // (2 + placeholder length). Placeholder deletion must convert first —
+    // the old code sliced with the display offset and never matched.
+    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    const handler = mocks.state.pasteHandlers.at(-1);
+    if (!handler) throw new Error('no paste handler registered');
+    const editor = currentEditor();
+    await typeText('你好');
+    await emitPaste(handler, 'y'.repeat(1500));
+    expect(editor.plainText).toBe('你好[Pasted Content 1500 chars]');
+    const placeholder = editor.plainText.slice('你好'.length);
+    expect(editor.cursorOffset).toBe(4 + placeholder.length);
+    expect(await pressRaw('\x7f')).toBe(true);
+    expect(editor.plainText).toBe('你好');
+    expect(editor.cursorOffset).toBe(4);
+    expect(editor.deleteCharBackwardCalls).toBe(0);
+  });
+
+  it('Enter after 你好 + backslash continues the line instead of submitting (R2-1)', async () => {
+    // The trailing-backslash check reads the char before the caret; with
+    // wide characters the display offset (5) must convert to the code-point
+    // index (3) before the lookup, or Enter submits instead of continuing.
+    const submitted: string[] = [];
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={(text) => submitted.push(text)}
+        userMessages={[]}
+      />,
+    );
+    const editor = currentEditor();
+    await typeText('你好\\');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(submitted).toEqual([]);
+    expect(editor.newLineCalls).toBe(1);
+    expect(editor.deleteCharBackwardCalls).toBe(1);
   });
 });
 

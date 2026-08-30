@@ -17,9 +17,13 @@ import {
   LARGE_PASTE_CHAR_THRESHOLD,
   LARGE_PASTE_LINE_THRESHOLD,
   applyCompletion,
+  codePointIndexToDisplayCol,
+  codePointIndexToDisplayOffset,
   commandCompletionItemsToSuggestions,
   decideSubmit,
   detectCompletionTarget,
+  displayColToCodePointIndex,
+  displayOffsetToCodePointIndex,
   expandPendingPastePlaceholders,
   freePastePlaceholderId,
   isLargePaste,
@@ -677,5 +681,54 @@ describe('suggestion shape stability', () => {
     const suggestions: Suggestion[] = slashSuggestions('/cd2', [withHint]);
     expect(suggestions[0]?.argumentHint).toBe('<path>');
     expect(suggestions[0]?.description).toBe('cd2 description');
+  });
+});
+
+describe('display-width ↔ code-point cursor conversion (R2-1)', () => {
+  it('converts display columns on a CJK line to code-point indices', () => {
+    const line = '你好abc';
+    // 你 and 好 are 2 cells each; a/b/c are 1 each.
+    expect(displayColToCodePointIndex(line, 0)).toBe(0);
+    expect(displayColToCodePointIndex(line, 2)).toBe(1); // after 你
+    expect(displayColToCodePointIndex(line, 4)).toBe(2); // after 好
+    expect(displayColToCodePointIndex(line, 5)).toBe(3); // after a
+    expect(displayColToCodePointIndex(line, 7)).toBe(5); // end
+    expect(displayColToCodePointIndex(line, 99)).toBe(5); // clamped
+  });
+
+  it('converts code-point indices back to display columns', () => {
+    const line = '你好abc';
+    expect(codePointIndexToDisplayCol(line, 1)).toBe(2);
+    expect(codePointIndexToDisplayCol(line, 2)).toBe(4);
+    expect(codePointIndexToDisplayCol(line, 5)).toBe(7);
+  });
+
+  it('round-trips columns through both converters', () => {
+    const line = 'aé你😀z';
+    for (let i = 0; i <= 5; i++) {
+      expect(
+        displayColToCodePointIndex(line, codePointIndexToDisplayCol(line, i)),
+      ).toBe(i);
+    }
+  });
+
+  it('converts global offsets across lines, weighing newlines as 1', () => {
+    const text = '你\nb';
+    // Cell offsets: 0 before 你, 2 after 你, 3 after the newline, 4 at end.
+    expect(displayOffsetToCodePointIndex(text, 0)).toBe(0);
+    expect(displayOffsetToCodePointIndex(text, 2)).toBe(1);
+    expect(displayOffsetToCodePointIndex(text, 3)).toBe(2);
+    expect(displayOffsetToCodePointIndex(text, 4)).toBe(3);
+    expect(codePointIndexToDisplayOffset(text, 1)).toBe(2);
+    expect(codePointIndexToDisplayOffset(text, 2)).toBe(3);
+    expect(codePointIndexToDisplayOffset(text, 3)).toBe(4);
+  });
+
+  it('keeps ASCII text transparent (offset == code-point index)', () => {
+    const text = 'abc\ndef';
+    for (let i = 0; i <= text.length; i++) {
+      expect(displayOffsetToCodePointIndex(text, i)).toBe(i);
+      expect(codePointIndexToDisplayOffset(text, i)).toBe(i);
+    }
   });
 });

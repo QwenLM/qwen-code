@@ -112,6 +112,24 @@ export async function handleResumeSession(
     return;
   }
 
+  // Open the telemetry swap transaction BEFORE touching the outgoing
+  // session (ink useResumeCommand parity): the slot is the only
+  // serialization for session switches, and a failed swap must restore
+  // the usage aggregate. A false return means another /resume or /branch
+  // already holds the single swap slot — reject instead of entangling.
+  const telemetrySwapOpened =
+    config.getLlmClient()?.beginTelemetrySwap?.() ?? true;
+  if (!telemetrySwapOpened) {
+    host.addItem(
+      {
+        type: MessageType.ERROR,
+        text: 'A session switch is already in progress. Try again in a moment.',
+      },
+      Date.now(),
+    );
+    return;
+  }
+
   const oldSessionId = config.getSessionId();
   let coreSwapped = false;
   let uiSwapped = false;
@@ -121,6 +139,8 @@ export async function handleResumeSession(
     const sessionService = new SessionService(cwd);
     const sessionData = await sessionService.loadSession(sessionId);
     if (!sessionData) {
+      // Nothing was replayed — close this attempt's unarmed transaction.
+      config.getLlmClient()?.commitTelemetrySwap?.();
       return;
     }
     const customTitle = sessionService.getSessionTitle(sessionId);
@@ -164,7 +184,8 @@ export async function handleResumeSession(
             .buildRecoveredBackgroundAgentsNotice(recovered.length)
         : null;
 
-    // 2. UI swap.
+    // 2. UI swap. The commit point is the UI-side session re-key: from here
+    //    on a failure must not roll core back OR undo the telemetry replay.
     host.startNewSession(sessionId);
     host.setSessionName(customTitle ?? null);
     host.clearPendingState();
@@ -178,6 +199,7 @@ export async function handleResumeSession(
       );
     }
     uiSwapped = true;
+    config.getLlmClient()?.commitTelemetrySwap?.();
   } catch (error) {
     if (coreSwapped && !uiSwapped) {
       try {
@@ -189,6 +211,15 @@ export async function handleResumeSession(
           .getDebugLogger()
           .warn(`Rollback after failed /resume init failed: ${rollbackErr}`);
       }
+      // Core is back on the old session: restore the usage aggregate to
+      // pre-swap state, dropping the abandoned session's replayed history.
+      config.getLlmClient()?.abortTelemetrySwap?.();
+    } else {
+      // Either the core swap never happened (nothing was replayed — the
+      // transaction is unarmed) or the UI already committed (the replay
+      // belongs to the session the user is on): close this attempt's
+      // transaction without restoring.
+      config.getLlmClient()?.commitTelemetrySwap?.();
     }
     host.addItem(
       {
@@ -241,6 +272,21 @@ export async function handleBranchSession(
           config,
           BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE,
         ),
+      },
+      Date.now(),
+    );
+    return;
+  }
+
+  // Telemetry swap transaction (ink useBranchCommand parity): the slot is
+  // the only serialization for session switches; see the resume handler.
+  const telemetrySwapOpened =
+    config.getLlmClient()?.beginTelemetrySwap?.() ?? true;
+  if (!telemetrySwapOpened) {
+    host.addItem(
+      {
+        type: MessageType.ERROR,
+        text: 'A session switch is already in progress. Try again in a moment.',
       },
       Date.now(),
     );
@@ -318,6 +364,9 @@ export async function handleBranchSession(
     host.resetTranscript(resumeEventsFromSession(resumed, config));
     uiSwapped = true;
     resetBackgroundStateForSessionSwitch(config);
+    // The UI re-key commits the swap: from here on a failure keeps the
+    // replay — it belongs to the session the user is on.
+    config.getLlmClient()?.commitTelemetrySwap?.();
 
     // 9. Apply the persisted title to the session-name surface.
     host.setSessionName(effectiveTitle);
@@ -348,6 +397,12 @@ export async function handleBranchSession(
           .getDebugLogger()
           .warn(`Rollback after failed /branch init failed: ${rollbackErr}`);
       }
+      // Core is back on the old session: restore the usage aggregate.
+      config.getLlmClient()?.abortTelemetrySwap?.();
+    } else {
+      // Unarmed (core never swapped) or already committed (UI re-keyed):
+      // close this attempt's transaction without restoring.
+      config.getLlmClient()?.commitTelemetrySwap?.();
     }
     if (forkCreated && !uiSwapped) {
       try {
