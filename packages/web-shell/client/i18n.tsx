@@ -1615,6 +1615,18 @@ const EN: Messages = {
     'This response is no longer on the active history path. Branching from this point is not supported by the current session.',
   'branch.success': (v) =>
     `Copied session. New session name: "${v?.name ?? ''}". Switched to the new session.`,
+  'branch.dialog.title': 'Branch session',
+  'branch.dialog.current.title': 'Current workspace',
+  'branch.dialog.current.description':
+    'Copy the conversation and continue using the current checkout.',
+  'branch.dialog.worktree.title': 'New worktree',
+  'branch.dialog.worktree.description':
+    'Create an isolated checkout from the current Git HEAD. Files are not restored to the state of this response.',
+  'branch.dialog.cancel': 'Cancel',
+  'branch.dialog.confirm': 'Branch',
+  'branch.dialog.creating': 'Creating…',
+  'branch.worktreeActivationFailed':
+    'The branched session was created, but its worktree could not be opened automatically. Reopen it from the session list.',
   'fork.empty': 'Please provide a directive. Usage: /fork <directive>',
   'fork.failed': (v) => `Failed to launch fork: ${v?.reason ?? ''}`,
   'fork.notStarted': 'Background agent was not launched.',
@@ -4749,6 +4761,17 @@ const ZH: Messages = {
     '这条回复已不在当前活跃历史路径中，当前会话不支持从此处分支。',
   'branch.success': (v) =>
     `已复制会话，新会话名称为： "${v?.name ?? ''}"，当前已切换到新的会话。`,
+  'branch.dialog.title': '分支会话',
+  'branch.dialog.current.title': '当前工作区',
+  'branch.dialog.current.description': '复制对话，并继续使用当前检出目录。',
+  'branch.dialog.worktree.title': '新 Worktree',
+  'branch.dialog.worktree.description':
+    '从当前 Git HEAD 创建隔离检出目录；不会把文件恢复到这条回复时的状态。',
+  'branch.dialog.cancel': '取消',
+  'branch.dialog.confirm': '创建分支',
+  'branch.dialog.creating': '正在创建…',
+  'branch.worktreeActivationFailed':
+    '分支会话已创建，但无法自动打开它的 Worktree。请从会话列表重新打开。',
   'fork.empty': '请提供任务指令。用法：/fork <指令>',
   'fork.failed': (v) => `启动后台智能体失败：${v?.reason ?? ''}`,
   'fork.notStarted': '后台智能体未启动。',

@@ -15,6 +15,7 @@ import type { Config } from '../config/config.js';
 import {
   GitWorktreeService,
   WORKTREE_SESSION_FILE,
+  WorktreeSessionMarkerOwnerChangedError,
   worktreeBranchForSlug,
   writeWorktreeSessionMarker,
 } from '../services/gitWorktreeService.js';
@@ -296,17 +297,17 @@ describe('ExitWorktreeTool', () => {
       await expect(fs.access(wtPath)).resolves.toBeUndefined();
     });
 
-    it('marker also written by writeWorktreeSessionMarker survives round-trip', async () => {
-      // Direct service-level write, then read via the same helper —
-      // covers the exclude-rule path (which is best-effort and may
-      // not fire in unusual test layouts).
+    it('keeps the marker owner stable across legacy writer calls', async () => {
       const wtPath = await provisionWorktree('roundtrip');
-      await writeWorktreeSessionMarker(wtPath, 'rewritten-id');
+      await expect(
+        writeWorktreeSessionMarker(wtPath, 'foreign-owner'),
+      ).rejects.toBeInstanceOf(WorktreeSessionMarkerOwnerChangedError);
+      await writeWorktreeSessionMarker(wtPath, 'session-creator');
       const re = await fs.readFile(
         path.join(wtPath, WORKTREE_SESSION_FILE),
         'utf8',
       );
-      expect(re.trim()).toBe('rewritten-id');
+      expect(re.trim()).toBe('session-creator');
     });
   });
 });

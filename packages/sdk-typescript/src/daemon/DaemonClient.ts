@@ -42,6 +42,7 @@ import type {
   DaemonBranchSessionResult,
   DaemonBranchedSession,
   HistoricalBranchSessionRequest,
+  WorktreeBranchSessionRequest,
   DaemonPersistedBranchedSession,
   DaemonSideTaskSession,
   DaemonForkSessionResult,
@@ -3114,6 +3115,11 @@ export class DaemonClient {
 
   async branchSession(
     sessionId: string,
+    req: WorktreeBranchSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonBranchedSession>;
+  async branchSession(
+    sessionId: string,
     req: HistoricalBranchSessionRequest,
     clientId?: string,
   ): Promise<DaemonPersistedBranchedSession>;
@@ -3140,6 +3146,9 @@ export class DaemonClient {
         body: JSON.stringify({
           name: req.name,
           ...('atRecordId' in req ? { atRecordId: req.atRecordId } : {}),
+          ...('worktree' in req && req.worktree !== undefined
+            ? { worktree: req.worktree }
+            : {}),
         }),
       },
       async (res) => {
@@ -6030,10 +6039,12 @@ export class WorkspaceDaemonClient {
   workspaceGit(opts?: {
     cwd?: string;
     wait?: boolean;
+    sessionId?: string;
   }): Promise<DaemonWorkspaceGitStatus> {
     const params = new URLSearchParams();
     if (opts?.cwd) params.set('cwd', opts.cwd);
     if (opts?.wait) params.set('wait', '1');
+    if (opts?.sessionId) params.set('sessionId', opts.sessionId);
     const query = params.toString();
     const suffix = query ? `/git?${query}` : '/git';
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitStatus>(
@@ -6044,9 +6055,15 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitDiff(cwd?: string): Promise<DaemonWorkspaceGitDiff> {
-    const suffix =
-      cwd != null ? `/git/diff?cwd=${urlEncode(cwd)}` : '/git/diff';
+  workspaceGitDiff(
+    cwd?: string,
+    sessionId?: string,
+  ): Promise<DaemonWorkspaceGitDiff> {
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/diff${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiff>(
       this.workspaceSelector,
       suffix,
@@ -6059,11 +6076,13 @@ export class WorkspaceDaemonClient {
     path: string,
     oldPath?: string,
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonWorkspaceGitDiffHunks> {
     const query =
       `/git/diff/file?path=${urlEncode(path)}` +
       (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '') +
-      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '');
+      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '') +
+      (sessionId != null ? `&sessionId=${urlEncode(sessionId)}` : '');
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiffHunks>(
       this.workspaceSelector,
       query,
@@ -6077,12 +6096,14 @@ export class WorkspaceDaemonClient {
     skip?: number,
     cwd?: string,
     range?: string,
+    sessionId?: string,
   ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
     if (cwd != null) params.set('cwd', cwd);
     if (range) params.set('range', range);
+    if (sessionId != null) params.set('sessionId', sessionId);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(
       this.workspaceSelector,
@@ -6095,10 +6116,12 @@ export class WorkspaceDaemonClient {
   workspaceGitCommitDetail(
     sha: string,
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitCommitDetail> {
     const query =
       `/git/log/commit?sha=${urlEncode(sha)}` +
-      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '');
+      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '') +
+      (sessionId != null ? `&sessionId=${urlEncode(sessionId)}` : '');
     return this.client.workspaceJsonRequest<DaemonGitCommitDetail>(
       this.workspaceSelector,
       query,
@@ -6107,9 +6130,15 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitBranches(cwd?: string): Promise<DaemonGitBranchesResult> {
-    const suffix =
-      cwd != null ? `/git/branches?cwd=${urlEncode(cwd)}` : '/git/branches';
+  workspaceGitBranches(
+    cwd?: string,
+    sessionId?: string,
+  ): Promise<DaemonGitBranchesResult> {
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/branches${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitBranchesResult>(
       this.workspaceSelector,
       suffix,
@@ -6121,9 +6150,13 @@ export class WorkspaceDaemonClient {
   workspaceGitCheckout(
     ref: string,
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitCheckoutResult> {
-    const suffix =
-      cwd != null ? `/git/checkout?cwd=${urlEncode(cwd)}` : '/git/checkout';
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/checkout${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitCheckoutResult>(
       this.workspaceSelector,
       suffix,
@@ -6136,9 +6169,13 @@ export class WorkspaceDaemonClient {
     name: string,
     startPoint?: string,
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitCheckoutResult> {
-    const suffix =
-      cwd != null ? `/git/branch?cwd=${urlEncode(cwd)}` : '/git/branch';
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/branch${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitCheckoutResult>(
       this.workspaceSelector,
       suffix,
@@ -6153,9 +6190,13 @@ export class WorkspaceDaemonClient {
       force?: boolean;
     },
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitPushResult> {
-    const suffix =
-      cwd != null ? `/git/push?cwd=${urlEncode(cwd)}` : '/git/push';
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/push${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitPushResult>(
       this.workspaceSelector,
       suffix,
@@ -6170,9 +6211,13 @@ export class WorkspaceDaemonClient {
       fetchOnly?: boolean;
     },
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitPullResult> {
-    const suffix =
-      cwd != null ? `/git/pull?cwd=${urlEncode(cwd)}` : '/git/pull';
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/pull${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitPullResult>(
       this.workspaceSelector,
       suffix,
@@ -6185,9 +6230,13 @@ export class WorkspaceDaemonClient {
     message: string,
     opts?: { all?: boolean },
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitCommitResult> {
-    const suffix =
-      cwd != null ? `/git/commit?cwd=${urlEncode(cwd)}` : '/git/commit';
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/git/commit${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitCommitResult>(
       this.workspaceSelector,
       suffix,
@@ -6213,11 +6262,13 @@ export class WorkspaceDaemonClient {
       head?: string;
     },
     cwd?: string,
+    sessionId?: string,
   ): Promise<DaemonGitHubPullRequestCreateResult> {
-    const suffix =
-      cwd != null
-        ? `/github/prs/create?cwd=${urlEncode(cwd)}`
-        : '/github/prs/create';
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/github/prs/create${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitHubPullRequestCreateResult>(
       this.workspaceSelector,
       suffix,

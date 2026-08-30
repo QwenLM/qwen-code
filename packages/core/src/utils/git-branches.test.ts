@@ -106,6 +106,11 @@ describe('gitEnv (R12 env isolation)', () => {
       GIT_CONFIG_PARAMETERS: "'foo=bar'",
       GIT_OBJECT_DIRECTORY: '/tmp/objects',
       GIT_ALTERNATE_OBJECT_DIRECTORIES: '/tmp/alt',
+      EDITOR: 'vi',
+      GIT_EDITOR: 'vim',
+      GIT_SEQUENCE_EDITOR: 'nano',
+      PAGER: 'less',
+      GIT_PAGER: 'cat',
     });
     expect(env['PATH']).toBe('/usr/bin');
     expect(env['LC_ALL']).toBe('C');
@@ -121,6 +126,11 @@ describe('gitEnv (R12 env isolation)', () => {
       'GIT_CONFIG_PARAMETERS',
       'GIT_OBJECT_DIRECTORY',
       'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+      'EDITOR',
+      'GIT_EDITOR',
+      'GIT_SEQUENCE_EDITOR',
+      'PAGER',
+      'GIT_PAGER',
     ]) {
       expect(env[key]).toBeUndefined();
     }

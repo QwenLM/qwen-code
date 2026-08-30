@@ -7,6 +7,7 @@
 import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
+  DaemonBranchSessionRequest,
   DaemonCapabilities,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
@@ -565,10 +566,7 @@ export interface DaemonSessionActions {
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
-  branchSession(
-    name?: string,
-    atRecordId?: string,
-  ): Promise<{
+  branchSession(options?: DaemonBranchSessionRequest): Promise<{
     sessionId: string;
     displayName: string;
     switchStarted: boolean;

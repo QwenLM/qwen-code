@@ -1147,6 +1147,7 @@ export const AppContainer = (props: AppContainerProps) => {
                 // eslint-disable-next-line no-console
                 console.debug('worktree session restore warning:', err);
               },
+              config.getSessionId(),
             );
             if (restored.contextMessage) {
               // UI: show the notice in the transcript so the user knows.

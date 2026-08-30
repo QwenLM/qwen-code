@@ -2052,6 +2052,39 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('reports the live execution cwd and worktree ownership snapshot', async () => {
+    const target = path.join(WS_A, '.qwen', 'worktrees', 'branch-test');
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionCd
+          ? { previousCwd: WS_A, newCwd: target, warnings: [] }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.changeSessionCwd(session.sessionId, {
+      path: target,
+      allowedRoots: [path.join(WS_A, '.qwen', 'worktrees')],
+    });
+    bridge.setSessionWorktree(session.sessionId, {
+      slug: 'branch-test',
+      path: target,
+      branch: 'worktree-branch-test',
+    });
+
+    expect(bridge.getSessionExecutionSnapshot(session.sessionId)).toEqual({
+      workspaceCwd: WS_A,
+      effectiveCwd: target,
+      worktree: {
+        slug: 'branch-test',
+        path: target,
+        branch: 'worktree-branch-test',
+      },
+    });
+    await bridge.shutdown();
+  });
+
   it('holds standalone prompts until the exact managed binding is released', async () => {
     const sessionId = '11111111-1111-4111-8111-111111111111';
     const target = path.join(WS_A, 'conversation-standalone');
@@ -16279,6 +16312,65 @@ describe('createAcpSessionBridge', () => {
           { clientId: branch.clientId },
         ),
       ).resolves.toEqual({ stopReason: 'end_turn' });
+      await bridge.shutdown();
+    });
+
+    it('keeps a latest-state worktree branch persisted and forwards its target id', async () => {
+      const targetSessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
+          return { newSessionId: targetSessionId, title: 'Worktree branch' };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const branch = await bridge.branchSession(source.sessionId, {
+        name: 'Worktree branch',
+        targetSessionId,
+        persistOnly: true,
+      });
+
+      expect(branch).toMatchObject({
+        sessionId: targetSessionId,
+        displayName: 'Worktree branch',
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+          params: expect.objectContaining({ targetSessionId }),
+        }),
+      );
+      expect(handle.agent.loadSessionCalls).toEqual([]);
+      await bridge.shutdown();
+    });
+
+    it('rejects a persisted branch whose returned target id changed', async () => {
+      const targetSessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
+          return {
+            newSessionId: '22222222-2222-4222-8222-222222222222',
+            title: 'Wrong target',
+          };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.branchSession(source.sessionId, {
+          targetSessionId,
+          persistOnly: true,
+        }),
+      ).rejects.toThrow('different target session id');
+      expect(handle.agent.loadSessionCalls).toEqual([]);
       await bridge.shutdown();
     });
 

@@ -210,6 +210,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
       super(`Invalid or inactive branch point: ${recordId}`);
     }
   },
+  SessionForkSourceUnavailableError: class SessionForkSourceUnavailableError extends Error {
+    constructor(readonly sessionId: string) {
+      super(`Source session not found or empty: ${sessionId}`);
+    }
+  },
   INVOCATION_CONTEXT_META_KEY: 'qwen-code/invocation',
   PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   PRIVATE_PARENT_CAPABILITY_META_KEY: 'qwen-code/private-parent-capability',
@@ -967,6 +972,7 @@ import type { CliArgs } from '../config/config.js';
 import {
   AuthType,
   BranchPointInvalidError,
+  SessionForkSourceUnavailableError,
   SessionEndReason,
   MCPServerConfig,
   SessionService,
@@ -18209,6 +18215,64 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
+  it('uses a daemon-reserved target session id for branch publication', async () => {
+    const targetSessionId = '11111111-1111-4111-8111-111111111111';
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const result = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionBranch,
+      {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        targetSessionId,
+      },
+    );
+
+    expect(sessionService.forkSession).toHaveBeenCalledWith(
+      liveSessionId,
+      targetSessionId,
+      { title: 'Source session(1)' },
+    );
+    expect(result).toMatchObject({ newSessionId: targetSessionId });
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects an invalid daemon-reserved branch target id', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+        targetSessionId: 'a'.repeat(32),
+      }),
+    ).rejects.toThrow('Invalid targetSessionId');
+    expect(sessionService.forkSession).not.toHaveBeenCalled();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it.each([
     {
       sourceTitle: 'Source session(2)',
@@ -18535,6 +18599,37 @@ describe('QwenAgent extMethod renameSession routing', () => {
     );
     expect(liveBeginHistoryMutation).toHaveBeenCalledOnce();
     expect(liveReleaseHistoryMutation).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('maps an empty fork source to session_not_found', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi
+        .fn()
+        .mockRejectedValue(
+          new SessionForkSourceUnavailableError(liveSessionId),
+        ),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toMatchObject({
+      code: -32004,
+      data: { errorKind: 'session_not_found', sessionId: liveSessionId },
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

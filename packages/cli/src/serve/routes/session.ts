@@ -9,9 +9,16 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   APPROVAL_MODES,
+  AGENT_WORKTREE_SLUG_PATTERN,
   BTW_MAX_INPUT_LENGTH,
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
+  clearWorktreeSessionDurable,
+  createWorktreeSession,
+  createWorktreeSessionMarker,
+  readWorktreeSessionMarker,
+  WORKTREE_SESSION_FILE,
+  worktreeBranchForSlug,
   SessionOrganizationError,
   SessionIdCaseConflictError,
   SessionStorageEntryError,
@@ -43,6 +50,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   type BridgeBranchedSession,
+  type BridgePersistedBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
@@ -74,12 +82,15 @@ import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
 import { parseChannelDelivery } from '../../runtime/channel-delivery.js';
 import {
   canonicalizeWorkspace,
+  BranchWhilePromptActiveError,
+  BridgeChannelQuarantinedError,
   InvalidClientIdError,
   InvalidSessionMetadataError,
   PromptQueueFullError,
   SessionArtifactValidationError,
   SessionArchivedError,
   SessionConflictError,
+  SessionBusyError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -174,6 +185,15 @@ import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,
 } from '../workspace-runtime-storage.js';
+import {
+  clearBranchWorktreeJournalDurable,
+  createBranchWorktreeJournal,
+  getBranchWorktreeJournalPath,
+  isBranchWorktreeCreationSupported,
+  resolveBranchWorktreeBaseCheckout,
+  updateBranchWorktreeJournal,
+  type BranchWorktreePreparationJournal,
+} from '../branch-worktree-preparation.js';
 import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import {
   CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
@@ -3002,7 +3022,9 @@ export function registerSessionRoutes(
         } else {
           slug = rawSlug;
         }
-        const slugError = GitWorktreeService.validateUserWorktreeSlug(slug);
+        const slugError = AGENT_WORKTREE_SLUG_PATTERN.test(slug)
+          ? 'Worktree name is reserved for ephemeral agent worktrees.'
+          : GitWorktreeService.validateUserWorktreeSlug(slug);
         if (slugError) {
           res
             .status(400)
@@ -3863,6 +3885,18 @@ export function registerSessionRoutes(
               if (!contained) {
                 realTarget = undefined;
               }
+              if (realTarget) {
+                const markerStat = fs.lstatSync(
+                  path.join(realTarget, WORKTREE_SESSION_FILE),
+                );
+                const markerOwner = await readWorktreeSessionMarker(realTarget);
+                if (
+                  !markerStat.isFile() ||
+                  markerOwner !== restoredStorageSessionId
+                ) {
+                  realTarget = undefined;
+                }
+              }
             } catch {
               realTarget = undefined;
             }
@@ -3896,6 +3930,7 @@ export function registerSessionRoutes(
                   });
                 }
                 runtime.bridge.setSessionWorktree(sessionId, wt);
+                session.currentCwd = wt.path;
                 session.worktree = wt;
               } catch (restoreErr) {
                 daemonLog?.warn('worktree restore failed on load/resume', {
@@ -4076,6 +4111,417 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        const rawWorktree = body?.['worktree'];
+        if (rawWorktree !== undefined) {
+          if (!runtime.trusted) {
+            res.status(403).json({
+              error: 'Worktree creation requires a trusted workspace',
+              code: 'untrusted_workspace',
+            });
+            return;
+          }
+          if (
+            rawWorktree === null ||
+            typeof rawWorktree !== 'object' ||
+            Array.isArray(rawWorktree)
+          ) {
+            res.status(400).json({
+              error: '`worktree` must be an object',
+              code: 'invalid_worktree',
+            });
+            return;
+          }
+          const worktreeRequest = rawWorktree as Record<string, unknown>;
+          const rawSlug = worktreeRequest['slug'];
+          const slug =
+            rawSlug === undefined
+              ? GitWorktreeService.generateAutoSlug()
+              : rawSlug;
+          if (typeof slug !== 'string' || slug.length === 0) {
+            res.status(400).json({
+              error: '`worktree.slug` must be a non-empty string',
+              code: 'worktree_invalid_slug',
+            });
+            return;
+          }
+          const slugError = AGENT_WORKTREE_SLUG_PATTERN.test(slug)
+            ? 'Worktree name is reserved for ephemeral agent worktrees.'
+            : GitWorktreeService.validateUserWorktreeSlug(slug);
+          if (slugError) {
+            res.status(400).json({
+              error: slugError,
+              code: 'worktree_invalid_slug',
+            });
+            return;
+          }
+
+          const sessionService = createWorkspaceRuntimeSessionService(runtime);
+          if (runtime.bridge.getSessionSummary(sessionId).hasActivePrompt) {
+            throw new BranchWhilePromptActiveError(sessionId);
+          }
+          const snapshot =
+            runtime.bridge.getSessionExecutionSnapshot(sessionId);
+          const base = await resolveBranchWorktreeBaseCheckout({
+            workspaceCwd: runtime.workspaceCwd,
+            sessionId,
+            snapshot,
+            sidecarPath: sessionService.getWorktreeSessionPath(sessionId),
+          });
+          if (!base) {
+            res.status(409).json({
+              error:
+                'The current session cwd cannot be used as a worktree base',
+              code: 'worktree_base_checkout_unsupported',
+            });
+            return;
+          }
+          if (!(await isBranchWorktreeCreationSupported(base))) {
+            res.status(500).json({
+              error: 'Worktree creation is not available for this checkout',
+              code: 'worktree_create_failed',
+            });
+            return;
+          }
+
+          const targetSessionId = crypto.randomUUID();
+          await archiveCoordinator.runSharedMany(
+            [targetSessionId],
+            async () => {
+              let reservation: RequestedSessionIdReservation | undefined;
+              let worktreeCreated = false;
+              let markerCreated = false;
+              let mutationDispatched = false;
+              let published: BridgePersistedBranchedSession | undefined;
+              let restored: BridgeBranchedSession | undefined;
+              const worktreeService = new GitWorktreeService(base.repoTop);
+              const sidecarPath =
+                sessionService.getWorktreeSessionPath(targetSessionId);
+              const journalPath = getBranchWorktreeJournalPath(
+                sidecarPath,
+                targetSessionId,
+              );
+              let journal: BranchWorktreePreparationJournal | undefined;
+              const cleanupPrepared = async (): Promise<void> => {
+                if (!journal) return;
+                if (
+                  await sessionService.sessionExistsInAnyState(targetSessionId)
+                ) {
+                  await clearBranchWorktreeJournalDurable(journalPath);
+                  return;
+                }
+                if (!worktreeCreated) {
+                  const pathExists = await fs.promises
+                    .lstat(journal.worktreePath)
+                    .then(() => true)
+                    .catch((error: NodeJS.ErrnoException) => {
+                      if (error.code === 'ENOENT') return false;
+                      throw error;
+                    });
+                  if (!pathExists) {
+                    await clearBranchWorktreeJournalDurable(journalPath);
+                  } else {
+                    daemonLog?.warn(
+                      'planned branch worktree residue preserved',
+                      { targetSessionId },
+                    );
+                  }
+                  return;
+                }
+                if (!journal.sidecarCreated) {
+                  const sidecarExists = await fs.promises
+                    .lstat(sidecarPath)
+                    .then(() => true)
+                    .catch((error: NodeJS.ErrnoException) => {
+                      if (error.code === 'ENOENT') return false;
+                      throw error;
+                    });
+                  if (sidecarExists) {
+                    daemonLog?.warn(
+                      'branch worktree sidecar ownership is unknown',
+                      { targetSessionId },
+                    );
+                    return;
+                  }
+                }
+                journal = await updateBranchWorktreeJournal(
+                  journalPath,
+                  journal,
+                  'cleanup-intent',
+                );
+                const removed =
+                  await worktreeService.removePreparedUserWorktree(
+                    slug,
+                    markerCreated ? targetSessionId : null,
+                    base.headCommit,
+                    async () => {
+                      journal = await updateBranchWorktreeJournal(
+                        journalPath,
+                        journal!,
+                        'worktree-removed',
+                      );
+                      runtime.generationGuard?.assertOpen();
+                    },
+                  );
+                if (!removed.success) {
+                  daemonLog?.warn('branch worktree cleanup refused', {
+                    targetSessionId,
+                    error: removed.error,
+                  });
+                  return;
+                }
+                journal = await updateBranchWorktreeJournal(
+                  journalPath,
+                  journal,
+                  removed.branchPreserved
+                    ? 'branch-preserved'
+                    : 'branch-deleted',
+                );
+                if (removed.branchPreserved) {
+                  daemonLog?.warn('branch worktree cleanup preserved branch', {
+                    targetSessionId,
+                    branch: journal.worktreeBranch,
+                  });
+                }
+                if (journal.sidecarCreated) {
+                  await clearWorktreeSessionDurable(sidecarPath);
+                } else {
+                  const lateSidecarExists = await fs.promises
+                    .lstat(sidecarPath)
+                    .then(() => true)
+                    .catch((error: NodeJS.ErrnoException) => {
+                      if (error.code === 'ENOENT') return false;
+                      throw error;
+                    });
+                  if (lateSidecarExists) {
+                    daemonLog?.warn(
+                      'branch worktree sidecar ownership is unknown',
+                      { targetSessionId },
+                    );
+                    return;
+                  }
+                }
+                await clearBranchWorktreeJournalDurable(journalPath);
+              };
+              const releaseRestored = async (): Promise<void> => {
+                if (!restored) return;
+                if (restored.attached) {
+                  await runtime.bridge
+                    .detachClient(restored.sessionId, restored.clientId)
+                    .catch(() => {});
+                } else {
+                  await runtime.bridge
+                    .killSession(restored.sessionId, {
+                      requireZeroAttaches: true,
+                    })
+                    .catch(() => false);
+                }
+              };
+
+              try {
+                reservation = await requestedSessionIdAdmission.reserveCreate(
+                  targetSessionId,
+                  {
+                    bridge: runtime.bridge,
+                    workspaceCwd: runtime.workspaceCwd,
+                    workspaceId: runtime.workspaceId,
+                  },
+                );
+                runtime.generationGuard?.assertOpen();
+                journal = await createBranchWorktreeJournal({
+                  journalPath,
+                  targetSessionId,
+                  slug,
+                  worktreePath: worktreeService.getUserWorktreePath(slug),
+                  worktreeBranch: worktreeBranchForSlug(slug),
+                  repoTop: base.repoTop,
+                  baseCommit: base.headCommit,
+                  sidecarPath,
+                });
+                runtime.generationGuard?.assertOpen();
+                const worktreeResult = await worktreeService.createUserWorktree(
+                  slug,
+                  base.headCommit,
+                );
+                if (!worktreeResult.success || !worktreeResult.worktree) {
+                  await cleanupPrepared();
+                  res.status(500).json({
+                    error: 'Failed to create worktree',
+                    code: 'worktree_create_failed',
+                  });
+                  return;
+                }
+                worktreeCreated = true;
+                journal = await updateBranchWorktreeJournal(
+                  journalPath,
+                  journal,
+                  'worktree-created',
+                );
+                runtime.generationGuard?.assertOpen();
+                const worktree = {
+                  slug,
+                  path: worktreeResult.worktree.path,
+                  branch: worktreeResult.worktree.branch,
+                };
+                await createWorktreeSessionMarker(
+                  worktree.path,
+                  targetSessionId,
+                );
+                markerCreated = true;
+                journal = await updateBranchWorktreeJournal(
+                  journalPath,
+                  journal,
+                  'marker-created',
+                );
+                runtime.generationGuard?.assertOpen();
+                await createWorktreeSession(sidecarPath, {
+                  slug,
+                  worktreePath: worktree.path,
+                  worktreeBranch: worktree.branch,
+                  originalCwd: base.repoTop,
+                  originalBranch: base.branch,
+                  originalHeadCommit: base.headCommit,
+                });
+                journal = await updateBranchWorktreeJournal(
+                  journalPath,
+                  journal,
+                  'sidecar-ready',
+                );
+
+                runtime.generationGuard?.assertOpen();
+                journal = await updateBranchWorktreeJournal(
+                  journalPath,
+                  journal,
+                  'mutation-dispatched',
+                );
+                runtime.generationGuard?.assertOpen();
+                mutationDispatched = true;
+                published = (await runtime.bridge.branchSession(
+                  sessionId,
+                  {
+                    name,
+                    ...(atRecordId !== undefined ? { atRecordId } : {}),
+                    targetSessionId,
+                    persistOnly: true,
+                  },
+                  { clientId },
+                )) as BridgePersistedBranchedSession;
+                await clearBranchWorktreeJournalDurable(journalPath);
+
+                runtime.generationGuard?.assertOpen();
+                const loaded = await runtime.bridge.loadSession({
+                  sessionId: targetSessionId,
+                  workspaceCwd: runtime.workspaceCwd,
+                  historyReplay: 'response',
+                  ...(clientId !== undefined ? { clientId } : {}),
+                });
+                restored = {
+                  ...loaded,
+                  displayName: published.displayName,
+                  forkedFrom: published.forkedFrom,
+                };
+                runtime.generationGuard?.assertOpen();
+                const changed = await runtime.bridge.changeSessionCwd(
+                  targetSessionId,
+                  {
+                    path: worktree.path,
+                    allowedRoots: [
+                      path.join(base.repoTop, '.qwen', 'worktrees'),
+                    ],
+                  },
+                );
+                runtime.generationGuard?.assertOpen();
+                runtime.bridge.setSessionWorktree(targetSessionId, worktree);
+                restored.currentCwd = changed.newCwd;
+                restored.worktree = worktree;
+                if (!res.writable) {
+                  await releaseRestored();
+                  return;
+                }
+                res
+                  .status(201)
+                  .json(omitSkillDetailsFromReplayArrays(restored));
+                return;
+              } catch (error) {
+                if (published) {
+                  await releaseRestored();
+                  if (res.writable) {
+                    res.status(500).json({
+                      error: 'Branch created but failed to open its worktree',
+                      code: 'branch_worktree_activation_failed',
+                      sessionId: targetSessionId,
+                    });
+                  }
+                  return;
+                }
+                const errorKind = (error as { data?: { errorKind?: unknown } })
+                  .data?.errorKind;
+                const settledPrecommitFailure =
+                  error instanceof BranchWhilePromptActiveError ||
+                  error instanceof BridgeChannelQuarantinedError ||
+                  error instanceof InvalidClientIdError ||
+                  error instanceof SessionBusyError ||
+                  error instanceof SessionNotFoundError ||
+                  errorKind === 'branch_point_invalid' ||
+                  errorKind === 'session_not_found' ||
+                  errorKind === 'session_busy';
+                if (!mutationDispatched || settledPrecommitFailure) {
+                  try {
+                    await cleanupPrepared();
+                  } catch (cleanupError) {
+                    daemonLog?.warn('branch worktree cleanup failed', {
+                      targetSessionId,
+                      error:
+                        cleanupError instanceof Error
+                          ? cleanupError.message
+                          : String(cleanupError),
+                    });
+                    if (res.writable) {
+                      res.status(500).json({
+                        error: 'Failed to prepare worktree branch',
+                        code: 'worktree_create_failed',
+                      });
+                    }
+                    return;
+                  }
+                  if (error instanceof RequestedSessionIdAdmissionError) {
+                    sendRequestedSessionIdAdmissionError(
+                      res,
+                      error,
+                      'POST /session/:id/branch',
+                    );
+                    return;
+                  }
+                  const fileSystemError = error as NodeJS.ErrnoException;
+                  if (
+                    typeof fileSystemError.path === 'string' ||
+                    typeof fileSystemError.syscall === 'string'
+                  ) {
+                    if (res.writable) {
+                      res.status(500).json({
+                        error: 'Failed to prepare worktree branch',
+                        code: 'worktree_create_failed',
+                      });
+                    }
+                    return;
+                  }
+                  throw error;
+                }
+                if (res.writable) {
+                  res.status(500).json({
+                    error:
+                      'Branch outcome is unknown; prepared resources were preserved',
+                    code: 'branch_worktree_outcome_unknown',
+                    sessionId: targetSessionId,
+                  });
+                }
+                return;
+              } finally {
+                reservation?.release();
+              }
+            },
+          );
+          return;
+        }
         const result = await runtime.bridge.branchSession(
           sessionId,
           {

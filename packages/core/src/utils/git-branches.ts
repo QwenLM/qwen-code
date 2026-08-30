@@ -47,10 +47,10 @@ export interface GitBranchesResult {
   detached: boolean;
 }
 
-// Repository-shifting variables that a daemon process may inherit from its
-// launch environment.  Clearing them prevents a trusted workspace request
-// from operating on a completely different repository despite the resolved
-// `cwd`.
+// Repository-shifting and command-executing variables that a daemon process
+// may inherit from its launch environment. Clearing them prevents a trusted
+// workspace request from operating on a different repository or spawning an
+// inherited editor/pager despite the resolved `cwd`.
 const GIT_ENV_VARS_TO_CLEAR = [
   'GIT_DIR',
   'GIT_WORK_TREE',
@@ -67,6 +67,11 @@ const GIT_ENV_VARS_TO_CLEAR = [
   'GIT_CONFIG_PARAMETERS',
   'GIT_OBJECT_DIRECTORY',
   'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'EDITOR',
+  'GIT_EDITOR',
+  'GIT_SEQUENCE_EDITOR',
+  'PAGER',
+  'GIT_PAGER',
 ];
 
 // Command-scope config injection uses numbered GIT_CONFIG_KEY_<n> /

@@ -333,6 +333,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_hooks: { since: 'v1' },
   workspace_extensions: { since: 'v1' },
   session_branch: { since: 'v1' },
+  session_branch_worktree: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
   // Immediate best-effort channel delivery for prompt/scheduled finals and
