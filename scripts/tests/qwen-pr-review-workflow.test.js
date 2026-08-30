@@ -53,6 +53,17 @@ const hasMkfifo = (() => {
   }
 })();
 
+describe('qwen pr review runner routing', () => {
+  it('isolates the long-running review job on the agent pool', () => {
+    const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
+
+    expect(runsOn).toBe(
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-agent"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+    );
+    expect(runsOn).not.toContain('ecs-qwen');
+  });
+});
+
 function runReviewStep() {
   const doc = parse(workflow);
   const step = doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review');

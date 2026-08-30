@@ -9982,25 +9982,21 @@ exit 1
     );
   });
 
-  it('runs heavy autofix jobs on the ECS pool with hosted fallback', () => {
+  it('isolates agent jobs from builds with hosted fallback', () => {
     const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
 
-    // Each heavy job routes to the persistent ECS pool (every target is
-    // live-gated to write+ internal authors and the ECS pool ships docker),
-    // with a hosted fallback for forks of this repo and when ECS routing is
-    // disabled. PR-family events additionally need a same-repo head or a
-    // write+ author — the fleet's ECS routing guard (ci.yml's classify_pr).
-    // Pin the exact expression so neither the repository guard nor the
-    // hosted fallback can be dropped silently.
+    // Agent execution uses the dedicated pool while the trusted-base build
+    // remains on the general ECS pool. Both retain the hosted fallback for
+    // forks and when ECS routing is disabled. Pin the exact expressions so
+    // neither the trust guard nor the fallback can be dropped silently.
     const ecsRunsOn =
       "runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]''), github.event.pull_request.author_association))) && fromJSON(''[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]'') || fromJSON(''[\"ubuntu-latest\"]'') }}'";
-    const heavyJobRunsOn = {
-      'issue-autofix': issueAutofixJob,
-      'build-cli': buildCliJob,
-      'review-address': reviewAddressJob,
-    };
-    for (const runsOn of Object.values(heavyJobRunsOn)) {
-      expect(runsOn).toContain(ecsRunsOn);
+    const agentRunsOn = ecsRunsOn.replace('ecs-qwen', 'ecs-agent');
+    expect(buildCliJob).toContain(ecsRunsOn);
+    for (const agentJob of [issueAutofixJob, reviewAddressJob]) {
+      const runsOn = agentJob.match(/runs-on: .*/)?.[0] ?? '';
+      expect(runsOn).toBe(agentRunsOn);
+      expect(runsOn).not.toContain('ecs-qwen');
     }
     // The widened runner-environment guard is what lets ECS-routed runs pass
     // 'Check runner environment' at all — pin the accepted set in both jobs
@@ -10044,6 +10040,8 @@ exit 1
       ) ?? [];
     expect(envCheckSteps).toHaveLength(2);
     for (const step of envCheckSteps) {
+      expect(step).toContain('ecs-qwen-*|ecs-agent-*) ;;');
+      expect(step).toContain('not an approved agent pool member');
       expect(step).toContain('docker info');
       expect(step).toContain('exit 1');
     }
@@ -10069,10 +10067,9 @@ exit 1
     expect(routeJob).not.toContain('actions/checkout');
     expect(reviewScanJob).not.toContain('actions/checkout');
     // The scan's per-run WORKDIR must not outlive the run on the pool:
-    // 0700 at creation and an always() cleanup step mirroring the heavy
-    // jobs' teardown. The value pins the autofix* prefix — the contract
-    // with the heavy jobs' age sweep, the only reclaim channel left after
-    // a hard runner kill.
+    // 0700 at creation, an age sweep on the same ecs-qwen pool, and an
+    // always() cleanup step mirroring the heavy jobs' teardown. The value
+    // pins the autofix* prefix used by both cleanup paths.
     expect(reviewScanJob).toContain(
       "WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'",
     );
@@ -10080,6 +10077,9 @@ exit 1
     // alone would accept a dir or symlink pre-planted on the shared /tmp.
     expect(reviewScanJob).toContain(
       'rm -rf "${WORKDIR}"\n          (umask 077; mkdir -p "${WORKDIR}")',
+    );
+    expect(reviewScanJob).toContain(
+      "find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true",
     );
     // The fleet file lives inside WORKDIR so the always() step and the age
     // sweep reclaim it when the EXIT trap cannot (cancelled/killed run).

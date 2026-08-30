@@ -480,7 +480,7 @@ jobs:
     # (default: 360); must stay above QWEN_REVIEW_MAX_TIMEOUT_MINUTES so
     # retry plus posting never hit the cap.
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-agent"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
       pull-requests: 'write'
