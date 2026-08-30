@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   AgentTool,
   type AgentParams,
+  findBackgroundedAncestorAgentId,
   resolveSubagentApprovalMode,
 } from './agent.js';
 import type { Content, Part, PartListUnion } from '@google/genai';
@@ -205,7 +206,7 @@ describe('AgentTool', () => {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getCliVersion: vi.fn().mockReturnValue('test-version'),
       getSubagentManager: vi.fn(),
-      getGeminiClient: vi.fn().mockReturnValue(undefined),
+      getLlmClient: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
@@ -399,6 +400,12 @@ describe('AgentTool', () => {
       expect(tool.description).toContain(
         'foreground regular agent returns its result inline',
       );
+      expect(tool.description).toContain(
+        'Unnamed caller-owned `working_dir` launches run in the foreground: an explicit `run_in_background: true` request is rejected',
+      );
+      expect(tool.description).toContain(
+        'a configured background default (`background: true` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches',
+      );
     });
 
     it('explains how to continue reusable background agents', async () => {
@@ -529,6 +536,18 @@ describe('AgentTool', () => {
       );
       expect(properties.properties.run_in_background.description).toContain(
         'Nested agents run in the foreground unless run_in_background is explicitly true',
+      );
+      expect(properties.properties.run_in_background.description).toContain(
+        'Named teammates are always concurrent',
+      );
+      expect(properties.properties.run_in_background.description).toContain(
+        'an explicit false is rejected',
+      );
+      expect(properties.properties.run_in_background.description).toContain(
+        'explicit run_in_background: true is rejected',
+      );
+      expect(properties.properties.run_in_background.description).toContain(
+        'a configured background default is rejected at the top level and downgraded to the foreground for nested launches',
       );
     });
 
@@ -662,6 +681,12 @@ describe('AgentTool', () => {
       };
 
       expect(parameters.properties.name?.description).toContain('active team');
+      expect(parameters.properties.name?.description).toContain(
+        'always run concurrently',
+      );
+      expect(parameters.properties.name?.description).toContain(
+        'run_in_background: false instead',
+      );
     });
 
     it('exposes plan_mode_required only when teams are enabled', async () => {
@@ -676,10 +701,22 @@ describe('AgentTool', () => {
           plan_mode_required?: {
             description?: string;
           };
+          read_only?: {
+            description?: string;
+          };
         };
       };
       expect(parameters.properties.plan_mode_required?.description).toContain(
         'named teammate',
+      );
+      expect(parameters.properties.plan_mode_required?.description).toContain(
+        'Cannot be combined with read_only',
+      );
+      expect(parameters.properties.read_only?.description).toContain(
+        'named teammate in an active team',
+      );
+      expect(parameters.properties.read_only?.description).toContain(
+        'Cannot be combined with plan_mode_required',
       );
 
       vi.mocked(config.isAgentTeamEnabled).mockReturnValue(false);
@@ -817,6 +854,46 @@ describe('AgentTool', () => {
           model: 'high',
         }),
       ).toMatch(/not supported for a named teammate/i);
+    });
+
+    it('rejects run_in_background: false for a named teammate with an active team', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          run_in_background: false,
+        }),
+      ).toMatch(/cannot be false for a named teammate/i);
+    });
+
+    it('accepts run_in_background: true for a named teammate', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          run_in_background: true,
+        }),
+      ).toBeNull();
+    });
+
+    it('accepts run_in_background: false with a name when no team is active', () => {
+      // Without an active team the name falls through to a regular agent,
+      // where the foreground request stays valid.
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          run_in_background: false,
+        }),
+      ).toBeNull();
     });
 
     it.each(['all', '1', '12'] as const)(
@@ -1344,6 +1421,42 @@ describe('AgentTool', () => {
       ).toBeNull();
     });
 
+    it('rejects read_only without a named teammate', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          read_only: true,
+        }),
+      ).toMatch(/named teammate/i);
+    });
+
+    it('rejects read_only when no team is active', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'reader',
+          read_only: true,
+        }),
+      ).toMatch(/active team/i);
+    });
+
+    it('rejects combining read_only with plan_mode_required', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'reader',
+          read_only: true,
+          plan_mode_required: true,
+        }),
+      ).toMatch(/cannot be used together/i);
+    });
+
     it('accepts redundant isolation for a named worktree teammate', () => {
       vi.mocked(config.getTeamManager).mockReturnValue({} as never);
 
@@ -1466,6 +1579,9 @@ describe('AgentTool', () => {
         'non-existent',
       );
       expect(result.llmContent).toBe(
+        'Subagent "non-existent" not found. Available subagents: file-search, code-review',
+      );
+      expect(result.error?.message).toBe(
         'Subagent "non-existent" not found. Available subagents: file-search, code-review',
       );
     });
@@ -1598,6 +1714,28 @@ describe('AgentTool', () => {
       expect(spawnTeammate).not.toHaveBeenCalled();
     });
 
+    it('blocks run_in_background: false if a team becomes active after validation', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find the config',
+        name: 'searcher',
+        run_in_background: false,
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(partToString(result.llmContent)).toMatch(
+        /cannot be false for a named teammate/i,
+      );
+      expect(spawnTeammate).not.toHaveBeenCalled();
+    });
+
     it('rejects plan_mode_required direct execution from a subagent context', async () => {
       const spawnTeammate = vi.fn().mockResolvedValue(undefined);
       vi.mocked(config.getTeamManager).mockReturnValue({
@@ -1684,7 +1822,9 @@ describe('AgentTool', () => {
         expect(spawnTeammate).toHaveBeenCalledWith(
           expect.objectContaining({
             name: 'reviewer',
-            cwd: '/test/project/.qwen/tmp/review-pr-1',
+            // The pin resolves through path.resolve, so expect the
+            // platform-normalized spelling (backslashes on Windows).
+            cwd: path.resolve('/test/project', '.qwen/tmp/review-pr-1'),
           }),
         );
       } finally {
@@ -2117,10 +2257,19 @@ describe('AgentTool', () => {
         subagent_type: 'file-search',
         working_dir: '.qwen/tmp/review-pr-1',
       });
-      const result = await invocation.execute();
+      const updates: AgentResultDisplay[] = [];
+      const result = await invocation.execute(undefined, (output) => {
+        updates.push(output as AgentResultDisplay);
+      });
 
       expect(partToString(result.llmContent)).toMatch(/background agent/i);
       expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      // The guard returns before the display init, like the other spawn
+      // guards: a never-running launch emits zero frames. A running frame
+      // carrying executionMode: 'background' would contradict the blocked
+      // result frame, which has no executionMode and falls back to the
+      // frozen legacy heuristic (foreground here).
+      expect(updates).toEqual([]);
     });
 
     it('allows working_dir for a background:true subagent that downgrades to foreground when nested', async () => {
@@ -2168,6 +2317,93 @@ describe('AgentTool', () => {
         fs.rmSync(nonRepo, { recursive: true, force: true });
         vi.useFakeTimers();
       }
+    });
+
+    it('bridges nested approvals to the nearest backgrounded ancestor entry', async () => {
+      // A foreground launch from inside a background agent (fork) has no
+      // inline UI: its TOOL_WAITING_APPROVAL fires on the invocation's own
+      // emitter. The launch path must bridge that emitter onto the
+      // ancestor's Background-tasks entry (marked nestedSource so the UI
+      // can name the waiter) and unbridge on completion.
+      const registry = config.getBackgroundTaskRegistry() as unknown as {
+        get: ReturnType<typeof vi.fn>;
+        bridgeApprovalEvents: ReturnType<typeof vi.fn>;
+      };
+      const cleanupSpy = vi.fn();
+      registry.bridgeApprovalEvents.mockReturnValue(cleanupSpy);
+      registry.get.mockImplementation((id: string) =>
+        id === 'fork-entry'
+          ? { isBackgrounded: true, status: 'running' }
+          : undefined,
+      );
+
+      const invocation = agentTool.build({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      });
+      await runWithAgentContext('fork-entry', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(registry.bridgeApprovalEvents).toHaveBeenCalledTimes(1);
+      const [ownerId, emitter, opts] =
+        registry.bridgeApprovalEvents.mock.calls[0];
+      expect(ownerId).toBe('fork-entry');
+      expect(emitter).toBe(
+        (invocation as unknown as { eventEmitter: unknown }).eventEmitter,
+      );
+      expect(opts).toEqual({ nestedSource: true });
+      // Unbridged in the foreground finally — no listener leak.
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not bridge approvals for a top-level foreground launch', async () => {
+      // No agent-context frame → no backgrounded ancestor → the inline
+      // confirmation path applies unchanged.
+      const registry = config.getBackgroundTaskRegistry() as unknown as {
+        bridgeApprovalEvents: ReturnType<typeof vi.fn>;
+      };
+
+      const invocation = agentTool.build({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      });
+      await invocation.execute(new AbortController().signal);
+
+      expect(registry.bridgeApprovalEvents).not.toHaveBeenCalled();
+    });
+
+    it('does not bridge nested approvals when the inherited policy auto-denies', async () => {
+      // Under a non-bubble ancestor the nested launch inherits
+      // prompt-avoidance through its config chain, so its scheduler
+      // auto-denies and no TOOL_WAITING_APPROVAL can fire — the wiring is
+      // gated like the sibling bridges instead of leaving a dead
+      // subscription on the emitter.
+      (config as unknown as Record<string, unknown>)[
+        'getShouldAvoidPermissionPrompts'
+      ] = vi.fn().mockReturnValue(true);
+      const registry = config.getBackgroundTaskRegistry() as unknown as {
+        get: ReturnType<typeof vi.fn>;
+        bridgeApprovalEvents: ReturnType<typeof vi.fn>;
+      };
+      registry.get.mockImplementation((id: string) =>
+        id === 'fork-entry'
+          ? { isBackgrounded: true, status: 'running' }
+          : undefined,
+      );
+
+      const invocation = agentTool.build({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      });
+      await runWithAgentContext('fork-entry', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(registry.bridgeApprovalEvents).not.toHaveBeenCalled();
     });
 
     it('strips internal analysis and summary tags from subagent result', async () => {
@@ -2246,6 +2482,36 @@ describe('AgentTool', () => {
 
       expect(partToString(result.llmContent)).toBe(
         '(subagent produced no model-visible output)',
+      );
+    });
+
+    it('marks a worktree provisioning failure as a failed tool call (#9509)', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockSubagents[0],
+      );
+      // The nested-isolation guard fires before any git probe, so no real
+      // repository is needed — a cwd inside `.qwen/worktrees/` is enough to
+      // make failWorktreeProvisioning() return.
+      vi.mocked(config.getTargetDir).mockReturnValue(
+        '/test/project/.qwen/worktrees/agent-outer',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Nested isolation',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        isolation: 'worktree',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(partToString(result.llmContent)).toMatch(/Nested isolation/);
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      // The scheduler records a failure only when `error` is set. A launch
+      // that never ran must not count as a successful agent call (#9509).
+      expect(result.error?.message).toMatch(
+        /Nested isolation worktrees are not supported/,
       );
     });
 
@@ -3009,10 +3275,68 @@ describe('AgentTool', () => {
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Failed to run subagent: Creation failed');
+      expect(result.error?.message).toContain(
+        'Failed to run subagent: Creation failed',
+      );
       const display = result.returnDisplay as AgentResultDisplay;
 
       expect(display.status).toBe('failed');
     });
+
+    it('includes preserved worktree details in execution errors', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wt-error-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], {
+          cwd: repo,
+        });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+        vi.mocked(mockSubagentManager.createAgentHeadless).mockImplementation(
+          async (_cfg, agentConfig) => {
+            fs.writeFileSync(
+              path.join(agentConfig.getProjectRoot(), 'dirty.txt'),
+              'dirty\n',
+            );
+            throw new Error('subagent boom');
+          },
+        );
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation({
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+          isolation: 'worktree',
+          run_in_background: false,
+        });
+        const result = await invocation.execute();
+
+        const llmText = partToString(result.llmContent);
+        expect(llmText).toContain('Failed to run subagent: subagent boom');
+        expect(llmText).toContain('[worktree preserved:');
+        expect(result.error?.message).toContain('[worktree preserved:');
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
 
     it('should execute subagent without live output callback', async () => {
       const params: AgentParams = {
@@ -3418,12 +3742,12 @@ describe('AgentTool', () => {
       // Parent conversation history: empty (first-turn fork — falls back to
       // the fork agent's own systemPrompt + wildcard tools because no
       // cache params have been captured yet).
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistory: vi.fn().mockReturnValue([]),
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({}),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       vi.mocked(AgentHeadless.create).mockClear();
       vi.mocked(AgentHeadless.create).mockResolvedValue(mockAgent);
@@ -3824,7 +4148,7 @@ describe('AgentTool', () => {
         role: 'model' as const,
         parts: [{ text: 'second answer' }],
       };
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistoryShallow: vi
           .fn()
           .mockReturnValue([
@@ -3840,7 +4164,7 @@ describe('AgentTool', () => {
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({}),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -3895,12 +4219,12 @@ describe('AgentTool', () => {
           secondUser,
           secondModel,
         ]);
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistoryShallow,
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({}),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -3970,12 +4294,12 @@ describe('AgentTool', () => {
       const getHistoryShallow = vi
         .fn()
         .mockReturnValue([startup, firstUser, forkLaunch]);
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistoryShallow,
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({}),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -4046,7 +4370,7 @@ describe('AgentTool', () => {
           secondUser,
           secondModel,
         ]);
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         // getHistoryShallow() (no arg) supplies the startup context;
         // getHistoryForForkWindow is intentionally omitted to exercise the
         // uncurated getHistory() fallback for the bounded window.
@@ -4063,7 +4387,7 @@ describe('AgentTool', () => {
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({}),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -4135,7 +4459,7 @@ describe('AgentTool', () => {
           parameters: { type: 'object', properties: {} },
         },
       ];
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistory: vi.fn().mockReturnValue([]),
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({
@@ -4143,7 +4467,7 @@ describe('AgentTool', () => {
             tools: [{ functionDeclarations: parentToolDecls }],
           }),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -4190,7 +4514,7 @@ describe('AgentTool', () => {
           parameters: { type: 'object', properties: {} },
         },
       ];
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistory: vi.fn().mockReturnValue([]),
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({
@@ -4198,7 +4522,7 @@ describe('AgentTool', () => {
             tools: [{ functionDeclarations: parentToolDecls }],
           }),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -4278,7 +4602,7 @@ describe('AgentTool', () => {
       (mockAgent as unknown as Record<string, unknown>)[
         'setExternalMessageWaitPredicate'
       ] = vi.fn();
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistory: vi.fn().mockReturnValue([
           {
             role: 'user',
@@ -4289,7 +4613,7 @@ describe('AgentTool', () => {
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({}),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
       const stubRegistry = (
         config as unknown as {
           getBackgroundTaskRegistry: () => {
@@ -4618,6 +4942,7 @@ describe('AgentTool', () => {
       // so resolveModelId returns the parent's current model.
       expect(stubRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
         'parent-model',
+        null,
       );
       expect(stubRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -4691,7 +5016,7 @@ describe('AgentTool', () => {
         fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
       } as unknown as HookSystem;
 
-      vi.mocked(config.getGeminiClient).mockReturnValue(undefined as never);
+      vi.mocked(config.getLlmClient).mockReturnValue(undefined as never);
       (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
         .fn()
         .mockReturnValue(mockHookSystem);
@@ -4887,7 +5212,7 @@ describe('AgentTool', () => {
         fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
       } as unknown as HookSystem;
 
-      vi.mocked(config.getGeminiClient).mockReturnValue(undefined as never);
+      vi.mocked(config.getLlmClient).mockReturnValue(undefined as never);
       (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
         .fn()
         .mockReturnValue(mockHookSystem);
@@ -5265,6 +5590,7 @@ describe('AgentTool', () => {
           name: 'read_file',
           success: true,
           responseParts,
+          boundaryArtifact: { state: 'reusable', kinds: ['file'] },
           timestamp: Date.now(),
         } satisfies AgentToolResultEvent);
       });
@@ -5284,6 +5610,10 @@ describe('AgentTool', () => {
       );
       expect(toolCall?.args).toEqual({ path: '/test.ts' });
       expect(toolCall?.responseParts).toBe(responseParts);
+      expect(toolCall?.boundaryArtifact).toEqual({
+        state: 'reusable',
+        kinds: ['file'],
+      });
     });
 
     it('omits subagent protocol payloads from interactive display state', async () => {
@@ -5310,6 +5640,7 @@ describe('AgentTool', () => {
           success: true,
           responseParts,
           resultDisplay: 'Rendered result',
+          boundaryArtifact: { state: 'reusable', kinds: ['file'] },
           timestamp: Date.now(),
         } satisfies AgentToolResultEvent);
       });
@@ -5331,6 +5662,7 @@ describe('AgentTool', () => {
       expect(toolCall?.resultDisplay).toBe('Rendered result');
       expect(toolCall).not.toHaveProperty('args');
       expect(toolCall).not.toHaveProperty('responseParts');
+      expect(toolCall).not.toHaveProperty('boundaryArtifact');
     });
 
     it('should clear pendingConfirmation when TOOL_RESULT arrives for the pending tool (IDE accept path)', async () => {
@@ -5666,6 +5998,7 @@ describe('AgentTool', () => {
 
     it('should run in background when agent definition has background: true', async () => {
       const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
       const params: AgentParams = {
         description: 'Start monitor',
         prompt: 'Watch for changes',
@@ -5675,7 +6008,10 @@ describe('AgentTool', () => {
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
-      const result = await invocation.execute();
+      const updates: AgentResultDisplay[] = [];
+      const result = await invocation.execute(undefined, (output) => {
+        updates.push(output as AgentResultDisplay);
+      });
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Background agent launched');
@@ -5714,6 +6050,11 @@ describe('AgentTool', () => {
       ).toHaveBeenCalled();
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('background');
+      expect(display.executionMode).toBe('background');
+      expect(updates[0]).toMatchObject({
+        status: 'running',
+        executionMode: 'background',
+      });
       expect(writeMetaSpy).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
@@ -5724,7 +6065,15 @@ describe('AgentTool', () => {
         }),
       );
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+      // Pin the launch-metadata extras at the background attach site too —
+      // the mutation probe in review showed both sites could drop
+      // initialUserPrompt while the suite stayed green.
+      expect(attachSpy.mock.calls[0]?.[2]).toMatchObject({
+        initialUserPrompt: 'Watch for changes',
+        agentName: 'monitor',
+      });
       writeMetaSpy.mockRestore();
+      attachSpy.mockRestore();
     });
 
     it('uses the resolved model grade for background slot selection and launch', async () => {
@@ -5748,6 +6097,7 @@ describe('AgentTool', () => {
       );
       expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
         'mapped-model',
+        null,
       );
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
         expect.objectContaining({ model: 'mapped-model' }),
@@ -6213,9 +6563,19 @@ describe('AgentTool', () => {
         subagent_type: 'monitor',
         run_in_background: false,
       });
-      const result = await invocation.execute();
+      const updates: AgentResultDisplay[] = [];
+      const result = await invocation.execute(undefined, (output) => {
+        updates.push(output as AgentResultDisplay);
+      });
 
       expect(partToString(result.llmContent)).toBe('Monitor done');
+      expect((result.returnDisplay as AgentResultDisplay).executionMode).toBe(
+        'foreground',
+      );
+      expect(updates[0]).toMatchObject({
+        status: 'running',
+        executionMode: 'foreground',
+      });
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({ isBackgrounded: false }),
       );
@@ -6295,11 +6655,25 @@ describe('AgentTool', () => {
         subagent_type: 'file-search',
       });
 
+      const updates: AgentResultDisplay[] = [];
       const result = await runWithAgentContext('sub-1', () =>
-        invocation.execute(),
+        invocation.execute(undefined, (output) => {
+          updates.push(output as AgentResultDisplay);
+        }),
       );
 
       expect(partToString(result.llmContent)).toBe('Monitor done');
+      // Pin the downgrade: backgroundRequested is true here (the loaded
+      // config has background: true), but a nested session runs foreground.
+      // Web Shell treats executionMode as authoritative, so a 'background'
+      // value on this path would hide the inline result from the user.
+      expect((result.returnDisplay as AgentResultDisplay).executionMode).toBe(
+        'foreground',
+      );
+      expect(updates[0]).toMatchObject({
+        status: 'running',
+        executionMode: 'foreground',
+      });
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({ isBackgrounded: false }),
       );
@@ -6328,6 +6702,7 @@ describe('AgentTool', () => {
         const result = await invocation.execute();
 
         expect(partToString(result.llmContent)).toBe(errorMessage);
+        expect(result.error?.message).toBe(errorMessage);
         expect((result.returnDisplay as AgentResultDisplay).status).toBe(
           'failed',
         );
@@ -6422,10 +6797,12 @@ describe('AgentTool', () => {
       // Per-model cap: resolved model ID must flow through to the registry.
       expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
         'parent-model',
+        null,
       );
       expect(mockRegistry.waitForBackgroundSlot).toHaveBeenCalledWith(
         undefined,
         'parent-model',
+        null,
       );
       expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
       expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
@@ -6700,6 +7077,13 @@ describe('AgentTool', () => {
       // Writer attached to the AgentTool's emitter so foreground tool
       // calls / round text get recorded into the JSONL.
       expect(attachSpy).toHaveBeenCalled();
+      // Pin the launch-metadata extras at this attach site — dropping
+      // initialUserPrompt here silently loses the launch `user` record
+      // that transcript readers recover the prompt from.
+      expect(attachSpy.mock.calls[0]?.[2]).toMatchObject({
+        initialUserPrompt: 'Find all TypeScript files',
+        agentName: 'file-search',
+      });
       // Meta sidecar is seeded eagerly at register time so resume
       // discovery can surface paused foreground runs.
       expect(writeMetaSpy).toHaveBeenCalledWith(
@@ -6863,6 +7247,62 @@ describe('AgentTool', () => {
       expect(createdConfig.getShouldAvoidPermissionPrompts()).toBe(true);
     });
 
+    it('stamps the prompt-avoidance policy where nested launches inherit it', async () => {
+      // The policy must sit on the config the rebuilt tool registry binds to
+      // (the createToolRegistry receiver), not on a wrapper above it: a
+      // nested AgentTool branches its own configs off that receiver via
+      // Object.create, and a wrapper-only stamp left nested schedulers
+      // resolving Config.prototype's `false` — believing they could prompt
+      // and waiting forever on approvals nobody could see.
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(bgSubagent);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+      await invocation.execute();
+
+      const contexts = vi.mocked(config.createToolRegistry).mock.contexts;
+      const toolBoundConfig = contexts[contexts.length - 1] as Config;
+      // Auto-deny background agent (non-interactive session): the policy is
+      // visible on the tool-bound config itself...
+      expect(toolBoundConfig.getShouldAvoidPermissionPrompts()).toBe(true);
+      // ...and through the prototype chain of any config a nested launch
+      // derives from it.
+      const derived = Object.create(toolBoundConfig) as Config;
+      expect(derived.getShouldAvoidPermissionPrompts()).toBe(true);
+    });
+
+    it('keeps prompts allowed through the chain for a bubbling background agent', async () => {
+      vi.mocked(
+        config.isInteractive as ReturnType<typeof vi.fn>,
+      ).mockReturnValue(true);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        approvalMode: 'bubble',
+      });
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+      await invocation.execute();
+
+      const contexts = vi.mocked(config.createToolRegistry).mock.contexts;
+      const toolBoundConfig = contexts[contexts.length - 1] as Config;
+      // Bubbling: prompts stay allowed (they park on the entry), and nested
+      // launches inherit the same policy so THEIR approvals can bubble too.
+      expect(toolBoundConfig.getShouldAvoidPermissionPrompts()).toBe(false);
+      const derived = Object.create(toolBoundConfig) as Config;
+      expect(derived.getShouldAvoidPermissionPrompts()).toBe(false);
+    });
+
     it('forwards the scheduler-provided callId as toolUseId on the registry entry', async () => {
       const params: AgentParams = {
         description: 'Start monitor',
@@ -6991,7 +7431,7 @@ describe('AgentTool', () => {
             { functionDeclarations: [{ name: 'Bash' }, { name: 'Read' }] },
           ],
         };
-        const geminiClient = {
+        const llmClient = {
           getHistory: vi
             .fn()
             .mockReturnValue([{ role: 'model', parts: [{ text: 'Ready' }] }]),
@@ -6999,8 +7439,8 @@ describe('AgentTool', () => {
             getGenerationConfig: () => generationConfig,
           }),
         };
-        vi.mocked(config.getGeminiClient).mockReturnValue(
-          geminiClient as unknown as ReturnType<Config['getGeminiClient']>,
+        vi.mocked(config.getLlmClient).mockReturnValue(
+          llmClient as unknown as ReturnType<Config['getLlmClient']>,
         );
 
         const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
@@ -7044,6 +7484,103 @@ describe('AgentTool', () => {
         createSpy.mockRestore();
       },
     );
+  });
+});
+
+describe('findBackgroundedAncestorAgentId', () => {
+  type Entry = {
+    isBackgrounded: boolean;
+    status: string;
+    parentAgentId?: string | null;
+  };
+  const registryOf = (entries: Record<string, Entry>) => ({
+    get: (id: string) =>
+      entries[id] as unknown as ReturnType<
+        Parameters<typeof findBackgroundedAncestorAgentId>[0]['get']
+      >,
+  });
+
+  it('returns undefined without a starting agent id', () => {
+    const registry = registryOf({});
+    expect(findBackgroundedAncestorAgentId(registry, undefined)).toBe(
+      undefined,
+    );
+    expect(findBackgroundedAncestorAgentId(registry, null)).toBe(undefined);
+  });
+
+  it('returns a directly backgrounded running ancestor', () => {
+    const registry = registryOf({
+      'fork-1': { isBackgrounded: true, status: 'running' },
+    });
+    expect(findBackgroundedAncestorAgentId(registry, 'fork-1')).toBe('fork-1');
+  });
+
+  it('walks foreground lineage to the backgrounded ancestor', () => {
+    const registry = registryOf({
+      'leaf-fg': {
+        isBackgrounded: false,
+        status: 'running',
+        parentAgentId: 'mid-fg',
+      },
+      'mid-fg': {
+        isBackgrounded: false,
+        status: 'running',
+        parentAgentId: 'fork-1',
+      },
+      'fork-1': { isBackgrounded: true, status: 'running' },
+    });
+    expect(findBackgroundedAncestorAgentId(registry, 'leaf-fg')).toBe('fork-1');
+  });
+
+  it('reaches the backgrounded ancestor on deep supported lineages', () => {
+    // maxSubagentDepth is user-configurable up to MAX_SUBAGENT_DEPTH_LIMIT
+    // (100), so the walk must not encode a smaller depth assumption: on a
+    // lineage deeper than the cap it used to carry, it walked off the end
+    // and returned undefined — no bridge, and the nested call hung on an
+    // approval nobody could see. Cycle protection comes from a visited set,
+    // not a hop budget.
+    const entries: Record<string, Entry> = {
+      'bg-root': { isBackgrounded: true, status: 'running' },
+    };
+    const depth = 20;
+    for (let i = 0; i < depth; i++) {
+      entries[`fg-${i}`] = {
+        isBackgrounded: false,
+        status: 'running',
+        parentAgentId: i === 0 ? 'bg-root' : `fg-${i - 1}`,
+      };
+    }
+    expect(
+      findBackgroundedAncestorAgentId(registryOf(entries), `fg-${depth - 1}`),
+    ).toBe('bg-root');
+  });
+
+  it('returns undefined for a terminal backgrounded ancestor', () => {
+    const registry = registryOf({
+      'fork-1': { isBackgrounded: true, status: 'completed' },
+    });
+    expect(findBackgroundedAncestorAgentId(registry, 'fork-1')).toBe(undefined);
+  });
+
+  it('returns undefined when the lineage breaks', () => {
+    const registry = registryOf({
+      'leaf-fg': {
+        isBackgrounded: false,
+        status: 'running',
+        parentAgentId: 'gone',
+      },
+    });
+    expect(findBackgroundedAncestorAgentId(registry, 'leaf-fg')).toBe(
+      undefined,
+    );
+  });
+
+  it('terminates on a corrupt (cyclic) lineage', () => {
+    const registry = registryOf({
+      a: { isBackgrounded: false, status: 'running', parentAgentId: 'b' },
+      b: { isBackgrounded: false, status: 'running', parentAgentId: 'a' },
+    });
+    expect(findBackgroundedAncestorAgentId(registry, 'a')).toBe(undefined);
   });
 });
 

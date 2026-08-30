@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   DaemonChannelInstanceSnapshot,
   DaemonChannelTypeDescriptor,
+  DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -54,6 +55,43 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
       label: 'Interactive Cards',
       kind: 'object',
       properties: [{ key: 'enabled', label: 'Enabled', kind: 'boolean' }],
+    },
+  ],
+};
+
+const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
+  ...DINGTALK,
+  fields: [
+    ...DINGTALK.fields,
+    {
+      key: 'senderPolicy',
+      label: 'Sender Policy',
+      kind: 'enum',
+      required: true,
+      default: 'allowlist',
+      options: [
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'disabled',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
     },
   ],
 };
@@ -141,6 +179,23 @@ const PAIRING_INSTANCE: DaemonChannelInstanceSnapshot = {
   },
 };
 
+const WORKSPACES: DaemonWorkspaceCapability[] = [
+  {
+    id: 'primary',
+    cwd: '/workspace/main',
+    displayName: 'Main repo',
+    primary: true,
+    trusted: true,
+  },
+  {
+    id: 'secondary',
+    cwd: '/workspace/secondary',
+    displayName: 'Secondary repo',
+    primary: false,
+    trusted: true,
+  },
+];
+
 const { ChannelEditorDialog } = await import('./ChannelEditorDialog');
 const { I18nProvider } = await import('../../i18n');
 
@@ -158,6 +213,9 @@ async function renderDialog(
           descriptor={DINGTALK}
           expectedRevision="revision-1"
           existingNames={[]}
+          workspaces={WORKSPACES}
+          workspaceCwd="/workspace/main"
+          onWorkspaceChange={vi.fn()}
           onOpenChange={vi.fn()}
           onSave={vi.fn().mockResolvedValue(undefined)}
           onReload={vi.fn().mockResolvedValue(undefined)}
@@ -177,6 +235,39 @@ function inputByLabel(label: string): HTMLInputElement | null {
   const match = labels.find((item) => item.textContent?.includes(label));
   const id = match?.htmlFor;
   return id ? document.querySelector<HTMLInputElement>(`#${id}`) : null;
+}
+
+function fieldByLabel(label: string): HTMLElement | null {
+  const labels = Array.from(document.querySelectorAll('label'));
+  const match = labels.find((item) => item.textContent?.includes(label));
+  return match?.htmlFor
+    ? document.querySelector<HTMLElement>(`#${match.htmlFor}`)
+    : null;
+}
+
+async function selectOption(label: string, optionLabel: string) {
+  const trigger = fieldByLabel(label);
+  expect(trigger).not.toBeNull();
+  await act(async () => {
+    trigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  const option = Array.from(
+    document.querySelectorAll<HTMLElement>('[role="option"]'),
+  ).find((item) => item.textContent?.trim() === optionLabel);
+  expect(option).toBeDefined();
+  await act(async () => {
+    option!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
+async function chooseRadioOption(optionLabel: string) {
+  const option = Array.from(document.querySelectorAll('label')).find(
+    (label) => label.textContent?.trim() === optionLabel,
+  );
+  expect(option).not.toBeNull();
+  await act(async () => {
+    option!.click();
+  });
 }
 
 function setInputValue(input: HTMLInputElement, value: string) {
@@ -200,6 +291,148 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it('defaults to the primary workspace and allows a registered workspace', async () => {
+    const onWorkspaceChange = vi.fn();
+    await renderDialog({ onWorkspaceChange });
+
+    expect(fieldByLabel('Workspace')?.textContent).toContain('Main repo');
+    expect(fieldByLabel('Workspace')?.textContent).toContain('Primary');
+
+    await selectOption('Workspace', 'Secondary repo');
+
+    expect(onWorkspaceChange).toHaveBeenCalledWith('/workspace/secondary');
+  });
+
+  it('offers the legacy thread scope only for an existing legacy Channel', async () => {
+    await renderDialog();
+
+    expect(document.body.textContent).not.toContain('By thread (legacy)');
+
+    await renderDialog({ instance: INSTANCE });
+
+    expect(document.body.textContent).not.toContain('By thread (legacy)');
+
+    await renderDialog({
+      instance: {
+        ...INSTANCE,
+        config: { ...INSTANCE.config, sessionScope: 'thread' },
+      },
+    });
+
+    expect(document.body.textContent).toContain('By thread (legacy)');
+    expect(
+      document
+        .querySelector('[role="radio"][value="thread"]')
+        ?.getAttribute('data-state'),
+    ).toBe('checked');
+
+    const defaultThreadDescriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: DINGTALK.fields.map((field) =>
+        field.key === 'sessionScope' ? { ...field, default: 'thread' } : field,
+      ),
+    };
+    const defaultThreadInstance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: { ...INSTANCE.config },
+    };
+    delete defaultThreadInstance.config.sessionScope;
+    await renderDialog({
+      descriptor: defaultThreadDescriptor,
+      instance: defaultThreadInstance,
+    });
+
+    expect(document.body.textContent).toContain('By thread (legacy)');
+    expect(
+      document
+        .querySelector('[role="radio"][value="thread"]')
+        ?.getAttribute('data-state'),
+    ).toBe('checked');
+  });
+
+  it('localizes named tasks and switches their session scope to user', async () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: [
+        ...DINGTALK.fields,
+        {
+          key: 'multiSession',
+          label: 'Named Sessions (descriptor)',
+          description: 'Descriptor description',
+          kind: 'boolean',
+        },
+      ],
+    };
+    await renderDialog({ descriptor });
+
+    expect(document.body.textContent).toContain('Named tasks');
+    expect(document.body.textContent).toContain(
+      'Keep a separate owner-scoped catalog of named tasks',
+    );
+    await chooseRadioOption('By chat or thread');
+    const toggle = fieldByLabel('Named tasks');
+    expect(toggle).not.toBeNull();
+    await act(async () => toggle!.click());
+
+    expect(
+      document
+        .querySelector('[role="radio"][value="user"]')
+        ?.getAttribute('data-state'),
+    ).toBe('checked');
+  });
+
+  it('clears validation errors when switching workspaces', async () => {
+    await renderDialog({ existingNames: ['duplicate'] });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'duplicate');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save?.click());
+    expect(document.body.textContent).toContain(
+      'A Channel with this name already exists.',
+    );
+    expect(inputByLabel('Instance name')?.getAttribute('aria-invalid')).toBe(
+      'true',
+    );
+
+    await renderDialog({
+      existingNames: [],
+      workspaceCwd: '/workspace/secondary',
+    });
+
+    expect(document.body.textContent).not.toContain(
+      'A Channel with this name already exists.',
+    );
+    expect(inputByLabel('Instance name')?.getAttribute('aria-invalid')).toBe(
+      'false',
+    );
+  });
+
+  it('clears submit errors when switching workspaces', async () => {
+    const onSave = vi.fn().mockRejectedValue(new Error('Revision conflict.'));
+    await renderDialog({ onSave });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'release-bot');
+      setInputValue(inputByLabel('Client ID')!, 'ding-client-id');
+      setInputValue(inputByLabel('Client Secret')!, 'ding-client-secret');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save?.click());
+    expect(document.body.textContent).toContain('Revision conflict.');
+    expect(document.body.textContent).toContain('Reload latest');
+
+    await renderDialog({ workspaceCwd: '/workspace/secondary' });
+
+    expect(document.body.textContent).not.toContain('Revision conflict.');
+    expect(document.body.textContent).not.toContain('Reload latest');
+  });
+
   it('does not render object metadata as a text field', async () => {
     await renderDialog();
 
@@ -213,6 +446,7 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).toContain('Stored in environment');
     expect(document.body.textContent).not.toContain('Clear');
     expect(inputByLabel('Client Secret')).toBeNull();
+    expect(fieldByLabel('Workspace')).toHaveProperty('disabled', true);
 
     const replace = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.trim() === 'Replace',
@@ -236,9 +470,9 @@ describe('ChannelEditorDialog', () => {
   it('shows the effective session scope in its own section', async () => {
     await renderDialog({ instance: INSTANCE });
 
-    expect(document.body.textContent).toContain('Session');
-    expect(document.body.textContent).toContain('Session scope');
-    expect(document.body.textContent).toContain('Per user and chat');
+    expect(document.body.textContent).toContain('Conversation management');
+    expect(document.body.textContent).toContain('Conversation isolation');
+    expect(document.body.textContent).toContain('By user');
   });
 
   it('submits a new instance with typed fields and the current revision', async () => {
@@ -272,6 +506,148 @@ describe('ChannelEditorDialog', () => {
         clientId: 'ding-client-id',
         sessionScope: 'user',
         senderPolicy: 'pairing',
+      },
+      secrets: {
+        clientSecret: {
+          operation: 'replace',
+          value: 'ding-client-secret',
+        },
+      },
+    });
+  });
+
+  it('can be dismissed while a save finishes in the background', async () => {
+    let finishSave!: () => void;
+    const onSave = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSave = resolve;
+        }),
+    );
+    const onOpenChange = vi.fn();
+    await renderDialog({ onSave, onOpenChange });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'release-bot');
+      setInputValue(inputByLabel('Client ID')!, 'ding-client-id');
+      setInputValue(inputByLabel('Client Secret')!, 'ding-client-secret');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+    expect((fieldByLabel('Workspace') as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    const cancel = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Cancel',
+    );
+
+    expect(cancel?.disabled).toBe(false);
+    await act(async () => {
+      cancel?.click();
+    });
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+
+    await act(async () => finishSave());
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('explains reserved group IDs under the allowlist field', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: DINGTALK_WITH_ACCESS, onSave });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'release-bot');
+      setInputValue(inputByLabel('Client ID')!, 'ding-client-id');
+      setInputValue(inputByLabel('Client Secret')!, 'ding-client-secret');
+    });
+    await selectOption('Group policy', 'Allowlist');
+    await act(async () => {
+      setInputValue(inputByLabel('Allowed group IDs')!, '__proto__');
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(
+      inputByLabel('Allowed group IDs')?.getAttribute('aria-invalid'),
+    ).toBe('true');
+    expect(document.body.textContent).toContain(
+      'Enter a group ID other than __proto__, constructor, or prototype.',
+    );
+    expect(document.body.textContent).not.toContain(
+      'Choose a different instance name.',
+    );
+  });
+
+  it('submits sender and group allowlists in their runtime config shapes', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: DINGTALK_WITH_ACCESS, onSave });
+
+    const name = inputByLabel('Instance name');
+    const clientId = inputByLabel('Client ID');
+    const clientSecret = inputByLabel('Client Secret');
+    await act(async () => {
+      setInputValue(name!, 'release-bot');
+      setInputValue(clientId!, 'ding-client-id');
+      setInputValue(clientSecret!, 'ding-client-secret');
+    });
+
+    const allowedUsers = inputByLabel('Allowed user IDs');
+    expect(allowedUsers).not.toBeNull();
+    await selectOption('Direct message policy', 'Pairing');
+    expect(inputByLabel('Allowed user IDs')).toBeNull();
+    await selectOption('Direct message policy', 'Allowlist');
+    await act(async () => {
+      setInputValue(inputByLabel('Allowed user IDs')!, 'staff-a, staff-b');
+    });
+
+    await selectOption('Group policy', 'Allowlist');
+    const allowedGroups = inputByLabel('Allowed group IDs');
+    expect(allowedGroups).not.toBeNull();
+    await act(async () => {
+      setInputValue(allowedGroups!, 'group-a, group-b');
+    });
+
+    const dialogText = document.body.textContent ?? '';
+    expect(dialogText).toContain('Conversation management');
+    expect(dialogText.indexOf('Conversation management')).toBeLessThan(
+      dialogText.indexOf('Access control'),
+    );
+    expect(dialogText).toContain(
+      "The same user's messages continue in one conversation; users stay isolated from each other.",
+    );
+    await chooseRadioOption('By chat or thread');
+    expect(document.body.textContent).toContain(
+      'Messages in the same group or topic share one conversation; best for collaboration.',
+    );
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith('release-bot', {
+      expectedRevision: 'revision-1',
+      config: {
+        type: 'dingtalk',
+        clientId: 'ding-client-id',
+        senderPolicy: 'allowlist',
+        allowedUsers: ['staff-a', 'staff-b'],
+        groupPolicy: 'allowlist',
+        sessionScope: 'chat_thread',
+        groups: { 'group-a': {}, 'group-b': {} },
       },
       secrets: {
         clientSecret: {

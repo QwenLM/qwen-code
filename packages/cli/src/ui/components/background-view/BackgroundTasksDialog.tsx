@@ -1542,6 +1542,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
                   selectedApproval.approval.callId,
                   outcome,
                   payload,
+                  selectedApproval.approval.subagentId,
                 );
               return;
             }
@@ -1947,6 +1948,17 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
                 ? `[workflow] ${t('needs approval')}`
                 : t('Background agent needs approval')}
             </Text>
+            {/* subagentId is set only on approvals bridged from a NESTED
+                agent onto this entry (see AgentTool's nested approval
+                bridge). Name the actual waiter so the user knows which of
+                the descendants is blocked. */}
+            {selectedApproval?.kind === 'agent' &&
+              selectedApproval.approval.subagentId !== undefined && (
+                <Text color={theme.text.secondary}>
+                  {t('from nested agent')}:{' '}
+                  {selectedApproval.approval.subagentId}
+                </Text>
+              )}
             <ToolConfirmationMessage
               confirmationDetails={approvalConfirmationDetails}
               config={config}

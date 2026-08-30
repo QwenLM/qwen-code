@@ -14,7 +14,15 @@ import {
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
-import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
+import {
+  DEFAULT_COMMAND,
+  DEFAULT_COMMAND_DESC,
+  QUERY_POSITIONAL,
+  TOP_LEVEL_DEPRECATED_OPTIONS,
+  TOP_LEVEL_HELP_OPTIONS,
+  TOP_LEVEL_USAGE,
+} from './config/top-level-options.js';
+import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
 import {
@@ -56,78 +64,46 @@ export const MCP_COMMANDS = [
   ['reject [name]', 'Reject a pending MCP server'],
 ] as const;
 
-const TOP_LEVEL_HELP_OPTIONS = [
-  ['model', { alias: 'm', type: 'string', description: 'Model' }],
-  [
-    'fallback-model',
-    {
-      type: 'array',
-      description:
-        'Fallback model(s) for capacity errors, repeatable or comma-separated (max 3)',
-    },
-  ],
-  [
-    'prompt',
-    {
-      alias: 'p',
-      type: 'string',
-      description: 'Prompt. Appended to input on stdin (if any).',
-    },
-  ],
-  [
-    'prompt-interactive',
-    {
-      alias: 'i',
-      type: 'string',
-      description:
-        'Execute the provided prompt and continue in interactive mode',
-    },
-  ],
-  [
-    'safe-mode',
-    {
-      type: 'boolean',
-      description:
-        'Disable all customizations (context files, hooks, extensions, skills, MCP servers) for troubleshooting.',
-    },
-  ],
-  [
-    'sandbox',
-    {
-      alias: 's',
-      type: 'boolean',
-      description: 'Run in sandbox?',
-    },
-  ],
-  [
-    'output-format',
-    {
-      alias: 'o',
-      type: 'string',
-      choices: ['text', 'json', 'stream-json'],
-      description: 'The format of the CLI output.',
-    },
-  ],
-  [
-    'continue',
-    {
-      alias: 'c',
-      type: 'boolean',
-      description: 'Resume the most recent session for the current project.',
-    },
-  ],
-  [
-    'resume',
-    {
-      alias: 'r',
-      type: 'string',
-      description:
-        'Resume a specific session by its ID. Use without an ID to show session picker.',
-    },
-  ],
-] as const satisfies ReadonlyArray<readonly [string, Options]>;
+function flagName(name: string): string {
+  return name.length === 1 ? `-${name}` : `--${name}`;
+}
 
-const VALUE_FLAGS = new Set([
+function optionAliases(config: Options): string[] {
+  const alias = config.alias;
+  if (!alias) {
+    return [];
+  }
+  return typeof alias === 'string' ? [alias] : [...alias];
+}
+
+function optionFlagNames(option: string, config: Options): string[] {
+  return [flagName(option), ...optionAliases(config).map(flagName)];
+}
+
+const VALUE_FLAGS = new Set(
+  TOP_LEVEL_HELP_OPTIONS.flatMap(([option, config]) =>
+    config.type === 'string' ||
+    config.type === 'number' ||
+    config.type === 'array'
+      ? optionFlagNames(option, config)
+      : [],
+  ),
+);
+// Value-taking options registered outside TOP_LEVEL_HELP_OPTIONS: hidden options
+// are inline-registered in config.ts and never appear in the help-display
+// list. The scanner must still consume their values, otherwise the value
+// becomes the first positional and defeats a later --help/--version fast path.
+VALUE_FLAGS.add('--sandbox-session-id');
+
+// The exact value-taking-flag spellings the pre-PR hasFlag scan hardcoded.
+// hasVersionToken must skip value slots for THIS set only: flags that only
+// the derived VALUE_FLAGS knows (--worktree, --proxy, -e, --auth-type,
+// --session-id, --exclude-tools, ...) were absent from the base scan, so base
+// COUNTED a `-v`/`--version` sitting in their value slot and printed the
+// version. Skipping those slots here would drop the intercept and hand the
+// argv to the full parser (corrupted `mcp add` settings writes, swallowed
+// `-e` values, exit-1 Unknown-argument on `--proxy -v mcp remove ...`).
+const BASE_VALUE_FLAGS = new Set([
   '--model',
   '-m',
   '--fallback-model',
@@ -140,6 +116,82 @@ const VALUE_FLAGS = new Set([
   '--resume',
   '-r',
 ]);
+
+// Every flag spelling the exact-token scanner is allowed to recognize: the
+// full option/alias surface from the shared top-level definitions (same
+// derivation pattern as VALUE_FLAGS) plus the help/version flags registered
+// inline in the parser builder and the hidden options registered inline in
+// config.ts. Anything outside this set can carry flag state the scanner
+// cannot model.
+const KNOWN_FAST_PATH_FLAGS = new Set(
+  TOP_LEVEL_HELP_OPTIONS.flatMap(([option, config]) =>
+    optionFlagNames(option, config),
+  ),
+);
+for (const flag of ['--help', '-h', '--version', '-v']) {
+  KNOWN_FAST_PATH_FLAGS.add(flag);
+}
+KNOWN_FAST_PATH_FLAGS.add('--sandbox-session-id');
+// Hidden boolean options registered inline in config.ts; like the sandbox
+// option above they are valid top-level flags the scanner should admit
+// instead of demoting (e.g. `qwen --experimental-acp --help`).
+KNOWN_FAST_PATH_FLAGS.add('--experimental-acp');
+KNOWN_FAST_PATH_FLAGS.add('--experimental-skills');
+
+function isValueToken(arg: string | undefined): arg is string {
+  return arg !== undefined && arg !== '--' && !arg.startsWith('-');
+}
+
+// Structural fast-path gate. The exact-token scanner cannot model yargs'
+// last-wins, order-dependent flag state, and every prior misfire class came
+// from approximating it token-by-token (`--help --no-help`, `--version=false`,
+// `---help`, ...). So instead of enumerating entrance classes, close the
+// grammar: the help/version fast paths fire ONLY when every argv token is
+// known-safe — an exact registered flag spelling from KNOWN_FAST_PATH_FLAGS,
+// a value consumed by a value-taking flag, or `--` (everything after it is
+// positional data). Any other token demotes to the slow path (the full
+// parser itself — direction-safe by construction, it prints exactly what it
+// would have printed anyway). The set stores only bare registered spellings,
+// so the membership check alone rejects `=`-form resets (`--version=false`),
+// `--no-` negations (`--help --no-help`), short-option clusters (`-dh`),
+// three-plus-dash tokens (`---help`), and unknown flags — every shape
+// yargs-parser treats specially and the scanner cannot model. Residual
+// conservatism is intentional: value-taking options still consume at most
+// ONE following token, so multi-value array invocations such as
+// `--extensions a b --help` also demote to the slow path, which prints the
+// same top-level options plus the full parser's command/positional sections.
+function argvSafeForFastPath(argv: readonly string[]): boolean {
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token === '--') {
+      return true; // the rest is positional data and cannot set flags
+    }
+    if (!token.startsWith('-')) {
+      return false; // a positional breaks the flag-only fast-path grammar
+    }
+    if (!KNOWN_FAST_PATH_FLAGS.has(token)) {
+      return false;
+    }
+    i = skipOptionValues(argv, i);
+  }
+  return true;
+}
+
+function skipOptionValues(argv: readonly string[], index: number): number {
+  const raw = argv[index]!;
+  const eq = raw.indexOf('=');
+  const flag = eq === -1 ? raw : raw.slice(0, eq);
+  if (!VALUE_FLAGS.has(flag)) {
+    return index;
+  }
+  // At most one token: yargs detects commands in an early pass where these
+  // options are still unknown (they are declared in the default command's
+  // builder), and an unknown option takes at most one value there — a
+  // `--flag=value` token carries its value inside itself and consumes none.
+  // Consuming greedily would swallow a command token sitting after the
+  // values and misfire the top-level help fast path on it.
+  return eq === -1 && isValueToken(argv[index + 1]) ? index + 1 : index;
+}
 
 function writeStdoutLine(line: string): void {
   process.stdout.write(line.endsWith('\n') ? line : `${line}\n`);
@@ -155,11 +207,43 @@ function hasFlag(
     if (arg === '--') {
       return false;
     }
-    if (VALUE_FLAGS.has(arg)) {
+    // Base parity (mirrors hasVersionToken): the pre-PR scan skipped the
+    // token after the base's hardcoded value flags unconditionally, even
+    // the `--` sentinel, so `qwen --model -- --help` still routed to help.
+    if (BASE_VALUE_FLAGS.has(arg)) {
       i++;
       continue;
     }
+    i = skipOptionValues(argv, i);
     if (arg === long || arg === short) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// True when argv carries a `-v`/`--version` token before any `--`.
+// Mirrors the pre-PR hasFlag scan exactly: the token
+// following one of the base's hardcoded value-taking flags
+// (BASE_VALUE_FLAGS) is skipped unconditionally (even when it starts with
+// `-`), so a version token sitting in one of THOSE value slots is NOT
+// counted — `qwen -p -v -h` and `qwen --resume -v --help` printed
+// top-level help on base, not the version. The derived VALUE_FLAGS set is
+// deliberately NOT used here: flags it adds were absent from the base
+// scan, which counted a version token in their value slot (`qwen --proxy
+// -v ...` printed the version), so this scan must count it too. Tokens
+// after `--` are positional data and never count.
+function hasVersionToken(argv: readonly string[]): boolean {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === '--') {
+      return false;
+    }
+    if (BASE_VALUE_FLAGS.has(arg)) {
+      i++; // skip the value slot; the loop increment consumes the token
+      continue;
+    }
+    if (arg === '--version' || arg === '-v') {
       return true;
     }
   }
@@ -169,10 +253,9 @@ function hasFlag(
 async function buildTopLevelHelpParser() {
   const { default: yargs } = await import('yargs');
   const parser = yargs([])
+    .locale('en')
     .scriptName('qwen')
-    .usage(
-      'Usage: qwen [options] [command]\n\nQwen Code - Launch an interactive CLI, use -p/--prompt for non-interactive mode',
-    )
+    .usage(TOP_LEVEL_USAGE)
     .version(process.env['CLI_VERSION'] || 'unknown')
     .alias('v', 'version')
     .help()
@@ -183,10 +266,27 @@ async function buildTopLevelHelpParser() {
   for (const [option, config] of TOP_LEVEL_HELP_OPTIONS) {
     parser.option(option, config);
   }
+  for (const [option, message] of Object.entries(
+    TOP_LEVEL_DEPRECATED_OPTIONS,
+  )) {
+    parser.deprecateOption(option, message);
+  }
+
+  // Registered first, mirroring the real parser, so the rendered command list
+  // leads with the default command and its `query` positional. Without it the
+  // fast-path help silently dropped both the `[default]` row and the whole
+  // Positionals section that the full parser prints.
+  parser.command(DEFAULT_COMMAND, DEFAULT_COMMAND_DESC, (defaultCmd) =>
+    defaultCmd.positional('query', QUERY_POSITIONAL),
+  );
 
   for (const [command, description] of TOP_LEVEL_COMMANDS) {
     parser.command(command, description);
   }
+
+  // Mirror config.ts, which wraps the rendered help at the terminal width;
+  // without it yargs falls back to 80 columns.
+  parser.wrap(parser.terminalWidth());
 
   return parser;
 }
@@ -197,10 +297,13 @@ function firstPositionalArg(argv: readonly string[]): string | undefined {
     if (arg === '--') {
       return undefined;
     }
-    if (VALUE_FLAGS.has(arg)) {
+    // Base parity: same unconditional BASE value-slot skip as hasFlag, so
+    // a sentinel sitting in one of those slots never ends the scan early.
+    if (BASE_VALUE_FLAGS.has(arg)) {
       i++;
       continue;
     }
+    i = skipOptionValues(argv, i);
     if (!arg.startsWith('-')) {
       return arg;
     }
@@ -220,21 +323,56 @@ export function resolveBootstrapRoute(
 ): BootstrapRoute {
   const argv = normalizeServeFastPathArgv(rawArgv);
 
-  if (hasFlag(argv, '--version', '-v')) {
+  // Base-parity version intercept (structural close). Base printed the
+  // version for any `-v`/`--version` token its hasFlag scan reached, no
+  // matter what else the argv carries — command-prefixed (`mcp remove
+  // victim -v help`, `mcp add name cmd server.js -v`), help tokens
+  // (`---help -v`, `-v help`, `--h -v`), real options with h-prefixed
+  // names (`review fetch-pr … --host x -v`), option-shifted command argv
+  // (`mcp --debug add … -v`). Verified by A/B probes against the base
+  // binary. Printing the version is side-effect-free, while demoting to
+  // the full parser EXECUTES subcommands (observed: `mcp remove victim -v
+  // help` deleted the server and its OAuth creds on the full parser) — so
+  // the fail-closed direction is to intercept. The scan mirrors base's
+  // hasFlag exactly: it skips the value slot of the base's hardcoded
+  // value-taking flags only (BASE_VALUE_FLAGS), so a version token
+  // sitting in one of those slots is NOT counted (`qwen -p -v -h` and
+  // `qwen --resume -v --help` printed top-level help on base, and
+  // `qwen --model -v` demoted to the full parser). Flags the base scan
+  // did not know (--worktree, --proxy, -e, --auth-type, ...) never
+  // consumed a value slot there, so a version token in their value slot
+  // WAS counted and IS intercepted here. The scan models no help state
+  // (base printed the version for every other help-token sibling probed).
+  // Escape surface: tokens after `--` (positional data, e.g. `mcp add
+  // name cmd -- -v`, which the mcp fast path persists verbatim),
+  // `=`-form tokens (`--model=-v` is one token, not an exact match), and
+  // version tokens sitting in a BASE_VALUE_FLAGS value slot.
+  if (hasVersionToken(argv)) {
     return 'version';
+  }
+
+  // Structural gate: unless every token is inside the known-safe grammar,
+  // the help fast path demotes to the slow path (see argvSafeForFastPath).
+  const fastPathSafe = argvSafeForFastPath(argv);
+
+  const firstPositional = firstPositionalArg(argv);
+  if (
+    fastPathSafe &&
+    hasFlag(argv, '--help', '-h') &&
+    firstPositional === undefined
+  ) {
+    return 'help';
   }
 
   const firstArg = argv[0];
   if (firstArg === 'serve') {
     return 'serve';
   }
+  // Version-bearing mcp argv never reaches here: the intercept above owns
+  // every exact version token before `--`, and post-`--` tokens are
+  // positional data the fast path persists verbatim.
   if (firstArg === 'mcp') {
     return 'mcp';
-  }
-
-  const firstPositional = firstPositionalArg(argv);
-  if (hasFlag(argv, '--help', '-h') && firstPositional === undefined) {
-    return 'help';
   }
 
   return 'default';
@@ -270,7 +408,9 @@ async function printBootstrapVersion(): Promise<void> {
 }
 
 async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
-  const argv = normalizeMcpFastPathArgv(normalizeServeFastPathArgv(rawArgv));
+  const argv: readonly string[] = normalizeMcpFastPathArgv(
+    normalizeServeFastPathArgv(rawArgv),
+  );
   const hasSubcommand = argv.length > 1 && !argv[1]!.startsWith('-');
   if (!hasSubcommand) {
     printMcpHelp();
@@ -398,7 +538,7 @@ export async function runCliEntry(
     : undefined;
   acpStartupProfiler?.initializeAcpStartupProfiler();
   acpStartupProfiler?.markAcpStartup('geminiImportStart');
-  const { main } = await import('./gemini.js');
+  const { main } = await import('./llm.js');
   acpStartupProfiler?.markAcpStartup('geminiImportEnd');
   await main();
 }
@@ -512,7 +652,7 @@ export function stampCliEntryEnv(entryPath?: string): void {
 
 // handleUncaughtException and isExpectedPtyRaceError live in
 // ./utils/uncaught-exception-handler.js and are re-exported here for existing
-// importers (cli.test.ts). gemini.tsx must import them from that leaf module
+// importers (cli.test.ts). llm.tsx must import them from that leaf module
 // directly: a static import of this entry file from a module the bundle loads
 // lazily makes esbuild hoist this entry into a shared chunk, which silently
 // disables the bootstrap guard at the bottom.

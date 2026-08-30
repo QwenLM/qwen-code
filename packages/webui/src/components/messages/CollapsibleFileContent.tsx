@@ -5,8 +5,9 @@
  */
 
 import type { FC } from 'react';
-import { useState, useMemo } from 'react';
+import { useMemo } from 'react';
 import { MessageContent } from './MessageContent.js';
+import { useControlledExpanded } from '../../context/ExpandControlContext.js';
 
 /**
  * Parsed segment of user message content
@@ -118,7 +119,7 @@ const CollapsibleFileReference: FC<CollapsibleFileReferenceProps> = ({
   onFileClick,
   defaultExpanded = false,
 }) => {
-  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+  const [isExpanded, setIsExpanded] = useControlledExpanded(defaultExpanded);
 
   const lineCount = useMemo(
     () => segment.content.split('\n').length,

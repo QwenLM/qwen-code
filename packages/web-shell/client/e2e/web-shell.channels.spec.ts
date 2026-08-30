@@ -176,6 +176,22 @@ test('creates and deletes a typed Channel configuration', async ({
         'workspace_voice',
         'channel_management',
       ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/qwen-web-shell-e2e',
+          displayName: 'Main workspace',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/qwen-channel-secondary',
+          displayName: 'Release workspace',
+          primary: false,
+          trusted: true,
+        },
+      ],
     },
     channelTypes: [
       {
@@ -198,8 +214,38 @@ test('creates and deletes a typed Channel configuration', async ({
             envResolvable: true,
           },
           {
+            key: 'senderPolicy',
+            label: 'Sender Policy',
+            kind: 'enum',
+            required: true,
+            default: 'pairing',
+            options: [
+              { value: 'pairing', label: 'Pairing' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'open', label: 'Open' },
+            ],
+          },
+          {
+            key: 'allowedUsers',
+            label: 'Allowed Users',
+            kind: 'string-list',
+          },
+          {
+            key: 'groupPolicy',
+            label: 'Group Policy',
+            kind: 'enum',
+            required: true,
+            default: 'disabled',
+            options: [
+              { value: 'disabled', label: 'Disabled' },
+              { value: 'pairing', label: 'Pairing' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'open', label: 'Open' },
+            ],
+          },
+          {
             key: 'sessionScope',
-            label: 'Session scope',
+            label: 'Session Scope',
             kind: 'enum',
             required: true,
             default: 'user',
@@ -263,11 +309,34 @@ test('creates and deletes a typed Channel configuration', async ({
   await expect(
     page.getByRole('heading', { name: 'Configure DingTalk' }),
   ).toBeVisible();
+  const editor = page.getByRole('dialog');
+  await expect(editor.getByLabel('Workspace')).toContainText('Main workspace');
+  await editor.getByLabel('Workspace').click();
+  await page.getByRole('option', { name: 'Release workspace' }).click();
+  await expect(editor.getByLabel('Workspace')).toContainText(
+    'Release workspace',
+  );
   await page.getByLabel('Instance name').fill('release-bot');
   await page.getByLabel('Client ID (AppKey)').fill('ding-client-id');
   await page.getByLabel('Client Secret (AppSecret)').fill('ding-client-secret');
-  await page.getByLabel('Session scope').click();
-  await page.getByRole('option', { name: 'Per thread' }).click();
+  await expect(page.getByLabel('Direct message policy')).toContainText(
+    'Pairing',
+  );
+  await expect(page.getByLabel('Allowed user IDs')).toHaveCount(0);
+  await expect(
+    page.getByRole('heading', { name: 'Conversation management' }),
+  ).toBeVisible();
+  await expect(page.getByText('By user', { exact: true })).toBeVisible();
+  await expect(
+    page.getByText('By chat or thread', { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText('Share all', { exact: true })).toBeVisible();
+  await page.getByLabel('By chat or thread').click();
+  await expect(
+    page.getByText(
+      'Messages in the same group or topic share one conversation; best for collaboration.',
+    ),
+  ).toBeVisible();
   await page.getByRole('button', { name: 'Save' }).click();
 
   await expect(
@@ -279,7 +348,8 @@ test('creates and deletes a typed Channel configuration', async ({
       daemon.requests.filter(
         (request) =>
           request.method === 'PUT' &&
-          request.path.endsWith('/channels/release-bot'),
+          request.path ===
+            '/workspaces/%2Ftmp%2Fqwen-channel-secondary/channels/release-bot',
       ),
     )
     .toEqual([
@@ -289,8 +359,9 @@ test('creates and deletes a typed Channel configuration', async ({
           config: {
             type: 'dingtalk',
             clientId: 'ding-client-id',
-            sessionScope: 'thread',
             senderPolicy: 'pairing',
+            groupPolicy: 'disabled',
+            sessionScope: 'chat_thread',
           },
           secrets: {
             clientSecret: {
@@ -306,7 +377,7 @@ test('creates and deletes a typed Channel configuration', async ({
   await expect(
     page.getByRole('heading', { name: 'Edit DingTalk' }),
   ).toBeVisible();
-  await expect(page.getByLabel('Session scope')).toHaveText('Per thread');
+  await expect(page.getByLabel('By chat or thread')).toBeChecked();
   await expect(page.getByText('Ada', { exact: true })).toBeVisible();
   await expect(page.getByText('ABCD1234', { exact: true })).toBeVisible();
   await page
@@ -375,9 +446,54 @@ test('creates and deletes a typed Channel configuration', async ({
         body: { senderId: 'user-42' },
       }),
     ]);
-  await page.getByRole('button', { name: 'Close' }).click();
 
-  await page.getByRole('button', { name: 'Delete release-bot' }).click();
+  await page.getByLabel('Direct message policy').click();
+  await page.getByRole('option', { name: 'Allowlist' }).click();
+  await page.getByLabel('Allowed user IDs').fill('staff-a, staff-b');
+  await page.getByLabel('Group policy').click();
+  await page.getByRole('option', { name: 'Allowlist' }).click();
+  await page.getByLabel('Allowed group IDs').fill('group-a, group-b');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Edit DingTalk' }),
+  ).toHaveCount(0);
+  await expect
+    .poll(() =>
+      daemon.requests.filter(
+        (request) =>
+          request.method === 'PUT' &&
+          request.path.endsWith('/channels/release-bot'),
+      ),
+    )
+    .toHaveLength(2);
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'PUT' &&
+        request.path.endsWith('/channels/release-bot'),
+    )[1],
+  ).toEqual(
+    expect.objectContaining({
+      body: {
+        expectedRevision: '2',
+        config: {
+          type: 'dingtalk',
+          clientId: 'ding-client-id',
+          senderPolicy: 'allowlist',
+          allowedUsers: ['staff-a', 'staff-b'],
+          groupPolicy: 'allowlist',
+          sessionScope: 'chat_thread',
+          groups: { 'group-a': {}, 'group-b': {} },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      },
+    }),
+  );
+
+  await page
+    .getByRole('button', { name: 'More actions for release-bot' })
+    .click();
+  await page.getByRole('menuitem', { name: 'Delete release-bot' }).click();
   const confirmation = page.getByRole('alertdialog');
   await confirmation.getByRole('button', { name: 'Delete' }).click();
   await expect(page.getByText('release-bot', { exact: true })).toHaveCount(0);
@@ -391,7 +507,7 @@ test('creates and deletes a typed Channel configuration', async ({
     )
     .toEqual([
       expect.objectContaining({
-        body: { expectedRevision: '2' },
+        body: { expectedRevision: '3' },
       }),
     ]);
 });

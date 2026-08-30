@@ -4,27 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import type { SSEClientTransportOptions } from '@modelcontextprotocol/sdk/client/sse.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import type { StreamableHTTPClientTransportOptions } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type {
-  GetPromptResult,
-  JSONRPCMessage,
-  Prompt,
-  ReadResourceResult,
-  Resource,
-} from '@modelcontextprotocol/sdk/types.js';
+import {
+  Client,
+  SSEClientTransport,
+  StreamableHTTPClientTransport,
+  type GetPromptResult,
+  type JSONRPCMessage,
+  type Prompt,
+  type ReadResourceResult,
+  type Resource,
+  type SSEClientTransportOptions,
+  type StreamableHTTPClientTransportOptions,
+  type Transport,
+} from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import type { Client as GenAiMcpClient } from '@modelcontextprotocol/sdk/client/index.js';
 import {
   GetPromptResultSchema,
   ListPromptsResultSchema,
   ListResourcesResultSchema,
-  ListRootsRequestSchema,
+  ListToolsResultSchema,
   ReadResourceResultSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+} from '@modelcontextprotocol/core';
 import { parse } from 'shell-quote';
 import type { Config, MCPServerConfig } from '../config/config.js';
 import { AuthProviderType, isSdkMcpServerConfig } from '../config/config.js';
@@ -34,12 +35,18 @@ import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-pro
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
-import { MCPServerStatus, updateMCPServerStatus } from './mcp-status.js';
+import {
+  MCPServerStatus,
+  recordMCPServerLastError,
+  updateMCPServerStatus,
+} from './mcp-status.js';
 export {
   addMCPStatusChangeListener,
   getAllMCPServerStatuses,
+  getMCPServerLastError,
   getMCPServerStatus,
   MCPServerStatus,
+  recordMCPServerLastError,
   removeMCPServerStatus,
   removeMCPStatusChangeListener,
   updateMCPServerStatus,
@@ -63,6 +70,10 @@ import {
   resetDispatcherCache,
 } from '../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  discoveryTimeoutFor,
+  runWithTimeout,
+} from './mcp-discovery-timeout.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
@@ -81,9 +92,28 @@ export type SendSdkMcpMessage = (
 ) => Promise<JSONRPCMessage>;
 
 export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
+// Auto-negotiation `server/discover` otherwise inherits connect()'s
+// timeout (10 minutes here, 60s SDK default). Silent legacy stdio
+// servers never answer that probe; cap it so fallback fits inside
+// the discovery window. Remote HTTP/SSE/WS skip the probe
+// entirely (`mode: 'legacy'`): SDK v2 rejects HTTP probe timeouts
+// with no `initialize` fallback. Modern-only remotes are deferred
+// until that SDK gap closes.
+export const MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS = 5_000;
+/** Reserve a full handshake window after a silent stdio discovery probe. */
+export const MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS =
+  MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS;
+export const MCP_APPS_EXTENSION_ID = 'io.modelcontextprotocol/ui';
+export const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
 
 const debugLogger = createDebugLogger('MCP');
 const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
+/**
+ * Upper bound for the session-termination DELETE in `disconnect()`. The SDK
+ * call has no timeout of its own; a live-but-unresponsive server must not
+ * hang teardown (see `disconnect()`).
+ */
+const TERMINATE_SESSION_TIMEOUT_MS = 2_000;
 
 const invocationContextTransports = new WeakSet<Transport>();
 const invocationContextClients = new WeakSet<Client>();
@@ -349,6 +379,90 @@ export type DiscoveredMCPResource = Resource & {
   serverName: string;
 };
 
+export type McpVersionNegotiation =
+  | { mode: 'legacy' }
+  | { mode: 'auto'; probe: { timeoutMs: number } };
+
+/**
+ * External stdio clients negotiate automatically only when explicitly opted
+ * in. Internal, remote, and default stdio transports stay on legacy.
+ */
+export function mcpVersionNegotiationFor(
+  cfg: MCPServerConfig,
+): McpVersionNegotiation {
+  if (
+    cfg.versionNegotiation !== 'auto' ||
+    isSdkMcpServerConfig(cfg) ||
+    !cfg.command ||
+    cfg.httpUrl ||
+    cfg.url ||
+    cfg.tcp
+  ) {
+    return { mode: 'legacy' };
+  }
+  const discoveryTimeoutMs = discoveryTimeoutFor(cfg);
+  const probeTimeoutMs = Math.min(
+    MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS,
+    discoveryTimeoutMs - MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS,
+  );
+  if (probeTimeoutMs <= 0) {
+    return { mode: 'legacy' };
+  }
+  return {
+    mode: 'auto',
+    probe: { timeoutMs: probeTimeoutMs },
+  };
+}
+
+export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
+  return new Client(
+    { name, version: '0.0.1' },
+    {
+      versionNegotiation: mcpVersionNegotiationFor(cfg),
+      // Keep listing until the server ends pagination. The SDK still stops on
+      // repeated cursors, while its default 64-page cap turns larger valid
+      // catalogs into a discovery failure that this module reports as empty.
+      listMaxPages: 0,
+      capabilities: {
+        extensions: {
+          [MCP_APPS_EXTENSION_ID]: {
+            mimeTypes: [MCP_APP_RESOURCE_MIME_TYPE],
+          },
+        },
+      },
+    },
+  );
+}
+
+export function getMcpAppResourceUri(tool: {
+  _meta?: Record<string, unknown>;
+}): string | undefined {
+  const ui = tool._meta?.['ui'];
+  const nested =
+    typeof ui === 'object' && ui !== null && !Array.isArray(ui)
+      ? (ui as Record<string, unknown>)['resourceUri']
+      : undefined;
+  const value = nested ?? tool._meta?.['ui/resourceUri'];
+  return typeof value === 'string' && value.startsWith('ui://')
+    ? value
+    : undefined;
+}
+
+/** SEP-1865: omit tools whose visibility does not include `"model"`. */
+export function isMcpToolVisibleToModel(tool: {
+  _meta?: Record<string, unknown>;
+}): boolean {
+  const ui = tool._meta?.['ui'];
+  if (typeof ui !== 'object' || ui === null || Array.isArray(ui)) {
+    return true;
+  }
+  const visibility = (ui as Record<string, unknown>)['visibility'];
+  if (visibility === undefined || visibility === null) {
+    return true;
+  }
+  return Array.isArray(visibility) && visibility.includes('model');
+}
+
 /**
  * Enum representing the overall MCP discovery state
  */
@@ -398,10 +512,10 @@ export class McpClient {
     private readonly debugMode: boolean,
     private readonly sendSdkMcpMessage?: SendSdkMcpMessage,
   ) {
-    this.client = new Client({
-      name: `qwen-cli-mcp-client-${this.serverName}`,
-      version: '0.0.1',
-    });
+    this.client = createMcpClient(
+      `qwen-cli-mcp-client-${this.serverName}`,
+      this.serverConfig,
+    );
   }
 
   /**
@@ -447,7 +561,7 @@ export class McpClient {
         roots: {},
       });
 
-      this.client.setRequestHandler(ListRootsRequestSchema, async () => {
+      this.client.setRequestHandler('roots/list', async () => {
         const roots = [];
         for (const dir of this.workspaceContext.getDirectories()) {
           roots.push({
@@ -486,6 +600,17 @@ export class McpClient {
         }
       }
       this.updateStatus(MCPServerStatus.DISCONNECTED);
+      // Preserve the cause: the manager's discovery catch swallows this
+      // error (best-effort discovery), leaving the status registry's enum as
+      // the only other witness. Recording it lets status consumers (e.g.
+      // `qwen mcp reconnect`) tell the user WHY the connection failed
+      // instead of a bare "status: disconnected" (issue #9944).
+      // Same guard as `updateStatus()`: a late rejection from a doomed
+      // in-flight connect (server disabled/removed mid-connect) must not
+      // resurrect a cause entry that `removeMCPServerStatus` already dropped.
+      if (!this.isDisconnecting) {
+        recordMCPServerLastError(this.serverName, getErrorMessage(error));
+      }
       throw error;
     }
   }
@@ -594,10 +719,10 @@ export class McpClient {
       // requests by JSON-RPC id) to save round-trips per server at startup.
       // Each helper retries transient errors internally, then swallows
       // permanent errors and returns [], so Promise.all never rejects here.
-      const [prompts, resources, tools] = await Promise.all([
+      const [prompts, resources, toolDiscovery] = await Promise.all([
         listMcpPrompts(this.serverName, this.client),
         listMcpResources(this.serverName, this.client),
-        discoverTools(
+        discoverToolsWithMetadata(
           this.serverName,
           this.serverConfig,
           this.client,
@@ -605,11 +730,13 @@ export class McpClient {
           { applyConfigFilters: opts?.applyConfigFilters ?? true },
         ),
       ]);
+      const tools = applyListingAppResourceUi(toolDiscovery.tools, resources);
 
       if (
         prompts.length === 0 &&
         tools.length === 0 &&
-        resources.length === 0
+        resources.length === 0 &&
+        !toolDiscovery.hadVisibilityFilteredTools
       ) {
         throw new Error('No prompts, tools, or resources found on the server.');
       }
@@ -617,6 +744,13 @@ export class McpClient {
       return { tools, prompts, resources };
     } catch (error) {
       this.updateStatus(MCPServerStatus.DISCONNECTED);
+      // Same carrier as `connect()`'s catch: the manager swallows this error
+      // for best-effort discovery; keep the cause retrievable for status
+      // consumers (issue #9944). Gated like the status write so a server
+      // removed mid-discovery doesn't get an orphan cause entry resurrected.
+      if (!this.isDisconnecting) {
+        recordMCPServerLastError(this.serverName, getErrorMessage(error));
+      }
       throw error;
     }
   }
@@ -642,6 +776,42 @@ export class McpClient {
     updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
     if (this.transport) {
+      // Streamable HTTP only: the SDK's `transport.close()` aborts local
+      // state but leaves the server-side session alive. Per spec, a client
+      // that no longer needs a session SHOULD terminate it explicitly
+      // (`terminateSession()` sends the DELETE). Without this, a session we
+      // abandon keeps occupying the server: single-session HTTP servers
+      // then reject every later `initialize` with "Server already
+      // initialized" (issue #9944 — e.g. the internal reconnect path or a
+      // later `qwen mcp reconnect` can never recover them), and
+      // multi-session servers accumulate orphaned sessions. Best-effort —
+      // a dead/unreachable server must not block teardown. Must run BEFORE
+      // `close()` aborts the transport's request machinery.
+      const streamableTransport = this.transport as {
+        terminateSession?: () => Promise<void>;
+      };
+      if (typeof streamableTransport.terminateSession === 'function') {
+        try {
+          // Bound the DELETE: the SDK's `terminateSession()` has no timeout
+          // of its own (the MCP undici dispatcher runs with
+          // `headersTimeout: 0, bodyTimeout: 0`), and the transport's abort
+          // controller is only aborted by `close()` below — after this
+          // await. A live-but-unresponsive server would otherwise hang
+          // `disconnect()` (and every teardown caller) indefinitely. On
+          // timeout `runWithTimeout` rejects into the catch below (logged,
+          // then falls through to `close()`, which aborts the still-in-flight
+          // request) — same contract as the pool spawn/restart bounds.
+          await runWithTimeout(
+            streamableTransport.terminateSession(),
+            TERMINATE_SESSION_TIMEOUT_MS,
+            `terminateSession for server '${this.serverName}'`,
+          );
+        } catch (error) {
+          debugLogger.debug(
+            `Could not terminate MCP session for server '${this.serverName}' during disconnect (continuing): ${getErrorMessage(error)}`,
+          );
+        }
+      }
       await this.transport.close();
     }
     this.client.close();
@@ -707,9 +877,12 @@ export class McpClient {
     // but under-declares the `resources` capability would otherwise have its
     // resources discovered, listed in `/mcp`, and offered in `@server:`
     // completion, yet fail on read with a misleading "does not support
-    // resources" error. The underlying `request` is the raw `Protocol.request`
-    // (no capability assertion); a server that genuinely lacks resources
-    // answers `-32601`, which surfaces naturally to the caller.
+    // resources" error. The v2 typed helper skips the wire request when the
+    // capability is omitted, so modern sessions use it only when `resources`
+    // is declared; otherwise we issue the same raw request as the legacy path.
+    if (canUseModernTypedHelper(this.client, 'resources')) {
+      return this.client.readResource({ uri }, options);
+    }
     return this.client.request(
       { method: 'resources/read', params: { uri } },
       ReadResourceResultSchema,
@@ -1286,15 +1459,21 @@ export async function connectAndDiscover(
       mcpClient,
       cliConfig.getResourceRegistry(),
     );
-    const tools = await discoverTools(
+    const toolDiscovery = await discoverToolsWithMetadata(
       mcpServerName,
       mcpServerConfig,
       mcpClient,
       cliConfig,
     );
+    const tools = applyListingAppResourceUi(toolDiscovery.tools, resources);
 
     // If we found no prompts, resources, or tools, it's a failed discovery
-    if (prompts.length === 0 && resources.length === 0 && tools.length === 0) {
+    if (
+      prompts.length === 0 &&
+      resources.length === 0 &&
+      tools.length === 0 &&
+      !toolDiscovery.hadVisibilityFilteredTools
+    ) {
       throw new Error('No prompts, tools, or resources found on the server.');
     }
 
@@ -1332,6 +1511,28 @@ export async function connectAndDiscover(
  * @returns A promise that resolves to an array of discovered and enabled tools.
  * @throws An error if no enabled tools are found or if the server provides invalid function declarations.
  */
+function applyListingAppResourceUi(
+  tools: DiscoveredMCPTool[],
+  resources: readonly DiscoveredMCPResource[],
+): DiscoveredMCPTool[] {
+  if (tools.length === 0 || resources.length === 0) return tools;
+  const uiByUri = new Map<string, Record<string, unknown>>();
+  for (const resource of resources) {
+    const meta = resource._meta;
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) continue;
+    const ui = meta['ui'];
+    if (!ui || typeof ui !== 'object' || Array.isArray(ui)) continue;
+    uiByUri.set(resource.uri, ui as Record<string, unknown>);
+  }
+  if (uiByUri.size === 0) return tools;
+  return tools.map((tool) => {
+    const listingUi = tool.appResourceUri
+      ? uiByUri.get(tool.appResourceUri)
+      : undefined;
+    return listingUi ? tool.withAppResourceUi(listingUi) : tool;
+  });
+}
+
 export async function discoverTools(
   mcpServerName: string,
   mcpServerConfig: MCPServerConfig,
@@ -1339,9 +1540,57 @@ export async function discoverTools(
   cliConfig: Config,
   opts?: { applyConfigFilters?: boolean },
 ): Promise<DiscoveredMCPTool[]> {
+  return (
+    await discoverToolsWithMetadata(
+      mcpServerName,
+      mcpServerConfig,
+      mcpClient,
+      cliConfig,
+      opts,
+    )
+  ).tools;
+}
+
+type ToolDiscoveryResult = {
+  tools: DiscoveredMCPTool[];
+  hadVisibilityFilteredTools: boolean;
+};
+
+async function discoverToolsWithMetadata(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+  mcpClient: Client,
+  cliConfig: Config,
+  opts?: { applyConfigFilters?: boolean },
+): Promise<ToolDiscoveryResult> {
   try {
     const { mcpToTool } = await import('@google/genai');
-    const mcpCallableTool = mcpToTool(mcpClient, {
+    const listedTools: Array<
+      Awaited<ReturnType<Client['listTools']>>['tools'][number]
+    > = [];
+    let didListTools = false;
+    const listTools = async (params?: { cursor?: string }) => {
+      // Clients without getProtocolEra (tests and the genai adapter) keep
+      // the typed helper. Modern sessions use it only when `tools` is
+      // declared; otherwise the v2 helper returns [] without a wire request.
+      const result =
+        typeof mcpClient.getProtocolEra !== 'function' ||
+        canUseModernTypedHelper(mcpClient, 'tools')
+          ? await mcpClient.listTools(params)
+          : await mcpClient.request(
+              { method: 'tools/list', params: params ?? {} },
+              ListToolsResultSchema,
+            );
+      didListTools = true;
+      listedTools.push(...result.tools);
+      return result;
+    };
+    // @google/genai still types this structural adapter against SDK v1. Its
+    // discovery path only calls listTools(); execution stays on the v2 client.
+    // Legacy listTools must remain lenient because some servers implement
+    // tools/list without declaring the tools capability during initialization.
+    const discoveryClient = { listTools } as unknown as GenAiMcpClient;
+    const mcpCallableTool = mcpToTool(discoveryClient, {
       timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
     });
     const tool = await retryWithBackoff(
@@ -1351,18 +1600,21 @@ export async function discoverTools(
 
     if (!Array.isArray(tool.functionDeclarations)) {
       // This is a valid case for a prompt-only server
-      return [];
+      return { tools: [], hadVisibilityFilteredTools: false };
     }
 
     // Fetch raw tool list from MCP client to get annotations (readOnlyHint, etc.)
     // that are not preserved by mcpToTool's functionDeclarations conversion.
     const annotationsMap = new Map<string, McpToolAnnotations>();
+    const appResourceUriMap = new Map<string, string>();
     try {
-      const listToolsResult = await mcpClient.listTools();
-      for (const mcpTool of listToolsResult.tools) {
+      if (!didListTools) await listTools();
+      for (const mcpTool of listedTools) {
         if (mcpTool.annotations) {
           annotationsMap.set(mcpTool.name, mcpTool.annotations);
         }
+        const resourceUri = getMcpAppResourceUri(mcpTool);
+        if (resourceUri) appResourceUriMap.set(mcpTool.name, resourceUri);
       }
     } catch {
       // If listTools fails, proceed without annotations — non-critical
@@ -1374,6 +1626,7 @@ export async function discoverTools(
     const mcpTimeout = mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC;
     const applyConfigFilters = opts?.applyConfigFilters ?? true;
     const discoveredTools: DiscoveredMCPTool[] = [];
+    let hadVisibilityFilteredTools = false;
     for (const funcDecl of tool.functionDeclarations) {
       try {
         if (!funcDecl.name) {
@@ -1399,6 +1652,14 @@ export async function discoverTools(
           continue;
         }
 
+        const listed = listedTools.find(
+          (mcpTool) => mcpTool.name === funcDecl.name,
+        );
+        if (listed && !isMcpToolVisibleToModel(listed)) {
+          hadVisibilityFilteredTools = true;
+          continue;
+        }
+
         discoveredTools.push(
           new DiscoveredMCPTool(
             mcpCallableTool,
@@ -1415,6 +1676,7 @@ export async function discoverTools(
             annotationsMap.get(funcDecl.name!),
             mcpServerConfig.alwaysLoadTools === true,
             invocationContextClients.has(mcpClient),
+            appResourceUriMap.get(funcDecl.name!),
           ),
         );
       } catch (error) {
@@ -1425,7 +1687,7 @@ export async function discoverTools(
         );
       }
     }
-    return discoveredTools;
+    return { tools: discoveredTools, hadVisibilityFilteredTools };
   } catch (error) {
     if (!isMethodNotFound(error)) {
       debugLogger.error(
@@ -1434,7 +1696,7 @@ export async function discoverTools(
         )}`,
       );
     }
-    return [];
+    return { tools: [], hadVisibilityFilteredTools: false };
   }
 }
 
@@ -1453,6 +1715,22 @@ function isMethodNotFound(error: unknown): boolean {
 }
 
 /**
+ * v2 typed list/read helpers return empty (or skip the call) when the
+ * server omitted that capability. Use them only when the capability is
+ * declared; otherwise fall back to a raw request so under-declared
+ * servers stay visible.
+ */
+function canUseModernTypedHelper(
+  mcpClient: Client,
+  capability: 'prompts' | 'resources' | 'tools',
+): boolean {
+  return (
+    mcpClient.getProtocolEra?.() === 'modern' &&
+    Boolean(mcpClient.getServerCapabilities?.()?.[capability])
+  );
+}
+
+/**
  * Pure prompt listing. Asks the MCP server for its prompts and returns
  * enriched `DiscoveredMCPPrompt[]` (with `serverName` + bound `invoke`)
  * WITHOUT registering them anywhere. pool uses this so a single
@@ -1462,15 +1740,14 @@ function isMethodNotFound(error: unknown): boolean {
  * Returns `[]` on protocol errors or when the server has no prompts —
  * matches `discoverPrompts` swallow-and-continue behavior.
  *
- * We deliberately do NOT gate on `getServerCapabilities()?.prompts`. A
- * non-trivial number of real MCP servers implement `prompts/list` but
- * under-declare (or omit) the `prompts` capability in their `initialize`
- * response; gating on the declared capability made those servers' prompts
- * silently invisible in qwen-code (no `/`-menu entry) while lenient
- * clients still surfaced them. The underlying `mcpClient.request` is the
- * raw `Protocol.request` (the SDK only asserts capabilities for its typed
- * `listPrompts()` helper, which we don't use), so attempting the call is
- * safe: a server that truly lacks prompts answers `-32601 Method not
+ * We deliberately do NOT skip the wire request when
+ * `getServerCapabilities()?.prompts` is absent. A non-trivial number of
+ * real MCP servers implement `prompts/list` but under-declare (or omit)
+ * the `prompts` capability in their `initialize` response; the v2 typed
+ * helper returns `[]` without a request in that case. Modern sessions
+ * therefore use the helper only when the capability is declared;
+ * otherwise we issue the same raw `prompts/list` request as the legacy
+ * path. A server that truly lacks prompts answers `-32601 Method not
  * found`, which the catch below swallows silently.
  */
 export async function listMcpPrompts(
@@ -1480,10 +1757,12 @@ export async function listMcpPrompts(
   try {
     const response = await retryWithBackoff(
       () =>
-        mcpClient.request(
-          { method: 'prompts/list', params: {} },
-          ListPromptsResultSchema,
-        ),
+        canUseModernTypedHelper(mcpClient, 'prompts')
+          ? mcpClient.listPrompts()
+          : mcpClient.request(
+              { method: 'prompts/list', params: {} },
+              ListPromptsResultSchema,
+            ),
       `${mcpServerName}/prompts/list`,
     );
 
@@ -1548,16 +1827,17 @@ export async function invokeMcpPrompt(
   promptParams: Record<string, unknown>,
 ): Promise<GetPromptResult> {
   try {
-    const response = await mcpClient.request(
-      {
-        method: 'prompts/get',
-        params: {
-          name: promptName,
-          arguments: promptParams,
-        },
-      },
-      GetPromptResultSchema,
-    );
+    const params = {
+      name: promptName,
+      arguments: promptParams as Record<string, string>,
+    };
+    const response =
+      mcpClient.getProtocolEra?.() === 'modern'
+        ? await mcpClient.getPrompt(params)
+        : await mcpClient.request(
+            { method: 'prompts/get', params },
+            GetPromptResultSchema,
+          );
 
     return response;
   } catch (error) {
@@ -1578,15 +1858,16 @@ export async function invokeMcpPrompt(
  * transport can produce the snapshot once and let each session register
  * into its own registry. Mirrors `listMcpPrompts`.
  *
- * As with prompts, we do NOT gate on `getServerCapabilities()?.resources`:
- * some servers expose resources but under-declare the capability, and the
- * raw `mcpClient.request` does not assert capabilities. A server with no
- * resources answers `-32601 Method not found`, swallowed below.
+ * As with prompts, we do NOT skip the wire request when
+ * `getServerCapabilities()?.resources` is absent: some servers expose
+ * resources but under-declare the capability. The v2 typed helper returns
+ * `[]` without a request in that case, so modern sessions use it only
+ * when `resources` is declared; otherwise we issue the same raw request
+ * as the legacy path. A server with no resources answers `-32601 Method
+ * not found`, swallowed below.
  *
- * Note: cursor pagination is not followed (matching `listMcpPrompts`);
- * only the first page of resources is returned. Servers that paginate
- * their resource list would have later pages omitted — acceptable parity
- * with the prompt path and rare in practice.
+ * When the capability is declared, the v2 helper also aggregates cursor
+ * pagination. Legacy sessions preserve the existing first-page behavior.
  */
 export async function listMcpResources(
   mcpServerName: string,
@@ -1595,10 +1876,12 @@ export async function listMcpResources(
   try {
     const response = await retryWithBackoff(
       () =>
-        mcpClient.request(
-          { method: 'resources/list', params: {} },
-          ListResourcesResultSchema,
-        ),
+        canUseModernTypedHelper(mcpClient, 'resources')
+          ? mcpClient.listResources()
+          : mcpClient.request(
+              { method: 'resources/list', params: {} },
+              ListResourcesResultSchema,
+            ),
       `${mcpServerName}/resources/list`,
     );
 
@@ -1671,10 +1954,7 @@ export async function connectToMcpServer(
   sendSdkMcpMessage?: SendSdkMcpMessage,
 ): Promise<Client> {
   clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
-  const mcpClient = new Client({
-    name: 'qwen-code-mcp-client',
-    version: '0.0.1',
-  });
+  const mcpClient = createMcpClient('qwen-code-mcp-client', mcpServerConfig);
 
   mcpClient.registerCapabilities({
     roots: {
@@ -1682,7 +1962,7 @@ export async function connectToMcpServer(
     },
   });
 
-  mcpClient.setRequestHandler(ListRootsRequestSchema, async () => {
+  mcpClient.setRequestHandler('roots/list', async () => {
     const roots = [];
     for (const dir of workspaceContext.getDirectories()) {
       roots.push({

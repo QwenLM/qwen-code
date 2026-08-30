@@ -47,7 +47,7 @@ create `CuaDriver` directly. This path does not start an executable or open a
 socket, and TCC checks execute as the importing application:
 
 ```ts
-import { CuaDriver } from '@trycua/cua-driver';
+import { CuaDriver } from '@qwen-code/cua-sdk';
 
 const driver = CuaDriver.create(undefined);
 try {
@@ -140,13 +140,13 @@ migration.
 
 ### Node and Electron daemon hosts
 
-Use the embedded host in `@trycua/cua-driver` instead of implementing process
+Use the embedded host in `@qwen-code/cua-sdk` instead of implementing process
 and socket management in every host. It starts a private daemon directly, waits
 until its socket accepts connections, returns SDK and MCP connection details,
 and owns restart and cleanup:
 
 ```ts
-import { CuaDriver, EmbeddedCuaDriverHost } from '@trycua/cua-driver';
+import { CuaDriver, EmbeddedCuaDriverHost } from '@qwen-code/cua-sdk';
 
 const embedded = new EmbeddedCuaDriverHost(
   '/path/inside/YourApp.app/Contents/Resources/qwen-cua-driver',
@@ -194,8 +194,9 @@ daemon child.
   completion is unknown.
 - The Rust owner holds a parent-liveness pipe, so host death closes the daemon;
   orderly shutdown should still await `stop()`.
-- Capture scope belongs to each session. One embedded daemon can concurrently
-  serve `auto`, strict `window`, and strict `desktop` sessions.
+- Capture modality belongs to each observation or action target, not to the
+  lifecycle session. One embedded daemon can concurrently serve exact window
+  and desktop calls without changing session state.
 - Permission changes require destroying clients, restarting the daemon, and
   reconnecting. A connection from the old generation is never reusable.
 
@@ -272,7 +273,7 @@ a dialog (the `prompt` argument is ignored) and returns:
     "embedded": true,
     "pid": 12345,
     "responsible_ppid": 12300,
-    "executable": "/path/to/cua-driver",
+    "executable": "/path/to/qwen-cua-driver",
     "disclaim_env": false,
     "note": "Embedded mode: these booleans reflect the HOST app's TCC grant…"
   }

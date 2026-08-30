@@ -34,6 +34,8 @@ export interface SessionReplaySnapshot {
   degraded?: true;
 }
 
+export type LiveReplayMode = 'full' | 'summary';
+
 export interface CompactionEngine {
   /**
    * `byteLength` is the serialized size the bus already computed for the
@@ -43,8 +45,20 @@ export interface CompactionEngine {
    */
   ingest(event: BridgeEvent, byteLength?: number): void;
   seedReplayEvents(events: BridgeEvent[]): void;
-  snapshot(): SessionReplaySnapshot;
+  snapshot(liveReplayMode?: LiveReplayMode): SessionReplaySnapshot;
+  /**
+   * In-flight journal only — events ingested since the last turn
+   * boundary — without flattening the compacted replay window. Optional:
+   * consumers fall back to `snapshot()` semantics when absent.
+   */
+  liveJournalSnapshot?(liveReplayMode?: LiveReplayMode): BridgeEvent[];
   close(): void;
+  /**
+   * Current live-journal caps — may exceed the configured baseline when
+   * adaptive growth raised them mid-turn. Optional: engines without a
+   * journal concept simply omit it.
+   */
+  journalLimits?(): { maxEvents: number; maxBytes: number };
 }
 
 export const EVENT_SCHEMA_VERSION = 1 as const;
@@ -388,12 +402,41 @@ export class EventBus {
     this.onCompactionError = opts.onCompactionError;
   }
 
-  snapshotReplay(): SessionReplaySnapshot | undefined {
-    const snapshot = this.compactionEngine?.snapshot();
+  snapshotReplay(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): SessionReplaySnapshot | undefined {
+    const snapshot = this.compactionEngine?.snapshot(liveReplayMode);
     if (snapshot && this.compactionDegraded) {
       return { ...snapshot, degraded: true };
     }
     return snapshot;
+  }
+
+  /**
+   * Events ingested since the last turn boundary (the boundary itself is
+   * folded into the replay window), without flattening that window.
+   * Undefined when no compaction engine is wired or it exposes no journal
+   * snapshot.
+   */
+  liveJournalSnapshot(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): BridgeEvent[] | undefined {
+    return this.compactionEngine?.liveJournalSnapshot?.(liveReplayMode);
+  }
+
+  /**
+   * The engine's current live-journal caps — may have grown past the
+   * configured baseline under adaptive growth. Read by the bridge's
+   * growth policy to account granted headroom across its live sessions
+   * and by daemon status for the per-session effective limits.
+   */
+  journalLimits(): { maxEvents: number; maxBytes: number } | undefined {
+    return this.compactionEngine?.journalLimits?.();
+  }
+
+  /** The byte half of `journalLimits()`; the growth-policy hot path. */
+  journalLimitBytes(): number | undefined {
+    return this.journalLimits()?.maxBytes;
   }
 
   private markCompactionDegraded(err: unknown): void {

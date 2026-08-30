@@ -16,6 +16,14 @@
 /** Runtime model snapshot ID prefix; format `$runtime|${authType}|${modelId}`. */
 export const RUNTIME_SNAPSHOT_PREFIX = '$runtime|';
 
+/** Canonical RuntimeModelSnapshot id: `$runtime|{authType}|{modelId}`. */
+export function buildRuntimeSnapshotId(
+  authType: string,
+  modelId: string,
+): string {
+  return `${RUNTIME_SNAPSHOT_PREFIX}${authType}|${modelId}`;
+}
+
 /**
  * Recover the bare model ID from a (possibly runtime-prefixed) model string.
  * Strips every layer so nested prefixes self-heal; bare IDs pass through.

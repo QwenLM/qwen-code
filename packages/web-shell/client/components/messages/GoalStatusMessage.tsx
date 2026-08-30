@@ -1,7 +1,5 @@
-import { useEffect } from 'react';
 import { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
-import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import styles from './GoalStatusMessage.module.css';
@@ -23,8 +21,6 @@ export interface SerializedGoalStatusMessage {
   setAt?: number;
   lastReason?: string;
 }
-
-export const GOAL_STATUS_ACTIVE_EVENT = 'web-shell-goal-status-active';
 
 const {
   serialize: serializeGoalStatusMessage,
@@ -142,27 +138,10 @@ function getTitle(
 
 export function GoalStatusMessage({
   status,
-  activateFooter = false,
 }: {
   status: SerializedGoalStatusMessage;
-  activateFooter?: boolean;
 }) {
   const { t } = useI18n();
-  const renderMode = useTranscriptRenderMode();
-
-  useEffect(() => {
-    if (!activateFooter || renderMode === 'readonly') return;
-    const active = status.kind === 'set' || status.kind === 'checking';
-    window.dispatchEvent(
-      new CustomEvent(GOAL_STATUS_ACTIVE_EVENT, {
-        detail: {
-          active,
-          condition: status.condition,
-          setAt: status.setAt,
-        },
-      }),
-    );
-  }, [activateFooter, renderMode, status.condition, status.kind, status.setAt]);
 
   const title = getTitle(status, t);
   const stats: string[] = [];

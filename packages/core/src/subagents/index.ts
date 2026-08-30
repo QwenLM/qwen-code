@@ -32,6 +32,7 @@ export { SubagentError, SubagentErrorCode } from './types.js';
 export {
   BuiltinAgentRegistry,
   DEFAULT_BUILTIN_SUBAGENT_TYPE,
+  REVIEW_BUILTIN_SUBAGENT_TYPE,
 } from './builtin-agents.js';
 
 // Validation system
