@@ -29,6 +29,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -158,6 +159,90 @@ describe('runScratchTree', () => {
     expect(
       existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
     ).toBe(false);
+  });
+
+  it('refuses an included filter whose origin is outside the repository config graph', () => {
+    const included = join(repo, 'review-filter-external.inc');
+    const attributes = git(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-path',
+      'info/attributes',
+    );
+    const pwned = join(repo, 'PWNED-external-smudge');
+    writeFileSync(included, `[filter "external"]\n\tsmudge = touch ${pwned}\n`);
+    git(worktree, 'config', 'include.path', included);
+    writeFileSync(attributes, '*.ts filter=external\n');
+    writeFileSync(join(worktree, 'a.ts'), 'dirty\n');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.external.smudge');
+    expect(existsSync(pwned)).toBe(false);
+  });
+
+  it('screens includeIf in the scratch gitdir context before checkout', () => {
+    const common = git(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    const tree = scratchWorktreePath(worktree, 'verify--round-1--abc123');
+    const scratchAdmin = join(common, 'worktrees', basename(tree));
+    const included = join(common, 'review-filter-conditional.inc');
+    const attributes = git(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-path',
+      'info/attributes',
+    );
+    const pwned = join(repo, 'PWNED-conditional-smudge');
+    writeFileSync(
+      included,
+      `[filter "conditional"]\n\tsmudge = touch ${pwned}\n`,
+    );
+    git(worktree, 'config', `includeIf.gitdir:${scratchAdmin}.path`, included);
+    writeFileSync(attributes, '*.ts filter=conditional\n');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.conditional.smudge');
+    expect(existsSync(pwned)).toBe(false);
+    expect(existsSync(tree)).toBe(false);
+  });
+
+  it('fails closed when the candidate config is a symlink outside the gitdir', () => {
+    const common = git(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    const config = join(common, 'config');
+    const outside = join(repo, 'outside-config');
+    const attributes = git(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-path',
+      'info/attributes',
+    );
+    const pwned = join(repo, 'PWNED-symlink-smudge');
+    renameSync(config, outside);
+    symlinkSync(outside, config);
+    git(worktree, 'config', 'filter.symlink.smudge', `touch ${pwned}`);
+    writeFileSync(attributes, '*.ts filter=symlink\n');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('could not be read to the end');
+    expect(existsSync(pwned)).toBe(false);
   });
 
   it('allows a repo-local include whose filter is defined by global config', () => {
