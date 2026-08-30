@@ -3392,13 +3392,7 @@ export class LlmChat {
         // Max output tokens escalation: when no user/env override is set and
         // the model hits MAX_TOKENS, retry once with the escalated limit.
         let maxTokensEscalated = false;
-        const parsedEnvMaxTokens = parsePositiveIntegerEnvValue(
-          process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
-        );
-        const hasUserMaxTokensOverride =
-          (cgConfig?.samplingParams?.max_tokens !== undefined &&
-            cgConfig?.samplingParams?.max_tokens !== null) ||
-          parsedEnvMaxTokens !== undefined;
+        const hasUserMaxTokensOverride = explicitOutputCeiling !== undefined;
         // params.config.maxOutputTokens is set by the first-send clamp; the
         // outputCeiling fallback is defensive and should not fire in practice.
         const effectiveInitialMaxOutputTokens =
@@ -5979,13 +5973,14 @@ export class LlmChat {
     let streamError: unknown = null;
     const streamIterator = streamResponse[Symbol.asyncIterator]();
     let streamFinished = false;
+    let recoveryTerminalObserved = false;
     let terminalDrainTimedOut = false;
     let terminalDrainTimeout: ReturnType<typeof delay> | undefined;
 
     try {
       for (;;) {
         let next: IteratorResult<GenerateContentResponse>;
-        if (terminalChunks.length > 0) {
+        if (recoveryTerminalObserved) {
           terminalDrainTimeout ??= delay(TERMINAL_CHUNK_DRAIN_TIMEOUT_MS);
           const nextPromise = streamIterator.next();
           const outcome = await Promise.race([
@@ -6227,6 +6222,12 @@ export class LlmChat {
         }
 
         const observedTerminalFinishReason = firstCandidateFinishReason(chunk);
+        const observedOwnedTerminal =
+          observedTerminalFinishReason !== undefined &&
+          (recordDeferral === 'always' ||
+            (recordDeferral === 'on-max-tokens' &&
+              observedTerminalFinishReason === FinishReason.MAX_TOKENS));
+        recoveryTerminalObserved ||= observedOwnedTerminal;
         if (isToolResultContinuation) {
           // Do not let consumers commit Finished before post-stream validation
           // can reject a semantically empty continuation.
@@ -6256,11 +6257,7 @@ export class LlmChat {
             yieldedFinishReason = yieldedChunkFinishReason as FinishReason;
           }
           const shouldStartTerminalBuffer =
-            (isToolResultContinuation &&
-              recordDeferral !== undefined &&
-              observedTerminalFinishReason !== undefined &&
-              (recordDeferral === 'always' ||
-                observedTerminalFinishReason === FinishReason.MAX_TOKENS)) ||
+            (isToolResultContinuation && observedOwnedTerminal) ||
             (yieldedChunkFinishReason !== undefined &&
               (recordDeferral === 'always' ||
                 (recordDeferral === 'on-max-tokens' &&

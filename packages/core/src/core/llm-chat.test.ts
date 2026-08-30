@@ -14705,6 +14705,31 @@ describe('LlmChat', async () => {
       } as AsyncGenerator<GenerateContentResponse>;
     }
 
+    it('does not recover when the request sets maxOutputTokens', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStream([makeChunk([{ text: 'user-capped output' }], 'MAX_TOKENS')]),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        {
+          message: 'essay',
+          config: { maxOutputTokens: 1024 },
+        },
+        'request-max-output-tokens',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledOnce();
+      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+        false,
+      );
+      expect(chat.getLastModelMessageText()).toBe('user-capped output');
+    });
+
     it('yields an ordinary STOP chunk before provider EOF', async () => {
       let releaseProvider!: () => void;
       const providerGate = new Promise<void>((resolve) => {
@@ -14844,6 +14869,65 @@ describe('LlmChat', async () => {
         expect(chat.getLastModelMessageText()).toBe('partial');
         expect(providerClosed).toBe(true);
         await iterator.return?.(undefined);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('bounds a suppressed recovery terminal drain when provider EOF never arrives', async () => {
+      vi.useFakeTimers();
+      try {
+        let releaseProvider!: () => void;
+        const providerGate = new Promise<void>((resolve) => {
+          releaseProvider = resolve;
+        });
+        let providerClosed = false;
+        const leakedText =
+          JSON.stringify([{ name: 'read_file', file_path: 'a.ts' }]) +
+          '\n</parameter>\n</function>\n';
+        const response = (async function* () {
+          try {
+            yield makeChunk([{ text: leakedText }], 'MAX_TOKENS');
+            await providerGate;
+          } finally {
+            providerClosed = true;
+          }
+        })();
+        const internalChat = chat as unknown as {
+          processStreamResponse(
+            model: string,
+            stream: AsyncGenerator<GenerateContentResponse>,
+            routeKey: string,
+            goalContext?: unknown,
+            transportContinuationPrefix?: string,
+            recordDeferral?: 'on-max-tokens' | 'always',
+            acceptQuietToolResultCompletion?: boolean,
+            onModelTurnCommitted?: (content: Content) => void,
+            abortStream?: () => void,
+          ): AsyncGenerator<GenerateContentResponse>;
+        };
+        const iterator = internalChat.processStreamResponse(
+          'test-model',
+          response,
+          'test-route',
+          undefined,
+          undefined,
+          'on-max-tokens',
+          false,
+          undefined,
+          releaseProvider,
+        );
+
+        const pending = iterator.next();
+        let rejection: unknown;
+        const handled = pending.catch((error: unknown) => {
+          rejection = error;
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        await handled;
+        expect(rejection).toMatchObject({ type: 'PROTOCOL_TAG_LEAK' });
+        expect(providerClosed).toBe(true);
       } finally {
         vi.useRealTimers();
       }
