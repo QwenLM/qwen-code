@@ -1,7 +1,7 @@
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { WEB_SHELL_SESSION_SOURCE_TYPE } from '../constants/sessions';
 
 const SESSION_CREATED_CALLBACK_TIMEOUT_MS = 30_000;
@@ -37,6 +37,7 @@ export async function createAndAttachSessionForPrompt({
   workspaceCwd,
   worktree,
   branch,
+  sessionSourceType = WEB_SHELL_SESSION_SOURCE_TYPE,
   onSessionCreated,
   onSessionAllocated,
   getCurrentSessionId,
@@ -49,6 +50,11 @@ export async function createAndAttachSessionForPrompt({
   workspaceCwd?: string;
   worktree?: { slug?: string };
   branch?: { name: string };
+  /**
+   * Creator attribution recorded on the session. Embedded hosts pass their own
+   * value so their sessions stay distinguishable from browser Web Shell ones.
+   */
+  sessionSourceType?: string;
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   onSessionAllocated?: (sessionId: string) => void;
   getCurrentSessionId: () => string | undefined;
@@ -71,7 +77,7 @@ export async function createAndAttachSessionForPrompt({
     branch: branchInfo,
   } = await sessionActions.createSession({
     workspaceCwd,
-    sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+    sourceType: sessionSourceType,
     ...(approvalMode ? { approvalMode } : {}),
     ...(worktree ? { worktree } : {}),
     ...(branch ? { branch } : {}),

@@ -54,6 +54,10 @@ function buildParser(): Argv {
 }
 
 describe('serve command args', () => {
+  it('documents the complete IPv4 loopback range', async () => {
+    expect(await buildParser().getHelp()).toContain('127.0.0.0/8');
+  });
+
   it('defaults authenticated open to disabled', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['open-with-auth']).toBe(false);
@@ -1034,6 +1038,10 @@ describe('maybeOpenWebShellBrowser', () => {
 });
 
 describe('serve startup import boundary', () => {
+  const ecs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-');
+  const startupMs = ecs ? 60_000 : 30_000;
+  const testMs = ecs ? 70_000 : 40_000;
+
   it('reaches listening through the dev entrypoint without loading interactive Ink internals first', async () => {
     const workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-import-boundary-')),
@@ -1159,7 +1167,7 @@ describe('serve startup import boundary', () => {
               `serve did not reach listening\nstdout:\n${stdout}\nstderr:\n${stderr}`,
             ),
           );
-        }, 30_000);
+        }, startupMs);
 
         child.stdout.on('data', (chunk: Buffer) => {
           stdout += chunk.toString('utf8');
@@ -1205,5 +1213,5 @@ describe('serve startup import boundary', () => {
       await removeTempDir(workspace);
       await removeTempDir(qwenHome);
     }
-  }, 40_000);
+  }, testMs);
 });

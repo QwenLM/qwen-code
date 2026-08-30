@@ -3157,6 +3157,8 @@ const EN: Messages = {
   'settings.models.empty': 'No configured models yet.',
   'settings.models.loading': 'Loading models…',
   'settings.models.deleteFailed': 'Failed to delete model',
+  'settings.models.runtimeSyncFailed':
+    'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
   'settings.models.fallbacks.title': 'Model Fallbacks',
   'settings.models.fallbacks.hint': (v) =>
     `Select up to ${v?.max ?? 3}; tried in order when the main model is at capacity.`,
@@ -6181,6 +6183,8 @@ const ZH: Messages = {
   'settings.models.empty': '暂无配置的模型。',
   'settings.models.loading': '正在加载模型…',
   'settings.models.deleteFailed': '删除模型失败',
+  'settings.models.runtimeSyncFailed':
+    '更改已保存，但无法刷新正在运行的会话。请重启 qwen serve 后再使用更新后的模型列表。',
   'settings.models.fallbacks.title': '模型回退',
   'settings.models.fallbacks.hint': (v) =>
     `最多选择 ${v?.max ?? 3} 个；主模型容量不足时按顺序回退。`,
@@ -6226,9 +6230,6 @@ const ZH: Messages = {
   'settings.label.general.language': '语言：界面',
   'settings.description.general.language':
     '用户界面的语言。使用 auto 可根据系统设置自动检测；也可以在 ~/.qwen/locales/ 中放置 JS 语言文件来使用自定义语言代码。',
-  'settings.label.general.dynamicCommandTranslation': '语言：动态命令翻译',
-  'settings.description.general.dynamicCommandTranslation':
-    '为动态 slash command 描述启用 AI 翻译。关闭后动态命令使用原始描述，也不会触发翻译模型调用。',
   'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
   'settings.description.general.preventSystemSleep':
     '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',
