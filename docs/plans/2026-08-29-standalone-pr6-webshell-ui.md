@@ -137,10 +137,12 @@ everywhere):
   (`client/live/useLiveVoice`), never a silent remap to standalone — the
   routing contract's "inherit explicit context" row stays intact (review
   P1).
-- **Split view** — each pane owns a `DaemonSessionProvider`
-  (`components/SplitView.tsx:464`); panes receive the pane's explicit
-  context alongside `sessionId` so a standalone chat can be opened beside a
-  workspace chat without cross-contamination.
+- **Split view excludes standalone sessions in PR6** (review P1): pane
+  identity is persisted as bare `sessionId` strings (split URL,
+  sessionStorage) and pane ownership derives from workspace catalogs, so a
+  standalone pane has no context source after a cold split URL or refresh
+  and would fall through to workspace resolution. Standalone rows get no
+  split entry point; context-bearing pane descriptors are a follow-up.
 - **Context propagation** — `WorkspaceSessionProvider`
   (`components/WorkspaceSessionProvider.tsx`) still passes legacy
   `workspaceCwd` into `DaemonSessionProvider`; PR6 passes the resolved
@@ -240,6 +242,19 @@ DaemonProductSessionContext | undefined` state, set by every entry point
   are removed. On success the session leaves Recents even when the response
   carries `fileCleanupPending`; that subset is surfaced as a non-blocking
   notice, not a blocking error.
+- **Archived standalone sessions stay reachable** (review P2): the lazy
+  Archived section gains a standalone `archiveState=archived` lane — today
+  that section is backed by workspace catalogs only, while the umbrella
+  contract requires archived standalone sessions to remain visible. Because
+  PR5 deliberately skips workspace event invalidation for standalone
+  contexts, the standalone lanes refresh explicitly after create, prompt
+  completion, and every lifecycle action.
+- **Batch outcomes are interpreted per session id** (review P2): archive,
+  unarchive, and delete return partial-success envelopes even with HTTP 200. The catalog updates only when the target id appears in
+  `archived`/`alreadyArchived`, `unarchived`/`alreadyActive`, or
+  `removed`/`notFound` as appropriate; an id in `errors` keeps its row and
+  surfaces the per-session code/message. `fileCleanupPending` is only an
+  additional notice for an otherwise removed id.
 
 ## Project-Only Surface Hiding
 
@@ -275,6 +290,14 @@ connection.sessionContext`) so draft standalone chats hide project
   acceptance matrix keeps all attachments out of standalone MVP; lane 2 is
   session-scoped, so it needs an explicit context check, not a capability
   check.
+- **Attachments held across a context switch are dropped, not carried**
+  (review P1): hiding paste/drop/upload controls does not clear
+  `pastedImages`/`pastedFiles` already held by `useComposerCore`, and
+  `createNewSession` does not clear them either — files added in a
+  workspace could otherwise ride into the first standalone prompt.
+  Switching into a standalone draft clears held attachments with a visible
+  notice, and a submit-time non-workspace guard blocks stale or
+  programmatically supplied attachments from reaching a standalone session.
 - Live chats get the same treatment through the same gate; PR5 already
   skips workspace providers/skills/Git/preheat for non-workspace contexts
   inside the provider, so this PR only hides the visible controls.
@@ -303,6 +326,13 @@ upward through `onSessionIdChange` (`App.tsx:8282`) so `main.tsx` can
   resolver polls exact lookup with bounded backoff (e.g. up to 30 s, capped
   attempts) and then stops at an explicit **Retry** action; it never hangs
   in the resolving state forever.
+- **Stale resolution is canceled before it starts a load** (review P1):
+  the provider's generation guard only orders loads after they start, but
+  exact lookup and polling happen before `loadSession`, so a delayed
+  `creating` poll resolving after the user opened another session would
+  start a load that incorrectly wins. An App-level route-resolution token
+  is invalidated on every navigation and checked before each poll and
+  immediately before `loadSession`.
 - **Fail-closed edge cases** (review P2): a `?context=standalone` link
   carrying a conflicting `?workspace=` parameter is rejected, not
   reconciled; on a daemon without the capability, a standalone link shows
@@ -323,7 +353,16 @@ Render the typed PR5 state instead of parsing strings:
   the transcript survived but previous files were not recovered.
 - `standaloneSession.errorCode === 'working_directory_missing'` → offer
   explicit **repair** (`repairStandaloneSessionDirectory`); repair never
-  replays a prompt.
+  replays a prompt. This requires one small provider/App transition in PR6
+  scope (review P1): today `sendPrompt`'s catch surfaces the
+  prompt-admission `409` only as a generic notice and never copies its
+  typed code into `standaloneSession`, and the SDK repair call neither
+  clears provider error state nor reloads the session — so the Repair UI
+  could neither reliably appear nor reliably unblock. PR6 captures the
+  typed code into `standaloneSession.errorCode` on prompt-admission
+  rejection, owner-guards Repair to the affected session, and on success
+  reloads the same standalone session, clearing the error only after the
+  reload commits.
 - `standaloneSession.errorCode === 'working_directory_compromised'` →
   **fail-closed blocking state** (review P1): the service rejects an
   existing compromised path instead of recreating it, so no Repair action
@@ -373,6 +412,17 @@ Unit/component (vitest, `packages/web-shell`):
 - `recreated` warning, repair offered only for `working_directory_missing`,
   `working_directory_compromised` rendered fail-closed without a repair
   action (review P1), creation-recovery banner rendering from typed state.
+- Prompt-admission `working_directory_missing` reaches
+  `standaloneSession.errorCode`, Repair is owner-guarded to the affected
+  session, and success reloads the same session and clears the error
+  (review P1).
+- A delayed `creating` poll canceled by a user session switch never starts
+  a load (review P1).
+- Context switch clears held composer attachments with a visible notice;
+  the submit-time guard rejects stale or programmatic attachments
+  (review P1).
+- Archived standalone lane lists and refreshes after lifecycle actions;
+  partial-success batch envelopes handled per action (review P2).
 
 E2E (Playwright, `packages/web-shell/client/e2e`):
 
@@ -396,7 +446,10 @@ PR6 does not add: standalone attachments/uploads (waits on the workspace
 upload follow-up), moving/forking a standalone session into a project,
 durable standalone scheduling, storage quotas, or child-session management
 UI. `SessionOverviewPanel` and `ResumeDialog` remain workspace-scoped in
-this PR; the top-level Recents group lives in the sidebar only. It does not
-change daemon lifecycle behavior, the SDK contract, or the PR5 provider
-switching semantics; any typed gap discovered in the provider surface is
-raised as a follow-up rather than patched into this PR's UI work.
+this PR; the top-level Recents group lives in the sidebar only. Split View
+stays workspace-only (context-bearing pane descriptors are a follow-up).
+The one in-scope provider change is the prompt-admission error-code capture
+plus repair-and-reload transition, because the Repair UI depends on it; any
+other typed gap discovered in the provider surface is raised as a
+follow-up. It does not change daemon lifecycle behavior, the SDK contract,
+or the PR5 provider switching semantics.
