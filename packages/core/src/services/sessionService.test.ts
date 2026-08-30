@@ -7411,6 +7411,56 @@ describe('SessionService', () => {
       ).resolves.toMatchObject({ goalObjective: undefined });
     });
 
+    it.each([
+      ['first array element', false],
+      ['comma-positioned array element', true],
+    ])(
+      'does not label a session from a payload-bearing Goal in a torn %s',
+      async (_name, withPrefix) => {
+        const sessionId = '22222222-4444-4222-8222-444444444444';
+        const clear = goalStateLine(sessionId, null);
+        const nestedGoal = goalStateLine(sessionId, 'injected', 'nested-goal');
+        const containing = JSON.stringify({
+          type: 'assistant',
+          parts: [
+            ...(withPrefix ? [{ type: 'text', text: 'before' }] : []),
+            nestedGoal,
+          ],
+        });
+        const nestedJson = JSON.stringify(nestedGoal);
+        const torn = containing.slice(
+          0,
+          containing.indexOf(nestedJson) + nestedJson.length,
+        );
+        const file = writeRawSession(
+          sessionId,
+          `${JSON.stringify(clear)}\n${torn}\n`,
+        );
+        const actualJsonl = await vi.importActual<
+          typeof import('../utils/jsonl-utils.js')
+        >('../utils/jsonl-utils.js');
+        vi.mocked(jsonl._recoverObjectsFromLine).mockImplementation(
+          actualJsonl._recoverObjectsFromLine,
+        );
+        vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+          actualJsonl.readLinesWithIntegrity,
+        );
+
+        await expect(
+          jsonl.readLinesWithIntegrity(file, 10),
+        ).resolves.toMatchObject({ complete: false });
+
+        const result = await service.listSessions();
+
+        expect(
+          findItem(result.items, sessionId)?.goalObjective,
+        ).toBeUndefined();
+        await expect(
+          service.getSessionListItem(sessionId),
+        ).resolves.toMatchObject({ goalObjective: undefined });
+      },
+    );
+
     it('does not resurrect a legacy Goal cleared past the record window', async () => {
       const sessionId = '29999999-9999-4999-8999-999999999999';
       const objective = 'Ship the legacy change';

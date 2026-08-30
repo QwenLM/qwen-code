@@ -283,6 +283,31 @@ export function extractJsonStringFieldFromLastMatchingLine(
   recordMatches?: (record: unknown) => boolean,
   readRecordField?: MatchingRecordFieldReader,
 ): LastMatchingLineField {
+  const canStartRecoveredSuffix = (line: string, recordStart: number) => {
+    const previous = line.slice(0, recordStart).trimEnd().at(-1);
+    if (previous === '[' || previous === ',' || previous === ':') return false;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = 0; i < recordStart; i++) {
+      const char = line[i];
+      if (escape) {
+        escape = false;
+      } else if (inString) {
+        if (char === '\\') escape = true;
+        else if (char === '"') inString = false;
+      } else if (char === '"') {
+        inString = true;
+      } else if (char === '{' || char === '[') {
+        depth++;
+      } else if (char === '}' || char === ']') {
+        depth = Math.max(0, depth - 1);
+      }
+    }
+    return inString || depth === 0;
+  };
+
   const readParsedRecord = (
     parsed: unknown,
     record: string,
@@ -319,10 +344,10 @@ export function extractJsonStringFieldFromLastMatchingLine(
     }
 
     let markerOffset = line.lastIndexOf(lineContains);
-    const latestMarkerOffset = markerOffset;
+    let authoritativeMarkerOffset = markerOffset;
     while (markerOffset >= 0) {
       const recordStart = line.lastIndexOf('{', markerOffset);
-      if (recordStart >= 0 && line[recordStart - 1] !== ':') {
+      if (recordStart >= 0 && canStartRecoveredSuffix(line, recordStart)) {
         try {
           const parsed = JSON.parse(line.slice(recordStart));
           const record = JSON.stringify(parsed);
@@ -351,13 +376,19 @@ export function extractJsonStringFieldFromLastMatchingLine(
             if (
               recordOffset < 0 ||
               recordOffset + record.lastIndexOf(lineContains) !==
-                latestMarkerOffset
+                authoritativeMarkerOffset
             ) {
               continue;
             }
           }
           const field = readParsedRecord(parsed, record);
           if (field) return field;
+          if (readRecordField) {
+            authoritativeMarkerOffset = line.lastIndexOf(
+              lineContains,
+              authoritativeMarkerOffset - 1,
+            );
+          }
         }
       }
     }

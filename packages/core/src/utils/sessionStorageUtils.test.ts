@@ -206,7 +206,9 @@ describe('sessionStorageUtils', () => {
     const nestedGoal = {
       type: 'system',
       subtype: 'goal_state',
-      objective: 'injected',
+      systemPayload: {
+        snapshot: { goal: { objective: 'injected' } },
+      },
     };
     const nestedMarkerLine = JSON.stringify({
       type: 'assistant',
@@ -316,6 +318,55 @@ describe('sessionStorageUtils', () => {
           readGoalStateObjective,
         ),
       ).toEqual({ matched: true, value: undefined });
+    });
+
+    it('does not read a comma-positioned goal-shaped array element from a torn record', () => {
+      const nestedJson = JSON.stringify(nestedGoal);
+      const containing = JSON.stringify({
+        type: 'assistant',
+        parts: [{ type: 'text', text: 'before' }, nestedGoal],
+      });
+      const torn = containing.slice(
+        0,
+        containing.indexOf(nestedJson) + nestedJson.length,
+      );
+
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          torn,
+          GOAL,
+          'objective',
+          true,
+          undefined,
+          readGoalStateObjective,
+        ),
+      ).toEqual({ matched: true, value: undefined });
+    });
+
+    it('uses the newest value-returning Goal record on a glued line', () => {
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          `${create('old')}${create('real')}`,
+          GOAL,
+          'objective',
+          true,
+          undefined,
+          readGoalStateObjective,
+        ),
+      ).toEqual({ matched: true, value: 'real' });
+    });
+
+    it('re-attributes a rejected nested marker to an earlier glued Goal record', () => {
+      expect(
+        extractJsonStringFieldFromLastMatchingLine(
+          `${create('real')}${nestedMarkerLine}`,
+          GOAL,
+          'objective',
+          true,
+          undefined,
+          readGoalStateObjective,
+        ),
+      ).toEqual({ matched: true, value: 'real' });
     });
 
     it('does not recover an older value when the newest marker cannot be attributed', () => {
