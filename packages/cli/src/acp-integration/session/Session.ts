@@ -3398,6 +3398,21 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  reloadModelProvidersFromDisk(): void {
+    if (
+      !this.settings.reloadScopesFromDiskAtomically([
+        SettingScope.User,
+        SettingScope.Workspace,
+      ])
+    ) {
+      throw new Error('Unable to reload model-provider settings from disk.');
+    }
+    this.config.reloadModelProvidersConfig(
+      this.settings.merged.modelProviders,
+      this.settings.merged.providerProtocol ?? {},
+    );
+  }
+
   installPendingManagedConversationBinding(
     expectation: BridgeConversationDirectoryExpectation,
     assertIdentity: () => Promise<void>,

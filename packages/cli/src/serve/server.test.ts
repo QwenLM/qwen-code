@@ -310,6 +310,14 @@ const baseOpts: ServeOptions = {
   mode: 'http-bridge',
 };
 
+// `createServeApp` does not own a socket, so a direct no-token embed may
+// declare a non-loopback hostname. It never receives trusted-loopback
+// authority and is the fail-closed fixture for strict-gate tests.
+const nonTrustedEmbedOpts: ServeOptions = {
+  ...baseOpts,
+  hostname: '0.0.0.0',
+};
+
 // Direct app tests bypass runQwenServe's reconciler cleanup.
 const createdApps = new Set<ReturnType<typeof createServeAppImpl>>();
 const createdAppLifecycles = new Map<
@@ -2702,6 +2710,7 @@ function makeWorkspaceRuntimeForTest(input: {
   sessionRuntimeBaseDir?: string;
   trusted?: boolean;
   generationGuard?: WorkspaceGenerationGuard;
+  workspaceService?: DaemonWorkspaceService;
 }): WorkspaceRuntime {
   return {
     workspaceId: input.workspaceId,
@@ -2712,7 +2721,7 @@ function makeWorkspaceRuntimeForTest(input: {
     trusted: input.trusted ?? true,
     env: { mode: 'parent-process', overlayKeys: [] },
     bridge: input.bridge,
-    workspaceService: {} as DaemonWorkspaceService,
+    workspaceService: input.workspaceService ?? ({} as DaemonWorkspaceService),
     routeFileSystemFactory: {} as WorkspaceFileSystemFactory,
     clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
     ...(input.generationGuard
@@ -4896,6 +4905,15 @@ describe('createServeApp', () => {
       expect(res.body.features).toContain('require_auth');
     });
 
+    it.each([undefined, ''])(
+      'rejects direct requireAuth construction with token=%j',
+      (token) => {
+        expect(() =>
+          createServeApp({ ...baseOpts, requireAuth: true, token }),
+        ).toThrow(/requireAuth requires a non-empty bearer token/);
+      },
+    );
+
     it('omits `session_shell_command` by default', async () => {
       const app = createServeApp(baseOpts);
       const res = await request(app)
@@ -4905,7 +4923,7 @@ describe('createServeApp', () => {
       expect(res.body.features).not.toContain('session_shell_command');
     });
 
-    it('omits `session_shell_command` when enabled without a token', async () => {
+    it('advertises `session_shell_command` when enabled on trusted loopback', async () => {
       const app = createServeApp({
         ...baseOpts,
         enableSessionShell: true,
@@ -4914,10 +4932,20 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
+      expect(res.body.features).toContain('session_shell_command');
+    });
+
+    it('omits `session_shell_command` in a non-trusted embed', async () => {
+      const app = createServeApp({
+        ...nonTrustedEmbedOpts,
+        enableSessionShell: true,
+      });
+      const res = await request(app).get('/capabilities');
+      expect(res.status).toBe(200);
       expect(res.body.features).not.toContain('session_shell_command');
     });
 
-    it('advertises `session_shell_command` only when enabled with a token', async () => {
+    it('advertises `session_shell_command` when enabled with a token', async () => {
       const app = createServeApp({
         ...baseOpts,
         token: 'secret',
@@ -4941,7 +4969,7 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
-      expect(res.body.features).not.toContain('session_shell_command');
+      expect(res.body.features).toContain('session_shell_command');
     });
   });
 
@@ -11180,6 +11208,38 @@ describe('createServeApp', () => {
         .set('Host', `host.docker.internal:${baseOpts.port}`);
       expect(res.status).toBe(200);
     });
+
+    it('accepts the exact IPv4 loopback address the daemon binds', async () => {
+      const opts = { ...baseOpts, hostname: '127.0.0.2' };
+      const app = createServeApp(opts);
+      const res = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.2:${opts.port}`);
+      expect(res.status).toBe(200);
+    });
+
+    it('rejects a different IPv4 loopback address than the daemon bind', async () => {
+      const opts = { ...baseOpts, hostname: '127.0.0.2' };
+      const app = createServeApp(opts);
+      const res = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.3:${opts.port}`);
+      expect(res.status).toBe(403);
+    });
+
+    it.each([
+      [80, 200],
+      [443, 200],
+      [4170, 403],
+    ])(
+      'handles the port-less bound loopback Host on port %i with status %i',
+      async (port, expectedStatus) => {
+        const opts = { ...baseOpts, hostname: '127.0.0.2', port };
+        const app = createServeApp(opts, () => port);
+        const res = await request(app).get('/health').set('Host', '127.0.0.2');
+        expect(res.status).toBe(expectedStatus);
+      },
+    );
   });
 
   describe('middleware order — auth runs before body parser', () => {
@@ -20221,13 +20281,13 @@ describe('createServeApp', () => {
       ]);
     });
 
-    it('POST /session/:id/artifacts requires strict mutation auth', async () => {
+    it('POST /session/:id/artifacts fails closed for a non-trusted embed', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, { bridge });
 
       const res = await request(app)
         .post('/session/session-A/artifacts')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .send({ title: 'Lineage', url: 'https://example.com/lineage' });
 
       expect(res.status).toBe(401);
@@ -20312,13 +20372,13 @@ describe('createServeApp', () => {
       });
     });
 
-    it('DELETE /session/:id/artifacts/:artifactId requires strict mutation auth', async () => {
+    it('DELETE /session/:id/artifacts/:artifactId fails closed for a non-trusted embed', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, { bridge });
 
       const res = await request(app)
         .delete('/session/session-A/artifacts/artifact-1')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
+        .set('Host', `0.0.0.0:${baseOpts.port}`);
 
       expect(res.status).toBe(401);
       expect(res.body.code).toBe('token_required');
@@ -20893,7 +20953,7 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret');
 
-    it('401 token_required on a no-token daemon before bridge dispatch', async () => {
+    it('executes on trusted loopback without a token when explicitly enabled', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, enableSessionShell: true },
@@ -20903,9 +20963,43 @@ describe('createServeApp', () => {
       const res = await request(app)
         .post('/session/session-A/shell')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ command: 'pwd' });
+      expect(res.status).toBe(200);
+      expect(bridge.shellCalls).toHaveLength(1);
+      expect(bridge.shellCalls[0]).toMatchObject({
+        sessionId: 'session-A',
+        command: 'pwd',
+        context: { clientId: 'client-1' },
+      });
+    });
+
+    it('denies shell execution in a non-trusted tokenless embed', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...nonTrustedEmbedOpts, enableSessionShell: true },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session/session-A/shell')
+        .set('X-Qwen-Client-Id', 'client-1')
         .send({ command: 'pwd' });
       expect(res.status).toBe(401);
       expect(res.body.code).toBe('token_required');
+      expect(bridge.shellCalls).toHaveLength(0);
+    });
+
+    it('keeps trusted-loopback shell disabled without the explicit flag', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/shell')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ command: 'pwd' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('session_shell_disabled');
       expect(bridge.shellCalls).toHaveLength(0);
     });
 
@@ -21003,7 +21097,7 @@ describe('createServeApp', () => {
       });
     });
 
-    it('treats an empty token string as no token on the strict shell route', async () => {
+    it('treats an empty token string as trusted-loopback no-token mode', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, token: '', enableSessionShell: true },
@@ -21015,9 +21109,8 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ command: 'pwd' });
-      expect(res.status).toBe(401);
-      expect(res.body.code).toBe('token_required');
-      expect(bridge.shellCalls).toHaveLength(0);
+      expect(res.status).toBe(200);
+      expect(bridge.shellCalls).toHaveLength(1);
     });
 
     it('maps bridge shell policy errors to stable REST error kinds', async () => {
@@ -21782,18 +21875,18 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${port}`)
         .set('Authorization', 'Bearer secret');
 
-    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+    it('401 on a non-trusted no-token embed', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, { bridge });
       const res = await request(app)
         .post('/workspace/init')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .send({});
       expect(res.status).toBe(401);
       expect(res.body.code).toBe('token_required');
     });
 
-    it('200 with action:created and force=false on success', async () => {
+    it('executes workspace init on trusted loopback without a token', async () => {
       // Use a real temp directory so the workspace service can perform
       // filesystem operations.
       const wsRoot = await fsp.mkdtemp(
@@ -21803,14 +21896,13 @@ describe('createServeApp', () => {
         const bridge = fakeBridge();
         const opts: ServeOptions = {
           ...baseOpts,
-          token: 'secret',
           workspace: wsRoot,
         };
         const app = createServeApp(opts, undefined, { bridge });
-        const res = await auth(
-          request(app).post('/workspace/init'),
-          opts.port,
-        ).send({});
+        const res = await request(app)
+          .post('/workspace/init')
+          .set('Host', `127.0.0.1:${opts.port}`)
+          .send({});
         expect(res.status).toBe(200);
         expect(res.body.action).toBe('created');
         expect(res.body.path).toContain('QWEN.md');
@@ -22011,9 +22103,9 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret');
 
-    it('requires strict mutation auth before calling the workspace service', async () => {
+    it('fails closed before calling the workspace service in a non-trusted embed', async () => {
       const reload = vi.fn();
-      const app = createServeApp(baseOpts, undefined, {
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, {
         bridge: fakeBridge(),
         boundWorkspace: WS_BOUND,
         workspace: {
@@ -22023,7 +22115,7 @@ describe('createServeApp', () => {
 
       const res = await request(app)
         .post('/workspace/reload')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .send({});
 
       expect(res.status).toBe(401);
@@ -22152,9 +22244,9 @@ describe('createServeApp', () => {
       },
     };
 
-    it('requires strict mutation auth before delivery', async () => {
+    it('fails closed before delivery in a non-trusted embed', async () => {
       const deliverChannelMessage = vi.fn();
-      const app = createServeApp(baseOpts, undefined, {
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, {
         bridge: fakeBridge(),
         boundWorkspace: WS_BOUND,
         primaryWorkspaceTrusted: true,
@@ -22163,7 +22255,7 @@ describe('createServeApp', () => {
 
       const response = await request(app)
         .post('/workspace/notify')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .send(notification);
 
       expect(response.status).toBe(401);
@@ -22296,10 +22388,10 @@ describe('createServeApp', () => {
       }
     });
 
-    it('requires a configured token before any runtime channel mutation', async () => {
+    it('fails closed before channel mutation in a non-trusted embed', async () => {
       const state = disabled();
       const setSelection = vi.fn();
-      const app = createServeApp(baseOpts, undefined, {
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, {
         bridge: fakeBridge(),
         boundWorkspace: WS_BOUND,
         getChannelWorkerControl: () => state,
@@ -22310,7 +22402,7 @@ describe('createServeApp', () => {
 
       const response = await request(app)
         .put('/workspace/channel')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .send({ selection: { mode: 'all' } });
 
       expect(response.status).toBe(401);
@@ -22649,9 +22741,9 @@ describe('createServeApp', () => {
       channels: [],
     };
 
-    it('requires strict mutation auth before reloading', async () => {
+    it('fails closed before channel reload in a non-trusted embed', async () => {
       const reloadChannelWorker = vi.fn(async () => runningSnapshot);
-      const app = createServeApp(baseOpts, undefined, {
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, {
         bridge: fakeBridge(),
         boundWorkspace: WS_BOUND,
         getChannelWorkerSnapshot: () => runningSnapshot,
@@ -22660,7 +22752,7 @@ describe('createServeApp', () => {
 
       const res = await request(app)
         .post('/workspace/channel/reload')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .send({});
 
       expect(res.status).toBe(401);
@@ -23093,6 +23185,34 @@ describe('createServeApp', () => {
     it('POST /workspace/trust/request requires strict mutation permission', async () => {
       const requestWorkspaceTrustChange = vi.fn();
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+        workspace: {
+          getWorkspaceTrustStatus: vi.fn(async () => trustStatus),
+          requestWorkspaceTrustChange,
+        } as unknown as DaemonWorkspaceService,
+      });
+
+      const res = await request(app)
+        .post('/workspace/trust/request')
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ desiredState: 'untrusted' });
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(requestWorkspaceTrustChange).not.toHaveBeenCalled();
+    });
+
+    it('publishes trust_change_requested on trusted loopback without a token', async () => {
+      const atomicWriteSpy = vi.spyOn(qwenCore, 'atomicWriteFileSync');
+      const requestWorkspaceTrustChange = vi.fn(async () => ({
+        accepted: true,
+        desiredState: 'untrusted' as const,
+        requiresOperatorAction: true,
+      }));
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
       const app = createServeApp(baseOpts, undefined, {
         bridge,
         boundWorkspace: WS_BOUND,
@@ -23105,32 +23225,6 @@ describe('createServeApp', () => {
       const res = await request(app)
         .post('/workspace/trust/request')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('X-Qwen-Client-Id', 'client-1')
-        .send({ desiredState: 'untrusted' });
-
-      expect(res.status).toBe(401);
-      expect(res.body.code).toBe('token_required');
-      expect(requestWorkspaceTrustChange).not.toHaveBeenCalled();
-    });
-
-    it('POST /workspace/trust/request publishes trust_change_requested without writing trustedFolders', async () => {
-      const atomicWriteSpy = vi.spyOn(qwenCore, 'atomicWriteFileSync');
-      const requestWorkspaceTrustChange = vi.fn(async () => ({
-        accepted: true,
-        desiredState: 'untrusted' as const,
-        requiresOperatorAction: true,
-      }));
-      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
-      const app = createServeApp(tokenOpts, undefined, {
-        bridge,
-        boundWorkspace: WS_BOUND,
-        workspace: {
-          getWorkspaceTrustStatus: vi.fn(async () => trustStatus),
-          requestWorkspaceTrustChange,
-        } as unknown as DaemonWorkspaceService,
-      });
-
-      const res = await auth(request(app).post('/workspace/trust/request'))
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ desiredState: 'untrusted', reason: 'remote user request' });
 
@@ -23353,23 +23447,24 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret');
 
-    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+    it('401 on a non-trusted no-token embed', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/mcp/docs/restart')
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(401);
+      expect(bridge.restartMcpServerCalls).toHaveLength(0);
+    });
+
+    it('restarts MCP on trusted loopback without a token', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
       const res = await request(app)
         .post('/workspace/mcp/docs/restart')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({});
-      expect(res.status).toBe(401);
-      expect(bridge.restartMcpServerCalls).toHaveLength(0);
-    });
-
-    it('200 with restarted:true on success', async () => {
-      const bridge = fakeBridge();
-      const app = createServeApp(tokenOpts, undefined, { bridge });
-      const res = await auth(
-        request(app).post('/workspace/mcp/docs/restart'),
-      ).send({});
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
         serverName: 'docs',
@@ -23664,12 +23759,12 @@ describe('createServeApp', () => {
       expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
     });
 
-    it('401 auth_required when no bearer token (strict gate)', async () => {
+    it('401 on a non-trusted no-token embed', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, { bridge });
       const res = await request(app)
         .post('/workspace/mcp/servers')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .send({ name: 'echo', config: { command: 'echo' } });
       expect(res.status).toBe(401);
       expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
@@ -23888,12 +23983,12 @@ describe('createServeApp', () => {
       },
     );
 
-    it('401 auth_required when no bearer token (strict gate)', async () => {
+    it('401 on a non-trusted no-token embed', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, { bridge });
       const res = await request(app)
         .delete('/workspace/mcp/servers/echo')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .send();
       expect(res.status).toBe(401);
       expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
@@ -23921,12 +24016,12 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret');
 
-    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+    it('401 on a non-trusted no-token embed', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, { bridge });
       const res = await request(app)
         .post('/workspace/tools/Bash/enable')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .send({ enabled: false });
       expect(res.status).toBe(401);
       expect(res.body.code).toBe('token_required');
@@ -24131,27 +24226,27 @@ describe('createServeApp', () => {
       modelInvocable: true,
     };
 
-    it('requires the strict bearer-auth mutation gate', async () => {
+    it('fails closed for a non-trusted no-token embed', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, { bridge });
       const res = await request(app)
         .post('/workspace/skills/review/enable')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .send({ enabled: false });
       expect(res.status).toBe(401);
       expect(res.body.code).toBe('token_required');
     });
 
-    it('requires the strict bearer-auth mutation gate for Skill batches', async () => {
+    it('fails closed for Skill batches in a non-trusted no-token embed', async () => {
       const bridge = fakeBridge();
       const persistDisabledSkillsBatch = vi.fn();
-      const app = createServeApp(baseOpts, undefined, {
+      const app = createServeApp(nonTrustedEmbedOpts, undefined, {
         bridge,
         persistDisabledSkillsBatch,
       });
       const res = await request(app)
         .post('/workspace/skills/enable')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .send({ skillNames: ['review'], enabled: false });
       expect(res.status).toBe(401);
       expect(res.body.code).toBe('token_required');
@@ -24183,7 +24278,7 @@ describe('createServeApp', () => {
       expect(badBody.body.code).toBe('invalid_enabled_flag');
     });
 
-    it('trims and returns the requested name with deferred activation without a child', async () => {
+    it('persists a Skill toggle on trusted loopback without a token', async () => {
       const bridge = fakeBridge({
         workspaceSkillsImpl: async () => ({
           v: 1,
@@ -24196,15 +24291,16 @@ describe('createServeApp', () => {
         changed: true,
         disabled: ['review'],
       });
-      const app = createServeApp(tokenOpts, undefined, {
+      const app = createServeApp(baseOpts, undefined, {
         bridge,
         boundWorkspace: WS_BOUND,
         persistDisabledSkills,
         primaryWorkspaceTrusted: true,
       });
-      const res = await auth(
-        request(app).post('/workspace/skills/%20ReViEw%20/enable'),
-      ).send({ enabled: false });
+      const res = await request(app)
+        .post('/workspace/skills/%20ReViEw%20/enable')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ enabled: false });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
@@ -27203,13 +27299,15 @@ describe('createServeApp', () => {
       });
     });
 
-    it('requires mutation auth before updating metadata', async () => {
+    it('fails closed before updating metadata in a non-trusted embed', async () => {
       const bridge = fakeBridge();
-      const noTokenApp = createServeApp(baseOpts, undefined, { bridge });
+      const noTokenApp = createServeApp(nonTrustedEmbedOpts, undefined, {
+        bridge,
+      });
 
       const noToken = await request(noTokenApp)
         .patch('/session/550e8400-e29b-41d4-a716-446655440321/metadata')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Host', `0.0.0.0:${baseOpts.port}`)
         .send({ displayName: 'blocked' });
       expect(noToken.status).toBe(401);
       expect(noToken.body.code).toBe('token_required');
@@ -29465,6 +29563,7 @@ describe('createServeApp', () => {
           {
             ...baseOpts,
             workspace,
+            token: 'secret',
             allowOrigins: ['https://hooks.example'],
           },
           undefined,
@@ -29824,6 +29923,47 @@ describe('runQwenServe', () => {
     ).rejects.toThrow(/Refusing to bind/);
   });
 
+  it('refuses tokenless localhost when it resolves outside loopback', async () => {
+    const bindHostnameLookup = vi.fn(async () => ({
+      address: '192.0.2.10',
+      family: 4,
+    }));
+    await expect(
+      runQwenServe(
+        {
+          hostname: 'localhost',
+          port: 0,
+          mode: 'http-bridge',
+        },
+        { bindHostnameLookup },
+      ),
+    ).rejects.toThrow(/Refusing to bind 192\.0\.2\.10/);
+    expect(bindHostnameLookup).toHaveBeenCalledWith('localhost');
+  });
+
+  it('refuses trusted mode when the actual listener address is not loopback', async () => {
+    const httpServerFactory = vi.fn((app) => {
+      const server = createServer(app);
+      vi.spyOn(server, 'address').mockReturnValue({
+        address: '0.0.0.0',
+        family: 'IPv4',
+        port: 0,
+      });
+      return server;
+    });
+    await expect(
+      runQwenServe(
+        {
+          hostname: 'localhost',
+          port: 0,
+          mode: 'http-bridge',
+        },
+        { httpServerFactory },
+      ),
+    ).rejects.toThrow(/bound to non-loopback address 0\.0\.0\.0/);
+    expect(httpServerFactory).toHaveBeenCalledOnce();
+  });
+
   it('refuses to start with --require-auth on loopback when no token configured (#4175 PR 15)', async () => {
     // Boot-loud check: silently dropping the flag would leave the
     // operator believing loopback is hardened when it isn't.
@@ -29869,6 +30009,69 @@ describe('runQwenServe', () => {
     );
   });
 
+  it('refuses a non-loopback HTTP(S) allow-origin without a token', async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        allowOrigins: ['https://app.example.com'],
+      }),
+    ).rejects.toThrow(/Non-loopback HTTP\(S\).*code execution/);
+  });
+
+  it('starts with a non-loopback HTTP(S) allow-origin when a token is configured', async () => {
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      token: 'secret',
+      allowOrigins: ['https://app.example.com'],
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/capabilities`, {
+      headers: {
+        Origin: 'https://app.example.com',
+        Authorization: 'Bearer secret',
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe(
+      'https://app.example.com',
+    );
+  });
+
+  it('warns that a specific origin receives full trusted-loopback authority', async () => {
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+    try {
+      handle = await runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        allowOrigins: ['http://localhost:5173'],
+      });
+      expect(
+        stderrSpy.mock.calls.some(([chunk]) =>
+          String(chunk).includes('receive full API authority'),
+        ),
+      ).toBe(true);
+      expect(
+        stderrSpy.mock.calls.some(([chunk]) =>
+          String(chunk).includes('trusted loopback mode'),
+        ),
+      ).toBe(true);
+      expect(
+        stderrSpy.mock.calls.some(([chunk]) =>
+          String(chunk).includes('execute code as the daemon user'),
+        ),
+      ).toBe(true);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
   it('uses normalized token for session shell capability across REST and ACP initialize', async () => {
     handle = await runQwenServe({
       hostname: '127.0.0.1',
@@ -29906,7 +30109,7 @@ describe('runQwenServe', () => {
     );
   });
 
-  it('warns and does not advertise session shell when flag is set without a token', async () => {
+  it('enables and advertises session shell on trusted loopback without a token', async () => {
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation((() => true) as typeof process.stderr.write);
@@ -29921,7 +30124,7 @@ describe('runQwenServe', () => {
         stderrSpy.mock.calls.some(([chunk]) =>
           String(chunk).includes('--enable-session-shell ignored'),
         ),
-      ).toBe(true);
+      ).toBe(false);
     } finally {
       stderrSpy.mockRestore();
     }
@@ -29930,7 +30133,7 @@ describe('runQwenServe', () => {
     const capsRes = await fetch(`http://127.0.0.1:${port}/capabilities`);
     expect(capsRes.status).toBe(200);
     const caps = (await capsRes.json()) as { features: string[] };
-    expect(caps.features).not.toContain('session_shell_command');
+    expect(caps.features).toContain('session_shell_command');
 
     const initRes = await fetch(`http://127.0.0.1:${port}/acp`, {
       method: 'POST',
@@ -29945,7 +30148,7 @@ describe('runQwenServe', () => {
     const init = (await initRes.json()) as {
       result: { agentCapabilities: { _meta: { qwen: { methods: string[] } } } };
     };
-    expect(init.result.agentCapabilities._meta.qwen.methods).not.toContain(
+    expect(init.result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/session/shell',
     );
   });
@@ -32355,6 +32558,62 @@ describe('same-origin Origin-stripping middleware', () => {
       .set('Origin', 'http://[::1]:4170');
     expect(res.status).not.toBe(403);
   });
+
+  it('strips the exact IPv4 loopback Origin the daemon binds', async () => {
+    const opts = { ...baseOpts, hostname: '127.0.0.2' };
+    const app = createServeApp(opts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.2:${opts.port}`)
+      .set('Origin', 'http://127.0.0.2:4170');
+    expect(res.status).toBe(200);
+  });
+
+  it.each([
+    { port: 80, authority: 'localhost', scheme: 'http', expectedStatus: 200 },
+    { port: 80, authority: 'localhost', scheme: 'https', expectedStatus: 403 },
+    {
+      port: 80,
+      authority: '127.0.0.2',
+      scheme: 'http',
+      expectedStatus: 200,
+    },
+    {
+      port: 80,
+      authority: '127.0.0.2',
+      scheme: 'https',
+      expectedStatus: 403,
+    },
+    { port: 443, authority: 'localhost', scheme: 'https', expectedStatus: 200 },
+    { port: 443, authority: 'localhost', scheme: 'http', expectedStatus: 403 },
+    {
+      port: 443,
+      authority: '127.0.0.2',
+      scheme: 'https',
+      expectedStatus: 200,
+    },
+    {
+      port: 443,
+      authority: '127.0.0.2',
+      scheme: 'http',
+      expectedStatus: 403,
+    },
+  ])(
+    'handles port-less $scheme://$authority on port $port with status $expectedStatus',
+    async ({ port, authority, scheme, expectedStatus }) => {
+      const opts = { ...baseOpts, hostname: '127.0.0.2', port };
+      const app = createServeApp(opts, () => port, {
+        bridge: fakeBridge(),
+      });
+      const res = await request(app)
+        .get('/health')
+        .set('Host', authority)
+        .set('Origin', `${scheme}://${authority}`);
+      expect(res.status).toBe(expectedStatus);
+    },
+  );
 });
 
 describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
@@ -32388,6 +32647,24 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
     expect(res.headers['access-control-expose-headers']).toBe(
       'Retry-After, X-Qwen-Event-Epoch, X-Qwen-SSE-Stream-Id',
     );
+  });
+
+  it('grants a matched origin trusted-loopback strict-route authority', async () => {
+    const bridge = fakeBridge();
+    const persistDisabledTools = vi.fn(async () => {});
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge,
+      persistDisabledTools,
+    });
+    const res = await request(app)
+      .post('/workspace/tools/Bash/enable')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:3000')
+      .send({ enabled: false });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ toolName: 'Bash', enabled: false });
+    expect(persistDisabledTools).toHaveBeenCalledOnce();
   });
 
   it('OPTIONS preflight returns 204 + CORS headers with no body', async () => {
@@ -32469,6 +32746,34 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
         bridge: fakeBridge(),
       }),
     ).toThrow(/--allow-origin '\*'/);
+  });
+
+  it('rejects an embedded non-loopback HTTP(S) allowlist without a token', () => {
+    const remoteOpts = {
+      ...baseOpts,
+      allowOrigins: ['https://app.example.com'],
+    };
+    expect(() =>
+      createServeApp(remoteOpts, () => 4170, {
+        bridge: fakeBridge(),
+      }),
+    ).toThrow(/Non-loopback HTTP\(S\).*code execution/);
+  });
+
+  it('preserves tokenless browser-extension origins for local automation', async () => {
+    const extensionOrigin =
+      'chrome-extension://idkijaaipeeinemigojbjkmfmabokbdk';
+    const app = createServeApp(
+      { ...baseOpts, allowOrigins: [extensionOrigin] },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', extensionOrigin);
+    expect(res.status).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBe(extensionOrigin);
   });
 
   it('`*` pattern with a token admits any cross-origin request', async () => {
@@ -33145,14 +33450,45 @@ describe('auth device-flow routes', () => {
     )?.dispose();
   });
 
-  it('POST is rejected with 401 token_required on token-less loopback (strict gate)', async () => {
+  it('POST, GET, and DELETE are allowed on tokenless trusted loopback', async () => {
     const { app } = buildApp({ token: undefined });
-    const res = await request(app)
+    const start = await request(app)
       .post('/workspace/auth/device-flow')
       .set('Host', `127.0.0.1:${baseOpts.port}`)
       .send({ providerId: 'qwen-oauth' });
+    expect(start.status).toBe(201);
+    expect(start.body.providerId).toBe('qwen-oauth');
+    const id = start.body.deviceFlowId as string;
+
+    const read = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(read.status).toBe(200);
+    expect(read.body.deviceFlowId).toBe(id);
+
+    const cancel = await request(app)
+      .delete(`/workspace/auth/device-flow/${id}`)
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(cancel.status).toBe(204);
+    (
+      app.locals['deviceFlowRegistry'] as DeviceFlowRegistryType | undefined
+    )?.dispose();
+  });
+
+  it('POST is denied in a non-trusted tokenless embed', async () => {
+    const { app, fakeProvider } = buildApp({
+      hostname: '0.0.0.0',
+      token: undefined,
+    });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .send({ providerId: 'qwen-oauth' });
     expect(res.status).toBe(401);
     expect(res.body.code).toBe('token_required');
+    expect(fakeProvider.startCount()).toBe(0);
+    (
+      app.locals['deviceFlowRegistry'] as DeviceFlowRegistryType | undefined
+    )?.dispose();
   });
 
   it('POST with unknown providerId returns 400 unsupported_provider', async () => {
@@ -33500,6 +33836,7 @@ describe('auth device-flow routes', () => {
       message: 'ok',
     });
     const bridge = fakeBridge();
+    const invokeWorkspaceCommand = vi.spyOn(bridge, 'invokeWorkspaceCommand');
     const app = createServeApp(
       {
         ...baseOpts,
@@ -33532,6 +33869,406 @@ describe('auth device-flow routes', () => {
       },
       expect.any(Function),
     );
+    expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+      'qwen/control/workspace/model-providers/reload',
+      { cwd: process.cwd() },
+      { timeoutMs: 30_000 },
+    );
+    expect(res.body.runtimeSync).toEqual({ status: 'applied' });
+  });
+
+  it('POST /workspace/auth/provider syncs the active primary runtime after replacement', async () => {
+    const initialReloadModelProviders = vi
+      .fn()
+      .mockResolvedValue({ status: 'applied' });
+    const initialBridge = fakeBridge();
+    const initialRuntime = makeWorkspaceRuntimeForTest({
+      workspaceId: 'primary-id',
+      workspaceCwd: WS_BOUND,
+      primary: true,
+      bridge: initialBridge,
+      workspaceService: {
+        reloadModelProviders: initialReloadModelProviders,
+      } as unknown as DaemonWorkspaceService,
+    });
+    const registry = createWorkspaceRegistry([initialRuntime]);
+    const installAuthProvider = vi.fn().mockResolvedValue({
+      v: 1,
+      providerId: 'custom-openai-compatible',
+      providerLabel: 'Custom OpenAI',
+      authType: 'openai',
+      message: 'ok',
+    });
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge: initialBridge,
+      workspaceRegistry: registry,
+      installAuthProvider,
+    });
+    const replacementReloadModelProviders = vi
+      .fn()
+      .mockResolvedValue({ status: 'deferred' });
+    const replacementRuntime = makeWorkspaceRuntimeForTest({
+      workspaceId: 'primary-id',
+      workspaceCwd: WS_BOUND,
+      primary: true,
+      bridge: fakeBridge(),
+      workspaceService: {
+        reloadModelProviders: replacementReloadModelProviders,
+      } as unknown as DaemonWorkspaceService,
+    });
+    expect(registry.beginReplacement(registry.primaryEntry, 'policy-2')).toBe(
+      true,
+    );
+    registry.activateReplacement(
+      registry.primaryEntry,
+      replacementRuntime,
+      'policy-2',
+    );
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.example.com/v1',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.runtimeSync).toEqual({ status: 'deferred' });
+    expect(replacementReloadModelProviders).toHaveBeenCalledOnce();
+    expect(initialReloadModelProviders).not.toHaveBeenCalled();
+  });
+
+  it('POST /workspace/auth/provider reports failed when a user-scoped secondary runtime cannot sync', async () => {
+    const qwenHome = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-provider-user-sync-'),
+    );
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    await fsp.writeFile(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({ modelProviders: { openai: [{ id: 'gpt-4o' }] } }),
+    );
+    try {
+      const primaryReloadModelProviders = vi
+        .fn()
+        .mockResolvedValue({ status: 'applied' });
+      const secondaryReloadModelProviders = vi
+        .fn()
+        .mockResolvedValue({ status: 'failed' });
+      const primaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+          workspaceService: {
+            reloadModelProviders: primaryReloadModelProviders,
+          } as unknown as DaemonWorkspaceService,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: fakeBridge(),
+          workspaceService: {
+            reloadModelProviders: secondaryReloadModelProviders,
+          } as unknown as DaemonWorkspaceService,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, token: 'tkn', workspace: WS_BOUND },
+        undefined,
+        {
+          bridge: primaryBridge,
+          workspaceRegistry: registry,
+          installAuthProvider: vi.fn().mockResolvedValue({
+            v: 1,
+            providerId: 'custom-openai-compatible',
+            providerLabel: 'Custom OpenAI',
+            authType: 'openai',
+            message: 'ok',
+          }),
+        },
+      );
+
+      const res = await request(app)
+        .post('/workspace/auth/provider')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          baseUrl: 'https://api.example.com/v1',
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.runtimeSync).toEqual({ status: 'failed' });
+      expect(primaryReloadModelProviders).toHaveBeenCalledWith({
+        originatorClientId: undefined,
+        route: 'POST /workspace/auth/provider',
+        workspaceCwd: WS_BOUND,
+      });
+      expect(secondaryReloadModelProviders).toHaveBeenCalledWith({
+        originatorClientId: undefined,
+        route: 'POST /workspace/auth/provider',
+        workspaceCwd: WS_DIFFERENT,
+      });
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      await fsp.rm(qwenHome, { recursive: true, force: true });
+    }
+  });
+
+  it('POST /workspace/auth/provider keeps workspace-scoped sync on the primary runtime', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-provider-workspace-sync-'),
+    );
+    const secondary = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-provider-workspace-secondary-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'));
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ modelProviders: { openai: [{ id: 'gpt-4o' }] } }),
+    );
+    try {
+      const primaryReloadModelProviders = vi
+        .fn()
+        .mockResolvedValue({ status: 'applied' });
+      const secondaryReloadModelProviders = vi.fn();
+      const primaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: workspace,
+          primary: true,
+          bridge: primaryBridge,
+          workspaceService: {
+            reloadModelProviders: primaryReloadModelProviders,
+          } as unknown as DaemonWorkspaceService,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'secondary-id',
+          workspaceCwd: secondary,
+          primary: false,
+          bridge: fakeBridge(),
+          workspaceService: {
+            reloadModelProviders: secondaryReloadModelProviders,
+          } as unknown as DaemonWorkspaceService,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, token: 'tkn', workspace },
+        undefined,
+        {
+          bridge: primaryBridge,
+          workspaceRegistry: registry,
+          installAuthProvider: vi.fn().mockResolvedValue({
+            v: 1,
+            providerId: 'custom-openai-compatible',
+            providerLabel: 'Custom OpenAI',
+            authType: 'openai',
+            message: 'ok',
+          }),
+        },
+      );
+
+      const res = await request(app)
+        .post('/workspace/auth/provider')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          baseUrl: 'https://api.example.com/v1',
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.runtimeSync).toEqual({ status: 'applied' });
+      expect(primaryReloadModelProviders).toHaveBeenCalledOnce();
+      expect(secondaryReloadModelProviders).not.toHaveBeenCalled();
+    } finally {
+      await Promise.all([
+        fsp.rm(workspace, { recursive: true, force: true }),
+        fsp.rm(secondary, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it('DELETE /workspace/models syncs the active primary runtime after replacement', async () => {
+    const qwenHome = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-model-runtime-sync-'),
+    );
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    await fsp.writeFile(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        modelProviders: { openai: [{ id: 'gpt-4o' }] },
+      }),
+    );
+    try {
+      const initialReloadModelProviders = vi
+        .fn()
+        .mockResolvedValue({ status: 'applied' });
+      const initialBridge = fakeBridge();
+      const initialRuntime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: initialBridge,
+        workspaceService: {
+          reloadModelProviders: initialReloadModelProviders,
+        } as unknown as DaemonWorkspaceService,
+      });
+      const secondaryReloadModelProviders = vi
+        .fn()
+        .mockResolvedValue({ status: 'applied' });
+      const secondaryRuntime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'secondary-id',
+        workspaceCwd: WS_DIFFERENT,
+        primary: false,
+        bridge: fakeBridge(),
+        workspaceService: {
+          reloadModelProviders: secondaryReloadModelProviders,
+        } as unknown as DaemonWorkspaceService,
+      });
+      const registry = createWorkspaceRegistry([
+        initialRuntime,
+        secondaryRuntime,
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, token: 'tkn', workspace: WS_BOUND },
+        undefined,
+        {
+          bridge: initialBridge,
+          workspaceRegistry: registry,
+          persistSettings: vi.fn().mockResolvedValue(undefined),
+        },
+      );
+      const replacementReloadModelProviders = vi
+        .fn()
+        .mockResolvedValue({ status: 'deferred' });
+      const replacementRuntime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary-id',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: fakeBridge(),
+        workspaceService: {
+          reloadModelProviders: replacementReloadModelProviders,
+        } as unknown as DaemonWorkspaceService,
+      });
+      expect(registry.beginReplacement(registry.primaryEntry, 'policy-2')).toBe(
+        true,
+      );
+      registry.activateReplacement(
+        registry.primaryEntry,
+        replacementRuntime,
+        'policy-2',
+      );
+
+      const res = await request(app)
+        .delete('/workspace/models')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.runtimeSync).toEqual({ status: 'applied' });
+      expect(replacementReloadModelProviders).toHaveBeenCalledOnce();
+      expect(secondaryReloadModelProviders).toHaveBeenCalledOnce();
+      expect(initialReloadModelProviders).not.toHaveBeenCalled();
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      await fsp.rm(qwenHome, { recursive: true, force: true });
+    }
+  });
+
+  it('POST /workspace/auth/provider returns a warning state when runtime sync fails after persistence', async () => {
+    const installAuthProvider = vi.fn().mockResolvedValue({
+      v: 1,
+      providerId: 'custom-openai-compatible',
+      providerLabel: 'Custom OpenAI',
+      authType: 'openai',
+      baseUrl: 'https://api.example.com/v1',
+      message: 'ok',
+    });
+    const bridge = fakeBridge();
+    vi.spyOn(bridge, 'invokeWorkspaceCommand').mockRejectedValueOnce(
+      new Error('child rejected reload'),
+    );
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      installAuthProvider,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.example.com/v1',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      v: 1,
+      providerId: 'custom-openai-compatible',
+      runtimeSync: { status: 'failed' },
+    });
+    expect(installAuthProvider).toHaveBeenCalledOnce();
+  });
+
+  it('POST /workspace/auth/provider preserves generation-close semantics during runtime sync', async () => {
+    const generationGuard = createWorkspaceGenerationGuard();
+    const bridge = fakeBridge();
+    const workspaceService = {
+      reloadModelProviders: vi.fn(async () => {
+        generationGuard.close();
+        generationGuard.assertOpen();
+        return { status: 'applied' as const };
+      }),
+    } as unknown as DaemonWorkspaceService;
+    const runtime = makeWorkspaceRuntimeForTest({
+      workspaceId: 'primary-id',
+      workspaceCwd: WS_BOUND,
+      primary: true,
+      bridge,
+      generationGuard,
+      workspaceService,
+    });
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      workspaceRegistry: createWorkspaceRegistry([runtime]),
+      installAuthProvider: vi.fn().mockResolvedValue({
+        v: 1,
+        providerId: 'custom-openai-compatible',
+        providerLabel: 'Custom OpenAI',
+        authType: 'openai',
+        message: 'ok',
+      }),
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.example.com/v1',
+      });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
   });
 
   it('POST /workspace/auth/provider filters invalid advanced numeric fields', async () => {
@@ -33777,11 +34514,11 @@ describe('auth device-flow routes', () => {
     expect(res.body.code).toBe('too_many_active_flows');
   });
 
-  it('DELETE without bearer is rejected 401 token_required (strict-mutation gate)', async () => {
-    const { app } = buildApp({ token: undefined });
+  it('DELETE fails closed in a non-trusted no-token embed', async () => {
+    const { app } = buildApp({ token: undefined, hostname: '0.0.0.0' });
     const res = await request(app)
       .delete('/workspace/auth/device-flow/some-id')
-      .set('Host', `127.0.0.1:${baseOpts.port}`);
+      .set('Host', `0.0.0.0:${baseOpts.port}`);
     expect(res.status).toBe(401);
     expect(res.body.code).toBe('token_required');
   });
@@ -33794,18 +34531,18 @@ describe('auth device-flow routes', () => {
     //   (round-4 #1) added `mutate({strict:true})` to close the
     //   info-disclosure asymmetry vs. the strict POST/DELETE.
     // - `GET /workspace/auth/status` intentionally redacts userCode
-    //   (lists only deviceFlowId/providerId/expiresAt) so it stays
-    //   bearer-only (passthrough on loopback no-token default).
-    const { app } = buildApp({ token: undefined });
+    //   (lists only deviceFlowId/providerId/expiresAt), so its non-strict gate
+    //   preserves compatibility even for a non-trusted token-less embed.
+    const { app } = buildApp({ token: undefined, hostname: '0.0.0.0' });
     const flowGet = await request(app)
       .get('/workspace/auth/device-flow/no-such-id')
-      .set('Host', `127.0.0.1:${baseOpts.port}`);
+      .set('Host', `0.0.0.0:${baseOpts.port}`);
     expect(flowGet.status).toBe(401);
     expect(flowGet.body.code).toBe('token_required');
-    // Status, by contrast, is reachable on loopback without a token.
+    // Status, by contrast, stays reachable because its gate is non-strict.
     const status = await request(app)
       .get('/workspace/auth/status')
-      .set('Host', `127.0.0.1:${baseOpts.port}`);
+      .set('Host', `0.0.0.0:${baseOpts.port}`);
     expect(status.status).toBe(200);
   });
 
@@ -35931,9 +36668,7 @@ describe('Live conversation runtime lifecycle', () => {
           workspaceCwd: setup.root.canonicalRoot,
         }),
       );
-      expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty(
-        'sourceType',
-      );
+      expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty('sourceType');
       expect(setup.liveBridge.resumeCalls[0]).not.toHaveProperty('sourceId');
     } finally {
       readCreationMetadataIfReadable.mockRestore();

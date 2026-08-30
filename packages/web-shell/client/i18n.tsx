@@ -3159,6 +3159,8 @@ const EN: Messages = {
   'settings.models.empty': 'No configured models yet.',
   'settings.models.loading': 'Loading models…',
   'settings.models.deleteFailed': 'Failed to delete model',
+  'settings.models.runtimeSyncFailed':
+    'The change was saved, but running sessions could not be refreshed. Restart qwen serve before using the updated model list.',
   'settings.models.fallbacks.title': 'Model Fallbacks',
   'settings.models.fallbacks.hint': (v) =>
     `Select up to ${v?.max ?? 3}; tried in order when the main model is at capacity.`,
@@ -6185,6 +6187,8 @@ const ZH: Messages = {
   'settings.models.empty': '暂无配置的模型。',
   'settings.models.loading': '正在加载模型…',
   'settings.models.deleteFailed': '删除模型失败',
+  'settings.models.runtimeSyncFailed':
+    '更改已保存，但无法刷新正在运行的会话。请重启 qwen serve 后再使用更新后的模型列表。',
   'settings.models.fallbacks.title': '模型回退',
   'settings.models.fallbacks.hint': (v) =>
     `最多选择 ${v?.max ?? 3} 个；主模型容量不足时按顺序回退。`,
