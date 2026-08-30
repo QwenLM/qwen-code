@@ -312,7 +312,7 @@ import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
-import { runExitCleanup } from '../utils/cleanup.js';
+import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 
 describe('AppContainer State Management', () => {
   let mockConfig: Config;
@@ -941,6 +941,10 @@ describe('AppContainer State Management', () => {
     it('exits the foreground runtime after handing it to Agent View', async () => {
       const requestShutdown = vi.fn();
       const flush = vi.fn().mockResolvedValue(undefined);
+      const unregisterSessionEndCleanup = vi.fn();
+      vi.mocked(registerCleanup)
+        .mockReturnValueOnce(unregisterSessionEndCleanup)
+        .mockReturnValue(vi.fn());
       vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
         requestShutdown,
       } as unknown as LlmClient);
@@ -971,6 +975,7 @@ describe('AppContainer State Management', () => {
         expect(agentViewHandoffMocks.detachCurrentSession).toHaveBeenCalledWith(
           mockConfig,
         );
+        expect(unregisterSessionEndCleanup).toHaveBeenCalledOnce();
         expect(requestShutdown).toHaveBeenCalledOnce();
         expect(runExitCleanup).toHaveBeenCalledOnce();
         expect(exit).toHaveBeenCalledWith(0);
@@ -982,6 +987,9 @@ describe('AppContainer State Management', () => {
         expect(
           agentViewHandoffMocks.detachCurrentSession.mock
             .invocationCallOrder[0],
+        ).toBeLessThan(unregisterSessionEndCleanup.mock.invocationCallOrder[0]);
+        expect(
+          unregisterSessionEndCleanup.mock.invocationCallOrder[0],
         ).toBeLessThan(requestShutdown.mock.invocationCallOrder[0]);
         expect(requestShutdown.mock.invocationCallOrder[0]).toBeLessThan(
           vi.mocked(runExitCleanup).mock.invocationCallOrder[0],
@@ -2422,6 +2430,7 @@ describe('AppContainer State Management', () => {
     it('drains a queued submission through a rendered AppContainer (#10430)', async () => {
       const submitQuery = vi.fn().mockResolvedValue(undefined);
       mockedUseLlmStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: StreamingState.Idle,
         submitQuery,
         initError: null,

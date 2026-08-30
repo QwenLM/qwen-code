@@ -871,6 +871,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const [currentModel, setCurrentModel] = useState(() => config.getModel());
 
   const [isConfigInitialized, setConfigInitialized] = useState(false);
+  const unregisterSessionEndCleanupRef = useRef<(() => void) | undefined>(
+    undefined,
+  );
 
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
@@ -1179,7 +1182,7 @@ export const AppContainer = (props: AppContainerProps) => {
     })();
 
     // Register SessionEnd cleanup for process exit
-    registerCleanup(async () => {
+    unregisterSessionEndCleanupRef.current = registerCleanup(async () => {
       try {
         await config
           .getHookSystem()
@@ -1895,6 +1898,7 @@ export const AppContainer = (props: AppContainerProps) => {
     }
     await config.getChatRecordingService?.()?.flush?.();
     await detachCurrentSessionToAgentView(config);
+    unregisterSessionEndCleanupRef.current?.();
     config.getLlmClient()?.requestShutdown();
     await runExitCleanup();
     process.exit(0);
