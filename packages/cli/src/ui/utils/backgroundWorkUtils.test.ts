@@ -233,7 +233,7 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
     expect(summary?.lines[0]).toContain('Explore: research the codebase');
     expect(summary?.lines[0]).toContain('(running 21h)');
     expect(summary?.hasTaskEntries).toBe(true);
-    expect(summary?.hasWorkflowRuns).toBe(false);
+    expect(summary?.hasStartingWorkflowRuns).toBe(false);
   });
 
   it('lists monitors, running shells, and running/pausing workflow runs', () => {
@@ -284,7 +284,7 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
     expect(joined).not.toContain('shell_2');
     expect(joined).not.toContain('wf_3');
     expect(summary?.hasTaskEntries).toBe(true);
-    expect(summary?.hasWorkflowRuns).toBe(true);
+    expect(summary?.hasStartingWorkflowRuns).toBe(false);
   });
 
   it('lists workflow runs that are still starting', () => {
@@ -294,7 +294,7 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
 
     expect(summary?.lines).toEqual(['  [wf_starting] (starting)']);
     expect(summary?.hasTaskEntries).toBe(false);
-    expect(summary?.hasWorkflowRuns).toBe(true);
+    expect(summary?.hasStartingWorkflowRuns).toBe(true);
   });
 
   it('renders a starting run without a fabricated duration', () => {
@@ -358,6 +358,27 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
       'Cannot clear.',
     );
     expect(message).toContain('Use /workflows to inspect them, then retry.');
+    expect(message).toContain('Retry once the run has finished starting.');
+  });
+
+  it('keeps the starting-run hint when the starting row overflows', () => {
+    const shells = Array.from({ length: 10 }, (_, i) => ({
+      shellId: `shell_${i}`,
+      status: 'running',
+      command: `cmd ${i}`,
+      startTime: now - (10 - i) * 1_000,
+    }));
+    const message = buildBackgroundWorkBlockedMessage(
+      createEnumeratingMockConfig({
+        shells,
+        startingWorkflows: ['wf_starting'],
+      }),
+      'Cannot clear.',
+    );
+
+    expect(message).not.toContain('[wf_starting]');
+    expect(message).toContain('  …and 1 more');
+    expect(message).toContain('Retry once the run has finished starting.');
   });
 
   it('sorts lines by start time', () => {

@@ -65,13 +65,11 @@ export interface BlockingBackgroundWork {
   /** True when at least one blocking entry is an agent, shell, or monitor
    *  (the kinds `/tasks` lists). */
   hasTaskEntries: boolean;
-  /** True when at least one blocking entry is a workflow run (listed via
-   *  `/workflows`, not `/tasks`). */
-  hasWorkflowRuns: boolean;
   /** True when at least one blocking workflow run is actually inspectable on
    *  `/workflows`. A reserved-but-unregistered run is not: that command reads
    *  `registry.list()`, which the reservation has not entered yet. */
   hasInspectableWorkflowRuns: boolean;
+  hasStartingWorkflowRuns: boolean;
 }
 
 /**
@@ -178,10 +176,10 @@ export function describeBlockingBackgroundWork(
   return {
     lines,
     hasTaskEntries: entries.some((entry) => !entry.isWorkflowRun),
-    hasWorkflowRuns: entries.some((entry) => entry.isWorkflowRun),
     hasInspectableWorkflowRuns: entries.some(
       (entry) => entry.isWorkflowRun && !entry.isStarting,
     ),
+    hasStartingWorkflowRuns: entries.some((entry) => entry.isStarting),
   };
 }
 
@@ -206,11 +204,9 @@ export function buildBackgroundWorkBlockedMessage(
   return [
     baseMessage,
     ...blocking.lines,
-    // A reservation is on no surface yet — `/workflows` reads
-    // `registry.list()`, which it has not entered — so pointing there would
-    // send the user to a list that cannot show what is blocking them.
-    surfaces
-      ? `Use ${surfaces} to inspect them, then retry.`
-      : 'Retry once the run has finished starting.',
+    ...(surfaces ? [`Use ${surfaces} to inspect them, then retry.`] : []),
+    ...(blocking.hasStartingWorkflowRuns
+      ? ['Retry once the run has finished starting.']
+      : []),
   ].join('\n');
 }
