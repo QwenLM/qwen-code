@@ -775,10 +775,40 @@ export async function backfillWorkspaceSessionPrs(
         // other capped writer still sees the weaker persisted rank and
         // evicts the session's own PR first. A new object, so the no-op
         // check below commits the promotion.
+        //
+        // Plan membership is NOT enough for the stamp: plannedFor fails
+        // open on GitHub when the number cannot be resolved this run, which
+        // is fine for trimmability (reversible) but not for provenance
+        // (permanent) — a foreign same-numbered occupant at the convention
+        // number would become the session's highest-authority binding.
+        // The stamp needs ATTESTED identity, the bar upsertSessionPrs sets
+        // for its upgrade: the entry's canonical url is the one gh resolved
+        // for the number, or this workspace's own `<remote>/pull/<N>` shape
+        // (a url names its repository by path), or on Aone the exact
+        // detailUrl shape for this repoPath. Anything else stays as it is
+        // until a later run can attest it.
+        const attested = (entry: SessionPr): boolean => {
+          if (aoneRepo) {
+            return isAoneDetailUrlForRepo(
+              aoneRepo.repoPath,
+              entry.number,
+              entry.url,
+            );
+          }
+          const canonical = canonicalSessionPrUrl(entry.url);
+          const resolved = numberToUrl.get(entry.number);
+          return (
+            (resolved !== undefined &&
+              canonical === canonicalSessionPrUrl(resolved)) ||
+            (remote !== undefined &&
+              canonical ===
+                canonicalSessionPrUrl(`${remote}/pull/${entry.number}`))
+          );
+        };
         const kept = base
           .filter((entry) => planSet.has(entry.number) || !plannedFor(entry))
           .map((entry) => {
-            if (!planSet.has(entry.number)) return entry;
+            if (!planSet.has(entry.number) || !attested(entry)) return entry;
             const stamp: SessionPrSource =
               entry.number === candidate.conventionNumber
                 ? 'worktree'

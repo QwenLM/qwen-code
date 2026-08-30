@@ -1101,6 +1101,55 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(await fsp.readFile(prPath, 'utf8')).toBe(before);
   });
 
+  it('never promotes an occupant whose identity this run cannot attest', async () => {
+    // A foreign same-numbered occupant sits at the convention number (a
+    // divergent-page form or a dialog bind can put it there). With gh
+    // unavailable the trim's same-PR check fails open — acceptable for
+    // trimmability — but a provenance stamp is permanent: promoting this
+    // entry would make a stranger's PR the session's highest-authority
+    // binding, evicting its genuine bindings and blocking this repo's PR
+    // 100 forever. Without attested identity the entry is left untouched.
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-100', 'worktree-pr-100');
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await fsp.mkdir(path.dirname(prPath), { recursive: true });
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: [
+          {
+            number: 100,
+            url: 'https://github.com/stranger/other/pull/100',
+            createdAt: '2026-08-01T00:00:00.000Z',
+            source: 'review',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+    const before = await fsp.readFile(prPath, 'utf8');
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, alreadyBound: 1, written: 0 });
+    expect(await fsp.readFile(prPath, 'utf8')).toBe(before);
+
+    // Once gh attests this repo's PR 100 at another url, the foreign entry
+    // is not the same PR: it keeps its slot as a foreign occupant, still
+    // unpromoted, and the convention number counts as displaced.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(100, 'worktree-pr-100')],
+    });
+    const attested = await backfillWorkspaceSessionPrs(runtime);
+    expect(attested).toMatchObject({ bound: 0, written: 0 });
+    expect(await fsp.readFile(prPath, 'utf8')).toBe(before);
+  });
+
   it('promotes a reviewed occupant the session now exists for, never the reverse', async () => {
     // `/review 100` bound 100 as a review; the session later gained the
     // `pr-100` worktree association. The planner protects the number at
@@ -1108,7 +1157,8 @@ describe('backfillWorkspaceSessionPrs', () => {
     // otherwise the next capped upsert evicts the session's own PR first.
     // A `/review` re-mention of a pre-provenance entry is NOT an upgrade
     // on the ladder (review ranks below unknown provenance) and writes
-    // nothing.
+    // nothing. gh is unavailable: the entry's own `<remote>/pull/100`
+    // shape attests its identity offline.
     await seedSession(SESSION_A);
     await seedWorktreeSidecar(SESSION_A, 'pr-100', 'worktree-pr-100');
     await seedReviewedNumbers(SESSION_A, 100, 100);
