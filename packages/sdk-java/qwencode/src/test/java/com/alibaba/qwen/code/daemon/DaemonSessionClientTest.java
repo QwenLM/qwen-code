@@ -39,6 +39,8 @@ class DaemonSessionClientTest {
     private static final boolean CI = Boolean.parseBoolean(System.getenv("CI"));
     private static final long ASYNC_WAIT_SECONDS = CI ? 60 : 1;
     private static final long TIMEOUT_UPPER_BOUND_MILLIS = CI ? 5000 : 900;
+    private static final long TIMEOUT_FIXTURE_STALL_MILLIS =
+            TIMEOUT_UPPER_BOUND_MILLIS + 1000;
     private static final long NON_BLOCKING_UPPER_BOUND_MILLIS = CI ? 5000 : 500;
     private static final Duration CONNECT_TIMEOUT =
             Duration.ofSeconds(CI ? 60 : 2);
@@ -1247,7 +1249,7 @@ class DaemonSessionClientTest {
                         "{\"promptId\":\"prompt-1\",\"lastEventId\":0}"));
         server.createContext("/session/session-1/events", exchange -> {
             try {
-                Thread.sleep(2000);
+                Thread.sleep(TIMEOUT_FIXTURE_STALL_MILLIS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } finally {
@@ -1276,7 +1278,7 @@ class DaemonSessionClientTest {
             exchange.sendResponseHeaders(202, 100);
             exchange.getResponseBody().write('{');
             exchange.getResponseBody().flush();
-            sleep(2000);
+            sleep(TIMEOUT_FIXTURE_STALL_MILLIS);
             exchange.close();
         });
         server.createContext("/session/session-1/detach", noContent());
@@ -1309,7 +1311,7 @@ class DaemonSessionClientTest {
             exchange.sendResponseHeaders(503, 100);
             exchange.getResponseBody().write('{');
             exchange.getResponseBody().flush();
-            sleep(2000);
+            sleep(TIMEOUT_FIXTURE_STALL_MILLIS);
             exchange.close();
         });
         server.createContext("/session/session-1/detach", noContent());
