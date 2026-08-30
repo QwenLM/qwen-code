@@ -185,9 +185,13 @@ describe('SDK MCP Server Integration (E2E)', () => {
           }
         }
 
-        expect(advertisedToolNames(fakeServer, 1)).toEqual(
-          expect.arrayContaining([MCP_CALCULATE_SUM, MCP_REVERSE_STRING]),
-        );
+        // ToolSearch + ToolCall bridge contract: tools fetched via
+        // `select:` stay hidden from the model-facing declaration list so
+        // the prompt-cache prefix remains stable; the model reaches them
+        // through `tool_call` (direct invocation by name still executes).
+        const advertisedAfterSelect = advertisedToolNames(fakeServer, 1);
+        expect(advertisedAfterSelect).not.toContain(MCP_CALCULATE_SUM);
+        expect(advertisedAfterSelect).not.toContain(MCP_REVERSE_STRING);
 
         const toolResults = findToolResults(messages, MCP_CALCULATE_SUM);
         expect(toolResults).toHaveLength(1);
@@ -378,7 +382,11 @@ describe('SDK MCP Server Integration (E2E)', () => {
           messages.push(message);
         }
 
-        expect(advertisedToolNames(fakeServer, 1)).toContain(MCP_MAYBE_FAIL);
+        // Bridge contract: selected deferred tools remain hidden from the
+        // advertised declaration list (stable prompt-cache prefix).
+        expect(advertisedToolNames(fakeServer, 1)).not.toContain(
+          MCP_MAYBE_FAIL,
+        );
         const toolResults = findToolResults(messages, MCP_MAYBE_FAIL);
         expect(toolResults).toHaveLength(1);
         expect(toolResults[0]?.isError).toBe(true);
@@ -461,7 +469,9 @@ describe('SDK MCP Server Integration (E2E)', () => {
           messages.push(message);
         }
 
-        expect(advertisedToolNames(fakeServer, 1)).toContain(
+        // Bridge contract: selected deferred tools remain hidden from the
+        // advertised declaration list (stable prompt-cache prefix).
+        expect(advertisedToolNames(fakeServer, 1)).not.toContain(
           MCP_DELAYED_RESPONSE,
         );
         const toolResults = findToolResults(messages, MCP_DELAYED_RESPONSE);
