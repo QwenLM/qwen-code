@@ -950,6 +950,12 @@ export class WebViewProvider {
     // Clean up when the view is disposed
     webviewView.onDidDispose(() => {
       this.attachedWebview = null;
+      // A pending web-shell approval is only actionable while a webview exists
+      // to relay the decision. Clear the flag too (like the panel dispose
+      // path does) so a diff-editor vote cannot hit hasPendingPermission()
+      // true, find no active webview, and vanish while the diff closes.
+      this.webShellPermissionPending = false;
+      this.webShellPermissionPendingPaths.clear();
       // Disconnect the ACP agent process to prevent orphan processes
       this.agentManager.disconnect();
       this.disposables.forEach((d) => d.dispose());
