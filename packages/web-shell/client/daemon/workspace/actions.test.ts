@@ -81,6 +81,80 @@ describe('workspace actions', () => {
     });
   });
 
+  it('leaves model-provider mutation timeouts to the SDK client', async () => {
+    vi.useFakeTimers();
+    let resolveInstall!: (value: {
+      v: 1;
+      providerId: string;
+      providerLabel: string;
+      authType: string;
+      message: string;
+    }) => void;
+    let resolveDelete!: (value: {
+      removed: true;
+      clearedActiveModel: false;
+      requiresRestart: false;
+    }) => void;
+    const installAuthProvider = vi.fn(
+      () =>
+        new Promise<{
+          v: 1;
+          providerId: string;
+          providerLabel: string;
+          authType: string;
+          message: string;
+        }>((resolve) => {
+          resolveInstall = resolve;
+        }),
+    );
+    const deleteModel = vi.fn(
+      () =>
+        new Promise<{
+          removed: true;
+          clearedActiveModel: false;
+          requiresRestart: false;
+        }>((resolve) => {
+          resolveDelete = resolve;
+        }),
+    );
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ installAuthProvider, deleteModel }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+    let installSettled = false;
+    let deleteSettled = false;
+    const install = actions
+      .installAuthProvider({ providerId: 'openai', apiKey: 'key' })
+      .finally(() => {
+        installSettled = true;
+      });
+    const deletion = actions
+      .deleteModel({ authType: 'openai', modelId: 'gpt-4o' })
+      .finally(() => {
+        deleteSettled = true;
+      });
+
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(installSettled).toBe(false);
+    expect(deleteSettled).toBe(false);
+
+    resolveInstall({
+      v: 1,
+      providerId: 'openai',
+      providerLabel: 'OpenAI',
+      authType: 'openai',
+      message: 'saved',
+    });
+    resolveDelete({
+      removed: true,
+      clearedActiveModel: false,
+      requiresRestart: false,
+    });
+    await Promise.all([install, deletion]);
+  });
+
   it('applies the action timeout to workspace removal', async () => {
     vi.useFakeTimers();
     const remove = vi.fn(() => new Promise<never>(() => {}));
