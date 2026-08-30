@@ -441,6 +441,119 @@ describe('useWorkspaceOverview', () => {
     expect(latest?.overview?.mcp).toBeUndefined();
   });
 
+  it('does not book a round from before a cwd round trip into the new session', async () => {
+    let rejectHeld: (reason: unknown) => void = () => {};
+    workspaceSkills
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            rejectHeld = reject;
+          }),
+      )
+      .mockResolvedValueOnce(skillsStatus(9))
+      .mockResolvedValueOnce(skillsStatus(2))
+      .mockRejectedValue(new Error('daemon down'));
+    const client = makeClient(fullHandle);
+    // Round held in flight for /w, then an A→B→A round trip.
+    await render(client, '/w', { enabled: true, items: ['skills'] });
+    await render(client, '/w2', { enabled: true, items: ['skills'] });
+    await flush();
+    await render(client, '/w', { enabled: true, items: ['skills'] });
+    await flush();
+    expect(latest?.overview?.skills?.total).toBe(2);
+    // The held round lands rejected; it passes the cwd guard (both '/w')
+    // but belongs to the session before the round trip.
+    await act(async () => {
+      rejectHeld(new Error('request timed out'));
+    });
+    await flush();
+    // Two real failures are still inside the three-round grace.
+    for (let tick = 1; tick <= WORKSPACE_OVERVIEW_MAX_MISSES - 1; tick += 1) {
+      await act(async () => {
+        vi.advanceTimersByTime(WORKSPACE_OVERVIEW_POLL_MS);
+      });
+      await flush();
+    }
+    expect(latest?.overview?.skills?.total).toBe(2);
+    // The third real failure expires it.
+    await act(async () => {
+      vi.advanceTimersByTime(WORKSPACE_OVERVIEW_POLL_MS);
+    });
+    await flush();
+    expect(latest?.overview?.skills).toBeUndefined();
+  });
+
+  it('does not let a stale success from before a round trip refill the miss budget', async () => {
+    let resolveHeld: (value: unknown) => void = () => {};
+    workspaceSkills
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveHeld = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(skillsStatus(9))
+      .mockResolvedValueOnce(skillsStatus(2))
+      .mockRejectedValue(new Error('daemon down'));
+    const client = makeClient(fullHandle);
+    await render(client, '/w', { enabled: true, items: ['skills'] });
+    await render(client, '/w2', { enabled: true, items: ['skills'] });
+    await flush();
+    await render(client, '/w', { enabled: true, items: ['skills'] });
+    await flush();
+    expect(latest?.overview?.skills?.total).toBe(2);
+    // Two unanswered rounds spend most of the grace.
+    for (let tick = 1; tick <= WORKSPACE_OVERVIEW_MAX_MISSES - 1; tick += 1) {
+      await act(async () => {
+        vi.advanceTimersByTime(WORKSPACE_OVERVIEW_POLL_MS);
+      });
+      await flush();
+    }
+    expect(latest?.overview?.skills?.total).toBe(2);
+    // The pre-round-trip round lands a late success: its data is already
+    // discarded, and it must not zero the current session's misses either.
+    await act(async () => {
+      resolveHeld(skillsStatus(1));
+    });
+    await flush();
+    await act(async () => {
+      vi.advanceTimersByTime(WORKSPACE_OVERVIEW_POLL_MS);
+    });
+    await flush();
+    expect(latest?.overview?.skills).toBeUndefined();
+  });
+
+  it('does not book a round from before a disable/enable cycle into the new session', async () => {
+    let rejectHeld: (reason: unknown) => void = () => {};
+    workspaceSkills
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            rejectHeld = reject;
+          }),
+      )
+      .mockResolvedValueOnce(skillsStatus(2))
+      .mockRejectedValue(new Error('daemon down'));
+    const client = makeClient(fullHandle);
+    // Collapse while the round is in flight, then expand again.
+    await render(client, '/w', { enabled: true, items: ['skills'] });
+    await render(client, '/w', { enabled: false, items: ['skills'] });
+    await render(client, '/w', { enabled: true, items: ['skills'] });
+    await flush();
+    expect(latest?.overview?.skills?.total).toBe(2);
+    await act(async () => {
+      rejectHeld(new Error('request timed out'));
+    });
+    await flush();
+    for (let tick = 1; tick <= WORKSPACE_OVERVIEW_MAX_MISSES - 1; tick += 1) {
+      await act(async () => {
+        vi.advanceTimersByTime(WORKSPACE_OVERVIEW_POLL_MS);
+      });
+      await flush();
+    }
+    expect(latest?.overview?.skills?.total).toBe(2);
+  });
+
   it('refetches as soon as it is enabled again', async () => {
     const client = makeClient(fullHandle);
     await render(client, '/w', { enabled: true, items: ['mcp'] });

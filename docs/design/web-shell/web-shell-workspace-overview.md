@@ -90,7 +90,10 @@ after a rollback cannot freeze a stale count on the chip. Rounds that time
 out after the next tick has already replaced them still count: the SDK's
 request deadline equals the poll cadence, so during a daemon hang every
 round is superseded before it lands, and only their observed misses can
-expire the facet.
+expire the facet. The budget is scoped to one bookkeeping session: a reset
+boundary (a cwd change, the section collapsing) advances an epoch, and a
+round launched before the boundary can neither book misses into the fresh
+session nor refill it with a stale success.
 
 Fetching is gated on the section being expanded, the workspace trusted and the
 default header rendered (a locked sidebar's custom header has no chip or menu

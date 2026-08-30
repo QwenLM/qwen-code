@@ -118,6 +118,12 @@ export function useWorkspaceOverview(
 ): WorkspaceOverviewResult {
   const [overview, setOverview] = useState<WorkspaceOverviewSnapshot>();
   const requestIdRef = useRef(0);
+  // Miss budgets live per bookkeeping session: the epoch advances at every
+  // reset boundary (cwd change, disable) so a round launched before a reset
+  // can neither book misses into the fresh session nor zero them with a
+  // stale success. Rounds inside one unbroken session keep accumulating —
+  // the hang case below depends on superseded rounds still counting.
+  const epochRef = useRef(0);
   // Consecutive rounds each facet went unanswered; bounds the carry-over.
   const missesRef = useRef<Partial<Record<WorkspaceOverviewItem, number>>>({});
   // The workspace the bookkeeping belongs to; a round from another cwd that
@@ -141,8 +147,12 @@ export function useWorkspaceOverview(
     if (!active || !workspaceCwd) return;
     const requestId = ++requestIdRef.current;
     const cwd = workspaceCwd;
+    const epoch = epochRef.current;
     const next = await fetchWorkspaceOverview(client, cwd, requested);
     if (cwd !== cwdRef.current) return;
+    // Started before the last bookkeeping reset: its budget no longer
+    // exists, and the snapshot it could expire was already cleared.
+    if (epoch !== epochRef.current) return;
     // Bookkeeping runs for every round that lands, superseded or not: the
     // SDK's request deadline equals the poll cadence, so while the daemon
     // hangs each round times out just after the next tick has replaced it.
@@ -172,6 +182,7 @@ export function useWorkspaceOverview(
   // A snapshot belongs to one workspace: switching cwd on a live hook must
   // not let the previous workspace's facets carry over into the next merge.
   useEffect(() => {
+    epochRef.current += 1;
     missesRef.current = {};
     setOverview(undefined);
   }, [workspaceCwd]);
@@ -180,6 +191,7 @@ export function useWorkspaceOverview(
     if (!active) {
       // Invalidate any in-flight round so it cannot land after the clear.
       requestIdRef.current += 1;
+      epochRef.current += 1;
       missesRef.current = {};
       setOverview(undefined);
       return;
