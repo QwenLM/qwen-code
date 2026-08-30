@@ -112,6 +112,7 @@ import {
   getServeProtocolVersions,
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import {
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
@@ -1036,9 +1037,14 @@ export function describeWorkerTlsTrustGaps(opts: {
   // leaf (what the `mkcert` flow this project documents produces) never
   // terminates the chain — unless something else in the worker's bundle
   // carries the issuer that does.
+  // One clock for the whole report: the walk's issuer preference and the
+  // per-member validity flags below must judge the same sampled instant, or
+  // the walk can anchor through a certificate the report then contradicts.
+  const now = Date.now();
   const anchorPath = walkWorkerAnchorPath(
     x509,
     workerTrustStore,
+    now,
     // The `servingBlocks === undefined` fallback prepends the leaf too, but
     // that file already reports its own gap below and the workers receive it
     // verbatim; only the partial-read case needs the distinction.
@@ -1229,7 +1235,6 @@ export function describeWorkerTlsTrustGaps(opts: {
   // `X509Certificate.verify` checks signatures only and never consults dates,
   // so an expired root or intermediate anchors "fine" here while every worker
   // handshake fails CERT_HAS_EXPIRED. Boot validation covers the leaf alone.
-  const now = Date.now();
   for (const member of anchorPath.path) {
     if (member.fingerprint256 === x509.fingerprint256) continue;
     const subject = member.subject.replace(/\r?\n/g, ', ');
@@ -1250,20 +1255,22 @@ export function describeWorkerTlsTrustGaps(opts: {
       );
       continue;
     }
-    if (new Date(member.validTo).getTime() < now) {
-      gaps.push(
-        `--tls-cert "${opts.certPath}" chains through "${subject}", which ` +
-          `expired on ${member.validTo} — every worker handshake to the ` +
-          `daemon will fail CERT_HAS_EXPIRED. Renew that chain member and ` +
-          `restart.`,
-      );
-    } else if (new Date(member.validFrom).getTime() > now) {
-      gaps.push(
-        `--tls-cert "${opts.certPath}" chains through "${subject}", which is ` +
-          `not yet valid (validFrom: ${member.validFrom}) — every worker ` +
-          `handshake to the daemon will fail CERT_NOT_YET_VALID. Check that ` +
-          `chain member's notBefore date or the system clock.`,
-      );
+    if (!certValidAt(member, now)) {
+      if (new Date(member.validTo).getTime() < now) {
+        gaps.push(
+          `--tls-cert "${opts.certPath}" chains through "${subject}", which ` +
+            `expired on ${member.validTo} — every worker handshake to the ` +
+            `daemon will fail CERT_HAS_EXPIRED. Renew that chain member and ` +
+            `restart.`,
+        );
+      } else {
+        gaps.push(
+          `--tls-cert "${opts.certPath}" chains through "${subject}", which is ` +
+            `not yet valid (validFrom: ${member.validFrom}) — every worker ` +
+            `handshake to the daemon will fail CERT_NOT_YET_VALID. Check that ` +
+            `chain member's notBefore date or the system clock.`,
+        );
+      }
     }
   }
   const host = workerDialHost(opts.daemonUrl);
@@ -1451,6 +1458,14 @@ function cannotIssueCertificates(cert: X509Certificate): boolean {
   return !isV1Certificate(cert) && keyUsage === undefined;
 }
 
+/** Whether `cert`'s validity window contains `now`. */
+function certValidAt(cert: X509Certificate, now: number): boolean {
+  return (
+    new Date(cert.validFrom).getTime() <= now &&
+    new Date(cert.validTo).getTime() >= now
+  );
+}
+
 function isSelfSignedCert(x509: X509Certificate): boolean {
   if (x509.subject !== x509.issuer) return false;
   try {
@@ -1580,6 +1595,12 @@ function walkWorkerAnchorPath(
   leaf: X509Certificate,
   chain: readonly X509Certificate[],
   /**
+   * The instant the report samples trust at. The issuer preference must judge
+   * the same clock the caller's per-member validity flags do, or the walk can
+   * anchor through a certificate the report then contradicts.
+   */
+  now: number,
+  /**
    * Whether `leaf` is a certificate the workers' loader actually hands them.
    * It is not when the caller had to PREPEND the boot-parsed leaf because the
    * serving file's own block is not one the loader takes.
@@ -1649,11 +1670,19 @@ function walkWorkerAnchorPath(
         : { anchored: true, path };
     }
     walked.add(current.fingerprint256);
-    const issuer: X509Certificate | undefined = chain.find(
+    const issuers = chain.filter(
       (candidate) =>
         !walked.has(candidate.fingerprint256) &&
         certIssuedBy(current, candidate),
     );
+    // A renewed CA leaves two certificates in the bundle that share a subject
+    // AND a key, so both verify what they issued. Taking whichever one came
+    // first reported the expired copy as the path the handshake depends on and
+    // told the operator to renew a CA they had already renewed, while the
+    // merged bundle authorizes through the renewed copy. OpenSSL may use
+    // either, so prefer the copy that is usable now.
+    const issuer: X509Certificate | undefined =
+      issuers.find((candidate) => certValidAt(candidate, now)) ?? issuers[0];
     // `certIssuedBy` asks only "did this sign that": name match plus signature.
     // OpenSSL asks a second question of every certificate it uses AS an issuer,
     // and answering only the first is how a chain that walks THROUGH an
@@ -2289,6 +2318,7 @@ function currentServeFeaturesForRunQwenServe(
   sessionArtifactsPersistenceAvailable: boolean,
   currentSessionSchedulingAvailable: boolean,
   env: Readonly<Record<string, string | undefined>>,
+  nativeDirectoryPickerAvailable: boolean,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -2315,8 +2345,10 @@ function currentServeFeaturesForRunQwenServe(
     channelManagementAvailable: true,
     persistentWorkspaceRegistrationAvailable: true,
     workspaceRuntimeRemovalAvailable: true,
-    // Advertise the same WS feature flags as the runtime path (serve-features.ts)
-    // so the bootstrap `/capabilities` window doesn't briefly under-report them.
+    // Advertise the same host-conditional and WS feature flags as the runtime
+    // path (serve-features.ts) so the bootstrap `/capabilities` window doesn't
+    // briefly under-report them.
+    nativeDirectoryPickerAvailable,
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
     browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
@@ -2332,6 +2364,7 @@ function createBootstrapCapabilities(input: {
   currentSessionSchedulingAvailable: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   env: Readonly<Record<string, string | undefined>>;
+  nativeDirectoryPickerAvailable: boolean;
 }): CapabilitiesEnvelope {
   return {
     v: CAPABILITIES_SCHEMA_VERSION,
@@ -2346,6 +2379,7 @@ function createBootstrapCapabilities(input: {
       input.sessionArtifactsPersistenceAvailable,
       input.currentSessionSchedulingAvailable,
       input.env,
+      input.nativeDirectoryPickerAvailable,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -2566,6 +2600,11 @@ function createBootstrapServeApp(input: {
     onHealthServed,
   } = input;
   const app = express();
+  // The probe stats `/dev/console` (macOS) or scans `PATH` for `zenity`
+  // (Linux), and both bootstrap endpoints below rebuild their envelope per
+  // request, so evaluate it once here — the runtime path likewise probes once,
+  // at `createApp` time (server.ts).
+  const nativeDirectoryPickerAvailable = isNativeDirectoryPickerAvailable();
 
   installSameOriginOriginStrip(app, getPort);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
@@ -2626,6 +2665,7 @@ function createBootstrapServeApp(input: {
         currentSessionSchedulingAvailable,
         permissionPolicy,
         env: process.env,
+        nativeDirectoryPickerAvailable,
       }),
     );
   });
@@ -2765,6 +2805,7 @@ function createBootstrapServeApp(input: {
           sessionArtifactsPersistenceAvailable,
           currentSessionSchedulingAvailable,
           process.env,
+          nativeDirectoryPickerAvailable,
         ),
       },
       runtime: {

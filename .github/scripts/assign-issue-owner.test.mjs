@@ -149,6 +149,43 @@ describe('assign-issue-owner: owner map', () => {
     broken.areas[0].owners = [42];
     assert.throws(() => loadPolicy(JSON.stringify(broken)), /invalid login/);
   });
+
+  it('rejects paths entries that could never route the area', () => {
+    // startsWith matching can never honour these spellings; accepting them
+    // would silently unroute the area from PR assignment forever.
+    for (const paths of [
+      ['./packages/core/'],
+      ['packages//core/'],
+      ['.github/../packages/core/'],
+      ['/packages/core/'],
+      ['packages/core'],
+      ['packages\\core/'],
+      [''],
+      [42],
+    ]) {
+      const broken = JSON.parse(ownersRaw);
+      broken.areas[0].paths = paths;
+      assert.throws(
+        () => loadPolicy(JSON.stringify(broken)),
+        /invalid paths entry/,
+      );
+    }
+
+    const notArray = JSON.parse(ownersRaw);
+    notArray.areas[0].paths = 'packages/core/';
+    assert.throws(
+      () => loadPolicy(JSON.stringify(notArray)),
+      /paths must be an array/,
+    );
+
+    // An explicitly empty list can never route the area either.
+    const emptyPaths = JSON.parse(ownersRaw);
+    emptyPaths.areas[0].paths = [];
+    assert.throws(
+      () => loadPolicy(JSON.stringify(emptyPaths)),
+      /paths must not be empty/,
+    );
+  });
 });
 
 describe('assign-issue-owner: skip policy', () => {
