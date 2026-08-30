@@ -11878,15 +11878,14 @@ describe('LlmChat', async () => {
 
         // Verify retryInfo contains retry metadata
         const retryInfo =
-          second.value.type === StreamEventType.RETRY
-            ? second.value.retryInfo
+          first.value.type === StreamEventType.RETRY
+            ? first.value.retryInfo
             : undefined;
-        expect(
-          retryInfo === undefined ||
-            (retryInfo.attempt === 1 &&
-              retryInfo.maxRetries === 10 &&
-              retryInfo.delayMs === 60_000),
-        ).toBe(true);
+        expect(retryInfo).toMatchObject({
+          attempt: 1,
+          maxRetries: 10,
+          delayMs: 60_000,
+        });
 
         const events: StreamEvent[] = [first.value, second.value];
         for (;;) {
@@ -12619,6 +12618,51 @@ describe('LlmChat', async () => {
     );
 
     await expect(failedSend).rejects.toBe(routeError);
+    const stream = await queuedSend;
+    for await (const _ of stream) {
+      // consume
+    }
+
+    expect(chat.getLastModelMessageText()).toBe('second response');
+  });
+
+  it('releases the next queued send when exact-route resolution is aborted', async () => {
+    const abortController = new AbortController();
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      resolveForModel: vi.fn(() => new Promise(() => {})),
+    } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+      (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: 'second response' }],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })(),
+    );
+
+    const abortedSend = chat.sendMessageStream(
+      'stalled-model\0',
+      {
+        message: 'first',
+        config: { abortSignal: abortController.signal },
+      },
+      'prompt-exact-abort',
+    );
+    const queuedSend = chat.sendMessageStream(
+      'ordinary-model',
+      { message: 'second' },
+      'prompt-after-exact-abort',
+    );
+
+    abortController.abort();
+    await expect(abortedSend).rejects.toMatchObject({ name: 'AbortError' });
     const stream = await queuedSend;
     for await (const _ of stream) {
       // consume

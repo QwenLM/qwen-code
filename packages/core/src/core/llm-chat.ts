@@ -1240,6 +1240,33 @@ function delay(
   };
 }
 
+async function waitForAbortable<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return await promise;
+  signal.throwIfAborted();
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
 /**
  * Returns true if the response is valid, false otherwise.
  *
@@ -2858,9 +2885,12 @@ export class LlmChat {
     try {
       const fullTurnRoute = model.endsWith('\0');
       exactRoute = fullTurnRoute
-        ? await this.config
-            .getBaseLlmClient()
-            .resolveForModel(model.slice(0, -1), { failClosed: true })
+        ? await waitForAbortable(
+            this.config
+              .getBaseLlmClient()
+              .resolveForModel(model.slice(0, -1), { failClosed: true }),
+            params.config?.abortSignal,
+          )
         : undefined;
       if (exactRoute) {
         model = exactRoute.model;
