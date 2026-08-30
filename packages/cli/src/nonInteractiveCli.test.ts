@@ -11,6 +11,7 @@ import type {
   GoalJournal,
   GoalRuntime,
   GoalStateRecordPayloadV2,
+  GoalTurnHost,
   GoalTurnPermit,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
@@ -32,6 +33,7 @@ import {
   FatalInputError,
   ApprovalMode,
   SendMessageType,
+  SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
   LoopType,
   getToolCallFingerprint,
@@ -63,6 +65,7 @@ import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAda
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
+import { MANUAL_DREAM_TOOL_GUARD_MARKER } from './utils/tool-invocation-guards.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
 import {
@@ -244,6 +247,7 @@ describe('runNonInteractive', () => {
     abortAll: ReturnType<typeof vi.fn>;
   };
   let mockCoreExecuteToolCall: Mock;
+  let mockLoopDetectionReset: Mock;
   let mockShutdownTelemetry: Mock;
   let processStdoutSpy: MockInstance;
   let processStderrSpy: MockInstance;
@@ -256,6 +260,7 @@ describe('runNonInteractive', () => {
     consumePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
     addHistory: Mock;
+    getLoopDetectionService: Mock;
   };
   let mockGetDebugResponses: Mock;
   let goalRuntime: GoalRuntime;
@@ -317,11 +322,15 @@ describe('runNonInteractive', () => {
       abortAll: vi.fn(),
     };
 
+    mockLoopDetectionReset = vi.fn();
     mockLlmClient = {
       sendMessageStream: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
       addHistory: vi.fn(),
+      getLoopDetectionService: vi.fn(() => ({
+        reset: mockLoopDetectionReset,
+      })),
       stripOrphanedUserEntriesFromHistory: vi.fn(),
       getChatRecordingService: vi.fn(() => ({
         initialize: vi.fn(),
@@ -1976,17 +1985,95 @@ describe('runNonInteractive', () => {
       );
     });
 
-    it('adds plan mode reminders to an interrupted prompt replay', async () => {
+    it('reconstructs the /dream tool guard for an interrupted continuation', async () => {
+      setupMetricsMock();
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `${SYSTEM_REMINDER_OPEN}\nToday is tomorrow\n${SYSTEM_REMINDER_CLOSE}`,
+              },
+              { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+              { text: 'deterministic recovered dream prompt' },
+              { text: 'context appended by UserPromptSubmit' },
+            ],
+          },
+        ]),
+      }));
+      const toolRequest: ToolCallRequestInfo = {
+        callId: 'continued-dream-tool',
+        name: 'write_file',
+        args: { file_path: '/memory/pinned.md' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-continued-dream',
+      };
+      mockCoreExecuteToolCall.mockResolvedValue({
+        callId: toolRequest.callId,
+        responseParts: [{ text: 'denied' }],
+      });
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.ToolCallRequest, value: toolRequest },
+          ]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishedEvents));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-continued-dream',
+        { continueInterrupted: true },
+      );
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+        mockConfig,
+        toolRequest,
+        expect.any(AbortSignal),
+        expect.objectContaining({
+          toolInvocationGuard: expect.any(Function),
+        }),
+      );
+      const recoveredGuard =
+        mockCoreExecuteToolCall.mock.calls[0]?.[3]?.toolInvocationGuard;
+      expect(recoveredGuard).toEqual(expect.any(Function));
+      await expect(
+        recoveredGuard({
+          callId: 'recovered-deny',
+          toolName: ToolNames.AGENT,
+          args: { prompt: 'edit arbitrary files' },
+          signal: new AbortController().signal,
+        }),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        recoveredGuard({
+          callId: 'recovered-allow',
+          toolName: ToolNames.READ_FILE,
+          args: { file_path: '/tmp/read-only-context.md' },
+          signal: new AbortController().signal,
+        }),
+      ).resolves.toEqual({ allowed: true });
+    });
+
+    it('adds plan mode reminders when a recovered Dream has only its policy marker', async () => {
       setupMetricsMock();
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       mockLlmClient.stripOrphanedUserEntriesFromHistory = vi.fn();
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
-        getHistory: vi
-          .fn()
-          .mockReturnValue([
-            { role: 'user', parts: [{ text: 'do the thing' }] },
-          ]),
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'user',
+            parts: [
+              { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+              { text: 'do the thing' },
+            ],
+          },
+        ]),
       }));
       mockLlmClient.sendMessageStream.mockReturnValue(
         createStreamFromEvents([
@@ -2008,8 +2095,43 @@ describe('runNonInteractive', () => {
       );
       expect(request).toEqual([
         { text: expect.stringContaining(SYSTEM_REMINDER_OPEN) },
+        { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
         { text: 'do the thing' },
       ]);
+    });
+
+    it('adds plan mode reminders to a marker-less interrupted prompt replay', async () => {
+      setupMetricsMock();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockLlmClient.stripOrphanedUserEntriesFromHistory = vi.fn();
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents(finishedEvents),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-plain', {
+        continueInterrupted: true,
+      });
+
+      const [request, , , options] =
+        mockLlmClient.sendMessageStream.mock.calls[0]!;
+      expect(options).toEqual(
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+      expect(request).toEqual([
+        { text: expect.stringContaining(SYSTEM_REMINDER_OPEN) },
+        { text: 'do the thing' },
+      ]);
+      expect(request).not.toContainEqual({
+        text: MANUAL_DREAM_TOOL_GUARD_MARKER,
+      });
     });
 
     it('closes dangling tool calls with synthesized ToolResult parts', async () => {
@@ -5056,6 +5178,562 @@ describe('runNonInteractive', () => {
     expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
   });
 
+  it('runs a slash-command onComplete callback after a successful headless turn', async () => {
+    setupMetricsMock();
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'record-on-success',
+        description: 'record only completed turns',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Complete this turn' }],
+          onComplete,
+        }),
+      },
+    ]);
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/record-on-success',
+      'prompt-on-complete-success',
+    );
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not run a slash-command onComplete callback when the headless turn fails', async () => {
+    setupMetricsMock();
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'record-on-success',
+        description: 'record only completed turns',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Fail this turn' }],
+          onComplete,
+        }),
+      },
+    ]);
+    const apiError = new Error('API connection failed');
+    mockLlmClient.sendMessageStream.mockImplementation(() => {
+      throw apiError;
+    });
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/record-on-success',
+        'prompt-on-complete-failure',
+      ),
+    ).rejects.toThrow(apiError);
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'does not run a slash-command onComplete callback after a %s API error event',
+    async (outputFormat) => {
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(outputFormat);
+      setupMetricsMock();
+      const onComplete = vi.fn().mockResolvedValue(undefined);
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'record-on-success',
+          description: 'record only completed turns',
+          kind: CommandKind.FILE,
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'Fail this turn' }],
+            onComplete,
+          }),
+        },
+      ]);
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Error,
+            value: {
+              error: {
+                message: 'API connection failed',
+                status: 503,
+              },
+            },
+          },
+        ]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/record-on-success',
+        `prompt-on-complete-${outputFormat}-api-error`,
+      );
+
+      expect(onComplete).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps a slash-command tool guard for the full headless turn', async () => {
+    setupMetricsMock();
+    const toolInvocationGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: true as const });
+    const mockCommand = {
+      name: 'guarded',
+      description: 'a guarded prompt command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Guarded prompt' }],
+        toolInvocationGuard,
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    const toolRequest: ToolCallRequestInfo = {
+      callId: 'guarded-headless-call',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-headless',
+    };
+    const secondToolRequest: ToolCallRequestInfo = {
+      callId: 'guarded-headless-call-2',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-headless',
+    };
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config: Config, request: ToolCallRequestInfo) => ({
+        callId: request.callId,
+        responseParts: [{ text: `tool result ${request.callId}` }],
+      }),
+    );
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.ToolCallRequest, value: toolRequest },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.ToolCallRequest, value: secondToolRequest },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'done' },
+          ...finishedEvents,
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/guarded',
+      'prompt-guarded-headless',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      toolRequest,
+      expect.any(AbortSignal),
+      expect.objectContaining({ toolInvocationGuard }),
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      secondToolRequest,
+      expect.any(AbortSignal),
+      expect.objectContaining({ toolInvocationGuard }),
+    );
+  });
+
+  it('defers teammate input until the guarded tool-result chain ends', async () => {
+    setupMetricsMock();
+    // The isolated teammate send is an implementation-only extra turn; the
+    // equivalent logical exchange still fits within this four-turn cap.
+    vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(4);
+    const toolInvocationGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: true as const });
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'guarded-teammate-turn',
+        description: 'a guarded prompt command',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Guarded prompt' }],
+          toolInvocationGuard,
+        }),
+      },
+    ]);
+
+    let leaderMessageCallback: ((formatted: string) => void) | null = null;
+    const teamEvents = new EventEmitter();
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(
+        (callback: ((formatted: string) => void) | null) => {
+          leaderMessageCallback = callback;
+        },
+      ),
+      getEventEmitter: () => teamEvents,
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+
+    const guardedRequest: ToolCallRequestInfo = {
+      callId: 'guarded-before-teammate',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-teammate',
+    };
+    const guardedContinuationRequest: ToolCallRequestInfo = {
+      callId: 'guarded-before-deferred-teammate',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-teammate',
+    };
+    const teammateRequest: ToolCallRequestInfo = {
+      callId: 'unguarded-after-teammate',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-teammate',
+    };
+    mockCoreExecuteToolCall
+      .mockImplementationOnce(async () => {
+        leaderMessageCallback?.('Fresh teammate input');
+        return {
+          callId: guardedRequest.callId,
+          responseParts: [{ text: 'guarded tool result' }],
+        };
+      })
+      .mockResolvedValueOnce({
+        callId: guardedContinuationRequest.callId,
+        responseParts: [{ text: 'guarded continuation result' }],
+      })
+      .mockResolvedValueOnce({
+        callId: teammateRequest.callId,
+        responseParts: [{ text: 'teammate turn tool result' }],
+      });
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.ToolCallRequest, value: guardedRequest },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.ToolCallRequest,
+            value: guardedContinuationRequest,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.ToolCallRequest, value: teammateRequest },
+        ]),
+      )
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/guarded-teammate-turn',
+      'prompt-guarded-teammate',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenNthCalledWith(
+      1,
+      mockConfig,
+      guardedRequest,
+      expect.any(AbortSignal),
+      expect.objectContaining({ toolInvocationGuard }),
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenNthCalledWith(
+      2,
+      mockConfig,
+      guardedContinuationRequest,
+      expect.any(AbortSignal),
+      expect.objectContaining({ toolInvocationGuard }),
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenNthCalledWith(
+      3,
+      mockConfig,
+      teammateRequest,
+      expect.any(AbortSignal),
+      expect.not.objectContaining({
+        toolInvocationGuard: expect.anything(),
+      }),
+    );
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'guarded tool result' }],
+      expect.any(AbortSignal),
+      'prompt-guarded-teammate',
+      { type: SendMessageType.ToolResult },
+    );
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+      4,
+      [{ text: 'Fresh teammate input' }],
+      expect.any(AbortSignal),
+      expect.stringContaining('/teammate/'),
+      { type: SendMessageType.Teammate },
+    );
+    expect(mockLoopDetectionReset).toHaveBeenCalledTimes(1);
+    expect(mockLoopDetectionReset).toHaveBeenCalledWith(
+      'prompt-guarded-teammate',
+    );
+  });
+
+  it('keeps queued teammate input out of a Goal segment and clears the prior guard', async () => {
+    setupMetricsMock();
+    vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(1);
+    await prepareGoalState('active');
+    const toolInvocationGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: true as const });
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'guarded-goal-turn',
+        description: 'a guarded prompt command',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Guarded prompt' }],
+          toolInvocationGuard,
+        }),
+      },
+    ]);
+
+    let boundGoalHost: GoalTurnHost | undefined;
+    mockConfig.bindGoalTurnHost = vi.fn((host: GoalTurnHost) => {
+      boundGoalHost = host;
+      return () => {};
+    });
+    const goal = goalRuntime.getSnapshot().goal!;
+    const initialPermit = goalRuntime.permitForTurn('prompt-guarded-goal-turn');
+    const nextPermit: GoalTurnPermit = {
+      goalId: goal.goalId,
+      revision: goal.revision,
+      turnId: 'runtime-after-guarded-turn',
+    };
+    let finishCount = 0;
+    vi.spyOn(goalRuntime, 'finishTurn').mockImplementation(async () => {
+      finishCount += 1;
+      if (finishCount === 1) {
+        await boundGoalHost!.startGoalTurn({
+          permit: nextPermit,
+          continuationContext: 'continue the active goal',
+        });
+      }
+    });
+
+    let leaderMessageCallback: ((formatted: string) => void) | null = null;
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(
+        (callback: ((formatted: string) => void) | null) => {
+          leaderMessageCallback = callback;
+        },
+      ),
+      getEventEmitter: () => new EventEmitter(),
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+
+    const guardedToolRequest: ToolCallRequestInfo = {
+      callId: 'guarded-tool-before-goal-turn',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-goal-turn',
+      ...(initialPermit ? { goalContext: initialPermit } : {}),
+    };
+
+    const goalToolRequest: ToolCallRequestInfo = {
+      callId: 'goal-tool-after-guarded-turn',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-goal-turn',
+      goalContext: nextPermit,
+    };
+    mockCoreExecuteToolCall
+      .mockImplementationOnce(async () => {
+        leaderMessageCallback?.('Teammate input waiting behind Goal');
+        return {
+          callId: guardedToolRequest.callId,
+          responseParts: [{ text: 'guarded turn result' }],
+          terminateTurn: true,
+        };
+      })
+      .mockResolvedValueOnce({
+        callId: goalToolRequest.callId,
+        responseParts: [{ text: 'goal tool result' }],
+        terminateTurn: true,
+      });
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.ToolCallRequest,
+            value: guardedToolRequest,
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.ToolCallRequest, value: goalToolRequest },
+        ]),
+      )
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/guarded-goal-turn',
+      'prompt-guarded-goal-turn',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenNthCalledWith(
+      1,
+      mockConfig,
+      guardedToolRequest,
+      expect.any(AbortSignal),
+      expect.objectContaining({ toolInvocationGuard }),
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenNthCalledWith(
+      2,
+      mockConfig,
+      goalToolRequest,
+      expect.any(AbortSignal),
+      expect.not.objectContaining({
+        toolInvocationGuard: expect.anything(),
+      }),
+    );
+    const goalSend = mockLlmClient.sendMessageStream.mock.calls[1];
+    expect(goalSend?.[0]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: expect.stringContaining('continue the active goal'),
+        }),
+      ]),
+    );
+    expect(goalSend?.[0]).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: expect.stringContaining('Teammate input waiting behind Goal'),
+        }),
+      ]),
+    );
+    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+      3,
+      [{ text: 'Teammate input waiting behind Goal' }],
+      expect.any(AbortSignal),
+      expect.stringContaining('/teammate/'),
+      { type: SendMessageType.Teammate },
+    );
+  });
+
+  it('does not leak a slash-command tool guard into notification drains', async () => {
+    setupMetricsMock();
+    const toolInvocationGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: true as const });
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'guarded-drain',
+        description: 'a guarded prompt command',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Guarded prompt' }],
+          toolInvocationGuard,
+        }),
+      },
+    ]);
+    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+      (callback) => {
+        callback?.('Task finished', 'task result', {
+          agentId: 'agent-1',
+          toolUseId: 'agent-tool-1',
+          status: 'completed',
+        });
+      },
+    );
+    const drainToolRequest: ToolCallRequestInfo = {
+      callId: 'unguarded-drain-call',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-drain',
+    };
+    const drainToolCall: ServerGeminiStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
+      value: drainToolRequest,
+    };
+    mockCoreExecuteToolCall.mockResolvedValue({
+      callId: drainToolRequest.callId,
+      responseParts: [{ text: 'drain tool result' }],
+    });
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents))
+      .mockReturnValueOnce(createStreamFromEvents([drainToolCall]))
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/guarded-drain',
+      'prompt-guarded-drain',
+    );
+
+    expect(
+      mockLlmClient.sendMessageStream.mock.calls.map((call) => ({
+        parts: call[0],
+        promptId: call[2],
+        type: call[3]?.type,
+      })),
+    ).toEqual([
+      {
+        parts: [{ text: 'Guarded prompt' }],
+        promptId: 'prompt-guarded-drain',
+        type: SendMessageType.UserQuery,
+      },
+      {
+        parts: [{ text: 'task result' }],
+        promptId: 'prompt-guarded-drain/automatic/2',
+        type: SendMessageType.Notification,
+      },
+      {
+        parts: [{ text: 'drain tool result' }],
+        promptId: 'prompt-guarded-drain/automatic/2',
+        type: SendMessageType.ToolResult,
+      },
+    ]);
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      drainToolRequest,
+      expect.any(AbortSignal),
+      expect.not.objectContaining({ toolInvocationGuard: expect.anything() }),
+    );
+  });
+
   it('should handle command that requires confirmation by returning early', async () => {
     setupMetricsMock();
     const mockCommand = {
@@ -7012,6 +7690,73 @@ describe('runNonInteractive', () => {
         ? block.tool_use_id
         : undefined;
     };
+
+    it('lets a guarded /dream turn satisfy the structured output contract', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      const dreamGuard = (
+        await import('@qwen-code/qwen-code-core')
+      ).createManualDreamToolInvocationGuard('/test/project');
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'dream',
+          description: 'guarded memory consolidation',
+          kind: CommandKind.BUILT_IN,
+          supportedModes: ['non_interactive'],
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'Dream prompt' }],
+            toolInvocationGuard: dreamGuard,
+          }),
+        },
+      ]);
+      const structuredRequest: ToolCallRequestInfo = {
+        callId: 'dream-structured-output',
+        name: ToolNames.STRUCTURED_OUTPUT,
+        args: { summary: 'dream complete' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-dream-structured',
+      };
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, signal, options) => {
+          const decision = await options?.toolInvocationGuard?.({
+            callId: request.callId,
+            toolName: request.name,
+            args: request.args,
+            signal,
+          });
+          expect(decision).toEqual({ allowed: true });
+          return {
+            callId: request.callId,
+            responseParts: [{ text: 'accepted' }],
+          };
+        },
+      );
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.ToolCallRequest, value: structuredRequest },
+        ]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/dream',
+        'prompt-dream-structured',
+      );
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+        mockConfig,
+        structuredRequest,
+        expect.any(AbortSignal),
+        expect.objectContaining({ toolInvocationGuard: dreamGuard }),
+      );
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
+    });
 
     it('stops executing remaining tool calls from the same turn once structured_output succeeds', async () => {
       (mockConfig.getJsonSchema as Mock).mockReturnValue({

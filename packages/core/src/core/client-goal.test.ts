@@ -25,6 +25,7 @@ import {
 } from '../goals/activeGoalStore.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { ApprovalMode } from '../config/config.js';
+import { MANUAL_DREAM_TOOL_GUARD_MARKER } from '../memory/manual-dream-turn-policy.js';
 
 const turnMocks = vi.hoisted(() => ({
   constructors: [] as unknown[][],
@@ -858,6 +859,59 @@ describe('LlmClient Goal admission', () => {
     expect(messageBus.request).toHaveBeenCalledTimes(2);
     expect(reset).toHaveBeenCalledTimes(2);
     expect(reset).toHaveBeenCalledWith('goal-prompt');
+  });
+
+  it('persists the manual-dream policy on a Goal-owned Stop continuation', async () => {
+    const { client, config } = setupGoalClient();
+    client['chat'] = {
+      getUserContentPushCount: vi.fn(() => 0),
+      getHistory: vi.fn(() => [
+        {
+          role: 'user',
+          parts: [
+            { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+            { text: 'dream prompt' },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'not done' }] },
+      ]),
+      getHistoryLength: vi.fn(() => 2),
+    } as unknown as LlmChat;
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          output: { decision: 'block', reason: 'continue checking' },
+          stopHookCount: 1,
+        })
+        .mockResolvedValue({ output: undefined, stopHookCount: 1 }),
+    };
+    vi.mocked(config.getDisableAllHooks).mockReturnValue(false);
+    vi.mocked(config.getMessageBus).mockReturnValue(
+      messageBus as unknown as ReturnType<Config['getMessageBus']>,
+    );
+    vi.mocked(config.hasHooksForEvent).mockImplementation(
+      (event) => event === 'Stop',
+    );
+
+    await drain(
+      client.sendMessageStream(
+        [{ text: MANUAL_DREAM_TOOL_GUARD_MARKER }, { text: 'dream prompt' }],
+        new AbortController().signal,
+        'goal-dream-prompt',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+        },
+        2,
+      ),
+    );
+
+    const continuation = turnMocks.run.mock.calls[1]?.[1];
+    expect(continuation).toEqual(
+      expect.arrayContaining([MANUAL_DREAM_TOOL_GUARD_MARKER]),
+    );
   });
 
   it('does not recurse with a stale permit when Goal preemption lands while draining steer input', async () => {

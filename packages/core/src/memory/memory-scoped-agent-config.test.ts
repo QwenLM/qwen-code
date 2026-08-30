@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
@@ -21,6 +22,7 @@ import {
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
+import { createManualDreamToolInvocationGuard } from './dreamAgentPlanner.js';
 
 describe('createMemoryScopedAgentConfig', () => {
   const originalMemoryBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
@@ -510,6 +512,175 @@ describe('createMemoryScopedAgentConfig', () => {
         command: 'touch bad',
       }),
     ).resolves.toBe('deny');
+  });
+
+  it('gives a manual Dream turn the forked worker filesystem boundary', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const pinnedDir = path.join(memoryRoot, AUTO_MEMORY_PINNED_DIRNAME);
+    const pinnedFile = path.join(pinnedDir, 'architecture.md');
+    const pinnedAlias = path.join(memoryRoot, 'project', 'pinned-alias');
+    await fs.mkdir(pinnedDir, { recursive: true });
+    await fs.writeFile(pinnedFile, 'canonical architecture');
+    await fs.symlink(pinnedDir, pinnedAlias);
+
+    const guard = createManualDreamToolInvocationGuard(projectRoot);
+    const signal = new AbortController().signal;
+    const evaluate = (toolName: string, args: Record<string, unknown>) =>
+      guard({
+        callId: `call-${toolName}`,
+        toolName,
+        args,
+        signal,
+      });
+
+    await expect(
+      evaluate(ToolNames.WRITE_FILE, {
+        file_path: path.join(memoryRoot, 'project', 'ordinary.md'),
+      }),
+    ).resolves.toEqual({ allowed: true });
+    await expect(
+      evaluate(ToolNames.EDIT, { file_path: pinnedFile }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(edit: pinned memory is read-only)',
+    });
+    await expect(
+      evaluate(ToolNames.WRITE_FILE, {
+        file_path: path.join(pinnedAlias, 'new.md'),
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(write_file: pinned memory is read-only)',
+    });
+    await expect(
+      evaluate(ToolNames.WRITE_FILE, {
+        file_path: path.join(getUserAutoMemoryRoot(), 'user', 'notes.md'),
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: expect.stringContaining('only within'),
+    });
+    await expect(
+      evaluate(ToolNames.SHELL, { command: 'git status' }),
+    ).resolves.toEqual({ allowed: true });
+    await expect(
+      evaluate(ToolNames.SHELL, { command: "bash -c 'git status'" }),
+    ).resolves.toEqual({ allowed: true });
+    await expect(
+      evaluate(ToolNames.SHELL, {
+        command: "bash -c 'git diff' && touch /tmp/pwn8357",
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(
+      evaluate(ToolNames.SHELL, {
+        command: "bash -c 'git diff' > /tmp/pwn8357",
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(
+      evaluate(ToolNames.SHELL, {
+        command: "bash -c 'git diff'\ntouch /tmp/pwn8357",
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(
+      evaluate(ToolNames.SHELL, {
+        command: "bash -c 'git diff'\r\ntouch /tmp/pwn8357",
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(
+      evaluate(ToolNames.SHELL, { command: `rm ${pinnedFile}` }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(
+      evaluate(ToolNames.AGENT, { prompt: 'edit pinned memory' }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(agent: unavailable in this scoped turn)',
+    });
+    await expect(
+      evaluate(ToolNames.STRUCTURED_OUTPUT, { summary: 'dream complete' }),
+    ).resolves.toEqual({ allowed: true });
+  });
+
+  it('applies repository-local Git safety checks in the requested directory', async () => {
+    execFileSync('git', ['init', '-q'], { cwd: projectRoot });
+    const guard = createManualDreamToolInvocationGuard(projectRoot);
+    const evaluate = (command: string) =>
+      guard({
+        callId: `call-${command}`,
+        toolName: ToolNames.SHELL,
+        args: { command, directory: projectRoot },
+        signal: new AbortController().signal,
+      });
+
+    execFileSync(
+      'git',
+      ['config', 'diff.external', 'untrusted-external-diff'],
+      { cwd: projectRoot },
+    );
+    await expect(evaluate('git diff')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+
+    execFileSync('git', ['config', '--unset', 'diff.external'], {
+      cwd: projectRoot,
+    });
+    execFileSync(
+      'git',
+      ['config', 'diff.untrusted.textconv', 'untrusted-textconv'],
+      { cwd: projectRoot },
+    );
+    for (const command of ['git diff', 'git log -p -1', 'git show HEAD']) {
+      await expect(evaluate(command)).resolves.toEqual({
+        allowed: false,
+        reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+      });
+    }
+
+    execFileSync('git', ['config', '--unset', 'diff.untrusted.textconv'], {
+      cwd: projectRoot,
+    });
+    execFileSync('git', ['config', 'core.fsmonitor', 'untrusted-fsmonitor'], {
+      cwd: projectRoot,
+    });
+    await expect(evaluate('git status')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(evaluate('git diff')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(evaluate('git diff HEAD')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(evaluate('git ls-files')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(evaluate('git blame README.md')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(evaluate('git grep needle')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
   });
 
   it('lets base deny rules override scoped allows', async () => {

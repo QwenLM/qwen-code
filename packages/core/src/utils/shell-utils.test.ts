@@ -1012,6 +1012,25 @@ describe('normalizeMonitorCommand', () => {
     });
   });
 
+  it('preserves a leading newline before shell-wrapper suffix commands', () => {
+    expect(
+      normalizeMonitorCommand("/bin/bash -c 'git diff'\ntouch /tmp/pwn8357"),
+    ).toEqual({
+      analysisCommand: 'git diff',
+      safetyCommand: 'git diff\ntouch /tmp/pwn8357',
+      spawnCommand: "/bin/bash -c 'git diff'\ntouch /tmp/pwn8357",
+      strippedTrailingAmp: false,
+    });
+    expect(
+      normalizeMonitorCommand("/bin/bash -c 'git diff'\r\ntouch /tmp/pwn8357"),
+    ).toEqual({
+      analysisCommand: 'git diff',
+      safetyCommand: 'git diff\ntouch /tmp/pwn8357',
+      spawnCommand: "/bin/bash -c 'git diff'\ntouch /tmp/pwn8357",
+      strippedTrailingAmp: false,
+    });
+  });
+
   it('handles escaped whitespace in env-prefixed wrappers', () => {
     expect(
       normalizeMonitorCommand(

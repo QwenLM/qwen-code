@@ -116,12 +116,11 @@ index entries unchanged, while Dream is instructed to skip `pinned/` during
 consolidation. Both automatic extraction and forked Dream workers, including
 background cleanup, enforce the pinned-file boundary on their write and edit
 tools, including paths that resolve through a symlink into `pinned/`; their
-existing read-only shell policy blocks command-line deletion. You still control
-these files directly and can remove them with an explicit `/forget` request.
-
-> **Note:** The visible `/dream` slash command runs on the main Agent. It
-> receives the same skip instruction, but does not yet receive the forked
-> worker's deterministic per-turn tool gate.
+existing read-only shell policy blocks command-line deletion. The visible
+`/dream` command applies the same boundary for its complete interactive,
+headless, or ACP tool turn without changing permissions for later prompts. You
+still control these files directly and can remove them with an explicit
+`/forget` request.
 
 ### Periodic cleanup
 

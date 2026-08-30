@@ -1566,6 +1566,33 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
+    it('should preserve a submit_prompt turn-scoped tool guard', async () => {
+      const toolInvocationGuard = vi
+        .fn()
+        .mockResolvedValue({ allowed: true as const });
+      const command = createTestCommand({
+        name: 'guarded',
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'guarded prompt',
+          toolInvocationGuard,
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand('/guarded');
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: 'guarded prompt',
+        toolInvocationGuard,
+      });
+    });
+
     it('should preserve context-file refresh intent from submit_prompt actions', async () => {
       const fileCommand = createTestCommand(
         {
@@ -3323,6 +3350,66 @@ describe('useSlashCommandProcessor', () => {
         ]),
         refreshContextFilesOnWrite: true,
       });
+    });
+
+    it('combines every turn guard from stacked skills', async () => {
+      const firstGuard = vi.fn().mockResolvedValue({ allowed: true as const });
+      const secondGuard = vi.fn().mockResolvedValue({
+        allowed: false as const,
+        reason: 'second skill denied',
+      });
+      const skillA: SlashCommand = createTestCommand(
+        {
+          name: 'guard-a',
+          description: 'Skill with first guard',
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'SKILL_BODY:guard-a' }],
+            toolInvocationGuard: firstGuard,
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const skillB: SlashCommand = createTestCommand(
+        {
+          name: 'guard-b',
+          description: 'Skill with second guard',
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'SKILL_BODY:guard-b' }],
+            toolInvocationGuard: secondGuard,
+          }),
+        },
+        CommandKind.SKILL,
+      );
+      const result = setupProcessorHook([skillA, skillB]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+
+      let actionResult: SlashCommandProcessorResult | false = false;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/guard-a /guard-b implement X',
+        );
+      });
+
+      if (
+        !actionResult ||
+        actionResult.type !== 'submit_prompt' ||
+        !actionResult.toolInvocationGuard
+      ) {
+        throw new Error('Expected a combined tool guard');
+      }
+      const signal = new AbortController().signal;
+      await expect(
+        actionResult.toolInvocationGuard({
+          callId: 'stacked-call',
+          toolName: 'write_file',
+          args: { file_path: '/memory/topic.md' },
+          signal,
+        }),
+      ).resolves.toEqual({ allowed: false, reason: 'second skill denied' });
+      expect(firstGuard).toHaveBeenCalledOnce();
+      expect(secondGuard).toHaveBeenCalledOnce();
     });
 
     it('calls recordSkillInvocation for each stacked skill', async () => {

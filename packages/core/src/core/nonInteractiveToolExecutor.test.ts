@@ -46,6 +46,7 @@ describe('executeToolCall', () => {
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getAllowedTools: () => [],
       getSessionId: () => 'test-session-id',
+      getTargetDir: () => '/test/dir',
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getContentGeneratorConfig: () => ({
@@ -123,6 +124,44 @@ describe('executeToolCall', () => {
         },
       ],
     });
+  });
+
+  it('applies a direct-call invocation guard before execution', async () => {
+    const request: ToolCallRequestInfo = {
+      callId: 'guarded-call',
+      name: 'testTool',
+      args: { param1: 'blocked' },
+      isClientInitiated: false,
+      prompt_id: 'guarded-prompt',
+    };
+    const toolInvocationGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: false, reason: 'turn policy denied' });
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+
+    const response = await executeToolCall(
+      mockConfig,
+      request,
+      abortController.signal,
+      { toolInvocationGuard },
+    );
+
+    expect(toolInvocationGuard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: request.callId,
+        toolName: request.name,
+        args: request.args,
+        signal: abortController.signal,
+      }),
+    );
+    expect(executeFn).not.toHaveBeenCalled();
+    expect(response).toEqual(
+      expect.objectContaining({
+        callId: request.callId,
+        error: new Error('turn policy denied'),
+        errorType: ToolErrorType.EXECUTION_DENIED,
+      }),
+    );
   });
 
   it('records direct calls by default and can defer to an outer boundary', async () => {

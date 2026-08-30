@@ -18,6 +18,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
+  ToolInvocationGuard,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -83,6 +84,7 @@ import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAda
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
+import { recoverManualDreamToolInvocationGuard } from './utils/tool-invocation-guards.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -903,6 +905,11 @@ export async function runNonInteractive(
     // accumulate here and are drained into the LLM
     // conversation between turns.
     const pendingTeammateMessages: string[] = [];
+    let teammateLoopResetPending = false;
+    const enqueueTeammateMessage = (message: string) => {
+      pendingTeammateMessages.push(message);
+      teammateLoopResetPending = true;
+    };
     // Track the manager we're currently bound to so we can
     // detach the leader callback and approval listener before
     // a new manager is installed (or in `finally`). Without
@@ -937,7 +944,7 @@ export async function runNonInteractive(
       boundManager = manager;
       if (manager) {
         manager.setLeaderMessageCallback((formatted) => {
-          pendingTeammateMessages.push(formatted);
+          enqueueTeammateMessage(formatted);
         });
 
         // Route teammate tool approvals through the session's
@@ -994,9 +1001,7 @@ export async function runNonInteractive(
             // Also surface to the leader's LLM, otherwise it just
             // sees the teammate fail without any signal that an
             // approval was needed and the host couldn't prompt.
-            pendingTeammateMessages.push(
-              `<team_notice>\n${reason}\n</team_notice>`,
-            );
+            enqueueTeammateMessage(`<team_notice>\n${reason}\n</team_notice>`);
             event.respond(ToolConfirmationOutcome.Cancel).catch((err) => {
               debugLogger.warn('Teammate approval Cancel failed:', err);
             });
@@ -1078,6 +1083,9 @@ export async function runNonInteractive(
       // slash command; seeds the loop-scoped `modelOverride` below so the
       // submitted prompt runs on the chosen model without a session switch.
       let inlineModelOverride: string | undefined;
+      let fullTurnToolInvocationGuard: ToolInvocationGuard | undefined;
+      let fullTurnOnComplete: (() => Promise<void>) | undefined;
+      let fullTurnHadApiError = false;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
@@ -1106,6 +1114,10 @@ export async function runNonInteractive(
         }
 
         initialPartList = recoveryPlan.continuation.parts;
+        fullTurnToolInvocationGuard = recoverManualDreamToolInvocationGuard(
+          config,
+          recoveryPlan.originalApiHistory,
+        );
         if (recoveryPlan.continuation.mode === 'retry_user_parts') {
           continueSendType = SendMessageType.Retry;
         } else {
@@ -1140,6 +1152,9 @@ export async function runNonInteractive(
             case 'submit_prompt':
               // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
               initialPartList = slashCommandResult.content;
+              fullTurnToolInvocationGuard =
+                slashCommandResult.toolInvocationGuard;
+              fullTurnOnComplete = slashCommandResult.onComplete;
               // Re-validate provider identity rather than trust the producer:
               // any slash command can set `modelOverride`, so the consumer
               // enforces that it names a model on the active provider before
@@ -1541,6 +1556,7 @@ export async function runNonInteractive(
       let isFirstTurn = true;
       let isFirstGoalSegment = activeGoalTurn !== undefined;
       let hasUnsentToolResponse = false;
+      let deferredTeammateTurnPending = false;
       let modelOverride: string | undefined =
         inlineModelOverride ?? fullTurnModelOverride;
       // An explicit inline `/model <id> <prompt>` override wins for the whole
@@ -1572,6 +1588,17 @@ export async function runNonInteractive(
       const PLAIN_TEXT_PREVIEW_LIMIT = 200;
       let loopDetected = false;
       let loopDetectedMessage = formatLoopDetectedMessage(undefined);
+
+      const runFullTurnOnComplete = async (): Promise<void> => {
+        const onComplete = fullTurnOnComplete;
+        fullTurnOnComplete = undefined;
+        if (!onComplete || fullTurnHadApiError) return;
+        try {
+          await onComplete();
+        } catch (error) {
+          debugLogger.error('onComplete callback failed:', error);
+        }
+      };
 
       // Shared terminal block for the structured-output success
       // contract. Both the main-turn loop and the drain-turn post-loop
@@ -1624,6 +1651,7 @@ export async function runNonInteractive(
           await new Promise((r) => setTimeout(r, 50));
         }
         flushQueuedNotificationsToSdk(localQueue);
+        await runFullTurnOnComplete();
         finalizeOneShotMonitors();
         const metrics = uiTelemetryService.getMetrics();
         const usage = computeUsageFromMetrics(metrics);
@@ -1718,6 +1746,7 @@ export async function runNonInteractive(
         batchRequests: ToolCallRequestInfo[],
         setModelOverride: (override: string | undefined) => boolean,
         runtimeView?: RuntimeContentGeneratorView,
+        toolInvocationGuard?: ToolInvocationGuard,
       ): Promise<ToolCallBatchResult> => {
         let terminateTurn = false;
         const responseByRequest = new Map<
@@ -1961,6 +1990,7 @@ export async function runNonInteractive(
                 }
               },
               runtimeView,
+              ...(toolInvocationGuard && { toolInvocationGuard }),
               ...(toolCallUpdateCallback && {
                 onToolCallsUpdate: toolCallUpdateCallback,
               }),
@@ -2285,17 +2315,50 @@ export async function runNonInteractive(
       };
 
       let currentPromptId = prompt_id;
+      const deferQueuedTeammateTurn = () => {
+        if (!teammateLoopResetPending || pendingTeammateMessages.length === 0) {
+          return;
+        }
+        llmClient.getLoopDetectionService().reset(currentPromptId);
+        teammateLoopResetPending = false;
+        deferredTeammateTurnPending = true;
+      };
       while (true) {
-        // Drain pending teammate messages into the conversation.
-        // sendMessageStream only reads currentMessages[0].parts,
-        // so teammate text must be merged into that same parts
-        // array to avoid being silently dropped.
-        // Skip on the first turn to avoid replacing the user's
-        // initial query — early teammate messages will be picked
-        // up on the next iteration.
+        const hasOwningContinuation = Boolean(
+          hasUnsentToolResponse || activeGoalTurn,
+        );
+        const mustDeferTeammateTurn = Boolean(
+          hasOwningContinuation &&
+            (fullTurnToolInvocationGuard || deferredTeammateTurnPending),
+        );
+        // Fresh teammate input is a loop-detection boundary even when it must
+        // wait for a guarded tool/Goal chain to finish before it can be sent as
+        // a distinct policy turn. Unguarded continuations retain the existing
+        // behavior of merging teammate text into their next model send.
+        if (teammateLoopResetPending && mustDeferTeammateTurn) {
+          deferQueuedTeammateTurn();
+        }
+
+        // Drain pending teammate messages only at a logical turn boundary.
+        // A teammate message is fresh external input, so merging it into an
+        // unsent tool response would make one persisted user entry belong to
+        // two different policy turns. Defer it until the current tool/Goal
+        // chain finalizes; the shouldFinalize path below clears any owning
+        // slash-command guard before looping back here.
         let isTeammateTurn = false;
-        if (!isFirstTurn && pendingTeammateMessages.length > 0) {
+        let isDeferredTeammateTurn = false;
+        if (
+          !isFirstTurn &&
+          pendingTeammateMessages.length > 0 &&
+          !mustDeferTeammateTurn
+        ) {
           const batch = pendingTeammateMessages.splice(0);
+          if (teammateLoopResetPending) {
+            llmClient.getLoopDetectionService().reset(currentPromptId);
+          }
+          teammateLoopResetPending = false;
+          isDeferredTeammateTurn = deferredTeammateTurnPending;
+          deferredTeammateTurnPending = false;
           const teammatePart = { text: batch.join('\n\n') };
           if ((hasUnsentToolResponse || activeGoalTurn) && currentMessages[0]) {
             currentMessages[0].parts = [
@@ -2305,22 +2368,21 @@ export async function runNonInteractive(
           } else {
             currentMessages = [{ role: 'user', parts: [teammatePart] }];
           }
-          // Treat BOTH the standalone and the merged-into-tool-response
-          // cases as a teammate turn. Teammate text is fresh external
-          // input, so the loop detector must reset — otherwise a leader
-          // that polls task_list while teammate messages keep merging
-          // into its tool-response turns climbs the identical-tool-call
-          // counter and trips a false LoopDetected. The Teammate send
-          // path prepends nothing to the request, so a merged turn's
-          // leading functionResponse parts stay paired with their
-          // functionCall.
           isTeammateTurn = true;
+          // Defensive clear for callers that enter this boundary without
+          // passing through shouldFinalize (the normal path already cleared).
+          fullTurnToolInvocationGuard = undefined;
         }
         hasUnsentToolResponse = false;
 
         turnCount++;
         const goalTurn = activeGoalTurn;
-        await enforceSessionTurnLimit(goalTurn?.origin === 'runtime');
+        // A deferred teammate drain is the extra model call introduced to keep
+        // fresh external input out of the prior policy turn. Do not charge
+        // that isolation-only call against the user's configured turn cap.
+        await enforceSessionTurnLimit(
+          goalTurn?.origin === 'runtime' || isDeferredTeammateTurn,
+        );
 
         let sendType: SendMessageType;
         if (goalTurn && isFirstGoalSegment) {
@@ -2392,6 +2454,9 @@ export async function runNonInteractive(
             // loop fix below.
             adapter.finalizeAssistantMessage();
             await routeAbort();
+          }
+          if (event.type === LlmEventType.Error) {
+            fullTurnHadApiError = true;
           }
           // Use adapter for all event processing
           adapter.processEvent(event);
@@ -2475,6 +2540,7 @@ export async function runNonInteractive(
               return true;
             },
             fullTurnRuntimeView,
+            fullTurnToolInvocationGuard,
           );
 
           if (structuredSubmission !== undefined) {
@@ -2496,6 +2562,13 @@ export async function runNonInteractive(
             return emitLoopDetectedResult();
           }
           if (terminateTurn && activeGoalTurn) {
+            if (fullTurnToolInvocationGuard) {
+              deferQueuedTeammateTurn();
+            }
+            // The slash-command guard belongs only to the turn that just
+            // terminated. Goal work dequeued below is a new turn and must not
+            // inherit the expired /dream policy.
+            fullTurnToolInvocationGuard = undefined;
             llmClient.addHistory({
               role: 'user',
               parts: toolResponseParts,
@@ -2527,6 +2600,13 @@ export async function runNonInteractive(
           }
         }
         if (shouldFinalizeTurn) {
+          await runFullTurnOnComplete();
+          if (fullTurnToolInvocationGuard) {
+            deferQueuedTeammateTurn();
+          }
+          // Clear before any Goal/teammate continuation can loop back through
+          // the shared tool-batch call site.
+          fullTurnToolInvocationGuard = undefined;
           if (activeGoalTurn) {
             const completedGoalTurn = activeGoalTurn;
             await config.getChatRecordingService?.()?.flush();
@@ -2560,7 +2640,7 @@ export async function runNonInteractive(
             if (teamManager.allRemainingStalled()) {
               teamManager.abortStalledTeammates();
               const status = teamManager.buildTeamStatusSummary();
-              pendingTeammateMessages.push(status);
+              enqueueTeammateMessage(status);
               continue;
             }
 
@@ -2579,7 +2659,7 @@ export async function runNonInteractive(
               if (teamManager.allRemainingStalled()) {
                 teamManager.abortStalledTeammates();
                 const status = teamManager.buildTeamStatusSummary();
-                pendingTeammateMessages.push(status);
+                enqueueTeammateMessage(status);
                 break;
               }
               const waitResult = await teamManager.waitForTeammateActivity(
@@ -2720,6 +2800,9 @@ export async function runNonInteractive(
                   flushQueuedNotificationsToSdk(localQueue);
                   finalizeOneShotMonitors();
                   await routeAbort();
+                }
+                if (event.type === LlmEventType.Error) {
+                  fullTurnHadApiError = true;
                 }
                 adapter.processEvent(event);
                 if (event.type === LlmEventType.ToolCallRequest) {

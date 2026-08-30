@@ -90,6 +90,7 @@ import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
+import { preserveManualDreamToolGuardMarker } from '../memory/manual-dream-turn-policy.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -4011,8 +4012,12 @@ export class LlmClient {
           const pushCountBefore = currentPushCount();
           let steeredTurn: Turn;
           try {
-            steeredTurn = yield* this.sendMessageStream(
+            const steerRequest = preserveManualDreamToolGuardMarker(
+              this.getChat().getHistory(),
               steerInput.parts,
+            );
+            steeredTurn = yield* this.sendMessageStream(
+              steerRequest,
               signal,
               prompt_id,
               {
@@ -4164,10 +4169,14 @@ export class LlmClient {
               endCurrentInteraction('cancelled');
               return turn;
             }
-            const continueRequest: Part[] = [{ text: continueReason }];
+            let continueRequest: Part[] = [{ text: continueReason }];
             if (pendingSteer) {
               continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
             }
+            continueRequest = preserveManualDreamToolGuardMarker(
+              this.getChat().getHistory(),
+              continueRequest,
+            );
             const pushCountBefore = currentPushCount();
             let hookTurn: Turn;
             try {
@@ -4330,7 +4339,7 @@ export class LlmClient {
             normalCompletion = true;
             return turn;
           }
-          const continueRequest: Part[] = continuationReasonAfterSteer
+          let continueRequest: Part[] = continuationReasonAfterSteer
             ? [{ text: continuationReasonAfterSteer }]
             : [];
           if (pendingSteer) {
@@ -4339,6 +4348,10 @@ export class LlmClient {
             }
             continueRequest.push(...pendingSteer.parts);
           }
+          continueRequest = preserveManualDreamToolGuardMarker(
+            this.getChat().getHistory(),
+            continueRequest,
+          );
           const pushCountBefore = currentPushCount();
           let hookTurn: Turn;
           try {
@@ -4466,9 +4479,13 @@ export class LlmClient {
         if (nextSpeakerCheck?.next_speaker === 'model') {
           const continueTurnBudget = boundedTurns - 1;
           const pendingSteer = await takeSteerInput(continueTurnBudget);
-          const nextRequest: Part[] = pendingSteer
+          let nextRequest: Part[] = pendingSteer
             ? pendingSteer.parts
             : [{ text: 'Please continue.' }];
+          nextRequest = preserveManualDreamToolGuardMarker(
+            this.getChat().getHistory(),
+            nextRequest,
+          );
           const pushCountBefore = currentPushCount();
           let continueTurn: Turn;
           try {

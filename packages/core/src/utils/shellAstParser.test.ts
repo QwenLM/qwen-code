@@ -89,7 +89,7 @@ describe('isShellCommandReadOnlyAST', () => {
       }
     });
 
-    it('downgrades only the two reproduced command/config pairs', async () => {
+    it('downgrades read-only Git commands that can invoke local helpers', async () => {
       const cwd = createRepo();
       gitConfig(cwd, 'diff.external', 'example-external-diff');
       expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
@@ -100,17 +100,46 @@ describe('isShellCommandReadOnlyAST', () => {
       ).toBe(true);
 
       gitConfig(cwd, '--unset', 'diff.external');
+      gitConfig(cwd, 'diff.untrusted.textconv', 'example-textconv');
+      for (const command of ['git diff', 'git log -p -1', 'git show HEAD']) {
+        expect(await isShellCommandReadOnlyASTInDirectory(command, cwd)).toBe(
+          false,
+        );
+      }
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git log --oneline', cwd),
+      ).toBe(true);
+
+      gitConfig(cwd, '--unset', 'diff.untrusted.textconv');
       gitConfig(cwd, 'core.fsmonitor', 'example-fsmonitor');
       expect(
         await isShellCommandReadOnlyASTInDirectory('git status', cwd),
       ).toBe(false);
       expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
-        true,
+        false,
       );
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git diff HEAD', cwd),
+      ).toBe(false);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git ls-files', cwd),
+      ).toBe(false);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git blame README.md', cwd),
+      ).toBe(false);
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git grep needle', cwd),
+      ).toBe(false);
 
       gitConfig(cwd, 'core.fsmonitor', 'false');
       expect(
         await isShellCommandReadOnlyASTInDirectory('git status', cwd),
+      ).toBe(true);
+      expect(await isShellCommandReadOnlyASTInDirectory('git diff', cwd)).toBe(
+        true,
+      );
+      expect(
+        await isShellCommandReadOnlyASTInDirectory('git ls-files', cwd),
       ).toBe(true);
     });
 

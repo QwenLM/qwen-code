@@ -15,9 +15,11 @@ import type {
   PermissionCheckContext,
   PermissionDecision,
 } from '../permissions/types.js';
+import { buildPermissionCheckContext } from '../core/permission-helpers.js';
+import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyASTInDirectory } from '../utils/shellAstParser.js';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
@@ -43,6 +45,12 @@ export interface MemoryScopedAgentConfigOptions {
   includeUserMemory?: boolean;
   protectPinnedMemory?: boolean;
   restrictReadsToMemoryPaths?: boolean;
+}
+
+export interface MemoryScopedToolInvocationGuardOptions
+  extends Omit<MemoryScopedAgentConfigOptions, 'bypassBaseAskForScopedPaths'> {
+  /** Restrict the turn to the same explicit tool surface as a forked worker. */
+  allowedTools?: readonly string[];
 }
 
 interface PinnedMemoryRoot {
@@ -302,7 +310,7 @@ async function evaluateScopedDecision(
         return 'deny';
       }
       const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
-        stripShellWrapper(ctx.command),
+        normalizeMonitorCommand(ctx.command).safetyCommand,
         ctx.cwd ?? projectRoot,
       );
       return isReadOnly ? 'allow' : 'deny';
@@ -491,4 +499,62 @@ export function createMemoryScopedAgentConfig(
   return deriveConfig(config, {
     getPermissionManager: () => scopedPm as unknown as PermissionManager,
   });
+}
+
+/**
+ * Build an execution-time guard with the same filesystem boundary used by
+ * managed-memory workers. Unlike createMemoryScopedAgentConfig, this guard is
+ * safe to attach to one main-agent turn without mutating session-wide state.
+ */
+export function createMemoryScopedToolInvocationGuard(
+  projectRoot: string,
+  options: MemoryScopedToolInvocationGuardOptions = {},
+): ToolInvocationGuard {
+  const opts: Required<MemoryScopedAgentConfigOptions> = {
+    allowShell: options.allowShell ?? false,
+    bypassBaseAskForScopedPaths: false,
+    includeProjectMemory: options.includeProjectMemory ?? true,
+    includeUserMemory: options.includeUserMemory ?? true,
+    protectPinnedMemory: options.protectPinnedMemory ?? false,
+    restrictReadsToMemoryPaths: options.restrictReadsToMemoryPaths ?? false,
+  };
+  const allowedTools = options.allowedTools
+    ? new Set(options.allowedTools)
+    : undefined;
+  const pinnedRoots = opts.protectPinnedMemory
+    ? createPinnedMemoryRoots(
+        projectRoot,
+        opts.includeProjectMemory,
+        opts.includeUserMemory,
+      )
+    : [];
+
+  return async ({ toolName, args }) => {
+    if (allowedTools && !allowedTools.has(toolName)) {
+      return {
+        allowed: false,
+        reason: `ManagedAutoMemory(${toolName}: unavailable in this scoped turn)`,
+      };
+    }
+
+    const permissionContext = buildPermissionCheckContext(
+      toolName,
+      args,
+      projectRoot,
+    );
+    const decision = await evaluateScopedDecision(
+      permissionContext,
+      projectRoot,
+      opts,
+      pinnedRoots,
+    );
+    if (decision !== 'deny') return { allowed: true };
+
+    return {
+      allowed: false,
+      reason:
+        getScopedDenyRule(permissionContext, projectRoot, opts, pinnedRoots) ??
+        `ManagedAutoMemory(${toolName}: denied in this scoped turn)`,
+    };
+  };
 }

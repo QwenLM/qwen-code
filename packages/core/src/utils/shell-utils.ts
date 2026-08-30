@@ -1222,6 +1222,7 @@ interface ParsedMonitorShellWrapper {
   innerCommand: string;
   innerQuote: '"' | "'" | '';
   innerArgsSuffix?: string;
+  innerArgsSeparator?: ' ' | '\n';
 }
 
 export interface NormalizedMonitorCommand {
@@ -1501,6 +1502,9 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         innerCommand,
         innerQuote,
         innerArgsSuffix: commandToken.rest.trimStart(),
+        innerArgsSeparator: /^[^\S\r\n]*(?:\r\n?|\n)/.test(commandToken.rest)
+          ? '\n'
+          : ' ',
       };
     }
 
@@ -1531,8 +1535,13 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 export function normalizeMonitorCommand(
   command: string,
 ): NormalizedMonitorCommand {
-  const { wrapperTokens, innerCommand, innerQuote, innerArgsSuffix } =
-    parseMonitorShellWrapper(command);
+  const {
+    wrapperTokens,
+    innerCommand,
+    innerQuote,
+    innerArgsSuffix,
+    innerArgsSeparator = ' ',
+  } = parseMonitorShellWrapper(command);
   const leadingEnvTokens =
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
@@ -1543,28 +1552,35 @@ export function normalizeMonitorCommand(
   // execute: leading env assignments, the -c script, and argv suffixes. Wrapper
   // flags are preserved in spawnCommand, but are not converted into Bash(...)
   // command-rule surface.
-  const safetyParts = [
+  const safetyBase = [
     ...(wrapperTokens ? leadingEnvTokens : []),
     analysisCommand,
-    ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
-  ];
-  const safetyCommand =
-    wrapperTokens && safetyParts.length > 0
-      ? safetyParts.join(' ').trim()
-      : analysisCommand;
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+  const safetyCommand = wrapperTokens
+    ? `${safetyBase}${
+        normalizedInnerArgsSuffix ? innerArgsSeparator : ''
+      }${normalizedInnerArgsSuffix}`.trim()
+    : analysisCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
     normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
-  const spawnCommand = wrapperTokens
+  const spawnBase = wrapperTokens
     ? [
         wrapperTokens.join(' '),
         innerQuote
           ? `${innerQuote}${analysisCommand}${innerQuote}`
           : analysisCommand,
-        normalizedInnerArgsSuffix,
       ]
         .filter(Boolean)
         .join(' ')
+    : analysisCommand;
+  const spawnCommand = wrapperTokens
+    ? `${spawnBase}${
+        normalizedInnerArgsSuffix ? innerArgsSeparator : ''
+      }${normalizedInnerArgsSuffix}`
     : analysisCommand;
 
   return {

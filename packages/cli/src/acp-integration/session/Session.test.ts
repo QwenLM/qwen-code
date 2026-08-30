@@ -54,6 +54,7 @@ import { RequestError } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
+import { MANUAL_DREAM_TOOL_GUARD_MARKER } from '../../utils/tool-invocation-guards.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
@@ -3373,6 +3374,195 @@ describe('Session', () => {
       // fire its own internal prompt() here.
       await Promise.resolve();
       expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      {
+        label: 'interrupted prompt',
+        history: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `${SYSTEM_REMINDER_OPEN}\nToday is tomorrow\n${SYSTEM_REMINDER_CLOSE}`,
+              },
+              { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+              { text: 'dream prompt' },
+              { text: 'context appended by UserPromptSubmit' },
+            ],
+          },
+        ] as Content[],
+      },
+      {
+        label: 'interrupted tool turn',
+        history: [
+          {
+            role: 'user',
+            parts: [
+              { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+              { text: 'dream prompt' },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'dangling-dream-tool',
+                  name: core.ToolNames.READ_FILE,
+                  args: { file_path: 'memory.md' },
+                },
+              },
+            ],
+          },
+        ] as Content[],
+      },
+    ])('restores the /dream guard for an $label', async ({ history }) => {
+      mockChat.getHistory = vi.fn().mockReturnValue(history);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn();
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        displayName: 'shell',
+        description: 'shell',
+        build: vi.fn().mockImplementation((params) => ({
+          params,
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('shell'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        })),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'continued-dream-shell',
+                    name: core.ToolNames.SHELL,
+                    args: { command: 'echo changed > outside-memory.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as PromptRequest);
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.objectContaining({
+          callId: 'continued-dream-shell',
+          status: 'error',
+          errorType: core.ToolErrorType.EXECUTION_DENIED,
+        }),
+      );
+    });
+
+    it('allows safe work after restoring the /dream guard', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+            { text: 'dream prompt' },
+          ],
+        },
+      ]);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'read complete',
+        returnDisplay: 'read complete',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.READ_FILE,
+        kind: core.Kind.Read,
+        displayName: 'read_file',
+        description: 'read_file',
+        build: vi.fn().mockImplementation((params) => ({
+          params,
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        })),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'continued-dream-read',
+                    name: core.ToolNames.READ_FILE,
+                    args: { file_path: '/repo/README.md' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as PromptRequest);
+
+      expect(execute).toHaveBeenCalledTimes(1);
+    });
+
+    it('adds a newly applicable plan reminder to a recovered Dream', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+            { text: 'dream prompt' },
+          ],
+        },
+      ]);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      let sentParts: Part[] = [];
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementation(async (_model, req) => {
+          sentParts = req.message ?? [];
+          return createEmptyStream();
+        });
+
+      await session.prompt({
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as PromptRequest);
+
+      expect(sentParts).toContainEqual({
+        text: expect.stringContaining('Plan mode is active'),
+      });
+      expect(sentParts).toContainEqual({
+        text: MANUAL_DREAM_TOOL_GUARD_MARKER,
+      });
     });
 
     it('classifies a turn with dangling tool calls as interrupted_turn', async () => {
@@ -20051,6 +20241,182 @@ describe('Session', () => {
         expect(finishedSpy).toHaveBeenCalledTimes(1);
       });
 
+      it('applies a submit_prompt tool guard throughout an ACP slash turn', async () => {
+        const toolInvocationGuard = vi
+          .fn()
+          .mockResolvedValue({ allowed: false, reason: 'dream guard denied' });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'dream prompt' }],
+          toolInvocationGuard,
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const execute = vi.fn();
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.WRITE_FILE,
+          kind: core.Kind.Edit,
+          displayName: 'write_file',
+          description: 'write_file',
+          build: vi.fn().mockReturnValue({
+            params: { file_path: '/memory/pinned/a.md', content: 'changed' },
+            execute,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('write file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'dream-write',
+                      name: core.ToolNames.WRITE_FILE,
+                      args: {
+                        file_path: '/memory/pinned/a.md',
+                        content: 'changed',
+                      },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/dream' }],
+        });
+
+        expect(toolInvocationGuard).toHaveBeenCalledWith({
+          callId: 'dream-write',
+          toolName: core.ToolNames.WRITE_FILE,
+          args: { file_path: '/memory/pinned/a.md', content: 'changed' },
+          cwd: process.cwd(),
+          sessionId: 'test-session-id',
+          signal: expect.any(AbortSignal),
+        });
+        expect(execute).not.toHaveBeenCalled();
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          expect.any(Array),
+          expect.objectContaining({
+            callId: 'dream-write',
+            status: 'error',
+            errorType: core.ToolErrorType.EXECUTION_DENIED,
+          }),
+        );
+      });
+
+      it('keeps /dream provenance and its guard through an ACP Stop hook', async () => {
+        const toolInvocationGuard = vi
+          .fn()
+          .mockResolvedValue({ allowed: false, reason: 'dream guard denied' });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [
+            { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+            { text: 'dream prompt' },
+          ],
+          toolInvocationGuard,
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const execute = vi.fn();
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.WRITE_FILE,
+          kind: core.Kind.Edit,
+          displayName: 'write_file',
+          description: 'write_file',
+          build: vi.fn().mockImplementation((params) => ({
+            params,
+            execute,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('write file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+          })),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        mockChat.getHistory = vi.fn().mockReturnValue([
+          {
+            role: 'user',
+            parts: [
+              { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+              { text: 'dream prompt' },
+            ],
+          },
+          { role: 'model', parts: [{ text: 'not done' }] },
+        ]);
+        let stopCalls = 0;
+        const messageBus = {
+          request: vi.fn().mockImplementation(async (request) => {
+            if (request.eventName !== 'Stop') {
+              return { success: true, output: {} };
+            }
+            stopCalls += 1;
+            return stopCalls === 1
+              ? {
+                  success: true,
+                  output: { decision: 'block', reason: 'keep dreaming' },
+                }
+              : { success: true, output: {} };
+          }),
+        };
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((name: string) => name === 'Stop');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'dream-stop-write',
+                      name: core.ToolNames.WRITE_FILE,
+                      args: {
+                        file_path: '/memory/pinned/a.md',
+                        content: 'changed',
+                      },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/dream' }],
+        });
+
+        const stopContinuation = vi.mocked(mockChat.sendMessageStream).mock
+          .calls[1]?.[1] as { message: Part[] };
+        expect(stopContinuation.message).toContainEqual({
+          text: MANUAL_DREAM_TOOL_GUARD_MARKER,
+        });
+        expect(toolInvocationGuard).toHaveBeenCalledWith(
+          expect.objectContaining({ callId: 'dream-stop-write' }),
+        );
+        expect(execute).not.toHaveBeenCalled();
+      });
+
       it('marks streamed slash-command messages with their source', async () => {
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,
@@ -27405,6 +27771,7 @@ describe('Session', () => {
         functionCalls: FunctionCall[],
         toolLoopState?: DaemonToolLoopState,
         onFullTurnModel?: (model: string) => boolean,
+        toolInvocationGuard?: core.ToolInvocationGuard,
       ) => Promise<{
         parts: Part[];
         stopAfterPermissionCancel: boolean;
@@ -27611,6 +27978,124 @@ describe('Session', () => {
       expect(execute).toHaveBeenCalledOnce();
       expect(result.parts[0].functionResponse?.response).toEqual({
         output: 'fork completed',
+      });
+    });
+
+    it('applies a turn-scoped guard to one ACP tool batch only', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'read',
+        returnDisplay: 'read',
+      });
+      const toolInvocationGuard = vi
+        .fn()
+        .mockResolvedValue({ allowed: false, reason: 'turn policy denied' });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.READ_FILE, execute),
+      );
+
+      const first = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-guarded',
+        [
+          {
+            id: 'guarded-read',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/workspace/a.md' },
+          },
+        ],
+        undefined,
+        undefined,
+        toolInvocationGuard,
+      );
+
+      expect(toolInvocationGuard).toHaveBeenCalledWith({
+        callId: 'guarded-read',
+        toolName: core.ToolNames.READ_FILE,
+        args: {},
+        cwd: process.cwd(),
+        sessionId: 'test-session-id',
+        signal: expect.any(AbortSignal),
+      });
+      expect(execute).not.toHaveBeenCalled();
+      expect(first.parts[0].functionResponse?.response).toEqual({
+        error: 'turn policy denied',
+      });
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-unguarded',
+        [
+          {
+            id: 'unguarded-read',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/workspace/a.md' },
+          },
+        ],
+      );
+
+      expect(toolInvocationGuard).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledOnce();
+    });
+
+    it('composes ACP host and turn guards with the invocation context', async () => {
+      const execute = vi.fn();
+      const guardOrder: string[] = [];
+      const hostGuard = vi.fn(async () => {
+        guardOrder.push('host');
+        return { allowed: true } as const;
+      });
+      const turnGuard = vi.fn(async () => {
+        guardOrder.push('turn');
+        return { allowed: false, reason: 'turn policy denied' } as const;
+      });
+      const invocationContext: core.InvocationContextV1 = {
+        version: 1,
+        sessionId: 'guard-session',
+        promptId: 'guard-prompt',
+      };
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(hostGuard);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.READ_FILE, execute),
+      );
+
+      const result = await core.runWithInvocationContext(
+        invocationContext,
+        () =>
+          (session as unknown as ToolCallInternals).runToolCalls(
+            new AbortController().signal,
+            'guard-prompt',
+            [
+              {
+                id: 'composed-guard-read',
+                name: core.ToolNames.READ_FILE,
+                args: { file_path: '/workspace/a.md' },
+              },
+            ],
+            undefined,
+            undefined,
+            turnGuard,
+          ),
+      );
+
+      const expectedInvocation = {
+        callId: 'composed-guard-read',
+        toolName: core.ToolNames.READ_FILE,
+        args: {},
+        cwd: process.cwd(),
+        sessionId: 'test-session-id',
+        signal: expect.any(AbortSignal),
+        invocationContext,
+      };
+      expect(hostGuard).toHaveBeenCalledWith(expectedInvocation);
+      expect(turnGuard).toHaveBeenCalledWith(expectedInvocation);
+      expect(guardOrder).toEqual(['host', 'turn']);
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: 'turn policy denied',
       });
     });
 
@@ -32673,12 +33158,12 @@ describe('Session', () => {
         .mockResolvedValue(createEmptyStream());
     }
 
-    async function runGuardPrompt() {
+    async function runGuardPrompt(promptText = 'finish everything') {
       lastGuardPromptId = `test-session-id########guard-${++guardPromptCounter}`;
       return session.prompt(
         {
           sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'finish everything' }],
+          prompt: [{ type: 'text', text: promptText }],
         },
         {
           version: 1,
@@ -32686,6 +33171,33 @@ describe('Session', () => {
           promptId: lastGuardPromptId,
         },
       );
+    }
+
+    function installManualDreamSlashGuard() {
+      const toolInvocationGuard = vi
+        .fn()
+        .mockResolvedValue({ allowed: true as const });
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: [
+          { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+          { text: 'dream prompt' },
+        ],
+        toolInvocationGuard,
+      });
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+            { text: 'dream prompt' },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'not done' }] },
+      ]);
+      return toolInvocationGuard;
     }
 
     type GuardDrainResponse = {
@@ -34378,6 +34890,7 @@ describe('Session', () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();
       queuePendingTodoThenNaturalStops();
+      const toolInvocationGuard = installManualDreamSlashGuard();
       const noCompression = {
         originalTokenCount: 50,
         newTokenCount: 50,
@@ -34411,7 +34924,7 @@ describe('Session', () => {
         .fn()
         .mockImplementation((name: string) => name === 'Stop');
 
-      await runGuardPrompt();
+      await runGuardPrompt('/dream');
 
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
       const externalOnly = vi.mocked(mockChat.sendMessageStream).mock
@@ -34422,6 +34935,10 @@ describe('Session', () => {
       expect(textParts(externalOnly.message).join('\n')).not.toContain(
         '[Todo Stop Guard]',
       );
+      expect(externalOnly.message).toContainEqual({
+        text: MANUAL_DREAM_TOOL_GUARD_MARKER,
+      });
+      expect(toolInvocationGuard).toHaveBeenCalled();
       expect(
         vi
           .mocked(mockClient.sessionUpdate)
@@ -34527,6 +35044,7 @@ describe('Session', () => {
     it('counts every Guard-attributable tool follow-up as a model call', async () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();
+      const toolInvocationGuard = installManualDreamSlashGuard();
       const todoTool = mockToolRegistry.getTool(core.ToolNames.TODO_WRITE);
       const readExecute = vi.fn().mockResolvedValue({
         llmContent: 'file contents',
@@ -34598,15 +35116,23 @@ describe('Session', () => {
           ]),
         );
 
-      await runGuardPrompt();
+      await runGuardPrompt('/dream');
 
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
       expect(readExecute).toHaveBeenCalledTimes(2);
       const secondGuardCall = vi.mocked(mockChat.sendMessageStream).mock
         .calls[3]?.[1] as { message: Part[] };
+      expect(secondGuardCall.message[0]?.functionResponse).toMatchObject({
+        id: 'guard-read-1',
+        name: 'read_file',
+      });
+      expect(secondGuardCall.message).toContainEqual({
+        text: MANUAL_DREAM_TOOL_GUARD_MARKER,
+      });
       expect(textParts(secondGuardCall.message).join('\n')).toContain(
         'This is the final automatic continuation.',
       );
+      expect(toolInvocationGuard).toHaveBeenCalled();
       const guardAttempts = vi
         .mocked(mockClient.sessionUpdate)
         .mock.calls.map(([params]) => params.update)
@@ -36033,6 +36559,7 @@ describe('Session', () => {
       rebuildSessionWithGuard();
       installPendingTodoTool();
       queuePendingTodoThenNaturalStops();
+      const toolInvocationGuard = installManualDreamSlashGuard();
       mockGuardDrainResponses(
         { messages: [], hasQueuedPrompt: false },
         { messages: [], hasQueuedPrompt: false },
@@ -36044,7 +36571,7 @@ describe('Session', () => {
         { messages: [], hasQueuedPrompt: false },
       );
 
-      await runGuardPrompt();
+      await runGuardPrompt('/dream');
 
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(6);
       const midTurnCall = vi.mocked(mockChat.sendMessageStream).mock
@@ -36052,6 +36579,10 @@ describe('Session', () => {
       expect(textParts(midTurnCall.message).join('\n')).toContain(
         'new user direction',
       );
+      expect(midTurnCall.message).toContainEqual({
+        text: MANUAL_DREAM_TOOL_GUARD_MARKER,
+      });
+      expect(toolInvocationGuard).toHaveBeenCalled();
       const guardAttempts = vi
         .mocked(mockClient.sessionUpdate)
         .mock.calls.map(([params]) => params.update)

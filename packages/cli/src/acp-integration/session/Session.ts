@@ -53,6 +53,7 @@ import type {
   ChatRecordingService,
   TurnResultRecordPayload,
   WorkflowApproval,
+  ToolInvocationGuard,
   BranchPoint,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -114,7 +115,7 @@ import {
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
   buildPermissionCheckContext,
-  evaluateToolInvocationGuard,
+  evaluateToolInvocationGuards,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
@@ -133,6 +134,7 @@ import {
   isDenialFallbackReason,
   MAX_TRANSCRIPT_MESSAGES,
   formatDenialStateLog,
+  preserveManualDreamToolGuardMarker,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
@@ -297,6 +299,7 @@ import {
   getSlashCommandFirstToken,
   isSlashCommand,
 } from '../../ui/utils/commandUtils.js';
+import { recoverManualDreamToolInvocationGuard } from '../../utils/tool-invocation-guards.js';
 import {
   collectGoalStatusItemsFromRecords,
   findGoalToRestore,
@@ -4960,6 +4963,7 @@ export class Session implements SessionContext {
               isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
             let continuationParts: Part[] | null = null;
+            let recoveredToolInvocationGuard: ToolInvocationGuard | undefined;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
             // throws before re-pushing it, the orphan would be permanently lost
@@ -5007,6 +5011,11 @@ export class Session implements SessionContext {
               } else {
                 continuationParts = recoveryPlan.continuation.parts;
               }
+              recoveredToolInvocationGuard =
+                recoverManualDreamToolInvocationGuard(
+                  this.config,
+                  recoveryPlan.originalApiHistory,
+                );
             }
 
             if (goalTurn?.origin === 'runtime') {
@@ -5052,6 +5061,7 @@ export class Session implements SessionContext {
 
             let parts: Part[] | null;
             let fullTurnModelOverride: string | undefined;
+            let fullTurnToolInvocationGuard = recoveredToolInvocationGuard;
             const onFullTurnModel = (model: string) => {
               if (fullTurnModelOverride === model) {
                 return true;
@@ -5084,6 +5094,10 @@ export class Session implements SessionContext {
                 },
                 this.slashCommandPolicy,
               );
+              if (slashCommandResult.type === 'submit_prompt') {
+                fullTurnToolInvocationGuard =
+                  slashCommandResult.toolInvocationGuard;
+              }
 
               if (
                 slashCommandName === 'advisor' &&
@@ -5797,6 +5811,7 @@ export class Session implements SessionContext {
                         functionCalls,
                         toolLoopState,
                         onFullTurnModel,
+                        fullTurnToolInvocationGuard,
                       ),
                   );
                   if (
@@ -5867,6 +5882,7 @@ export class Session implements SessionContext {
                 true,
                 fullTurnModelOverride,
                 responseCapture,
+                fullTurnToolInvocationGuard,
                 rejectOnLoopDetected,
               );
               if (result.stopReason !== 'cancelled') {
@@ -5951,6 +5967,7 @@ export class Session implements SessionContext {
     allowExternalHooks = true,
     modelOverride?: string,
     responseCapture?: AgentResponseCapture,
+    toolInvocationGuard?: ToolInvocationGuard,
     rejectOnLoopDetected = false,
   ): Promise<{
     stopReason: PromptResponse['stopReason'];
@@ -5970,6 +5987,13 @@ export class Session implements SessionContext {
       return true;
     };
     let midTurnContinuationCount = 0;
+    const preserveTurnPolicy = (parts: readonly Part[]): Part[] =>
+      toolInvocationGuard
+        ? preserveManualDreamToolGuardMarker(
+            this.#getCurrentChat().getHistory(),
+            parts,
+          )
+        : [...parts];
 
     while (true) {
       if (this.pendingPrompt && this.pendingPrompt !== pendingSend) {
@@ -6014,12 +6038,13 @@ export class Session implements SessionContext {
             pendingSend,
             promptId + '_mid_turn_' + ++midTurnContinuationCount,
             promptId,
-            drained.parts,
+            preserveTurnPolicy(drained.parts),
             false,
             {
               onFullTurnModel,
               getModelOverride: () => modelOverride,
               responseCapture,
+              toolInvocationGuard,
               rejectOnLoopDetected,
             },
           );
@@ -6114,12 +6139,13 @@ export class Session implements SessionContext {
               pendingSend,
               promptId + '_mid_turn_' + ++midTurnContinuationCount,
               promptId,
-              drained.parts,
+              preserveTurnPolicy(drained.parts),
               false,
               {
                 onFullTurnModel,
                 getModelOverride: () => modelOverride,
                 responseCapture,
+                toolInvocationGuard,
                 rejectOnLoopDetected,
               },
             );
@@ -6235,7 +6261,7 @@ export class Session implements SessionContext {
         pendingSend,
         continuationPromptId,
         promptId,
-        continueParts,
+        preserveTurnPolicy(continueParts),
         stopHookIterationCount > 1 || (guardContinuation?.attempt ?? 0) > 1,
         {
           ...(guardContinuation ? { guardContinuation } : {}),
@@ -6255,6 +6281,7 @@ export class Session implements SessionContext {
           onFullTurnModel,
           getModelOverride: () => modelOverride,
           responseCapture,
+          toolInvocationGuard,
           rejectOnLoopDetected,
         },
       );
@@ -6281,11 +6308,19 @@ export class Session implements SessionContext {
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
       responseCapture?: AgentResponseCapture;
+      toolInvocationGuard?: ToolInvocationGuard;
       rejectOnLoopDetected?: boolean;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
     let nextGuardContinuation = options.guardContinuation;
+    const preserveTurnPolicy = (candidate: readonly Part[]): Part[] =>
+      options.toolInvocationGuard
+        ? preserveManualDreamToolGuardMarker(
+            this.#getCurrentChat().getHistory(),
+            candidate,
+          )
+        : [...candidate];
     const toolLoopState = createDaemonToolLoopState('off');
     let initialSend = true;
     let automaticContinuationValidated = false;
@@ -6410,18 +6445,20 @@ export class Session implements SessionContext {
                     if (initialSend) {
                       supersededAutomaticContinuation = true;
                     }
-                    preparedMessage = initialSend
-                      ? drained.parts
-                      : [
-                          ...(nextMessage?.parts ?? []).filter(
-                            (part) =>
-                              !(
-                                'text' in part &&
-                                isTodoStopGuardPromptText(part.text)
-                              ),
-                          ),
-                          ...drained.parts,
-                        ];
+                    preparedMessage = preserveTurnPolicy(
+                      initialSend
+                        ? drained.parts
+                        : [
+                            ...(nextMessage?.parts ?? []).filter(
+                              (part) =>
+                                !(
+                                  'text' in part &&
+                                  isTodoStopGuardPromptText(part.text)
+                                ),
+                            ),
+                            ...drained.parts,
+                          ],
+                    );
                     messageForPreservation = {
                       role: 'user',
                       parts: preparedMessage,
@@ -6568,10 +6605,11 @@ export class Session implements SessionContext {
                     await options.onAutomaticContinuationValidated();
                     automaticContinuationValidated = true;
                   }
-                  preparedMessage =
+                  preparedMessage = preserveTurnPolicy(
                     guardForThisSend || !externalParts
                       ? (nextMessage?.parts ?? [])
-                      : externalParts;
+                      : externalParts,
+                  );
                   messageForPreservation = {
                     role: 'user',
                     parts: preparedMessage,
@@ -6592,7 +6630,7 @@ export class Session implements SessionContext {
                   preserveGuardOnSkippedSend = true;
                   return { kind: 'stop', stopReason: 'end_turn' };
                 }
-                preparedMessage =
+                preparedMessage = preserveTurnPolicy(
                   initialSend && externalParts
                     ? externalParts
                     : preparedMessage.filter(
@@ -6601,7 +6639,8 @@ export class Session implements SessionContext {
                             'text' in part &&
                             isTodoStopGuardPromptText(part.text)
                           ),
-                      );
+                      ),
+                );
                 preservePreparedMessageOnSkippedSend = true;
               }
 
@@ -6850,6 +6889,7 @@ export class Session implements SessionContext {
               functionCalls,
               toolLoopState,
               options.onFullTurnModel,
+              options.toolInvocationGuard,
             ),
         );
         if (toolRun.stopAfterPermissionCancel || pendingSend.signal.aborted) {
@@ -9976,6 +10016,7 @@ export class Session implements SessionContext {
     functionCalls: FunctionCall[],
     toolLoopState?: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
+    toolInvocationGuard?: ToolInvocationGuard,
   ): Promise<RunToolResult> {
     // The daemon executes tools directly rather than through
     // CoreToolScheduler, so the ALS bindings the scheduler would provide must
@@ -10458,6 +10499,7 @@ export class Session implements SessionContext {
           queueToolResultRecord,
           executionCallIds.get(calls[idx]),
           onFullTurnModel,
+          toolInvocationGuard,
         )
           .then((r) => {
             results[idx] = r;
@@ -10600,6 +10642,7 @@ export class Session implements SessionContext {
               queueToolResultRecord,
               executionCallIds.get(fc),
               onFullTurnModel,
+              toolInvocationGuard,
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
@@ -10688,6 +10731,7 @@ export class Session implements SessionContext {
     queueToolResultRecord?: QueueToolResultRecord,
     generatedCallId?: string,
     onFullTurnModel?: (model: string) => boolean,
+    toolInvocationGuard?: ToolInvocationGuard,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -12028,11 +12072,12 @@ export class Session implements SessionContext {
             }
           }
 
-          const toolInvocationGuard = this.config.getToolInvocationGuard?.();
-          if (toolInvocationGuard) {
+          const hostToolInvocationGuard =
+            this.config.getToolInvocationGuard?.();
+          if (hostToolInvocationGuard || toolInvocationGuard) {
             const invocationContext = getInvocationContext();
-            const guardDecision = await evaluateToolInvocationGuard(
-              toolInvocationGuard,
+            const guardDecision = await evaluateToolInvocationGuards(
+              [hostToolInvocationGuard, toolInvocationGuard],
               {
                 callId,
                 toolName: policyToolName,

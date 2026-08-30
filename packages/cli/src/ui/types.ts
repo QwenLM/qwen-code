@@ -17,6 +17,7 @@ import type {
   ArenaDiffSummary,
   GoalSnapshotV2,
   GoalStateCause,
+  ToolInvocationGuard,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import type { ReactNode } from 'react';
@@ -912,6 +913,8 @@ export interface SubmitPromptResult {
    * tool-call continuations) only — no session change, no persistence.
    */
   modelOverride?: string;
+  /** Optional execution-time guard applied only to this submitted turn. */
+  toolInvocationGuard?: ToolInvocationGuard;
 }
 
 /**

@@ -1116,8 +1116,8 @@ function localGitConfigMakesCommandUnsafe(
   cwd: string,
 ): boolean {
   let changedDirectory = false;
-  let usesDiff = false;
-  let usesStatus = false;
+  let usesDiffOutput = false;
+  let usesFsmonitor = false;
 
   for (const command of collectDescendants(root, new Set(['command']))) {
     const name = getCommandName(command);
@@ -1129,15 +1129,35 @@ function localGitConfigMakesCommandUnsafe(
     const subcommand = stripOuterQuotes(
       getArgumentNodes(command)[0]?.text ?? '',
     ).toLowerCase();
-    if (subcommand !== 'diff' && subcommand !== 'status') continue;
+    const argumentTexts = getArgumentNodes(command)
+      .slice(1)
+      .map((argument) => stripOuterQuotes(argument.text).toLowerCase());
+    const logShowsPatch =
+      subcommand === 'log' &&
+      argumentTexts.some((argument) =>
+        ['-p', '-u', '--patch'].includes(argument),
+      );
+    const canUseDiffOutput =
+      subcommand === 'diff' || subcommand === 'show' || logShowsPatch;
+    const canUseFsmonitor = [
+      'blame',
+      'diff',
+      'grep',
+      'ls-files',
+      'status',
+    ].includes(subcommand);
+    if (!canUseDiffOutput && !canUseFsmonitor) continue;
     if (changedDirectory) return true;
-    usesDiff ||= subcommand === 'diff';
-    usesStatus ||= subcommand === 'status';
+    usesDiffOutput ||= canUseDiffOutput;
+    usesFsmonitor ||= canUseFsmonitor;
   }
 
-  if (!usesDiff && !usesStatus) return false;
+  if (!usesDiffOutput && !usesFsmonitor) return false;
   const risk = getLocalGitConfigRisk(cwd);
-  return (usesDiff && risk.diffExternal) || (usesStatus && risk.fsmonitor);
+  return (
+    (usesDiffOutput && (risk.diffExternal || risk.diffTextconv)) ||
+    (usesFsmonitor && risk.fsmonitor)
+  );
 }
 
 function fallbackGitConfigMakesCommandUnsafe(
@@ -1147,7 +1167,7 @@ function fallbackGitConfigMakesCommandUnsafe(
   if (/\b(?:cd|pushd)\b[\s\S]*\bgit\b/i.test(command)) return true;
   if (!/\bgit\b/i.test(command)) return false;
   const risk = getLocalGitConfigRisk(cwd);
-  return risk.diffExternal || risk.fsmonitor;
+  return risk.diffExternal || risk.diffTextconv || risk.fsmonitor;
 }
 
 async function classifyInternal(

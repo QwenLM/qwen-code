@@ -109,6 +109,7 @@ import {
   clearCacheSafeParams,
   getCacheSafeParams,
 } from '../agents/forkedAgent.js';
+import { MANUAL_DREAM_TOOL_GUARD_MARKER } from '../memory/manual-dream-turn-policy.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -12003,6 +12004,207 @@ Other open files:
         expect(
           mockInteractionTelemetry.endInteractionSpan,
         ).toHaveBeenCalledWith('ok', { promptId: 'prompt-stop-hook-budget' });
+      });
+
+      it('persists the manual-dream policy on a blocking Stop continuation', async () => {
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            {
+              role: 'user',
+              parts: [
+                { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+                { text: 'dream prompt' },
+              ],
+            },
+            { role: 'model', parts: [{ text: 'not done' }] },
+          ]),
+        } as unknown as LlmChat;
+        mockTurnRunFn
+          .mockReturnValueOnce(
+            (async function* () {
+              yield { type: LlmEventType.Content, value: 'not done' };
+            })(),
+          )
+          .mockReturnValueOnce(
+            (async function* () {
+              yield { type: LlmEventType.Content, value: 'done' };
+            })(),
+          );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+              { text: 'dream prompt' },
+            ],
+            new AbortController().signal,
+            'prompt-dream-stop-hook',
+          ),
+        );
+
+        const continuationRequest = mockTurnRunFn.mock.calls[1]?.[1] as Array<
+          Part | string
+        >;
+        expect(continuationRequest).toContain(MANUAL_DREAM_TOOL_GUARD_MARKER);
+      });
+
+      it('does not add manual-dream provenance to an ordinary blocking Stop continuation', async () => {
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            { role: 'user', parts: [{ text: 'ordinary prompt' }] },
+            { role: 'model', parts: [{ text: 'not done' }] },
+          ]),
+        } as unknown as LlmChat;
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'response' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'ordinary prompt' }],
+            new AbortController().signal,
+            'prompt-ordinary-stop-hook',
+          ),
+        );
+
+        const continuationRequest = mockTurnRunFn.mock.calls[1]?.[1] as Array<
+          Part | string
+        >;
+        expect(continuationRequest).not.toContain(
+          MANUAL_DREAM_TOOL_GUARD_MARKER,
+        );
+      });
+
+      it('persists the manual-dream policy on a same-turn Steer continuation', async () => {
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            {
+              role: 'user',
+              parts: [
+                { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+                { text: 'dream prompt' },
+              ],
+            },
+            { role: 'model', parts: [{ text: 'not done' }] },
+          ]),
+        } as unknown as LlmChat;
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'response' };
+          })(),
+        );
+        const getSteerInput = vi
+          .fn<() => Promise<SteerInput | undefined>>()
+          .mockResolvedValueOnce({
+            parts: [{ text: 'steer the same turn' }],
+            accept: vi.fn(),
+            restore: vi.fn(),
+          })
+          .mockResolvedValue(undefined);
+
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+              { text: 'dream prompt' },
+            ],
+            new AbortController().signal,
+            'prompt-dream-steer',
+            { type: SendMessageType.UserQuery, getSteerInput },
+          ),
+        );
+
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(getLastTurnRequestText()).toContain(
+          MANUAL_DREAM_TOOL_GUARD_MARKER,
+        );
+        expect(getLastTurnRequestText()).toContain('steer the same turn');
+      });
+
+      it('persists the manual-dream policy on a next-speaker continuation', async () => {
+        const { checkNextSpeaker } = await import(
+          '../utils/nextSpeakerChecker.js'
+        );
+        vi.mocked(checkNextSpeaker)
+          .mockResolvedValueOnce({
+            next_speaker: 'model',
+            reasoning: 'continue',
+          })
+          .mockResolvedValue(null);
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            {
+              role: 'user',
+              parts: [
+                { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+                { text: 'dream prompt' },
+              ],
+            },
+            { role: 'model', parts: [{ text: 'not done' }] },
+          ]),
+        } as unknown as LlmChat;
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'response' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+              { text: 'dream prompt' },
+            ],
+            new AbortController().signal,
+            'prompt-dream-next-speaker',
+          ),
+        );
+
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(getLastTurnRequestText()).toContain(
+          MANUAL_DREAM_TOOL_GUARD_MARKER,
+        );
+        expect(getLastTurnRequestText()).toContain('Please continue.');
       });
 
       it('emits one active_goal null when the blocking cap aborts an active goal', async () => {

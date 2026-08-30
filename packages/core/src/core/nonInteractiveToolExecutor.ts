@@ -7,6 +7,7 @@
 import type { ToolCallRequestInfo, ToolCallResponseInfo } from './turn.js';
 import type { Config } from '../config/config.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import type { ToolInvocationGuard } from '../index.js';
 import {
   CoreToolScheduler,
   type AllToolCallsCompleteHandler,
@@ -22,6 +23,8 @@ export interface ExecuteToolCallOptions {
   /** Direct calls record by default; aggregate callers can defer recording. */
   recordToolResult?: boolean;
   runtimeView?: RuntimeContentGeneratorView;
+  /** Optional execution-time guard scoped to this direct call. */
+  toolInvocationGuard?: ToolInvocationGuard;
 }
 
 /**
@@ -52,7 +55,12 @@ export async function executeToolCall(
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
     })
-      .schedule(toolCallRequest, abortSignal, options.runtimeView)
+      .schedule(
+        toolCallRequest,
+        abortSignal,
+        options.runtimeView,
+        options.toolInvocationGuard,
+      )
       .catch(reject);
   });
 }

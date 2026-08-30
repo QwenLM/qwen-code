@@ -509,6 +509,62 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('passes a submit_prompt onComplete callback through to the result', async () => {
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+    const mockCommand = {
+      name: 'custom',
+      description: 'Custom command with completion bookkeeping',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Run and record completion' }],
+        onComplete,
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toMatchObject({
+      type: 'submit_prompt',
+      onComplete,
+    });
+  });
+
+  it('passes a submit_prompt tool guard through to ACP consumers', async () => {
+    const toolInvocationGuard = vi
+      .fn()
+      .mockResolvedValue({ allowed: true as const });
+    const mockCommand = {
+      name: 'custom',
+      description: 'Custom command with a per-turn tool guard',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Run with a guard' }],
+        toolInvocationGuard,
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.toolInvocationGuard).toBe(toolInvocationGuard);
+    }
+  });
+
   it('passes context-file refresh intent through submit_prompt results', async () => {
     const mockCommand = {
       name: 'remember',
@@ -1219,6 +1275,53 @@ describe('handleSlashCommand', () => {
       if (result.type === 'submit_prompt') {
         expect(result.refreshContextFilesOnWrite).toBe(true);
       }
+    });
+
+    it('combines every turn guard from stacked skills', async () => {
+      const firstGuard = vi.fn().mockResolvedValue({ allowed: true as const });
+      const secondGuard = vi.fn().mockResolvedValue({
+        allowed: false as const,
+        reason: 'second skill denied',
+      });
+      const skillA = {
+        ...createSkillCommand('guard-a', 'first guard'),
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'SKILL_BODY:guard-a' }],
+          toolInvocationGuard: firstGuard,
+        }),
+      };
+      const skillB = {
+        ...createSkillCommand('guard-b', 'second guard'),
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'SKILL_BODY:guard-b' }],
+          toolInvocationGuard: secondGuard,
+        }),
+      };
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/guard-a /guard-b implement X',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('submit_prompt');
+      if (result.type !== 'submit_prompt' || !result.toolInvocationGuard) {
+        throw new Error('Expected a combined tool guard');
+      }
+      await expect(
+        result.toolInvocationGuard({
+          callId: 'stacked-call',
+          toolName: 'write_file',
+          args: { file_path: '/memory/topic.md' },
+          signal: abortController.signal,
+        }),
+      ).resolves.toEqual({ allowed: false, reason: 'second skill denied' });
+      expect(firstGuard).toHaveBeenCalledOnce();
+      expect(secondGuard).toHaveBeenCalledOnce();
     });
 
     it('calls each skill action once', async () => {
