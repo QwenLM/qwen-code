@@ -5,6 +5,7 @@ import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
   artifactKindLabel,
   downloadWorkspaceFile,
+  getArtifactFreshnessKey,
   getArtifactImageMimeType,
   getArtifactTypeLabel,
   getReviewDownloadMimeType,
@@ -18,6 +19,22 @@ import {
 describe('artifactUtils', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('builds a preview freshness key from status, updatedAt, and content hash', () => {
+    expect(
+      getArtifactFreshnessKey({
+        status: 'changed',
+        updatedAt: '2026-08-24T00:00:00.000Z',
+        metadata: { 'qwen.workspace.sha256': 'abc' },
+      }),
+    ).toBe('changed:2026-08-24T00:00:00.000Z:abc');
+    expect(
+      getArtifactFreshnessKey({
+        status: 'available',
+        updatedAt: '2026-08-24T00:00:01.000Z',
+      }),
+    ).toBe('available:2026-08-24T00:00:01.000Z:');
   });
 
   it('labels office documents from path or kind', () => {
@@ -51,6 +68,57 @@ describe('artifactUtils', () => {
       }),
     ).toBe(false);
   });
+
+  it.each([
+    { workspacePath: 'notes.md' },
+    { workspacePath: 'notes.markdown' },
+    { workspacePath: 'notes', mimeType: 'text/markdown' },
+    { workspacePath: 'notes', mimeType: 'text/markdown; charset=utf-8' },
+    { workspacePath: 'report.html' },
+    { workspacePath: 'report.htm' },
+    { workspacePath: 'report', mimeType: 'text/html' },
+    { workspacePath: 'report', mimeType: 'text/html; charset=utf-8' },
+  ])('previews document-classified text artifacts', (artifact) => {
+    expect(
+      isDownloadOnlyWorkspaceArtifact({ kind: 'document', ...artifact }),
+    ).toBe(false);
+  });
+
+  it.each([
+    { workspacePath: 'photo.png' },
+    { workspacePath: 'photo', mimeType: 'image/png' },
+  ])('previews document-classified raster image artifacts', (artifact) => {
+    expect(
+      isDownloadOnlyWorkspaceArtifact({ kind: 'document', ...artifact }),
+    ).toBe(false);
+  });
+
+  it.each([
+    ['document', 'graphic.svg', 'image/svg+xml'],
+    ['image', 'graphic.svg', 'image/svg+xml'],
+    ['file', 'graphic.svg', 'image/svg+xml'],
+    ['image', 'graphic.svg', 'image/png'],
+    ['image', 'graphic.svg', 'text/html'],
+    ['file', 'graphic', 'image/svg+xml'],
+  ])('keeps SVG artifacts download-only', (kind, workspacePath, mimeType) => {
+    expect(
+      isDownloadOnlyWorkspaceArtifact({ kind, workspacePath, mimeType }),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['report.docx', 'text/html'],
+    ['report.xlsx', 'image/png'],
+    ['report.pdf', 'text/markdown'],
+    ['clip.mp4', 'image/png'],
+  ])(
+    'does not let previewable MIME types override download-only paths',
+    (workspacePath, mimeType) => {
+      expect(isDownloadOnlyWorkspaceArtifact({ workspacePath, mimeType })).toBe(
+        true,
+      );
+    },
+  );
 
   it('rejects directory stats before reading bytes', async () => {
     const readFileBytes = vi.fn();

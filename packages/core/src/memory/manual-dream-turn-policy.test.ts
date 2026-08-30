@@ -6,7 +6,7 @@
 
 import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
-import { isSystemReminderContent } from '../utils/environmentContext.js';
+import { isSystemReminderContent } from '../core/environmentContext.js';
 import {
   isManualDreamToolGuardTurn,
   MANUAL_DREAM_TOOL_GUARD_MARKER,

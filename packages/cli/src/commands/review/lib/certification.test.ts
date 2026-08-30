@@ -112,7 +112,7 @@ describe('openedBrief / readBrief', () => {
   const arg = `{"absolute_path":${needle}}`;
 
   it('does not credit a shell command that merely MENTIONS the brief', () => {
-    // The trap a prose matcher walks into: `utils/findings.ts` has a
+    // The trap a prose matcher walks into: `findings.ts` has a
     // same-purpose-looking `namesPath` that matches on a name boundary, and
     // it credits this arg. Deleting a brief is not opening it — so this atom
     // matches the whole JSON string value instead, and keeps a different

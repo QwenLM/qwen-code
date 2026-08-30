@@ -9,7 +9,7 @@ import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { GenerateTextResult } from '../core/baseLlmClient.js';
 import { AuthType } from '../core/contentGenerator.js';
-import type { GeminiChat } from '../core/geminiChat.js';
+import type { LlmChat } from '../core/llm-chat.js';
 import {
   type ChatCompressionInfo,
   type CompactionTriggerReason,
@@ -137,7 +137,7 @@ export const HARD_BUFFER = 3_000;
  * Auto-compaction consecutive-failure circuit breaker. After this many
  * consecutive failures the cheap-gate NOOPs until a successful force
  * compress resets the counter. Co-located here with other compaction-
- * tuning constants; the counter state itself lives on GeminiChat.
+ * tuning constants; the counter state itself lives on LlmChat.
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
@@ -390,7 +390,7 @@ function hasStateSnapshot(summary: string): boolean {
 
 export class ChatCompressionService {
   async compress(
-    chat: GeminiChat,
+    chat: LlmChat,
     opts: CompressOptions,
   ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
     const {
@@ -464,7 +464,7 @@ export class ChatCompressionService {
       if (effectiveTokens < auto) {
         // Screenshot-overflow trigger: even below the token threshold,
         // compact once tool-returned images accumulate past the configured
-        // count, so computer-use sessions don't drown the model in stale
+        // count, so tool-driven visual sessions don't drown the model in stale
         // screenshots. Only counted in the would-be-NOOP path and only when
         // enabled, so the common case pays nothing. Counts NESTED tool media
         // only (countToolResponseImages), not user-pasted top-level images.
@@ -571,9 +571,21 @@ export class ChatCompressionService {
     const pendingToolResult = opts.pendingUserMessage?.parts?.some(
       (part) => !!part.functionResponse,
     );
+    // With no pending functionResponse to pair with it, a trailing
+    // model[functionCall] (e.g. a restored ask_user_question preserved by
+    // startChat) would put `model[functionCall] → user[directive]` on the
+    // wire — the shape the API rejects. Strip it like the manual-trigger
+    // strip below; the preserved call stays in chat history untouched.
+    const lastCurated = curatedHistory[curatedHistory.length - 1];
+    const sideQueryBase =
+      !pendingToolResult &&
+      lastCurated?.role === 'model' &&
+      lastCurated.parts?.some((part) => !!part.functionCall)
+        ? curatedHistory.slice(0, -1)
+        : curatedHistory;
     const sideQueryHistory = pendingToolResult
-      ? [...curatedHistory, opts.pendingUserMessage!]
-      : curatedHistory;
+      ? [...sideQueryBase, opts.pendingUserMessage!]
+      : sideQueryBase;
     const pendingToolResultTokenCount = pendingToolResult
       ? estimateContentTokens(
           [opts.pendingUserMessage!],
@@ -860,7 +872,24 @@ export class ChatCompressionService {
 
     if (!summaryResult) {
       abortSignal.throwIfAborted();
-      summaryResult = await runColdCompression();
+      try {
+        summaryResult = await runColdCompression();
+      } catch (error) {
+        if (abortSignal.aborted) throw error;
+        config
+          .getDebugLogger()
+          .warn(
+            `[chat-compression] compression side-query failed: ${String(error)}`,
+          );
+        return {
+          newHistory: null,
+          info: {
+            originalTokenCount,
+            newTokenCount: originalTokenCount,
+            compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+          },
+        };
+      }
     }
     const summary = summaryResult.text;
     // Check the PROCESSED summary: postProcessSummary strips <analysis>

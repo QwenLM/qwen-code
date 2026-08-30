@@ -197,15 +197,33 @@ export function reduceDaemonTranscriptEvents(
   opts: DaemonTranscriptReducerOptions = {},
 ): DaemonTranscriptState {
   if (events.length === 0) return state;
-  const next = cloneTranscriptState(state, opts);
+  const maxBlocks = opts.maxBlocks ?? state.maxBlocks;
+  const shareSideIndexes =
+    state.blocks.length + events.length <= maxBlocks &&
+    events.every(
+      (event) =>
+        (event.type === 'assistant.text.delta' ||
+          event.type === 'thought.text.delta') &&
+        event.parentToolCallId === undefined,
+    );
+  const next = cloneTranscriptState(state, opts, shareSideIndexes);
   for (const event of events) applyDaemonTranscriptEvent(next, event);
-  const result = trimTranscriptState(next);
-  // With lazy COW, blocks and their index can be shared across snapshots.
-  // Freeze both at the dispatch boundary so external in-place mutation throws
-  // in strict mode instead of poisoning every snapshot sharing the reference.
+  const result = trimTranscriptState(next, shareSideIndexes);
+  // With lazy COW, these collections can be shared across snapshots. Freeze
+  // them at the dispatch boundary so external in-place mutation throws in
+  // strict mode instead of poisoning every snapshot sharing the reference.
   if (FREEZE_TRANSCRIPT_COLLECTIONS) {
     Object.freeze(result.blocks);
     Object.freeze(result.blockIndexById);
+    Object.freeze(result.toolBlockByCallId);
+    Object.freeze(result.activeAssistantBlockByParent);
+    Object.freeze(result.activeThoughtBlockByParent);
+    Object.freeze(result.trimmedToolNotificationByCallId);
+    Object.freeze(result.permissionBlockByRequestId);
+    for (const progress of Object.values(result.toolProgress)) {
+      Object.freeze(progress);
+    }
+    Object.freeze(result.toolProgress);
   }
   return result;
 }
@@ -610,18 +628,27 @@ function clearActiveAssistant(
 }
 
 /**
- * Fold a round's token usage onto the active top-level assistant block.
+ * Fold a round's token usage onto the latest top-level assistant block in the
+ * current user turn. A tool update finalizes the active text block before the
+ * model stream's trailing usage frame arrives, so the active pointer alone is
+ * not sufficient.
  * Subagent usage stays part of the spawning turn's total for compatibility.
  * Summary projections route it to the parent tool before calling this helper.
  *
- * No active block (a rare usage frame with no preceding top-level assistant
- * text) drops the count rather than minting a stray empty block.
+ * A turn with no preceding top-level assistant text still drops the count
+ * rather than crossing a user boundary or minting a stray empty block.
  */
 function applyAssistantUsage(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): void {
-  const block = getWritableBlockById(state, state.activeAssistantBlockId);
+  if (isLegacySubagentUsageDuplicate(state, event)) return;
+  const activeBlockId =
+    state.activeAssistantBlockId ??
+    (event.parentToolCallId
+      ? undefined
+      : latestTopLevelAssistantBlockIdInCurrentTurn(state));
+  const block = getWritableBlockById(state, activeBlockId);
   if (!block || block.kind !== 'assistant') return;
   const prev = block.usage;
   block.usage = {
@@ -630,6 +657,46 @@ function applyAssistantUsage(
     cachedTokens: (prev?.cachedTokens ?? 0) + (event.usage.cachedTokens ?? 0),
   };
   block.updatedAt = state.now;
+}
+
+function isLegacySubagentUsageDuplicate(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
+): boolean {
+  if (event.parentToolCallId || !event.sourceRecordIds?.length) return false;
+  const sourceRecordIds = new Set(event.sourceRecordIds);
+  for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
+    const block = state.blocks[i]!;
+    if (block.kind === 'user' && !block.parentToolCallId) return false;
+    if (
+      block.kind !== 'tool' ||
+      !block.sourceRecordIds?.some((id) => sourceRecordIds.has(id))
+    ) {
+      continue;
+    }
+    const rawOutput = isRecord(block.rawOutput) ? block.rawOutput : undefined;
+    const summary =
+      rawOutput && isRecord(rawOutput['executionSummary'])
+        ? rawOutput['executionSummary']
+        : undefined;
+    return (
+      summary?.['inputTokens'] === event.usage.inputTokens &&
+      summary['outputTokens'] === event.usage.outputTokens &&
+      (summary['cachedTokens'] ?? 0) === (event.usage.cachedTokens ?? 0)
+    );
+  }
+  return false;
+}
+
+function latestTopLevelAssistantBlockIdInCurrentTurn(
+  state: DaemonTranscriptState,
+): string | undefined {
+  for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
+    const block = state.blocks[i]!;
+    if (block.kind === 'user' && !block.parentToolCallId) return undefined;
+    if (block.kind === 'assistant' && !block.parentToolCallId) return block.id;
+  }
+  return undefined;
 }
 
 function applySubagentUsageToParentTool(
@@ -1101,6 +1168,21 @@ function discardToolBlock(
   }
 }
 
+/**
+ * The task-display projection carries exactly these two `executionMode`
+ * literals. Fail closed: any other value (corrupted recording, future runtime
+ * mode) must fall back to the legacy argument/status heuristic instead of
+ * forcing a classification. Both consumer-side whitelists — webui's
+ * `projectSubagentToolUpdate` and web-shell's `daemonToolBlockToToolCall` —
+ * call this single guard so live-summary and recorded-transcript clients
+ * accept the same literal set; when a third mode lands, extend it here once.
+ */
+export function isTaskExecutionMode(
+  value: unknown,
+): value is 'foreground' | 'background' {
+  return value === 'foreground' || value === 'background';
+}
+
 function compactTaskExecutionOutput(
   rawOutput: unknown,
   retainSubagentBlocks: boolean,
@@ -1118,6 +1200,7 @@ function compactTaskExecutionOutput(
     'subagentColor',
     'taskDescription',
     'status',
+    'executionMode',
     'terminateReason',
     'tokenCount',
     'executionSummary',
@@ -1540,6 +1623,7 @@ function createTextBlock(
 function cloneTranscriptState(
   state: DaemonTranscriptState,
   opts: DaemonTranscriptReducerOptions,
+  shareSideIndexes = false,
 ): DaemonTranscriptState {
   const next: DaemonTranscriptState = {
     ...state,
@@ -1560,26 +1644,32 @@ function cloneTranscriptState(
     // consumers + the WeakMap caches want.
     blocks: state.blocks,
     blockIndexById: state.blockIndexById,
-    toolBlockByCallId: createIndex(state.toolBlockByCallId),
-    activeAssistantBlockByParent: createIndex(
-      state.activeAssistantBlockByParent,
-    ),
-    activeThoughtBlockByParent: createIndex(state.activeThoughtBlockByParent),
-    trimmedToolNotificationByCallId: createIndex(
-      state.trimmedToolNotificationByCallId,
-    ),
-    permissionBlockByRequestId: createIndex(state.permissionBlockByRequestId),
-    // Deep-clone the inner progress records.
-    // The outer spread alone shares `{ ratio?, step? }` references between
-    // snapshots — once `tool.progress` event handlers start mutating in
-    // place, the prior snapshot leaks. Pre-empt that here; cost is bounded
-    // by `Object.keys(state.toolProgress).length` which is small (only
-    // in-flight tools).
-    toolProgress: createIndex(
-      Object.fromEntries(
-        Object.entries(state.toolProgress).map(([k, v]) => [k, { ...v }]),
-      ),
-    ),
+    // Top-level streamed text cannot mutate these side indexes. Sharing them
+    // avoids work proportional to historical tool count on every delta.
+    toolBlockByCallId: shareSideIndexes
+      ? state.toolBlockByCallId
+      : createIndex(state.toolBlockByCallId),
+    activeAssistantBlockByParent: shareSideIndexes
+      ? state.activeAssistantBlockByParent
+      : createIndex(state.activeAssistantBlockByParent),
+    activeThoughtBlockByParent: shareSideIndexes
+      ? state.activeThoughtBlockByParent
+      : createIndex(state.activeThoughtBlockByParent),
+    trimmedToolNotificationByCallId: shareSideIndexes
+      ? state.trimmedToolNotificationByCallId
+      : createIndex(state.trimmedToolNotificationByCallId),
+    permissionBlockByRequestId: shareSideIndexes
+      ? state.permissionBlockByRequestId
+      : createIndex(state.permissionBlockByRequestId),
+    // Other reducer events may mutate the inner progress records, so those
+    // paths still deep-clone them before applying updates.
+    toolProgress: shareSideIndexes
+      ? state.toolProgress
+      : createIndex(
+          Object.fromEntries(
+            Object.entries(state.toolProgress).map(([k, v]) => [k, { ...v }]),
+          ),
+        ),
     lastResyncRequired:
       state.lastResyncRequired !== undefined
         ? { ...state.lastResyncRequired }
@@ -1612,6 +1702,7 @@ function sharesSourceRecordId(
 
 function trimTranscriptState(
   state: DaemonTranscriptState,
+  sideIndexesShared = false,
 ): DaemonTranscriptState {
   const overByteBudget = state.retainedBytes > state.maxRetainedBytes;
   if (state.blocks.length <= state.maxBlocks && !overByteBudget) return state;
@@ -1692,6 +1783,21 @@ function trimTranscriptState(
   // future appends in the same dispatch don't copy them again.
   ownedBlocks.set(state, state.blocks);
   ownedBlockIndexes.set(state, state.blockIndexById);
+  if (sideIndexesShared) {
+    state.toolBlockByCallId = createIndex(state.toolBlockByCallId);
+    state.activeAssistantBlockByParent = createIndex(
+      state.activeAssistantBlockByParent,
+    );
+    state.activeThoughtBlockByParent = createIndex(
+      state.activeThoughtBlockByParent,
+    );
+    state.trimmedToolNotificationByCallId = createIndex(
+      state.trimmedToolNotificationByCallId,
+    );
+    state.permissionBlockByRequestId = createIndex(
+      state.permissionBlockByRequestId,
+    );
+  }
   for (const [toolCallId, blockId] of Object.entries(state.toolBlockByCallId)) {
     if (!keptIds.has(blockId)) {
       state.toolBlockByCallId[toolCallId] = TRIMMED_TOOL_BLOCK_ID;

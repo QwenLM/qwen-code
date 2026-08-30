@@ -23,7 +23,7 @@ import {
   useTranscriptStore,
   useWorkspace,
   type DaemonSessionActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   type DaemonSessionArtifact,
   type DaemonSessionMonitorTaskStatus,
@@ -38,7 +38,7 @@ import {
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
 } from '../constants/sessions';
-import { useAnimationFrameTranscriptBlocks } from '../hooks/useAnimationFrameTranscriptBlocks';
+import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
@@ -95,6 +95,7 @@ import composerStatusStyles from './ComposerStatusStack.module.css';
 import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
+import { serializeContextUsageMessage } from './messages/ContextUsageMessage';
 import type {
   TurnOutputKind,
   TurnOutputOpenRequest,
@@ -110,12 +111,12 @@ import { PaneHeaderActions } from './PaneHeaderActions';
 import styles from './ChatPane.module.css';
 import accentStyles from './WorkspaceAccent.module.css';
 
-// Split-view panes get the same interactive composer controls as the main chat,
-// each scoped to the pane's own session: the approval-mode and model pickers,
-// plus voice dictation. The width toggle is omitted (panes size themselves); the
-// slash menu is populated from the session's own command list (see below).
+// Split-view panes get the same session-scoped composer controls as the main
+// chat. The width toggle is omitted because panes size themselves.
 const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
+  'addMenu',
   'approvalMode',
+  'contextUsage',
   'model',
   'voice',
 ];
@@ -140,6 +141,8 @@ function OptionalMonitorDetailsProvider({
 export interface PaneHeaderActionsInfo {
   sessionId: string;
   workspaceCwd?: string;
+  /** The pane's own session actions; lets an action drive session data. */
+  sessionActions?: DaemonSessionActions;
 }
 
 export type PaneHeaderActionsRenderer = (
@@ -249,7 +252,7 @@ export function ChatPane({
   sessionWorkflowEnabled = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
-  const { renderComposerFooter: CustomComposerFooter } =
+  const { renderComposerFooter: CustomComposerFooter, askUserFreeTextLabel } =
     useWebShellCustomization();
   const connection = useConnection();
   const actions = useActions();
@@ -261,14 +264,15 @@ export function ChatPane({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
-
   const sessionHasActivePrompt = useSessionHasActivePrompt(
     workspace.client,
     workspaceCwd ?? connection.workspaceCwd,
     connection.sessionId,
   );
-  const blocks = useAnimationFrameTranscriptBlocks();
-  const messages = useMessagesFromBlocks(t, blocks);
+  const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
+  sessionHasActivePromptRef.current = sessionHasActivePrompt;
+  const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
+  const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
@@ -604,7 +608,7 @@ export function ChatPane({
     canInjectMidTurnMedia,
     workspaceFileActions: attachmentWorkspaceTarget?.actions,
     streamingState,
-    holdQueuedPromptsLocally: isGoalGateBlocked(connection),
+    sessionHasActivePrompt,
     sessionActions: actions,
     store,
     editorRef,
@@ -798,16 +802,16 @@ export function ChatPane({
           onFirstPromptAdmitted(trimmed);
         }
       };
-      // Fail CLOSED on a hydrating `goalState`, exactly as the local hold
-      // above does: the load makes the composer writable before `goal()`
-      // resolves, and the daemon has no server-side prompt gate for an active
-      // Goal, so a direct send in that window bypasses the Goal queue.
-      if (
-        streamingStateRef.current === 'idle' &&
-        !isGoalGateBlocked({
+      const commandBlockedByGoal =
+        trimmed.startsWith('/') &&
+        isGoalGateBlocked({
           sessionId: connection.sessionId,
           goalState: connection.goalState,
-        })
+        });
+      if (commandBlockedByGoal) return false;
+      if (
+        streamingStateRef.current === 'idle' &&
+        !sessionHasActivePromptRef.current
       ) {
         const admissionOwner = admissionOwnerRef.current;
         let admissionStarted = false;
@@ -881,9 +885,6 @@ export function ChatPane({
       admissionPayloadLocked,
       catalogOwnerCwd,
       clearFollowup,
-      // The whole snapshot, not just the status: the gate distinguishes an
-      // absent (hydrating) snapshot from a Goal-less one, and both read as an
-      // undefined status.
       connection.goalState,
       connection.sessionId,
       connection.status,
@@ -1022,6 +1023,60 @@ export function ChatPane({
       };
     });
   }, [connection.commands, t]);
+  const skills = useMemo(() => {
+    const commandsByName = new Map(
+      commands.map((command) => [command.name.toLowerCase(), command]),
+    );
+    return (connection.skills ?? [])
+      .map((name) => {
+        const command = commandsByName.get(name.toLowerCase());
+        return {
+          name,
+          description: command?.description ?? '',
+          ...(command?.argumentHint
+            ? { argumentHint: command.argumentHint }
+            : {}),
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [commands, connection.skills]);
+  const handleShowContextUsage = useCallback(() => {
+    if (
+      shouldBlockComposerSubmit({
+        connectionStatus: connection.status,
+        hasSession: Boolean(connection.sessionId),
+      })
+    ) {
+      return;
+    }
+    const owner = sessionOwnerGuard.capture();
+    if (streamingStateRef.current === 'idle') {
+      store.appendLocalUserMessage('/context');
+    }
+    actions
+      .getContextUsage({ detail: false })
+      .then((result) => {
+        if (!owner.isCurrent()) return;
+        store.dispatch([
+          {
+            type: 'status',
+            text: serializeContextUsageMessage(result),
+            clearActiveText: false,
+          },
+        ]);
+      })
+      .catch((error: unknown) => {
+        if (!owner.isCurrent()) return;
+        reportError(error, 'Failed to load context usage');
+      });
+  }, [
+    actions,
+    connection.sessionId,
+    connection.status,
+    reportError,
+    sessionOwnerGuard,
+    store,
+  ]);
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
@@ -1113,6 +1168,7 @@ export function ChatPane({
       ? renderHeaderActions({
           sessionId: connection.sessionId,
           workspaceCwd: paneWorkspaceCwd || undefined,
+          sessionActions: actions,
         })
       : null;
 
@@ -1325,6 +1381,7 @@ export function ChatPane({
               onError={reportError}
               variant="floating"
               keyboardActive={false}
+              customInputLabel={askUserFreeTextLabel}
             />
           </div>
         )}
@@ -1350,7 +1407,9 @@ export function ChatPane({
                 prompts={queuedPrompts}
                 t={t}
                 canMutateMidTurn={canMutateMidTurn}
-                canInsertMidTurn={streamingState !== 'idle'}
+                canInsertMidTurn={
+                  streamingState !== 'idle' || sessionHasActivePrompt
+                }
                 onDelete={removeQueuedPrompt}
                 onInsert={insertQueuedPrompt}
                 onEdit={editQueuedPrompt}
@@ -1397,10 +1456,14 @@ export function ChatPane({
             onCancel={handleCancel}
             isRunning={isResponding || sessionHasActivePrompt}
             commands={commands}
+            skills={skills}
             queuedMessages={queuedTexts}
             onPopQueuedMessages={editLastQueuedPrompt}
             onClearQueuedMessages={clearQueuedPrompts}
             visibleToolbarActions={paneToolbarActions}
+            tokenCount={connection.tokenCount ?? 0}
+            contextWindow={connection.contextWindow ?? 0}
+            onShowContextUsage={handleShowContextUsage}
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
             workspaceTitle={paneWorkspaceCwd}
             workspaceColor={workspaceAccent}

@@ -19,10 +19,10 @@ import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import {
   DAEMON_APPROVAL_MODES,
   useOptionalWorkspace,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
-import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
+import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonSessionGroupPresetColor,
   DaemonWorkspaceGitStatus,
@@ -30,7 +30,7 @@ import type {
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
-import type { DaemonReasoningControls } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonReasoningControls } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useWebShellPortalRoot } from '../portalRoot';
 import {
   useWebShellCustomization,
@@ -52,6 +52,8 @@ import {
 import { AtMentionPanel } from './AtMentionPanel';
 import { useFileUpload, type FileUploadItem } from '../hooks/useFileUpload';
 import { fileReferenceInsertText } from '../hooks/useAtMentionMenu';
+import { AddMenu } from './composer/AddMenu';
+import { computePrependSkillTransaction } from './composer/prependSkillInvocation';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import {
   getComposerTagIconUrl,
@@ -83,6 +85,7 @@ import {
   ChevronRightIcon,
   FolderClosedIcon,
   LoaderCircleIcon,
+  SlashIcon,
   UploadIcon,
   XIcon,
 } from 'lucide-react';
@@ -132,7 +135,12 @@ export type ComposerToolbarAction =
   | 'files'
   | 'widthMode'
   | 'voice'
-  | 'workspace';
+  | 'workspace'
+  // Unlike the actions above, `addMenu` is never shown unless the host
+  // lists it explicitly in `visibleToolbarActions` — the generic gate
+  // defaults to "show" when the prop is absent, so `+` checks the prop
+  // directly to stay off by default.
+  | 'addMenu';
 
 // Dropped folders surface in `dataTransfer.files` as 0-byte Files; only the
 // items API can tell them apart, and folder uploads are out of scope.
@@ -153,6 +161,7 @@ function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
 
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'commands',
   'contextUsage',
   'gitBranch',
   'model',
@@ -175,6 +184,7 @@ interface ChatEditorProps {
   onInputTextChange?: (text: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
   onCycleMode?: () => void;
+  cycleModeOnTab?: boolean;
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
   isRunning?: boolean;
@@ -186,6 +196,7 @@ interface ChatEditorProps {
   commands: CommandInfo[];
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
@@ -223,6 +234,8 @@ interface ChatEditorProps {
   /** Current context-window occupancy for the `contextUsage` toolbar ring. */
   tokenCount?: number;
   contextWindow?: number;
+  /** Keep Context Usage available before a restored session reports usage. */
+  contextUsageAlwaysVisible?: boolean;
   /** Show the context-usage breakdown, exactly like typing /context. */
   onShowContextUsage?: () => void;
   availableModels?: Array<{ id: string; label?: string }>;
@@ -265,6 +278,7 @@ interface ChatEditorProps {
   /** Click a pasted image in the composer to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  compactOverlays?: boolean;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -790,6 +804,7 @@ function ToolbarPopover({
   noResultsLabel,
   header,
   submenu,
+  compact = false,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -808,6 +823,7 @@ function ToolbarPopover({
     triggerAriaLabel: string;
     sectionLabel: string;
   };
+  compact?: boolean;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
@@ -956,6 +972,7 @@ function ToolbarPopover({
         collisionPadding={8}
         collisionBoundary={collisionBoundary ?? undefined}
         data-web-shell-toolbar-popover
+        data-web-shell-compact-overlay={compact ? '' : undefined}
         data-web-shell-reasoning-popover={submenu ? '' : undefined}
         onClick={(event) => event.stopPropagation()}
         onOpenAutoFocus={(event) => {
@@ -1057,13 +1074,13 @@ function ModelReasoningControls({
   onSelect,
 }: {
   reasoning: DaemonReasoningControls;
-  onSelect: (value: string) => Promise<void> | void;
+  onSelect?: (value: string) => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const hasEffortOptions = reasoning.efforts.length > 0;
   const select = async (value: string) => {
-    if (busy) return;
+    if (busy || !onSelect) return;
     setBusy(true);
     try {
       await onSelect(value);
@@ -1083,7 +1100,7 @@ function ModelReasoningControls({
         <span>{t('reasoning.thinking')}</span>
         <Switch
           checked={reasoning.enabled}
-          disabled={busy}
+          disabled={busy || !onSelect || reasoning.canDisable === false}
           aria-label={t('reasoning.thinking')}
           data-web-shell-thinking-toggle
           onCheckedChange={(enabled) =>
@@ -1104,7 +1121,7 @@ function ModelReasoningControls({
               className={styles.reasoningEffortRow}
               aria-pressed={reasoning.effort === effort}
               data-web-shell-effort={effort}
-              disabled={!reasoning.enabled || busy}
+              disabled={!reasoning.enabled || busy || !onSelect}
               onClick={() => void select(effort)}
             >
               <span>{t(`reasoning.effort.${effort}`)}</span>
@@ -1124,6 +1141,7 @@ function SlashCommandPanel({
   anchorRef,
   panelRef,
   detailRef,
+  compact,
   onClose,
   onSelect,
   onAccept,
@@ -1132,6 +1150,7 @@ function SlashCommandPanel({
   anchorRef: RefObject<HTMLElement | null>;
   panelRef: RefObject<HTMLDivElement | null>;
   detailRef: RefObject<HTMLDivElement | null>;
+  compact?: boolean;
   onClose: () => void;
   onSelect: (index: number) => boolean;
   onAccept: (index?: number) => boolean;
@@ -1209,14 +1228,15 @@ function SlashCommandPanel({
           ref={panelRef}
           side="top"
           align="start"
-          alignOffset={16}
-          sideOffset={8}
-          avoidCollisions={false}
-          collisionPadding={12}
+          alignOffset={compact ? 0 : 16}
+          sideOffset={compact ? 6 : 8}
+          avoidCollisions={compact}
+          collisionPadding={compact ? 8 : 12}
           collisionBoundary={collisionBoundary ?? undefined}
           className="duration-0 data-open:animate-none data-closed:animate-none"
           role="listbox"
           data-web-shell-slash-menu
+          data-web-shell-compact-overlay={compact ? '' : undefined}
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
           onInteractOutside={(event) => {
@@ -1284,7 +1304,7 @@ function SlashCommandPanel({
                         }`}
                         onMouseEnter={(event) => {
                           onSelect(index);
-                          if (!item.detail) {
+                          if (!item.detail || compact) {
                             setHoverDetail(null);
                             return;
                           }
@@ -1322,6 +1342,12 @@ function SlashCommandPanel({
                       >
                         <span className={styles.slashCommand}>
                           {item.label}
+                          {item.argumentHint && (
+                            <span className={styles.slashArgumentHint}>
+                              {' '}
+                              {item.argumentHint}
+                            </span>
+                          )}
                         </span>
                         {item.detail && (
                           <span className={styles.slashDescription}>
@@ -1338,7 +1364,7 @@ function SlashCommandPanel({
         </PopoverContent>
       </Popover>
       <Popover
-        open={Boolean(hoverDetail)}
+        open={!compact && Boolean(hoverDetail)}
         onOpenChange={(open) => {
           if (!open) setHoverDetail(null);
         }}
@@ -1447,6 +1473,7 @@ export const ChatEditor = memo(
       onInputTextChange,
       onAttachmentsChange,
       onCycleMode,
+      cycleModeOnTab = false,
       onToggleShortcuts,
       onCancel,
       isRunning = false,
@@ -1457,6 +1484,7 @@ export const ChatEditor = memo(
       commands,
       skills = [],
       slashCommandCategoryOrder,
+      autoSubmitSlashCommands = false,
       queuedMessages = [],
       onPopQueuedMessages,
       currentMode = 'default',
@@ -1479,6 +1507,7 @@ export const ChatEditor = memo(
       visibleToolbarActions,
       tokenCount = 0,
       contextWindow = 0,
+      contextUsageAlwaysVisible = false,
       onShowContextUsage,
       availableModels = [],
       onSelectMode,
@@ -1513,6 +1542,7 @@ export const ChatEditor = memo(
       onImageIngestionNotice,
       onImagePreview,
       onAttachmentPreview,
+      compactOverlays = false,
     } = props;
 
     const {
@@ -1641,6 +1671,7 @@ export const ChatEditor = memo(
       onSubmit,
       onInputTextChange,
       onCycleMode,
+      cycleModeOnTab,
       onToggleShortcuts,
       disabled,
       fileDragEnabled: fileUploadEnabled !== false,
@@ -1648,6 +1679,7 @@ export const ChatEditor = memo(
       commands,
       skills,
       slashCommandCategoryOrder,
+      autoSubmitSlashCommands,
       queuedMessages,
       onPopQueuedMessages,
       currentMode,
@@ -1681,6 +1713,7 @@ export const ChatEditor = memo(
 
     const addComposerTags = core.addTags;
     const clearImageDragState = core.clearImageDragState;
+    const focusComposer = core.focus;
     const ingestFiles = core.ingestFiles;
     const insertUploadReference = useCallback(
       (path: string) => {
@@ -1843,6 +1876,63 @@ export const ChatEditor = memo(
       pendingDropFiles,
       uploadFiles,
     ]);
+    // -- Composer add menu (`+`) ---------------------------------------------
+    const showAddMenuAction = visibleToolbarActions?.includes('addMenu');
+    const getAddMenuWorkspaceActions = useCallback(
+      () => core.workspaceActionsRef.current,
+      [core.workspaceActionsRef],
+    );
+    const handleAddMenuFiles = useCallback(
+      (files: File[], destination: 'attach' | 'upload') => {
+        if (destination === 'upload') {
+          if (!uploadEnabled) return;
+          uploadFiles(files, fileUploadDirectory ?? '.', insertUploadReference);
+        } else {
+          ingestFiles(files);
+        }
+        focusComposer();
+      },
+      [
+        fileUploadDirectory,
+        focusComposer,
+        ingestFiles,
+        insertUploadReference,
+        uploadEnabled,
+        uploadFiles,
+      ],
+    );
+    const handleAddMenuInsertReference = useCallback(
+      (tag: WebShellComposerTag) => {
+        addComposerTags([tag], { placement: 'inline', position: 'end' });
+        const view = core.viewRef.current;
+        if (view) {
+          view.dispatch({
+            selection: { anchor: view.state.doc.length },
+            scrollIntoView: true,
+          });
+        }
+        focusComposer();
+      },
+      [addComposerTags, core.viewRef, focusComposer],
+    );
+    const handleAddMenuPrependSkill = useCallback(
+      (invocation: string) => {
+        const view = core.viewRef.current;
+        const spec = computePrependSkillTransaction(
+          view ? view.state.doc.toString() : core.getText(),
+          invocation,
+        );
+        if (!spec) return focusComposer();
+        if (view) {
+          view.dispatch(spec);
+          view.focus();
+        } else {
+          core.mobileComposer?.textareaRef.current?.setSelectionRange(0, 0);
+          core.insertText(spec.changes.insert);
+        }
+      },
+      [core, focusComposer],
+    );
     const handleUploadPickerChange = useCallback(
       (event: ReactChangeEvent<HTMLInputElement>) => {
         const files = Array.from(event.target.files ?? []);
@@ -2041,6 +2131,7 @@ export const ChatEditor = memo(
     };
     const showModeAction = showToolbarAction('approvalMode');
     const showModelAction = showToolbarAction('model');
+    const showCommandAction = showToolbarAction('commands');
     const commandNames = useMemo(
       () =>
         new Set(commands.map((command) => command.name.replace(/^\/+/, ''))),
@@ -2313,7 +2404,7 @@ export const ChatEditor = memo(
       currentModelLabel,
       lastConfirmedModelLabel,
     });
-    const showReasoningOptions = Boolean(reasoning && onSelectReasoningEffort);
+    const showReasoningOptions = Boolean(reasoning);
     const reasoningEffortLabel = reasoning
       ? reasoning.efforts.length > 0
         ? t(`reasoning.effort.${reasoning.effort}`)
@@ -2525,6 +2616,7 @@ export const ChatEditor = memo(
       modeLabel,
       normalizedModelChipLabel,
       sessionName,
+      showAddMenuAction,
       showModelAction,
       showModeAction,
       workspaceIndicatorVisible,
@@ -2542,6 +2634,7 @@ export const ChatEditor = memo(
         }`}
         data-composer
         data-web-shell-composer
+        data-web-shell-compact-composer={compactOverlays ? '' : undefined}
         onDragOver={cancelShellFileDrag}
         onDrop={cancelShellFileDrag}
       >
@@ -2674,6 +2767,7 @@ export const ChatEditor = memo(
                 <input
                   ref={searchInputRef}
                   className={styles.searchInput}
+                  data-web-shell-composer-history-search
                   value={searchQuery}
                   onChange={handleSearchInput}
                   onCompositionEnd={handleSearchCompositionEnd}
@@ -2719,7 +2813,7 @@ export const ChatEditor = memo(
               )}
             </div>
           )}
-          <div className={styles.content}>
+          <div className={styles.content} data-web-shell-composer-content>
             {core.pastedImages.length > 0 && (
               <div className={styles.images} data-web-shell-composer-images>
                 {core.pastedImages.map((img, i) => {
@@ -2905,9 +2999,10 @@ export const ChatEditor = memo(
                 anchorRef={containerRef}
                 panelRef={slashPanelRef}
                 detailRef={slashDetailRef}
+                compact={compactOverlays}
                 onClose={core.closeSlashMenu}
                 onSelect={core.selectSlashCompletion}
-                onAccept={core.acceptSlashCompletion}
+                onAccept={(index) => core.acceptSlashCompletion(index, true)}
               />
             )}
             {core.atMenu && (
@@ -2915,6 +3010,7 @@ export const ChatEditor = memo(
                 menu={core.atMenu}
                 anchorRef={containerRef}
                 panelRef={atPanelRef}
+                compact={compactOverlays}
                 onSelect={core.selectAtCompletion}
                 onAccept={core.acceptAtCompletion}
                 onBack={() => {
@@ -2980,6 +3076,40 @@ export const ChatEditor = memo(
                   </div>
                 )}
                 <div className={styles.toolbarLeft}>
+                  {showAddMenuAction && (
+                    <AddMenu
+                      key={JSON.stringify([
+                        sessionId,
+                        atWorkspaceCwd,
+                        Boolean(disabled),
+                      ])}
+                      disabled={disabled}
+                      availabilityKey={JSON.stringify([
+                        fileUploadEnabled === false,
+                        uploadEnabled,
+                        Boolean(
+                          core.workspaceActionsRef.current?.globWorkspace ??
+                            core.workspaceActionsRef.current?.listDirectory,
+                        ),
+                        Boolean(
+                          core.workspaceActionsRef.current
+                            ?.loadExtensionsStatus,
+                        ),
+                        Boolean(
+                          core.workspaceActionsRef.current?.loadMcpStatus,
+                        ),
+                        Boolean(skills?.length),
+                      ])}
+                      addFileAvailable={fileUploadEnabled !== false}
+                      uploadAvailable={uploadEnabled}
+                      onAddFiles={handleAddMenuFiles}
+                      onFilePickerCancel={focusComposer}
+                      onInsertReference={handleAddMenuInsertReference}
+                      onPrependSkill={handleAddMenuPrependSkill}
+                      getWorkspaceActions={getAddMenuWorkspaceActions}
+                      skills={skills ?? []}
+                    />
+                  )}
                   {workspaceSelectVisible &&
                     workspaces &&
                     onSelectWorkspace && (
@@ -3030,6 +3160,7 @@ export const ChatEditor = memo(
                         onOpenChange={setBranchPickerOpen}
                         workspaceCwd={selectedWorkspace?.cwd ?? ''}
                         gitCwd={gitCwd}
+                        status={gitStatus}
                         onOpenDiff={onOpenGitDiff}
                         onOpenCommit={onOpenCommit}
                       >
@@ -3058,6 +3189,7 @@ export const ChatEditor = memo(
                       }`}
                     >
                       <ToolbarPopover
+                        compact={compactOverlays}
                         open={modeDropdownOpen}
                         items={modeItems}
                         activeId={currentMode}
@@ -3105,6 +3237,7 @@ export const ChatEditor = memo(
                       }`}
                     >
                       <ToolbarPopover
+                        compact={compactOverlays}
                         open={modelDropdownOpen}
                         items={modelItems}
                         activeId={currentModel}
@@ -3130,9 +3263,7 @@ export const ChatEditor = memo(
                             : undefined
                         }
                         header={
-                          showReasoningOptions &&
-                          reasoning &&
-                          onSelectReasoningEffort ? (
+                          showReasoningOptions && reasoning ? (
                             <ModelReasoningControls
                               reasoning={reasoning}
                               onSelect={onSelectReasoningEffort}
@@ -3257,8 +3388,8 @@ export const ChatEditor = memo(
                     </button>
                   )}
                 {showToolbarAction('contextUsage') &&
-                  contextWindow > 0 &&
-                  tokenCount > 0 && (
+                  (contextUsageAlwaysVisible ||
+                    (contextWindow > 0 && tokenCount > 0)) && (
                     <TooltipProvider delayDuration={300}>
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -3271,25 +3402,60 @@ export const ChatEditor = memo(
                               onShowContextUsage?.();
                             }}
                             disabled={!onShowContextUsage}
-                            aria-label={t('status.contextUsed', {
-                              pct: ((tokenCount / contextWindow) * 100).toFixed(
-                                1,
-                              ),
-                            })}
+                            aria-label={
+                              contextWindow > 0 && tokenCount > 0
+                                ? t('status.contextUsed', {
+                                    pct: (
+                                      (tokenCount / contextWindow) *
+                                      100
+                                    ).toFixed(1),
+                                  })
+                                : t('contextUsage.title')
+                            }
                           >
                             <span className={styles.toolBtnIcon}>
                               <ContextUsageRing
-                                pct={(tokenCount / contextWindow) * 100}
+                                pct={
+                                  contextWindow > 0
+                                    ? (tokenCount / contextWindow) * 100
+                                    : 0
+                                }
                               />
                             </span>
                           </button>
                         </TooltipTrigger>
                         <TooltipContent side="top">
-                          {formatContextUsageDetail(tokenCount, contextWindow)}
+                          {contextWindow > 0 && tokenCount > 0
+                            ? formatContextUsageDetail(
+                                tokenCount,
+                                contextWindow,
+                              )
+                            : t('contextUsage.title')}
                         </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
                   )}
+                {showCommandAction && (
+                  <button
+                    type="button"
+                    className={`${styles.toolBtn} ${styles.toolBtnCompact}`}
+                    data-web-shell-command-button
+                    aria-label={t('help.shortcut.commandMenu')}
+                    title={t('help.shortcut.commandMenu')}
+                    disabled={disabled}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (!core.openSlashMenu()) {
+                        core.insertText('/');
+                        core.focus();
+                      }
+                    }}
+                  >
+                    <span className={styles.toolBtnIcon}>
+                      <SlashIcon />
+                    </span>
+                  </button>
+                )}
                 {showToolbarAction('voice') && (
                   <>
                     <LiveVoiceButton />

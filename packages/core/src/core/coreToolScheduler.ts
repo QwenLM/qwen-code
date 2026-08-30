@@ -8,18 +8,20 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   ToolExecutionStatus,
+} from './turn.js';
+import type {
   ToolCallConfirmationDetails,
   ToolResult,
   ToolResultDisplay,
-  ToolRegistry,
-  EditorType,
-  Config,
   ToolConfirmationPayload,
   AnyDeclarativeTool,
   AnyToolInvocation,
-  ChatRecordingService,
   ToolArtifact,
-} from '../index.js';
+} from '../tools/tools.js';
+import type { EditorType } from '../utils/editor.js';
+import type { Config } from '../config/config.js';
+import type { ToolRegistry } from '../tools/tool-registry.js';
+import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
@@ -41,20 +43,17 @@ import {
   truncateLlmContent,
   truncateToolOutput,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
-} from '../utils/truncation.js';
+} from '../tools/truncation.js';
 import {
   finalizeToolResponses,
   toolResponseTextLength,
-} from '../utils/tool-response-finalizer.js';
-import {
-  ToolConfirmationOutcome,
-  ApprovalMode,
-  logToolCall,
-  ToolErrorType,
-  ToolCallEvent,
-  InputFormat,
-  Kind,
-} from '../index.js';
+} from '../tools/tool-response-finalizer.js';
+import { ToolConfirmationOutcome, Kind } from '../tools/tools.js';
+import { ApprovalMode } from '../config/approval-mode.js';
+import { logToolCall } from '../telemetry/loggers.js';
+import { ToolCallEvent } from '../telemetry/types.js';
+import { InputFormat } from '../output/types.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import type {
   FunctionResponse,
   FunctionResponsePart,
@@ -66,7 +65,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { resolveToolName } from '../permissions/rule-parser.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
-import { approvedPlanRedactionText } from './geminiChat.js';
+import { approvedPlanRedactionText } from './llm-chat.js';
 import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
@@ -84,7 +83,7 @@ import {
   toolResultBoundaryArtifact,
   toolResultPartDiagnosticValues,
   type ToolResultBoundaryValue,
-} from '../utils/tool-result-boundary-diagnostics.js';
+} from '../tools/tool-result-boundary-diagnostics.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
 import { CONCURRENCY_SAFE_KINDS, isShellProgressData } from '../tools/tools.js';
@@ -93,7 +92,7 @@ import { parsePositiveIntegerEnv } from '../utils/env.js';
 import {
   isAlreadyTruncated,
   persistAndTruncateToolResult,
-} from '../utils/truncation.js';
+} from '../tools/truncation.js';
 import {
   injectPermissionRulesIfMissing,
   persistPermissionOutcome,
@@ -210,6 +209,7 @@ import {
   type ToolInvocationGuard,
 } from './tool-invocation-guard.js';
 import { goalTurnContext } from '../goals/goal-turn-context.js';
+import { goalToolResultProvenance } from '../goals/goal-tool-result-provenance.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -1222,6 +1222,29 @@ interface CoreToolSchedulerOptions {
   onToolResultFullTurnModel?: (model: string) => boolean;
   /** Lets an outer owner suppress a scheduler result it already emitted. */
   shouldObserveProducer?: (callId: string) => boolean;
+  /**
+   * Whether the model this scheduler serves was DECLARED the Skill tool.
+   *
+   * The skill-activation reminder must not announce a skill to a model that
+   * cannot invoke one, and the registry cannot answer that: `SKILL` is
+   * registered unconditionally, including for subagents, while a subagent
+   * running an explicit `tools` list may never have it declared — nor is
+   * being declared sufficient, since a fork can keep a declaration it is
+   * forbidden to execute. An owner that filters either passes its own
+   * predicate here.
+   *
+   * It is NOT the predicate behind the startup `<available_skills>` snapshot,
+   * and the two are independent rather than ordered. The snapshot is decided
+   * before any declarations exist, so it answers from configuration; this
+   * answers from the declarations that were sent. Either can say yes where
+   * the other says no — `tools: ['*'], disallowedTools: ['skill']` announces
+   * at startup and is refused here, while a string list carrying an inline
+   * `skill` declaration is the reverse. Do not reason from one to the other.
+   *
+   * Omitted, the scheduler falls back to the registry, which is correct for
+   * an owner that declares whatever it registers.
+   */
+  hasSkillTool?: () => boolean;
 }
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
@@ -1396,6 +1419,7 @@ export class CoreToolScheduler {
   private chatRecordingService?: ChatRecordingService;
   private onToolResultFullTurnModel?: (model: string) => boolean;
   private shouldObserveProducer: (callId: string) => boolean;
+  private hasSkillToolOverride?: () => boolean;
   private isFinalizingToolCalls = false;
   private postToolBatchEnabledForBatch = false;
   private postToolBatchSpanCallId: string | undefined;
@@ -1473,6 +1497,7 @@ export class CoreToolScheduler {
     this.chatRecordingService = options.chatRecordingService;
     this.onToolResultFullTurnModel = options.onToolResultFullTurnModel;
     this.shouldObserveProducer = options.shouldObserveProducer ?? (() => true);
+    this.hasSkillToolOverride = options.hasSkillTool;
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -2133,7 +2158,7 @@ export class CoreToolScheduler {
 
     // MCP tool whose server is gone / unconfigured: explain in MCP terms
     // instead of falling through to a Levenshtein suggestion that would surface
-    // unrelated tools (e.g. "did you mean computer_use__click?").
+    // unrelated tools (e.g. "did you mean read_file?").
     const mcpMessage = this.getMcpToolUnavailableMessage(unknownToolName);
     if (mcpMessage) {
       return mcpMessage;
@@ -2398,6 +2423,14 @@ export class CoreToolScheduler {
       const requestsToProcess = dedupeRequestsByCallId(
         Array.isArray(request) ? request : [request],
       ).map((item) => ({ ...item, args: structuredClone(item.args) }));
+      if (toolInvocationGuard) {
+        // The intake clone above replaces every request object, and the guard
+        // map is keyed by identity — register the clones too or a turn-scoped
+        // guard is silently dropped before execution.
+        for (const item of requestsToProcess) {
+          this.requestToolInvocationGuards.set(item, toolInvocationGuard);
+        }
+      }
       // args are cloned at intake: callers pass args that may alias the
       // model-emitted functionCall part stored in chat history, and
       // _executeToolCallBody later rewrites PATH_ARG_KEYS on request.args in
@@ -2499,10 +2532,28 @@ export class CoreToolScheduler {
             const matchingRule = pm.findMatchingDenyRule({
               toolName: canonicalName,
             });
-            const ruleInfo = matchingRule
-              ? ` Matching deny rule: "${matchingRule}".`
-              : '';
-            const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.${ruleInfo}`;
+            let permissionErrorMessage: string;
+            if (matchingRule) {
+              permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined. Matching deny rule: "${matchingRule}".`;
+            } else if (
+              // The legacy `coreTools` allowlist (`--core-tools` / settings
+              // `tools.core`) keeps its hard-disable semantic: an unlisted
+              // core tool is never registered (#9827). Attribute the miss
+              // to the real knob — neither `permissions.allow` (pure
+              // auto-approval since #10075) nor `tools.eager` (which only
+              // defers) can reject a call here, so a rejection without a
+              // deny rule points at the coreTools list. The optional call
+              // keeps scoped PermissionManager shims (installed via `as
+              // unknown as PermissionManager`, e.g.
+              // memory-scoped-agent-config.ts) from throwing until they
+              // grow the delegation.
+              typeof pm.isToolDisabledByCoreToolsAllowList === 'function' &&
+              pm.isToolDisabledByCoreToolsAllowList(canonicalName)
+            ) {
+              permissionErrorMessage = `"${reqInfo.name}" is not listed in the active core tools allowlist (--core-tools or settings tools.core), so the tool is not available. Add it to the core tools list to re-enable it.`;
+            } else {
+              permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
+            }
             newToolCalls.push({
               status: 'error',
               request: reqInfo,
@@ -3017,7 +3068,7 @@ export class CoreToolScheduler {
             // fast-path AUTO call.
             const messages =
               this.config
-                .getGeminiClient?.()
+                .getLlmClient?.()
                 ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
             const decision = await runInRequestGoalContext(reqInfo, () =>
               evaluateAutoMode({
@@ -5296,11 +5347,12 @@ export class CoreToolScheduler {
           const activatedSkills =
             await skillManager?.matchAndActivateByPaths(candidatePaths);
           if (activatedSkills && activatedSkills.length > 0 && skillManager) {
-            // Subagents share the parent's SkillManager but may run with a
-            // restricted toolsList that excludes SkillTool. Announcing a skill
-            // such a context can't invoke wastes a turn, so gate on whether the
-            // active registry actually exposes SkillTool to the model.
-            const hasSkillTool = !!this.toolRegistry.getTool(ToolNames.SKILL);
+            // Gate on whether SkillTool was DECLARED to the model — the
+            // registry cannot answer that. See `hasSkillTool` in
+            // `CoreToolSchedulerOptions` for the mechanism and the reason.
+            const hasSkillTool = this.hasSkillToolOverride
+              ? this.hasSkillToolOverride()
+              : !!this.toolRegistry.getTool(ToolNames.SKILL);
             if (hasSkillTool) {
               // Render the just-activated skills with their description/whenToUse
               // (the full listing is no longer in the tool description, so the
@@ -5544,7 +5596,7 @@ export class CoreToolScheduler {
             // throws here and skips the redaction entirely.
             const savedPlan = fsSync.readFileSync(planPath, 'utf-8');
             const redacted = this.config
-              .getGeminiClient?.()
+              .getLlmClient?.()
               ?.getChat()
               .redactApprovedPlanFromHistory(
                 callId,
@@ -6133,6 +6185,15 @@ export class CoreToolScheduler {
 
         this.recordToolResults(completedCalls);
 
+        // Notify observers that the display list is empty before awaiting the
+        // completion callback: the TUI commits the finalized tool_group to
+        // history inside that callback, which may await the entire next model
+        // turn (#9121). Deferring this notify to the finally block pinned the
+        // completed group at the bottom of the virtualized list until the
+        // next tool call arrived (#9420). Placed immediately before the
+        // callback (no await in between) so the clear and the history commit
+        // land in the same React render.
+        this.notifyToolCallsUpdate();
         if (this.onAllToolCallsComplete) {
           await this.onAllToolCallsComplete(completedCalls);
         }
@@ -6264,28 +6325,14 @@ export class CoreToolScheduler {
         error: call.response.error,
         errorType: call.response.errorType,
       };
-      const goalContext = call.request.goalContext;
-      if (!goalContext) {
-        this.chatRecordingService.recordToolResult(
-          call.response.responseParts,
-          result,
-        );
-      } else if (
-        call.request.name === ToolNames.GET_GOAL ||
-        call.request.name === ToolNames.UPDATE_GOAL
-      ) {
-        this.chatRecordingService.recordToolResult(
-          call.response.responseParts,
-          result,
-          { goalContext: { ...goalContext }, provenance: 'goal_runtime' },
-        );
-      } else {
-        this.chatRecordingService.recordToolResult(
-          call.response.responseParts,
-          result,
-          { goalContext: { ...goalContext } },
-        );
-      }
+      const goalProvenance = goalToolResultProvenance(call.request);
+      this.chatRecordingService.recordToolResult(
+        call.response.responseParts,
+        result,
+        // Passed only inside a Goal turn, so recording outside one keeps its
+        // two-argument shape.
+        ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+      );
     }
   }
 
@@ -6382,7 +6429,7 @@ export class CoreToolScheduler {
           const fallback = shouldFallback(denialState);
           const messages =
             this.config
-              .getGeminiClient?.()
+              .getLlmClient?.()
               ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
           const decision = await runInRequestGoalContext(
             pendingTool.request,

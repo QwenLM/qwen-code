@@ -181,7 +181,11 @@ export interface DaemonTurnUsage {
 export interface DaemonUiAssistantUsageEvent extends DaemonUiEventBase {
   type: 'assistant.usage';
   usage: DaemonTurnUsage;
-  /** Set when the usage belongs to a sub-agent round; folded into the parent turn total. */
+  /**
+   * Set for sub-agent usage; folded into its parent tool in compact mode. In
+   * retain mode it is folded into the active top-level assistant block, or
+   * dropped after a tool update has finalized that block.
+   */
   parentToolCallId?: string;
 }
 
@@ -1153,6 +1157,21 @@ export interface DaemonTranscriptReducerOptions {
   onTruncation?: (detail: DaemonTranscriptTruncationDetail) => void;
 }
 
+export interface DaemonTranscriptBlockChangeSummary {
+  /** Opaque identity of the transcript store that produced this summary. */
+  source: object;
+  /** Monotonic version of the store's block projection state. */
+  revision: number;
+  /**
+   * The latest revision that was not a pure append to one streaming tail
+   * block. For summaries from the same source, equal values therefore prove
+   * that every intervening revision was such an append.
+   */
+  tailAppendBarrierRevision: number;
+  /** The streaming tail block changed at this revision, when eligible. */
+  tailBlockId?: string;
+}
+
 export interface DaemonTranscriptTruncationDetail {
   kind: 'blocks' | 'text';
   blockId?: string;
@@ -1185,6 +1204,7 @@ export interface DaemonTranscriptTruncationDetail {
 
 export interface DaemonTranscriptStore {
   getSnapshot(): DaemonTranscriptState;
+  getBlockChangeSummary?(): DaemonTranscriptBlockChangeSummary;
   subscribe(listener: () => void): () => void;
   dispatch(event: DaemonUiEvent | DaemonUiEvent[]): void;
   appendLocalUserMessage(

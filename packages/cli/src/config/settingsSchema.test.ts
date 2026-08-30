@@ -8,15 +8,16 @@ import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
-  MergeStrategy,
   type SettingDefinition,
   type Settings,
   type SettingsSchema,
 } from './settingsSchema.js';
+import { MergeStrategy } from '../utils/deepMerge.js';
 import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
@@ -25,6 +26,21 @@ import {
 
 describe('SettingsSchema', () => {
   describe('getSettingsSchema', () => {
+    it('should describe prompt hooks supported by the runtime', () => {
+      const hookProperties =
+        getSettingsSchema().hooks.properties.PreToolUse.items.properties?.[
+          'hooks'
+        ]?.items?.properties;
+
+      expect(hookProperties?.['type']?.enum).toEqual([
+        'command',
+        'http',
+        'prompt',
+      ]);
+      expect(hookProperties?.['prompt']).toMatchObject({ type: 'string' });
+      expect(hookProperties?.['model']).toMatchObject({ type: 'string' });
+    });
+
     it('should contain all expected top-level settings', () => {
       const expectedSettings: Array<keyof Settings> = [
         'mcpServers',
@@ -87,6 +103,12 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should not expose the removed dynamic command translation setting', () => {
+      expect(getSettingsSchema().general.properties).not.toHaveProperty(
+        'dynamicCommandTranslation',
+      );
+    });
+
     it('should have accessibility nested properties', () => {
       expect(
         getSettingsSchema().ui?.properties?.accessibility?.properties,
@@ -136,6 +158,22 @@ describe('SettingsSchema', () => {
         default: false,
         requiresRestart: true,
         showInDialog: true,
+      });
+    });
+
+    // requiresRestart is load-bearing, not decorative: the Workflow tool is
+    // registered once while the tool registry is built, so a mid-session
+    // toggle would leave the dialog claiming the feature is on while the
+    // tool is absent from the registry.
+    it('should keep dynamic workflows opt-in and restart-scoped', () => {
+      expect(
+        getSettingsSchema().tools.properties.workflowsEnabled,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+        category: 'Tools',
       });
     });
 
@@ -205,6 +243,7 @@ describe('SettingsSchema', () => {
       expect(imageModel.default).toBe('');
       expect(imageModel.requiresRestart).toBe(false);
       expect(imageModel.showInDialog).toBe(false);
+      expect(imageModel.description).toContain('supportsImageGeneration: true');
     });
 
     it('should define the advisor model setting', () => {
@@ -226,6 +265,33 @@ describe('SettingsSchema', () => {
       expect(exploreModel.default).toBe('inherit');
       expect(exploreModel.requiresRestart).toBe(true);
       expect(exploreModel.showInDialog).toBe(false);
+    });
+
+    it('should keep cross-session messaging off by default', () => {
+      // The default is the entire security posture of the feature: shipping
+      // it flipped on would open every session on the box to peer messages.
+      const crossSessionMessaging =
+        getSettingsSchema().agents.properties.crossSessionMessaging;
+
+      expect(crossSessionMessaging.type).toBe('boolean');
+      expect(crossSessionMessaging.default).toBe(false);
+      expect(crossSessionMessaging.requiresRestart).toBe(true);
+      expect(crossSessionMessaging.showInDialog).toBe(false);
+    });
+
+    it('should define the inbound cross-session policy as accept/hold/refuse', () => {
+      const crossSessionInbound =
+        getSettingsSchema().agents.properties.crossSessionInbound;
+
+      expect(crossSessionInbound.type).toBe('enum');
+      // Unset is not a fourth policy: it means approval-mode parity, which
+      // the gate derives. A concrete default here would silence that.
+      expect(crossSessionInbound.default).toBeUndefined();
+      expect(crossSessionInbound.options).toEqual([
+        { value: 'accept', label: 'Accept' },
+        { value: 'hold', label: 'Hold for review' },
+        { value: 'refuse', label: 'Refuse' },
+      ]);
     });
 
     it('should define model grade settings', () => {
@@ -259,6 +325,21 @@ describe('SettingsSchema', () => {
 
       expect(model.maxSessionTurns.type).toBe('integer');
       expect(model.maxToolCallsPerTurn.type).toBe('integer');
+    });
+
+    it('should define streamIdleTimeoutMs as a bounded generation setting', () => {
+      const streamIdleTimeout =
+        getSettingsSchema().model.properties.generationConfig.properties
+          ?.streamIdleTimeoutMs;
+
+      expect(streamIdleTimeout).toMatchObject({
+        type: 'integer',
+        default: undefined,
+        minimum: 0,
+        maximum: 2_147_483_647,
+        requiresRestart: false,
+        showInDialog: false,
+      });
     });
 
     it('should define stopHookBlockingCap schema override as a positive integer', () => {
@@ -578,6 +659,22 @@ describe('SettingsSchema', () => {
         { value: 'tree', label: 'Tree' },
         { value: 'flat', label: 'Flat' },
       ]);
+    });
+
+    it('should allow stream-json as an output.format the runtime honors', () => {
+      // The runtime reads `output.format` from settings.json via
+      // `normalizeOutputFormat`, which returns `OutputFormat.STREAM_JSON` for
+      // `"stream-json"` — a documented, first-class CLI output format. The
+      // settings schema drives VS Code validation of `.qwen/settings.json`, so
+      // it must not reject a value the runtime accepts and runs.
+      const format = getSettingsSchema().output?.properties.format;
+
+      expect(format.type).toBe('enum');
+      const values = format.options?.map((o: { value: string }) => o.value);
+      // Pin the options to the full runtime enum, array-derived (order
+      // included) so a removed, added, or reordered core format fails this
+      // test until the schema follows.
+      expect(values).toEqual(Object.values(OutputFormat));
     });
 
     it('should have loadFromIncludeDirectories setting in schema', () => {

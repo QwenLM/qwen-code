@@ -32,6 +32,8 @@ let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
 let sessionHasActivePromptValue: boolean;
+let queuedPromptStreamingState: string | undefined;
+let queuedPromptSessionHasActivePrompt: boolean | undefined;
 let latestOnSubmit:
   | ((
       text: string,
@@ -66,6 +68,7 @@ const getTasks = vi.fn();
 const getGoal = vi.fn();
 const controlGoal = vi.fn();
 const readAttachment = vi.fn();
+const getContextUsage = vi.fn();
 const daemonActions = {
   sendPrompt,
   submitPermission,
@@ -77,6 +80,7 @@ const daemonActions = {
   getGoal,
   controlGoal,
   readAttachment,
+  getContextUsage,
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
@@ -91,7 +95,7 @@ const latestComposerCoreOptions = vi.hoisted(() => ({
   current: null as Record<string, unknown> | null,
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useActions: () => daemonActions,
   useConnection: () => connectionState,
@@ -141,15 +145,22 @@ vi.mock('../session-catalog/session-catalog-hooks', () => ({
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
-  useQueuedPrompts: () => ({
-    queuedPrompts: queuedPromptsMock,
-    queuedTexts: queuedTextsMock,
-    enqueuePrompt,
-    removeQueuedPrompt,
-    editQueuedPrompt,
-    editLastQueuedPrompt,
-    clearQueuedPrompts,
-  }),
+  useQueuedPrompts: (args: {
+    streamingState: string;
+    sessionHasActivePrompt?: boolean;
+  }) => {
+    queuedPromptStreamingState = args.streamingState;
+    queuedPromptSessionHasActivePrompt = args.sessionHasActivePrompt;
+    return {
+      queuedPrompts: queuedPromptsMock,
+      queuedTexts: queuedTextsMock,
+      enqueuePrompt,
+      removeQueuedPrompt,
+      editQueuedPrompt,
+      editLastQueuedPrompt,
+      clearQueuedPrompts,
+    };
+  },
 }));
 
 let messagesState: any[];
@@ -159,7 +170,7 @@ vi.mock('../hooks/useMessages', () => ({
 }));
 
 vi.mock('../hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptBlocks: () => [],
+  useAnimationFrameTranscriptSnapshot: () => ({ blocks: [] }),
 }));
 
 vi.mock('../adapters/transcriptAdapter', () => ({
@@ -393,10 +404,8 @@ beforeEach(() => {
     workspaceCwd: '/w',
     loadingTranscript: false,
     catchingUp: false,
-    // A loaded session always carries a Goal snapshot (the load falls back to
-    // an idle one when the fetch fails), and the Goal gates fail CLOSED on an
-    // absent one — leaving it out here would model a session that is still
-    // hydrating, not a Goal-less one.
+    // A loaded session normally carries a Goal snapshot; tests that exercise
+    // the hydration window set it back to undefined.
     goalState: { v: 2, activity: 'idle', goal: null },
   };
   streamingStateValue = 'idle';
@@ -406,6 +415,8 @@ beforeEach(() => {
   latestChatEditorProps = undefined;
   renderRealChatEditor = false;
   sessionHasActivePromptValue = false;
+  queuedPromptStreamingState = undefined;
+  queuedPromptSessionHasActivePrompt = undefined;
   latestComposerCoreOptions.current = null;
   latestFollowupAccept = undefined;
   latestMonitorDetailsOnOpen = undefined;
@@ -423,6 +434,10 @@ beforeEach(() => {
   readAttachment.mockResolvedValue({
     data: 'eyJoaSI6IuS9oOWlvSJ9',
     mimeType: 'application/json',
+  });
+  getContextUsage.mockReset();
+  getContextUsage.mockResolvedValue({
+    usage: { totalTokens: 1200, contextWindowSize: 8192 },
   });
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
@@ -608,9 +623,8 @@ describe('ChatPane', () => {
   });
 
   it('offers Insert only while a turn is running', () => {
-    // Between two Goal turns streaming is idle while the hold keeps queued
-    // prompts visible. `insertQueuedPrompt` no-ops at idle, so the affordance
-    // has to disappear with it rather than render a button that does nothing.
+    // `insertQueuedPrompt` no-ops at idle, so the affordance has to disappear
+    // with it rather than render a button that does nothing.
     queuedPromptsMock = [{ id: 1, text: 'held while the Goal runs' } as never];
     connectionState.goalState = {
       v: 2,
@@ -633,6 +647,14 @@ describe('ChatPane', () => {
     expect(testid('pane-queue')?.dataset['canInsertMidTurn']).toBe('false');
 
     act(() => {
+      sessionHasActivePromptValue = true;
+      rerender();
+    });
+
+    expect(testid('pane-queue')?.dataset['canInsertMidTurn']).toBe('true');
+
+    act(() => {
+      sessionHasActivePromptValue = false;
       streamingStateValue = 'responding';
       rerender();
     });
@@ -1331,6 +1353,7 @@ describe('ChatPane', () => {
 
   it('adds no workspace toolbar chip on a single-workspace daemon', () => {
     render({ title: 'Refactor core', workspaceCwd: '/w' });
+    expect(latestChatEditorProps.visibleToolbarActions).toContain('addMenu');
     expect(latestChatEditorProps.visibleToolbarActions).not.toContain(
       'workspace',
     );
@@ -1619,13 +1642,23 @@ describe('ChatPane', () => {
     expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
-  it('holds an idle prompt while the Goal state is still hydrating', () => {
-    // The session load clears `loadingTranscript` before its `goal()` fetch
-    // resolves, so the composer is writable with no snapshot yet. The daemon
-    // has no server-side prompt gate for an active Goal, so a direct send in
-    // that window bypasses the Goal queue outright — fail closed, exactly as
-    // the local hold does.
+  it('sends an idle prompt while the Goal state is still hydrating', () => {
     connectionState = { ...connectionState, goalState: undefined };
+    render();
+
+    act(() =>
+      testid('pane-submit')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('inserts a hydrating prompt while the session is active', () => {
+    connectionState = { ...connectionState, goalState: undefined };
+    streamingStateValue = 'responding';
     render();
 
     act(() =>
@@ -1636,14 +1669,29 @@ describe('ChatPane', () => {
 
     expect(sendPrompt).not.toHaveBeenCalled();
     expect(enqueuePrompt).toHaveBeenCalled();
+    expect(queuedPromptStreamingState).toBe('responding');
+    expect(queuedPromptSessionHasActivePrompt).toBe(false);
+  });
 
-    // ...and the gate reopens once the snapshot lands Goal-less — the window
-    // is a hold, not a lock.
+  it('inserts a prompt before the first stream event reaches the pane', () => {
+    sessionHasActivePromptValue = true;
+    render();
+
+    act(() =>
+      testid('pane-submit')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).toHaveBeenCalled();
+    expect(queuedPromptStreamingState).toBe('idle');
+    expect(queuedPromptSessionHasActivePrompt).toBe(true);
+
+    sendPrompt.mockClear();
+    enqueuePrompt.mockClear();
     act(() => {
-      connectionState = {
-        ...connectionState,
-        goalState: { v: 2, activity: 'idle', goal: null },
-      };
+      sessionHasActivePromptValue = false;
       rerender();
     });
     act(() =>
@@ -1652,8 +1700,66 @@ describe('ChatPane', () => {
       ),
     );
 
+    expect(queuedPromptStreamingState).toBe('idle');
+    expect(queuedPromptSessionHasActivePrompt).toBe(false);
     expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(enqueuePrompt).not.toHaveBeenCalled();
   });
+
+  it('sends an idle prompt when an active Goal is known', () => {
+    connectionState.goalState = {
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active',
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    render();
+
+    act(() =>
+      testid('pane-submit')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+
+    sendPrompt.mockClear();
+    let accepted: boolean | undefined;
+    act(() => {
+      accepted = latestOnSubmit!('/deploy production');
+    });
+    expect(accepted).toBe(false);
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it.each(['idle', 'responding'] as const)(
+    'blocks a forwarded slash command while Goal state is hydrating (%s)',
+    (streamingState) => {
+      streamingStateValue = streamingState;
+      connectionState = { ...connectionState, goalState: undefined };
+      render();
+
+      let accepted: boolean | undefined;
+      act(() => {
+        accepted = latestOnSubmit!('/deploy production');
+      });
+
+      expect(accepted).toBe(false);
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(enqueuePrompt).not.toHaveBeenCalled();
+    },
+  );
 
   it('lets the host handle a slash command', () => {
     const onSlashCommand = vi.fn(() => true);
@@ -1687,6 +1793,27 @@ describe('ChatPane', () => {
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
+  });
+
+  it('queues a forwarded slash command while the pane is running', () => {
+    streamingStateValue = 'responding';
+    const onSlashCommand = vi.fn();
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      '/deploy staging',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Function),
+    );
   });
 
   it('lets the host handle a slash command while the pane is disconnected', () => {
@@ -2402,6 +2529,7 @@ describe('ChatPane', () => {
     expect(renderHeaderActions).toHaveBeenCalledWith({
       sessionId: 'sess-1',
       workspaceCwd: '/work/api',
+      sessionActions: daemonActions,
     });
     expect(testid('host-pane-action')?.textContent).toBe('sess-1:/work/api');
     expect(testid('pane-header-actions')).not.toBeNull();
@@ -2502,11 +2630,42 @@ describe('ChatPane', () => {
     );
   });
 
-  it('enables the interactive composer controls (approval mode, model, voice)', () => {
+  it('enables the interactive composer controls', () => {
+    connectionState.tokenCount = 1200;
+    connectionState.contextWindow = 8192;
     render();
     expect(testid('pane-toolbar')?.textContent).toBe(
-      JSON.stringify(['approvalMode', 'model', 'voice']),
+      JSON.stringify([
+        'addMenu',
+        'approvalMode',
+        'contextUsage',
+        'model',
+        'voice',
+      ]),
     );
+    expect(latestChatEditorProps.tokenCount).toBe(1200);
+    expect(latestChatEditorProps.contextWindow).toBe(8192);
+    expect(latestChatEditorProps.onShowContextUsage).toEqual(
+      expect.any(Function),
+    );
+  });
+
+  it('shows context usage for this pane session', async () => {
+    render();
+
+    await act(async () => {
+      latestChatEditorProps.onShowContextUsage();
+    });
+
+    expect(appendLocalUserMessage).toHaveBeenCalledWith('/context');
+    expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
+    expect(transcriptDispatch).toHaveBeenCalledWith([
+      expect.objectContaining({
+        type: 'status',
+        clearActiveText: false,
+        text: expect.stringContaining('web-shell:context-usage:v1:'),
+      }),
+    ]);
   });
 
   it("lists the pane session's own commands in the slash menu", () => {
@@ -2519,6 +2678,27 @@ describe('ChatPane', () => {
     // 'compress' is daemon-only — so the count is localCount + 1.
     const count = Number(testid('pane-commands')?.textContent);
     expect(count).toBeGreaterThan(30);
+  });
+
+  it("passes the pane session's skills to the add menu", () => {
+    connectionState.skills = ['review'];
+    connectionState.commands = [
+      {
+        name: 'review',
+        description: 'Review code',
+        argumentHint: '[path]',
+        source: 'skill',
+      },
+    ];
+    render();
+
+    expect(latestChatEditorProps.skills).toEqual([
+      {
+        name: 'review',
+        description: 'Review changed code for bugs, security, and quality',
+        argumentHint: '[path]',
+      },
+    ]);
   });
 
   it('hides internal composer models and labels the rest', () => {

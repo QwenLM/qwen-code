@@ -119,7 +119,7 @@ reject_fix() {
   if [[ "${preexisting}" == 'true' ]]; then
     # NOT retryable: the repair agent is only allowed to amend this round's
     # fix, and a failure that exists without the fix is outside that boundary
-    # by definition — the 18-minute repair budget cannot reach it. The remedy
+    # by definition — the 60-minute repair budget cannot reach it. The remedy
     # is a base update (merge main into the branch), not a repair.
     echo "preexisting=true" >> "${GITHUB_OUTPUT}"
   elif [[ "${retryable}" == 'true' ]]; then
@@ -236,7 +236,10 @@ fi
 if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
   echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
   git status --short
-  cat "${WORKDIR}/failure.md"
+  # Agent-written content on step stdout: both workflow-command syntaxes
+  # parse here (`##[` mid-line too — measured on #9761). Same reason
+  # 'Show run artifacts' neutralizes these files.
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/failure.md"
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
   echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
   if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
@@ -247,7 +250,7 @@ fi
 
 if [[ -f "${WORKDIR}/failure.md" ]]; then
   echo "🛑 Agent aborted intentionally:"
-  cat "${WORKDIR}/failure.md"
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/failure.md"
   echo "outcome=failed" >> "${GITHUB_OUTPUT}"
   echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
   if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
@@ -277,7 +280,7 @@ if [[ -s "${WORKDIR}/handoff.md" && -n "$(git status --porcelain)" \
   && "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
   echo "❌ Agent wrote handoff.md after leaving a dirty workspace:"
   git status --short
-  sed 's/::/;;/g' "${WORKDIR}/handoff.md"
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/handoff.md"
   echo "outcome=dirty_handoff" >> "${GITHUB_OUTPUT}"
   echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
   if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
@@ -299,7 +302,7 @@ if [[ -s "${WORKDIR}/handoff.md" && "${committed_rc:-0}" -eq 1 \
   && "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
   echo "❌ Agent wrote handoff.md but the round HAS a commit — a brake violation:"
   git log --oneline "origin/${BRANCH}..${BRANCH}"
-  sed 's/::/;;/g' "${WORKDIR}/handoff.md"
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/handoff.md"
   echo "outcome=committed_handoff" >> "${GITHUB_OUTPUT}"
   echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
   if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
@@ -321,10 +324,11 @@ if git diff --quiet "origin/${BRANCH}...${BRANCH}" \
   && [[ -s "${WORKDIR}/handoff.md" ]] \
   && [[ "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
   echo "🤝 Branch unchanged with a handoff — the agent stopped under instruction and deferred this item to a human:"
-  # Agent-written content: a line-start `::` would be parsed as a workflow
-  # command (::error::, ::add-mask::), the same reason 'Show run artifacts'
-  # neutralizes these files.
-  sed 's/::/;;/g' "${WORKDIR}/handoff.md"
+  # Agent-written content: both workflow-command syntaxes parse on step
+  # stdout — a line-start `::` (::error::, ::add-mask::) AND `##[` even
+  # mid-line (a quoted `##[add-matcher]` fails the step; measured on
+  #9761). The same reason 'Show run artifacts' neutralizes these files.
+  sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/handoff.md"
   echo "outcome=handoff" >> "${GITHUB_OUTPUT}"
   echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
   if [[ "${AUDIT_VERDICT_RECORDED:-false}" == 'true' ]]; then
@@ -586,7 +590,9 @@ if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
   # no-commit handoff was classified before the structural checks above.
   if [[ -s "${WORKDIR}/no-action.md" ]]; then
     echo "🟰 No action needed:"
-    cat "${WORKDIR}/no-action.md"
+    # Both command syntaxes, like every other echo of agent-written files
+    # (`##[` parses mid-line too — #9761).
+    sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/no-action.md"
     echo "verified_head=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
     echo "outcome=noop" >> "${GITHUB_OUTPUT}"
     echo "kiss_audit=${KISS_AUDIT:-false}" >> "${GITHUB_OUTPUT}"
@@ -1047,7 +1053,7 @@ fi
 # a DEFECT-CLAIM round only when resolved-comments.txt marks a finding
 # resolved-in-code whose thread is Critical-tagged or belongs to a
 # CHANGES_REQUESTED review (matched in rc.json/rv.json). Those rounds get a
-# non-retryable rejection on all-green — the 18-minute repair pass cannot
+# non-retryable rejection on all-green — the 60-minute repair pass cannot
 # make a nonexistent defect reproduce; the next full round re-reads the
 # feedback with the evidence in LAST_REJECTION and can decline or escalate
 # instead. Every OTHER src+test round (a refactor pinning existing

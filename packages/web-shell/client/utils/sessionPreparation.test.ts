@@ -16,6 +16,7 @@ function createActions(
     clearSession: vi.fn(async () => {}),
     releaseSession: vi.fn(async () => {}),
     setModel: vi.fn(async () => modelResult),
+    setReasoningEffort: vi.fn(async () => {}),
     ...overrides,
   };
 }
@@ -63,6 +64,88 @@ describe('createAndAttachSessionForPrompt', () => {
     // Model is still a post-create call, sequenced after attach.
     expect(order).toEqual(['create', 'attach', 'model']);
     expect(actions.setModel).toHaveBeenCalledWith('qwen3');
+  });
+
+  it('applies an explicit reasoning effort after the model and before resolving', async () => {
+    const order: string[] = [];
+    const actions = createActions({
+      createSession: vi.fn(async () => {
+        order.push('create');
+        return sessionResult;
+      }),
+      attachSession: vi.fn(async () => {
+        order.push('attach');
+      }),
+      setModel: vi.fn(async () => {
+        order.push('model');
+        return modelResult;
+      }),
+      setReasoningEffort: vi.fn(async () => {
+        order.push('reasoning');
+      }),
+    });
+
+    await prepareSession({
+      sessionActions: actions,
+      modelId: 'qwen3.8-max',
+      reasoningEffort: 'medium',
+    });
+
+    expect(order).toEqual(['create', 'attach', 'model', 'reasoning']);
+    expect(actions.setReasoningEffort).toHaveBeenCalledWith('medium');
+  });
+
+  it('releases and clears the session when an explicit reasoning effort cannot be applied', async () => {
+    const error = new Error('reasoning failed');
+    const warn = vi.fn();
+    const actions = createActions({
+      setReasoningEffort: vi.fn(async () => {
+        throw error;
+      }),
+    });
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3.8-max',
+        reasoningEffort: 'medium',
+        warn,
+      }),
+    ).rejects.toThrow(error);
+
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] failed to set reasoning effort:',
+      error,
+    );
+  });
+
+  it('fails closed when the target model cannot be set for an explicit reasoning effort', async () => {
+    const error = new Error('model failed');
+    const warn = vi.fn();
+    const actions = createActions({
+      setModel: vi.fn(async () => {
+        throw error;
+      }),
+    });
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3.8-max',
+        reasoningEffort: 'medium',
+        warn,
+      }),
+    ).rejects.toThrow(error);
+
+    expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] failed to set model for new session:',
+      error,
+    );
   });
 
   it('omits approvalMode when the mode is not a recognized daemon approval mode', async () => {
@@ -254,6 +337,18 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: '/ws/secondary',
       sourceType: 'default',
+    });
+  });
+
+  it('records the host source type so embedded channels stay attributable', async () => {
+    const actions = createActions();
+    await prepareSession({
+      sessionActions: actions,
+      sessionSourceType: 'vscode',
+    });
+    expect(actions.createSession).toHaveBeenCalledWith({
+      workspaceCwd: undefined,
+      sourceType: 'vscode',
     });
   });
 

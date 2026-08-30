@@ -77,16 +77,34 @@ export interface WriteAuthorizationRequest {
    */
   repo?: string;
   /**
-   * The EFFECTIVE host of the write — where the gh calls will actually route,
-   * including an operator-exported GH_HOST the caller resolved. Absent means
-   * github.com, and the gate compares against that default rather than
-   * skipping the check: a URL-shaped authorisation recorded for an Enterprise
-   * host must not admit a write routed at github.com merely because the
-   * caller omitted --host — and vice versa. (The asymmetric `req.host &&`
-   * guard this replaces bound the host in one direction only; caught by this
+   * The host the caller ASSERTS for the write — the semantics are
+   * caller-dependent, paired with `absentHostFollowsRecording` below.
+   * Callers whose routing falls back to the recorded binding (submit)
+   * pass the caller-typed flag only — never the ambient env: absence is
+   * NOT a github.com claim there, and the pr-url host check is skipped.
+   * Callers whose routing falls back to github.com/ambient
+   * (publish-assets) pass the resolved effective host, including an
+   * operator-exported GH_HOST: absence reads as github.com, and the
+   * gate compares against that default rather than skipping the check —
+   * a URL-shaped authorisation recorded for an Enterprise host must not
+   * admit a write routed at github.com merely because the caller
+   * omitted --host, and vice versa. (The asymmetric `req.host &&` guard
+   * this replaces bound the host in one direction only; caught by this
    * skill's own review.)
    */
   host?: string;
+  /**
+   * True only for callers whose routing FALLS BACK to the recorded
+   * binding when no host is asserted (submit: the gh write binds
+   * explicitHost ?? recordedHost ?? cwdOriginHost). There the recording
+   * cannot contradict the routing it supplies — an absent `host` is NOT
+   * a github.com claim, and the pr-url host check is skipped instead of
+   * reading absence as one (which refused the ordinary flagless publish
+   * of a GHE-recorded review after the whole review ran). publish-assets
+   * leaves this false: its routing falls back to github.com/ambient, so
+   * an absent host IS github.com there and the comparison stands.
+   */
+  absentHostFollowsRecording?: boolean;
 }
 
 /**
@@ -247,6 +265,18 @@ function lookupRecordedHost(
 }
 
 /**
+ * The structural class of a write refusal. The advice at the submit call
+ * site branches on THIS, never on the refusal text: `why` embeds the
+ * operator's verbatim recorded arguments (JSON.stringify of the raw
+ * record), and any marker string can itself appear inside that quoted
+ * record — text that embeds operator input cannot classify itself.
+ */
+export type ReviewWriteRefusalClass =
+  | 'topology'
+  | 'comment-not-requested'
+  | 'unbound';
+
+/**
  * Exactly three things authorise a public write, and all are facts rather than
  * impressions: `--comment` in the arguments the user typed (re-parsed from the
  * CLI's verbatim record), the standing `review.comment` setting, or
@@ -257,6 +287,12 @@ function lookupRecordedHost(
 export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   ok: boolean;
   why: string;
+  /**
+   * The refusal class — present on every refusal, absent on success. See
+   * `ReviewWriteRefusalClass` for why the caller branches on this instead
+   * of matching `why`.
+   */
+  cls?: ReviewWriteRefusalClass;
   /**
    * The host the recorded target names, when it names one: a pr-url target
    * carries it; a bare pr-number supplies a recorded `--host` flag or none.
@@ -325,6 +361,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     // a plain re-run of the review fixes that — typing `--comment` does not.
     return {
       ok: false,
+      cls: req.defaultComment === true ? 'unbound' : 'comment-not-requested',
       why:
         req.defaultComment === true
           ? `no review arguments were recorded at ${path}, so no recorded ` +
@@ -336,16 +373,17 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   }
 
   const verdict = parseReviewArgs(raw, { comment: req.defaultComment });
-  if (!verdict.comment.effective) {
-    // The refusal must name the REAL blocker. When comment was requested —
-    // by the flag or the standing `review.comment` setting — but the target
-    // is not a PR, effective is false because the arguments name no pull
-    // request to bind the write to; blaming a missing `--comment` flag the
-    // operator never typed (and implying typing one would fix it) misdirects.
+  if (!verdict.comment.effective && verdict.topology !== 'minimal') {
+    // When comment was requested — by the flag or the standing
+    // `review.comment` setting — but the target is not a PR, effective is
+    // false because the arguments name no pull request to bind the write to;
+    // blaming a missing `--comment` flag the operator never typed (and
+    // implying typing one would fix it) misdirects.
     const commentRequested =
       verdict.comment.requested || req.defaultComment === true;
     return {
       ok: false,
+      cls: commentRequested ? 'unbound' : 'comment-not-requested',
       why: commentRequested
         ? `the review arguments (${JSON.stringify(raw.trim())}) do not name a ` +
           'pull request, so they cannot authorise posting to one'
@@ -353,6 +391,12 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
           `(${JSON.stringify(raw.trim())})`,
     };
   }
+  // A minimal record falls through to the binding checks below: the refusal
+  // must name the REAL blocker, and the topology is it only when it is the
+  // SOLE one — "re-run the review without it" cannot lift a refusal that a
+  // non-PR target, or another PR's number, repo, or host, still holds, and
+  // leading with the topology sends the operator to re-run into the same
+  // refusal with the binding blocker still unnamed.
 
   const t = verdict.target;
   const authorisedPr =
@@ -360,6 +404,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   if (authorisedPr === undefined) {
     return {
       ok: false,
+      cls: 'unbound',
       why:
         `the review arguments (${JSON.stringify(raw.trim())}) do not name a ` +
         'pull request, so they cannot authorise posting to one',
@@ -368,6 +413,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   if (authorisedPr !== req.pr) {
     return {
       ok: false,
+      cls: 'unbound',
       why:
         `the review arguments authorise pull request #${authorisedPr}, but ` +
         `this submission targets #${req.pr}`,
@@ -379,6 +425,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
       if (authorisedRepo.toLowerCase() !== req.repo.toLowerCase()) {
         return {
           ok: false,
+          cls: 'unbound',
           why:
             `the review arguments authorise ${authorisedRepo}, but this ` +
             `submission targets ${req.repo}`,
@@ -387,22 +434,46 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     }
     // The host check stands on its own, NOT nested under the repo binding —
     // and it binds in BOTH directions: an absent req.host means the write
-    // routes at github.com, which is a host like any other, not an exemption.
+    // routes at github.com, which is a host like any other, not an exemption
+    // — UNLESS the caller's routing follows the recorded binding when no
+    // host is asserted (submit): there the recording supplies the routing
+    // host itself, so absence is not a github.com claim and cannot
+    // contradict the recording. Reading it as one refused the ordinary
+    // flagless publish of a GHE-recorded review after the whole review ran.
     // Hosts compare through hostsEquivalent, not raw equality — Aone is one
     // platform under TWO names (the CR URL records the web host
     // `code.alibaba-inc.com`; the skill's own `--host` rule for Aone targets
     // carries the git host `gitlab.alibaba-inc.com`). Raw equality refused
     // every codereview-URL target that followed that rule — the whole review
     // ran, and the write died at the gate.
+    const hostUnasserted =
+      req.host === undefined && req.absentHostFollowsRecording === true;
     const writeHost = (req.host ?? 'github.com').toLowerCase();
-    if (!hostsEquivalent(t.host.toLowerCase(), writeHost)) {
+    if (!hostUnasserted && !hostsEquivalent(t.host.toLowerCase(), writeHost)) {
       return {
         ok: false,
+        cls: 'unbound',
         why:
           `the review arguments authorise ${t.host}, but this submission ` +
           `targets ${req.host ?? 'github.com'}`,
       };
     }
+  }
+
+  if (!verdict.comment.effective) {
+    // Minimal, and bound to this write on every axis above. When a comment
+    // source was recorded, the parser forced effective false, so the
+    // topology is the sole blocker and its remedy lifts the refusal; when
+    // none was, the topology is still the blocker to name — even a typed
+    // --comment would not lift the refusal while minimal stands.
+    return {
+      ok: false,
+      cls: 'topology',
+      why:
+        `the review arguments (${JSON.stringify(raw.trim())}) ran with ` +
+        '`--topology minimal`, which is terminal-only and cannot authorise ' +
+        'posting — re-run the review without it',
+    };
   }
 
   return {

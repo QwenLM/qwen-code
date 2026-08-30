@@ -46,6 +46,7 @@ describe('executeToolCall', () => {
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getAllowedTools: () => [],
       getSessionId: () => 'test-session-id',
+      getTargetDir: () => '/test/dir',
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getContentGeneratorConfig: () => ({
@@ -63,7 +64,7 @@ describe('executeToolCall', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -145,12 +146,14 @@ describe('executeToolCall', () => {
       { toolInvocationGuard },
     );
 
-    expect(toolInvocationGuard).toHaveBeenCalledWith({
-      callId: request.callId,
-      toolName: request.name,
-      args: request.args,
-      signal: abortController.signal,
-    });
+    expect(toolInvocationGuard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: request.callId,
+        toolName: request.name,
+        args: request.args,
+        signal: abortController.signal,
+      }),
+    );
     expect(executeFn).not.toHaveBeenCalled();
     expect(response).toEqual(
       expect.objectContaining({

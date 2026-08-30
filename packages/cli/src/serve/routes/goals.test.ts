@@ -55,6 +55,7 @@ const activeGoal = (
         evidenceCursor: { recordId: 'cursor-1' },
         turnCount: active.iterations,
         activeTimeMs: 0,
+        tokensUsed: 0,
         createdAt: active.setAt,
         updatedAt: active.setAt,
         ...(active.lastReason ? { lastReason: active.lastReason } : {}),

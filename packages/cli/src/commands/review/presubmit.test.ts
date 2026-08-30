@@ -294,7 +294,7 @@ const {
   writeFileSyncMock,
   writeStdoutLineMock,
   detectPlatformKindMock,
-  mrPresubmitFactsMock,
+  getMrAuthorAndHeadMock,
   ensureAoneAuthMock,
 } = vi.hoisted(() => ({
   ghMock: vi.fn(),
@@ -308,7 +308,7 @@ const {
   writeFileSyncMock: vi.fn(),
   writeStdoutLineMock: vi.fn(),
   detectPlatformKindMock: vi.fn(),
-  mrPresubmitFactsMock: vi.fn(),
+  getMrAuthorAndHeadMock: vi.fn(),
   ensureAoneAuthMock: vi.fn(),
 }));
 
@@ -334,9 +334,18 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
 vi.mock('./lib/platform/registry.js', () => ({
   detectPlatformKind: detectPlatformKindMock,
 }));
-vi.mock('./lib/platform/aone.js', () => ({
-  mrPresubmitFacts: mrPresubmitFactsMock,
-}));
+vi.mock('./lib/platform/aone.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    getMrAuthorAndHead: getMrAuthorAndHeadMock,
+    // An EMPTY MR is this suite's baseline for the backed slices: a
+    // found-but-empty gate list reads no_checks with zero totals (never a
+    // downgrade), and zero comments leave every dedup bucket empty.
+    listMrComments: vi.fn((): unknown[] => []),
+    getMrStatusChecks: vi.fn(() => []),
+  };
+});
 vi.mock('./lib/platform/aone-client.js', () => ({
   ensureAoneAuthenticated: ensureAoneAuthMock,
 }));
@@ -993,6 +1002,23 @@ describe('presubmitCommand', () => {
       commit_id: 'abc123',
       user: { login: 'qwen-code-ci-bot' },
     };
+
+    it('reads the carried id past axis tags placed before it (#10291)', async () => {
+      // The claim head slot admits the tags in any order; a re-post whose
+      // line leads with them must still land in the repost bucket, or it is
+      // dedup-dropped as a plain overlap every round.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** [fails-closed] [new-surface] R3-2: eq-form rescue asymmetry _— model via Qwen Code /review (v0.21.3)_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
 
     it('marks an id-matched overlap comment as a re-post target', async () => {
       const result = await presubmitWithComments(
@@ -1756,10 +1782,12 @@ describe('parseFindingsFile (via mocked fs)', () => {
   });
 });
 
-// The Aone branch (#9616): the SAME report shape, with only the backed
-// slice filled in — self-PR detection (whoami account vs the MR author)
-// and head drift (`sourceBranch` is the live head). CI classification and
-// existing-comment dedup are unbacked and report neutral/empty.
+// The Aone branch (#9616 self-PR, then the full backing): the SAME report
+// shape, computed by the SAME shared writer as the GitHub path — self-PR
+// detection (the gate's whoami account vs the MR author), head drift
+// (`sourceBranch` is the live head), merge-gate classification, and the
+// existing-comment dedup. The empty-input cells of those slices are pinned
+// here; their classification semantics ride presubmit.aone.test.ts.
 describe('presubmitCommand — Aone targets', () => {
   const aoneArgs = {
     _: [],
@@ -1778,7 +1806,7 @@ describe('presubmitCommand — Aone targets', () => {
     ensureAoneAuthMock.mockReturnValue('wenshao');
     // The mr-view fetch returns author + live head in one call; a live head
     // equal to aoneArgs' commit_sha means "no drift" unless a test says so.
-    mrPresubmitFactsMock.mockReturnValue({
+    getMrAuthorAndHeadMock.mockReturnValue({
       author: 'someone-else',
       headSha: 'abc123',
     });
@@ -1818,7 +1846,7 @@ describe('presubmitCommand — Aone targets', () => {
     // same verdict semantics as on GitHub — and on Aone the load-bearing
     // half is downgradeRequestChanges, which keeps a self-review from
     // posting the blocking REQUEST_CHANGES header.
-    mrPresubmitFactsMock.mockReturnValue({
+    getMrAuthorAndHeadMock.mockReturnValue({
       author: 'WenShao',
       headSha: 'abc123',
     });
@@ -1829,8 +1857,11 @@ describe('presubmitCommand — Aone targets', () => {
     expect(result.downgradeReasons).toEqual(['self-PR']);
   });
 
-  it('reports the unbacked slices neutral — no phantom downgrades or blocks', async () => {
-    mrPresubmitFactsMock.mockReturnValue({
+  it('an empty MR reads all-clear through the full backing — no phantom downgrades', async () => {
+    // Both slices are BACKED now (CI classification and comment dedup); an
+    // MR with a found-but-empty gate list and zero comments must still be
+    // the all-clear shape — the backing itself manufactures nothing.
+    getMrAuthorAndHeadMock.mockReturnValue({
       author: 'someone-else',
       headSha: 'abc123',
     });
@@ -1862,7 +1893,7 @@ describe('presubmitCommand — Aone targets', () => {
   it('fails soft when the MR author is absent (deleted account)', async () => {
     // Parity with the GitHub `author: null` test: isSelfPr false, the run
     // completes, and no metadata-unavailable reason fires.
-    mrPresubmitFactsMock.mockReturnValue({ author: '', headSha: 'abc123' });
+    getMrAuthorAndHeadMock.mockReturnValue({ author: '', headSha: 'abc123' });
     const result = await runAonePresubmit();
     expect(result.isSelfPr).toBe(false);
     expect(result.headDrift).toMatchObject({ drifted: false });
@@ -1876,7 +1907,7 @@ describe('presubmitCommand — Aone targets', () => {
     // downgrades someone else's MR as a self-review. House-pinned for the
     // GitHub path's identical guard (#9212's currentUserLogin tests).
     ensureAoneAuthMock.mockReturnValue('');
-    mrPresubmitFactsMock.mockReturnValue({ author: '', headSha: 'abc123' });
+    getMrAuthorAndHeadMock.mockReturnValue({ author: '', headSha: 'abc123' });
     const result = await runAonePresubmit();
     expect(result.isSelfPr).toBe(false);
     expect(result.downgradeApprove).toBe(false);
@@ -1887,14 +1918,14 @@ describe('presubmitCommand — Aone targets', () => {
   it('fails CLOSED when mr view throws — caps the Approve and names it', async () => {
     // A thrown fetch means neither self-PR nor drift could be checked; the
     // run must not proceed as if they passed (GitHub metaUnavailable parity).
-    mrPresubmitFactsMock.mockImplementation(() => {
+    getMrAuthorAndHeadMock.mockImplementation(() => {
       throw new Error('HTTP 502: Bad Gateway');
     });
     const result = await runAonePresubmit();
     expect(result.isSelfPr).toBe(false);
     expect(result.downgradeApprove).toBe(true);
     expect((result.downgradeReasons as string[]).join(' ')).toContain(
-      'MR metadata unavailable',
+      'metadata unavailable',
     );
     // The gate is the ONLY whoami: the fail-closed path pays no account
     // fetch after the thrown mr view — the pre-merge second spawn delayed
@@ -1917,14 +1948,14 @@ describe('presubmitCommand — Aone targets', () => {
       handler(aoneArgs as unknown as Parameters<typeof handler>[0]),
     ).rejects.toThrow(/a1 CLI not found/);
     expect(writeFileSyncMock).not.toHaveBeenCalled();
-    expect(mrPresubmitFactsMock).not.toHaveBeenCalled();
+    expect(getMrAuthorAndHeadMock).not.toHaveBeenCalled();
   });
 
   it('reports head drift with null compare and fail-safe anchor risk', async () => {
     // Under AGit-Flow sourceBranch IS the head; Aone has no compare API, so
     // a drifted head is always anchors-at-risk (findingPaths cannot prove
     // otherwise without a touched-file list).
-    mrPresubmitFactsMock.mockReturnValue({
+    getMrAuthorAndHeadMock.mockReturnValue({
       author: 'someone-else',
       headSha: 'def456',
     });
@@ -1957,7 +1988,7 @@ describe('presubmitCommand — Aone targets', () => {
       ).rejects.toThrow(/expected owner\/repo/);
     }
     expect(writeFileSyncMock).not.toHaveBeenCalled();
-    expect(mrPresubmitFactsMock).not.toHaveBeenCalled();
+    expect(getMrAuthorAndHeadMock).not.toHaveBeenCalled();
   });
 
   it('refuses a non-positive-integer pr_number before any auth or a1 call', async () => {
@@ -1976,30 +2007,7 @@ describe('presubmitCommand — Aone targets', () => {
       ).rejects.toThrow(/pr_number must be a positive integer/);
     }
     expect(ensureAoneAuthMock).not.toHaveBeenCalled();
-    expect(mrPresubmitFactsMock).not.toHaveBeenCalled();
+    expect(getMrAuthorAndHeadMock).not.toHaveBeenCalled();
     expect(writeFileSyncMock).not.toHaveBeenCalled();
-  });
-
-  it('ignores a malformed --new-findings file — nothing consumes it on Aone', async () => {
-    // Both of the file's GitHub consumers are unbacked on Aone (no dedup,
-    // no compare), so a garbage file neither downgrades nor poisons the
-    // report — unlike the GitHub path's findingsFileInvalid.
-    mrPresubmitFactsMock.mockReturnValue({
-      author: 'someone-else',
-      headSha: 'abc123',
-    });
-    readFileSyncMock.mockReturnValue('this is not json');
-    const handler = presubmitCommand.handler;
-    if (!handler) throw new Error('presubmit handler missing');
-    await handler({
-      ...aoneArgs,
-      'new-findings': '/tmp/findings.json',
-    } as unknown as Parameters<typeof handler>[0]);
-    const [, content] = writeFileSyncMock.mock.calls.find(
-      ([path]) => path === '/tmp/presubmit-aone.json',
-    ) ?? [null, null];
-    const result = JSON.parse(String(content));
-    expect(result.findingsFileInvalid).toBe(false);
-    expect(result.downgradeApprove).toBe(false);
   });
 });

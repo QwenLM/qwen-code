@@ -156,6 +156,109 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   Monitor: 'monitor',
   MonitorTool: 'monitor',
 
+  // Send Message tool (teams)
+  send_message: 'send_message',
+  SendMessage: 'send_message',
+  SendMessageTool: 'send_message',
+
+  // Goal tools — the display name of get_goal is "Goal" (see ToolDisplayNames)
+  get_goal: 'get_goal',
+  Goal: 'get_goal',
+  GetGoal: 'get_goal',
+  update_goal: 'update_goal',
+  UpdateGoal: 'update_goal',
+  UpdateGoalTool: 'update_goal',
+
+  // Save Memory tool
+  save_memory: 'save_memory',
+  SaveMemory: 'save_memory',
+  SaveMemoryTool: 'save_memory',
+
+  // Ask User Question tool
+  ask_user_question: 'ask_user_question',
+  AskUserQuestion: 'ask_user_question',
+  AskUserQuestionTool: 'ask_user_question',
+
+  // Cron tools
+  cron_create: 'cron_create',
+  CronCreate: 'cron_create',
+  cron_list: 'cron_list',
+  CronList: 'cron_list',
+  cron_delete: 'cron_delete',
+  CronDelete: 'cron_delete',
+
+  // Loop wakeup tool
+  loop_wakeup: 'loop_wakeup',
+  LoopWakeup: 'loop_wakeup',
+  LoopWakeupTool: 'loop_wakeup',
+
+  // Create Sub Session tool
+  create_sub_session: 'create_sub_session',
+  CreateSubSession: 'create_sub_session',
+  CreateSubSessionTool: 'create_sub_session',
+
+  // List Agents tool
+  list_agents: 'list_agents',
+  ListAgents: 'list_agents',
+  ListAgentsTool: 'list_agents',
+
+  // Task lifecycle tools (teams)
+  task_stop: 'task_stop',
+  TaskStop: 'task_stop',
+  task_create: 'task_create',
+  TaskCreate: 'task_create',
+  task_update: 'task_update',
+  TaskUpdate: 'task_update',
+  task_list: 'task_list',
+  TaskList: 'task_list',
+
+  // Team tools
+  team_create: 'team_create',
+  TeamCreate: 'team_create',
+  team_delete: 'team_delete',
+  TeamDelete: 'team_delete',
+  team_plan_approval: 'team_plan_approval',
+  TeamPlanApproval: 'team_plan_approval',
+
+  // Image generation tool
+  image_gen: 'image_gen',
+  ImageGen: 'image_gen',
+  ImageGenTool: 'image_gen',
+
+  // Tool search tool
+  tool_search: 'tool_search',
+  ToolSearch: 'tool_search',
+  ToolSearchTool: 'tool_search',
+
+  // Structured output (synthetic --json-schema contract)
+  structured_output: 'structured_output',
+  StructuredOutput: 'structured_output',
+
+  // Worktree tools
+  enter_worktree: 'enter_worktree',
+  EnterWorktree: 'enter_worktree',
+  exit_worktree: 'exit_worktree',
+  ExitWorktree: 'exit_worktree',
+
+  // Workflow / artifact tools
+  workflow: 'workflow',
+  Workflow: 'workflow',
+  artifact: 'artifact',
+  Artifact: 'artifact',
+  record_artifact: 'record_artifact',
+  RecordArtifact: 'record_artifact',
+
+  // Report Findings tool
+  report_findings: 'report_findings',
+  ReportFindings: 'report_findings',
+
+  request_shutdown: 'request_shutdown',
+  RequestShutdown: 'request_shutdown',
+
+  // Display image tool
+  display_image: 'display_image',
+  DisplayImage: 'display_image',
+
   // Legacy edit tool name
   replace: 'edit',
 };
@@ -204,7 +307,9 @@ const WEBFETCH_TOOLS = new Set(['web_fetch']);
  * (e.g. MCP tool names are kept as-is).
  */
 export function resolveToolName(rawName: string): string {
-  return TOOL_NAME_ALIASES[rawName] ?? rawName;
+  return Object.hasOwn(TOOL_NAME_ALIASES, rawName)
+    ? TOOL_NAME_ALIASES[rawName]!
+    : rawName;
 }
 
 /**
