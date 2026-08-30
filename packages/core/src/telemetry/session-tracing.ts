@@ -42,6 +42,14 @@ import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { redactUrlCredentials } from '../extension/redaction.js';
 import type { ToolExecutionStatus } from '../core/turn.js';
 import { sessionIdContext } from '../utils/sessionIdContext.js';
+import {
+  cloneContextUsage,
+  CONTEXT_USAGE_ATTRIBUTE,
+  normalizeContextUsage,
+  serializeContextUsage,
+  serializeContextUsageForSpanStart,
+  type ContextUsageV1,
+} from './context-usage.js';
 
 const debugLogger = createDebugLogger('SESSION_TRACING');
 
@@ -67,6 +75,7 @@ export interface StartLLMRequestSpanOptions {
   outputType?: 'text' | 'json' | 'image' | 'speech';
   sessionId?: string;
   userId?: string;
+  contextUsage?: ContextUsageV1;
 }
 
 export interface LLMRequestMetadata {
@@ -158,6 +167,7 @@ interface SpanContext {
   startTime: number;
   lastActivityTime?: number;
   interactionOwner?: SpanContext;
+  contextUsage?: ContextUsageV1;
   attributes: Record<string, string | number | boolean>;
   ended?: boolean;
   type:
@@ -769,6 +779,9 @@ export function startLLMRequestSpanWithContext(
 
   const sessionId = resolveSessionId(parentCtx, options?.sessionId, ctx);
   const userId = resolveGenAiUserId(parentCtx, promptId, options?.userId);
+  const contextUsage = cloneContextUsage(options?.contextUsage);
+  const serializedContextUsage =
+    serializeContextUsageForSpanStart(contextUsage);
   const attributes: Attributes = {
     ...(sessionId ? { 'session.id': sessionId } : {}),
     ...(sessionId ? { 'gen_ai.conversation.id': sessionId } : {}),
@@ -791,6 +804,9 @@ export function startLLMRequestSpanWithContext(
     ...(options?.outputType
       ? { 'gen_ai.output.type': options.outputType }
       : {}),
+    ...(serializedContextUsage
+      ? { [CONTEXT_USAGE_ATTRIBUTE]: serializedContextUsage }
+      : {}),
   };
 
   const sessionContext = setSessionIdOnContext(ctx, sessionId);
@@ -805,6 +821,7 @@ export function startLLMRequestSpanWithContext(
     span,
     startTime: Date.now(),
     ...(interactionParentCtx ? { interactionOwner: interactionParentCtx } : {}),
+    ...(serializedContextUsage && contextUsage ? { contextUsage } : {}),
     attributes: attributes as Record<string, string | number | boolean>,
     type: 'llm_request',
   };
@@ -843,12 +860,21 @@ export function endLLMRequestSpan(
     const endAttributes: Attributes = { duration_ms: duration };
 
     if (metadata) {
-      if (
-        metadata.inputTokens !== undefined &&
-        Number.isSafeInteger(metadata.inputTokens) &&
-        metadata.inputTokens >= 0
-      ) {
-        endAttributes['gen_ai.usage.input_tokens'] = metadata.inputTokens;
+      const inputTokens = metadata.inputTokens;
+      const hasValidInputTokens =
+        inputTokens !== undefined &&
+        Number.isSafeInteger(inputTokens) &&
+        inputTokens >= 0;
+      if (hasValidInputTokens) {
+        endAttributes['gen_ai.usage.input_tokens'] = inputTokens;
+        if (spanCtx.contextUsage) {
+          const normalized = serializeContextUsage(
+            normalizeContextUsage(spanCtx.contextUsage, inputTokens),
+          );
+          if (normalized) {
+            endAttributes[CONTEXT_USAGE_ATTRIBUTE] = normalized;
+          }
+        }
       }
       if (
         metadata.outputTokens !== undefined &&

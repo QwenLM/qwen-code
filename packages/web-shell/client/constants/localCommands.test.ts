@@ -116,10 +116,31 @@ describe('skillDescriptionKey', () => {
     expect(zh(skillDescriptionKey('bugfix')!)).toBe(
       '按先复现流程修复 GitHub issue 中的 bug',
     );
+    expect(skillDescriptionKey('goal-draft')).toBe('skilldesc.goalDraft');
+    expect(en(skillDescriptionKey('goal-draft')!)).toBe(
+      'Turn a fuzzy intention into a verifiable /goal objective',
+    );
+    expect(zh(skillDescriptionKey('goal-draft')!)).toBe(
+      '将模糊意图改写为可验证的 /goal 目标',
+    );
   });
 
   it('returns undefined for an unknown (user) skill', () => {
     expect(skillDescriptionKey('my-personal-skill')).toBeUndefined();
+  });
+});
+
+describe('settings message catalog', () => {
+  it('does not retain translations for the removed dynamic command setting', () => {
+    const removedKeys = [
+      'settings.label.general.dynamicCommandTranslation',
+      'settings.description.general.dynamicCommandTranslation',
+    ];
+
+    for (const key of removedKeys) {
+      expect(zh(key)).toBe(key);
+      expect(en(key)).toBe(key);
+    }
   });
 });
 

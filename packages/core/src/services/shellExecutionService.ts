@@ -27,7 +27,7 @@ import {
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
-import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
+import { getShellContextEnvVars } from './shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 

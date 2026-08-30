@@ -33,8 +33,8 @@ import {
   getSettingDefinition,
   saveModifiedSettings,
   TEST_ONLY,
-} from '../../utils/settingsUtils.js';
-import { OUTPUT_LANGUAGE_AUTO } from '../../utils/languageUtils.js';
+} from '../../config/settingsUtils.js';
+import { OUTPUT_LANGUAGE_AUTO } from '../../i18n/languageUtils.js';
 
 // Mock the VimModeContext
 const mockToggleVimEnabled = vi.fn();
@@ -130,16 +130,16 @@ vi.mock('../contexts/VimModeContext.js', async () => {
   };
 });
 
-vi.mock('../../utils/settingsUtils.js', async () => {
-  const actual = await vi.importActual('../../utils/settingsUtils.js');
+vi.mock('../../config/settingsUtils.js', async () => {
+  const actual = await vi.importActual('../../config/settingsUtils.js');
   return {
     ...actual,
     saveModifiedSettings: vi.fn(),
   };
 });
 
-vi.mock('../../utils/languageUtils.js', async () => {
-  const actual = await vi.importActual('../../utils/languageUtils.js');
+vi.mock('../../i18n/languageUtils.js', async () => {
+  const actual = await vi.importActual('../../i18n/languageUtils.js');
   return {
     ...actual,
     updateOutputLanguageFile: vi.fn(),
@@ -1340,9 +1340,16 @@ describe('SettingsDialog', () => {
 
       // Press Escape to exit
       stdin.write('\u001B');
-      await wait();
-
-      expect(onSelect).toHaveBeenCalledWith(undefined, 'User');
+      await waitFor(
+        () => {
+          expect(onSelect).toHaveBeenCalledWith(undefined, 'User');
+        },
+        {
+          timeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+            ? 10_000
+            : 1_000,
+        },
+      );
 
       unmount();
     });

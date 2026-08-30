@@ -347,6 +347,7 @@
     position: fixed;
     top: 0;
     left: 0;
+    right: 0;
     bottom: 0;
     z-index: 50;
     pointer-events: none;
@@ -453,9 +454,9 @@
   --streaming-label-color: #b794f4;
   --agent-logo-gradient: linear-gradient(
     90deg,
-    #4796e4 0%,
-    #847ace 52%,
-    #c3677f 100%
+    #5b8def 0%,
+    #6d44e8 55%,
+    #a78bfa 100%
   );
   --subtle-bg: rgba(255, 255, 255, 0.04);
   --subtle-bg-strong: rgba(255, 255, 255, 0.06);
@@ -527,9 +528,9 @@
   --streaming-label-color: #7b4ab8;
   --agent-logo-gradient: linear-gradient(
     90deg,
-    #0b66c3 0%,
-    #7357b8 52%,
-    #bd4f67 100%
+    #2563eb 0%,
+    #6d44e8 55%,
+    #7c3aed 100%
   );
   --subtle-bg: rgba(32, 31, 25, 0.05);
   --subtle-bg-strong: rgba(32, 31, 25, 0.08);
@@ -1086,6 +1087,32 @@
   opacity: 0.85;
 }
 
+.queuedPromptFile {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 120px;
+  height: 22px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--muted);
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.queuedPromptFile:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.queuedPromptFile span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .queuedPromptState {
   display: inline-flex;
   align-items: center;
@@ -1168,4 +1195,24 @@
 
 .queuedHint {
   display: none;
+}
+
+.tokenUsageHeaderButton {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.tokenUsageHeaderButton:hover,
+.tokenUsageHeaderButton:focus-visible {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
 }

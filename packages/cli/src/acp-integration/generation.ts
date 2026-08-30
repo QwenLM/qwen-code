@@ -6,7 +6,7 @@
 
 /**
  * Stateless, tool-free generation for the daemon request-scoped SSE endpoint.
- * It deliberately bypasses GeminiChat so neither history nor recording is
+ * It deliberately bypasses LlmChat so neither history nor recording is
  * read or mutated.
  */
 import { getResponseText, type Config } from '@qwen-code/qwen-code-core';

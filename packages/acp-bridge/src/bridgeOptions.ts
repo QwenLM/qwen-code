@@ -15,12 +15,14 @@ import type {
   ApprovalMode,
   DaemonBridgeTelemetryMetrics,
 } from '@qwen-code/qwen-code-core';
+import { MAX_SUB_SESSION_PROMPT_CHARS } from '@qwen-code/qwen-code-core/subSessionConstants';
 import type { ChannelFactory } from './channel.js';
 import type { PermissionPolicy } from './permission.js';
 import type { PermissionAuditPublisher } from './permissionMediator.js';
 import type { ServePreflightCell, ServeWorkspaceEnvStatus } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import type { JournalGrowthSessionLimit } from './replayWindowLimits.js';
+import type { PromptLedgerRecord } from './prompt-ledger.js';
 
 /**
  * Sink for serve-level diagnostic lines (set by the cli daemon logger).
@@ -33,6 +35,26 @@ export type DiagnosticLineSink = (
   line: string,
   level?: 'info' | 'warn' | 'error',
 ) => void;
+
+/**
+ * Append-only sink for the per-session prompt terminal ledger. The bridge
+ * owns only the writes (best-effort, synchronous so the daemon-shutdown
+ * flush lands before process exit); path resolution, reads, and cold-load
+ * reconciliation live in the serve layer, which knows the session storage
+ * layout. Keeping this a bare callable seam means the bridge needs no
+ * filesystem layout knowledge and no core dependency for ledger paths.
+ */
+export interface PromptLedgerSink {
+  appendSync(sessionId: string, record: PromptLedgerRecord): void;
+  /**
+   * Uuid of the transcript's last record right now, or `undefined` when
+   * there is no transcript evidence (fresh session, unreadable file). The
+   * bridge stamps it into the `in_flight` record at admission as the
+   * dispatch marker; best-effort — a failure or absence only degrades
+   * cold-load reconciliation back to its marker-less evidence chain.
+   */
+  transcriptTailUuid?(sessionId: string): string | undefined;
+}
 
 export interface BridgeFreshSessionAdmissionContext {
   readonly operation: 'spawn' | 'load' | 'resume' | 'branch';
@@ -193,6 +215,12 @@ export interface BridgeTelemetry {
  */
 export interface BridgeOptions {
   /**
+   * Runtime-owned directory for persistent session attachment bytes. Daemon
+   * callers provide a workspace-scoped directory under the Qwen runtime temp
+   * root. Direct embedded callers may omit it for process-local storage.
+   */
+  sessionAttachmentsRoot?: string;
+  /**
    * `single` shares one session per workspace across HTTP
    * clients (live-collaboration default); `thread` gives each `spawnOrAttach`
    * call its own session for strict isolation.
@@ -315,18 +343,24 @@ export interface BridgeOptions {
     provider: () => readonly JournalGrowthSessionLimit[],
   ) => () => void;
   /**
-   * Per-`requestPermission` wall clock. After this many ms with
-   * no client vote, the agent's permission promise resolves as
-   * cancelled — the per-session FIFO can drain instead of poisoning
-   * forever on a missing SSE subscriber. Defaults to 5 minutes.
-   * `0` / `Infinity` / non-finite disable the timeout (matches
-   * legacy behavior, NOT recommended).
+   * Per-`requestPermission` wall clock. After this many ms with no client
+   * vote, the agent's permission promise resolves as cancelled. Defaults to
+   * disabled so human permissions and questions wait for an explicit decision
+   * or session lifecycle cancellation.
+   * `0` / `Infinity` / non-finite disable the timeout.
    */
   permissionResponseTimeoutMs?: number;
   /**
+   * When true, load/resume re-hangs a trailing unanswered ask_user_question
+   * via a tracked restore prompt. Default false. Must match the ACP child
+   * `--restore-ask-user-question` extraArg.
+   */
+  restoreAskUserQuestion?: boolean;
+  /**
    * Enables direct daemon shell execution through session shell APIs.
-   * Defaults to false. Callers should turn this on only after the daemon has
-   * bearer auth configured and route layers require a session-bound client id.
+   * Defaults to false. Callers should turn this on only when the daemon has
+   * bearer auth or trusted-loopback operator authority and route layers require
+   * a session-bound client id.
    */
   sessionShellCommandEnabled?: boolean;
   /**
@@ -433,6 +467,17 @@ export interface BridgeOptions {
   statusProvider?: DaemonStatusProvider;
   /** Optional daemon telemetry seam. Omitted callers get no-op spans/logs. */
   telemetry?: BridgeTelemetry;
+  /**
+   * Optional prompt terminal ledger sink. When provided, the bridge appends
+   * an `in_flight` record when a prompt is admitted and a terminal record at
+   * the single `publishPromptTerminal` exit (including the close/kill/
+   * channel-crash/daemon-shutdown flushes), so a restarted daemon can
+   * reconcile dangling prompts on cold session load. Writes are best-effort:
+   * failures are logged to stderr and never block prompt execution or
+   * teardown. Omitted callers keep the pre-existing behavior (no
+   * persistence, cold loads answer "unknown" for pre-restart prompts).
+   */
+  promptLedger?: PromptLedgerSink;
 
   /**
    * Whether ACP text reads are delegated to the client filesystem service.
@@ -559,6 +604,9 @@ export interface BridgeOptions {
    * reports itself unavailable (daemon-only).
    */
   onCreateSubSession?: CreateSubSessionHandler;
+  /** Handles a trusted `cron_create` request to bind a durable task to the
+   * caller's currently executing daemon session. */
+  onCreateCurrentSessionScheduledTask?: CurrentSessionScheduledTaskCreateHandler;
   /** Handles one child-initiated Channel delivery attempt. The bridge
    * authenticates the session and publishes the sanitized result event. */
   onChannelDelivery?: ChannelDeliveryHandler;
@@ -583,9 +631,8 @@ export type ClientMcpMessageSender = (
   | undefined;
 
 /** Ceiling on a sub-session prompt arriving over `extMethod`. The child is a
- * separate process, so this is a trust boundary — mirrors the scheduled-task
- * REST route's `MAX_PROMPT_LENGTH` and the core tool's own client-side check. */
-export const MAX_SUB_SESSION_PROMPT_CHARS = 100_000;
+ * separate process, so this trust boundary keeps its own enforcement. */
+export { MAX_SUB_SESSION_PROMPT_CHARS };
 
 /** Ceiling on the sub-session display name. It is a label — the launcher
  * truncates it to 60 chars for display anyway. */
@@ -606,6 +653,10 @@ export interface CreateSubSessionInfo {
   model?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
+  /** Optional immutable creator attribution for the fresh session. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
   /**
    * The calling session's id. REQUIRED, and authenticated against the
    * connection's owned sessions before it reaches the host — it keys the
@@ -632,6 +683,24 @@ export interface CreateSubSessionResult {
 export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
+
+export interface CurrentSessionScheduledTaskCreateInfo {
+  callerSessionId: string;
+  promptId: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  assertCallerPromptActive: () => void;
+}
+
+export interface CurrentSessionScheduledTaskCreateResult {
+  id: string;
+  cron: string;
+}
+
+export type CurrentSessionScheduledTaskCreateHandler = (
+  info: CurrentSessionScheduledTaskCreateInfo,
+) => Promise<CurrentSessionScheduledTaskCreateResult>;
 
 export const MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS = 32_000;
 

@@ -520,6 +520,7 @@ export default {
   'Tool Output Truncation Lines': 'Lignes de troncature de sortie des outils',
   'Folder Trust': 'Confiance des dossiers',
   'Tool Schema Compliance': 'Conformité Tool Schema',
+  Unset: 'Non défini',
   'Auto (detect from system)': 'Auto (détecter depuis le système)',
   'Auto (follow user input)': "Auto (suivre l'entrée utilisateur)",
   'Auto (detect terminal theme)': 'Auto (détecter le thème du terminal)',
@@ -1186,6 +1187,12 @@ export default {
     "La compression de l'historique du chat n'a pas réduit la taille. Cela peut indiquer des problèmes avec l'invite de compression.",
   'Could not compress chat history due to a token counting error.':
     "Impossible de compresser l'historique du chat en raison d'une erreur de comptage de tokens.",
+  'Could not compress chat history because the compression summary was empty.':
+    "Impossible de compresser l'historique du chat, car le résumé de compression était vide.",
+  'Could not compress chat history because the compression summary was truncated.':
+    "Impossible de compresser l'historique du chat, car le résumé de compression a été tronqué.",
+  'Could not compress chat history due to an API error.':
+    "Impossible de compresser l'historique du chat en raison d'une erreur d'API.",
   // ============================================================================
   // Commandes - Répertoire
   // ============================================================================
@@ -1600,6 +1607,7 @@ export default {
     'rejeté — modifiez la configuration pour réapprouver',
   'Background agent needs approval':
     "L'agent en arrière-plan nécessite une approbation",
+  'from nested agent': "de l'agent imbriqué",
   'Approve or deny the request above':
     'Approuvez ou refusez la demande ci-dessus',
   Running: 'En cours',
