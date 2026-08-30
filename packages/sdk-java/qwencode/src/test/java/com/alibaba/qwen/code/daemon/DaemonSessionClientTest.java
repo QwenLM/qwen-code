@@ -41,6 +41,8 @@ class DaemonSessionClientTest {
     private static final long TIMEOUT_UPPER_BOUND_MILLIS = CI ? 5000 : 900;
     private static final long TIMEOUT_FIXTURE_STALL_MILLIS =
             TIMEOUT_UPPER_BOUND_MILLIS + 1000;
+    private static final Duration STALLED_RESPONSE_REQUEST_TIMEOUT =
+            Duration.ofMillis(CI ? 3000 : 150);
     private static final long NON_BLOCKING_UPPER_BOUND_MILLIS = CI ? 5000 : 500;
     private static final Duration CONNECT_TIMEOUT =
             Duration.ofSeconds(CI ? 60 : 2);
@@ -1284,7 +1286,7 @@ class DaemonSessionClientTest {
         server.createContext("/session/session-1/detach", noContent());
 
         try (DaemonClient daemon = clientBuilder()
-                .requestTimeout(Duration.ofMillis(150)).build();
+                .requestTimeout(STALLED_RESPONSE_REQUEST_TIMEOUT).build();
                 DaemonSessionClient session = daemon.createSession()) {
             long started = System.nanoTime();
             PromptCall call = session.startPrompt(PromptRequest.text("go"),
@@ -1317,7 +1319,7 @@ class DaemonSessionClientTest {
         server.createContext("/session/session-1/detach", noContent());
 
         try (DaemonClient daemon = clientBuilder()
-                .requestTimeout(Duration.ofMillis(150))
+                .requestTimeout(STALLED_RESPONSE_REQUEST_TIMEOUT)
                 .maximumReconnectAttempts(0).build();
                 DaemonSessionClient session = daemon.createSession()) {
             long started = System.nanoTime();
