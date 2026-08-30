@@ -278,7 +278,10 @@ async function drainNonInteractiveQueue(): Promise<void> {
     // exits the context around enqueue and the worker start, and timers
     // registered inside that scope inherit it. A second wrapper here was
     // unreachable defensive code no test could pin (recorded in #9930's
-    // round-4 review); the start-side exit is the single tested choke point.
+    // round-4 review); the single tested choke point is the start-side
+    // sessionIdContext.exit in startNonInteractiveOpenAILogHousekeeping. Any
+    // NEW way into this drain must enter through that exited scope, or it
+    // will start propagating a session id into process-scoped housekeeping.
     try {
       const result = await runOpenAILogCleanup(
         job.target,
