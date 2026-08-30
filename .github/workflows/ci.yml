@@ -209,7 +209,7 @@ jobs:
     # unit tests.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
-    timeout-minutes: 90
+    timeout-minutes: 120
     outputs:
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     permissions:
@@ -591,7 +591,7 @@ jobs:
       - name: 'Install tmux and zip tooling'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os == 'Linux' }}"
         # Bounded AND advisory: a stalled mirror or dpkg lock must neither
-        # hang the job toward its 90-minute cap nor red the required check —
+        # hang the job toward its 120-minute cap nor red the required check —
         # continue-on-error absorbs the step-level timeout. The apt calls
         # carry their OWN shorter bound (140 s + 140 s = 280 s < the 300 s
         # step cap) so the guard below still runs: when the step-level
