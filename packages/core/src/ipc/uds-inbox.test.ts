@@ -629,19 +629,22 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     }
   });
 
-  it('removes a fallback directory holding only dead sockets, never one with anything else', async () => {
+  it('removes dead-socket and old empty fallback directories, but keeps fresh empty directories', async () => {
     const parent = path.join(tmpDir, 'tmp');
     const nonce = (n: string) =>
       path.join(parent, `qwen-socks-${n.repeat(16)}`);
     const dead = nonce('a');
     const mixed = nonce('b');
-    const empty = nonce('c');
+    const freshEmpty = nonce('c');
     const own = nonce('d');
-    for (const d of [dead, mixed, empty, own])
+    const oldEmpty = nonce('e');
+    for (const d of [dead, mixed, freshEmpty, own, oldEmpty])
       await fs.mkdir(d, { recursive: true });
     await fs.writeFile(path.join(dead, '4194303.sock'), '');
     await fs.writeFile(path.join(mixed, '4194303.sock'), '');
     await fs.writeFile(path.join(mixed, 'keep.txt'), '');
+    const old = new Date(Date.now() - 120_000);
+    await fs.utimes(oldEmpty, old, old);
     await fs.mkdir(path.join(parent, 'qwen-socks-notanonce'));
 
     expect(await sweepOrphanSocketDirs(parent, own)).toBe(2);
@@ -649,12 +652,13 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     expect(left).toEqual(
       expect.arrayContaining([
         path.basename(mixed),
+        path.basename(freshEmpty),
         path.basename(own),
         'qwen-socks-notanonce',
       ]),
     );
     expect(left).not.toContain(path.basename(dead));
-    expect(left).not.toContain(path.basename(empty));
+    expect(left).not.toContain(path.basename(oldEmpty));
   });
 
   it('keeps a fallback directory with a listening absent-PID socket', async () => {

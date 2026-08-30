@@ -42,6 +42,14 @@ const debugLogger = createDebugLogger('PEER_IPC');
 const SOCKET_DIR_MODE = 0o700;
 const SOCKET_MODE = 0o600;
 
+// An empty fallback directory may be between mkdir and listen in another
+// session. A normal bind takes milliseconds; a minute keeps that window safe
+// while still letting later sessions collect directories left by a crash.
+const EMPTY_FALLBACK_DIR_GRACE_MS = 60_000;
+
+// Each probe holds a file descriptor until it connects or times out.
+const SWEEP_BATCH_SIZE = 16;
+
 /**
  * Most peers connected at once.
  *
@@ -296,22 +304,24 @@ export async function sweepOrphanSockets(
     return 0;
   }
   let swept = 0;
-  await Promise.all(
-    entries.map(async (name) => {
-      if (!SOCKET_FILENAME.test(name)) return;
-      const fullPath = path.join(dir, name);
-      if (fullPath === selfSocketPath) return;
-      const pid = Number.parseInt(name.slice(0, -'.sock'.length), 10);
-      if (!Number.isInteger(pid) || pid <= 0 || isPidAlive(pid)) return;
-      if (await probePeerSocket(fullPath)) return;
-      try {
-        await fs.unlink(fullPath);
-        swept += 1;
-      } catch {
-        // Raced with another session's sweep, or not ours to remove.
-      }
-    }),
-  );
+  for (let offset = 0; offset < entries.length; offset += SWEEP_BATCH_SIZE) {
+    await Promise.all(
+      entries.slice(offset, offset + SWEEP_BATCH_SIZE).map(async (name) => {
+        if (!SOCKET_FILENAME.test(name)) return;
+        const fullPath = path.join(dir, name);
+        if (fullPath === selfSocketPath) return;
+        const pid = Number.parseInt(name.slice(0, -'.sock'.length), 10);
+        if (!Number.isInteger(pid) || pid <= 0 || isPidAlive(pid)) return;
+        if (await probePeerSocket(fullPath)) return;
+        try {
+          await fs.unlink(fullPath);
+          swept += 1;
+        } catch {
+          // Raced with another session's sweep, or not ours to remove.
+        }
+      }),
+    );
+  }
   if (swept > 0) {
     debugLogger.debug(`swept ${swept} orphaned peer socket(s) from ${dir}`);
   }
@@ -340,30 +350,38 @@ export async function sweepOrphanSocketDirs(
   }
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
   let swept = 0;
-  await Promise.all(
-    entries.map(async (name) => {
-      if (!NONCE_DIRNAME.test(name)) return;
-      const dir = path.join(parent, name);
-      if (dir === selfDir) return;
-      try {
-        const stat = await fs.lstat(dir);
-        if (!stat.isDirectory()) return;
-        if (uid !== null && stat.uid !== uid) return;
-        const files = await fs.readdir(dir);
-        for (const file of files) {
-          if (!SOCKET_FILENAME.test(file)) return;
-          const pid = Number.parseInt(file.slice(0, -'.sock'.length), 10);
-          if (!Number.isInteger(pid) || pid <= 0 || isPidAlive(pid)) return;
-          if (await probePeerSocket(path.join(dir, file))) return;
+  for (let offset = 0; offset < entries.length; offset += SWEEP_BATCH_SIZE) {
+    await Promise.all(
+      entries.slice(offset, offset + SWEEP_BATCH_SIZE).map(async (name) => {
+        if (!NONCE_DIRNAME.test(name)) return;
+        const dir = path.join(parent, name);
+        if (dir === selfDir) return;
+        try {
+          const stat = await fs.lstat(dir);
+          if (!stat.isDirectory()) return;
+          if (uid !== null && stat.uid !== uid) return;
+          const files = await fs.readdir(dir);
+          if (
+            files.length === 0 &&
+            Date.now() - stat.mtimeMs < EMPTY_FALLBACK_DIR_GRACE_MS
+          ) {
+            return;
+          }
+          for (const file of files) {
+            if (!SOCKET_FILENAME.test(file)) return;
+            const pid = Number.parseInt(file.slice(0, -'.sock'.length), 10);
+            if (!Number.isInteger(pid) || pid <= 0 || isPidAlive(pid)) return;
+            if (await probePeerSocket(path.join(dir, file))) return;
+          }
+          for (const file of files) await fs.unlink(path.join(dir, file));
+          await fs.rmdir(dir);
+          swept += 1;
+        } catch {
+          // Raced, or not ours.
         }
-        for (const file of files) await fs.unlink(path.join(dir, file));
-        await fs.rmdir(dir);
-        swept += 1;
-      } catch {
-        // Raced, or not ours.
-      }
-    }),
-  );
+      }),
+    );
+  }
   if (swept > 0) {
     debugLogger.debug(
       `swept ${swept} orphaned peer socket director${swept === 1 ? 'y' : 'ies'} from ${parent}`,

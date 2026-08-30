@@ -189,10 +189,11 @@ export async function sendDeliveryStatus(
  *
  * A full listen backlog (EAGAIN on POSIX, EBUSY on Windows named pipes)
  * counts as alive: the peer is listening but momentarily saturated, which
- * is a busy session, not a dead one. Everything else — including a socket
- * file left behind by a crashed process — is dead, which is the point: a
- * stale socket inode still stats fine, so only a dial can tell the
- * difference.
+ * is a busy session, not a dead one. Local descriptor exhaustion is also
+ * conservative: if this process cannot open the probe, the peer is not
+ * proven dead. Everything else — including a socket file left behind by a
+ * crashed process — is dead, which is the point: a stale socket inode still
+ * stats fine, so only a dial can tell the difference.
  */
 export function probePeerSocket(socketPath: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -214,8 +215,14 @@ export function probePeerSocket(socketPath: string): Promise<boolean> {
     const deadline = setTimeout(() => settle(false), PROBE_TIMEOUT_MS);
     deadline.unref();
     socket.on('connect', () => settle(true));
-    socket.on('error', (error: NodeJS.ErrnoException) =>
-      settle(error.code === 'EAGAIN' || error.code === 'EBUSY'),
-    );
+    socket.on('error', (error: NodeJS.ErrnoException) => {
+      const code = error.code;
+      settle(
+        code === 'EAGAIN' ||
+          code === 'EBUSY' ||
+          code === 'EMFILE' ||
+          code === 'ENFILE',
+      );
+    });
   });
 }
