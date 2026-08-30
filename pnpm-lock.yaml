@@ -1118,9 +1118,6 @@ importers:
       '@qwen-code/web-shell':
         specifier: '*'
         version: link:../web-shell
-      '@qwen-code/webui':
-        specifier: workspace:*
-        version: link:../webui
       cors:
         specifier: ^2.8.5
         version: 2.8.5
@@ -1182,9 +1179,6 @@ importers:
       '@vscode/vsce':
         specifier: ^3.9.2
         version: 3.9.2(supports-color@8.1.1)
-      autoprefixer:
-        specifier: ^10.4.22
-        version: 10.4.22(postcss@8.5.26)
       esbuild:
         specifier: ^0.25.3
         version: 0.25.12
@@ -1197,12 +1191,6 @@ importers:
       npm-run-all2:
         specifier: ^8.0.2
         version: 8.0.4
-      postcss:
-        specifier: ^8.5.6
-        version: 8.5.26
-      tailwindcss:
-        specifier: ^3.4.18
-        version: 3.4.18(tsx@4.20.3)(yaml@2.9.0)
       typescript:
         specifier: 5.8.3
         version: 5.8.3
@@ -1312,9 +1300,6 @@ importers:
       '@qwen-code/sdk':
         specifier: workspace:*
         version: link:../sdk-typescript
-      '@qwen-code/webui':
-        specifier: workspace:*
-        version: link:../webui
       '@tailwindcss/vite':
         specifier: ^4.3.2
         version: 4.3.2(vite@5.4.21(@types/node@22.20.1)(lightningcss@1.32.0))
