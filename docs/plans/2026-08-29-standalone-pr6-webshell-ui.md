@@ -132,12 +132,14 @@ everywhere):
   Goals). Intent is never inferred from an undefined cwd or current state,
   and every real callsite is covered by tests.
 - **Project-scoped New Chat** — `handleNewSession(wsCwd)`
-  (`WebShellSidebar.tsx:5514`) → `createNewSession(workspaceCwd)`;
-  unchanged, pending context `{ kind: 'workspace', cwd }`.
-- **Goals** — `onCreateGoal` (`App.tsx:13223`) allocates through
-  `createNewSession(undefined, { keepView: true })` +
-  `ensureSessionForPrompt`; stays workspace-bound (locked/selected/primary
-  cwd), ignoring any standalone pending context.
+  (`WebShellSidebar.tsx:5514`) → `createNewSession({ kind: 'workspace',
+cwd: wsCwd })` under the new intent contract.
+- **Goals** — `onCreateGoal` (`App.tsx:13223`) first resolves the target
+  cwd exactly as today (locked ?? selected ?? primary), then calls
+  `createNewSession({ kind: 'workspace', cwd: resolved },
+{ keepView: true })` + `ensureSessionForPrompt`; stays workspace-bound,
+  ignoring any standalone pending context. It never passes a bare
+  `undefined` cwd.
 - **Git** — `resolveSessionForWorkspace` (`App.tsx:6661`) and the composer
   git chips (gated by `gitModeEligible`, `App.tsx:6763`); stays
   workspace-bound.
@@ -159,7 +161,15 @@ everywhere):
   bare standalone ID. PR6 disables the global Split View entry for
   non-workspace effective contexts and rejects or sanitizes standalone IDs
   at every seed, URL, storage, and controlled-prop boundary before panes
-  mount. Context-bearing pane descriptors are a follow-up.
+  mount. Because bare ids carry no context, sanitization uses a fail-closed
+  async classifier before panes mount: on a capable daemon, an unmapped id
+  is exact-checked via `getStandaloneSession` — standalone or `creating`
+  ids are rejected, and only a `404` continues through workspace ownership
+  resolution. The classifier has a cancellable pending state, treats lookup
+  errors as rejection, and hands the controlled host the sanitized set so
+  it cannot immediately re-inject a stripped id. Delayed-catalog and
+  controlled-prop tests cover this. Context-bearing pane descriptors are a
+  follow-up.
 - **Context propagation** — `WorkspaceSessionProvider`
   (`components/WorkspaceSessionProvider.tsx`) still passes legacy
   `workspaceCwd` into `DaemonSessionProvider`; PR6 passes the resolved
@@ -288,6 +298,19 @@ connection.sessionContext`) so draft standalone chats hide project
   `isKnownLiveWorkspaceCwd` (`App.tsx:2401-2405`), which already hides
   project UI for the Live runtime; PR6 generalizes it to "current chat is
   not a workspace context".
+- **Composer state is isolated, not just hidden** (review P1/P2): clearing
+  a workspace session preserves `connection.commands`/`skills`, and
+  `createNewSession` with no cwd reloads primary-workspace skills, while
+  `atWorkspaceCwd` falls back to the primary workspace when no session
+  exists — so `useComposerCore` would select workspace-scoped draft and
+  input-history keys and expose project commands/skills in a standalone
+  draft. Commands, skills, `atWorkspaceCwd`, and composer storage identity
+  all derive from the effective product context: a standalone draft skips
+  the workspace skill reload, keeps only local built-in commands before
+  attach, uses a standalone-specific draft/history identity with no primary
+  fallback, and after attach uses only the standalone session's
+  session-supported data. Covered by a workspace→standalone transition test
+  with stale commands, skills, draft, and history snapshots.
 - Component list (`origin/main`): composer workspace selector
   (`components/WorkspaceSelector.tsx`, rendered `ChatEditor.tsx:3116`);
   Git chips/popovers (`GitBranchIndicator`, `GitModePopover`,
@@ -343,9 +366,14 @@ upward through `onSessionIdChange` (`App.tsx:8282`) so `main.tsx` can
   `context` alongside the session id, passes the explicit context through
   `WorkspaceSessionProvider`, and for `context=standalone` suppresses
   provider session loading until exact `getStandaloneSession` lookup
-  selects the route: a summary mounts the provider with
-  `{ kind: 'standalone' }`, not-found shows the existing missing-session
-  UI (`connection.missingSession` → `showMissingSessionState`). It never
+  selects the route: an active summary mounts the provider with
+  `{ kind: 'standalone' }`, while an **archived** summary is never loaded
+  directly (review P1) — `getStandaloneSession` returns active and archived
+  summaries alike, but the daemon rejects load/resume with
+  `session_archived`. The flow renders the archived state, runs Unarchive,
+  verifies the target id in the per-id success array, and only then mounts
+  and loads. Not-found shows the existing missing-session UI
+  (`connection.missingSession` → `showMissingSessionState`). It never
   guesses the primary workspace, and a cold-load test asserts zero
   workspace-load requests.
 - **A `creating` lookup must reach a terminal state** (review P2): the
@@ -402,9 +430,13 @@ Render the typed PR5 state instead of parsing strings:
   new-session actions are therefore blocked while recovery is unresolved.
   The owner-guarded **Check Status** action performs exact lookup with
   transitions for every recovery state: `creating` → bounded polling;
-  `existing` → load and attach the same id; `absent` → an explicit
-  user-triggered retry (never an automatic create); `unknown` → a
-  persistent recovery UI. All four transitions are tested.
+  `existing` → load and attach the same id, branching on `isArchived`
+  first — an archived summary renders the archived state, runs Unarchive,
+  verifies the per-id success array, and only then loads, because the
+  daemon rejects direct loads with `session_archived` (review P1);
+  `absent` → an explicit user-triggered retry (never an automatic create);
+  `unknown` → a persistent recovery UI. All four transitions are tested,
+  including archived summaries on both the cold-link and recovery paths.
 - Delete responses carrying `fileCleanupPending` → non-blocking notice that
   file cleanup will finish automatically; the transcript is already gone.
 
@@ -469,6 +501,15 @@ Unit/component (vitest, `packages/web-shell`):
   unknown) transition correctly, ordinary submission and unconfirmed
   new-session actions are blocked while recovery is unresolved, and no
   automatic re-create ever fires (review P1).
+- Archived exact-lookup summaries are never loaded directly: both the
+  cold-link and outcome-recovery flows branch on `isArchived`, unarchive
+  with per-id success verification, and only then load (review P1).
+- Workspace→standalone draft transition isolates composer commands, skills,
+  `atWorkspaceCwd`, draft, and input history with stale snapshots present
+  (review P1/P2).
+- Split View bare-id classifier: delayed catalogs, standalone/`creating`
+  rejection, only `404` continues to workspace ownership resolution, and a
+  controlled host cannot re-inject sanitized ids (review P1).
 
 E2E (Playwright, `packages/web-shell/client/e2e`):
 
