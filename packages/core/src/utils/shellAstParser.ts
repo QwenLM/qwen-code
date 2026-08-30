@@ -828,14 +828,21 @@ function evaluateGitSafety(args: string[]): ShellCommandSafety {
   if (subcommand === 'remote') {
     const action = rest.find((arg) => !arg.startsWith('-'))?.toLowerCase();
     if (!action) return invokesHelper ? 'unknown' : 'read-only';
-    if (['show', 'get-url'].includes(action))
-      return rest.some((arg) =>
-        /^(?:add|remove|rm|rename|set-branches|set-head|set-url|update|prune)$/i.test(
-          arg,
-        ),
-      ) || invokesHelper
-        ? 'unknown'
-        : 'read-only';
+    const hasBlockedAction = rest.some((arg) =>
+      /^(?:add|remove|rm|rename|set-branches|set-head|set-url|update|prune)$/i.test(
+        arg,
+      ),
+    );
+    if (action === 'show') {
+      const noQuery = rest.some((arg) =>
+        ['-n', '--no-query'].includes(arg.toLowerCase()),
+      );
+      return noQuery && !hasBlockedAction && !invokesHelper
+        ? 'read-only'
+        : 'unknown';
+    }
+    if (action === 'get-url')
+      return hasBlockedAction || invokesHelper ? 'unknown' : 'read-only';
     if (WRITE_GIT_REMOTE_ACTION.test(action)) return 'write';
     if (action === 'prune')
       return rest.some((arg) => ['-n', '--dry-run'].includes(arg))
@@ -1116,9 +1123,13 @@ function localGitConfigMakesCommandUnsafe(
   cwd: string,
 ): boolean {
   let changedDirectory = false;
+  let usesGit = false;
   let usesDiff = false;
-  let usesStatus = false;
   let usesTextconvConsumer = false;
+  let usesFsmonitorConsumer = false;
+  let usesWorktreeFilterConsumer = false;
+  let usesSignatureConsumer = false;
+  let usesPromisorMaterializer = false;
 
   for (const command of collectDescendants(root, new Set(['command']))) {
     const name = getCommandName(command);
@@ -1127,25 +1138,54 @@ function localGitConfigMakesCommandUnsafe(
       continue;
     }
     if (name !== 'git') continue;
-    const subcommand = stripOuterQuotes(
-      getArgumentNodes(command)[0]?.text ?? '',
-    ).toLowerCase();
-    if (!['blame', 'diff', 'log', 'show', 'status'].includes(subcommand))
-      continue;
+
+    const args = getArgumentNodes(command).map((node) =>
+      stripOuterQuotes(node.text),
+    );
+    const subcommand = (args[0] ?? '').toLowerCase();
+    if (!READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) continue;
     if (changedDirectory) return true;
+
+    const rest = args.slice(1);
+    usesGit = true;
     usesDiff ||= subcommand === 'diff';
-    usesStatus ||= subcommand === 'status';
     usesTextconvConsumer ||= ['blame', 'diff', 'log', 'show'].includes(
       subcommand,
     );
+    usesFsmonitorConsumer ||= [
+      'blame',
+      'diff',
+      'grep',
+      'ls-files',
+      'status',
+    ].includes(subcommand);
+    usesWorktreeFilterConsumer ||=
+      ['blame', 'diff', 'status'].includes(subcommand) ||
+      (subcommand === 'ls-files' &&
+        beforeTerminator(rest).some(
+          (arg) => arg === '--modified' || /^-[^-]*m/.test(arg),
+        ));
+    usesSignatureConsumer ||= ['log', 'show'].includes(subcommand);
+    usesPromisorMaterializer ||=
+      ['blame', 'cat-file', 'diff', 'grep', 'show'].includes(subcommand) ||
+      (subcommand === 'log' &&
+        beforeTerminator(rest).some((arg) =>
+          /^(?:-p|--patch(?:=|$)|--stat(?:=|$)|--numstat$|--shortstat$|--dirstat(?:=|$)|--raw$|--name-only$|--name-status$)/.test(
+            arg,
+          ),
+        ));
   }
 
-  if (!usesDiff && !usesStatus && !usesTextconvConsumer) return false;
+  if (!usesGit) return false;
   const risk = getLocalGitConfigRisk(cwd);
   return (
     (usesDiff && (risk.diffExternal || risk.diffDriverCommand)) ||
     (usesTextconvConsumer && risk.diffDriverTextconv) ||
-    (usesStatus && risk.fsmonitor)
+    (usesFsmonitorConsumer && risk.fsmonitor) ||
+    (usesWorktreeFilterConsumer && risk.worktreeFilter) ||
+    risk.pager ||
+    (usesSignatureConsumer && risk.signatureVerifier) ||
+    (usesPromisorMaterializer && risk.promisorRemote)
   );
 }
 
@@ -1160,7 +1200,11 @@ function fallbackGitConfigMakesCommandUnsafe(
     risk.diffExternal ||
     risk.diffDriverCommand ||
     risk.diffDriverTextconv ||
-    risk.fsmonitor
+    risk.fsmonitor ||
+    risk.worktreeFilter ||
+    risk.pager ||
+    risk.signatureVerifier ||
+    risk.promisorRemote
   );
 }
 
