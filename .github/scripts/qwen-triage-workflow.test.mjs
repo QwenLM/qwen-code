@@ -100,7 +100,8 @@ const followupWorkflowPath = join(
   'qwen-issue-followup-bot.yml',
 );
 const followupDoc = parse(readFileSync(followupWorkflowPath, 'utf8'));
-const followupStep = followupDoc.jobs['follow-up-issues'].steps.find(
+const followupJob = followupDoc.jobs['follow-up-issues'];
+const followupStep = followupJob.steps.find(
   (s) => s.name === 'Run Qwen issue follow-up',
 );
 const ciWebShellJob = ciDoc.jobs.web_shell_e2e_smoke;
@@ -593,19 +594,53 @@ describe('qwen-issue-followup-bot.yml: agent settings', () => {
     assertSettingsContract(followupStep, 'the follow-up step');
   });
 
-  it('pins the CLI version instead of following `latest`', () => {
-    // Unknown `with:` inputs are dropped without error, and the 2026-08-15
-    // notarget outage is why the pin exists: without a contract test a
-    // future rename silently reverts the bot to the dist-tag with nothing
-    // red at merge time. resolve-pr's equivalent pin has two tests; this one
-    // keeps the follow-up bot's covered too. The pin governs runners without
-    // `qwen` on PATH — the action's install step skips when the CLI is
-    // already present — so it binds the ubuntu-latest fallback lane; on the
-    // ecs-qwen lane the fleet-installed CLI is authoritative.
+  it('installs the pinned CLI job-locally so the pin binds BOTH lanes', () => {
+    // The action's 'Install Qwen Code' step skips when `qwen` is already on
+    // PATH (verified at the pinned action SHA) — always true on the ecs-qwen
+    // pool this job routes to by default, whose fleet CLI
+    // update-ecs-runner-qwen.yml maintains at `latest`. An input-only pin
+    // never bound that primary lane, so the bot there ran whatever the fleet
+    // update last installed — the exact 2026-08-15 notarget outage class the
+    // pin exists to prevent. The job-local install is prepended to PATH, so
+    // the pinned copy outranks the fleet CLI on ecs-qwen and is the only CLI
+    // on the ubuntu-latest fallback lane; without a contract test a future
+    // edit silently reverts the bot to the fleet dist-tag with nothing red
+    // at merge time.
+    const install = followupJob.steps.find((s) => s.id === 'install_qwen');
+    assert.ok(install, 'the pinned CLI install step must exist');
     assert.match(
-      String(followupStep.with?.qwen_cli_version),
+      String(install.env?.QWEN_CLI_VERSION),
       /^\d+\.\d+\.\d+$/,
-      'the follow-up bot must pin an exact CLI version, not a dist-tag',
+      'the install must pin an exact CLI version, not a dist-tag',
+    );
+    assert.ok(
+      install.run.includes('npm install --prefix') &&
+        install.run.includes('"@qwen-code/qwen-code@${QWEN_CLI_VERSION}"'),
+      'the install must be job-local (--prefix) and pinned to QWEN_CLI_VERSION',
+    );
+    assert.ok(
+      install.run.includes('--registry=https://registry.npmjs.org'),
+      'the install must pin the registry, not the runner npm mirror',
+    );
+    assert.ok(
+      install.run.includes(
+        'echo "${install_dir}/node_modules/.bin" >> "${GITHUB_PATH}"',
+      ),
+      'the job-local bin dir must be prepended to PATH to outrank the fleet CLI',
+    );
+    // PATH prepends apply only to LATER steps, and the action's own install
+    // skips on any `qwen` already on PATH: if the install stops preceding
+    // the action step, the fleet CLI wins on ecs-qwen again.
+    assert.ok(
+      followupJob.steps.indexOf(install) <
+        followupJob.steps.indexOf(followupStep),
+      'the pinned install must run before the action step',
+    );
+    // Single source of truth: the action input is the installed version, so
+    // it can never drift from what actually runs.
+    assert.equal(
+      String(followupStep.with?.qwen_cli_version),
+      '${{ steps.install_qwen.outputs.version }}',
     );
   });
 
