@@ -430,6 +430,10 @@ describe('activate', () => {
       expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
 
       getPermissionRequestId.mockReturnValue(undefined);
+      await acceptHandler!(diffUri);
+      expect(provider.respondToPendingPermission).toHaveBeenCalledWith('allow');
+
+      provider.respondToPendingPermission.mockClear();
       provider.hasPendingPermission.mockReturnValue(false);
       await acceptHandler!(diffUri);
       expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
