@@ -64,7 +64,7 @@ Web Shell owns projection of the final visible assistant message and the public 
 - `TC-11`: listener exceptions do not interrupt subsequent daemon events or listeners.
 - `TC-12`: clearing or replacing a repair episode releases its held settlement once with `transcriptComplete: false`.
 - `TC-13`: degraded catch-up replay and unrecoverable live-journal markers publish with `transcriptComplete: false`.
-- `TC-14`: a terminal after reconnect consumes the restored-active snapshot and allows live or catch-up repair to finish.
+- `TC-14`: a correlated terminal after reconnect consumes the restored-active snapshot and allows live or catch-up repair to finish; a mismatched live terminal neither consumes nor publishes for the restored turn.
 - `TC-15`: a live turn in a Split View pane publishes with that pane's session and final message, while the shared dispatcher suppresses duplicate observation of the primary session.
 
 No visual UI changes are introduced, so browser screenshot validation is not applicable. Package unit tests, build, typecheck, and repository preflight are the delivery gates.

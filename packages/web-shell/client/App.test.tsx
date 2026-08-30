@@ -13178,6 +13178,42 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('retries a shared settlement when the first host delivery throws', async () => {
+    const onAssistantTurnSettled = vi.fn().mockImplementationOnce(() => {
+      throw new Error('host callback failed');
+    });
+    const { container } = renderApp({
+      onAssistantTurnSettled,
+      splitSessionIds: ['session-1'],
+    });
+    await flush();
+
+    expect(() => {
+      act(() => {
+        testState.promptSettledListener?.({
+          sessionId: 'session-1',
+          promptId: 'prompt-shared',
+          outcome: 'completed',
+          eventId: 13,
+          transcriptComplete: true,
+        });
+      });
+    }).toThrow('host callback failed');
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-report-settlement"]',
+        )
+        ?.click();
+    });
+
+    expect(onAssistantTurnSettled).toHaveBeenCalledTimes(2);
+    expect(onAssistantTurnSettled.mock.results).toEqual([
+      expect.objectContaining({ type: 'throw' }),
+      expect.objectContaining({ type: 'return' }),
+    ]);
+  });
+
   it('delivers a settlement observed only by a split provider', async () => {
     const onAssistantTurnSettled = vi.fn();
     const { container } = renderApp({

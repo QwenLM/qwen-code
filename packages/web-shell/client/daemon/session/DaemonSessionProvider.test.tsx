@@ -14015,6 +14015,102 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('marks a live restored-prompt terminal incomplete while an unowned live-journal marker remains', async () => {
+    const terminalDelivered = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-truncated-restored-live',
+      hasActivePrompt: true,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 8,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-1',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'partial restored answer' },
+              },
+            },
+          },
+        ],
+        liveJournal: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              scope: 'live_journal',
+              truncatedEvents: 8,
+              retainedEvents: 2,
+              maxBytes: 1024,
+              maxEvents: 2,
+              fullTranscriptAvailable: true,
+            },
+            id: 9,
+          },
+          {
+            id: 10,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-previous',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'previous retained tail' },
+              },
+            },
+          },
+          {
+            id: 11,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-1',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'current retained tail' },
+              },
+            },
+          },
+        ],
+      },
+      events: async function* terminalEvents() {
+        yield {
+          id: 12,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-1',
+          data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        terminalDelivered.resolve();
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    const settlements: DaemonPromptSettledEvent[] = [];
+    function Harness() {
+      useDaemonPromptSettled((event) => settlements.push(event));
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await terminalDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      expect.objectContaining({
+        sessionId: session.sessionId,
+        promptId: 'prompt-1',
+        outcome: 'completed',
+        transcriptComplete: false,
+      }),
+    ]);
+  });
+
   it('publishes a restored prompt terminal received in a reconnect replay', async () => {
     const ringEvicted = createDeferred<void>();
     const reloaded = createDeferred<void>();
@@ -14215,6 +14311,7 @@ describe('DaemonSessionProvider', () => {
     const reloadedSession = createMockSession({
       sessionId: firstSession.sessionId,
       hasActivePrompt: true,
+      replayDegraded: true,
       replaySnapshot: {
         compactedReplay: [
           {
@@ -14355,6 +14452,23 @@ describe('DaemonSessionProvider', () => {
     const firstSession = createMockSession({
       sessionId: 'session-restored-uncorrelated-terminal',
       hasActivePrompt: true,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 9,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-restored',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'restored partial answer' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
       events: async function* ringEvictedEvents() {
         await ringEvicted.promise;
         yield {
@@ -14443,6 +14557,8 @@ describe('DaemonSessionProvider', () => {
 
   it('preserves restored prompt correlation across degraded reconnect replay', async () => {
     const ringEvicted = createDeferred<void>();
+    const mismatchedTerminalDelivered = createDeferred<void>();
+    const deliverMatchingTerminal = createDeferred<void>();
     const terminalDelivered = createDeferred<void>();
     const firstSession = createMockSession({
       sessionId: 'session-restored-degraded-correlation',
@@ -14494,15 +14610,31 @@ describe('DaemonSessionProvider', () => {
         ],
         liveJournal: [],
       },
-      events: async function* correctTerminal() {
+      events: async function* correctTerminal(
+        options: { signal?: AbortSignal } = {},
+      ) {
         yield {
           id: 12,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-other',
+          data: { promptId: 'prompt-other', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        mismatchedTerminalDelivered.resolve();
+        await deliverMatchingTerminal.promise;
+        yield {
+          id: 13,
           v: 1,
           type: 'turn_complete',
           promptId: 'prompt-correct',
           data: { promptId: 'prompt-correct', stopReason: 'end_turn' },
         } satisfies DaemonEvent;
         terminalDelivered.resolve();
+        await new Promise<void>((resolve) =>
+          options.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        );
       },
     });
     sdkMocks.sessions.push(firstSession, reloadedSession);
@@ -14522,6 +14654,14 @@ describe('DaemonSessionProvider', () => {
     });
     await act(async () => {
       ringEvicted.resolve();
+      await mismatchedTerminalDelivered.promise;
+      await flushPromises();
+    });
+    expect(promptStatus).toBe('streaming');
+    expect(settlements).toEqual([]);
+
+    await act(async () => {
+      deliverMatchingTerminal.resolve();
       await terminalDelivered.promise;
       await flushPromises();
     });
@@ -18271,9 +18411,11 @@ describe('DaemonSessionProvider', () => {
 
   it('publishes authoritative prompt settlements once after terminal transcript commit', async () => {
     const delivered = createDeferred<void>();
-    const listener = vi.fn((_event: DaemonPromptSettledEvent) =>
-      delivered.resolve(),
-    );
+    let blocksAtDelivery: readonly DaemonTranscriptBlock[] = [];
+    const listener = vi.fn((_event: DaemonPromptSettledEvent) => {
+      blocksAtDelivery = store?.getSnapshot().blocks ?? [];
+      delivered.resolve();
+    });
     const terminal: DaemonEvent = {
       id: 4,
       v: 1,
@@ -18336,6 +18478,16 @@ describe('DaemonSessionProvider', () => {
       eventId: 4,
       transcriptComplete: true,
     });
+    expect(blocksAtDelivery).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'before toolfinal answer',
+          streaming: false,
+          promptId: 'prompt-live',
+        }),
+      ]),
+    );
     expect(store?.getSnapshot().blocks).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -18395,6 +18547,13 @@ describe('DaemonSessionProvider', () => {
             promptId: 'prompt-1024',
             data: { promptId: 'prompt-1024', stopReason: 'end_turn' },
           } satisfies DaemonEvent;
+          yield {
+            id: 1029,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-1023',
+            data: { promptId: 'prompt-1023', stopReason: 'end_turn' },
+          } satisfies DaemonEvent;
           streamCompleted.resolve();
         },
       }),
@@ -18428,14 +18587,21 @@ describe('DaemonSessionProvider', () => {
     expect(
       settlements.filter((event) => event.promptId === 'prompt-1024'),
     ).toHaveLength(1);
+    expect(
+      settlements.filter((event) => event.promptId === 'prompt-1023'),
+    ).toHaveLength(1);
   });
 
   it('isolates prompt settlement listener failures', async () => {
     const delivered = createDeferred<void>();
     const failingListener = vi.fn(() => {
-      throw new Error('host callback failed');
+      if (failingListener.mock.calls.length === 1) {
+        throw new Error('host callback failed');
+      }
     });
-    const healthyListener = vi.fn(() => delivered.resolve());
+    const healthyListener = vi.fn(() => {
+      if (healthyListener.mock.calls.length === 2) delivered.resolve();
+    });
     const consoleError = vi
       .spyOn(console, 'error')
       .mockImplementation(() => {});
@@ -18448,6 +18614,13 @@ describe('DaemonSessionProvider', () => {
             type: 'turn_complete',
             promptId: 'prompt-live',
             data: { promptId: 'prompt-live', stopReason: 'end_turn' },
+          } satisfies DaemonEvent;
+          yield {
+            id: 2,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-next',
+            data: { promptId: 'prompt-next', stopReason: 'end_turn' },
           } satisfies DaemonEvent;
         },
       }),
@@ -18466,8 +18639,8 @@ describe('DaemonSessionProvider', () => {
         await flushPromises();
       });
 
-      expect(failingListener).toHaveBeenCalledOnce();
-      expect(healthyListener).toHaveBeenCalledOnce();
+      expect(failingListener).toHaveBeenCalledTimes(2);
+      expect(healthyListener).toHaveBeenCalledTimes(2);
       expect(consoleError).toHaveBeenCalledWith(
         '[DaemonSessionProvider] prompt settlement listener failed',
         expect.objectContaining({ message: 'host callback failed' }),

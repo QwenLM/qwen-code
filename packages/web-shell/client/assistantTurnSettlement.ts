@@ -89,11 +89,19 @@ export function useAssistantTurnSettlementDispatcher(
 ): AssistantTurnSettledHandler {
   const recentKeysRef = useRef(new Set<string>());
   const recentKeyOrderRef = useRef<string[]>([]);
+  const deliveringKeysRef = useRef(new Set<string>());
   return useCallback(
     (event) => {
       if (!onAssistantTurnSettled) return;
       const key = JSON.stringify([event.sessionId, event.promptId]);
-      if (recentKeysRef.current.has(key)) return;
+      if (recentKeysRef.current.has(key) || deliveringKeysRef.current.has(key))
+        return;
+      deliveringKeysRef.current.add(key);
+      try {
+        onAssistantTurnSettled(event);
+      } finally {
+        deliveringKeysRef.current.delete(key);
+      }
       recentKeysRef.current.add(key);
       recentKeyOrderRef.current.push(key);
       while (
@@ -102,7 +110,6 @@ export function useAssistantTurnSettlementDispatcher(
         const oldestKey = recentKeyOrderRef.current.shift();
         if (oldestKey !== undefined) recentKeysRef.current.delete(oldestKey);
       }
-      onAssistantTurnSettled(event);
     },
     [onAssistantTurnSettled],
   );

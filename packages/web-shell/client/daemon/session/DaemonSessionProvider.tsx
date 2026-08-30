@@ -3371,10 +3371,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // exposing settlement to subscribers.
                 flushTranscriptSync();
               }
-              const rawSettlement = promptSettledFromTurnEvent(
-                activeSession.sessionId,
-                event,
-              );
+              const rawSettlement =
+                !restoredActivePrompt ||
+                activePromptSettled ||
+                restoredPromptSettled
+                  ? promptSettledFromTurnEvent(activeSession.sessionId, event)
+                  : undefined;
               const settlement =
                 rawSettlement && restoredPromptReplayDegraded
                   ? { ...rawSettlement, transcriptComplete: false }
@@ -3397,7 +3399,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 queueMicrotask(tryLiveJournalRepair);
               }
               if (settlement && !settlementDelayedForRepair) {
-                publishPromptSettlement(settlement);
+                const committedTranscriptHasLiveJournalMarker = store
+                  .getSnapshot()
+                  .blocks.some(
+                    (block) =>
+                      block.kind === 'status' &&
+                      block.source === 'history_truncated' &&
+                      isRecord(block.data) &&
+                      block.data['scope'] === 'live_journal',
+                  );
+                publishPromptSettlement(
+                  committedTranscriptHasLiveJournalMarker
+                    ? { ...settlement, transcriptComplete: false }
+                    : settlement,
+                );
               }
               // ── state_resync_required handling ──────────────────────
               // Resyncs are transcript recovery signals, not prompt terminal
