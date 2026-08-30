@@ -369,18 +369,11 @@ export class ModelRegistry {
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
   ): void {
-    if (providerProtocolConfig !== undefined) {
-      this.providerProtocolConfig = providerProtocolConfig;
-    }
-
-    // Clear existing user-configured models (preserve qwen-oauth)
-    for (const authType of this.modelsByAuthType.keys()) {
-      if (authType !== AuthType.QWEN_OAUTH) {
-        this.modelsByAuthType.delete(authType);
-      }
-    }
-
-    // Re-register user-configured models under their resolved protocol
-    this.registerProvidersConfig(modelProvidersConfig);
+    const reloaded = new ModelRegistry(
+      modelProvidersConfig,
+      providerProtocolConfig ?? this.providerProtocolConfig,
+    );
+    this.modelsByAuthType = reloaded.modelsByAuthType;
+    this.providerProtocolConfig = reloaded.providerProtocolConfig;
   }
 }

@@ -6,6 +6,7 @@
 # looked healthy by the time anyone ran `df`. Failing BEFORE the heavy step
 # turns that into a clear, retryable gate failure instead of a corrupted
 # half-run; a re-run lands on a host with headroom.
+# Checkout populates this script first, so the gate cannot protect checkout.
 #
 # Usage: check-disk-floor.sh [DIR ...]
 # With no directories, checks GITHUB_WORKSPACE and RUNNER_TEMP.
