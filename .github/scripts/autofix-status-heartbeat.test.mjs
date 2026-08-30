@@ -848,18 +848,24 @@ describe('autofix-status-heartbeat loop', () => {
     });
     const child = startLoop(env);
     try {
-      // Gate on the skip line itself, not a fixed sleep: the loop sleeps
-      // a full interval BEFORE its first tick, so on a loaded runner the
-      // tick's forks land after any small fixed budget, and the sleep
-      // raced startup — a red lane with no product defect. Content, not
-      // existence: `exec >> heartbeat.log` creates the file before any
-      // line is written.
+      // Gate on the skip line's SECOND occurrence, not a fixed sleep: the
+      // loop sleeps a full interval BEFORE its first tick, so on a loaded
+      // runner a fixed budget races startup — a red lane with no product
+      // defect. Content, not existence: `exec >> heartbeat.log` creates the
+      // file before any line is written. Nor the FIRST occurrence: a
+      // fail-open mutant (skip logged, `continue` dropped) writes its fake
+      // gh record two fork+exec chains AFTER the echo, so a gate resolving
+      // on the first line lets the zero-gh-calls assertion land in that
+      // fork-latency window and pass. The second line arrives a full
+      // interval later, restoring the cross-tick observation window.
       const ok = await waitFor(
         () =>
           existsSync(join(workdir, 'heartbeat.log')) &&
-          readFileSync(join(workdir, 'heartbeat.log'), 'utf8').includes(
-            'gh config mint failed; skipping this tick',
-          ),
+          (
+            readFileSync(join(workdir, 'heartbeat.log'), 'utf8').match(
+              /gh config mint failed; skipping this tick/g,
+            ) ?? []
+          ).length >= 2,
         8000,
       );
       assert.ok(ok, 'a failed mint must log a skipped tick');
