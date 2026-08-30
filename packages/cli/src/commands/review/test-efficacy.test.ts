@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   replacementMutantsOf,
@@ -34,6 +34,7 @@ import {
   committedSymlinkProbes,
 } from './test-efficacy.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+import { sanitizedGitEnv } from './lib/worktree.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -46,12 +47,29 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
+// Hermetic git config for every fixture in this file, the same discipline as
+// the sibling integration suites: `sanitizedGitEnv` strips env redirects, but
+// the file scopes stay reachable through $HOME/.gitconfig and /etc/gitconfig.
+// A persistent runner's ambient `core.sparseCheckout` flipped the very
+// semantics the skip-worktree refusal pins — on git 2.39 an active sparse flag
+// makes `checkout --force` clear the bit and read clean — so the refusal never
+// fired and the run died later on a missing vitest.
+let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+
+beforeEach(() => {
+  gitIsolation = isolateHostGitConfig();
+});
+
+afterEach(() => {
+  gitIsolation.dispose();
+});
+
 // The real root `package.json` workspace list.
 const GLOBS = [
   'packages/*',
   'packages/channels/base',
   'packages/channels/telegram',
-  '!packages/desktop',
+  '!packages/desktop-shell',
 ];
 
 describe('isWorkspaceMember', () => {
@@ -77,22 +95,30 @@ describe('isWorkspaceMember', () => {
   });
 
   it('honours a negated glob', () => {
-    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', GLOBS)).toBe(
-      false,
-    );
+    expect(
+      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', GLOBS),
+    ).toBe(false);
   });
 
   it('honours workspace-glob ORDER — a positive after a negation re-includes', () => {
     // npm evaluates the list in order. Filtering all negations first let a
     // negation win wherever it sat, which would file a false `unreachable`.
-    const globs = ['packages/*', '!packages/desktop', 'packages/desktop'];
-    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', globs)).toBe(
-      true,
-    );
-    const reordered = ['packages/*', 'packages/desktop', '!packages/desktop'];
-    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', reordered)).toBe(
-      false,
-    );
+    const globs = [
+      'packages/*',
+      '!packages/desktop-shell',
+      'packages/desktop-shell',
+    ];
+    expect(
+      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', globs),
+    ).toBe(true);
+    const reordered = [
+      'packages/*',
+      'packages/desktop-shell',
+      '!packages/desktop-shell',
+    ];
+    expect(
+      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', reordered),
+    ).toBe(false);
   });
 
   it('does not match a sibling directory by prefix', () => {
@@ -252,7 +278,12 @@ function asCheckout(dir: string): void {
         'core.hooksPath=/dev/null/no-hooks',
         ...args,
       ],
-      { cwd: dir, encoding: 'utf8' },
+      // Sanitized like the guards these fixtures exist to provoke: an
+      // ambient GIT_INDEX_FILE (observed on a persistent runner) makes
+      // add/commit stage into ANOTHER index, and the bit a later
+      // update-index sets locally can never reproduce the state under
+      // test — the fixture must build the same index the guard reads.
+      { cwd: dir, encoding: 'utf8', env: sanitizedGitEnv() },
     );
   git('init', '-q', '-b', 'main', '--template=', '.');
   git('add', '-A');
@@ -444,8 +475,14 @@ describe('committedSymlinkProbes', () => {
     const repo = mkdtempSync(join(tmpdir(), 'qwen-symlink-mode-'));
     const isolation = isolateHostGitConfig();
     try {
+      // Sanitized for the reason asCheckout is: the function under test
+      // reads with a sanitized env, so the fixture must build with one.
       const g = (...args: string[]) =>
-        execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: sanitizedGitEnv(),
+        }).trim();
       g('init', '-q', '-b', 'main');
       g('config', 'user.email', 't@t.t');
       g('config', 'user.name', 't');
@@ -544,8 +581,15 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       // about the oracle, not about that.
       writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
       asCheckout(dir);
+      // With the same sanitized env the guard's own git calls use: an
+      // ambient discovery redirect (a GIT_INDEX_FILE on a persistent runner)
+      // writes the bit into ANOTHER index than the guard reads, the refusal
+      // this test pins never fires, and the mutant run dies later on a
+      // missing vitest instead — the incident this file's isolation
+      // discipline exists for.
       execFileSync('git', ['update-index', '--skip-worktree', 'a.ts'], {
         cwd: dir,
+        env: sanitizedGitEnv(),
       });
       writeFileSync(join(dir, 'a.ts'), 'MUTANT\n');
 

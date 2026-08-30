@@ -89,7 +89,7 @@ vi.mock('../ide/ide-client.js', () => ({
   },
 }));
 vi.mock('../utils/memory-constants.js', () => ({
-  setGeminiMdFilename: vi.fn(),
+  setMemoryFilename: vi.fn(),
 }));
 
 import * as fs from 'node:fs';
@@ -454,7 +454,7 @@ describe('Config.getModelRouteIdentity (#9454 route key)', () => {
     const config = new Config({ ...baseParams });
     await config.refreshAuth(AuthType.USE_GEMINI);
 
-    // Route-scoped caches (e.g. GeminiChat token counts) compare these
+    // Route-scoped caches (e.g. LlmChat token counts) compare these
     // strings for equality — the value must not drift between calls.
     const first = config.getModelRouteIdentity();
     expect(config.getModelRouteIdentity()).toBe(first);
@@ -486,11 +486,13 @@ describe('Config.getModelRouteIdentity (#9454 route key)', () => {
       baseUrl: 'https://route.example/v1',
     } as ContentGeneratorConfig);
     expect(explicit).toMatch(/^route-model@[0-9a-f]{8}$/);
-    expect(config.getModelRouteIdentity('route-model', {
-      model: 'route-model',
-      authType: 'openai',
-      baseUrl: 'https://route.example/v1',
-    } as ContentGeneratorConfig)).toBe(explicit);
+    expect(
+      config.getModelRouteIdentity('route-model', {
+        model: 'route-model',
+        authType: 'openai',
+        baseUrl: 'https://route.example/v1',
+      } as ContentGeneratorConfig),
+    ).toBe(explicit);
   });
 
   it('does not mix the registry base URL into a non-active model identity', async () => {
@@ -523,13 +525,17 @@ describe('Config.getModelRouteIdentity (#9454 route key)', () => {
 
     registrySpy.mockReturnValue('https://registry.example/v1');
     const activeWithRegistry = config.getModelRouteIdentity();
-    const foreignWithRegistry =
-      config.getModelRouteIdentity('foreign-model', foreignGeneratorConfig);
+    const foreignWithRegistry = config.getModelRouteIdentity(
+      'foreign-model',
+      foreignGeneratorConfig,
+    );
 
     registrySpy.mockReturnValue(null);
     const activeWithoutRegistry = config.getModelRouteIdentity();
-    const foreignWithoutRegistry =
-      config.getModelRouteIdentity('foreign-model', foreignGeneratorConfig);
+    const foreignWithoutRegistry = config.getModelRouteIdentity(
+      'foreign-model',
+      foreignGeneratorConfig,
+    );
 
     // The fallback is load-bearing for the ACTIVE model…
     expect(activeWithRegistry).toMatch(/^active-model@[0-9a-f]{8}$/);

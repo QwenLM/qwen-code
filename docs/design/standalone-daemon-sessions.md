@@ -9,9 +9,12 @@ source of truth for the standalone-session design and delivery plan.
 not a documentation-only gate: it keeps this document synchronized while
 delivering the Conversations runtime foundation.
 [PR #9181](https://github.com/QwenLM/qwen-code/pull/9181) is the merged PR1
-implementation of runtime ownership and ordinary-workspace isolation. The
-remaining standalone core, capability, SDK, WebUI, and WebShell work is
-delivered in PR2 through PR6 below.
+implementation of runtime ownership and ordinary-workspace isolation.
+[PR #9341](https://github.com/QwenLM/qwen-code/pull/9341) and
+[PR #9978](https://github.com/QwenLM/qwen-code/pull/9978) are the merged PR2A
+and PR2B implementation of isolation primitives and the internal standalone
+service. The remaining public daemon API, capability, SDK, WebUI, and WebShell
+work is delivered in PR3 through PR6 below.
 
 The design builds on the projectless conversation infrastructure introduced for
 Live Voice. It does not authorize a second projectless runtime, a second session
@@ -272,15 +275,20 @@ junction/reparse escapes, path traversal, non-direct descendants, and identity
 changes are rejected.
 
 Device and inode identity are pinned for both the root and every materialized
-session child for one daemon ownership lifetime. The owner keeps each child's
-validated identity by session ID and compares it before every later use; an
-owned `0700` directory substituted at the same path is still compromised.
-Identity may be established only at first materialization, after a daemon
-restart with no pending deletion journal, or when load, resume, or explicit
-repair recreates a path proven absent while holding the lifecycle coordinator.
-Archive does not reset it, and the normal-to-staged deletion rename preserves
-it. After a restart, a securely recreated root and child at the expected
-canonical paths may be accepted only after recovery journals have been
+session child for one daemon ownership lifetime when the filesystem exposes a
+nonzero inode. The owner keeps each child's validated identity by session ID and
+compares it before every later use; on an inode-verifiable filesystem, an owned
+`0700` directory substituted at the same path is still compromised. FAT/exFAT
+and some SMB filesystems report inode zero. Consistent with the implemented
+identity model, those filesystems explicitly fall back to device, canonical
+path, direct-child shape, owner/mode where available, and link/reparse checks;
+they cannot detect same-path replacement and must not be described as offering
+inode attestation. Identity may be established only at first materialization,
+after a daemon restart with no pending deletion journal, or when load, resume,
+or explicit repair recreates a path proven absent while holding the lifecycle
+coordinator. Archive does not reset it, and the normal-to-staged deletion rename
+preserves it. After a restart, a securely recreated root and child at the
+expected canonical paths may be accepted only after recovery journals have been
 reconciled; the feature does not promise persistent inode attestation across
 clean restarts. Windows validates canonical path and link/reparse behavior
 exposed by the platform without claiming POSIX owner/mode or ACL guarantees.
@@ -487,7 +495,9 @@ the primary runtime.
 The daemon advertises `standalone_sessions_v1` in `GET /capabilities` only when
 the complete manager, service, route, and managed-directory lifecycle dependency
 set is installed, including embedded `createServeApp` configurations. A build
-constant alone is insufficient. PR0 through PR2 do not expose the dedicated
+constant alone is insufficient. The final app evaluates a runtime closure after
+route registration; bootstrap capability snapshots and partial embedded apps
+therefore omit the tag. PR0 through PR2 do not expose the dedicated
 standalone API, capability, SDK, or UI; PR2B does migrate the existing
 projectless Live task path to explicit standalone persistence and private
 directories and atomically applies the source-aware generic mutation
@@ -650,17 +660,19 @@ The SDK generates a UUID before sending the request. Creation proceeds as one
 logical transaction:
 
 1. Strictly validate the request and required UUID.
-2. Ensure cross-daemon ownership, runtime, and secure root.
-3. Under the exclusive lifecycle coordinator, check the deletion-journal
-   namespace for that UUID and run its bounded reconciliation. Continue only
-   after the journal reaches a terminal cleared state. A valid record still
-   pending cleanup returns retryable `409 standalone_session_conflict`; a
-   compromised record returns `409 deletion_recovery_compromised`. Neither case
-   materializes a child. While still holding the coordinator, reserve the UUID
-   daemon-wide across every active runtime bridge, every active and archived
-   transcript catalog, the Live owner index, and in-flight creation. Admission
-   is global, but the new session is created only through the validated
-   Conversations runtime. Any existing owner is a conflict.
+2. Ensure cross-daemon ownership, runtime, and secure root, then await the
+   runtime-generation bounded reconciliation singleflight before acquiring this
+   UUID's lifecycle coordinator.
+3. Under the exclusive lifecycle coordinator, reconcile an exact matching
+   deletion journal. Continue only after it reaches a terminal cleared state. A
+   valid record still pending cleanup returns retryable
+   `409 standalone_session_conflict`; a compromised record returns
+   `409 deletion_recovery_compromised`. Neither case materializes a child. While
+   still holding the coordinator, reserve the UUID daemon-wide across every
+   active runtime bridge, every active and archived transcript catalog, the Live
+   owner index, and in-flight creation. Admission is global, but the new session
+   is created only through the validated Conversations runtime. Any existing
+   owner is a conflict.
 4. Validate and reuse an existing empty child or materialize a new deterministic
    child. A non-empty child without a transcript is a conflict and is never
    adopted or deleted automatically.
@@ -759,11 +771,11 @@ then load; it never retries create automatically.
 ### Load, resume, prompt, and repair
 
 Load and resume first validate source ownership, root, and deterministic child.
-Before shared load admission or any missing-child recreation, they check for a
-pending deletion journal. If one exists, the daemon runs bounded reconciliation
-under the exclusive lifecycle coordinator; it never recreates the normal child
-while the journal remains. A non-terminal or compromised recovery returns its
-structured deletion error instead of loading the session.
+Before per-session admission or any missing-child recreation, they await the
+runtime-generation bounded reconciliation singleflight, acquire exclusive
+admission, and reconcile an exact pending deletion journal. They never recreate
+the normal child while the journal remains. A non-terminal or compromised
+recovery returns its structured deletion error instead of loading the session.
 If the child is absent, the daemon recreates it at the same path, relocates the
 session, and returns `workingDirectory.state: "recreated"` with a warning that
 deleted files were not recovered. This recreation holds the lifecycle
@@ -853,27 +865,37 @@ directory.
 ### Deletion transaction
 
 WebShell retains its second confirmation and explains that deletion removes the
-transcript and private files. The daemon then acquires the exclusive lifecycle
-coordinator and writer lease, closes prompt admission, and tears down active
-ownership before changing either the directory or transcript.
+transcript and private files. The daemon acquires the exclusive lifecycle
+coordinator, closes prompt admission, and tears down active ownership before
+acquiring the writer lease or changing either the directory or transcript. It
+never waits for active bridge work while holding the writer lease.
 
 Deletion uses a small durable recovery journal beside the stable Conversations
 owner record in an owner-only user-global namespace independent of
-`QWEN_RUNTIME_DIR` and project runtime bases. Each atomically written record has
-a bounded schema containing the session ID, expected directory hash,
-transaction phase, validated Conversations-root canonical/device/inode
-identity, the exact normal and staged canonical paths, and the validated
-child's device/inode identity captured before rename when a child exists. The
-atomic rename preserves that identity, so either path can be matched after a
-crash between rename and the staged-phase journal write. Recovery must match
-the recorded root and applicable child identity before destructive file
-cleanup; an identity mismatch or an unprovable identity fails closed and leaves
-files untouched.
+`QWEN_RUNTIME_DIR` and project runtime bases. A transaction has immutable
+`prepared` and, after directory staging, `staged` phase files. Each phase is
+atomically written to a previously absent final name; `staged` supplements
+rather than replaces `prepared`, avoiding an unlink-to-replace gap on Windows.
+Each bounded record contains the session ID, transaction phase, validated
+authoritative storage spelling, pre-delete active/archive transcript location,
+validated Conversations-root canonical/device/inode identity, the exact
+deterministic normal and staged child names, and the validated child's device/inode
+identity captured before rename when a child exists. Recovery derives the only
+allowed direct-child paths from the recorded canonical root and those validated
+names; it never follows an arbitrary serialized child path. The storage spelling
+must case-normalize to the canonical request UUID and remains the cleanup key
+after transcript unlink removes the only rediscoverable copy of that spelling.
+The atomic rename preserves directory identity, so the prepared evidence plus
+physical state remains sufficient after a crash between rename and the
+staged-phase write. Recovery must match the recorded root and applicable child
+identity using the existing inode-verifiable or documented reduced filesystem
+guarantee before destructive file cleanup; an identity mismatch fails closed
+and leaves files untouched.
 
 If both normal and staged children are absent, record that state, delete the
-transcript, and clear the journal. Missing files do not block transcript
-deletion. If either path exists but fails validation, stop before transcript
-mutation.
+transcript, perform idempotent post-commit cleanup, and clear the journal.
+Missing files do not block transcript deletion. If either path exists but fails
+validation, stop before transcript mutation.
 
 1. If the session has active ownership, wait for its prompt to settle or cancel,
    close its ACP session in the shared Conversations child, and remove its live
@@ -881,73 +903,81 @@ mutation.
 2. Revalidate owner, root, source, transcript, normal child, and absence of
    conflicting staged state.
 3. Persist a prepared deletion record, including the validated normal child's
-   identity and exact normal/staged paths when the child exists.
+   identity and deterministic normal/staged names when the child exists, plus the
+   authoritative transcript spelling and active/archive location.
 4. If the normal child exists, atomically rename it to the exact `.deleting`
-   sibling and atomically advance the journal to the staged phase. Transcript
-   deletion cannot start until that phase is durable. If the phase update
-   fails, restore the child before clearing the journal; interruption leaves a
-   prepared record whose pre-rename child identity safely drives recovery.
-5. Delete the active or archived transcript and its sidecars.
-6. If deletion reports an error, re-read the transcript and all sidecar state
-   under the writer lease. Only a fully intact set permits restoring the normal
-   child first and clearing the journal last, followed by retryable
-   `500 transcript_deletion_failed` with the session intact. A fully absent set
-   commits transcript deletion and continues to step 7. Partial or unknown
-   state retains the journal and staged child and returns
-   `transcript_deletion_outcome_unknown`; recovery must reconcile it before any
-   rollback or recursive cleanup. If restoring a fully intact set fails, leave
-   both journal and staged child for repair and return
-   `working_directory_recovery_failed`. If both children were already absent,
-   retain the journal on intact, partial, or unknown deletion failure so an
-   exact retry or bounded reconciliation can finish the authorized deletion.
-7. If transcript deletion succeeds, recursively remove only the exact validated
-   staged child, then clear the journal.
+   sibling and write the immutable staged phase. Transcript deletion cannot
+   start until that phase is durable. If the staged write fails, restore the
+   child before clearing prepared evidence; interruption leaves a prepared
+   record whose pre-rename identity plus physical state drives recovery.
+5. Unlink the one accepted active or archived transcript. This unlink is the
+   logical deletion commit point; sidecars remain retryable post-commit cleanup.
+6. If unlink reports an error, re-read authoritative transcript location under
+   the writer lease. An intact transcript permits restoring the staged child
+   first and clearing the journal last, followed by retryable
+   `500 transcript_deletion_failed`. An absent transcript means deletion
+   committed and cleanup continues. Conflicted, unreadable, or unprovable state
+   retains the journal and directory state and returns
+   `transcript_deletion_outcome_unknown`. A failed restore retains both phase
+   evidence and the staged child and returns
+   `working_directory_recovery_failed`.
+7. After commit, idempotently remove transcript sidecars, bridge attachments,
+   and only the exact validated staged child. Clear `staged` first and
+   `prepared` last only after all cleanup succeeds.
 
 Final removal failure does not resurrect the transcript. Return the session ID
 in `fileCleanupPending` and retain the journal so an exact retry or bounded
 reconciliation can resume cleanup.
 
-Reconciliation has explicit reachable entry points. The first successful
-Conversations ownership acquisition in a daemon lifetime runs a bounded pass
-over deletion-journal records after secure-root validation and before standalone
-route admission; this does not initialize Conversations while Live and
-standalone are unused. Each record is reconciled under its exclusive lifecycle
-coordinator and the transcript writer lease. A delete retry containing that exact
-session ID checks for a matching journal before mapping an absent transcript to
-`notFound`; if no session in another context owns the UUID, a valid record resumes
-the authorized deletion and returns the session ID in `removed` after terminal
-cleanup. Creation checks and reconciles the same UUID before reservation, and
-load, resume, or repair of an existing transcript checks before normal child
-validation or recreation. A startup pass that reaches its fixed safety bound
-leaves remaining records untouched and reachable through a singleton delete
-retry; it never guesses from staged-looking directories. A non-terminal or
-compromised record is isolated to its UUID: the pass records the structured
-error, leaves that record untouched, and continues without blocking unrelated
-standalone sessions.
+Reconciliation has explicit reachable entry points. The first mutating, load,
+resume, or repair operation after successful Conversations ownership acquisition
+starts one runtime-generation singleflight for a bounded pass over deletion
+journal records after secure-root validation. The caller awaits this pass before
+acquiring its requested session lifecycle lock. The pass sorts canonical IDs
+and holds only one record's exclusive lifecycle coordinator and transcript
+writer lease at a time; it never runs while a caller-specific session lock is
+held. This does not initialize Conversations while Live and standalone are
+unused. Read-only get and export inspect but never reconcile a matching record.
+List validates only returned page items, taking shared admission for one UUID at
+a time, and omits journaled or no-longer-valid entries. A delete retry containing
+that exact session ID checks for a matching journal before mapping an absent
+transcript to `notFound`; if no session in another context owns the UUID, a valid
+record resumes the authorized deletion and returns the session ID in `removed`.
+Creation, load, resume, repair, and exact delete then always reconcile their
+requested UUID inside its exclusive admission even after the bounded pass
+reaches its fixed safety limit. The pass never guesses from staged-looking
+directories. A non-terminal or compromised record is isolated to its UUID: the
+pass records the structured error, leaves that record untouched, and continues
+without blocking unrelated standalone sessions.
+
+Before a valid record authorizes directory or attachment cleanup, recovery
+rechecks every runtime and live owner for the canonical UUID. A project, Live,
+child, conflicting transcript spelling, or foreign bridge entry that appeared
+outside the standalone lifecycle makes the record compromised and leaves every
+file untouched. Durable deletion evidence authorizes cleanup of the deleted
+standalone incarnation only; it never authorizes mutation of a later owner.
 
 Recovery considers active and archived transcripts and every Conversations
 source before destructive cleanup:
 
-- Transcript and sidecars are fully intact, journal valid, staged exists, normal
-  absent, and the recorded root/child identities match: restore staged to normal
-  first and clear the journal last, regardless of whether the durable phase is
-  prepared or staged.
-- Transcript and sidecars are fully intact, journal valid, normal exists, staged
-  absent, and the recorded root/child identities match: clear the journal
-  without touching the directory, regardless of whether its durable phase is
-  prepared or staged.
-- Transcript and sidecars are fully intact, journal valid, and both directories
-  absent: finish transcript deletion and clear the journal. An intact deletion
-  failure retains the journal and reports `transcript_deletion_failed` for a
-  later exact retry or bounded reconciliation.
-- Transcript and sidecars are fully absent, journal valid, staged exists,
-  normal absent, and recorded identities match: finish exact staged cleanup and
-  clear the journal.
-- Transcript or sidecar state is partial or unknown: retain the journal and
-  staged state, report `transcript_deletion_outcome_unknown`, and leave every
-  directory untouched until bounded reconciliation proves a terminal state.
-- Transcript and sidecars are fully absent, both directories are absent, and
-  the journal's recorded root identity matches: clear the completed journal.
+- The transcript is intact, a recorded child is matching at the staged path,
+  and normal is absent: restore staged to normal first and clear the phase files
+  last.
+- The transcript is intact, a recorded child is matching at normal, and staged
+  is absent: clear the stale phase files without touching the directory.
+- The transcript is intact, the record proves the child was absent, and both
+  paths remain absent: clear the stale phase files and keep the transcript.
+- The transcript is absent and a recorded child is matching at staged: finish
+  post-commit cleanup and clear the phase files.
+- The transcript is absent and both paths are absent: finish idempotent sidecar
+  and attachment cleanup, record a vanished expected child diagnostically when
+  applicable, and clear the completed phase files.
+- The transcript is intact, the record expected a child, and both paths are
+  absent: report `deletion_recovery_compromised`; a missing private directory is
+  not equivalent to a record that proved absence before deletion.
+- Transcript location is conflicted, unreadable, or unknown: retain journal and
+  directory state, report `transcript_deletion_outcome_unknown`, and leave every
+  directory untouched.
 - Both normal and staged exist, regardless of journal phase or validity: report
   `deletion_recovery_compromised` and leave every file untouched.
 - The journal is invalid or missing for staged state, the hash does not match,
@@ -958,6 +988,12 @@ A staged-looking directory without a valid recovery record is never proof that
 deletion was authorized. Creation cannot establish a new incarnation of a UUID
 while any journal for that UUID remains, so recovery never treats a fresh normal
 child as belonging beside an older staged child.
+
+The recovery commit rule is deliberately singular: an intact transcript rolls
+the incomplete transaction back to an intact session, while an absent
+transcript commits deletion and requires cleanup. An exact delete retry may
+start a fresh transaction after rollback clears stale evidence. Conflicted or
+unreadable transcript state proves neither outcome and fails closed.
 
 ### Failure contract
 
@@ -976,7 +1012,7 @@ child as belonging beside an older staged child.
 | Create crossed persistence and owned session closed        | `500 standalone_creation_outcome_unknown` with UUID |
 | Create failed before persistence and owned session closed  | `500 standalone_creation_rolled_back` with UUID     |
 | Transcript deletion failed and directory state recovered   | `500 transcript_deletion_failed`                    |
-| Transcript or sidecar deletion outcome is partial/unknown  | `500 transcript_deletion_outcome_unknown`           |
+| Transcript deletion outcome is conflicted/unreadable       | `500 transcript_deletion_outcome_unknown`           |
 | Transcript rollback cannot restore staged child            | `500 working_directory_recovery_failed`             |
 | Create cleanup outcome is unknown                          | `500 standalone_creation_outcome_unknown` with UUID |
 | Conversations root identity or trust fails                 | `503 conversation_root_compromised`                 |
@@ -1147,7 +1183,10 @@ pending, crashes between child rename and phase persistence, crashes between
 rollback restore and journal clear, embedded-app capability absence,
 multi-daemon ownership, and macOS/Linux/Windows path behavior.
 
-Estimated size: 500-850 production lines and 950-1,600 test lines.
+Audited estimate against merged PR2B: 1,250-2,050 production lines and
+2,500-4,000 test lines, dominated by the durable deletion transaction and fault
+injection. If production logic exceeds 1,000 added lines, obtain maintainer
+direction before publication as required by the repository advisory gate.
 
 Exit criterion: the complete feature works through REST without SDK/WebShell,
 survives daemon restart, and safely advertises v1.
@@ -1174,32 +1213,59 @@ Estimated size: 300-500 production lines and 450-800 test lines.
 Exit criterion: consumers use the complete lifecycle without constructing
 routes or supplying internal cwd.
 
-### PR5: Explicit WebUI context
+### PR5: Explicit WebShell session context
 
-Suggested title: `feat(webui): Add explicit daemon session contexts`
+Suggested title: `feat(web-shell): Add explicit daemon session contexts`
 
-Dependency: PR4. [PR #8882](https://github.com/QwenLM/qwen-code/pull/8882) is
-merged; re-audit its final API and extend its transaction rather than
-duplicating it.
+Dependency: PR4. PR5 targets the current `main` ownership boundary: WebShell
+continues to consume the daemon React provider from `@qwen-code/webui`, so the
+provider changes land there and WebShell-facing types remain exported through
+the existing `daemon-react-sdk` entry. The later WebShell cutover can carry the
+same files by rename; it is not a prerequisite.
 
-- Add `standalone | workspace { cwd } | live` to connection and transition
-  state.
-- Classify from persisted source plus validated ownership, never cwd/runtime
-  kind alone.
-- Atomically commit or roll back client, transcript, internal cwd, product
-  context, warnings, and deferred intent.
-- Accept legacy `workspaceCwd` only at the workspace compatibility boundary,
-  normalize it immediately, and reject conflicts. It never selects standalone.
-- Add directory-recreated/missing/compromised and outcome-unknown notice state.
+- Add `standalone | workspace { cwd } | live` to provider props, connection
+  state, and transition state. Use a distinct `sessionContext` name because
+  `connection.context` already stores model context-window status.
+- Classify from an explicit requested context plus the authoritative restore
+  path. Standalone uses the dedicated capability-gated SDK methods. Workspace
+  uses its exact ordinary runtime cwd. Live resolves exactly one trusted
+  capability-advertised Live runtime and then relies on the daemon's persisted
+  source and ownership validation. Source strings or cwd alone never select a
+  product context.
+- Follow the loading-skeleton switching model restored by
+  [PR #9129](https://github.com/QwenLM/qwen-code/pull/9129): publish the target
+  context, clear the old transcript, and keep the failed target visible with an
+  explicit error. Do not restore the transaction or roll back to the previous
+  conversation. A generation guard prevents a superseded completion from
+  publishing its client, transcript, warnings, or context.
+- Accept legacy `workspaceCwd` only at one compatibility boundary, normalize it
+  immediately to `{ kind: 'workspace', cwd }`, and reject conflicts with an
+  explicit context. It never selects standalone or Live. Existing callers that
+  provide neither field retain the current primary-workspace behavior.
+- Keep daemon-internal routing cwd private. `connection.workspaceCwd` remains a
+  product workspace only and is absent for standalone and Live sessions.
+  Standalone working-directory state and outcome-unknown recovery remain in
+  target-scoped standalone connection state.
+- Skip workspace providers, Git, preheat, and workspace event invalidation for
+  standalone and Live contexts. Session-scoped commands, model context, Goal,
+  transcript, prompt, and permission behavior remain shared.
+- Standalone creation awaits the SDK operation directly so the SDK can complete
+  its single exact recovery lookup. It is never wrapped in the provider's
+  shorter generic action timeout and is never retried automatically.
 
-Verification covers all #8882 failure and supersession cases plus cross-context
-switching, capability absence, legacy source, outcome recovery, warning
-rollback, and no-primary-fallback.
+Verification covers normalization conflicts, exact workspace/standalone/Live
+dispatch, cross-context switching, capability absence, ambiguous Live runtime,
+legacy callers, reconnect and reload, outcome recovery, target-scoped directory
+warnings, supersession, and no-primary-fallback.
 
-Estimated size: 350-650 production lines and 650-1,100 test lines.
+Audited implementation footprint: approximately 910 added production lines and
+1,250 added test lines. Most production churn is the explicit routing,
+transition, reconnect, and target-scoped error handling inside the existing
+provider rather than new abstraction surface.
 
-Exit criterion: WebUI represents and switches all contexts explicitly while
-existing visible WebShell behavior remains unchanged.
+Exit criterion: the daemon React provider represents and switches all contexts
+explicitly without changing visible WebShell entry points. PR6 owns global New
+Chat, Recents, lifecycle controls, deep links, and project-control visibility.
 
 ### PR6: WebShell product UI
 
@@ -1239,15 +1305,15 @@ flowchart LR
     PR1 --> PR2["PR2 standalone core"]
     PR2 --> PR3["PR3 complete daemon API"]
     PR3 --> PR4["PR4 SDK"]
-    PR4 --> PR5["PR5 WebUI context"]
-    T["PR #8882 transactional switching"] --> PR5
+    PR4 --> PR5["PR5 WebShell session context"]
+    S["PR #9129 loading-skeleton switching"] --> PR5
     PR5 --> PR6["PR6 WebShell"]
 ```
 
-PR0 through PR6 are the required feature sequence. PR5 builds on the final API
-merged by PR #8882. PR #8874 (workspace uploads) and PR #8817 (fork/move
-foundations) are follow-up dependencies rather than MVP blockers. No capability
-is advertised before PR3.
+PR0 through PR6 are the required feature sequence. PR5 builds on the
+loading-skeleton switching model restored by PR #9129. PR #8874 (workspace
+uploads) and PR #8817 (fork/move foundations) are follow-up dependencies rather
+than MVP blockers. No capability is advertised before PR3.
 
 Expected total implementation size is approximately 3,800-6,170 production
 lines plus 7,600-11,800 test lines. The companion document is excluded from
@@ -1339,17 +1405,18 @@ the daemon contract.
 - Archive/unarchive retain the child and do not cascade to children.
 - Prompt, repair, rename, archive, unarchive, and delete obey one lifecycle
   admission boundary.
-- Delete closes active ownership, stages the exact child, deletes active or
-  archived transcript and sidecars, and returns the exact batch fields.
+- Delete closes active ownership, stages the exact child, commits by unlinking
+  the active or archived transcript, then idempotently cleans sidecars,
+  attachments, and the staged child and returns the exact batch fields.
 - Every journal write, rename, transcript delete, rollback, final cleanup, and
   restart recovery boundary is fault-injected.
-- Owner acquisition and a singleton delete retry reconcile a valid journal whose
-  transcript is already absent; bounded startup work leaves excess records for
-  exact retry.
+- The first mutating/load/repair operation after owner acquisition and a
+  singleton delete retry reconcile a valid journal whose transcript is already
+  absent; bounded first-use work leaves excess records for exact retry.
 - Invalid/missing journal, normal-plus-staged conflict, hash mismatch, and unsafe
   staged path remain untouched.
 - Failed final cleanup reports `fileCleanupPending`; a singleton delete retry and
-  the owner-acquisition startup pass resume only the journaled exact path.
+  the owner-generation first-use pass resume only the journaled exact path.
 - Creation with the same UUID cannot materialize a new child until its pending
   deletion journal is terminally reconciled and cleared.
 

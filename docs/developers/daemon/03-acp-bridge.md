@@ -45,7 +45,7 @@ Each active `WorkspaceRuntime` owns one `HttpAcpBridge` instance. Production att
 | `defaultEntry`  | `SessionEntry \| null`          | The "single" session used when `sessionScope: 'single'`.                                                                                                                                                                                                                                                                                                                                                 |
 | `defaultPolicy` | `PermissionPolicy`              | Configured via `BridgeOptions.permissionPolicy`.                                                                                                                                                                                                                                                                                                                                                         |
 | `mediator`      | `MultiClientPermissionMediator` | One per bridge instance.                                                                                                                                                                                                                                                                                                                                                                                 |
-| Constants       | —                               | `DEFAULT_INIT_TIMEOUT_MS = 10_000`, `MCP_RESTART_TIMEOUT_MS = 300_000`, `DEFAULT_MAX_SESSIONS = 32`, `MAX_EVENT_RING_SIZE = 1_000_000`, `DEFAULT_PERMISSION_TIMEOUT_MS = 5min`, `DEFAULT_MAX_PENDING_PER_SESSION = 64`.                                                                                                                                                                                  |
+| Constants       | —                               | `DEFAULT_INIT_TIMEOUT_MS = 10_000`, `MCP_RESTART_TIMEOUT_MS = 300_000`, `DEFAULT_MAX_SESSIONS = 32`, `MAX_EVENT_RING_SIZE = 1_000_000`, `DEFAULT_PERMISSION_TIMEOUT_MS = 0`, `DEFAULT_MAX_PENDING_PER_SESSION = 64`.                                                                                                                                                                                     |
 
 **`isDying` invariant**: any teardown path must set `ChannelInfo.isDying = true` synchronously **before** awaiting `channel.kill()`. `ensureChannel` treats a dying channel as absent and spawns a fresh one. Without this flag a concurrent `spawnOrAttach` arriving during the SIGTERM grace window (up to 10s) would attach to a transport about to close and the caller's sessionId would 404 on every follow-up. **Set sites** (must keep in sync): `ensureChannel` (initialize failure + late-shutdown re-check), `doSpawn` (newSession failure on empty channel), `killSession` (last session leaving), `shutdown` (bulk).
 
@@ -179,16 +179,16 @@ sequenceDiagram
 - Bridge construction is synchronous. A caller may preheat the channel before the first session; otherwise the first `spawnOrAttach` cold-starts the ACP child. A failed preheat leaves first use free to retry.
 - `defaultEntry` lives for the lifetime of the bridge under `sessionScope: 'single'`; the channel reaps when `sessionIds.size === 0` (after `killSession`) AND `isDying` flips true.
 - `MAX_EVENT_RING_SIZE = 1_000_000` is a soft upper bound on `BridgeOptions.eventRingSize` to catch operator typos before ~500 MB per-session OOMs.
-- `DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000` keeps a wedged permission request from blocking the per-session `promptQueue` forever.
+- `DEFAULT_PERMISSION_TIMEOUT_MS = 0` lets human permissions and questions wait indefinitely by default. `permissionResponseTimeoutMs` enables a wall-clock cap when operators need one; voter cancellation, session cancellation, and shutdown remain available without it.
 - `DEFAULT_MAX_PENDING_PER_SESSION = 64` mirrors `DEFAULT_MAX_SUBSCRIBERS`; excess `requestPermission` calls resolve as cancelled with a stderr warning.
 
 ## Dependencies
 
-| Upstream                                                                                     | Downstream                                     |
-| -------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `@agentclientprotocol/sdk` — `ClientSideConnection`, `PROTOCOL_VERSION`, ACP types           | `packages/cli/src/serve/` (the daemon)         |
-| `@qwen-code/qwen-code-core` — `ApprovalMode`, `TrustGateError`, `getCurrentGeminiMdFilename` | `packages/channels/base/` (planned, F4)        |
-| `node:crypto`, `node:fs`, `node:path`                                                        | `packages/vscode-ide-companion/` (planned, F4) |
+| Upstream                                                                           | Downstream                                     |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `@agentclientprotocol/sdk` — `ClientSideConnection`, `PROTOCOL_VERSION`, ACP types | `packages/cli/src/serve/` (the daemon)         |
+| `@qwen-code/qwen-code-core` — `ApprovalMode`, `TrustGateError`                     | `packages/channels/base/` (planned, F4)        |
+| `node:crypto`, `node:fs`, `node:path`                                              | `packages/vscode-ide-companion/` (planned, F4) |
 
 ## Configuration
 
@@ -203,12 +203,11 @@ sequenceDiagram
 | `sessionRestoreTimeoutMs`                     | `60_000`                                           | ACP `loadSession` / `unstable_resumeSession` timeout; defaults to 60s, and an explicitly configured initialize timeout can raise it but never lower it.      |
 | `maxSessions`                                 | `DEFAULT_MAX_SESSIONS = 32`                        | Cap on `byId.size`. `0` / `Infinity` = unlimited; NaN/negative throws.                                                                                       |
 | `eventRingSize`                               | `DEFAULT_RING_SIZE` (from `eventBus.ts`)           | Per-session event ring; soft-capped at `MAX_EVENT_RING_SIZE`.                                                                                                |
-| `permissionResponseTimeoutMs`                 | `DEFAULT_PERMISSION_TIMEOUT_MS = 5 min`            | Per-request wallclock for the mediator.                                                                                                                      |
+| `permissionResponseTimeoutMs`                 | `DEFAULT_PERMISSION_TIMEOUT_MS = 0`                | Per-request wallclock for the mediator; `0` disables it.                                                                                                     |
 | `maxPendingPermissionsPerSession`             | `DEFAULT_MAX_PENDING_PER_SESSION = 64`             | Backpressure on high-volume agents.                                                                                                                          |
 | `childEnvOverrides`                           | `{}`                                               | Per-handle env additions / scrubs for the ACP child.                                                                                                         |
 | `externalToolGuard`                           | (none)                                             | Optional handler for the private child-to-parent pre-execution decision. The bridge accepts it only from the owning channel for the currently active Prompt. |
 | `persistApprovalMode`, `persistDisabledTools` | —                                                  | Settings-write hooks for the Wave 4 mutation routes.                                                                                                         |
-| `contextFilename`                             | from `settings.json`'s `context.fileName`          | Overrides `getCurrentGeminiMdFilename`.                                                                                                                      |
 | `statusProvider`                              | (none)                                             | Daemon-host preflight cells (`DaemonStatusProvider`).                                                                                                        |
 | `delegateReadTextFileToClient`                | `true`                                             | Set `false` only for same-host runtimes so every child `FileSystemService.readTextFile` consumer uses the regular CLI filesystem service.                    |
 | `fileSystem`                                  | (none)                                             | `BridgeFileSystem` adapter for ACP `readTextFile` / `writeTextFile`.                                                                                         |

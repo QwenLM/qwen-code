@@ -27,14 +27,18 @@ import { publishAssetsCommand } from './review/publish-assets.js';
 import { resolveAnchorsCommand } from './review/resolve-anchors.js';
 import { checkCoverageCommand } from './review/check-coverage.js';
 import { agentPromptCommand } from './review/agent-prompt.js';
+import { emitWorkflowCommand } from './review/emit-workflow.js';
 import { buildTestCommand } from './review/build-test.js';
 import { baseTreeCommand } from './review/base-tree.js';
 import { scratchTreeCommand } from './review/scratch-tree.js';
 import { testDeltaCommand } from './review/test-delta.js';
 import { driveCommand } from './review/drive.js';
+import { abDriveCommand } from './review/ab-drive.js';
 import { mockProviderCommand } from './review/mock-provider.js';
 import { extractStepCommand } from './review/extract-step.js';
 import { scriptLintCommand } from './review/script-lint.js';
+import { dedupCandidatesCommand } from './review/dedup-candidates.js';
+import { revertHunkCommand } from './review/revert-hunk.js';
 import { submitCommand } from './review/submit.js';
 import { testEfficacyCommand } from './review/test-efficacy.js';
 import { testPlanCommand } from './review/test-plan.js';
@@ -69,14 +73,18 @@ export const reviewCommand: CommandModule = {
       .command(commentStatusCommand)
       .command(loadRulesCommand)
       .command(agentPromptCommand)
+      .command(emitWorkflowCommand)
       .command(buildTestCommand)
       .command(baseTreeCommand)
       .command(scratchTreeCommand)
       .command(testDeltaCommand)
       .command(driveCommand)
+      .command(abDriveCommand)
       .command(mockProviderCommand)
       .command(extractStepCommand)
       .command(scriptLintCommand)
+      .command(dedupCandidatesCommand)
+      .command(revertHunkCommand)
       .command(resolveAnchorsCommand)
       .command(checkCoverageCommand)
       .command(costLedgerCommand)
@@ -92,7 +100,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, capture-tui, plan-diff, repo-context, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, scratch-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, capture-tui, plan-diff, repo-context, pr-context, comment-status, load-rules, agent-prompt, emit-workflow, build-test, base-tree, scratch-tree, test-delta, drive, ab-drive, mock-provider, extract-step, script-lint, dedup-candidates, revert-hunk, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
       )
       .version(false),
   handler: () => {

@@ -206,7 +206,7 @@ describe('AgentTool', () => {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getCliVersion: vi.fn().mockReturnValue('test-version'),
       getSubagentManager: vi.fn(),
-      getGeminiClient: vi.fn().mockReturnValue(undefined),
+      getLlmClient: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
@@ -1822,6 +1822,8 @@ describe('AgentTool', () => {
         expect(spawnTeammate).toHaveBeenCalledWith(
           expect.objectContaining({
             name: 'reviewer',
+            // The pin resolves through path.resolve, so expect the
+            // platform-normalized spelling (backslashes on Windows).
             cwd: path.resolve('/test/project', '.qwen/tmp/review-pr-1'),
           }),
         );
@@ -2255,10 +2257,19 @@ describe('AgentTool', () => {
         subagent_type: 'file-search',
         working_dir: '.qwen/tmp/review-pr-1',
       });
-      const result = await invocation.execute();
+      const updates: AgentResultDisplay[] = [];
+      const result = await invocation.execute(undefined, (output) => {
+        updates.push(output as AgentResultDisplay);
+      });
 
       expect(partToString(result.llmContent)).toMatch(/background agent/i);
       expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      // The guard returns before the display init, like the other spawn
+      // guards: a never-running launch emits zero frames. A running frame
+      // carrying executionMode: 'background' would contradict the blocked
+      // result frame, which has no executionMode and falls back to the
+      // frozen legacy heuristic (foreground here).
+      expect(updates).toEqual([]);
     });
 
     it('allows working_dir for a background:true subagent that downgrades to foreground when nested', async () => {
@@ -3731,12 +3742,12 @@ describe('AgentTool', () => {
       // Parent conversation history: empty (first-turn fork — falls back to
       // the fork agent's own systemPrompt + wildcard tools because no
       // cache params have been captured yet).
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistory: vi.fn().mockReturnValue([]),
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({}),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       vi.mocked(AgentHeadless.create).mockClear();
       vi.mocked(AgentHeadless.create).mockResolvedValue(mockAgent);
@@ -4137,7 +4148,7 @@ describe('AgentTool', () => {
         role: 'model' as const,
         parts: [{ text: 'second answer' }],
       };
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistoryShallow: vi
           .fn()
           .mockReturnValue([
@@ -4153,7 +4164,7 @@ describe('AgentTool', () => {
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({}),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -4208,12 +4219,12 @@ describe('AgentTool', () => {
           secondUser,
           secondModel,
         ]);
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistoryShallow,
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({}),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -4283,12 +4294,12 @@ describe('AgentTool', () => {
       const getHistoryShallow = vi
         .fn()
         .mockReturnValue([startup, firstUser, forkLaunch]);
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistoryShallow,
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({}),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -4359,7 +4370,7 @@ describe('AgentTool', () => {
           secondUser,
           secondModel,
         ]);
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         // getHistoryShallow() (no arg) supplies the startup context;
         // getHistoryForForkWindow is intentionally omitted to exercise the
         // uncurated getHistory() fallback for the bounded window.
@@ -4376,7 +4387,7 @@ describe('AgentTool', () => {
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({}),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -4448,7 +4459,7 @@ describe('AgentTool', () => {
           parameters: { type: 'object', properties: {} },
         },
       ];
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistory: vi.fn().mockReturnValue([]),
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({
@@ -4456,7 +4467,7 @@ describe('AgentTool', () => {
             tools: [{ functionDeclarations: parentToolDecls }],
           }),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -4503,7 +4514,7 @@ describe('AgentTool', () => {
           parameters: { type: 'object', properties: {} },
         },
       ];
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistory: vi.fn().mockReturnValue([]),
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({
@@ -4511,7 +4522,7 @@ describe('AgentTool', () => {
             tools: [{ functionDeclarations: parentToolDecls }],
           }),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
@@ -4591,7 +4602,7 @@ describe('AgentTool', () => {
       (mockAgent as unknown as Record<string, unknown>)[
         'setExternalMessageWaitPredicate'
       ] = vi.fn();
-      vi.mocked(config.getGeminiClient).mockReturnValue({
+      vi.mocked(config.getLlmClient).mockReturnValue({
         getHistory: vi.fn().mockReturnValue([
           {
             role: 'user',
@@ -4602,7 +4613,7 @@ describe('AgentTool', () => {
         getChat: vi.fn().mockReturnValue({
           getGenerationConfig: vi.fn().mockReturnValue({}),
         }),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
+      } as unknown as ReturnType<Config['getLlmClient']>);
       const stubRegistry = (
         config as unknown as {
           getBackgroundTaskRegistry: () => {
@@ -5005,7 +5016,7 @@ describe('AgentTool', () => {
         fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
       } as unknown as HookSystem;
 
-      vi.mocked(config.getGeminiClient).mockReturnValue(undefined as never);
+      vi.mocked(config.getLlmClient).mockReturnValue(undefined as never);
       (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
         .fn()
         .mockReturnValue(mockHookSystem);
@@ -5201,7 +5212,7 @@ describe('AgentTool', () => {
         fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
       } as unknown as HookSystem;
 
-      vi.mocked(config.getGeminiClient).mockReturnValue(undefined as never);
+      vi.mocked(config.getLlmClient).mockReturnValue(undefined as never);
       (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
         .fn()
         .mockReturnValue(mockHookSystem);
@@ -5997,7 +6008,10 @@ describe('AgentTool', () => {
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
-      const result = await invocation.execute();
+      const updates: AgentResultDisplay[] = [];
+      const result = await invocation.execute(undefined, (output) => {
+        updates.push(output as AgentResultDisplay);
+      });
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Background agent launched');
@@ -6036,6 +6050,11 @@ describe('AgentTool', () => {
       ).toHaveBeenCalled();
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('background');
+      expect(display.executionMode).toBe('background');
+      expect(updates[0]).toMatchObject({
+        status: 'running',
+        executionMode: 'background',
+      });
       expect(writeMetaSpy).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
@@ -6544,9 +6563,19 @@ describe('AgentTool', () => {
         subagent_type: 'monitor',
         run_in_background: false,
       });
-      const result = await invocation.execute();
+      const updates: AgentResultDisplay[] = [];
+      const result = await invocation.execute(undefined, (output) => {
+        updates.push(output as AgentResultDisplay);
+      });
 
       expect(partToString(result.llmContent)).toBe('Monitor done');
+      expect((result.returnDisplay as AgentResultDisplay).executionMode).toBe(
+        'foreground',
+      );
+      expect(updates[0]).toMatchObject({
+        status: 'running',
+        executionMode: 'foreground',
+      });
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({ isBackgrounded: false }),
       );
@@ -6626,11 +6655,25 @@ describe('AgentTool', () => {
         subagent_type: 'file-search',
       });
 
+      const updates: AgentResultDisplay[] = [];
       const result = await runWithAgentContext('sub-1', () =>
-        invocation.execute(),
+        invocation.execute(undefined, (output) => {
+          updates.push(output as AgentResultDisplay);
+        }),
       );
 
       expect(partToString(result.llmContent)).toBe('Monitor done');
+      // Pin the downgrade: backgroundRequested is true here (the loaded
+      // config has background: true), but a nested session runs foreground.
+      // Web Shell treats executionMode as authoritative, so a 'background'
+      // value on this path would hide the inline result from the user.
+      expect((result.returnDisplay as AgentResultDisplay).executionMode).toBe(
+        'foreground',
+      );
+      expect(updates[0]).toMatchObject({
+        status: 'running',
+        executionMode: 'foreground',
+      });
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({ isBackgrounded: false }),
       );
@@ -7388,7 +7431,7 @@ describe('AgentTool', () => {
             { functionDeclarations: [{ name: 'Bash' }, { name: 'Read' }] },
           ],
         };
-        const geminiClient = {
+        const llmClient = {
           getHistory: vi
             .fn()
             .mockReturnValue([{ role: 'model', parts: [{ text: 'Ready' }] }]),
@@ -7396,8 +7439,8 @@ describe('AgentTool', () => {
             getGenerationConfig: () => generationConfig,
           }),
         };
-        vi.mocked(config.getGeminiClient).mockReturnValue(
-          geminiClient as unknown as ReturnType<Config['getGeminiClient']>,
+        vi.mocked(config.getLlmClient).mockReturnValue(
+          llmClient as unknown as ReturnType<Config['getLlmClient']>,
         );
 
         const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
