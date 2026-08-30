@@ -6,7 +6,7 @@ import type {
   DaemonWorkspaceGitStatus,
   ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
-import type { DaemonReasoningControls } from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonReasoningControls } from '@qwen-code/web-shell/daemon-react-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   WebShellCustomizationProvider,
