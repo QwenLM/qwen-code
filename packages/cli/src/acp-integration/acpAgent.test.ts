@@ -2372,7 +2372,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ['non-positive', () => 0],
     ['non-integer', () => Date.now() + 0.5],
     ['non-safe', () => Number.MAX_SAFE_INTEGER + 1],
-    ['beyond the timer range', () => Date.now() + 2_147_483_648],
+    ['beyond the timer range', () => Number.MAX_SAFE_INTEGER],
   ])(
     'rejects a %s trusted session initialization deadline before creating state',
     async (_label, deadline) => {
