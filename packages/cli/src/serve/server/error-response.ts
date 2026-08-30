@@ -541,9 +541,9 @@ export function sendBridgeError(
     // orchestration / deployment drift (the workspace was not registered, or
     // runtime selection and bridge dispatch disagree).
     // Without a breadcrumb the daemon's log looks healthy while
-    // every client request silently 400s. Limited to authenticated
-    // requests by the upstream bearer-token gate, so probing-DoS
-    // log noise stays bounded.
+    // every client request silently 400s. Limited to requests admitted by the
+    // upstream bearer/listener policy, so probing-DoS log noise stays bounded
+    // by the configured deployment boundary.
     // SECURITY: `err.requested` is derived from the request body
     // (`req.workspaceCwd` → `canonicalizeWorkspace` → here). `path.resolve`
     // + `realpathSync.native` both preserve control characters inside
